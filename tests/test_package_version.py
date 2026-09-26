@@ -67,3 +67,27 @@ def test_versions_outside_the_supported_form_do_not_parse(text: object) -> None:
 
 def test_equal_versions_hash_alike() -> None:
     assert len({PackageVersion.parse("1.0"), PackageVersion.parse("1.0.0")}) == 1
+
+
+@pytest.mark.parametrize(
+    "text,expected,prerelease",
+    [
+        ("2.27.0", "2.27.0", False),
+        ("2.27.0+deb1", "2.27.0", False),
+        ("2.28.0rc1+local.2", "2.28.0rc1", True),
+        ("2.27.0-1ubuntu1", "2.27.0", False),
+        ("v2.27.0", "2.27.0", False),
+        ("2.28.0-rc1", "2.28.0", False),
+    ],
+)
+def test_installed_versions_are_read_leniently(
+    text: str, expected: str, prerelease: bool
+) -> None:
+    parsed = PackageVersion.parse_installed(text)
+    assert parsed == PackageVersion.parse(expected)
+    assert parsed is not None and parsed.is_prerelease is prerelease
+
+
+@pytest.mark.parametrize("text", ["", "unknown", "+local", None])
+def test_installed_versions_without_a_release_number_do_not_parse(text: object) -> None:
+    assert PackageVersion.parse_installed(text) is None

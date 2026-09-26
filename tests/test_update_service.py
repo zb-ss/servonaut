@@ -353,15 +353,68 @@ def test_is_newer_orders_prereleases():
 
 
 @pytest.mark.parametrize("kind", [DistributionKind.PIP, DistributionKind.PIPX])
-def test_stable_upgrade_commands_never_request_prereleases(kind):
-    command = _svc(current="2.27.0", kind=kind).get_upgrade_command()
+@pytest.mark.parametrize("latest", [None, "2.28.0", "2.28.0rc1"])
+def test_stable_upgrade_commands_never_request_prereleases(kind, latest):
+    command = _svc(current="2.27.0", latest=latest, kind=kind).get_upgrade_command()
     assert command is not None
+    assert command[-1] == "servonaut"
     assert "--pre" not in command
     assert not any(argument.startswith("--pip-args") for argument in command)
 
 
-def test_prerelease_upgrade_commands_request_prereleases():
-    pip = _svc(current="2.28.0rc1").get_upgrade_command()
-    pipx = _svc(current="2.28.0rc1", kind=DistributionKind.PIPX).get_upgrade_command()
-    assert pip == [sys.executable, "-m", "pip", "install", "--upgrade", "--pre", "servonaut"]
-    assert pipx == [str(Path("/usr/bin/pipx")), "upgrade", "--pip-args=--pre", "servonaut"]
+def test_prerelease_upgrade_pins_the_version_found():
+    # Pinning keeps dependencies on stable releases, and unlike pipx's
+    # --pip-args=--pre it is not stored for later `pipx upgrade` runs.
+    pip = _svc(current="2.28.0rc1", latest="2.28.0rc2").get_upgrade_command()
+    pipx = _svc(
+        current="2.28.0rc1", latest="2.28.0rc2", kind=DistributionKind.PIPX
+    ).get_upgrade_command()
+    assert pip == [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut==2.28.0rc2"]
+    assert pipx == [str(Path("/usr/bin/pipx")), "install", "--force", "servonaut==2.28.0rc2"]
+
+
+def test_prerelease_upgrade_without_a_known_version_is_the_plain_upgrade():
+    for latest in (None, "not a version"):
+        command = _svc(current="2.28.0rc1", latest=latest).get_upgrade_command()
+        assert command == [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut"]
+
+
+def test_run_upgrade_pins_the_prerelease_it_just_found(monkeypatch):
+    service = _svc(current="2.28.0rc1", latest=None, kind=DistributionKind.PIPX)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc2"])
+    )
+    spawn = AsyncMock(return_value=_fake_proc())
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    ok, message = asyncio.run(service.run_upgrade())
+    assert ok is True, message
+    assert spawn.call_args.args == (
+        str(Path("/usr/bin/pipx")), "install", "--force", "servonaut==2.28.0rc2"
+    )
+
+
+# --- repackaged installations still see updates -----------------------------
+
+@pytest.mark.parametrize(
+    "current,offered",
+    [
+        ("2.27.0+deb1", "2.27.1"),
+        ("2.27.1+deb1", None),
+        ("2.27.0-1ubuntu1", "2.27.1"),
+        ("v2.27.0", "2.27.1"),
+        ("unknown", None),
+    ],
+)
+def test_local_and_repackaged_versions_are_still_offered_updates(current, offered):
+    service = _svc(current=current, latest=None)
+    service._opener = _Opener(_index("2.27.1", {"2.27.1": [_file()], "2.28.0rc1": [_file()]}))
+    assert service.check_for_update() == offered
+    assert service.follows_prereleases is False
+
+
+def test_a_local_prerelease_still_follows_prereleases():
+    service = _svc(current="2.28.0rc1+local", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    assert service.follows_prereleases is True
+    assert service.check_for_update() == "2.28.0rc2"

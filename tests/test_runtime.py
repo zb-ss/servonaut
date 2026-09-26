@@ -314,24 +314,34 @@ def test_package_capabilities_keep_pip_pipx_and_source_semantics() -> None:
         source.package_management.self_update_argv()
 
 
-def test_self_update_requests_prereleases_only_when_asked() -> None:
+def test_self_update_pins_a_version_only_when_given_one() -> None:
     pip = resolve_runtime(_evidence()).package_management
     pipx = resolve_runtime(_evidence(pipx_contains_servonaut=True)).package_management
 
-    assert pip.self_update_argv(include_prereleases=True)[-3:] == [
+    assert pip.self_update_argv(version="2.28.0rc2")[-3:] == [
+        "install",
         "--upgrade",
-        "--pre",
-        "servonaut",
+        "servonaut==2.28.0rc2",
     ]
-    assert pipx.self_update_argv(include_prereleases=True)[-3:] == [
-        "upgrade",
-        "--pip-args=--pre",
-        "servonaut",
+    assert pipx.self_update_argv(version="2.28.0rc2")[-3:] == [
+        "install",
+        "--force",
+        "servonaut==2.28.0rc2",
     ]
     for capability in (pip, pipx):
         argv = capability.self_update_argv()
+        assert argv[-1] == "servonaut"
         assert "--pre" not in argv
         assert not any(arg.startswith("--pip-args") for arg in argv)
+
+
+@pytest.mark.parametrize(
+    "version", ["", "2.28.0; os_name=='nt'", ">=2.28", "2.28.0 --pre", "2.28.0+local", "v2.28.0"]
+)
+def test_self_update_refuses_anything_but_a_plain_version(version: str) -> None:
+    pip = resolve_runtime(_evidence()).package_management
+    with pytest.raises(ValueError):
+        pip.self_update_argv(version=version)
 
 
 def test_argv_builders_preserve_spaced_unicode_arguments_and_return_fresh_lists() -> (

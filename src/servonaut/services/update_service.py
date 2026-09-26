@@ -266,7 +266,7 @@ class UpdateService:
         Only then are newer pre-releases offered and installed; a stable
         installation is offered stable releases only.
         """
-        current = PackageVersion.parse(self._current)
+        current = PackageVersion.parse_installed(self._current)
         return current is not None and current.is_prerelease
 
     def _fetch_pypi_version(self, url: str) -> Optional[str]:
@@ -487,15 +487,22 @@ class UpdateService:
     def get_upgrade_command(self) -> list[str] | None:
         """Return a self-update argv, or None when the runtime cannot self-update.
 
+        A stable installation always gets the plain upgrade, which never
+        installs a pre-release. A running pre-release installs exactly the
+        version the last check found, which may be a newer pre-release.
+
         This has no side effects; :meth:`run_upgrade` reports why an update
         cannot run.
         """
         try:
-            return self._runtime.package_management.self_update_argv(
-                include_prereleases=self.follows_prereleases
-            )
+            return self._upgrade_argv()
         except RuntimeCapabilityError:
             return None
+
+    def _upgrade_argv(self) -> list[str]:
+        latest = PackageVersion.parse(self._latest)
+        pinned = latest.text if latest is not None and self.follows_prereleases else None
+        return self._runtime.package_management.self_update_argv(version=pinned)
 
     def installed_version_external(self) -> Optional[str]:
         """Query the target mutable environment after an upgrade."""
@@ -541,13 +548,14 @@ class UpdateService:
         if self._runtime.is_frozen:
             return await self._run_frozen_upgrade()
 
-        command = self.get_upgrade_command()
-        if command is None:
+        if self.get_upgrade_command() is None:
             self._update_status = _SOURCE_UPDATE_GUIDANCE
             return False, self._update_status
 
         before = self.installed_version_external() or self._current
         target = self._latest or self.check_for_update()
+        # Built after the check, since a running pre-release pins the version found.
+        command = self._upgrade_argv()
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -637,8 +645,8 @@ class UpdateService:
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
         """Compare PEP 440 versions; a version that cannot be ordered is never newer."""
-        latest_version = PackageVersion.parse(latest)
-        current_version = PackageVersion.parse(current)
+        latest_version = PackageVersion.parse_installed(latest)
+        current_version = PackageVersion.parse_installed(current)
         if latest_version is None or current_version is None:
             return False
         return latest_version > current_version

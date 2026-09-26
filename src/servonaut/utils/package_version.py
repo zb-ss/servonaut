@@ -6,8 +6,10 @@ pip or pipx install cannot rely on it being present; this module covers the
 public PEP 440 versions an index serves in normalized form: a release number
 (``1.2.3``) with an optional pre-release (``a1``, ``b2``, ``rc3``),
 post-release (``.post1``) and development release (``.dev4``). Epochs and
-local versions are not supported: they parse as ``None``, so callers can skip
-them instead of guessing an order.
+local versions are not supported by :meth:`PackageVersion.parse`: they parse
+as ``None``, so callers can skip them instead of guessing an order.
+:meth:`PackageVersion.parse_installed` is the lenient reading for the version
+a running installation reports, which a repackager may have changed.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ _PUBLIC_VERSION: Final = re.compile(
     r"(?:\.post(?P<post>[0-9]+))?"
     r"(?:\.dev(?P<dev>[0-9]+))?"
 )
+_LEADING_RELEASE: Final = re.compile(r"v?([0-9]+(?:\.[0-9]+)*)")
 _PRE_RELEASE_ORDER: Final = {"a": 0, "b": 1, "rc": 2}
 # Sort positions outside every real pre-release: a development release of a
 # final version comes before its alphas, and a final version after its
@@ -63,6 +66,23 @@ class PackageVersion:
             post=_optional_int(match.group("post")),
             dev=_optional_int(match.group("dev")),
         )
+
+    @classmethod
+    def parse_installed(cls, text: object) -> Optional["PackageVersion"]:
+        """Parse an installed version, tolerating local and repackaged forms.
+
+        A local version (``2.27.0+deb1``) is read as its public part, and any
+        other form by its leading release number (``2.27.0-1ubuntu1`` reads as
+        the final release ``2.27.0``), so such an installation is still offered
+        newer releases. Returns None only when no release number can be found.
+        """
+        if not isinstance(text, str):
+            return None
+        parsed = cls.parse(text) or cls.parse(text.split("+", 1)[0])
+        if parsed is not None:
+            return parsed
+        match = _LEADING_RELEASE.match(text)
+        return cls.parse(match.group(1)) if match else None
 
     @property
     def is_prerelease(self) -> bool:
