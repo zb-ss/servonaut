@@ -19,13 +19,10 @@ def plain(cell: str) -> str:
 async def press(t: Any, target: Union[str, Button]) -> None:
     """Click a button like a user who waits for it to settle.
 
-    A button ignores clicks while its short "pressed" highlight is showing,
-    exactly as it would for a real double click, so a second press waits
-    for the highlight to clear first.
+    The driver's click waits for the button to appear and for an earlier
+    press's highlight to clear (a highlighted button ignores clicks).
     """
-    button = t.on_screen(target, Button) if isinstance(target, str) else target
-    await t.wait_until(lambda: not button.has_class("-active"), desc=f"{button.id} ready")
-    await t.click(button)
+    await t.click(target)
 
 
 async def select_row(t: Any, table_selector: str, column: int, value: str) -> None:

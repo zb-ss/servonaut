@@ -232,6 +232,26 @@ class TuiDriver:
         await self.pilot.pause()
         return self.app.screen
 
+    async def wait_for_widget(
+        self,
+        selector: Union[str, type],
+        expect_type: Optional[type] = None,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Any:
+        """The match for *selector* on the active screen, once it is mounted.
+
+        A screen can mount part of its content after it becomes active, for
+        example a card it rebuilds when its state changes: the card joins the
+        screen at once, the buttons inside it a few frames later.
+        """
+        found = await self.wait_until(
+            lambda: [self.on_screen(selector, expect_type)],
+            timeout=timeout,
+            desc=f"{selector} on {self.screen_name()}",
+        )
+        return found[0]
+
     async def wait_for_toast(
         self,
         pattern: str,
@@ -280,10 +300,21 @@ class TuiDriver:
         await self.pilot.press(*text)
 
     async def click(self, target: Union[str, Widget]) -> None:
-        """Click the middle of a visible widget on the active screen."""
-        widget = self.on_screen(target) if isinstance(target, str) else target
+        """Click the middle of a visible widget on the active screen.
+
+        A selector is waited for (see :meth:`wait_for_widget`), the way a
+        user waits for a button to appear; a hidden widget fails at once.
+        A button ignores clicks while its short "pressed" highlight is
+        showing, exactly as it would a real double click, so a second click
+        on the same button waits for the highlight to clear first.
+        """
+        widget = await self.wait_for_widget(target) if isinstance(target, str) else target
         if not self.is_reachable(widget):
             raise AssertionError(f"{widget!r} is hidden, so a user cannot click it")
+        if isinstance(widget, Button):
+            await self.wait_until(
+                lambda: not widget.has_class("-active"), desc=f"{widget!r} ready for a click"
+            )
         widget.scroll_visible(animate=False, immediate=True)
         await self.pilot.pause()
         region = widget.region
@@ -294,7 +325,7 @@ class TuiDriver:
 
     async def fill(self, selector: str, text: str) -> None:
         """Focus an input on the active screen, clear it and type *text*."""
-        field = self.on_screen(selector, Input)
+        field = await self.wait_for_widget(selector, Input)
         await self.click(field)
         await self.wait_until(lambda: field.has_focus, desc=f"focus on {selector}")
         field.clear()
