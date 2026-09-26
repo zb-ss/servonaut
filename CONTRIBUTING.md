@@ -149,7 +149,9 @@ Every run is sealed off from your machine:
   and `SERVONAUT_E2E_ROOT` to choose the directory it is created in).
 - The environment is rebuilt from an allowlist. `PATH` contains only scripted
   stand-ins for `ssh`, `scp`, `ssh-agent`, the terminal emulator, the browser
-  and the editor, so no real session or window is ever opened.
+  and the editor, so no real session or window is ever opened. A journey can
+  add stand-ins for the Bitwarden CLIs (`bws`, `bw`), which answer from a
+  fake vault (`e2e/harness/bitwarden.py`).
 - Network access is limited to loopback. AWS calls go to a local moto server;
   the Servonaut API and the package index go to a local HTTPS stand-in with a
   throwaway certificate authority. An attempt to reach any other host, to
@@ -230,6 +232,12 @@ When you add a journey:
   streams in `tests/fixtures/sse`.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
+- To prove a secret never reached the service, use
+  `fake_cloud.assert_absent_on_wire(...)`: it searches every request
+  unredacted, in any encoding. The request log (`fake_cloud.requests()`) is
+  redacted for the artifacts, so a check against it proves nothing. Register
+  every secret you fabricate with `artifacts.register_secret` so it never
+  reaches an artifact.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out
   to be flaky gets `e2e_quarantine` until it is fixed. Every journey needs one
   of the two; collection stops with an error otherwise.

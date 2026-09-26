@@ -135,11 +135,13 @@ async def test_stale_token_is_refreshed_and_the_request_retried(tui, seed, fake_
         await t.wait_for_toast("MCP relay disabled by your plan")
         # A Teams plan shows the Teams entry.
         assert t.nav_reachable("nav_teams")
-        # Let the start-up requests (which include a team lookup) finish
-        # before the token goes stale.
+        # Let the start-up requests (a team lookup, then the team and
+        # personal secret-store configs) finish before the token goes stale.
         await t.wait_until(
             lambda: fake_cloud.requests("/api/v1/me/instances")
-            and fake_cloud.requests("/api/v1/teams"),
+            and fake_cloud.requests("/api/v1/teams")
+            and fake_cloud.requests("/api/v1/teams/ops/secrets-config")
+            and fake_cloud.requests("/api/v1/me/secrets-config"),
             desc="start-up requests",
         )
         before = len(fake_cloud.requests("/api/v1/teams"))

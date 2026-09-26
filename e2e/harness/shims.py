@@ -64,6 +64,11 @@ class ShimCall:
     cwd: str
     rule: Optional[str]
     stdin: Optional[str] = None
+    # With ``inspect_identity``: the ``-i`` file as it was during the call,
+    # ``{"path", "exists", "mode", "size", "sha256"}`` (never the contents).
+    identity: Optional[dict] = None
+    # Credential variables a Bitwarden fake saw: name -> present (never values).
+    env: Optional[dict] = None
 
     @property
     def joined(self) -> str:
@@ -100,6 +105,24 @@ class ShimSet:
         path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
         path.chmod(0o755)
 
+    def install(self, tool: str, runner: Path) -> Path:
+        """Put an extra fake tool on PATH, answered by the program *runner*.
+
+        *runner* is called like the built-in runner (``runner <shim-dir>
+        <tool> [arguments...]``, in Python's isolated mode) and should
+        record its calls in the same log, so :meth:`calls` sees them. The
+        default tools stay as they are: a journey opts in to each extra one.
+        """
+        if tool in TOOLS or tool in ("python", "python3"):
+            raise ValueError(f"{tool!r} is already a built-in fake tool")
+        python = shlex.quote(sys.executable)
+        self._write_script(
+            tool,
+            f"exec {python} -I {shlex.quote(str(runner))} "
+            f"{shlex.quote(str(self.directory))} {shlex.quote(tool)} \"$@\"\n",
+        )
+        return self.path_of(tool)
+
     @property
     def log_path(self) -> Path:
         return self.directory / "argv.jsonl"
@@ -117,12 +140,15 @@ class ShimSet:
         rc: int = 0,
         delay: float = 0.0,
         capture_stdin: bool = False,
+        inspect_identity: bool = False,
         name: Optional[str] = None,
     ) -> None:
         """Answer calls to *tool* whose joined argv matches *match* (a regex).
 
         Rules are tried in the order they were added; the first match wins,
-        and the built-in defaults come last.
+        and the built-in defaults come last. *inspect_identity* records the
+        state of the file passed with ``-i`` at the moment of the call (see
+        :attr:`ShimCall.identity`), never its contents.
         """
         self._rules.append(
             {
@@ -134,6 +160,7 @@ class ShimSet:
                 "rc": rc,
                 "delay": delay,
                 "capture_stdin": capture_stdin,
+                "inspect_identity": inspect_identity,
             }
         )
         self._save()
@@ -173,6 +200,8 @@ class ShimSet:
                 cwd=data.get("cwd", ""),
                 rule=data.get("rule"),
                 stdin=data.get("stdin"),
+                identity=data.get("identity"),
+                env=data.get("env"),
             )
             for _, data in records
         ]
