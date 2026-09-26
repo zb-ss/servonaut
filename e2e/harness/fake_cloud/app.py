@@ -3,9 +3,10 @@
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
 relay (subscriber token, Mercure hub, heartbeat, results, status), account
-data, the AI routes and hosted-MCP endpoint, the package-index JSON the
-update check reads, and the ``/__e2e/`` control plane. Each path belongs to
-exactly one route module; registering one twice fails at start-up.
+data, the AI routes and hosted-MCP endpoint, the package index (the JSON
+the update check reads and a simple index pip and pipx install from), and
+the ``/__e2e/`` control plane. Each path belongs to exactly one route
+module; registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
 """
