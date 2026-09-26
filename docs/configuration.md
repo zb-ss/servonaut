@@ -359,6 +359,12 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_MCP_URL` | `https://mcp.servonaut.dev` | Base URL for the hosted MCP server (premium tools) |
 | `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
 | `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
+| `SERVONAUT_PYPI_URL` | `https://pypi.org/pypi/servonaut/json` | PyPI JSON document read by the update check (pip and pipx installs) |
+| `SERVONAUT_HETZNER_API_URL` | `https://api.hetzner.cloud/v1` | Hetzner Cloud API base URL, version path included |
+| `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
+| `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
+
+The last four accept only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
 
 The relay listener's local timeouts can be lengthened on slow or heavily loaded machines. Values are in seconds; a missing, non-numeric, zero, negative or infinite value falls back to the default, so a typo can never make shutdown unbounded.
 
