@@ -621,6 +621,15 @@ def test_publish_requires_candidate_only_when_enabled() -> None:
     assert '--artifacts-dir "$WORK/artifacts"' in candidate
     # New steps stay behind the staged gate variable.
     assert "if: env.REQUIRE_CANDIDATE == 'true'" in candidate
+    # A stable publish also needs the attached qualification record to pass
+    # for the same evidence, after the release files have been verified.
+    assert "--pattern qualification-record.json" in candidate
+    assert "python -m scripts.distribution.qualification check" in candidate
+    assert '--record "$WORK/qualification-record.json"' in candidate
+    assert candidate.count("--channel stable") == 2
+    assert candidate.index("release_candidate.py check-publish") < candidate.index(
+        "scripts.distribution.qualification check"
+    )
     # Publishing stays gated behind eligibility and, when enabled, the
     # candidate job as well.
     assert "needs: [eligibility, candidate]" in _job(source, "test")
@@ -722,7 +731,9 @@ def run_enabled_candidate_gate(
 def test_enabled_candidate_gate_hashes_the_release_files_it_names(
     tmp_path: Path,
 ) -> None:
-    result, calls = run_enabled_candidate_gate(tmp_path, "one.tar.gz two.zip")
+    result, calls = run_enabled_candidate_gate(
+        tmp_path, "one.tar.gz two.zip qualification-record.json"
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "--pattern one.tar.gz" in calls
     assert "--pattern two.zip" in calls
@@ -732,8 +743,180 @@ def test_enabled_candidate_gate_hashes_the_release_files_it_names(
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="The runner script uses jq")
+def test_enabled_candidate_gate_checks_qualification_after_the_files(
+    tmp_path: Path,
+) -> None:
+    result, calls = run_enabled_candidate_gate(
+        tmp_path, "one.tar.gz two.zip qualification-record.json"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = calls.splitlines()
+    publish = next(i for i, line in enumerate(lines) if "check-publish" in line)
+    qualify = next(
+        i for i, line in enumerate(lines) if "scripts.distribution.qualification" in line
+    )
+    assert publish < qualify
+    assert re.fullmatch(
+        r"python -m scripts\.distribution\.qualification check"
+        r" --evidence (\S+)/candidate-evidence\.json"
+        r" --record \1/qualification-record\.json --channel stable",
+        lines[qualify],
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="The runner script uses jq")
 def test_enabled_candidate_gate_refuses_a_missing_release_file(tmp_path: Path) -> None:
-    result, calls = run_enabled_candidate_gate(tmp_path, "one.tar.gz")
+    result, calls = run_enabled_candidate_gate(
+        tmp_path, "one.tar.gz qualification-record.json"
+    )
     assert result.returncode == 1
     assert "::error::" in result.stdout
     assert "check-publish" not in calls
+    assert "scripts.distribution.qualification" not in calls
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="The runner script uses jq")
+def test_enabled_candidate_gate_refuses_a_missing_qualification_record(
+    tmp_path: Path,
+) -> None:
+    result, calls = run_enabled_candidate_gate(tmp_path, "one.tar.gz two.zip")
+    assert result.returncode == 1
+    assert "::error::No qualification-record.json is attached to v1.2.3" in result.stdout
+    assert "--pattern one.tar.gz" not in calls
+    assert "check-publish" not in calls
+    assert "scripts.distribution.qualification" not in calls
+
+
+@pytest.mark.parametrize("value", ["", "false", "TRUE"])
+def test_disabled_candidate_gate_downloads_and_checks_nothing(
+    tmp_path: Path, value: str
+) -> None:
+    log = tmp_path / "calls.log"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _GATE_STUBS
+            + step_script("publish.yml", "Require candidate verification when enabled"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "REQUIRE_CANDIDATE": value,
+            "REPO": "example/project",
+            "THIS_TAG": "v1.2.3",
+            "REVISION": "c" * 40,
+            "TEST_LOG": str(log),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "::notice::Release-candidate verification is not required yet.\n"
+    )
+    assert not log.exists()
+
+
+def test_enabling_the_gate_needs_files_the_release_workflow_does_not_attach() -> None:
+    """Pins the documented precondition for turning the candidate gate on.
+
+    With REQUIRE_RELEASE_CANDIDATE on, publishing needs candidate evidence and
+    a qualification record attached to the release, and the Release workflow
+    creates the release without either, so the guide must say so.
+    """
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "gh release create" in release
+    assert "gh release upload" not in release
+    candidate = _job((WORKFLOWS / "publish.yml").read_text(encoding="utf-8"), "candidate")
+    for name in ("candidate-evidence.json", "qualification-record.json"):
+        assert name not in release
+        assert f"--pattern {name}" in candidate
+    guide = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    section = guide.split("## Release qualification\n", 1)[1].split("\n## ", 1)[0]
+    prose = " ".join(section.split())
+    assert "`REQUIRE_RELEASE_CANDIDATE`" in prose
+    assert "needs at least one fully qualified binary artifact" in prose
+    assert "The Release workflow attaches none of these" in prose
+    assert "without blocking pip/pipx" not in prose
+
+
+def test_release_candidate_emits_a_qualification_template_after_verify() -> None:
+    source = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+    verify = _job(source, "verify")
+    prepare_at = verify.index("      - name: Prepare the qualification record template\n")
+    upload_at = verify.index("      - name: Upload the qualification record template\n")
+    assert verify.index("release_candidate.py verify") < prepare_at < upload_at
+    prepare, upload = verify[prepare_at:upload_at], verify[upload_at:]
+    assert "python -m scripts.distribution.qualification template" in prepare
+    assert "--evidence candidate-evidence.json" in prepare
+    assert (
+        "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+        in upload
+    )
+    assert "name: qualification-record-template\n" in upload
+    assert "path: qualification/qualification-record.json\n" in upload
+    assert "if-no-files-found: error" in upload
+    assert "secrets." not in prepare + upload
+
+
+def test_release_candidate_template_step_writes_a_loadable_record(
+    tmp_path: Path,
+) -> None:
+    # Imported here so the release-policy tests keep a light module import.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from scripts.distribution.qualification import load_matrix, load_record
+    from scripts.distribution.release_candidate import plan_candidate
+    from servonaut.distribution.builder import ManifestBuilder
+    from servonaut.distribution.manifest import (
+        ArtifactKind,
+        ReleaseChannel,
+        canonicalize_json,
+    )
+    from servonaut.runtime import DistributionKind
+
+    release_file = tmp_path / "servonaut.tar.gz"
+    release_file.write_bytes(b"PAYLOAD")
+    builder = ManifestBuilder(
+        product_version="1.2.3",
+        channel=ReleaseChannel.STABLE,
+        expires_at="2099-01-01T00:00:00Z",
+    )
+    artifact = builder.add_artifact_file(
+        release_file,
+        kind=ArtifactKind.STANDALONE_CLI,
+        distribution=DistributionKind.FROZEN_CLI,
+        platform="linux",
+        arch="x86_64",
+        download_url="https://example.com/servonaut.tar.gz",
+    )
+    builder.sign_artifact(artifact.artifact_id, Ed25519PrivateKey.generate())
+    candidate = plan_candidate(builder.build(), tag="v1.2.3", source_commit="c" * 40)
+    (tmp_path / "candidate-evidence.json").write_bytes(
+        canonicalize_json(candidate.to_evidence()) + b"\n"
+    )
+    script = 'python() { "$TEST_PYTHON" "$@"; }\n' + step_script(
+        "release-candidate.yml", "Prepare the qualification record template"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "TEST_PYTHON": sys.executable,
+            "PYTHONPATH": os.pathsep.join((str(ROOT), str(ROOT / "src"))),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    matrix = load_matrix()
+    record = load_record(tmp_path / "qualification" / "qualification-record.json", matrix)
+    assert record.tag == "v1.2.3"
+    assert record.candidate_digest == candidate.digest
+    assert [entry.row_id for entry in record.entries] == [
+        "cli-ubuntu-22.04-x64",
+        "cli-ubuntu-24.04-x64",
+    ]

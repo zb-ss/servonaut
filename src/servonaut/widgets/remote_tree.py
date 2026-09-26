@@ -220,7 +220,30 @@ class RemoteTree(Tree):
                     return self._parse_ls_output(sudo_out, path)
             raise RuntimeError(error_msg)
 
-        return self._parse_ls_output(stdout, path)
+        return self._resolve_symlinks(self._parse_ls_output(stdout, path), safe_path)
+
+    def _resolve_symlinks(self, entries: List[dict], safe_path: str) -> List[dict]:
+        """Type each symlink by what it points to: a file link becomes a file.
+
+        ``ls -la`` only says "link". Links stay expandable directories unless
+        one extra read-only call shows they point at a regular file; if that
+        call fails, the listing is kept as it was.
+        """
+        if not any(e.get('symlink') for e in entries):
+            return entries
+        stdout, error_msg = self._run_ls(
+            f'cd "{safe_path}" && for f in * .*; do [ -L "$f" ] && [ -f "$f" ] '
+            '&& printf "%s\\n" "$f"; done; true'
+        )
+        if error_msg is not None:
+            logger.debug("Could not resolve symlinks in %s: %s", safe_path, error_msg)
+            return entries
+        file_links = set(stdout.splitlines())
+        for entry in entries:
+            if entry.get('symlink') and entry['name'] in file_links:
+                entry['type'] = 'file'
+        entries.sort(key=lambda e: (e['type'] != 'directory', e['name'].lower()))
+        return entries
 
     def _run_ls(self, remote_command: str) -> tuple:
         """Run a remote listing command. Returns ``(stdout, error_or_None)``.
@@ -301,10 +324,9 @@ class RemoteTree(Tree):
             # Build full path
             full_path = f"{parent_path.rstrip('/')}/{name}"
 
-            # Symlinks are treated as directories (expandable) so mount points
-            # and linked directories (e.g. EFS/NFS) can be navigated.
-            # If the link points to a file, expanding will show an error or
-            # empty, which is acceptable.
+            # Symlinks start as directories (expandable) so mount points and
+            # linked directories (e.g. EFS/NFS) can be navigated;
+            # _resolve_symlinks retypes the ones that point at a file.
             entry_type = "directory" if (is_directory or is_link) else "file"
 
             entries.append({
@@ -313,6 +335,7 @@ class RemoteTree(Tree):
                 'size': size,
                 'permissions': permissions,
                 'path': full_path,
+                'symlink': is_link,
             })
 
         # Sort: directories first, then files, both alphabetically

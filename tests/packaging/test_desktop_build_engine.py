@@ -20,7 +20,9 @@ from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_build_policy,
     load_desktop_target_spec,
+    load_voice_runtime_policy,
 )
+from scripts.desktop_shell.voice_bundle import VoiceBundleError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
@@ -252,6 +254,13 @@ def test_capture_build_metadata_persists_warnings_and_every_toc(
         assert (tocs / "PYZ-00.toc").read_text() == f"[('PYZ{index}',)]"
     provenance = json.loads((metadata / "dependency-provenance.json").read_text())
     assert provenance["require_artifact_selftest"] is True
+    voice_policy = load_voice_runtime_policy()
+    assert provenance["voice_runtime"] == {
+        "python_version": voice_policy.python_version,
+        "uv_version": voice_policy.uv_version,
+        "uv_archive_url": voice_policy.uv_archives[target.name].url,
+        "uv_archive_sha256": voice_policy.uv_archives[target.name].sha256,
+    }
 
 
 def test_capture_build_metadata_requires_every_toc(
@@ -402,3 +411,102 @@ def test_build_policy_rejects_out_of_bounds_timeouts(tmp_path: Path) -> None:
         load_desktop_build_policy(policy_path)
 
     assert isinstance(load_desktop_build_policy(), DesktopBuildPolicy)
+
+
+def _voice_bundle(root: Path) -> Path:
+    voice = root / "voice"
+    voice.mkdir(parents=True)
+    (voice / "uv").write_bytes(b"\x7fELF uv")
+    (voice / "uv").chmod(0o755)
+    for name in ("servonaut-2.26.3-py3-none-any.whl", "voice-requirements.txt"):
+        (voice / name).write_bytes(name.encode())
+    (voice / "voice-runtime.json").write_text("{}")
+    return voice
+
+
+def test_voice_bundle_is_copied_into_the_payload_unchanged(tmp_path: Path) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    payload = tmp_path / "servonaut-desktop"
+    (payload / "_internal").mkdir(parents=True)
+
+    desktop_build._install_voice_bundle(payload, voice)
+
+    installed = payload / "_internal" / "voice"
+    assert sorted(path.name for path in installed.iterdir()) == sorted(
+        path.name for path in voice.iterdir()
+    )
+    for source in voice.iterdir():
+        assert (installed / source.name).read_bytes() == source.read_bytes()
+    assert (installed / "uv").stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("existing", ["voice", "voice-link"])
+def test_voice_bundle_never_merges_into_pyinstaller_output(
+    tmp_path: Path, existing: str
+) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    internal = tmp_path / "servonaut-desktop" / "_internal"
+    internal.mkdir(parents=True)
+    if existing == "voice":
+        (internal / "voice").mkdir()
+    else:
+        (internal / "voice").symlink_to(voice, target_is_directory=True)
+
+    with pytest.raises(DesktopPolicyValidationError, match="already contains a voice"):
+        desktop_build._install_voice_bundle(tmp_path / "servonaut-desktop", voice)
+
+
+def test_voice_bundle_requires_the_pyinstaller_contents_directory(tmp_path: Path) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    (tmp_path / "servonaut-desktop").mkdir()
+
+    with pytest.raises(DesktopPolicyValidationError, match="contents directory"):
+        desktop_build._install_voice_bundle(tmp_path / "servonaut-desktop", voice)
+
+
+def test_voice_bundle_is_staged_before_dependencies_and_pyinstaller(
+    wheel: Path,
+    target: DesktopTargetSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        desktop_build, "_bootstrap_build_venv", lambda root, policy: _context(root)
+    )
+
+    def refuse_download(staging_root: Path, spec: DesktopTargetSpec, *args: object) -> Path:
+        staged.append((staging_root, spec.name))
+        raise VoiceBundleError("the uv archive does not match its pinned SHA-256")
+
+    def unexpected(*args: object) -> None:
+        raise AssertionError("the long build steps must not start")
+
+    monkeypatch.setattr(desktop_build, "stage_voice_bundle", refuse_download)
+    monkeypatch.setattr(desktop_build, "_prepare_spec_inputs", unexpected)
+    monkeypatch.setattr(desktop_build, "_run_pyinstaller", unexpected)
+
+    with pytest.raises(DesktopPolicyValidationError, match="pinned SHA-256"):
+        desktop_build._build_staged_payload(
+            _request(wheel, target, tmp_path), tmp_path, load_desktop_build_policy()
+        )
+
+    assert staged == [(tmp_path, target.name)]
+
+
+def test_malformed_voice_lock_is_refused_before_output_is_created(
+    wheel: Path,
+    target: DesktopTargetSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(desktop_build, "_validate_host_target", lambda target: None)
+    lock = tmp_path / "voice-lock.txt"
+    lock.write_text("numpy>=1.24\n", encoding="ascii")
+    monkeypatch.setattr(desktop_build, "voice_lock_path", lambda name: lock)
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(DesktopPolicyValidationError, match="only name==version pins"):
+        desktop_build.build_desktop(_request(wheel, target, output_dir))
+
+    assert not output_dir.exists()

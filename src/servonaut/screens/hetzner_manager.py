@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
@@ -32,6 +33,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -53,6 +55,26 @@ logger = logging.getLogger(__name__)
 
 _RUNNING = {"running"}
 _STOPPED = {"stopped", "off"}
+
+# Power actions that interrupt a running server ask first (yes/no); starting
+# a stopped server does not. Values: (verb shown to the user, consequence).
+_CONFIRM_POWER = {
+    "shutdown": (
+        "Shut down",
+        "The operating system shuts down and the server's services stop "
+        "until it is started again.",
+    ),
+    "power_off": (
+        "Power off",
+        "Power is cut at once, like pulling the plug: the operating system "
+        "gets no chance to shut down and unsaved data can be lost.",
+    ),
+    "reboot": (
+        "Reboot",
+        "The server restarts and its services are unavailable until it is "
+        "back up.",
+    ),
+}
 
 
 class HetznerManagerScreen(Screen):
@@ -258,6 +280,22 @@ class HetznerManagerScreen(Screen):
         shown = str(inst.get("id") or "")
         return getattr(self, "_api_ids", {}).get(shown, shown)
 
+    @staticmethod
+    def _row_label(inst: dict) -> str:
+        """What to call a row's server: its name, else the id the table shows.
+
+        The fallback is the row's id, never the API id: in demo mode the row
+        carries a placeholder and the real id stays off the screen.
+        """
+        return str(inst.get("name") or inst.get("id") or "")
+
+    def _display_id(self, api_id: str) -> str:
+        """An API id as the table shows it (a placeholder in demo mode)."""
+        if not self.app.demo_mode:
+            return api_id
+        redactor = self.app.redaction_service
+        return redactor.redact_instance_id(api_id) if redactor else "Hidden"
+
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's state.
 
@@ -319,7 +357,12 @@ class HetznerManagerScreen(Screen):
             )
             return
         from servonaut.screens.hetzner_create import HetznerCreateScreen
-        self.app.push_screen(HetznerCreateScreen())
+        self.app.push_screen(HetznerCreateScreen(), callback=self._on_create_closed)
+
+    def _on_create_closed(self, created: Optional[bool]) -> None:
+        """Reload the list once the wizard has created a server."""
+        if created:
+            self._refresh()
 
     def action_power_on(self) -> None:
         self._run_lifecycle("power_on", "Starting", "started")
@@ -360,11 +403,16 @@ class HetznerManagerScreen(Screen):
                 severity="warning", markup=False,
             )
             return
-        self._set_status(
-            f"[dim]{in_progress_verb} {inst.get('name', identifier)}…[/dim]"
-        )
         self.run_worker(
-            self._do_lifecycle(method, identifier, done_verb),
+            confirm_and_run_power_action(
+                self.app,
+                prompt=_CONFIRM_POWER.get(method),
+                server_name=self._row_label(inst),
+                provider="Hetzner Cloud",
+                in_progress_verb=in_progress_verb,
+                set_status=self._set_status,
+                run=lambda: self._do_lifecycle(method, identifier, done_verb),
+            ),
             exclusive=False,
             name=f"hetzner_mgr_{method}",
         )
@@ -386,12 +434,12 @@ class HetznerManagerScreen(Screen):
                 f"[red]{method} failed: {err_msg}[/red]"
             )
             self.notify(
-                f"{method} failed: {exc}",
+                f"{method} failed: {err_msg}",
                 severity="error", markup=False,
             )
             return
         self.notify(
-            f"Server {identifier}: {done_verb}.",
+            f"Server {self._display_id(identifier)}: {done_verb}.",
             severity="information", markup=False,
         )
         # Re-fetch so the table reflects the new state (running/stopped).
@@ -399,14 +447,15 @@ class HetznerManagerScreen(Screen):
 
     async def _do_delete(self, inst: dict) -> None:
         identifier = self._api_id(inst) or str(inst.get("name") or "")
+        label = self._row_label(inst)
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Delete Hetzner Server",
                 description=(
-                    f"Delete [bold]{inst.get('name', identifier)}[/bold] "
-                    f"([bold]{inst.get('type', '')}[/bold]) in "
-                    f"[bold]{inst.get('region', '')}[/bold]?"
+                    f"Delete [bold]{escape(label)}[/bold] "
+                    f"([bold]{escape(str(inst.get('type', '')))}[/bold]) in "
+                    f"[bold]{escape(str(inst.get('region', '')))}[/bold]?"
                 ),
                 consequences=[
                     "All data on the server will be permanently destroyed",
@@ -421,9 +470,7 @@ class HetznerManagerScreen(Screen):
         if not confirmed:
             return
 
-        self._set_status(
-            f"[dim]Deleting {inst.get('name', identifier)}…[/dim]"
-        )
+        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
         svc = self.app.hetzner_service
         try:
             await svc.delete_server(identifier)
@@ -438,12 +485,12 @@ class HetznerManagerScreen(Screen):
                 f"[red]Delete failed: {err_msg}[/red]"
             )
             self.notify(
-                f"Delete failed: {exc}",
+                f"Delete failed: {err_msg}",
                 severity="error", markup=False,
             )
             return
         self.notify(
-            f"Server {identifier} deleted.",
+            f"Server {self._display_id(identifier)} deleted.",
             severity="information", markup=False,
         )
         await self._load_instances()

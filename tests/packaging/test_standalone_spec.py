@@ -117,6 +117,7 @@ def _configure_environment(
     tmp_path: Path,
     *,
     selftest: bool = False,
+    excluded_modules: tuple[str, ...] = ("readline", "sounddevice"),
 ) -> tuple[Path, Path]:
     for name in tuple(os.environ):
         if name.startswith("SERVONAUT_STANDALONE_"):
@@ -138,7 +139,7 @@ def _configure_environment(
         "python_version": "3.12",
         "payload_name": "servonaut",
         "product_version": "2.26.2",
-        "excluded_modules": ["readline", "sounddevice"],
+        "excluded_modules": list(excluded_modules),
         "hook_directory": str(_HOOK_DIRECTORY.resolve()),
         "require_artifact_selftest": selftest,
     }
@@ -334,6 +335,20 @@ def test_spec_executes_against_an_installed_wheel_shim(
     } <= destinations
     assert _EXE.instances.pop().kwargs["name"] == "servonaut"
     assert _COLLECT.instances.pop().kwargs["name"] == "servonaut"
+
+
+def test_spec_excludes_every_module_the_resolved_profile_forbids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbidden = ("readline", "sounddevice", "servonaut.desktop")
+    output_dir, _ = _configure_environment(
+        monkeypatch, tmp_path, excluded_modules=forbidden
+    )
+
+    _execute_spec(output_dir)
+
+    analysis = _Analysis.instances.pop()
+    assert set(forbidden) <= set(analysis.kwargs["excludes"])
 
 
 def test_spec_rejects_a_substituted_runtime_notice_source(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from scripts.desktop_shell.model import (
     PAYLOAD_NOTICES_DIRECTORY,
     PYINSTALLER_WARNING_NAME,
     RUNTIME_NOTICE_NAME,
+    VOICE_PAYLOAD_DIRECTORY,
     DesktopPolicyValidationError,
     DesktopTargetSpec,
     executable_toc_directory,
@@ -28,6 +30,8 @@ from scripts.desktop_shell.model import (
     load_desktop_target_spec,
     load_frontend_licenses,
     load_size_baseline,
+    load_voice_runtime_policy,
+    uv_executable_name,
 )
 from scripts.desktop_shell.native_headers import (
     NativeHeaderError,
@@ -35,6 +39,8 @@ from scripts.desktop_shell.native_headers import (
     macho_minimum_macos,
     read_native_identity,
 )
+from scripts.desktop_shell.voice_bundle import VoiceBundleError, verify_voice_bundle
+from scripts.standalone_cli.artifact_filesystem import matches_forbidden_path
 from scripts.standalone_cli.artifact_types import (
     ArtifactDescriptor,
     ArtifactEvidenceError,
@@ -69,6 +75,7 @@ class DesktopInspectionReport:
     assets_verified_count: int
     licenses_verified_count: int
     notices_verified_count: int
+    voice_files_verified_count: int
     expanded_bytes: int
     regular_file_count: int
     binary_formats: dict[str, str]
@@ -218,6 +225,42 @@ def _payload_entry(payload_root: Path, path: Path) -> PayloadEntry:
     if stat.S_ISREG(status.st_mode):
         return PayloadEntry(relative, "file", status.st_mode, status.st_size, None, None)
     raise DesktopInspectionError(f"Payload contains an unsupported file type: {relative}")
+
+
+def _verify_voice_bundle(
+    payload_root: Path, target: DesktopTargetSpec, product_version: str
+) -> int:
+    """Require exactly the managed voice runtime inputs, matching their manifest."""
+    voice_dir = payload_root.joinpath(*VOICE_PAYLOAD_DIRECTORY.parts)
+    _verify_executable(
+        voice_dir / uv_executable_name(target.platform), target, label="Voice runtime uv"
+    )
+    try:
+        verify_voice_bundle(
+            voice_dir, target, product_version, load_voice_runtime_policy()
+        )
+    except VoiceBundleError as error:
+        raise DesktopInspectionError(f"Voice runtime bundle invalid: {error}") from error
+    return len(target.voice_bundle_paths)
+
+
+def _without_voice_bundle(
+    snapshot: PayloadSnapshot, target: DesktopTargetSpec
+) -> PayloadSnapshot:
+    """Drop the voice bundle files, which _verify_voice_bundle checks one by one.
+
+    Every other path, including anything else under a voice directory, still
+    meets the forbidden path policy.
+    """
+    return dataclasses.replace(
+        snapshot,
+        entries=tuple(
+            entry
+            for entry in snapshot.entries
+            if entry.kind != "file"
+            or not matches_forbidden_path(entry.relative_path, target.voice_bundle_paths)
+        ),
+    )
 
 
 def _verify_toc_policy(
@@ -399,8 +442,13 @@ def inspect_desktop_payload(
     marker = _verify_marker(payload_root, target, product_version)
     provenance = _read_build_provenance(build_metadata_dir, target, product_version)
     snapshot = _payload_snapshot(payload_root, gui_path, marker, provenance)
+    voice_count = _verify_voice_bundle(payload_root, target, product_version)
     _verify_toc_policy(
-        snapshot, target, executables, build_metadata_dir, policy.max_metadata_file_bytes
+        _without_voice_bundle(snapshot, target),
+        target,
+        executables,
+        build_metadata_dir,
+        policy.max_metadata_file_bytes,
     )
     asset_count, license_count = _verify_frontend(payload_root, target)
     notice_count = _verify_notices(payload_root, target, policy.max_metadata_file_bytes)
@@ -419,6 +467,7 @@ def inspect_desktop_payload(
         assets_verified_count=asset_count,
         licenses_verified_count=license_count,
         notices_verified_count=notice_count,
+        voice_files_verified_count=voice_count,
         expanded_bytes=snapshot.expanded_regular_bytes,
         regular_file_count=file_count,
         binary_formats=formats,

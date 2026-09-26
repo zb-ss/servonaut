@@ -1,0 +1,11 @@
+# Managed voice runtime for the packaged desktop app.
+#
+# These are the union of pyproject.toml's voice, voice-streaming and
+# voice-output extras. The desktop payload does not contain them: the app
+# installs them on demand from the per-target, hash-locked voice-<target>.txt
+# files generated from this input by scripts/desktop_shell/voice_lock.py.
+# Keep every specifier identical to its pyproject.toml extra.
+faster-whisper>=1.0
+sherpa-onnx>=1.13.3
+sounddevice>=0.4
+numpy>=1.24

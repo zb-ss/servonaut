@@ -110,3 +110,56 @@ def test_timeout_surfaces_as_timeout():
         with pytest.raises(RuntimeError) as exc:
             tree._fetch_directory_contents("/mnt/efs")
     assert "timed out" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Symlinks are typed by their target
+# ---------------------------------------------------------------------------
+
+_LS_WITH_LINKS = (
+    "total 8\n"
+    "drwxr-xr-x 3 root root 4096 Jan  1 00:00 .\n"
+    "drwxr-xr-x 3 root root 4096 Jan  1 00:00 ..\n"
+    "lrwxrwxrwx 1 root root   11 Jan  1 00:00 current.log -> app-01.log\n"
+    "lrwxrwxrwx 1 root root   12 Jan  1 00:00 archive -> /srv/archive\n"
+    "-rw-r--r-- 1 root root   12 Jan  1 00:00 app-01.log\n"
+)
+
+
+def test_symlink_to_a_file_is_a_file_and_to_a_directory_stays_expandable():
+    tree = _make_tree()
+    commands = []
+
+    def _run(cmd, **kw):
+        commands.append(cmd[-1])
+        if cmd[-1].startswith("ls -la"):
+            return _completed(0, _LS_WITH_LINKS)
+        return _completed(0, "current.log\n")  # only the file link
+
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=_run):
+        entries = tree._fetch_directory_contents("/var/log/app")
+
+    types = {e["name"]: e["type"] for e in entries}
+    assert types == {"current.log": "file", "archive": "directory", "app-01.log": "file"}
+    assert len(commands) == 2
+    assert commands[1].startswith('cd "/var/log/app" && ')
+
+
+def test_symlink_lookup_failure_keeps_links_expandable():
+    tree = _make_tree()
+    results = [_completed(0, _LS_WITH_LINKS), _completed(1, "", "sh: cd: denied")]
+
+    with patch("servonaut.widgets.remote_tree.subprocess.run", side_effect=results):
+        entries = tree._fetch_directory_contents("/var/log/app")
+
+    types = {e["name"]: e["type"] for e in entries}
+    assert types["current.log"] == "directory"
+    assert types["archive"] == "directory"
+
+
+def test_listing_without_symlinks_makes_no_extra_call():
+    tree = _make_tree()
+    with patch("servonaut.widgets.remote_tree.subprocess.run",
+               return_value=_completed(0, _LS_OUTPUT)) as run:
+        tree._fetch_directory_contents("/mnt/efs")
+    assert run.call_count == 1

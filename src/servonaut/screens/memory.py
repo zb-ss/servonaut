@@ -6,6 +6,7 @@ keyboard actions to refresh, pin, clear, annotate, and export memory.
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import hashlib
 import inspect
@@ -16,17 +17,18 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -123,7 +125,7 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
         return label
 
     instance_id = instance.get("id") or instance.get("name", "")
-    provider = instance.get("provider", "custom")
+    provider = instance_provider(instance)
     try:
         modules = memory_service.get_all_modules(instance_id, provider)
     except Exception as exc:  # noqa: BLE001
@@ -495,7 +497,7 @@ class MemoryScreen(Screen):
         banner = self.query_one("#memory-opt-out-banner", Static)
 
         instance_id = self._instance.get("id") or self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
 
         # Opt-out check
         memory_service = getattr(self.app, "memory_service", None)
@@ -848,7 +850,7 @@ class MemoryScreen(Screen):
             return
 
         # Look up the current observed value for the placeholder text
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         try:
             data = memory_service.get(instance_id, module_name, provider)
             current_value = str(data.get("observed", {}).get(key, "")) if data else ""
@@ -881,7 +883,7 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         try:
             await memory_service.pin(
                 instance_id,
@@ -919,7 +921,7 @@ class MemoryScreen(Screen):
             if self._is_opted_out(instance_id, memory_service):
                 self.app.notify("Memory disabled for this server.", severity="warning")
                 return
-            provider = self._instance.get("provider", "custom")
+            provider = instance_provider(self._instance)
             try:
                 memory_service.clear(
                     instance_id, modules=[module_name], provider=provider
@@ -944,7 +946,7 @@ class MemoryScreen(Screen):
         distinction obvious without fighting the data-table surface.
         """
         name = self._instance.get("name") or instance_id
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         return (
             f"# Notes — {name} ({instance_id}) @ {provider}\n"
             "\n"
@@ -977,10 +979,12 @@ class MemoryScreen(Screen):
         )
 
     def action_annotate(self) -> None:
-        """Open the annotations file in the user's ``$EDITOR``.
+        """Edit this server's free-form notes (``annotations.md``).
 
-        Drops out of the TUI via ``self.app.suspend()``, opens the editor,
-        then re-renders the table on return.
+        Opens ``$VISUAL`` / ``$EDITOR`` in the terminal via
+        ``self.app.suspend()``. Where the app cannot suspend (the headless
+        driver, web drivers) it falls back to an in-app editor, so annotating
+        works everywhere. The table re-renders after either.
         """
         instance_id = self._instance.get("id") or self._instance.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
@@ -991,14 +995,52 @@ class MemoryScreen(Screen):
             self.app.notify("Memory disabled for this server.", severity="warning")
             return
 
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
+        path = self._prepare_annotations_file(instance_id, provider, memory_service)
+        if path is None:
+            return
+
+        argv = self._editor_argv(path)
+        logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
+        try:
+            proc = self._run_external_editor(argv)
+        except SuspendNotSupported:
+            logger.info("Terminal cannot be suspended; using the in-app editor")
+            self._open_in_app_annotation_editor(instance_id, provider, memory_service)
+            return
+        except FileNotFoundError:
+            self.app.notify(
+                f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
+                "installed command (e.g. 'vi', 'nano').",
+                severity="error",
+            )
+            return
+        except OSError as exc:
+            self.app.notify(f"Could not launch editor: {exc}", severity="error")
+            return
+
+        self._report_editor_problems(argv, proc)
+        self.run_worker(
+            self._finish_external_edit(instance_id, provider, memory_service),
+            exclusive=False,
+            group="memory_mutation",
+            name="memory_annotations_record",
+        )
+
+    def _prepare_annotations_file(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[Path]:
+        """Resolve ``annotations.md``, seeding the template on first open.
+
+        Returns ``None`` (after notifying) when the file cannot be prepared.
+        """
         try:
             path = memory_service.get_annotations_path(instance_id, provider)
         except Exception as exc:
             self.app.notify(
                 f"Could not resolve annotations path: {exc}", severity="error"
             )
-            return
+            return None
 
         # Seed a short template on first open so operators understand what
         # goes here (free-form notes) vs. what is machine-probed (the table
@@ -1021,8 +1063,12 @@ class MemoryScreen(Screen):
                 self.app.notify(
                     f"Could not create annotations file: {exc}", severity="error"
                 )
-                return
+                return None
+        return path
 
+    @staticmethod
+    def _editor_argv(path: Path) -> List[str]:
+        """Build the editor argv from ``$VISUAL`` / ``$EDITOR`` (default ``vi``)."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         # $EDITOR / $VISUAL may include flags (e.g. "emacsclient -c -a emacs")
         # so split with shlex rather than passing the raw string as argv[0];
@@ -1035,41 +1081,40 @@ class MemoryScreen(Screen):
         if not argv:
             argv = ["vi"]
         argv.append(str(path))
+        return argv
 
-        logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
+    def _run_external_editor(self, argv: List[str]) -> Optional[subprocess.CompletedProcess]:
+        """Run the editor in the real terminal while the app is suspended.
 
+        Raises:
+            SuspendNotSupported: the driver cannot hand the terminal over.
+                Raised on entering ``suspend()``, before anything is launched.
+        """
+        with self.app.suspend():
+            # Only stderr is captured, so a non-zero exit (e.g. emacsclient
+            # can't reach a daemon) can be surfaced. stdout must stay the
+            # terminal: a terminal editor draws its screen there, and
+            # capturing it leaves the user typing into an invisible editor.
+            return subprocess.run(  # noqa: S603
+                argv,
+                check=False,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
+
+    def _report_editor_problems(
+        self, argv: List[str], proc: Optional[subprocess.CompletedProcess]
+    ) -> None:
+        """Explain common editor misconfigurations and non-zero exits."""
         # Heuristic: catch the common "$EDITOR=emacs -c -a emacs" typo.  Those
         # flags are emacsclient-specific; plain emacs treats them as filenames
         # and opens buffers named -c / -a / emacs alongside the real file,
         # which users perceive as "emacs opened but not my file".
         editor_binary = os.path.basename(argv[0])
-        looks_like_bad_emacs_config = editor_binary == "emacs" and any(
+        if editor_binary == "emacs" and any(
             flag in argv[1:-1] for flag in ("-c", "-a", "--alternate-editor")
-        )
-        try:
-            with self.app.suspend():
-                # capture_output so a non-zero exit (e.g. emacsclient can't
-                # reach a daemon and fallback emacs fails) can be surfaced
-                # instead of dropping the user back into the TUI with no
-                # clue why nothing happened.
-                proc = subprocess.run(  # noqa: S603
-                    argv,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-        except FileNotFoundError:
-            self.app.notify(
-                f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
-                "installed command (e.g. 'vi', 'nano').",
-                severity="error",
-            )
-            return
-        except OSError as exc:
-            self.app.notify(f"Could not launch editor: {exc}", severity="error")
-            return
-
-        if looks_like_bad_emacs_config:
+        ):
             self.app.notify(
                 "Your $EDITOR is 'emacs' but uses emacsclient flags (-c / -a). "
                 "Plain emacs treats those as filenames, so the wrong buffer "
@@ -1079,53 +1124,169 @@ class MemoryScreen(Screen):
                 timeout=10,
             )
 
-        if proc is not None and proc.returncode != 0:
-            stderr_snippet = (proc.stderr or "").strip().splitlines()
-            last_err = stderr_snippet[-1] if stderr_snippet else ""
-            logger.warning(
-                "Editor exited non-zero: argv=%r rc=%d stderr=%r",
-                argv,
-                proc.returncode,
-                proc.stderr,
+        if proc is None or proc.returncode == 0:
+            return
+        stderr_snippet = (proc.stderr or "").strip().splitlines()
+        last_err = stderr_snippet[-1] if stderr_snippet else ""
+        logger.warning(
+            "Editor exited non-zero: argv=%r rc=%d stderr=%r",
+            argv,
+            proc.returncode,
+            proc.stderr,
+        )
+        # emacsclient is a common trip-wire: it only opens a frame when
+        # an emacs daemon is running, and "emacsclient -c -a emacs"
+        # falls back to GUI emacs which needs DISPLAY.  Hint at the fix
+        # rather than just showing a bare exit code.
+        hint = ""
+        if "emacsclient" in argv[0]:
+            hint = (
+                " — try 'emacsclient -t' (terminal frame) or start an "
+                "emacs daemon with 'emacs --daemon'."
             )
-            # emacsclient is a common trip-wire: it only opens a frame when
-            # an emacs daemon is running, and "emacsclient -c -a emacs"
-            # falls back to GUI emacs which needs DISPLAY.  Hint at the fix
-            # rather than just showing a bare exit code.
-            hint = ""
-            if "emacsclient" in argv[0]:
-                hint = (
-                    " — try 'emacsclient -t' (terminal frame) or start an "
-                    "emacs daemon with 'emacs --daemon'."
-                )
-            msg = (
-                f"Editor exited with code {proc.returncode}"
-                f"{': ' + last_err if last_err else ''}{hint}"
-            )
-            self.app.notify(msg, severity="warning")
+        msg = (
+            f"Editor exited with code {proc.returncode}"
+            f"{': ' + last_err if last_err else ''}{hint}"
+        )
+        self.app.notify(msg, severity="warning", markup=False)
 
-        # After the editor closes, compute a content hash and enqueue the
-        # updated annotations for sync if the content has changed.
+    def _open_in_app_annotation_editor(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> None:
+        """Edit the annotations in a modal TextArea; save them in a worker."""
+        from servonaut.screens.text_editor_modal import TextEditorModal
+
         try:
             content = memory_service.read_annotations(instance_id, provider)
-            new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            prior_hash = memory_service.get_annotations_meta(instance_id).get(
-                "annotations_hash", ""
+        except Exception as exc:
+            self.app.notify(f"Could not read annotations: {exc}", severity="error")
+            return
+
+        def _on_close(result: Optional[str]) -> None:
+            if result is None or result == content:
+                return
+            self.run_worker(
+                self._save_annotations(instance_id, provider, memory_service, result),
+                exclusive=False,
+                group="memory_mutation",
+                name="memory_annotations_save",
             )
-            if new_hash != prior_hash:
-                now_iso = datetime.now(timezone.utc).isoformat()
-                memory_service.set_annotations_meta(
-                    instance_id,
-                    annotations_hash=new_hash,
-                    annotations_modified_at=now_iso,
-                )
+
+        name = self._instance.get("name") or instance_id
+        self.app.push_screen(
+            TextEditorModal(
+                content,
+                title=f"Notes — {name}",
+                hint="Free-form notes for this server (Markdown)",
+                check=self._secret_warning,
+            ),
+            _on_close,
+        )
+
+    async def _save_annotations(
+        self, instance_id: str, provider: str, memory_service: Any, text: str
+    ) -> None:
+        """Worker: write the notes off the UI thread, then record the change."""
+        try:
+            await asyncio.to_thread(
+                memory_service.write_annotations, instance_id, text, provider
+            )
+        except Exception as exc:
+            self.app.notify(
+                f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        self.app.notify("Annotations saved.", severity="information")
+        await self._record_annotations_edit(instance_id, provider, memory_service)
+
+    async def _finish_external_edit(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> None:
+        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret."""
+        content = await self._record_annotations_edit(
+            instance_id, provider, memory_service
+        )
+        warning = self._secret_warning(content) if content is not None else None
+        if warning:
+            self.app.notify(
+                f"{warning} They were saved as written; remove them if that "
+                "was not intended.",
+                severity="warning",
+                timeout=10,
+                markup=False,
+            )
+
+    async def _record_annotations_edit(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[str]:
+        """Store a changed annotations hash, queue the notes for sync, re-render.
+
+        The file read and metadata write run off the UI thread. The sync
+        enqueue stays on the event loop, which is where the sync queue is
+        drained, so the two never touch the queue at the same time.
+
+        Returns:
+            The new content when it changed, else ``None``.
+        """
+        content: Optional[str] = None
+        try:
+            changed = await asyncio.to_thread(
+                self._store_annotations_hash, instance_id, provider, memory_service
+            )
+            if changed is not None:
+                content, modified_at = changed
                 sync = getattr(self.app, "memory_sync_service", None)
                 if sync is not None:
-                    sync.enqueue_annotations(self._instance, content, probed_at=now_iso)
+                    sync.enqueue_annotations(
+                        self._instance, content, probed_at=modified_at
+                    )
         except Exception as exc:
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
         self._render_table()
+        return content
+
+    @staticmethod
+    def _store_annotations_hash(
+        instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[Tuple[str, str]]:
+        """Blocking: when the notes changed, store their new hash.
+
+        Returns:
+            ``(content, modified_at)`` when they changed, else ``None``.
+        """
+        content = memory_service.read_annotations(instance_id, provider)
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        prior_hash = memory_service.get_annotations_meta(instance_id).get(
+            "annotations_hash", ""
+        )
+        if new_hash == prior_hash:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        memory_service.set_annotations_meta(
+            instance_id,
+            annotations_hash=new_hash,
+            annotations_modified_at=now_iso,
+        )
+        return content, now_iso
+
+    @staticmethod
+    def _secret_warning(content: str) -> Optional[str]:
+        """A warning when the notes look like they hold a secret, else ``None``.
+
+        Notes are never blocked or scrubbed: the user may have pasted a
+        placeholder on purpose.
+        """
+        from servonaut.services.memory.redaction import scan_for_secrets
+
+        categories = scan_for_secrets(content)
+        if not categories:
+            return None
+        return (
+            "These notes appear to contain secrets ("
+            + ", ".join(dict.fromkeys(categories))
+            + ")."
+        )
 
     def action_view_summary(self) -> None:
         """Render the deterministic local summary without an entitlement gate."""
@@ -1470,7 +1631,7 @@ class MemoryScreen(Screen):
     async def _do_sync_now(self, sync_service: Any) -> None:
         iid = self._instance.get("id") or self._instance.get("name", "")
         name = self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         display_name = name or iid or "this server"
         try:
             queued = sync_service.backfill_from_local_store(instance_id=iid)

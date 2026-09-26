@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "failure_link_prefixes": [
+    "https://github.com/zb-ss/servonaut/issues/",
+    "https://github.com/zb-ss/servonaut/actions/runs/"
+  ],
+  "checks": {
+    "verify-integrity": "The archive's checksum, signature, SBOM and provenance verify before it is extracted.",
+    "version-help": "The extracted executable prints --version and --help without system Python or developer tools.",
+    "tui-boot-navigate": "The TUI boots, navigates the sidebar, exercises an adjacent screen and a failure path, and exits cleanly.",
+    "mcp-stdio": "The MCP server completes initialize and list-tools over stdio.",
+    "update-check-no-self-mutation": "An update check reports a newer release without running pip or modifying the installation.",
+    "native-terminal": "An external SSH terminal opens, or the missing-client message appears, and no process is left behind.",
+    "verify-publisher": "The installer's publisher, signature and notarization verify before installation.",
+    "install-lifecycle": "Install, offline first launch, relaunch, upgrade or repair, uninstall and reinstalling the previous release keep user data as documented.",
+    "desktop-ux": "The app boots, navigates the sidebar and settings, and exercises an adjacent screen and a failure path with no console, page or network errors.",
+    "local-security": "The local session enforces its token, Origin and single-session rules, and closing either process leaves no child process, listener or port.",
+    "update-and-mcp-helper": "Update notification and download verification work, and the packaged MCP helper starts.",
+    "voice-runtime": "Managed voice installs, cancels, repairs and removes cleanly; dictation, streaming, conversation mode and spoken replies work and reuse the downloaded models.",
+    "webview2-missing": "The app works with WebView2 present and explains how to install it when it is missing.",
+    "openssh-missing": "Terminal features work with OpenSSH present and explain how to install it when it is missing.",
+    "standard-user": "Installation and use work for a standard, non-administrator account and for paths with spaces or non-ASCII characters.",
+    "terminal-focus": "An external terminal opened from the app comes to the front with keyboard focus.",
+    "gatekeeper-offline-staple": "Gatekeeper accepts the app opened from Finder while offline, using the stapled notarization ticket.",
+    "macos-permissions": "Microphone and automation permission prompts appear and the app honours the answer.",
+    "external-terminal": "An external terminal opens from the app for SSH sessions.",
+    "native-arm64": "Every shipped executable and library is native arm64 and runs without Rosetta.",
+    "deb-dependencies": "The package pulls in its GTK, WebKit and PortAudio dependencies and removes cleanly.",
+    "desktop-entry": "The desktop entry appears in the application launcher and starts the app.",
+    "frozen-payload-compat": "The payload built on the oldest supported Ubuntu release runs unchanged."
+  },
+  "families": {
+    "cli": {
+      "title": "Standalone CLI",
+      "checks": [
+        "verify-integrity",
+        "version-help",
+        "tui-boot-navigate",
+        "mcp-stdio",
+        "update-check-no-self-mutation",
+        "native-terminal"
+      ]
+    },
+    "desktop": {
+      "title": "Desktop app",
+      "checks": [
+        "verify-publisher",
+        "install-lifecycle",
+        "desktop-ux",
+        "local-security",
+        "update-and-mcp-helper",
+        "voice-runtime"
+      ]
+    }
+  },
+  "rows": [
+    {
+      "row_id": "cli-windows-10-x64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "windows",
+      "arch": "x86_64",
+      "baseline": "Windows 10 22H2",
+      "extra_checks": []
+    },
+    {
+      "row_id": "cli-windows-11-x64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "windows",
+      "arch": "x86_64",
+      "baseline": "Windows 11",
+      "extra_checks": []
+    },
+    {
+      "row_id": "cli-macos-13-x64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "darwin",
+      "arch": "x86_64",
+      "baseline": "macOS 13 or later (Intel)",
+      "extra_checks": []
+    },
+    {
+      "row_id": "cli-macos-13-arm64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "darwin",
+      "arch": "arm64",
+      "baseline": "macOS 13 or later (Apple Silicon)",
+      "extra_checks": ["native-arm64"]
+    },
+    {
+      "row_id": "cli-ubuntu-22.04-x64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 22.04",
+      "extra_checks": []
+    },
+    {
+      "row_id": "cli-ubuntu-24.04-x64",
+      "family": "cli",
+      "artifact_kind": "standalone_cli",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 24.04",
+      "extra_checks": ["frozen-payload-compat"]
+    },
+    {
+      "row_id": "desktop-windows-10-x64",
+      "family": "desktop",
+      "artifact_kind": "windows_msi",
+      "platform": "windows",
+      "arch": "x86_64",
+      "baseline": "Windows 10 22H2",
+      "extra_checks": ["webview2-missing", "openssh-missing", "standard-user"]
+    },
+    {
+      "row_id": "desktop-windows-11-x64",
+      "family": "desktop",
+      "artifact_kind": "windows_msi",
+      "platform": "windows",
+      "arch": "x86_64",
+      "baseline": "Windows 11",
+      "extra_checks": ["webview2-missing", "openssh-missing", "standard-user", "terminal-focus"]
+    },
+    {
+      "row_id": "desktop-macos-13-x64",
+      "family": "desktop",
+      "artifact_kind": "macos_dmg",
+      "platform": "darwin",
+      "arch": "x86_64",
+      "baseline": "macOS 13 or later (Intel)",
+      "extra_checks": ["gatekeeper-offline-staple", "macos-permissions", "external-terminal"]
+    },
+    {
+      "row_id": "desktop-macos-13-arm64",
+      "family": "desktop",
+      "artifact_kind": "macos_dmg",
+      "platform": "darwin",
+      "arch": "arm64",
+      "baseline": "macOS 13 or later (Apple Silicon)",
+      "extra_checks": ["native-arm64", "gatekeeper-offline-staple", "macos-permissions", "external-terminal"]
+    },
+    {
+      "row_id": "desktop-ubuntu-22.04-x64-x11",
+      "family": "desktop",
+      "artifact_kind": "ubuntu_deb",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 22.04 (X11)",
+      "extra_checks": ["deb-dependencies", "desktop-entry"]
+    },
+    {
+      "row_id": "desktop-ubuntu-22.04-x64-wayland",
+      "family": "desktop",
+      "artifact_kind": "ubuntu_deb",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 22.04 (Wayland)",
+      "extra_checks": ["deb-dependencies", "desktop-entry"]
+    },
+    {
+      "row_id": "desktop-ubuntu-24.04-x64-x11",
+      "family": "desktop",
+      "artifact_kind": "ubuntu_deb",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 24.04 (X11)",
+      "extra_checks": ["deb-dependencies", "desktop-entry", "frozen-payload-compat"]
+    },
+    {
+      "row_id": "desktop-ubuntu-24.04-x64-wayland",
+      "family": "desktop",
+      "artifact_kind": "ubuntu_deb",
+      "platform": "linux",
+      "arch": "x86_64",
+      "baseline": "Ubuntu 24.04 (Wayland)",
+      "extra_checks": ["deb-dependencies", "desktop-entry", "frozen-payload-compat"]
+    }
+  ]
+}

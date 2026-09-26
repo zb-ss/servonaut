@@ -4,6 +4,8 @@ Guards three properties:
 
 1. Every entry in CSS_FILES exists on disk and lives under src/servonaut/styles/.
 2. The App's stylesheet loads without errors (no StylesheetError on boot).
+   The boot runs in a child process with a throwaway HOME and no network, so
+   it never reads the developer's own ``~/.servonaut`` or calls PyPI.
 3. The CSS bundle has not grown since the original split (size guard): the
    concatenated size of CSS_FILES must be smaller than or equal to the
    original pre-split app.css.  This catches accidental rule duplication or
@@ -17,9 +19,9 @@ import pathlib
 import subprocess
 
 import pytest
-from textual.css.errors import StylesheetError
 
 from servonaut.styles import CSS_FILES
+from tests._hermetic_app import SENTINEL_USERNAME, run_hermetic_app
 
 STYLES_ROOT = pathlib.Path(__file__).parent.parent / "src" / "servonaut" / "styles"
 
@@ -49,18 +51,29 @@ def test_css_files_list_has_expected_count():
 # 2. App stylesheet loads without StylesheetError
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_app_stylesheet_loads_without_error():
-    """The full CSS bundle must parse and load without raising StylesheetError."""
-    from servonaut.app import ServonautApp
+def test_app_stylesheet_loads_without_error(tmp_path):
+    """The full CSS bundle must parse and load without raising StylesheetError.
 
-    app = ServonautApp()
-    try:
-        async with app.run_test(size=(120, 40)):
-            # If we reach here, no StylesheetError was raised during mount.
-            pass
-    except StylesheetError as exc:
-        pytest.fail(f"StylesheetError during App boot: {exc}")
+    Boots the real app over a throwaway HOME whose config carries a sentinel
+    value. The app reporting the sentinel back proves it used that HOME; the
+    child's audit hook proves it opened nothing under the real one and made
+    no network call.
+    """
+    report = run_hermetic_app(tmp_path, "boot")
+
+    error = report["error"]
+    if error and "StylesheetError" in error:
+        pytest.fail(f"StylesheetError during App boot:\n{error}")
+    assert error is None, f"App boot failed:\n{error}\n{report['stderr']}"
+
+    result = report["result"]
+    home = pathlib.Path(report["home"])
+    assert result["screen"] == "InstanceListScreen"
+    assert result["default_username"] == SENTINEL_USERNAME
+    assert pathlib.Path(result["config_path"]).is_relative_to(home)
+    assert pathlib.Path(result["data_root"]).is_relative_to(home)
+    assert report["home_accesses"] == [], "boot touched the real home directory"
+    assert report["network_attempts"] == [], "boot attempted network access"
 
 
 # ---------------------------------------------------------------------------

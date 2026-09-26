@@ -1,11 +1,19 @@
 """Shared fixtures for Servonaut tests."""
 from __future__ import annotations
 
-import os
+# The suite runs against a throwaway home directory. This must happen before
+# anything imports servonaut: several of its modules compute runtime paths
+# (config, backups, cache, auth, memory, ...) from Path.home() at import time.
+from . import _home_isolation
 
-import pytest
+_HOME_ISOLATION = _home_isolation.isolate()
 
-from servonaut.config.schema import (
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+from servonaut.config.schema import (  # noqa: E402
     AppConfig,
     ConnectionProfile,
     ConnectionRule,
@@ -30,6 +38,57 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         ssh_host_keys, "servonaut_known_hosts_path", lambda: _session_known_hosts,
     )
+
+
+# ---------------------------------------------------------------------------
+# Real-home write guard
+#
+# From session start to session finish, an audit hook refuses writes under
+# the account's real home (outside the checkout, the interpreter and the
+# temporary directories). The test that attempted one fails, and so does the
+# session, even when the code under test swallowed the refusal.
+# ---------------------------------------------------------------------------
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Arm the real-home write guard for collection and the test run."""
+    allowed = [session.config.rootpath, Path(__file__).resolve().parent.parent]
+    basetemp = session.config.option.basetemp
+    if basetemp:
+        allowed.append(Path(basetemp).expanduser())
+    _home_isolation.arm(_HOME_ISOLATION, allowed)
+
+
+@pytest.fixture(autouse=True)
+def _refuse_real_home_writes():
+    """Fail the test that tried to write under the real home directory."""
+    mark = _home_isolation.violation_count()
+    yield
+    refused = _home_isolation.violations_since(mark)
+    if refused:
+        lines = "\n".join(f"  {event}: {path}" for event, path in refused)
+        pytest.fail(
+            f"test wrote under the real home directory (refused):\n{lines}",
+            pytrace=False,
+        )
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Disarm before pytest's own outputs, and fail on any refused write."""
+    _home_isolation.disarm()
+    if _home_isolation.all_violations():
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    """List every write the guard refused during the run."""
+    refused = _home_isolation.all_violations()
+    if not refused:
+        return
+    terminalreporter.section("writes under the real home directory", red=True)
+    for event, path in refused:
+        terminalreporter.line(f"{event}: {path}")
 
 
 # ---------------------------------------------------------------------------

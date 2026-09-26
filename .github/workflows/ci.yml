@@ -74,6 +74,44 @@ jobs:
           SERVONAUT_REQUIRE_DESKTOP_TESTS: "1"
         run: python -m pytest --tb=short -q tests/desktop
 
+  e2e:
+    name: end-to-end journeys / Python 3.12
+    runs-on: ubuntu-latest
+    # The suite targets about four minutes including the install; the limit
+    # only stops a hung run.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # The provider extras let the MCP journey list every tool.
+        run: python -m pip install -e ".[test,e2e,hetzner,ovh]"
+
+      - name: Run end-to-end journeys
+        # Its own pytest process (see e2e/__init__.py). Journeys that share
+        # one server declare an xdist group, hence --dist loadgroup.
+        run: >-
+          python -m pytest e2e --tb=short -q
+          -m "e2e_pr and not e2e_quarantine"
+          -n auto --dist loadgroup
+
+      - name: Upload failure artifacts
+        # Public: every fixture is neutral, and paths and credentials are scrubbed.
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-failure-artifacts
+          path: e2e-artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
   native-runtime:
     name: ${{ matrix.os }} / Python 3.12 focused runtime
     runs-on: ${{ matrix.os }}

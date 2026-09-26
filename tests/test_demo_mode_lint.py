@@ -474,6 +474,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes code-controlled SSH agent status labels ('Running', "
                    "'Not Running', 'Unknown') — no user PII."),
 
+    # text_editor_modal.py — _show_warning renders the editor's own prompts.
+    AllowlistEntry("screens/text_editor_modal.py", "_show_warning", "update",
+                   "Fixed editor prompts plus secret-category labels from "
+                   "scan_for_secrets — never the edited text or server data."),
+
     # log_picker.py — _rebuild_options writes count integers only.
     AllowlistEntry("screens/log_picker.py", "_rebuild_options", "update",
                    "Writes 'N matches (of M total)' count label — "

@@ -350,7 +350,16 @@ servonaut connect --stop        # stop
 **Authentication:** the listener uses your stored `servonaut login`
 session (with automatic token refresh). Setting both
 `SERVONAUT_RELAY_TOKEN` and `SERVONAUT_USER_ID` overrides the session
-(legacy/CI mode).
+(legacy/CI mode). If the server rejects the session or token (expired or
+revoked), the listener stops, reports it (on the terminal, and in
+`~/.servonaut/logs/relay.log` for `--bg`) and exits with code `4`. Run
+`servonaut login`, then start the relay again. A temporary failure to
+refresh the session (network error, rate limit, server error, or a
+firewall or CDN in front of the API blocking the request) does not stop
+the listener; it keeps retrying. If the server keeps rejecting heartbeats
+while the session is still valid, the listener keeps retrying and writes
+one `heartbeat_rejected` line to `relay.log` (see
+`relay.heartbeat_rejection_alert_after`).
 
 **AI chat tool execution:** when started with a logged-in session, the
 listener also executes tool calls dispatched by Servonaut AI chats
@@ -397,6 +406,53 @@ proceeds even if the server is unreachable) and delete
 ```bash
 servonaut logout
 ```
+
+---
+
+## `servonaut ssh`
+
+Connect to a managed instance (AWS or custom server) by name or id. The SSH
+key is resolved from your Bitwarden reference when one is registered, else
+from `~/.ssh` — see [Bitwarden SSH keys](bitwarden-ssh.md).
+
+```
+servonaut ssh [--user USER] [--port PORT] <instance> [-- <command>...]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--user`, `-u` | Override the SSH username (default: the server's own username, then `default_username`, then `ubuntu`) |
+| `--port`, `-p` | Override the SSH port (default: the server's own port, else 22) |
+
+With no command, an interactive shell opens. With a command, it runs on the
+instance and `servonaut ssh` exits with the command's exit status, like
+`ssh host <command>`. Put the command after `--` whenever it has flags of its
+own, so they are not read as `servonaut` options; everything after the first
+`--` is passed through unchanged. Standard input is passed through too.
+As with `ssh`, no terminal is allocated for a command, so programs that
+need one (`top`, a `sudo` password prompt) belong in an interactive session.
+
+**Examples:**
+
+```bash
+servonaut ssh web-1                              # interactive shell
+servonaut ssh web-1 -- uname -a                  # run one command
+servonaut ssh -u deploy web-1 -- systemctl status nginx --no-pager
+servonaut ssh web-1 -- 'df -h / | tail -1'       # quote pipes for the remote shell
+echo "hello" | servonaut ssh web-1 -- cat        # stdin reaches the remote command
+```
+
+**Exit codes** before a connection is attempted:
+
+| Code | Meaning |
+|------|---------|
+| `1` | No instance matches the name or id |
+| `2` | No SSH key found for the instance (also: invalid arguments) |
+| `3` | Bitwarden key could not be read (CLI missing, vault locked, item not found) |
+| `5` | More than one instance matches — use the id |
+
+Once connected, the exit code is the remote command's (or the session's);
+`255` means SSH itself could not connect.
 
 ---
 

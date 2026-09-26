@@ -239,6 +239,7 @@ def test_db_setup_remove():
         DBProfile(instance="web", engine="mysql", password_secret="db/web"),
     ])
     t = _tools(cfg)
+    t._find_instance = _async_return({"id": "web", "name": "web"})  # type: ignore
     sp = MagicMock(); sp.delete_secret = AsyncMock(return_value=True)
     t._secret_provider = sp
     out = asyncio.run(t.db_setup_remove("web"))
@@ -249,6 +250,7 @@ def test_db_setup_remove():
 
 def test_db_setup_remove_no_profile():
     t = _tools(AppConfig())
+    t._find_instance = _async_return(None)  # type: ignore
     out = asyncio.run(t.db_setup_remove("nope"))
     assert "No db_profile found" in out
 
@@ -1032,6 +1034,7 @@ def test_db_setup_save_commits_and_consumes_token():
     sp = MagicMock(); sp.set_secret = AsyncMock()
     t._secret_provider = sp
     # Bare web-root path → no derivable site label → legacy db/<instance> name.
+    t._find_instance = _async_return({"id": "web", "name": "web"})  # type: ignore
     t._db_staging["tok1"] = DBCandidate(
         "mysql", "127.0.0.1", 3306, "app", _SECRET_PW, "appdb", "/var/www/html/.env")
     out = asyncio.run(t.db_setup_save("tok1", instance_id="web"))

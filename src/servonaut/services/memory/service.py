@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
+from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .store import MemoryStore, _validate_finding_id
 from .summariser import build_summary_markdown
@@ -249,7 +250,7 @@ class MemoryService(MemoryServiceInterface):
         """
         instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
         name = instance.get("name", instance_id)
 
         if not self._config.enabled:
@@ -438,7 +439,7 @@ class MemoryService(MemoryServiceInterface):
         instance_meta = self._resolve_instance(instance_meta)
         summary = await self.get_summary(instance_meta)
         instance_id = instance_meta.get("id") or instance_meta.get("name", "")
-        provider = instance_meta.get("provider", "custom")
+        provider = instance_provider(instance_meta)
         return self._store.write_summary(instance_id, summary, provider=provider)
 
     def clear(
@@ -756,7 +757,7 @@ class MemoryService(MemoryServiceInterface):
         """
         instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
         instance_name = instance.get("name", "")
 
         # Opt-out gate.
