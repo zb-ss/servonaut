@@ -1,9 +1,10 @@
 """Instance table widget for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from textual.widgets import DataTable
+from textual.widgets.data_table import RowKey
 
 
 class InstanceTable(DataTable):
@@ -35,6 +36,24 @@ class InstanceTable(DataTable):
         # Memory discoverability — at-a-glance status so users learn the
         # feature exists without needing to drill into a server.
         self.add_column("Mem", width=6, key="memory")
+
+    def _update_dimensions(self, new_rows: Iterable[RowKey]) -> None:
+        """Size the columns for new rows, then redraw rows drawn too early.
+
+        DataTable measures new rows for its auto-width columns on its idle
+        pass, not when they are added, and it keeps the lines it rendered
+        before that pass. A frame drawn in between (a busy event loop, a slow
+        terminal) would leave a long server name cut to the old column width
+        until the next repopulate, so drop those lines once a width changes.
+        """
+        widths_before = self._render_widths()
+        super()._update_dimensions(new_rows)
+        if self._render_widths() != widths_before:
+            self._clear_caches()
+            self.refresh()
+
+    def _render_widths(self) -> List[int]:
+        return [column.get_render_width(self) for column in self.columns.values()]
 
     def populate(self, instances: List[dict]) -> None:
         """Populate table with instances.
