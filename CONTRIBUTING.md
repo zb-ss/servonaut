@@ -167,6 +167,25 @@ the shared inventory in `e2e/harness/fleet.py` is the place to start.
 `SERVONAUT_E2E_ARTIFACTS` picks another folder; the suite only ever empties a
 folder it created itself.
 
+The journeys in `e2e/journeys/packaged/` install Servonaut the way users do:
+they build the wheel from the checkout as the next release (with the build
+tools in the `e2e` extra, so nothing is downloaded), install it by name from
+the local package index with pip into a fresh venv and with pipx, and upgrade
+to it from published releases. Dependencies come from the environment you run the suite
+in. The published releases have to be downloaded first, because the suite
+never reaches the network:
+
+```bash
+python e2e/tools/fetch_previous_release.py   # into .e2e-cache/releases
+```
+
+It fetches the latest release at or below the checkout's version, checked
+against the SHA-256 digest PyPI publishes, and the newest release of each
+earlier config schema, pinned to its digest in the script. Without them the upgrade journeys are skipped.
+`SERVONAUT_E2E_RELEASE_CACHE` chooses another cache directory (inside the
+checkout or outside your home directory, where the suite may read); when it
+is set, as in CI, a missing release fails those journeys instead.
+
 When you add a journey:
 
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`

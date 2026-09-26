@@ -87,9 +87,12 @@ class ShimSet:
         runner = HARNESS_DIR / "shim_runner.py"
         python = shlex.quote(sys.executable)
         for tool in TOOLS:
+            # -B: isolated mode ignores PYTHONDONTWRITEBYTECODE, and the runner
+            # is unguarded, so it would compile the standard library into the
+            # toolchain unnoticed.
             self._write_script(
                 tool,
-                f"exec {python} -I {shlex.quote(str(runner))} "
+                f"exec {python} -I -B {shlex.quote(str(runner))} "
                 f"{shlex.quote(str(self.directory))} {shlex.quote(tool)} \"$@\"\n",
             )
         # Python itself is the one real program reachable by name.
