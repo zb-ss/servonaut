@@ -88,3 +88,6 @@ yes.md
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# End-to-end suite: failure artifacts (see CONTRIBUTING.md)
+e2e-artifacts/

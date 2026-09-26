@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -340,8 +341,8 @@ def test_run_insights_query_polls_until_complete():
     assert res["status"] == "Complete"
     assert res["columns"] == ["clientIp", "hits"]
     assert res["rows"][0] == {"clientIp": "1.2.3.4", "hits": "50"}
-    # start_query used epoch seconds, not millis.
-    assert client.start_query.call_args.kwargs["startTime"] == int(start.timestamp())
+    # start_query used epoch seconds (not millis) of the naive UTC start.
+    assert client.start_query.call_args.kwargs["startTime"] == 1717239600
 
 
 def test_run_insights_query_timeout_stops_query():
@@ -362,3 +363,46 @@ def test_run_insights_query_timeout_stops_query():
         )
     assert res["status"] == "Timeout"
     client.stop_query.assert_called_once_with(queryId="q-2")
+
+
+@pytest.fixture
+def east_of_utc(monkeypatch):
+    """Run with the local clock three hours east of UTC."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX-only")
+    monkeypatch.setenv("TZ", "Etc/GMT-3")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_log_event_window_reads_naive_times_as_utc(service, east_of_utc) -> None:
+    mock_client = MagicMock()
+    mock_client.filter_log_events.return_value = {"events": []}
+
+    with patch("boto3.client", return_value=mock_client):
+        service._get_log_events_sync(
+            "/app/web", datetime(2024, 6, 1, 11, 0, 0), datetime(2024, 6, 1, 13, 0, 0),
+            "", "us-east-1", 100,
+        )
+
+    call_kwargs = mock_client.filter_log_events.call_args[1]
+    assert call_kwargs["startTime"] == 1717239600 * 1000
+    assert call_kwargs["endTime"] == (1717239600 + 7200) * 1000
+
+
+def test_insights_window_reads_naive_times_as_utc(service, east_of_utc) -> None:
+    client = MagicMock()
+    client.start_query.return_value = {"queryId": "q-1"}
+    client.get_query_results.return_value = {"status": "Complete", "results": []}
+
+    with patch("boto3.client", return_value=client):
+        service._run_insights_query_sync(
+            ["/app/web"], "fields @message", datetime(2024, 6, 1, 11, 0, 0),
+            datetime(2024, 6, 1, 13, 0, 0), "us-east-1", 10, 5,
+        )
+
+    call_kwargs = client.start_query.call_args[1]
+    assert call_kwargs["startTime"] == 1717239600
+    assert call_kwargs["endTime"] == 1717239600 + 7200

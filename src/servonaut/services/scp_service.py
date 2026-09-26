@@ -68,6 +68,9 @@ class SCPService(SCPServiceInterface):
             List of command arguments for subprocess.
         """
         cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port, extra_options)
+        # "--" keeps a path that starts with "-" from being read as an scp
+        # option (such as "-oProxyCommand=...", which runs a local program).
+        cmd.append('--')
         cmd.append(os.path.expanduser(local_path))
         cmd.append(f'{username}@{host}:{remote_path}')
         logger.debug("Built SCP upload command: %s", ' '.join(cmd))
@@ -103,6 +106,7 @@ class SCPService(SCPServiceInterface):
             List of command arguments for subprocess.
         """
         cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port, extra_options)
+        cmd.append('--')  # see build_upload_command
         cmd.append(f'{username}@{host}:{remote_path}')
         cmd.append(os.path.expanduser(local_path))
         logger.debug("Built SCP download command: %s", ' '.join(cmd))

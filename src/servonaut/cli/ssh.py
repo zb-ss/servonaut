@@ -12,8 +12,8 @@ Registration:
     integer.
 
 Non-goals (handled elsewhere):
-    - ``servonaut servers ssh-ref set`` — BW ref CRUD
-    - ``servonaut auth login`` / ``servonaut auth logout`` — auth flows
+    - BW ref CRUD — the TUI's SSH Ref editor (instance list, ``k``)
+    - ``servonaut login`` / ``servonaut logout`` — auth flows
 """
 
 from __future__ import annotations
@@ -36,6 +36,10 @@ _EXIT_NO_CREDENTIAL = 2
 _EXIT_BW_ERROR = 3
 _EXIT_GENERIC_ERROR = 4
 _EXIT_AMBIGUOUS = 5
+
+# There is no CLI command for assigning a Bitwarden SSH key to a server; the
+# TUI's instance list has an editor for it on the ``k`` key.
+_ASSIGN_KEY_HINT = "in the Servonaut TUI (run `servonaut`, select the server, press k)"
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +305,7 @@ async def _handle_ssh_async(args: Any) -> int:
     if not matches:
         print(
             f"No instance found matching {args.instance!r}. "
-            "Run `servonaut servers list` to see available instances.",
+            "Run `servonaut` to see the available instances.",
             file=sys.stderr,
         )
         return _EXIT_NOT_FOUND
@@ -362,7 +366,7 @@ async def _handle_ssh_async(args: Any) -> int:
     if resolved is None:
         print(
             f"No SSH key configured for {iid!r}. "
-            "Add one with `servonaut servers ssh-ref set <id>` "
+            f"Assign a Bitwarden SSH key {_ASSIGN_KEY_HINT}, "
             "or place a key in ~/.ssh/.",
             file=sys.stderr,
         )
@@ -390,7 +394,7 @@ async def _handle_ssh_async(args: Any) -> int:
         if not resolved.item_id:
             print(
                 f"BW ref for {iid!r} is missing item_id — the stored ref may be corrupt. "
-                "Re-register with `servonaut servers ssh-ref set <id>`.",
+                f"Re-assign the key {_ASSIGN_KEY_HINT}.",
                 file=sys.stderr,
             )
             return _EXIT_BW_ERROR
@@ -415,7 +419,7 @@ async def _handle_ssh_async(args: Any) -> int:
         except BwItemNotFoundError as exc:
             print(
                 f"Bitwarden item not found: {exc.message}\n"
-                "Verify the item UUID or re-register with `servonaut servers ssh-ref set <id>`.",
+                f"Verify the item UUID or re-assign the key {_ASSIGN_KEY_HINT}.",
                 file=sys.stderr,
             )
             return _EXIT_BW_ERROR

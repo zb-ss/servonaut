@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -76,6 +78,20 @@ _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
 # context. Reads auto-paginate up to this many items when no max_items is given.
 _AWS_CALL_MAX_RESULT_CHARS = 200_000
 _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
+
+
+def _run_capturing_stdout(func) -> str:
+    """Run *func* and return what it printed.
+
+    The relay CLI helpers report progress with ``print``. Under the MCP stdio
+    server, stdout is the JSON-RPC channel (the transport holds its own
+    handle to it), so their output is captured and returned in the tool
+    result instead of reaching the protocol stream.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        func()
+    return buffer.getvalue()
 
 
 def _error(code: str, message: str) -> Dict[str, Any]:
@@ -298,6 +314,7 @@ class ServonautTools:
         if not cmd_allowed:
             self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
+        command = self._guard.command_for_execution(command)
 
         instance = await self._find_instance(instance_id)
         if not instance:
@@ -555,7 +572,15 @@ class ServonautTools:
 
     async def get_logs(self, instance_id: str, log_path: str = "/var/log/syslog", lines: int = 100) -> str:
         """Get log content from remote instance."""
-        return await self.run_command(instance_id, f"tail -n {lines} {log_path}")
+        try:
+            count = int(lines)
+        except (TypeError, ValueError):
+            return "validation: lines must be an integer (1-10000)"
+        if not 1 <= count <= 10000:
+            return "validation: lines must be an integer (1-10000)"
+        return await self.run_command(
+            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}"
+        )
 
     async def check_status(self, instance_id: str) -> str:
         """Get instance status (state, IPs, type, region)."""
@@ -566,6 +591,7 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('check_status', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         lines = [
@@ -596,6 +622,7 @@ class ServonautTools:
         # Instead, execute via SSH directly to avoid double guard checking.
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('get_server_info', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
@@ -667,6 +694,10 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('transfer_file', {
+                'instance_id': instance_id, 'local_path': local_path,
+                'remote_path': remote_path, 'direction': direction,
+            }, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
@@ -736,18 +767,37 @@ class ServonautTools:
         }, result, returncode == 0, **key_extras)
         return result
 
+    def _ovh_read_unavailable(
+        self, tool_name: str, args: Dict[str, Any], service_label: str,
+    ) -> str:
+        """Early return + audit row when an OVH read service isn't wired up."""
+        self._audit.log(tool_name, args, '', False, 'ovh_unavailable')
+        return (
+            f"Error: OVH {service_label} is not available. "
+            "Ensure OVH is configured and enabled."
+        )
+
     async def ovh_list_ips(self) -> str:
         """List all IPs on the OVH account with type and routing info."""
+        args: Dict[str, Any] = {}
+        allowed, reason = self._guard.check_tool('ovh_list_ips')
+        if not allowed:
+            self._audit.log('ovh_list_ips', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_ip_service is None:
-            return "Error: OVH IP service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_list_ips', args, 'IP service')
 
         try:
             ips = await self._ovh_ip_service.list_ips()
         except Exception as e:
+            self._audit.log('ovh_list_ips', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH IPs: {e}"
 
         if not ips:
-            return "No IPs found on the OVH account."
+            result = "No IPs found on the OVH account."
+            self._audit.log('ovh_list_ips', args, result, True)
+            return result
 
         lines = [f"{'IP':<22} {'Type':<14} {'Routed To':<30} {'Country':<8}"]
         lines.append('-' * 76)
@@ -767,22 +817,34 @@ class ServonautTools:
             country = str(ip_info.get('country') or '')
             lines.append(f"{ip:<22} {ip_type:<14} {routed_service:<30} {country:<8}")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_list_ips', args, result, True)
+        return result
 
     async def ovh_firewall_rules(self, ip: str) -> str:
         """List firewall rules for an OVH IP address."""
+        args = {'ip': ip}
+        allowed, reason = self._guard.check_tool('ovh_firewall_rules')
+        if not allowed:
+            self._audit.log('ovh_firewall_rules', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_ip_service is None:
-            return "Error: OVH IP service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_firewall_rules', args, 'IP service')
 
         try:
             rules = await self._ovh_ip_service.list_firewall_rules(ip)
         except ValueError as e:
+            self._audit.log('ovh_firewall_rules', args, '', False, f"validation: {e}")
             return f"Error: {e}"
         except Exception as e:
+            self._audit.log('ovh_firewall_rules', args, '', False, f"api_error: {e}")
             return f"Error fetching firewall rules for {ip}: {e}"
 
         if not rules:
-            return f"No firewall rules found for IP: {ip}"
+            result = f"No firewall rules found for IP: {ip}"
+            self._audit.log('ovh_firewall_rules', args, result, True)
+            return result
 
         lines = [f"Firewall rules for {ip}:"]
         lines.append(f"  {'Seq':<5} {'Action':<8} {'Protocol':<10} {'Source':<20} {'Port'}")
@@ -795,22 +857,35 @@ class ServonautTools:
             port = rule.get('destinationPort', rule.get('port', ''))
             lines.append(f"  {str(seq):<5} {action:<8} {protocol:<10} {str(source):<20} {str(port)}")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_firewall_rules', args, result, True)
+        return result
 
     async def ovh_ssh_keys(self) -> str:
         """List SSH keys on the OVH account."""
+        args: Dict[str, Any] = {}
+        allowed, reason = self._guard.check_tool('ovh_ssh_keys')
+        if not allowed:
+            self._audit.log('ovh_ssh_keys', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_service is None:
-            return "Error: OVH service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_ssh_keys', args, 'service')
 
         import asyncio as _asyncio
-        client = self._ovh_service.client
         try:
+            # Client construction sits inside the try: it raises when the
+            # python-ovh dependency is missing, which is an API failure too.
+            client = self._ovh_service.client
             key_names = await _asyncio.to_thread(client.get, "/me/sshKey")
         except Exception as e:
+            self._audit.log('ovh_ssh_keys', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH SSH keys: {e}"
 
         if not key_names:
-            return "No SSH keys found on the OVH account."
+            result = "No SSH keys found on the OVH account."
+            self._audit.log('ovh_ssh_keys', args, result, True)
+            return result
 
         lines = [f"OVH SSH Keys ({len(key_names)} total):"]
         for key_name in key_names:
@@ -827,38 +902,52 @@ class ServonautTools:
             except Exception:
                 lines.append(f"  {key_name} (details unavailable)")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_ssh_keys', args, result, True)
+        return result
 
     async def ovh_snapshots(self, instance_id: str) -> str:
         """List snapshots for an OVH VPS or Cloud instance."""
+        args = {'instance_id': instance_id}
+        allowed, reason = self._guard.check_tool('ovh_snapshots')
+        if not allowed:
+            self._audit.log('ovh_snapshots', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_snapshot_service is None:
-            return "Error: OVH snapshot service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_snapshots', args, 'snapshot service')
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('ovh_snapshots', args, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         provider_type = instance.get('provider_type', '')
         name = instance.get('id', '') or instance.get('name', '')
+        # Public Cloud snapshots are listed per project, not per instance.
+        project_id = instance.get('project_id', '')
+        if provider_type != 'vps' and not project_id:
+            self._audit.log('ovh_snapshots', args, '', False, 'missing_project_id')
+            return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
 
         try:
             if provider_type == 'vps':
                 snapshots = await self._ovh_snapshot_service.list_vps_snapshots(name)
                 label = f"VPS snapshots for {name}"
             else:
-                # Public Cloud: use project_id
-                project_id = instance.get('project_id', '')
-                if not project_id:
-                    return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
                 snapshots = await self._ovh_snapshot_service.list_cloud_snapshots(project_id)
                 label = f"Cloud snapshots for project {project_id}"
         except ValueError as e:
+            self._audit.log('ovh_snapshots', args, '', False, f"validation: {e}")
             return f"Error: {e}"
         except Exception as e:
+            self._audit.log('ovh_snapshots', args, '', False, f"api_error: {e}")
             return f"Error fetching snapshots: {e}"
 
         if not snapshots:
-            return f"No snapshots found. ({label})"
+            result = f"No snapshots found. ({label})"
+            self._audit.log('ovh_snapshots', args, result, True)
+            return result
 
         lines = [f"{label} ({len(snapshots)} found):"]
         for snap in snapshots:
@@ -873,23 +962,35 @@ class ServonautTools:
             size_str = f", size={size}" if size else ""
             lines.append(f"  {snap_id} - {snap_name} (created={created}{size_str})")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_snapshots', args, result, True)
+        return result
 
     async def ovh_dns_records(self, zone: str, record_type: str = "") -> str:
         """List DNS records for an OVH zone."""
+        args = {'zone': zone, 'record_type': record_type}
+        allowed, reason = self._guard.check_tool('ovh_dns_records')
+        if not allowed:
+            self._audit.log('ovh_dns_records', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_dns_service is None:
-            return "Error: OVH DNS service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_dns_records', args, 'DNS service')
 
         try:
             records = await self._ovh_dns_service.list_records(zone, field_type=record_type)
         except ValueError as e:
+            self._audit.log('ovh_dns_records', args, '', False, f"validation: {e}")
             return f"Error: {e}"
         except Exception as e:
+            self._audit.log('ovh_dns_records', args, '', False, f"api_error: {e}")
             return f"Error fetching DNS records for zone {zone!r}: {e}"
 
         if not records:
             filter_note = f" (type={record_type})" if record_type else ""
-            return f"No DNS records found for zone: {zone}{filter_note}"
+            result = f"No DNS records found for zone: {zone}{filter_note}"
+            self._audit.log('ovh_dns_records', args, result, True)
+            return result
 
         type_note = f" [{record_type}]" if record_type else ""
         lines = [f"DNS records for {zone}{type_note} ({len(records)} found):"]
@@ -902,16 +1003,25 @@ class ServonautTools:
             target = rec.get('target', '')
             lines.append(f"  {rec_type:<8} {subdomain:<30} {str(ttl):<8} {target}")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_dns_records', args, result, True)
+        return result
 
     async def ovh_billing(self) -> str:
         """Get current OVH billing summary (spend, forecast)."""
+        args: Dict[str, Any] = {}
+        allowed, reason = self._guard.check_tool('ovh_billing')
+        if not allowed:
+            self._audit.log('ovh_billing', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_billing_service is None:
-            return "Error: OVH billing service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_billing', args, 'billing service')
 
         try:
             usage = await self._ovh_billing_service.get_current_usage()
         except Exception as e:
+            self._audit.log('ovh_billing', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH billing data: {e}"
 
         lines = ["OVH Billing Summary:"]
@@ -933,20 +1043,31 @@ class ServonautTools:
         elif not forecast:
             lines.append("  Forecast: no data available")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_billing', args, result, True)
+        return result
 
     async def ovh_invoices(self, limit: int = 5) -> str:
         """List recent OVH invoices."""
+        args = {'limit': limit}
+        allowed, reason = self._guard.check_tool('ovh_invoices')
+        if not allowed:
+            self._audit.log('ovh_invoices', args, '', False, reason)
+            return f"Blocked: {reason}"
+
         if self._ovh_billing_service is None:
-            return "Error: OVH billing service is not available. Ensure OVH is configured and enabled."
+            return self._ovh_read_unavailable('ovh_invoices', args, 'billing service')
 
         try:
             invoices = await self._ovh_billing_service.get_invoices(limit=limit)
         except Exception as e:
+            self._audit.log('ovh_invoices', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH invoices: {e}"
 
         if not invoices:
-            return "No invoices found on the OVH account."
+            result = "No invoices found on the OVH account."
+            self._audit.log('ovh_invoices', args, result, True)
+            return result
 
         lines = [f"Recent OVH Invoices (up to {limit}):"]
         lines.append(f"  {'ID':<20} {'Date':<14} {'Amount':<16} Status")
@@ -968,7 +1089,9 @@ class ServonautTools:
                 status = 'PDF available'
             lines.append(f"  {bill_id:<20} {date:<14} {amount_str:<16} {status}")
 
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        self._audit.log('ovh_invoices', args, result, True)
+        return result
 
     async def whoami(self) -> str:
         """Introspect the CLI's logged-in session without exposing the bearer.
@@ -1019,8 +1142,13 @@ class ServonautTools:
         (``{"error": {"code": ..., "message": ...}}``) rather than raised —
         MCP agents handle structured results far better than exceptions.
         """
-        started = time.monotonic()
         method_upper = (method or "").upper()
+        allowed, reason = self._guard.check_tool('api_request')
+        if not allowed:
+            self._audit.log('api_request', {'method': method_upper, 'path': path}, '', False, reason)
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
+        started = time.monotonic()
         result = await self._api_request_impl(method_upper, path, query, body, headers)
         duration_ms = int((time.monotonic() - started) * 1000)
 
@@ -1180,23 +1308,28 @@ class ServonautTools:
         last heartbeat, client_ids). Errors propagate as the normal
         ``{"error": ...}`` shape.
         """
-        raw = await self.api_request("GET", "/api/cli/status")
-        try:
-            wrapped = json.loads(raw)
-        except ValueError:
-            # api_request always returns JSON; preserve the raw string as a fallback
-            return raw
-        if not isinstance(wrapped, dict):
-            return json.dumps(_error("unexpected_response", "Non-object payload."))
+        wrapped = await self._fetch_relay_status()
         if "error" in wrapped:
+            self._audit.log("relay_status", {}, "", False, wrapped["error"].get("code"))
             return json.dumps(wrapped)
         body = wrapped.get("body")
         if not isinstance(body, dict):
+            self._audit.log("relay_status", {}, "", False, "unexpected_response")
             return json.dumps(_error(
                 "unexpected_response",
                 f"Expected JSON object body, got {type(body).__name__}.",
             ))
+        self._audit.log("relay_status", {}, "", True)
         return json.dumps(body)
+
+    async def _fetch_relay_status(self) -> Dict[str, Any]:
+        """Fetch ``GET /api/cli/status`` for the relay tools.
+
+        This is one fixed, read-only request, so it does not go through the
+        ``api_request`` tool and its guard tier: ``relay_status`` is a
+        readonly tool, and ``relay_reconnect`` checks its own tier.
+        """
+        return await self._api_request_impl("GET", "/api/cli/status", None, None, None)
 
     async def mcp_tool_call(self, name: str,
                             arguments: Optional[Dict[str, Any]] = None) -> str:
@@ -1208,6 +1341,13 @@ class ServonautTools:
         ``result`` or ``error`` without constructing the envelope themselves.
         One-shot 401 refresh + retry mirrors ``api_request``.
         """
+        allowed, reason = self._guard.check_tool('mcp_tool_call')
+        if not allowed:
+            self._audit.log(
+                'mcp_tool_call', {"name": name, "has_arguments": bool(arguments)}, '', False, reason
+            )
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
         import uuid
         request_id = str(uuid.uuid4())
         envelope: Dict[str, Any] = {
@@ -1320,14 +1460,15 @@ class ServonautTools:
         through the existing ``api_request`` tool envelope.
         """
         args = {"force": force}
+        allowed, reason = self._guard.check_tool('relay_reconnect')
+        if not allowed:
+            self._audit.log('relay_reconnect', args, '', False, reason)
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
         now_connected = None
         if not force:
-            status_raw = await self.api_request("GET", "/api/cli/status")
-            try:
-                status = json.loads(status_raw)
-            except ValueError:
-                status = {}
-            body = status.get("body") if isinstance(status, dict) else None
+            status = await self._fetch_relay_status()
+            body = status.get("body")
             if isinstance(body, dict) and "connected" in body:
                 now_connected = bool(body.get("connected"))
             if now_connected is True:
@@ -1342,13 +1483,15 @@ class ServonautTools:
         try:
             from servonaut.main import _relay_reconnect as _do_reconnect
         except ImportError as e:
-            return json.dumps(_error(
+            payload = _error(
                 "reconnect_unavailable",
                 f"Cannot import relay reconnect helper: {e}",
-            ))
+            )
+            self._audit.log("relay_reconnect", args, json.dumps(payload), False, "reconnect_unavailable")
+            return json.dumps(payload)
 
         try:
-            await asyncio.to_thread(_do_reconnect)
+            output = await asyncio.to_thread(_run_capturing_stdout, _do_reconnect)
         except Exception as e:
             payload = _error("reconnect_failed", str(e))
             self._audit.log("relay_reconnect", args, json.dumps(payload), False)
@@ -1357,6 +1500,7 @@ class ServonautTools:
         payload = {
             "action": "restarted",
             "backend_connected_before": now_connected,
+            "details": output.splitlines(),
         }
         self._audit.log("relay_reconnect", args, json.dumps(payload), True)
         return json.dumps(payload)
@@ -3136,46 +3280,6 @@ class ServonautTools:
         self._audit.log('ip_ban_list_banned', args, result, True)
         return result
 
-    async def ip_ban_set(
-        self, ip_address: str, config_name: str, action: str = "ban",
-    ) -> str:
-        """Ban or unban an IP address via a named WAF/SG/NACL config.
-
-        ``action`` must be ``"ban"`` or ``"unban"``. The underlying
-        IPBanService validates the IP and records every action to its own
-        audit trail in addition to the MCP audit log.
-        """
-        args = {
-            'ip_address': ip_address, 'config_name': config_name,
-            'action': action,
-        }
-        allowed, reason = self._guard.check_tool('ip_ban_set')
-        if not allowed:
-            self._audit.log('ip_ban_set', args, '', False, reason)
-            return f"Blocked: {reason}"
-        if self._ip_ban_service is None:
-            self._audit.log('ip_ban_set', args, '', False, 'service_unavailable')
-            return "Error: IP ban service is not available."
-
-        action_norm = (action or "").strip().lower()
-        if action_norm not in ('ban', 'unban'):
-            self._audit.log('ip_ban_set', args, '', False, 'invalid_action')
-            return f"Error: action must be 'ban' or 'unban', got {action!r}."
-
-        try:
-            if action_norm == 'ban':
-                result = await self._ip_ban_service.ban_ip(ip_address, config_name)
-            else:
-                result = await self._ip_ban_service.unban_ip(ip_address, config_name)
-        except Exception as e:
-            self._audit.log('ip_ban_set', args, '', False, f"error: {e}")
-            return f"Error during {action_norm} of {ip_address}: {e}"
-
-        success = bool(result.get('success'))
-        message = result.get('message', '')
-        self._audit.log('ip_ban_set', args, message, success)
-        return f"{'OK' if success else 'Failed'}: {message}"
-
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
         profile = self._connection_service.resolve_profile(instance)
@@ -4290,7 +4394,7 @@ class ServonautTools:
 
         if log_path:
             quoted = shlex.quote(log_path)
-            remote = f'echo "===VHOST:{log_path}==="; tail -n {n} -- {quoted}'
+            remote = f"printf '===VHOST:%s===\\n' {quoted}; tail -n {n} -- {quoted}"
             hint = log_path
         else:
             remote = (
@@ -5337,6 +5441,12 @@ class ServonautTools:
         if not allowed:
             self._audit.log('db_setup_scan', args, '', False, reason)
             return f"Blocked: {reason}"
+        from servonaut.services.db_credential_scanner import validate_search_roots
+        try:
+            validate_search_roots(search_path)
+        except ValueError as e:
+            self._audit.log('db_setup_scan', args, '', False, f"validation: {e}")
+            return f"validation: {e}"
 
         instance = await self._find_instance(instance_id)
         if not instance:
