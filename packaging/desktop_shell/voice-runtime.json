@@ -1,0 +1,45 @@
+{
+  "$comment": "Supply-chain cooldown: pin only releases published at least minimum_release_age_days days before the pin is chosen. uv is the newest release that old, python_version is the newest 3.12 patch that uv release pins for every target, and the voice lock generator applies the same age limit to every wheel through pip --uploaded-prior-to.",
+  "schema_version": 1,
+  "minimum_release_age_days": 7,
+  "python_version": "3.12.14",
+  "uv": {
+    "version": "0.12.16",
+    "origin_host": "github.com",
+    "redirect_hosts": [
+      "github.com",
+      "release-assets.githubusercontent.com"
+    ],
+    "targets": {
+      "windows-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-x86_64-pc-windows-msvc.zip",
+        "sha256": "f730454bf09019754e5e5abd71a8aa18683cb739cba0d9c720bac2e7c901160f",
+        "member": "uv.exe"
+      },
+      "macos-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-x86_64-apple-darwin.tar.gz",
+        "sha256": "a42bcc9ce97eb8b364d7f162233a9c6b8c0ee25388e551d362809795127e0c31",
+        "member": "uv-x86_64-apple-darwin/uv"
+      },
+      "macos-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-aarch64-apple-darwin.tar.gz",
+        "sha256": "b6e03fae61704b1aa622f12b792a69483e837b83068e44f4fd34f8a07a8f74a3",
+        "member": "uv-aarch64-apple-darwin/uv"
+      },
+      "linux-x64-ubuntu-22.04": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.12.16/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "8e5c6e5523dffc2dcf615bd995554c84c9feb4e577808a3fb8698a639d3f8d9c",
+        "member": "uv-x86_64-unknown-linux-gnu/uv"
+      }
+    }
+  },
+  "uv_command_timeout_seconds": 1800,
+  "stall_timeout_seconds": 300,
+  "provision_timeout_seconds": 3600,
+  "build_download": {
+    "timeout_seconds": 300,
+    "socket_timeout_seconds": 60,
+    "max_archive_bytes": 67108864,
+    "max_member_bytes": 134217728
+  }
+}

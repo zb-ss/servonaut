@@ -54,9 +54,10 @@ _CHAT_BUFFERED_TIMEOUT_SECONDS = 150
 _TOPUP_PATH = "/api/ai/topup/checkout"
 
 # Rate-limit retry budget (T5). Buffered chat retries up to this many
-# times when the server returns ``rate_limited``; streaming retries only
-# when the failure happens before the first SSE event reaches the caller
-# (mid-stream retry would re-send the request body and is unsafe).
+# times when the server returns ``rate_limited``. Streaming never
+# retries: re-sending the request could repeat tool calls the server has
+# already dispatched, so the error reaches the caller, which tells the
+# user when to try again.
 _RATE_LIMIT_MAX_ATTEMPTS = 3
 _RATE_LIMIT_JITTER_S = 2.0
 _VALID_TOPUP_PACKS = frozenset({"small", "medium", "large"})
@@ -276,7 +277,13 @@ class ServonautProvider(AIProviderInterface):
 
     @staticmethod
     def _retry_after_seconds(err: Any) -> Optional[int]:
-        """Best-effort ``retry-after`` extraction across header / details."""
+        """Best-effort ``retry-after`` extraction across header / details.
+
+        Parsed by :func:`coerce_retry_after`: bad values give ``None``
+        and large ones are capped, so the retry sleep stays bounded.
+        """
+        from servonaut.services.ai_sse import coerce_retry_after
+
         # Header form (RFC 7231 §7.1.3) — preferred when present.
         headers = getattr(err, "response_headers", None) or {}
         raw = headers.get("retry-after")
@@ -284,12 +291,7 @@ class ServonautProvider(AIProviderInterface):
             details = getattr(err, "details", None) or {}
             if isinstance(details, dict):
                 raw = details.get("retry_after")
-        if raw is None:
-            return None
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
+        return coerce_retry_after(raw)
 
     def _build_chat_body(
         self,
@@ -381,7 +383,8 @@ class ServonautProvider(AIProviderInterface):
         - :class:`servonaut.services.ai_sse.SSEStreamError` — terminal
           server error event (T5 error handler maps to UX action).
         - :class:`servonaut.services.ai_sse.SSEStreamDead` — heartbeat
-          watchdog tripped; no event for >35s.
+          watchdog tripped; the server sent nothing for longer than
+          ``config.stream_silence_timeout_seconds`` (default 35 s).
         - :class:`APIError` and subclasses — pre-stream HTTP failures
           (e.g. 429 before the SSE body opens).
 
@@ -408,7 +411,11 @@ class ServonautProvider(AIProviderInterface):
             conversation_id or "<new>",
         )
 
-        async for event in self._api_client.stream_sse(_CHAT_PATH, body):
+        # Invalid or missing values fall back to the SSE module default.
+        silence_timeout = getattr(config, "stream_silence_timeout_seconds", None)
+        async for event in self._api_client.stream_sse(
+            _CHAT_PATH, body, silence_timeout=silence_timeout,
+        ):
             if event.get("event") == "tool_catalog":
                 # PR5' audit-only consumer. The static _LOCAL_TOOL_HANDLERS map
                 # in ai_tool_bridge.py is source of truth for dispatch; the

@@ -159,3 +159,28 @@ def test_run_command_executes_the_rebuilt_standard_command():
 
     executed = tools._run_command_via_ssh.call_args.args[1]
     assert executed == "grep '$HOME' /etc/profile"
+
+
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        ("check_status", {"instance_id": "no-such-host"}),
+        ("get_server_info", {"instance_id": "no-such-host"}),
+        (
+            "transfer_file",
+            {"instance_id": "no-such-host", "local_path": "/tmp/a", "remote_path": "/tmp/b"},
+        ),
+    ],
+)
+def test_unknown_instance_is_audited(tool, kwargs):
+    tools = make_tools(guard_level=GuardLevel.DANGEROUS)
+    tools._audit = MagicMock()
+    tools._find_instance = AsyncMock(return_value=None)
+
+    result = asyncio.run(getattr(tools, tool)(**kwargs))
+
+    assert result.startswith("Instance not found")
+    audit_call = tools._audit.log.call_args
+    assert audit_call.args[0] == tool
+    assert audit_call.args[3] is False
+    assert audit_call.args[4] == "instance_not_found"

@@ -2,7 +2,8 @@
 
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
-package-index JSON the update check reads, and the ``/__e2e/`` control plane.
+package index (the JSON the update check reads and a simple index pip and
+pipx install from), and the ``/__e2e/`` control plane.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
 """

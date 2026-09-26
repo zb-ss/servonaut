@@ -79,6 +79,9 @@ _PATH_EVENTS: dict[str, tuple[tuple[int, bool, Optional[int]], ...]] = {
     "shutil.rmtree": ((0, True, 1),),
 }
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+# Events that act on a symbolic link itself, never on its target: removing a
+# link inside the test root that points elsewhere changes only the root.
+_LINK_ITSELF_EVENTS = frozenset({"os.remove"})
 
 # Audit events that start a program: event → (program position, env position
 # or None). os.system carries only a command line and is always refused.
@@ -346,8 +349,12 @@ def install_network_guard() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _normalise(value: object, dir_fd: object = None) -> Optional[str]:
-    """Absolute, symlink-free form of an audited path, or None if unknowable."""
+def _normalise(value: object, dir_fd: object = None, *, follow_final: bool = True) -> Optional[str]:
+    """Absolute, symlink-free form of an audited path, or None if unknowable.
+
+    With *follow_final* False the last component is kept as it is: the
+    result names the directory entry itself, not what a link points to.
+    """
     if value is None or isinstance(value, int):
         return None
     try:
@@ -367,6 +374,9 @@ def _normalise(value: object, dir_fd: object = None) -> Optional[str]:
         else:
             base = os.getcwd()
         text = os.path.join(base, text)
+    head, tail = os.path.split(text)
+    if not follow_final and tail not in ("", ".", ".."):
+        return os.path.join(_resolve(head), tail)
     return _resolve(text)
 
 
@@ -406,7 +416,7 @@ def _check_path_event(event: str, args: tuple[Any, ...]) -> None:
         dir_fd = None
         if dir_fd_position is not None and dir_fd_position < len(args):
             dir_fd = args[dir_fd_position]
-        path = _normalise(args[position], dir_fd)
+        path = _normalise(args[position], dir_fd, follow_final=event not in _LINK_ITSELF_EVENTS)
         if path is None:
             continue
         if event == "open":

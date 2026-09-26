@@ -17,7 +17,7 @@ add a thin wrapper here — but treat ``ServonautTools`` as the truth.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard
@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 MAX_OUTPUT_LINES = 150
 MAX_OUTPUT_CHARS = 20_000
 
+
+_VALID_GUARD_LEVELS = ("readonly", "standard", "dangerous")
 
 # Exposed so tests and other callers can enumerate the chat tool surface
 # without poking at tool_schemas directly.
@@ -58,12 +60,17 @@ class ChatToolExecutor:
     independent of the MCP server's guard level. The chat can be set to
     ``readonly`` even while the MCP server is ``dangerous`` — callers pick
     the level appropriate to each trust boundary.
+
+    ``guard_level`` is a fixed label or a zero-argument callable read on
+    every call, so a level lowered in Settings applies to the next tool
+    call without a restart (see :meth:`from_config`). An invalid label
+    falls back to ``readonly``, the safest level.
     """
 
     def __init__(
         self,
         tools=None,
-        guard_level: str = "standard",
+        guard_level: Union[str, Callable[[], str]] = "standard",
         # Legacy kwargs kept for backwards compatibility with call sites that
         # haven't been migrated to pass a ServonautTools directly. If ``tools``
         # isn't given, we build one from the individual services.
@@ -88,21 +95,57 @@ class ChatToolExecutor:
                 bw_ssh_config_service=bw_ssh_config_service,
             )
         self._tools = tools
-
-        mcp_config = tools.config_manager.get().mcp
-        guard_config = MCPConfig(
-            guard_level=guard_level,
-            command_blocklist=mcp_config.command_blocklist,
-            command_allowlist=mcp_config.command_allowlist,
-        )
-        self._guard = CommandGuard(guard_config)
+        self._guard_level_source = guard_level
+        self._guard: Optional[CommandGuard] = None
+        self._guard_key: Optional[Tuple[Any, ...]] = None
+        self._warned_level: Any = None
         self._allowed_names = chat_tool_names()
+
+    @classmethod
+    def from_config(cls, tools, config_manager: Any) -> "ChatToolExecutor":
+        """Executor that follows ``chat_tool_guard_level`` live from config."""
+        return cls(
+            tools=tools,
+            guard_level=lambda: config_manager.get().chat_tool_guard_level,
+        )
+
+    @property
+    def guard_level(self) -> str:
+        """Current guard level (``readonly`` / ``standard`` / ``dangerous``)."""
+        source = self._guard_level_source
+        raw = source() if callable(source) else source
+        level = str(raw or "").strip().lower()
+        if level in _VALID_GUARD_LEVELS:
+            return level
+        if raw != self._warned_level:
+            logger.warning("Invalid chat tool guard level %r — using 'readonly'", raw)
+            self._warned_level = raw
+        return "readonly"
+
+    def _current_guard(self) -> CommandGuard:
+        """CommandGuard for the current level and MCP lists (rebuilt on change)."""
+        level = self.guard_level
+        mcp_config = self._tools.config_manager.get().mcp
+        key = (
+            level,
+            tuple(mcp_config.command_blocklist),
+            tuple(mcp_config.command_allowlist),
+        )
+        if self._guard is None or key != self._guard_key:
+            self._guard = CommandGuard(MCPConfig(
+                guard_level=level,
+                command_blocklist=mcp_config.command_blocklist,
+                command_allowlist=mcp_config.command_allowlist,
+            ))
+            self._guard_key = key
+        return self._guard
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Tool definitions the LLM is allowed to see at the current guard level."""
+        guard = self._current_guard()
         out = []
         for tool in CHAT_TOOLS:
-            allowed, _ = self._guard.check_tool(tool["name"])
+            allowed, _ = guard.check_tool(tool["name"])
             if allowed:
                 out.append(tool)
         return out
@@ -117,7 +160,8 @@ class ChatToolExecutor:
         if tool_name not in self._allowed_names:
             return f"Unknown tool: {tool_name}"
 
-        allowed, reason = self._guard.check_tool(tool_name)
+        guard = self._current_guard()
+        allowed, reason = guard.check_tool(tool_name)
         if not allowed:
             return f"Blocked: {reason}"
 
@@ -125,7 +169,7 @@ class ChatToolExecutor:
         # the one thing that isn't driven from tool name alone.
         if tool_name == "run_command":
             command = arguments.get("command", "")
-            cmd_allowed, cmd_reason = self._guard.check_command(command)
+            cmd_allowed, cmd_reason = guard.check_command(command)
             if not cmd_allowed:
                 return f"Blocked: {cmd_reason}"
             arguments = {**arguments, "command": self._guard.command_for_execution(command)}
