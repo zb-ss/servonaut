@@ -299,6 +299,17 @@ def test_ci_runs_the_browser_journeys_in_their_own_job() -> None:
     assert "e2e-artifacts/" in desktop
 
 
+def test_ci_runs_the_screenshot_tests_strictly_in_their_own_job() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    job = jobs["screenshots"]
+    assert '.[test]"' in job
+    assert 'SERVONAUT_SNAPSHOTS_STRICT: "1"' in job
+    assert "pytest --tb=short -q tests/snapshots" in job
+    assert "tests/snapshots/__failures__/" in job
+    # Elsewhere a Textual version mismatch skips them instead of failing.
+    assert "SERVONAUT_SNAPSHOTS_STRICT" not in jobs["test"]
+
+
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     extra = re.search(r"^desktop-test = \[(.*)\]$", pyproject, re.MULTILINE)
