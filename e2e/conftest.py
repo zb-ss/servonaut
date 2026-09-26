@@ -42,7 +42,8 @@ JOURNEY_TIMEOUT_SECONDS = 90
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
 # Journeys that drive a headless browser (the desktop frontend).
 BROWSER_MARKER = "needs_browser"
-_REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright")
+# The provider SDKs are needed for the Hetzner and OVH journeys.
+_REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright", "hcloud", "ovh")
 # Read by child_site/sitecustomize.py (module constants pointed at the fakes).
 REDIRECTS_ENV = "SERVONAUT_E2E_REDIRECTS"
 _SEQUENCE = itertools.count(1)
@@ -60,8 +61,8 @@ def pytest_configure(config: pytest.Config) -> None:
     missing = [name for name in _REQUIRED_MODULES if importlib.util.find_spec(name) is None]
     if missing:
         raise pytest.UsageError(
-            f"the end-to-end suite needs the e2e extra ({', '.join(missing)} not installed): "
-            "pip install -e '.[e2e]'"
+            f"the end-to-end suite needs the e2e and provider extras ({', '.join(missing)} "
+            "not installed): pip install -e '.[test,e2e,hetzner,ovh]'"
         )
 
 
@@ -411,6 +412,49 @@ def moto(_moto_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -
     refused = aws_logs_filter.take_refused()
     if refused:
         pytest.fail("CloudWatch filter patterns the e2e emulation refused: " + "; ".join(refused))
+
+
+@pytest.fixture(scope="session")
+def _fake_providers_server() -> Any:
+    from e2e.harness.fake_providers import FakeProviders
+
+    server = FakeProviders().start()
+    yield server
+    server.stop()
+
+
+def product_reads_hetzner_endpoint_override() -> bool:
+    """True once Servonaut passes ``SERVONAUT_HETZNER_API_URL`` to hcloud."""
+    from servonaut.services import hetzner_service
+
+    return hasattr(hetzner_service, "HETZNER_API_URL_ENV")
+
+
+@pytest.fixture
+def providers(
+    _fake_providers_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    """The Hetzner and OVH stand-ins, emptied, with both client libraries pointed at them.
+
+    Applies to this process (TUI journeys) and to every child the journey
+    starts. Seed accounts with ``fleet.seed_provider_fleet(providers)`` or the
+    ``providers.hetzner`` / ``providers.ovh`` state objects.
+    """
+    from e2e.harness import provider_redirects as redirects
+
+    server = _fake_providers_server
+    server.reset()
+    wanted = {"ovh": server.ovh_url}
+    redirects.redirect_ovh(server.ovh_url, setitem=monkeypatch.setitem)
+    # The product's own switch, where it has one; the library default otherwise.
+    monkeypatch.setenv(redirects.HETZNER_URL_ENV, server.hetzner_url)
+    journey.env_overrides[redirects.HETZNER_URL_ENV] = server.hetzner_url
+    if not product_reads_hetzner_endpoint_override():
+        redirects.redirect_hcloud(server.hetzner_url, setter=monkeypatch.setattr)
+        wanted["hetzner"] = server.hetzner_url
+    journey.env_overrides[redirects.ENV_REDIRECTS] = json.dumps(wanted)
+    yield server
+    server.write_log(journey.staging / "fake_providers_requests.jsonl")
 
 
 # ---------------------------------------------------------------------------

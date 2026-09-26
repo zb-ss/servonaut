@@ -79,6 +79,41 @@ class HomeSeeder:
         ConfigManager(config_path=self.config_path).save(config)
         return config
 
+    @staticmethod
+    def hetzner_config(**overrides: Any) -> Any:
+        """An enabled ``HetznerConfig`` with a placeholder token.
+
+        Pass it as ``seed.config(hetzner=...)``; the ``providers`` fixture
+        points the client at the local stand-in.
+        """
+        from servonaut.config.schema import HetznerConfig
+
+        config = HetznerConfig(enabled=True, api_token="hz-fake-token")
+        for name, value in overrides.items():
+            if not hasattr(config, name):
+                raise AttributeError(f"HetznerConfig has no field {name!r}")
+            setattr(config, name, value)
+        return config
+
+    @staticmethod
+    def ovh_config(**overrides: Any) -> Any:
+        """An enabled ``OVHConfig`` (classic keys) covering the fleet's cloud project."""
+        from servonaut.config.schema import OVHConfig
+
+        config = OVHConfig(
+            enabled=True,
+            endpoint="ovh-eu",
+            application_key="ak-fake",
+            application_secret="as-fake",
+            consumer_key="ck-fake",
+            cloud_project_ids=[fleet.OVH_PROJECT_ID],
+        )
+        for name, value in overrides.items():
+            if not hasattr(config, name):
+                raise AttributeError(f"OVHConfig has no field {name!r}")
+            setattr(config, name, value)
+        return config
+
     def previous_version_config(self, **overrides: Any) -> dict:
         """Save the config as the release before the current schema wrote it.
 
