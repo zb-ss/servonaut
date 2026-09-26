@@ -246,3 +246,22 @@ class ConnectionService(ConnectionServiceInterface):
                 host, public_ip, private_ip
             )
         return host
+
+    def get_target_port(self, instance: dict) -> Optional[int]:
+        """Get the SSH port for the target host.
+
+        Custom servers carry their own ``port``; every other provider listens
+        on the SSH default. A bastion's port is not returned here: it lives on
+        the connection profile and :meth:`get_proxy_args` emits it.
+
+        Args:
+            instance: Instance dictionary.
+
+        Returns:
+            The custom server's port, or None for the SSH default. Callers pass
+            it straight to ``build_ssh_command`` / ``build_*_command``, which
+            omit the flag for None and 22.
+        """
+        if not instance.get('is_custom'):
+            return None
+        return instance.get('port') or None
