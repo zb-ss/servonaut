@@ -157,22 +157,90 @@ def test_upstream_header_mount_handler_is_the_one_safe_header_replaces():
     )
 
 
+def _dotted_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
+
+
+def _stock_header_uses(source: str) -> list[int]:
+    """Line numbers where *source* imports or references Textual's Header.
+
+    Covers ``from textual.widgets import Header`` and attribute access
+    through any name bound to the ``textual.widgets`` module, such as
+    ``widgets.Header`` after ``from textual import widgets`` or
+    ``textual.widgets.Header`` after ``import textual.widgets``.
+    """
+    tree = ast.parse(source)
+    module_names = {"textual.widgets"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "textual":
+            module_names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "widgets"
+            )
+        elif isinstance(node, ast.Import):
+            module_names.update(
+                alias.asname
+                for alias in node.names
+                if alias.name == "textual.widgets" and alias.asname
+            )
+    lines = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module is not None
+            and node.module.startswith("textual.widgets")
+            and any(alias.name == "Header" for alias in node.names)
+        ) or (
+            isinstance(node, ast.Attribute)
+            and node.attr == "Header"
+            and _dotted_name(node.value) in module_names
+        ):
+            lines.append(node.lineno)
+    return sorted(lines)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "from textual.widgets import Footer, Header",
+        "from textual.widgets._header import Header",
+        "from textual import widgets\nwidgets.Header()",
+        "from textual import widgets as tw\ntw.Header()",
+        "import textual.widgets\ntextual.widgets.Header()",
+        "import textual.widgets as tw\ntw.Header()",
+    ),
+)
+def test_stock_header_check_catches_imports_and_attribute_access(source):
+    assert _stock_header_uses(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "from servonaut.widgets.safe_header import SafeHeader\nSafeHeader()",
+        "from textual.widgets import Footer\nFooter()",
+        "request.Header",
+    ),
+)
+def test_stock_header_check_ignores_other_code(source):
+    assert _stock_header_uses(source) == []
+
+
 def test_screens_use_safe_header():
     """Every Servonaut screen gets the guarded header, not Textual's own."""
-    offenders = []
-    for path in sorted(SRC_ROOT.rglob("*.py")):
-        if path.name == "safe_header.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module is not None
-                and node.module.startswith("textual.widgets")
-                and any(alias.name == "Header" for alias in node.names)
-            ):
-                offenders.append(f"{path.relative_to(SRC_ROOT)}:{node.lineno}")
+    offenders = [
+        f"{path.relative_to(SRC_ROOT)}:{line}"
+        for path in sorted(SRC_ROOT.rglob("*.py"))
+        if path.name != "safe_header.py"
+        for line in _stock_header_uses(path.read_text(encoding="utf-8"))
+    ]
     assert offenders == [], (
-        "import SafeHeader from servonaut.widgets.safe_header instead of "
+        "use SafeHeader from servonaut.widgets.safe_header instead of "
         f"textual's Header: {offenders}"
     )
