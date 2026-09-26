@@ -14,7 +14,10 @@ from typing import Final
 _LOG_MAX_BYTES: Final = 2 * 1024 * 1024
 _LOG_BACKUP_COUNT: Final = 5
 _LOG_FORMAT: Final = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
-_NOISY_LOGGERS: Final = ("botocore", "boto3", "urllib3", "textual")
+# httpx and httpcore log every request URL at INFO; some URLs carry tokens
+# in their query string (the relay hub's subscriber token), so they stay at
+# WARNING like the other chatty libraries.
+_NOISY_LOGGERS: Final = ("botocore", "boto3", "urllib3", "textual", "httpx", "httpcore")
 
 
 def configure_rotating_log(
