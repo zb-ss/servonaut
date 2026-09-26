@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import importlib.metadata
@@ -41,6 +42,7 @@ from servonaut.runtime import (
     detect_runtime,
 )
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
+from servonaut.utils.package_version import PackageVersion
 
 log = logging.getLogger(__name__)
 
@@ -252,14 +254,24 @@ class UpdateService:
 
         self._latest = latest
         self._update_status = None
-        if self._is_newer(self._latest, self._current):
+        if latest is not None and self._is_newer(latest, self._current):
             self._last_result = UpdateCheckResult.UPDATE_AVAILABLE
             return self._latest
         self._last_result = UpdateCheckResult.UP_TO_DATE
         return None
 
-    def _fetch_pypi_version(self, url: str) -> str:
-        """Read ``info.version`` from a PyPI-style JSON document.
+    @property
+    def follows_prereleases(self) -> bool:
+        """True when the running version is itself a pre-release.
+
+        Only then are newer pre-releases offered and installed; a stable
+        installation is offered stable releases only.
+        """
+        current = PackageVersion.parse_installed(self._current)
+        return current is not None and current.is_prerelease
+
+    def _fetch_pypi_version(self, url: str) -> Optional[str]:
+        """Return the version to offer from a PyPI-style JSON document.
 
         Uses the HTTPS-only opener, so a redirect can never downgrade the
         request to plain http.
@@ -267,7 +279,7 @@ class UpdateService:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         with self._opener.open(request, timeout=_PYPI_SOCKET_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read())
-        return data["info"]["version"]
+        return latest_index_version(data, include_prereleases=self.follows_prereleases)
 
     def _check_frozen_update(self) -> Optional[str]:
         """Check the canonical signed release manifest for frozen distributions."""
@@ -476,12 +488,42 @@ class UpdateService:
     def get_upgrade_command(self) -> list[str] | None:
         """Return a self-update argv, or None when the runtime cannot self-update.
 
+        The argv is the plain upgrade for every installation and never asks
+        for pre-releases. A running pre-release that moves to a newer one runs
+        the same argv with :meth:`prerelease_target` as a pip constraint.
+
         This has no side effects; :meth:`run_upgrade` reports why an update
         cannot run.
         """
         try:
             return self._runtime.package_management.self_update_argv()
         except RuntimeCapabilityError:
+            return None
+
+    def prerelease_target(self, installed: Optional[str] = None) -> Optional[str]:
+        """The version a pre-release installation upgrades to, or None.
+
+        ``installed`` is the version installed now, the running version by
+        default. Only while that is itself a pre-release, and only for a
+        version newer than it: an upgrade never reinstalls the same version or
+        moves back to an older one.
+        """
+        current = PackageVersion.parse_installed(installed or self._current)
+        latest = PackageVersion.parse(self._latest)
+        if current is None or latest is None or not current.is_prerelease:
+            return None
+        return latest.text if latest > current else None
+
+    @staticmethod
+    def _installed_package_version() -> Optional[str]:
+        """The version the installed package metadata records at this moment.
+
+        Another terminal may have upgraded the installation since this
+        process started, so this can differ from :attr:`current_version`.
+        """
+        try:
+            return importlib.metadata.version("servonaut")
+        except importlib.metadata.PackageNotFoundError:
             return None
 
     def installed_version_external(self) -> Optional[str]:
@@ -534,14 +576,28 @@ class UpdateService:
             return False, self._update_status
 
         before = self.installed_version_external() or self._current
-        target = self._latest or self.check_for_update()
+        if self.follows_prereleases:
+            # An offer can be days old in an open TUI: since then the version
+            # may have been yanked, which pip would still install when a
+            # constraint names it. Check again, and never reuse the old offer.
+            self._latest = None
+            await asyncio.to_thread(self.check_for_update)
+            target = self._latest
+        else:
+            target = self._latest or self.check_for_update()
+        # The installation may also have moved on since this process started.
+        installed = self._highest_version(
+            self._installed_package_version(), before, self._current
+        )
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
+            with _upgrade_environment(self.prerelease_target(installed)) as environment:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=environment,
+                )
+                stdout, stderr = await process.communicate()
             output = (
                 stdout.decode(errors="replace") + stderr.decode(errors="replace")
             ).strip()
@@ -622,17 +678,84 @@ class UpdateService:
         return f"Downloaded verified update to {path}."
 
     @staticmethod
+    def _highest_version(*versions: Optional[str]) -> Optional[str]:
+        """The highest of the versions that can be ordered, or None."""
+        parsed = [
+            (version, found)
+            for found in versions
+            if (version := PackageVersion.parse_installed(found)) is not None
+        ]
+        return max(parsed, key=lambda pair: pair[0])[1] if parsed else None
+
+    @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
-        """Compare PEP 440 versions with a small dependency-free fallback."""
-        try:
-            from packaging.version import Version
+        """Compare PEP 440 versions; a version that cannot be ordered is never newer."""
+        latest_version = PackageVersion.parse_installed(latest)
+        current_version = PackageVersion.parse_installed(current)
+        if latest_version is None or current_version is None:
+            return False
+        return latest_version > current_version
 
-            return Version(latest) > Version(current)
-        except ImportError:
-            def parse(value: str) -> tuple[int, ...]:
-                return tuple(int(part) for part in value.split(".") if part.isdigit())
 
-            return parse(latest) > parse(current)
+@contextlib.contextmanager
+def _upgrade_environment(pinned: Optional[str]) -> Iterator[Optional[dict[str, str]]]:
+    """The upgrade's environment: inherited, or with a constraint pinning Servonaut.
+
+    pip, and pipx through it, read ``PIP_CONSTRAINT`` from the environment,
+    so the pin applies to this run only. Unlike ``--pre`` or a pinned
+    requirement it is not stored in pipx's metadata, keeps the extras the
+    installation was made with, and lets no dependency become a pre-release.
+    The constraint file is named by a ``file:`` URL, which has no spaces for
+    pip to split the variable on.
+    """
+    if pinned is None:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="servonaut-upgrade-") as directory:
+        constraint = Path(directory) / "constraints.txt"
+        constraint.write_text(f"servonaut=={pinned}\n", encoding="utf-8")
+        existing = os.environ.get("PIP_CONSTRAINT", "").strip()
+        yield {**os.environ, "PIP_CONSTRAINT": f"{existing} {constraint.as_uri()}".strip()}
+
+
+def latest_index_version(
+    document: Mapping[str, object], *, include_prereleases: bool
+) -> Optional[str]:
+    """The newest installable version in a PyPI JSON project document.
+
+    ``info.version`` is the index's latest non-yanked stable release, but it
+    can name a pre-release when no stable release is available, and a mirror
+    may fill it differently. The ``releases`` table, when present, decides
+    instead: yanked versions and versions without files are never offered,
+    and pre-releases only when ``include_prereleases`` is set. Documents
+    without that table (some mirrors) fall back to ``info.version`` under the
+    same pre-release rule.
+
+    Raises:
+        KeyError, TypeError: If the document has no ``info.version``.
+    """
+    reported = document["info"]["version"]  # type: ignore[index]
+    installable: dict[str, bool] = {}
+    releases = document.get("releases")
+    if isinstance(releases, Mapping):
+        for version, files in releases.items():
+            installable[version] = (
+                isinstance(files, list)
+                and bool(files)
+                and not all(
+                    isinstance(entry, Mapping) and entry.get("yanked") is True
+                    for entry in files
+                )
+            )
+    versions = [version for version, ok in installable.items() if ok]
+    if installable.get(reported, True):
+        versions.append(reported)
+    offered = [
+        parsed
+        for parsed in map(PackageVersion.parse, versions)
+        if parsed is not None and (include_prereleases or not parsed.is_prerelease)
+    ]
+    return max(offered).text if offered else None
 
 
 def _read_limited(

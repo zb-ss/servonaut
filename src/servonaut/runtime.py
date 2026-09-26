@@ -146,7 +146,13 @@ class PackageManagementCapability:
         )
 
     def self_update_argv(self, package: str = "servonaut") -> list[str]:
-        """Build a self-update argv when this distribution permits one."""
+        """Build a self-update argv when this distribution permits one.
+
+        The argv never asks for pre-releases, so pip and pipx install only
+        stable releases with it. A running pre-release that should move to a
+        newer one passes a constraint to the same command instead (see
+        ``UpdateService``), which leaves pipx's stored install spec alone.
+        """
         if not isinstance(package, str) or not package:
             raise ValueError("package must be a non-empty string")
         if self.kind is PackageManagementKind.PIP:

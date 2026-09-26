@@ -7,12 +7,21 @@ installs that can't be release-upgraded in place.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
-from servonaut.services.update_service import UpdateService
+from servonaut.services.update_service import (
+    UpdateCheckResult,
+    UpdateService,
+    latest_index_version,
+)
 
 
 def _svc(current="2.16.3", latest="2.17.0", kind=DistributionKind.PIP):
@@ -205,3 +214,363 @@ def test_run_upgrade_missing_command(monkeypatch):
                         AsyncMock(side_effect=OSError("no pipx")))
     ok, msg = asyncio.run(s.run_upgrade())
     assert ok is False and "Could not run" in msg
+
+
+# --- pre-releases are never offered to a stable installation ----------------
+
+def _file(yanked=False):
+    return {"filename": "servonaut.whl", "yanked": yanked}
+
+
+def _index(reported, releases=None):
+    document = {"info": {"name": "servonaut", "version": reported}}
+    if releases is not None:
+        document["releases"] = releases
+    return document
+
+
+class _Response:
+    def __init__(self, document):
+        self._body = json.dumps(document).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+class _Opener:
+    def __init__(self, document):
+        self._document = document
+
+    def open(self, request, timeout):
+        return _Response(self._document)
+
+
+# PyPI's JSON API reports the newest non-yanked stable release as
+# info.version even when a newer pre-release exists, and lists every
+# version, pre-releases included, in the releases table.
+_PRERELEASE_PUBLISHED = _index(
+    "2.27.0",
+    {
+        "2.26.0": [_file()],
+        "2.27.0": [_file()],
+        "2.28.0rc1": [_file()],
+        "2.28.0rc2": [_file()],
+    },
+)
+
+
+def test_index_version_skips_a_newer_prerelease_for_stable_installs():
+    assert latest_index_version(_PRERELEASE_PUBLISHED, include_prereleases=False) == "2.27.0"
+    assert latest_index_version(_PRERELEASE_PUBLISHED, include_prereleases=True) == "2.28.0rc2"
+
+
+def test_index_version_ignores_info_version_naming_a_prerelease():
+    # With every stable release yanked, the index reports its newest
+    # remaining release as info.version, even a pre-release.
+    document = _index(
+        "2.28.0rc1", {"2.27.0": [_file(yanked=True)], "2.28.0rc1": [_file()]}
+    )
+    assert latest_index_version(document, include_prereleases=False) is None
+    assert latest_index_version(document, include_prereleases=True) == "2.28.0rc1"
+
+
+def test_index_version_never_offers_yanked_or_empty_releases():
+    document = _index(
+        "2.27.2",
+        {
+            "2.27.0": [_file()],
+            "2.27.1": [_file(yanked=True), _file(yanked=True)],
+            "2.27.2": [],
+        },
+    )
+    assert latest_index_version(document, include_prereleases=False) == "2.27.0"
+
+
+def test_index_version_keeps_a_release_with_any_unyanked_file():
+    document = _index("2.27.0", {"2.27.0": [_file()], "2.27.1": [_file(yanked=True), _file()]})
+    assert latest_index_version(document, include_prereleases=False) == "2.27.1"
+
+
+def test_index_version_without_a_releases_table_uses_info_version():
+    # Some mirrors serve only info.version.
+    for releases in (None, {}):
+        stable = _index("2.27.0", releases)
+        candidate = _index("2.28.0rc1", releases)
+        assert latest_index_version(stable, include_prereleases=False) == "2.27.0"
+        assert latest_index_version(candidate, include_prereleases=False) is None
+        assert latest_index_version(candidate, include_prereleases=True) == "2.28.0rc1"
+
+
+def test_index_version_skips_versions_it_cannot_order():
+    document = _index("2.27.0", {"2.27.0": [_file()], "3.0.0-final": [_file()], "1!4.0": [_file()]})
+    assert latest_index_version(document, include_prereleases=True) == "2.27.0"
+
+
+def test_index_version_requires_info_version():
+    for document in ({}, {"info": {}}, {"info": None}, []):
+        with pytest.raises((KeyError, TypeError)):
+            latest_index_version(document, include_prereleases=False)
+
+
+@pytest.mark.parametrize(
+    "current,offered",
+    [
+        ("2.27.0", None),  # stable: the newer pre-release is not an update
+        ("2.26.0", "2.27.0"),  # stable: the newest stable release is
+        ("2.28.0rc1", "2.28.0rc2"),  # pre-release: newer candidates are
+        ("2.28.0rc2", None),
+    ],
+)
+def test_update_check_offers_prereleases_only_to_prereleases(current, offered):
+    service = _svc(current=current, latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+
+    assert service.check_for_update() == offered
+    assert service.follows_prereleases is (current.find("rc") > 0)
+    expected = UpdateCheckResult.UPDATE_AVAILABLE if offered else UpdateCheckResult.UP_TO_DATE
+    assert service.last_check_result is expected
+
+
+def test_update_check_moves_a_prerelease_to_the_final_release():
+    document = _index("2.28.0", {"2.28.0rc2": [_file()], "2.28.0": [_file()]})
+    service = _svc(current="2.28.0rc2", latest=None)
+    service._opener = _Opener(document)
+    assert service.check_for_update() == "2.28.0"
+
+
+def test_is_newer_orders_prereleases():
+    assert UpdateService._is_newer("2.28.0", "2.28.0rc2")
+    assert UpdateService._is_newer("2.28.0rc2", "2.28.0rc1")
+    assert UpdateService._is_newer("2.28.0rc1", "2.27.9")
+    assert UpdateService._is_newer("2.28.1rc1", "2.28.0rc1")
+    assert not UpdateService._is_newer("2.28.0rc1", "2.28.0")
+    assert not UpdateService._is_newer("not-a-version", "2.27.0")
+    assert not UpdateService._is_newer("2.28.0", "unknown")
+
+
+@pytest.mark.parametrize("kind", [DistributionKind.PIP, DistributionKind.PIPX])
+@pytest.mark.parametrize("latest", [None, "2.28.0", "2.28.0rc1"])
+def test_stable_upgrade_commands_never_request_prereleases(kind, latest):
+    command = _svc(current="2.27.0", latest=latest, kind=kind).get_upgrade_command()
+    assert command is not None
+    assert command[-1] == "servonaut"
+    assert "--pre" not in command
+    assert not any(argument.startswith("--pip-args") for argument in command)
+
+
+def test_prerelease_upgrade_keeps_the_plain_command():
+    # pipx stores --pip-args=--pre, a pinned requirement or --force for later
+    # runs; the plain command, limited by a constraint, stores none of them.
+    for kind, expected in (
+        (DistributionKind.PIP, [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut"]),
+        (DistributionKind.PIPX, [str(Path("/usr/bin/pipx")), "upgrade", "servonaut"]),
+    ):
+        service = _svc(current="2.28.0rc1", latest="2.28.0rc2", kind=kind)
+        assert service.get_upgrade_command() == expected
+        assert service.prerelease_target() == "2.28.0rc2"
+
+
+@pytest.mark.parametrize(
+    "current,latest",
+    [
+        ("2.27.0", "2.28.0rc2"),  # stable installations are never limited
+        ("2.28.0rc2", "2.28.0rc2"),  # never reinstall the same version
+        ("2.28.0rc2", "2.28.0rc1"),  # never move back, e.g. after a yank
+        ("2.28.0rc1", None),
+        ("2.28.0rc1", "not a version"),
+    ],
+)
+def test_prerelease_target_is_only_ever_a_newer_version(current, latest):
+    assert _svc(current=current, latest=latest).prerelease_target() is None
+
+
+def _spawn_recording_constraint(record):
+    async def spawn(*argv, stdout=None, stderr=None, env=None):
+        record["argv"] = argv
+        record["env"] = env
+        if env is not None:
+            urls = env["PIP_CONSTRAINT"].split()
+            record["urls"] = urls
+            path = Path(urllib.request.url2pathname(urllib.parse.urlsplit(urls[-1]).path))
+            record["path"] = path
+            record["constraint"] = path.read_text(encoding="utf-8")
+        return _fake_proc()
+
+    return spawn
+
+
+def test_run_upgrade_limits_a_prerelease_with_a_constraint(monkeypatch):
+    service = _svc(current="2.28.0rc1", latest=None, kind=DistributionKind.PIPX)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc2"])
+    )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: "2.28.0rc1")
+    monkeypatch.setenv("PIP_CONSTRAINT", "/etc/pip/site-constraints.txt")
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+
+    ok, message = asyncio.run(service.run_upgrade())
+
+    assert ok is True, message
+    assert record["argv"] == (str(Path("/usr/bin/pipx")), "upgrade", "servonaut")
+    assert record["constraint"] == "servonaut==2.28.0rc2\n"
+    # An existing constraint still applies; ours is a file: URL, with no
+    # spaces for pip to split the variable on.
+    assert record["urls"][0] == "/etc/pip/site-constraints.txt"
+    assert record["urls"][1].startswith("file:")
+    assert not record["path"].exists()
+
+
+def test_run_upgrade_of_a_stable_installation_inherits_the_environment(monkeypatch):
+    service = _svc(current="2.26.0", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.26.0", "2.27.0"])
+    )
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+
+    ok, message = asyncio.run(service.run_upgrade())
+
+    assert ok is True, message
+    assert record["env"] is None
+    assert record["argv"] == (sys.executable, "-m", "pip", "install", "--upgrade", "servonaut")
+
+
+# --- repackaged installations still see updates -----------------------------
+
+@pytest.mark.parametrize(
+    "current,offered",
+    [
+        ("2.27.0+deb1", "2.27.1"),
+        ("2.27.1+deb1", None),
+        ("2.27.0-1ubuntu1", "2.27.1"),
+        ("v2.27.0", "2.27.1"),
+        ("unknown", None),
+    ],
+)
+def test_local_and_repackaged_versions_are_still_offered_updates(current, offered):
+    service = _svc(current=current, latest=None)
+    service._opener = _Opener(_index("2.27.1", {"2.27.1": [_file()], "2.28.0rc1": [_file()]}))
+    assert service.check_for_update() == offered
+    assert service.follows_prereleases is False
+
+
+def test_a_local_prerelease_still_follows_prereleases():
+    service = _svc(current="2.28.0rc1+local", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    assert service.follows_prereleases is True
+    assert service.check_for_update() == "2.28.0rc2"
+
+
+def test_update_command_line_names_the_prerelease_limit(monkeypatch, capsys):
+    from servonaut import main as main_module
+    from servonaut.services import update_service
+
+    service = _svc(current="2.28.0rc1", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(update_service, "UpdateService", lambda runtime: service)
+    monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: service.runtime)
+    monkeypatch.setattr(
+        service, "run_upgrade", AsyncMock(return_value=(True, "Updated."))
+    )
+    main_module._run_update()
+    printed = capsys.readouterr().out
+    assert (
+        f"Running: {sys.executable} -m pip install --upgrade servonaut"
+        " (limited to servonaut==2.28.0rc2)"
+    ) in printed
+
+
+
+# --- a pre-release upgrade re-checks what an open TUI offered ---------------
+
+def _prerelease_upgrade(monkeypatch, *, document, offered, installed, after):
+    """Run the upgrade of a running 2.28.0rc1 whose TUI once offered *offered*."""
+    service = _svc(current="2.28.0rc1", latest=offered, kind=DistributionKind.PIPX)
+    service._opener = _Opener(document)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=[installed, after])
+    )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: installed)
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+    ok, message = asyncio.run(service.run_upgrade())
+    return ok, message, record
+
+
+def test_a_candidate_yanked_after_the_offer_is_not_installed(monkeypatch):
+    # rc2 was offered, then yanked: a constraint naming it would still install it.
+    document = _index(
+        "2.27.0",
+        {"2.27.0": [_file()], "2.28.0rc1": [_file()], "2.28.0rc2": [_file(yanked=True)]},
+    )
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0rc1", after="2.28.0rc1",
+    )
+    assert record["env"] is None
+    assert record["argv"] == (str(Path("/usr/bin/pipx")), "upgrade", "servonaut")
+    assert ok is True and "Already on the latest version (v2.28.0rc1)" in message
+
+
+def test_an_installation_upgraded_elsewhere_is_never_moved_back(monkeypatch):
+    # Another terminal already installed rc3; this process still runs rc1.
+    document = _index(
+        "2.27.0",
+        {"2.27.0": [_file()], "2.28.0rc2": [_file()], "2.28.0rc3": [_file()]},
+    )
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0rc3", after="2.28.0rc3",
+    )
+    assert record["env"] is None
+    assert ok is True and "Updated v2.28.0rc1" not in message
+
+
+def test_an_installation_moved_to_stable_elsewhere_is_not_limited(monkeypatch):
+    document = _index("2.28.0", {"2.28.0": [_file()], "2.29.0rc1": [_file()]})
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0", after="2.28.0",
+    )
+    assert record["env"] is None
+
+
+def test_an_offline_recheck_never_reuses_the_old_offer(monkeypatch):
+    service = _svc(current="2.28.0rc1", latest="2.28.0rc2", kind=DistributionKind.PIPX)
+    service._opener = _RaisingOpener()
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc1"])
+    )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: "2.28.0rc1")
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+    asyncio.run(service.run_upgrade())
+    assert record["env"] is None
+
+
+def test_a_fresh_newer_candidate_is_still_limited_to(monkeypatch):
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=_PRERELEASE_PUBLISHED, offered="2.28.0rc2",
+        installed="2.28.0rc1", after="2.28.0rc2",
+    )
+    assert record["constraint"] == "servonaut==2.28.0rc2\n"
+    assert ok is True, message
+
+
+class _RaisingOpener:
+    def open(self, request, timeout):
+        raise OSError("network is unreachable")
+
+
+def test_highest_version_prefers_the_newest_readable_one():
+    assert UpdateService._highest_version(None, "2.28.0rc1", "2.28.0rc3", "junk") == "2.28.0rc3"
+    assert UpdateService._highest_version(None, "junk") is None
