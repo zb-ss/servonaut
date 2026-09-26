@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Optional
 
 import pytest
 
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import SeedBill, SeedFirewallRule
 from e2e.harness.known_bugs import ProductBug
+from e2e.harness.pilot import DEFAULT_TIMEOUT
 from e2e.journeys.tui.ovh_ui import (
     cancel_confirmation,
     confirm_typed,
@@ -87,11 +89,11 @@ async def test_vps_actions_show_the_reverse_dns(tui, seed, providers):
             await t.select_instance(MAIL.display_name)
             try:
                 # A crash mid-keypress leaves the key press waiting forever.
-                await asyncio.wait_for(t.press("enter"), timeout=8)
+                await asyncio.wait_for(t.press("enter"), timeout=DEFAULT_TIMEOUT)
                 await t.wait_for_screen("ServerActionsScreen")
                 await t.wait_until(
                     lambda: "mail-1.e2e.test" in t.rendered_text(),
-                    timeout=8,
+                    timeout=DEFAULT_TIMEOUT,
                     desc="reverse DNS shown",
                 )
             except (TimeoutError, AttributeError):
@@ -159,7 +161,7 @@ async def test_firewall_toggle_add_and_delete_rules(tui, seed, providers):
     async with tui() as t:
         await _open_server_action(t, MAIL.display_name, "btn_ovh_firewall", "OVHFirewallScreen")
         await t.wait_until(lambda: len(t.table_rows("#rules_table")) == 1, desc="rules listed")
-        assert "Firewall: Enabled" in t.rendered_text()
+        await t.wait_for_text("Firewall: Enabled")
         assert plain(t.table_rows("#rules_table")[0][1]) == "permit"
 
         # Disable: backing out first, then the typed word.
@@ -218,7 +220,13 @@ async def test_firewall_toggle_prompt_describes_the_effect(tui, seed, providers)
         await t.wait_until(lambda: "Firewall: Enabled" in t.rendered_text(), desc="state")
         await press(t, "#btn_toggle")
         await t.wait_for_screen("ConfirmActionScreen")
-        text = t.rendered_text()
+
+        def prompt() -> Optional[str]:
+            text = t.rendered_text(screen_only=True)
+            shown = ("rules will be suspended", "{'take effect'", "new_state")
+            return text if any(part in text for part in shown) else None
+
+        text = await t.wait_until(prompt, desc="the toggle prompt's description")
         if "{'take effect'" in text or "new_state" in text:
             raise FirewallPromptShowsTemplate("the prompt shows the raw template expression")
         assert "rules will be suspended" in text
@@ -348,8 +356,8 @@ async def test_reinstall_a_vps_needs_the_server_name(tui, seed, providers):
             await select_row(t, "#images_table", 0, "Debian 12")
             try:
                 # A crash mid-click leaves the click waiting forever.
-                await asyncio.wait_for(t.click("#btn_reinstall"), timeout=8)
-                await t.wait_for_screen("ConfirmActionScreen", timeout=8)
+                await asyncio.wait_for(t.click("#btn_reinstall"), timeout=DEFAULT_TIMEOUT)
+                await t.wait_for_screen("ConfirmActionScreen", timeout=DEFAULT_TIMEOUT)
             except (TimeoutError, NoActiveWorker):
                 crash = t.state()["exception"]
                 if "NoActiveWorker" not in crash:

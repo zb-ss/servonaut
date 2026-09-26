@@ -74,7 +74,7 @@ async def test_setup_wizard_tests_and_enables_ovh(tui, seed, providers):
             desc="second connection test sent",
         )
         await t.wait_for_toast(f"OVH connected as: {NIC_HANDLE}")
-        assert f"Connection successful! Account: {NIC_HANDLE}" in t.rendered_text()
+        await t.wait_for_text(f"Connection successful! Account: {NIC_HANDLE}")
         assert len(providers.requests("ovh", method="GET", path="/me")) == 2
 
         await press(t, "#btn_ovh_save")

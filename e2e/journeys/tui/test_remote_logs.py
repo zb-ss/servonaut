@@ -38,7 +38,7 @@ async def test_follow_a_log_and_switch_with_the_picker(tui, seed, journey, sshd)
         await t.wait_for_screen("LogViewerScreen")
         output = t.on_screen("#log_output")
         await t.wait_until(lambda: "CRON[901]" in t.log_text(output), desc="syslog content")
-        assert "Viewing: /var/log/syslog" in t.rendered_text()
+        await t.wait_for_text("Viewing: /var/log/syslog")
 
         remote.append("/var/log/syslog", f"Jan 01 10:05:00 {WEB_1.name} {FRESH}\n")
         await t.wait_until(lambda: FRESH in t.log_text(output), desc="the new line, live")
@@ -60,7 +60,7 @@ async def test_follow_a_log_and_switch_with_the_picker(tui, seed, journey, sshd)
         await t.wait_for_screen("LogViewerScreen")
         await t.wait_until(lambda: "worker: job 2 done" in t.log_text(output), desc="worker log")
         assert FRESH not in t.log_text(output)
-        assert "Viewing: /var/log/app/worker.log" in t.rendered_text()
+        await t.wait_for_text("Viewing: /var/log/app/worker.log")
 
         # The first tail ended on the server when the viewer switched away.
         await t.wait_until(

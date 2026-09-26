@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from typing import Any, Iterable, Mapping, Optional
@@ -32,6 +33,11 @@ MUTATE_ROLE_ACCOUNT = "444455556666"
 DEFAULT_ACCOUNT = "123456789012"
 # Newest seeded log event: a little in the past, well inside any time window.
 _NEWEST_LOG_EVENT_AGE_SECONDS = 30
+# Upper bound for one reset. A journey that listed the fleet touched every
+# region: rebuilding them all takes about 2 s on an idle machine and up to
+# about 15 s on a heavily loaded one. 30 s leaves room for that while a hung
+# endpoint still fails here, by name, well inside the 90 s journey timeout.
+_RESET_TIMEOUT_SECONDS = 30
 
 _CREDENTIALS = {
     "aws_access_key_id": "testing",
@@ -64,8 +70,15 @@ class MotoAws:
     def reset(self) -> None:
         """Drop every resource (moto's own reset endpoint)."""
         request = urllib.request.Request(f"{self.url}/moto-api/reset", data=b"", method="POST")
-        with urllib.request.urlopen(request, timeout=10) as response:
-            response.read()
+        try:
+            with urllib.request.urlopen(request, timeout=_RESET_TIMEOUT_SECONDS) as response:
+                response.read()
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if isinstance(exc, urllib.error.URLError) and not isinstance(exc.reason, TimeoutError):
+                raise
+            raise TimeoutError(
+                f"the local AWS endpoint did not reset within {_RESET_TIMEOUT_SECONDS} s"
+            ) from exc
         self._networks.clear()
         self._key_pairs.clear()
 
