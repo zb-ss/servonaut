@@ -59,6 +59,9 @@ class _FakeInput:
     def start_recording(self) -> None:
         if self.start_error is not None:
             raise self.start_error
+        if self.recording:
+            # Mirrors the real capture services, which refuse a second open.
+            raise VoiceInputError("A recording is already in progress")
         self.start_calls += 1
         self.recording = True
 
@@ -650,6 +653,52 @@ class TestStop:
         assert not starter.is_alive()
         assert service.state is ConversationState.IDLE
         assert release.is_set()
+        # The stopped session never opened the microphone.
+        assert not fake_input.recording
+        assert fake_input.frame_callback is None
+
+        fake_input.cancel_recording = cancel_recording
+        _start_listening(service, fake_input)
+        assert service.state is ConversationState.LISTENING
+        assert fake_input.recording
+        service.stop()
+
+    def test_stop_while_the_microphone_is_opening_closes_it(self):
+        """A stop whose teardown runs before the listener thread's
+        start_recording returns must not leave the microphone open, and
+        the next start must be able to open it again."""
+        service, fake_input, _out, _mon = _make()
+        events = _Events(service)
+        opening = threading.Event()
+        release = threading.Event()
+        start_recording = fake_input.start_recording
+
+        def held_start():
+            opening.set()
+            release.wait(5.0)
+            start_recording()
+
+        fake_input.start_recording = held_start
+        service.start()
+        _wait_until(opening.is_set)
+        stopper = threading.Thread(target=service.stop, daemon=True)
+        stopper.start()
+        # The stop has detached the tap and cancelled the (not yet open)
+        # capture; now let the open finish.
+        _wait_until(lambda: fake_input.cancel_calls >= 1)
+        release.set()
+        stopper.join(5.0)
+        assert not stopper.is_alive()
+        assert service.state is ConversationState.IDLE
+        assert not fake_input.recording
+        assert fake_input.frame_callback is None
+
+        fake_input.start_recording = start_recording
+        _start_listening(service, fake_input)
+        assert service.state is ConversationState.LISTENING
+        assert fake_input.recording
+        assert events.errors == []
+        service.stop()
 
     def test_stop_while_thinking(self):
         monitor = _ScriptedMonitor(list(_ONE_UTTERANCE))
@@ -729,6 +778,42 @@ class TestBargeIn:
             assert fake_input.recording is False
         finally:
             service.stop()
+
+    def test_stop_while_the_barge_microphone_is_opening_closes_it(self):
+        """The barge monitor's capture gets the same treatment: a stop
+        that lands while it is opening leaves the microphone closed."""
+        monitor = _ScriptedMonitor(list(_ONE_UTTERANCE))
+        service, fake_input, _out, _mon = _make(monitor=monitor, barge_in=True)
+        events = _Events(service)
+        opening = threading.Event()
+        release = threading.Event()
+        start_recording = fake_input.start_recording
+
+        def held_barge_start():
+            if fake_input.start_calls >= 1:  # the listening turn opened first
+                opening.set()
+                release.wait(5.0)
+            start_recording()
+
+        fake_input.start_recording = held_barge_start
+        self._drive_to_speaking(service, fake_input)
+        _wait_until(opening.is_set)
+        cancels_before = fake_input.cancel_calls
+        stopper = threading.Thread(target=service.stop, daemon=True)
+        stopper.start()
+        _wait_until(lambda: fake_input.cancel_calls > cancels_before)
+        release.set()
+        stopper.join(5.0)
+        assert not stopper.is_alive()
+        assert service.state is ConversationState.IDLE
+        assert not fake_input.recording
+        assert fake_input.frame_callback is None
+
+        fake_input.start_recording = start_recording
+        _start_listening(service, fake_input)
+        assert service.state is ConversationState.LISTENING
+        assert events.errors == []
+        service.stop()
 
     def test_speech_during_speaking_interrupts_playback(self):
         monitor = _ScriptedMonitor(list(_ONE_UTTERANCE) + [[SPEECH_STARTED]])

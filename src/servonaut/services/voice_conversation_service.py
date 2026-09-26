@@ -493,8 +493,11 @@ class VoiceConversationService(VoiceConversationServiceInterface):
 
         Returns:
             True when capture is running; False after reporting the
-            failure and landing in IDLE.
+            failure and landing in IDLE, or when the session was stopped
+            before or while the microphone opened.
         """
+        if session.stop_event.is_set():
+            return False
         try:
             input_service.set_frame_callback(
                 lambda block: self._enqueue_frame(session, block)
@@ -503,7 +506,23 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         except Exception as e:  # noqa: BLE001 — VoiceInputError and friends
             self._fail_from_loop(session, input_service, str(e))
             return False
+        if session.stop_event.is_set():
+            self._close_stopped_capture(input_service)
+            return False
         return True
+
+    def _close_stopped_capture(self, input_service: Any) -> None:
+        """Close a capture that opened after its session was stopped.
+
+        The stop's teardown ran before this capture existed, so nothing
+        else will close it. Once a newer session is active the input is
+        that session's, and it is left alone.
+        """
+        with self._lock:
+            if self._session is not None or self._barge_session is not None:
+                return
+            self._quiet(input_service.set_frame_callback, None)
+            self._quiet(input_service.cancel_recording)
 
     def _enqueue_frame(self, session: _ListenSession, block: Any) -> None:
         """Frame tap: audio thread -> session queue. O(1), never raises."""
@@ -625,6 +644,8 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         this reply.
         """
         try:
+            if session.stop_event.is_set():
+                return
             try:
                 input_service.set_frame_callback(
                     lambda block: self._enqueue_frame(session, block)
@@ -633,6 +654,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
             except Exception:  # noqa: BLE001 — VoiceInputError and friends
                 logger.debug("Barge-in capture failed to open", exc_info=True)
                 self._clear_barge_session(session)
+                return
+            if session.stop_event.is_set():
+                self._close_stopped_capture(input_service)
                 return
             while not session.stop_event.is_set():
                 try:
