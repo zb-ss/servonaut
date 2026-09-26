@@ -9,7 +9,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
 
@@ -74,6 +74,36 @@ def _classify_ovh_error(exc: Exception) -> str:
     return f"OVH refresh failed: {first_line}"
 
 
+def _source_of(instance: dict) -> str:
+    """The listing an OVH row comes from, named as in a failed-source entry.
+
+    Public Cloud rows carry their project in the composite id
+    ``<project_id>/<instance_id>``, so each project is its own source.
+    """
+    provider_type = str(instance.get('provider_type') or '')
+    if provider_type == 'cloud':
+        project_id = str(instance.get('id') or '').partition('/')[0]
+        return f"cloud:{project_id}"
+    return provider_type
+
+
+def _describe_source(source: str) -> str:
+    """User-facing name of a listing source."""
+    if source == 'dedicated':
+        return "dedicated servers"
+    if source == 'vps':
+        return "VPS"
+    if source.startswith('cloud:'):
+        return f"Public Cloud project {source[len('cloud:'):]}"
+    return source
+
+
+def _first_line(exc: Exception) -> str:
+    """First line of an error (OVH appends an ``OVH-Query-ID:`` line)."""
+    lines = str(exc).strip().splitlines()
+    return lines[0].strip() if lines else type(exc).__name__
+
+
 class OVHService:
     """Service for fetching OVHcloud instances (dedicated, VPS, Public Cloud)."""
 
@@ -88,7 +118,11 @@ class OVHService:
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Read by the instance list and MCP list_instances.
         self.last_fetch_error: Optional[str] = None
+        # True when some sources refreshed and others failed: the fresh rows
+        # are then mixed with cached rows for the failed sources only.
+        self.last_fetch_partial: bool = False
         self._failed_sources: List[str] = []
+        self._source_errors: Dict[str, str] = {}
 
     def _get_client(self):
         """Lazy-initialize the OVH API client.
@@ -148,6 +182,7 @@ class OVHService:
         logger.debug("Fetching instances from OVHcloud")
         instances: List[dict] = []
         self._failed_sources = []
+        self._source_errors = {}
         attempted = 0
         last_error: Optional[Exception] = None
 
@@ -159,7 +194,7 @@ class OVHService:
                 logger.debug("Fetched %d OVH dedicated servers", len(dedicated))
             except Exception as e:
                 logger.error("Error fetching OVH dedicated servers: %s", e)
-                self._failed_sources.append("dedicated")
+                self._record_failed_source("dedicated", e)
                 last_error = e
 
         if self._config.include_vps:
@@ -170,7 +205,7 @@ class OVHService:
                 logger.debug("Fetched %d OVH VPS instances", len(vps))
             except Exception as e:
                 logger.error("Error fetching OVH VPS instances: %s", e)
-                self._failed_sources.append("vps")
+                self._record_failed_source("vps", e)
                 last_error = e
 
         if self._config.include_cloud:
@@ -188,7 +223,7 @@ class OVHService:
                         "Error fetching OVH Cloud instances for project %s: %s",
                         project_id, e
                     )
-                    self._failed_sources.append(f"cloud:{project_id}")
+                    self._record_failed_source(f"cloud:{project_id}", e)
                     last_error = e
 
         if attempted and len(self._failed_sources) == attempted:
@@ -198,6 +233,10 @@ class OVHService:
 
         logger.info("Fetched %d total OVH instances", len(instances))
         return instances
+
+    def _record_failed_source(self, source: str, exc: Exception) -> None:
+        self._failed_sources.append(source)
+        self._source_errors[source] = _first_line(exc)
 
     async def fetch_instances_cached(self, force_refresh: bool = False) -> List[dict]:
         """Fetch instances with OVH-specific file cache.
@@ -219,6 +258,7 @@ class OVHService:
         except OVHFetchError as exc:
             # Don't poison the cache — keep the previous good entries.
             self.last_fetch_error = str(exc)
+            self.last_fetch_partial = False
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
                 logger.warning(
@@ -230,18 +270,46 @@ class OVHService:
             return []
 
         if self._failed_sources:
-            # A partial inventory is shown but never persisted: writing it
-            # would silently drop every instance behind the failed sources.
-            self.last_fetch_error = (
-                f"{len(self._failed_sources)} source(s) failed: "
-                + ", ".join(self._failed_sources)
-            )
-            logger.warning("OVH fetch incomplete (%s); cache left untouched", self.last_fetch_error)
+            # Save what did refresh and keep the cached rows of the sources
+            # that failed. Refusing to save a partial inventory would let one
+            # stale project id or one missing permission freeze the whole
+            # OVH cache; saving it as fetched would drop those rows.
+            instances = self._keep_cached_rows_of_failed_sources(instances)
+            self._save_cache(instances)
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_partial = False
         self._save_cache(instances)
         return instances
+
+    def _keep_cached_rows_of_failed_sources(self, fresh: List[dict]) -> List[dict]:
+        """Add the cached rows of every failed source to the fresh rows.
+
+        Also words :attr:`last_fetch_error` for the user: which sources
+        failed, why, and how many of their rows come from the cache.
+        """
+        failed = set(self._failed_sources)
+        cached = self._load_cache(ignore_ttl=True) or []
+        kept = [
+            row for row in cached
+            if isinstance(row, dict) and _source_of(row) in failed
+        ]
+        messages = []
+        for source in self._failed_sources:
+            count = sum(1 for row in kept if _source_of(row) == source)
+            shown = (
+                f"showing {count} cached {'row' if count == 1 else 'rows'}"
+                if count else "none cached to show"
+            )
+            messages.append(
+                f"Could not list OVH {_describe_source(source)} "
+                f"({self._source_errors.get(source, 'unknown error')}); {shown}."
+            )
+        self.last_fetch_error = " ".join(messages)
+        self.last_fetch_partial = True
+        logger.warning("OVH fetch incomplete: %s", self.last_fetch_error)
+        return fresh + kept
 
     def get_cached_instances(self) -> List[dict]:
         """Return cached OVH instances synchronously (any age).
@@ -564,13 +632,14 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call (bad credentials,
+                API error). :meth:`fetch_instances` records the source as
+                failed, so the refusal is never cached as "no servers".
         """
         client = self._get_client()
-        try:
-            server_names = client.get("/dedicated/server")
-        except Exception as e:
-            logger.error("Error listing OVH dedicated servers: %s", e)
-            return []
+        server_names = client.get("/dedicated/server")
 
         if not server_names:
             return []
@@ -637,13 +706,13 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call; see
+                :meth:`_fetch_dedicated`.
         """
         client = self._get_client()
-        try:
-            vps_names = client.get("/vps")
-        except Exception as e:
-            logger.error("Error listing OVH VPS instances: %s", e)
-            return []
+        vps_names = client.get("/vps")
 
         if not vps_names:
             return []
@@ -696,16 +765,13 @@ class OVHService:
 
         Returns:
             List of instance dictionaries.
+
+        Raises:
+            Exception: When OVH refuses the listing call; see
+                :meth:`_fetch_dedicated`.
         """
         client = self._get_client()
-        try:
-            cloud_instances = client.get(f"/cloud/project/{project_id}/instance")
-        except Exception as e:
-            logger.error(
-                "Error fetching OVH Cloud instances for project %s: %s",
-                project_id, e
-            )
-            return []
+        cloud_instances = client.get(f"/cloud/project/{project_id}/instance")
 
         if not cloud_instances:
             return []

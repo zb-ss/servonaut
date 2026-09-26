@@ -1,0 +1,52 @@
+name: Voice runtime drift check
+
+# Upstream can withdraw or replace a pinned uv release asset or a locked wheel.
+# Weekly, and whenever the pins or the code that checks them change, fetch
+# every pin for its own desktop target, require the reviewed SHA-256 digests,
+# confirm the pinned uv lists the pinned Python for every target, and hold the
+# pins to the supply-chain cooldown in voice-runtime.json.
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'packaging/desktop_shell/voice-runtime.json'
+      - 'packaging/desktop_shell/target-policy.json'
+      - 'packaging/desktop_shell/requirements/voice*'
+      - 'scripts/desktop_shell/voice_*.py'
+      - 'scripts/desktop_shell/model.py'
+      - 'scripts/desktop_shell/native_headers.py'
+      - 'scripts/standalone_cli/pinned_asset.py'
+      - '.github/workflows/voice-runtime-drift.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-runtime-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: pinned voice runtime inputs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install the hash-locked pip that supports --uploaded-prior-to
+        run: >-
+          python -m pip --isolated install --disable-pip-version-check --no-input
+          --require-hashes --only-binary :all: --no-deps
+          -r packaging/desktop_shell/requirements/voice-drift-tools.txt
+      - name: Verify pinned uv, Python and voice lock wheels
+        env:
+          # Read-only release lookup; the job's token has contents: read only.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: env -u PYTHONPATH -u PIP_CONFIG_FILE python -m scripts.desktop_shell.voice_drift

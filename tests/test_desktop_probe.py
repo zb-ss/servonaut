@@ -15,6 +15,7 @@ aiohttp = pytest.importorskip("aiohttp")
 pytest.importorskip("textual_serve")
 psutil = pytest.importorskip("psutil")
 
+from scripts.desktop_probe.config import ProbeConfig, load_config, scaled_seconds
 from scripts.desktop_probe.host import ProbeHost, terminal_size
 
 
@@ -34,6 +35,12 @@ async def host(
 
 def protocols(host: ProbeHost) -> tuple[str, str]:
     return "servonaut-probe", f"auth.{host._token}"
+
+
+def session_end_seconds(config: ProbeConfig) -> float:
+    """Budget for a session to end: the child's graceful stop, then the
+    WebSocket close handshake, are each bounded by the shutdown budget."""
+    return config.shutdown_seconds * 2
 
 
 @pytest.mark.asyncio
@@ -93,7 +100,9 @@ async def test_assets_are_closed_and_do_not_disclose_token(host: ProbeHost) -> N
             assert response.status == 403
 
 
-async def read_until(websocket: aiohttp.ClientWebSocketResponse, text: bytes) -> bytes:
+async def read_until(
+    websocket: aiohttp.ClientWebSocketResponse, text: bytes, config: ProbeConfig
+) -> bytes:
     async def collect() -> bytes:
         result = b""
         async for message in websocket:
@@ -103,7 +112,7 @@ async def read_until(websocket: aiohttp.ClientWebSocketResponse, text: bytes) ->
                     return result
         raise AssertionError("Child closed before expected screen rendered")
 
-    return await asyncio.wait_for(collect(), 20)
+    return await asyncio.wait_for(collect(), config.startup_seconds)
 
 
 @pytest.mark.asyncio
@@ -114,16 +123,16 @@ async def test_real_app_help_single_session_replay_and_cleanup(host: ProbeHost) 
             url, origin=host.origin, protocols=protocols(host)
         )
         assert websocket.protocol == "servonaut-probe"  # Never echo the credential.
-        await read_until(websocket, b"web-1")
+        await read_until(websocket, b"web-1", host.config)
         # Focus empty table space: Search legitimately has initial focus.
         await websocket.send_json(["stdin", "\x1b[<0;70;20M\x1b[<0;70;20m"])
         await websocket.send_json(["stdin", "?"])
-        await read_until(websocket, b"Navigation")
+        await read_until(websocket, b"Navigation", host.config)
         with pytest.raises(aiohttp.WSServerHandshakeError) as error:
             await client.ws_connect(url, origin=host.origin, protocols=protocols(host))
         assert error.value.status == 409
         await websocket.close()
-        await asyncio.wait_for(host.finished.wait(), 10)
+        await asyncio.wait_for(host.finished.wait(), session_end_seconds(host.config))
         assert host.child.process.returncode == 0
         with pytest.raises(aiohttp.WSServerHandshakeError) as replay:
             await client.ws_connect(url, origin=host.origin, protocols=protocols(host))
@@ -144,7 +153,7 @@ async def test_invalid_messages_close_session(host: ProbeHost, payload: object) 
             origin=host.origin,
             protocols=protocols(host),
         )
-        await read_until(websocket, b"web-1")
+        await read_until(websocket, b"web-1", host.config)
         await websocket.send_str(json.dumps(payload))
         async for _ in websocket:
             pass
@@ -159,9 +168,9 @@ async def test_child_crash_closes_socket(host: ProbeHost) -> None:
             origin=host.origin,
             protocols=protocols(host),
         )
-        await read_until(websocket, b"web-1")
+        await read_until(websocket, b"web-1", host.config)
         host.child.process.kill()
-        await asyncio.wait_for(host.finished.wait(), 10)
+        await asyncio.wait_for(host.finished.wait(), session_end_seconds(host.config))
         assert host.child.process.returncode != 0
         async for _ in websocket:
             pass
@@ -182,7 +191,7 @@ async def test_startup_timeout_reaps_direct_child() -> None:
             )
             async for _ in websocket:
                 pass
-            await asyncio.wait_for(host.finished.wait(), 3)
+            await asyncio.wait_for(host.finished.wait(), scaled_seconds(3))
             assert host.child.process.returncode is not None
     finally:
         await host.stop()
@@ -192,8 +201,6 @@ async def test_startup_timeout_reaps_direct_child() -> None:
     "value", [{}, {"width": True, "height": 1}, {"width": -1, "height": 1}]
 )
 def test_terminal_dimensions_are_bounded(value: dict) -> None:
-    from scripts.desktop_probe.config import load_config
-
     with pytest.raises((TypeError, ValueError)):
         terminal_size(value, load_config())
 
@@ -262,8 +269,11 @@ asyncio.run(main())
         except psutil.NoSuchProcess:
             return False
 
+    config = load_config()
     try:
-        info = json.loads(await asyncio.wait_for(parent.stdout.readline(), 20))
+        info = json.loads(
+            await asyncio.wait_for(parent.stdout.readline(), config.startup_seconds)
+        )
         child = psutil.Process(info["pid"])
         parent.kill()
         await parent.wait()
@@ -272,7 +282,7 @@ asyncio.run(main())
             while is_running():
                 await asyncio.sleep(0.05)
 
-        await asyncio.wait_for(wait_for_exit(), 10)
+        await asyncio.wait_for(wait_for_exit(), session_end_seconds(config))
         with pytest.raises(OSError):
             await asyncio.open_connection(
                 "127.0.0.1", int(info["origin"].rsplit(":", 1)[1])
@@ -304,7 +314,6 @@ def test_native_host_thread_failure_reaches_launcher(
 
 @pytest.mark.asyncio
 async def test_child_error_before_readiness_is_bounded_and_redacted() -> None:
-    from scripts.desktop_probe.config import load_config
     from scripts.desktop_probe.process import TextualChild
 
     # Noise larger than a pipe buffer must not block readiness/error collection.
@@ -330,7 +339,6 @@ raise ValueError('auth.synthetic-credential')
 
 @pytest.mark.asyncio
 async def test_child_pipe_preserves_binary_packet_bytes() -> None:
-    from scripts.desktop_probe.config import load_config
     from scripts.desktop_probe.process import TextualChild
 
     # Include CR, LF and Ctrl-Z: text-mode Windows pipes corrupt these bytes.

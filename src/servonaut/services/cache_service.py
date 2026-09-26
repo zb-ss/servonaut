@@ -3,11 +3,56 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ``timestamp_utc`` is the authoritative write time: an ISO 8601 string with a
+# UTC offset, so the cache age is right after a time-zone or DST change.
+# ``timestamp`` keeps the naive local-time form older releases write and read.
+# They subtract it from a naive ``datetime.now()``, so an offset-aware value
+# there would crash them when several installed versions share ~/.servonaut.
+_UTC_TIMESTAMP_KEY = 'timestamp_utc'
+_LEGACY_TIMESTAMP_KEY = 'timestamp'
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse a stored cache timestamp into an aware UTC datetime.
+
+    A naive value comes from an older release, which wrote the machine's
+    local time, so it is read as local time.
+
+    Returns:
+        The timestamp in UTC, or None when *value* is not a usable ISO string.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def timestamp_fields(written_at: Optional[datetime] = None) -> Dict[str, str]:
+    """Return the timestamp keys a cache file stores for *written_at* (default: now)."""
+    moment = (written_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return {
+        _UTC_TIMESTAMP_KEY: moment.isoformat(),
+        _LEGACY_TIMESTAMP_KEY: moment.astimezone().replace(tzinfo=None).isoformat(),
+    }
+
+
+def _written_at(cache_data: Dict[str, Any]) -> Optional[datetime]:
+    """Return when *cache_data* was written, as an aware UTC datetime."""
+    return (
+        _parse_timestamp(cache_data.get(_UTC_TIMESTAMP_KEY))
+        or _parse_timestamp(cache_data.get(_LEGACY_TIMESTAMP_KEY))
+    )
 
 
 class CacheService:
@@ -29,34 +74,22 @@ class CacheService:
         Returns:
             List of instance dictionaries, or None if cache invalid/expired.
         """
-        if not self.CACHE_PATH.exists():
-            logger.debug("Cache file does not exist")
+        cache_data = self._read()
+        if cache_data is None:
             return None
 
-        try:
-            with open(self.CACHE_PATH, 'r') as f:
-                cache_data = json.load(f)
-
-            timestamp_str = cache_data.get('timestamp')
-            instances = cache_data.get('instances')
-
-            if timestamp_str is None or instances is None:
-                logger.warning("Invalid cache file format (missing timestamp or instances)")
-                return None
-
-            cache_timestamp = datetime.fromisoformat(timestamp_str)
-            age = datetime.now() - cache_timestamp
-
-            if age >= timedelta(seconds=self.ttl_seconds):
-                logger.debug(f"Cache expired (age: {age}, TTL: {self.ttl_seconds}s)")
-                return None
-
-            logger.debug(f"Loaded {len(instances)} instances from cache (age: {age})")
-            return instances
-
-        except (json.JSONDecodeError, IOError, KeyError, ValueError) as e:
-            logger.error(f"Error reading cache file: {e}")
+        instances = self._valid_instances(cache_data)
+        age = self._raw_age(cache_data)
+        if age is None or instances is None:
+            logger.warning("Invalid cache file format (missing timestamp or instances)")
             return None
+
+        if not self._within_ttl(age):
+            logger.debug("Cache expired (age: %s, TTL: %ss)", age, self.ttl_seconds)
+            return None
+
+        logger.debug("Loaded %d instances from cache (age: %s)", len(instances), age)
+        return instances
 
     def save(self, instances: List[dict]) -> None:
         """Save instances to cache.
@@ -64,10 +97,7 @@ class CacheService:
         Args:
             instances: List of instance dictionaries to cache.
         """
-        cache_data = {
-            'timestamp': datetime.now().isoformat(),
-            'instances': instances
-        }
+        cache_data = {**timestamp_fields(), 'instances': instances}
 
         try:
             with open(self.CACHE_PATH, 'w') as f:
@@ -85,36 +115,33 @@ class CacheService:
         Returns:
             List of instance dictionaries, or None if no cache available.
         """
-        if not self.CACHE_PATH.exists():
+        cache_data = self._read()
+        if cache_data is None:
             return None
 
-        try:
-            with open(self.CACHE_PATH, 'r') as f:
-                cache_data = json.load(f)
-
-            instances = cache_data.get('instances')
-            if instances is None:
-                return None
-
-            age = self.get_age()
-            logger.debug("Loaded %d instances from cache (age: %s, stale: %s)",
-                         len(instances), age, age and age >= timedelta(seconds=self.ttl_seconds))
-            return instances
-
-        except (json.JSONDecodeError, IOError, KeyError, ValueError) as e:
-            logger.error("Error reading cache file: %s", e)
+        instances = self._valid_instances(cache_data)
+        if instances is None:
             return None
+
+        age = self._raw_age(cache_data)
+        logger.debug("Loaded %d instances from cache (age: %s, stale: %s)",
+                     len(instances), age, age is None or not self._within_ttl(age))
+        return instances
 
     def is_fresh(self) -> bool:
         """Check if cache exists and is within TTL.
 
+        A write time in the future (clock or time-zone change) means the age
+        is unknown, so that cache counts as stale and gets refreshed.
+
         Returns:
             True if cache is valid and not expired.
         """
-        age = self.get_age()
-        if age is None:
+        cache_data = self._read()
+        if cache_data is None:
             return False
-        return age < timedelta(seconds=self.ttl_seconds)
+        age = self._raw_age(cache_data)
+        return age is not None and self._within_ttl(age)
 
     def is_valid(self) -> bool:
         """Check if cache exists and is not expired.
@@ -127,26 +154,67 @@ class CacheService:
     def get_age(self) -> Optional[timedelta]:
         """Get age of cached data.
 
+        Never negative: a write time in the future reads as "just now"
+        (``is_fresh`` still treats that cache as stale).
+
         Returns:
             timedelta representing cache age, or None if cache doesn't exist.
         """
-        if not self.CACHE_PATH.exists():
+        cache_data = self._read()
+        if cache_data is None:
             return None
+        age = self._raw_age(cache_data)
+        if age is None:
+            return None
+        return max(age, timedelta(0))
 
+    # ------------------------------------------------------------------
+    # Parsing helpers — the cache file is user-writable, so every shape
+    # check degrades to "no usable cache" instead of raising.
+    # ------------------------------------------------------------------
+
+    def _read(self) -> Optional[Dict[str, Any]]:
+        """Return the parsed cache file, or None if missing or unusable."""
+        if not self.CACHE_PATH.exists():
+            logger.debug("Cache file does not exist")
+            return None
         try:
             with open(self.CACHE_PATH, 'r') as f:
                 cache_data = json.load(f)
-
-            timestamp_str = cache_data.get('timestamp')
-            if timestamp_str is None:
-                return None
-
-            cache_timestamp = datetime.fromisoformat(timestamp_str)
-            return datetime.now() - cache_timestamp
-
-        except (json.JSONDecodeError, IOError, KeyError, ValueError) as e:
-            logger.error(f"Error reading cache timestamp: {e}")
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            logger.error("Error reading cache file: %s", e)
             return None
+        if not isinstance(cache_data, dict):
+            logger.warning(
+                "Ignoring cache file: expected a JSON object, got %s",
+                type(cache_data).__name__,
+            )
+            return None
+        return cache_data
+
+    @staticmethod
+    def _valid_instances(cache_data: Dict[str, Any]) -> Optional[List[dict]]:
+        """Return ``instances`` when it is a list of dicts, else ``None``."""
+        instances = cache_data.get('instances')
+        if instances is None:
+            return None
+        if not isinstance(instances, list) or not all(
+            isinstance(item, dict) for item in instances
+        ):
+            logger.warning("Ignoring cache file: 'instances' is not a list of objects")
+            return None
+        return instances
+
+    @staticmethod
+    def _raw_age(cache_data: Dict[str, Any]) -> Optional[timedelta]:
+        """Time since *cache_data* was written; negative if it is in the future."""
+        written_at = _written_at(cache_data)
+        if written_at is None:
+            return None
+        return datetime.now(timezone.utc) - written_at
+
+    def _within_ttl(self, age: timedelta) -> bool:
+        return timedelta(0) <= age < timedelta(seconds=self.ttl_seconds)
 
     def invalidate(self) -> None:
         """Delete cache file to force fresh fetch."""

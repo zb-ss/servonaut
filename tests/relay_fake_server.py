@@ -1,7 +1,8 @@
 """In-memory relay backend for RelayListener tests.
 
 :class:`FakeRelayServer` answers the three routes a relay listener uses —
-the subscriber-token endpoint, the heartbeat and the Mercure hub — through
+the subscriber-token endpoint, the heartbeat and the Mercure hub — plus,
+when scripted, the OAuth refresh endpoint, through
 an ``httpx.MockTransport``, so tests drive the real listener, the real
 httpx client and the real ``httpx_sse`` parsing without any network.
 
@@ -23,6 +24,7 @@ MERCURE_URL = "https://hub.example.test/.well-known/mercure"
 
 _TOKEN_PATH = "/api/cli/mercure-token"
 _HEARTBEAT_PATH = "/api/cli/heartbeat"
+_REFRESH_PATH = "/api/oauth/refresh"
 _HUB_PATH = "/.well-known/mercure"
 _EVENT_STREAM = "text/event-stream"
 
@@ -36,6 +38,15 @@ class HubReply:
     stays_open: bool = True
 
 
+@dataclass(frozen=True)
+class RefreshReply:
+    """One scripted answer of the OAuth refresh endpoint."""
+
+    status: int
+    body: str = ""
+    content_type: str = "application/json"
+
+
 class FakeRelayServer:
     """Scriptable stand-in for the API and the Mercure hub.
 
@@ -46,6 +57,8 @@ class FakeRelayServer:
         heartbeat_waits_for_subscription: hold each heartbeat response until
             the hub has accepted a subscription, so a rejected heartbeat
             reaches a listener that is already parked on an idle stream.
+        refresh_replies: OAuth refresh answers, scripted the same way; with
+            none scripted the route answers 404.
 
     ``timeline`` records ``("hub", status, token)`` for every subscribe
     request; tests may append their own entries to interleave other events.
@@ -57,6 +70,7 @@ class FakeRelayServer:
         hub_replies: Iterable[Union[int, HubReply]] = (200,),
         heartbeat_statuses: Iterable[int] = (200,),
         heartbeat_waits_for_subscription: bool = False,
+        refresh_replies: Iterable[RefreshReply] = (),
     ) -> None:
         self._hub_replies = [
             reply if isinstance(reply, HubReply) else HubReply(reply)
@@ -64,6 +78,8 @@ class FakeRelayServer:
         ]
         self._heartbeat_statuses = list(heartbeat_statuses)
         self._heartbeat_waits = heartbeat_waits_for_subscription
+        self._refresh_replies = list(refresh_replies)
+        self.refresh_requests = 0
         self.tokens_issued: list[str] = []
         self.hub_tokens: list[str | None] = []
         self.heartbeat_replies: list[int] = []
@@ -101,6 +117,14 @@ class FakeRelayServer:
             return httpx.Response(status, text="")
         if path == _HUB_PATH:
             return self._subscribe(request)
+        if path == _REFRESH_PATH and self._refresh_replies:
+            self.refresh_requests += 1
+            reply = _next(self._refresh_replies)
+            return httpx.Response(
+                reply.status,
+                headers={"content-type": reply.content_type},
+                text=reply.body,
+            )
         return httpx.Response(404)
 
     def _subscribe(self, request: httpx.Request) -> httpx.Response:

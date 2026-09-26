@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.config.schema import MemoryConfig
+from servonaut.services.aws_service import AWSService
 from servonaut.services.memory.interfaces import ModuleResult
 from servonaut.services.memory.service import MemoryService
 from servonaut.services.memory.store import MemoryStore
@@ -162,9 +163,8 @@ class TestExitCode1:
     def test_resolve_missing_instance(self, tmp_path: Path, capsys: Any) -> None:
         from servonaut.cli.memory import _resolve_or_exit
 
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = []
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = []
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
 
@@ -252,9 +252,8 @@ class TestExitCode3:
             _make_inst(iid="fail-3"),
         ]
 
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = instances
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = instances
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
 
@@ -662,9 +661,8 @@ class TestRunMemoryDispatch:
     def _make_headless_mocks(self, tmp_path: Path):
         """Return (config, memory_service, aws, custom, ovh) mocks."""
         memory_service = _make_memory_service(tmp_path)
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = [_make_inst()]
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = [_make_inst()]
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
         config = _fake_config()
@@ -1019,9 +1017,8 @@ class TestBuildAllNoInstances:
         from servonaut.cli.memory import _cmd_build_all
 
         memory_service = _make_memory_service(tmp_path)
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = []
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = []
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
 
@@ -1055,9 +1052,8 @@ class TestResolveOrExitJsonError:
         import json as _json
         from servonaut.cli.memory import _resolve_or_exit
 
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = []
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = []
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
 
@@ -1078,9 +1074,8 @@ class TestRunMemoryBuildNoInstance:
         from servonaut.cli import memory as mem_mod
 
         memory_service = _make_memory_service(tmp_path)
-        aws_service = MagicMock()
-        aws_service._cache = MagicMock()
-        aws_service._cache.load_any.return_value = []
+        aws_service = MagicMock(spec=AWSService)
+        aws_service.get_cached_instances.return_value = []
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
         config = _fake_config()

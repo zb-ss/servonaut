@@ -5,3 +5,5 @@
 #
 # NOTE: confirm the owner handle below matches this repo's maintainer account.
 /.github/  @zb-ss
+/scripts/distribution/  @zb-ss
+/packaging/distribution/  @zb-ss
