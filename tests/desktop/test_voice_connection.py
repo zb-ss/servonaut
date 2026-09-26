@@ -712,11 +712,24 @@ def _flood(conn: VoiceConnection, frames: int = 8) -> float:
 
 class TestWedgedWorker:
     def test_sends_never_block_on_a_full_pipe(self, tmp_path: Path) -> None:
-        conn = _wedged(tmp_path, write_queue_frames=4, shutdown_timeout_seconds=0.5)
+        # Pings that time out while the queue is still filling must not get
+        # the worker recycled before the queue is full.
+        conn = _wedged(
+            tmp_path,
+            write_queue_frames=4,
+            shutdown_timeout_seconds=0.5,
+            max_consecutive_timeouts=100,
+        )
         assert _flood(conn) < 0.1
+        # Until the writer is stuck on the full pipe it can still take queued
+        # frames, which a slow machine may leave it doing after the flood. A
+        # ping queued meanwhile goes unanswered and times out, but its frame
+        # stays queued, so the pings fill the queue and a later send is
+        # refused at once.
         with pytest.raises(VoiceConnectionError, match="not reading"):
             for _ in range(8):
-                conn.send_request(PingRequest(id=str(uuid.uuid4())), timeout=0.1)
+                with contextlib.suppress(VoiceConnectionTimeoutError):
+                    conn.send_request(PingRequest(id=str(uuid.uuid4())), timeout=0.1)
         conn.kill()
 
     @pytest.mark.parametrize("method", ["close", "kill"])
