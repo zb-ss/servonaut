@@ -9,8 +9,11 @@ short until the next repopulate.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from textual.app import App, ComposeResult
+from textual.widgets import DataTable
 
 from servonaut.widgets.instance_table import InstanceTable
 
@@ -73,3 +76,42 @@ async def test_rows_drawn_after_the_width_pass_show_the_full_name() -> None:
             await pilot.pause()
 
         assert LONG_NAME in _drawn_text(table)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_cache_hook_skips_the_redraw_without_crashing() -> None:
+    app = _Host()
+    async with app.run_test(size=(220, 12)) as pilot:
+        table = app.query_one(InstanceTable)
+        table.populate([_instance("app-1")])
+        await pilot.pause()
+
+        table.populate([_instance("app-1"), _instance(LONG_NAME)])
+        _drawn_text(table)
+        # As if a Textual release had renamed the method, before the idle
+        # pass that widens the column runs.
+        table._clear_caches = None
+        for _ in range(3):
+            await pilot.pause()
+
+        assert app._exception is None
+        assert table.row_count == 2
+
+
+# The override relies on three DataTable internals. Should an upgrade change
+# any of them, these fail with a pointer to the code to revisit instead of
+# letting the fix go quiet.
+_REVISIT = "revisit InstanceTable._update_dimensions for this Textual version"
+
+
+def test_datatable_still_measures_new_rows_in_update_dimensions() -> None:
+    parameters = list(inspect.signature(DataTable._update_dimensions).parameters)
+    assert parameters == ["self", "new_rows"], f"signature is now {parameters}; {_REVISIT}"
+
+
+def test_datatable_still_sizes_columns_from_its_idle_pass() -> None:
+    assert "self._update_dimensions(" in inspect.getsource(DataTable._on_idle), _REVISIT
+
+
+def test_datatable_still_has_a_cache_clearing_method() -> None:
+    assert callable(getattr(DataTable, "_clear_caches", None)), _REVISIT
