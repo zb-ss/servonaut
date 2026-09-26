@@ -12,6 +12,13 @@ run unguarded. Any failure therefore ends the process at once (exit 70).
 import os
 import sys
 
+# A guarded child never writes bytecode: what it imports lives in the
+# toolchain and the checkout, outside the test root. The environment says so
+# too, but a child can arm through an install's start-up hook while running
+# under ``python -E``, which ignores PYTHONDONTWRITEBYTECODE. This line runs
+# before the guard's own imports.
+sys.dont_write_bytecode = True
+
 _MODULE_NAME = "_servonaut_e2e_netguard"
 _EXIT_UNGUARDED = 70
 
