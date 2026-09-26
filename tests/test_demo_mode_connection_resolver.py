@@ -170,21 +170,24 @@ class TestInstanceListSshConnect:
 
 
 class TestProviderRefreshKeepsPristineInStep:
-    def test_replace_pristine_rows_swaps_provider_rows(self) -> None:
-        from servonaut.screens.instance_list import InstanceListScreen
+    def test_replace_instances_swaps_one_providers_rows(self) -> None:
+        from servonaut.screens._demo_resolve import replace_instances
 
-        screen = object.__new__(InstanceListScreen)
-        mock_app = MagicMock()
-        mock_app._instances_pristine = [
-            {"id": "i-1", "name": "aws-1"},
-            {"id": "old-vps", "name": "old", "is_ovh": True},
-        ]
+        app = SimpleNamespace(
+            demo_mode=False, redaction_service=None,
+            instances=[{"id": "i-1", "name": "aws-1"},
+                       {"id": "old-vps", "name": "old", "is_ovh": True}],
+            _instances_pristine=[{"id": "i-1", "name": "aws-1"},
+                                 {"id": "old-vps", "name": "old", "is_ovh": True}],
+        )
         fresh = [{"id": "vps-new.vps.corp-example.net", "name": "new", "is_ovh": True}]
-        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
-            screen._replace_pristine_rows("is_ovh", fresh)
-        ids = [i["id"] for i in mock_app._instances_pristine]
-        assert ids == ["i-1", "vps-new.vps.corp-example.net"]
-        assert mock_app._instances_pristine[1] is not fresh[0], "snapshot must be a copy"
+        replace_instances(app, "ovh", fresh)
+        assert [i["id"] for i in app._instances_pristine] == [
+            "i-1", "vps-new.vps.corp-example.net",
+        ]
+        assert [i["id"] for i in app.instances] == ["i-1", "vps-new.vps.corp-example.net"]
+        assert app._instances_pristine[1] is not fresh[0], "snapshot must be a copy"
+        assert app.instances[1] is not fresh[0], "the service's rows are not modified"
 
 
 class TestToolBridgeTargetResolution:

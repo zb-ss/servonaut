@@ -15,7 +15,7 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional
 
 from importlib.metadata import version as pkg_version
 
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 from servonaut.services.memory.redaction import default_redactor, scan_for_secrets
 from servonaut.services.api_client import APIError
+from servonaut.services.report_scrubber import InventoryScrubber
 
 # ---------------------------------------------------------------------------
 # Public dataclasses (frozen — callers cannot mutate after collection)
@@ -103,6 +104,16 @@ class BugReportSubmissionError(Exception):
 # ---------------------------------------------------------------------------
 
 _GITHUB_URL_LIMIT = 8000
+
+# Provider labels the anonymous counts may name; anything else (a custom
+# server's free-text provider, often a hosting company) is counted as custom.
+_KNOWN_PROVIDERS = frozenset({"aws", "ovh", "hetzner", "gcp", "azure", "custom"})
+
+_INVENTORY_NOTE = (
+    "Server names, hosts, IP addresses, usernames, SSH key names and instance "
+    "or project ids are replaced with placeholders; server lists in the config "
+    "are reduced to a count."
+)
 
 
 def _scrub_config_dict(obj: Any, redactor: Callable[[str], str]) -> Any:
@@ -220,6 +231,9 @@ class BugReportService:
         self._redactor = redactor
         self._log_path: Path = log_path or Path.home() / ".servonaut" / "logs" / "servonaut.log"
         self._github_repo = github_repo
+        # Built by collect_diagnostics from the fleet it was given and the
+        # config; render_preview and submit scrub the user's text with it.
+        self._inventory = InventoryScrubber.from_inventory([], None)
 
     # ------------------------------------------------------------------
     # Public API
@@ -231,11 +245,16 @@ class BugReportService:
         consent: BugReportConsent,
         instances: List[Dict],
         log_tail_lines: int = 200,
+        known_hosts: Iterable[str] = (),
     ) -> BugReportPayload:
         """Collect all diagnostics and return an immutable :class:`BugReportPayload`.
 
         Redaction is applied as the LAST step so no secret ever escapes into
-        the frozen dataclass.
+        the frozen dataclass. The report may become a public issue, so it
+        never carries the user's inventory either: *instances* must be the
+        real records (not demo-mode stand-ins), and every value they and the
+        config hold is replaced before it reaches the payload. *known_hosts*
+        adds other names seen this session (DNS zones) to that list.
         """
         # --- Environment info ---
         servonaut_version = self._update_service.current_version
@@ -253,7 +272,9 @@ class BugReportService:
         if consent.include_anonymous_telemetry:
             provider_counts: Dict[str, int] = {}
             for inst in instances:
-                provider = inst.get("provider", "aws")
+                provider = str(inst.get("provider", "aws")).lower()
+                if provider not in _KNOWN_PROVIDERS:
+                    provider = "custom"
                 provider_counts[provider] = provider_counts.get(provider, 0) + 1
         else:
             provider_counts = {}
@@ -262,19 +283,28 @@ class BugReportService:
         raw_log_tail = _read_log_tail(self._log_path, log_tail_lines)
         raw_traceback = _read_last_traceback(self._log_path, log_tail_lines)
 
-        # --- Config snapshot (pre-redaction) ---
+        # --- Config (pre-redaction) ---
+        config_dict: Optional[Dict] = None
+        config_error: Optional[Exception] = None
+        try:
+            config_dict = dataclasses.asdict(self._config_manager.get())
+        except Exception as exc:
+            config_error = exc
+        # The inventory is needed even without the snapshot: logs name servers.
+        self._inventory = InventoryScrubber.from_inventory(
+            instances, config_dict, known_hosts
+        )
+
         raw_config: Optional[Dict] = None
         if consent.include_config:
-            try:
-                cfg = self._config_manager.get()
-                raw_config = dataclasses.asdict(cfg)
+            if config_dict is not None:
                 # Layer 1: remove secret-named keys
-                raw_config = _scrub_config_dict(raw_config, lambda s: s)  # keys only
-            except Exception as exc:
-                logger.warning("Bug report: failed to serialise config: %s", exc)
+                raw_config = _scrub_config_dict(config_dict, lambda s: s)  # keys only
+            else:
+                logger.warning("Bug report: failed to serialise config: %s", config_error)
                 raw_config = {
                     "error": "could not serialise config",
-                    "reason": f"{type(exc).__name__}: {exc}",
+                    "reason": f"{type(config_error).__name__}: {config_error}",
                 }
 
         # --- Collect secret categories from RAW text BEFORE redaction ---
@@ -291,18 +321,22 @@ class BugReportService:
         redacted_categories: List[str] = _collect_secret_categories(raw_texts_to_scan)
 
         # --- Redact all text fields (layer 2 for config, only layer for logs) ---
+        # Secrets first, then the inventory (hosts, addresses, logins, ids).
+        inventory = self._inventory
         redacted_log: Optional[str] = None
         if consent.include_logs and raw_log_tail is not None:
-            redacted_log = self._redactor(raw_log_tail)
+            redacted_log = inventory.scrub_text(self._redactor(raw_log_tail))
 
         redacted_traceback: Optional[str] = None
         if raw_traceback is not None:
-            redacted_traceback = self._redactor(raw_traceback)
+            redacted_traceback = inventory.scrub_text(self._redactor(raw_traceback))
 
         redacted_config: Optional[Dict] = None
         if raw_config is not None:
             # Layer 2: run redactor on all remaining string values
-            redacted_config = _scrub_config_dict(raw_config, self._redactor)
+            redacted_config = inventory.scrub_config(
+                _scrub_config_dict(raw_config, self._redactor)
+            )
 
         return BugReportPayload(
             servonaut_version=servonaut_version,
@@ -353,11 +387,13 @@ class BugReportService:
         """
         parts: List[str] = []
 
-        parts.append(f"# {title}")
+        parts.append(f"# {self.scrub_user_text(title)}")
         parts.append("")
-        parts.append(description)
+        parts.append(self.scrub_user_text(description))
         parts.append("")
         parts.append("---")
+        parts.append("")
+        parts.append(f"_{_INVENTORY_NOTE}_")
         parts.append("")
 
         # Environment table
@@ -411,6 +447,14 @@ class BugReportService:
 
         return "\n".join(parts)
 
+    def scrub_user_text(self, text: str) -> str:
+        """The user's title or description as it will be sent.
+
+        Names of the user's servers, their addresses and logins are replaced
+        like the rest of the report; the preview shows the result.
+        """
+        return self._inventory.scrub_prose(text) or ""
+
     async def submit(
         self,
         *,
@@ -427,6 +471,8 @@ class BugReportService:
         markdown_body = self.render_preview(
             payload=payload, title=title, description=description
         )
+        title = self.scrub_user_text(title)
+        description = self.scrub_user_text(description)
 
         if consent.channel == "github":
             return self._submit_github(

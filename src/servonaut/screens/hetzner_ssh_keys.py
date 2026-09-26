@@ -179,7 +179,14 @@ class HetznerSSHKeysScreen(Screen):
                 f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
             )
             return
+        self._render_keys()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the key rows for the new demo-mode state."""
+        self._render_keys()
+
+    def _render_keys(self) -> None:
+        """Draw the fetched keys; labels become pool key names in demo mode."""
         def _s(x: str) -> str:
             # Key labels are user-chosen (client names, an email address) --
             # shown as a pool key name in demo mode, like the instance list.

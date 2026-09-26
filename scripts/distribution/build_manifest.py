@@ -35,6 +35,25 @@ def parse_artifact_spec(spec: str) -> dict[str, str]:
     return data
 
 
+_PACKAGED_DISTRIBUTIONS = frozenset(
+    {DistributionKind.FROZEN_CLI, DistributionKind.PACKAGED_DESKTOP}
+)
+
+
+def _lists_packaged_builds(artifact_specs: list[str]) -> bool:
+    """Whether any artifact spec names a packaged build that carries a marker."""
+    for spec_str in artifact_specs:
+        raw = parse_artifact_spec(spec_str).get("distribution", "")
+        try:
+            distribution = DistributionKind(raw.replace("_", "-"))
+        except ValueError:
+            # An unknown distribution is refused where the artifact is added.
+            continue
+        if distribution in _PACKAGED_DISTRIBUTIONS:
+            return True
+    return False
+
+
 def load_private_key(key_path: Path) -> Ed25519PrivateKey:
     """Load an Ed25519 private key from PEM or raw 32-byte seed file."""
     raw = key_path.read_bytes()
@@ -55,7 +74,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Assemble and sign a canonical Servonaut ReleaseManifest.")
     parser.add_argument("--version", required=True, help="Product semantic version (X.Y.Z)")
     parser.add_argument("--channel", default="stable", choices=["stable", "preview", "nightly"])
-    parser.add_argument("--revision", type=int, default=None, help="Packaging revision")
+    parser.add_argument(
+        "--revision",
+        type=int,
+        default=None,
+        help=(
+            "Packaging revision the listed builds carry in their runtime markers; "
+            "required whenever the manifest lists packaged builds"
+        ),
+    )
     parser.add_argument("--published-at", default=None, help="ISO 8601 UTC timestamp (default: now)")
     parser.add_argument(
         "--expires-at",
@@ -82,6 +109,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.key_file is not None and not args.key_id:
         parser.error("--key-id is required when --key-file is provided.")
+    if args.revision is None and _lists_packaged_builds(args.artifacts):
+        # A manifest without a revision orders before every packaged build of
+        # its version, so an installed build would be offered it as an update.
+        parser.error(
+            "--revision is required when the manifest lists packaged builds; "
+            "use the packaging revision written into their runtime markers."
+        )
 
     channel = ReleaseChannel(args.channel)
     try:

@@ -234,6 +234,23 @@ def test_every_import_time_path_is_inside_the_test_root(e2e_ctx):
     assert GUARD.violations() == []
 
 
+def test_artifact_scrub_masks_credentials_and_keeps_json_valid():
+    import json
+
+    from e2e.harness.artifacts import scrub
+
+    line = json.dumps({
+        "authorization": None, "token": 12345, "access_token": "fake-access",
+        "url": "https://api.example.com/x?code=fake-device-code", "ok": True,
+    })
+    scrubbed = scrub(line)
+
+    parsed = json.loads(scrubbed)
+    assert parsed["authorization"] is None
+    assert parsed["token"] == parsed["access_token"] == "<redacted>"
+    assert "fake-device-code" not in scrubbed and "fake-access" not in scrubbed
+
+
 def test_children_see_module_constants_redirected_to_the_fakes(journey, fake_cloud):
     code = "import servonaut.services.update_service as u\nprint(u.PYPI_URL)\n"
     completed, _pid = _run_child(journey, code)

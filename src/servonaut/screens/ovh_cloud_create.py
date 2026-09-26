@@ -289,7 +289,7 @@ class OVHCloudCreateScreen(Screen):
                 tbl.move_cursor(row=0)
         except Exception as exc:
             logger.error("Failed to load flavors: %s", exc)
-            self.notify(f"Error loading flavors: {exc}", severity="error")
+            self.notify(f"Error loading flavors: {exc}", severity="error", markup=False)
 
     async def _load_images(self, region: str) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
@@ -321,7 +321,7 @@ class OVHCloudCreateScreen(Screen):
                 tbl.move_cursor(row=0)
         except Exception as exc:
             logger.error("Failed to load images: %s", exc)
-            self.notify(f"Error loading images: {exc}", severity="error")
+            self.notify(f"Error loading images: {exc}", severity="error", markup=False)
 
     async def _load_keys(self) -> None:
         svc = getattr(self.app, "ovh_cloud_service", None)
@@ -360,7 +360,7 @@ class OVHCloudCreateScreen(Screen):
                 hint.display = False
         except Exception as exc:
             logger.error("Failed to load SSH keys: %s", exc)
-            self.notify(f"Error loading SSH keys: {exc}", severity="error")
+            self.notify(f"Error loading SSH keys: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Region change → reload flavors + images filtered for that region.
@@ -580,4 +580,4 @@ class OVHCloudCreateScreen(Screen):
         except Exception as exc:
             logger.error("Cloud instance creation failed: %s", exc)
             error = "Provider request failed. See logs for details." if self.app.demo_mode else str(exc)
-            self.notify(f"Creation failed: {error}", severity="error")
+            self.notify(f"Creation failed: {error}", severity="error", markup=False)

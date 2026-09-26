@@ -360,8 +360,10 @@ def check_downgrade(
 ) -> None:
     """Validate that the manifest version is strictly newer than current installation.
 
-    Versions are ordered by Semantic Versioning precedence, then by packaging
-    revision.
+    Versions are ordered by Semantic Versioning precedence, then by the integer
+    packaging revision. Packaged builds always carry the revision their build
+    wrote into the runtime marker; ``None`` (a build without a marker, or a
+    manifest without a revision) orders before every revision of its version.
 
     Raises:
         ManifestDowngradeError: If the manifest version or revision is older or identical.

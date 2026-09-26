@@ -160,11 +160,34 @@ Every run is sealed off from your machine:
   Chromium is started so that it cannot resolve or reach anything but
   loopback, and a journey whose page requested any other host fails.
 
+Journeys marked `needs_sshd` use a real remote machine instead of the
+scripted `ssh`: two local SSH servers on loopback (a target and a bastion)
+and the OpenSSH client installed on your system (`ssh` and `scp` in
+`/usr/bin` or `/bin`; install `openssh-client` if they are missing, or
+deselect these journeys with `-m "not needs_sshd"`). For those journeys
+`ssh` and `scp` on `PATH` run the real client with a generated config file.
+Before each call, the settings OpenSSH will actually use are checked: the
+destination must be loopback, every file they name must be inside the test
+root, and no agent, local command or plugin may be involved, so your own
+`~/.ssh` is not used.
+
+Each server plays a small machine whose files live in the test root:
+`/var/log` holds fixture logs, `docker`, `journalctl` and `systemctl` are
+scripted, and absolute paths such as `/var/...` or `/home/...` in a command
+are mapped to the server's folder. Remote commands are still real programs
+on your machine. Where bubblewrap (`bwrap`) is installed and allowed to run,
+each command runs in a sandbox that sees your system read-only, cannot see
+your home directory or the rest of the test root, can write only the
+server's folder and has no network. Without it, the path mapping is only
+textual: it keeps journeys predictable but does not stop a command that
+goes around it (`cd ..`, a program's absolute path). The failure artifacts
+(`sshd-commands.jsonl`, `remote-files.txt`) say which mode was used.
+
 When a journey fails, its diagnostics are written to `e2e-artifacts/<test>/`:
 an SVG screenshot of the TUI and `state.json`, the calls the stand-in tools
-received, the requests the local API received, and the relevant logs; for
-desktop journeys also page screenshots, the browser console and a Playwright
-trace. CI
+received, the requests the local API received, the SSH servers' command log,
+and the relevant logs; for desktop journeys also page screenshots, the
+browser console and a Playwright trace. CI
 uploads that folder for failed runs, and the upload is public: paths and
 anything shaped like a credential are scrubbed, but keep every fixture neutral
 anyway (see [Avoiding accidental disclosure](#avoiding-accidental-disclosure));
@@ -195,10 +218,12 @@ When you add a journey:
 
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
   (config and cache, built through the real config schema), `moto`,
-  `fake_cloud`, `cli` and `mcp` (real child processes), and `desktop` (the
-  desktop frontend in headless Chromium, served by the desktop host in-process
-  or by the real desktop child process). Journeys using `desktop` are also
-  marked `needs_browser`; CI runs them in a job of their own.
+  `fake_cloud`, `cli` and `mcp` (real child processes), `sshd` (the loopback
+  SSH servers; see `e2e/harness/remote_fleet.py` for fleet entries that point
+  at them), and `desktop` (the desktop frontend in headless Chromium, served
+  by the desktop host in-process or by the real desktop child process). A
+  journey using `sshd` must be marked `needs_sshd`. Journeys using `desktop`
+  are also marked `needs_browser`; CI runs them in a job of their own.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out

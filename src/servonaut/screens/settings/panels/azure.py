@@ -35,6 +35,12 @@ class AzurePanel(SettingsPanel):
     PANEL_ID = "azure"
     TITLE = "Azure"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "azure_subscription_ids": "redact_identifier",
+        "azure_resource_groups": "redact_name",
+    }
+
     DEFAULT_CSS = """
     AzurePanel .section-label {
         padding: 1 0 0 0;
@@ -89,12 +95,8 @@ class AzurePanel(SettingsPanel):
 
         self.query_one("#azure_enabled", Switch).value = azure.enabled
 
-        self.query_one("#azure_subscription_ids", StringListEditor).set_values(
-            list(azure.subscription_ids)
-        )
-        self.query_one("#azure_resource_groups", StringListEditor).set_values(
-            list(azure.resource_groups)
-        )
+        self._show_field("azure_subscription_ids", list(azure.subscription_ids))
+        self._show_field("azure_resource_groups", list(azure.resource_groups))
 
         self._snapshot_now()
 
@@ -102,12 +104,8 @@ class AzurePanel(SettingsPanel):
         """Return current widget values for dirty comparison."""
         return {
             "enabled": self.query_one("#azure_enabled", Switch).value,
-            "subscription_ids": self.query_one(
-                "#azure_subscription_ids", StringListEditor
-            ).get_values(),
-            "resource_groups": self.query_one(
-                "#azure_resource_groups", StringListEditor
-            ).get_values(),
+            "subscription_ids": self._field_value("azure_subscription_ids"),
+            "resource_groups": self._field_value("azure_resource_groups"),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -123,9 +121,7 @@ class AzurePanel(SettingsPanel):
         """
         enabled: bool = self.query_one("#azure_enabled", Switch).value
 
-        subscription_ids: List[str] = self.query_one(
-            "#azure_subscription_ids", StringListEditor
-        ).get_values()
+        subscription_ids: List[str] = self._field_value("azure_subscription_ids")
 
         for sid in subscription_ids:
             if " " in sid:
@@ -134,9 +130,7 @@ class AzurePanel(SettingsPanel):
                     f"Subscription ID '{sid}' must not contain spaces",
                 )
 
-        resource_groups: List[str] = self.query_one(
-            "#azure_resource_groups", StringListEditor
-        ).get_values()
+        resource_groups: List[str] = self._field_value("azure_resource_groups")
 
         return {
             "enabled": enabled,

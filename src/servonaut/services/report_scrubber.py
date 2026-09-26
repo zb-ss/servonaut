@@ -1,0 +1,500 @@
+"""Keeps the user's server inventory out of bug reports.
+
+A bug report can become a public GitHub issue, and its config snapshot and
+log excerpt name the user's servers: hosts, addresses, logins, instance and
+project ids. :class:`InventoryScrubber` replaces every such value it knows
+(taken from the fleet, the config and the DNS zones seen this session) with
+the stand-in demo mode would show, then applies shape rules to what it does
+not know: the ``RedactionService.scrub_stream`` rules (IPs, URLs, e-mail
+addresses, home paths, account ids), ARN resource names, and any token that
+looks like a host name. Inventory sections of the config are left out
+altogether, keeping only how many entries each had.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from servonaut.services.redaction_service import RedactionService
+
+# Config sections that list the user's servers, logins or accounts. The
+# snapshot keeps only their size: their structure is not worth the risk of a
+# field that no rule below recognises.
+INVENTORY_SECTIONS: tuple = (
+    "instance_keys",
+    "custom_servers",
+    "connection_profiles",
+    "connection_rules",
+    "scan_rules",
+    "ip_ban_configs",
+    "db_profiles",
+    "log_viewer_custom_paths",
+    "db_scan_roots",
+    "memory.per_server_overrides",
+    "ovh.cloud_project_ids",
+    "gcp.project_ids",
+    "azure.subscription_ids",
+    "azure.resource_groups",
+    # Paths the user chose: directory names often name a site or customer.
+    "default_scan_paths",
+    "log_viewer_default_paths",
+    "log_viewer_scan_directories",
+)
+# Values never useful in a report: the OAuth client, the STS role ARNs and
+# ExternalId, the service-account key file, and free text the user wrote
+# (prompts, folder and log-group names can name anything).
+OMITTED_FIELDS: tuple = (
+    "ovh.client_id",
+    "gcp.credentials_path",
+    "ai_system_prompt",
+    "memory.ai_enhancement_prompt",
+    "bw_vault_folder",
+    "cloudwatch_log_group_prefix",
+)
+OMITTED_PREFIXES: tuple = ("aws.control_plane_",)
+
+# Scalar fields named after what they hold, wherever they appear.
+_USERNAME_FIELDS = frozenset({"username", "default_username", "user", "bastion_user"})
+_HOST_FIELDS = frozenset({"host", "hostname", "bastion_host"})
+
+# Shorter values (a port, "db") would turn ordinary words into stand-ins.
+_MIN_IDENTIFIER_LENGTH = 3
+# Values that identify nobody: replacing them only makes a report misleading.
+_GENERIC_VALUES = frozenset({
+    "root", "admin", "administrator", "ubuntu", "debian", "centos", "fedora",
+    "rocky", "almalinux", "ec2-user", "opc", "bitnami", "core", "deploy", "user",
+    "default", "production", "prod", "staging", "stage", "development", "dev",
+    "test", "testing", "demo", "local", "localhost", "main", "master", "backup",
+    "primary", "secondary", "public", "private", "web", "api", "app", "db",
+    "mail", "www", "none", "null", "true", "false",
+})
+# Runs of the characters an identifier is made of; anything else (spaces,
+# quotes, brackets, "=", "@", ",") ends a run. Known values are looked up
+# per run, so the cost of a lookup does not grow with the fleet.
+_TOKEN_RE = re.compile(r"[\w.\-:/~]+")
+
+# ARN with an optional account; the resource after it names the user's things.
+_ARN_RE = re.compile(
+    r"arn:(?P<partition>aws[\w-]*):(?P<service>[\w-]*):(?P<region>[\w-]*):"
+    r"(?P<account>\d{12})?:(?P<resource>[\w+=,.@/:*-]+)"
+)
+# A dotted run that ends in an alphabetic label (any TLD, 2-24 letters),
+# taken whole, also inside a path (``/var/www/acme.com/``) or with a file
+# suffix (``acme.com.conf``). A run that goes on into more dotted or word
+# characters (``self.app.push_screen``) is code, not a host.
+_HOSTNAME_RE = re.compile(
+    r"(?<![\w.@-])(?P<host>(?:_?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"(?P<tld>[A-Za-z]{2,24}|xn--[A-Za-z0-9-]{2,59}))(?![\w-]|\.[\w-])"
+)
+# A two-label dotted word is a host only when its last label is a common TLD
+# (or a two-letter country code); otherwise it reads as ``module.attr``
+# (``subprocess.run``, ``socket.gaierror``).
+_COMMON_TLDS = frozenset({
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "io", "dev",
+    "app", "cloud", "online", "site", "tech", "xyz", "host", "shop", "store",
+    "email", "media", "digital", "agency", "company", "solutions", "systems",
+    "network", "services", "space", "website", "local", "lan", "internal",
+    "intranet", "corp", "home", "localdomain", "example", "test", "invalid",
+    "arpa",
+})
+# Public service endpoints that name no one; left as they are.
+_PUBLIC_HOSTS = frozenset({
+    "api.ovh.com", "eu.api.ovh.com", "ca.api.ovh.com", "us.api.ovh.com",
+    "api.hetzner.cloud", "github.com", "pypi.org",
+})
+# Last labels of file names, not hosts (a host with a ``.conf`` suffix still
+# goes: the suffix is not on this list).
+_FILE_EXTENSIONS = frozenset({
+    "py", "pyc", "pyi", "sh", "md", "rst", "txt", "log", "json", "jsonl", "yaml",
+    "yml", "toml", "ini", "cfg", "csv", "tsv", "html", "css", "tcss", "js", "ts",
+    "rs", "go", "rb", "pl", "so", "gz", "xz", "zip", "tar", "lock", "pid", "sock",
+    "db", "sqlite", "pem", "crt", "pub", "whl", "egg", "tmp", "bak", "swp",
+    "php", "java", "kt", "c", "h", "cpp", "hpp", "xml", "sql", "vue", "jsx", "tsx",
+    "scss", "less", "svg", "png", "jpg", "jpeg", "gif", "ico", "pdf", "service",
+    "conf", "cnf", "env", "vhost", "properties", "socket", "timer",
+})
+# Dotted names that are Python modules or attribute chains, not hosts.
+_MODULE_PREFIXES = (
+    "servonaut.", "textual.", "asyncio.", "botocore.", "boto3.", "urllib3.",
+    "httpx.", "httpcore.", "mcp.", "rich.", "concurrent.", "json.", "logging.",
+    "keyring.", "sherpa_onnx.", "self.", "cls.", "os.", "sys.",
+)
+# Documentation domains (RFC 2606), which is where the stand-ins live too.
+_DOC_DOMAIN_RE = re.compile(r"(?:^|\.)example\.(?:com|net|org)$", re.IGNORECASE)
+
+
+class InventoryScrubber:
+    """Replaces known and recognisable server identifiers in report text."""
+
+    def __init__(
+        self,
+        redaction: RedactionService,
+        identifiers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """
+        Args:
+            redaction: Source of the stand-ins and of the shape rules.
+            identifiers: Real value -> stand-in, for values no shape rule
+                recognises (server names, bare host names, logins, ids).
+        """
+        self._redaction = redaction
+        self._identifiers = {
+            real.lower(): fake for real, fake in (identifiers or {}).items()
+            if len(real) >= _MIN_IDENTIFIER_LENGTH
+            and real.lower() not in _GENERIC_VALUES
+            and real != fake
+        }
+        # Values a run cannot hold whole (a name with a space) need a pattern.
+        self._pattern = self._build_pattern({
+            real: fake for real, fake in self._identifiers.items()
+            if not _TOKEN_RE.fullmatch(real)
+        })
+
+    @classmethod
+    def from_inventory(
+        cls,
+        instances: Iterable[Dict[str, Any]],
+        config: Optional[Dict[str, Any]],
+        known_hosts: Iterable[str] = (),
+    ) -> "InventoryScrubber":
+        """Build a scrubber from the real fleet, the config (as a dict) and
+        other host names seen this session (DNS zones)."""
+        redaction = RedactionService()
+        collector = _IdentifierCollector(redaction)
+        for instance in instances or []:
+            if isinstance(instance, dict):
+                collector.add_instance(instance)
+        if isinstance(config, dict):
+            collector.add_config(config)
+        for host in known_hosts or ():
+            collector.add_host(host)
+        return cls(redaction, collector.found)
+
+    # ------------------------------------------------------------------
+    # Text
+    # ------------------------------------------------------------------
+
+    def scrub_text(self, text: Optional[str]) -> Optional[str]:
+        """Log lines, tracebacks, config values: every rule.
+
+        A dotted word taken for a host name is an acceptable loss here: the
+        text is diagnostics, and a leak cannot be taken back.
+        """
+        if not text:
+            return text
+        text = self._replace_known(text)
+        text = _ARN_RE.sub(_redact_arn, text)
+        text = self._redaction.scrub_stream(text, honour_kill_switch=False)
+        return _HOSTNAME_RE.sub(self._redact_hostname, text)
+
+    def scrub_prose(self, text: Optional[str]) -> Optional[str]:
+        """What the user typed: known identifiers and IP addresses only.
+
+        URLs and e-mail addresses in a description are usually there on
+        purpose (a docs link, a contact), so they are left as typed.
+        """
+        if not text:
+            return text
+        text = self._replace_known(text)
+        text = self._redaction.redact_text(text)
+        return self._redaction.redact_ipv6(text)
+
+    def replace_known(self, text: str) -> str:
+        """Replace only the known identifiers (no shape rules).
+
+        Whole runs only: ``acme-files`` is replaced, ``acme-files-backup`` is
+        another name. A known host is also found after a dot
+        (``_dmarc.acme.com``) and inside paths and ``host:port``.
+        """
+        if not text or not self._identifiers:
+            return text
+        text = _TOKEN_RE.sub(lambda m: self._lookup(m.group(0)), text)
+        if self._pattern is not None:
+            text = self._pattern.sub(
+                lambda m: self._identifiers[m.group(0).lower()], text
+            )
+        return text
+
+    _replace_known = replace_known
+
+    def _lookup(self, token: str) -> str:
+        known = self._identifiers
+        hit = known.get(token.lower())
+        if hit is not None:
+            return hit
+        core = token.rstrip(".:/-")
+        if core != token:
+            # "host." at the end of a sentence, "host:" before a colon.
+            return self._lookup(core) + token[len(core):] if core else token
+        for index, char in enumerate(token):
+            if char == ".":
+                hit = known.get(token[index + 1:].lower())
+                if hit is not None:
+                    return token[:index + 1] + hit
+        if "/" in token or ":" in token:
+            return "".join(
+                self._lookup(part) if part and part not in "/:" else part
+                for part in re.split(r"([/:])", token)
+            )
+        return token
+
+    @classmethod
+    def for_fleet(
+        cls, redaction: RedactionService, rows: Iterable[Dict[str, Any]],
+        ids: Iterable[str] = (),
+    ) -> "InventoryScrubber":
+        """Identifying values of *rows* (real records) -> the stand-ins
+        *redaction* shows for them this session.
+
+        Names, hosts, addresses, ids, logins and key names only: tags and
+        groups are ordinary words ("nginx", "web") far too often to replace
+        in running text.
+        """
+        collector = _IdentifierCollector(redaction)
+        for row in rows or []:
+            if isinstance(row, dict):
+                collector.add_instance(row, labels=False)
+        for value in ids:
+            collector.add_id(value)
+        return cls(redaction, collector.found)
+
+    @staticmethod
+    def _build_pattern(identifiers: Dict[str, str]) -> Optional["re.Pattern[str]"]:
+        if not identifiers:
+            return None
+        # Longest first, so a host name wins over the server name inside it.
+        alternatives = "|".join(
+            re.escape(value) for value in sorted(identifiers, key=len, reverse=True)
+        )
+        return re.compile(
+            rf"(?<![\w.\-])(?:{alternatives})(?![\w\-])", re.IGNORECASE
+        )
+
+    def _redact_hostname(self, match: "re.Match[str]") -> str:
+        host = match.group("host")
+        if match.string[match.end():match.end() + 1] == "(":
+            return host  # ``manager.load(`` is a call, not a host
+        return self._host_or_code(host)
+
+    def _host_or_code(self, host: str) -> str:
+        labels = host.split(".")
+        tld = labels[-1]
+        lowered = host.lower()
+        if tld.lower() in _FILE_EXTENSIONS:
+            # ``acme.com.conf`` names a host; ``nginx.conf`` does not.
+            stem = host[: -len(tld) - 1]
+            if "." in stem and stem.rsplit(".", 1)[-1].isalpha():
+                return f"{self._host_or_code(stem)}.{tld}"
+            return host
+        if (
+            lowered in _PUBLIC_HOSTS
+            or _DOC_DOMAIN_RE.search(lowered)
+            or lowered.startswith(_MODULE_PREFIXES)
+            # ``ssl.SSLError``, ``requests.ConnectionError``: a class, not a TLD.
+            or (tld != tld.lower() and tld != tld.upper())
+            # ``subprocess.run``: module.attr unless the last label is a TLD.
+            or (
+                len(labels) == 2
+                and len(tld) != 2
+                and not tld.lower().startswith("xn--")
+                and tld.lower() not in _COMMON_TLDS
+            )
+        ):
+            return host
+        return self._redaction.redact_hostname(host)
+
+    # ------------------------------------------------------------------
+    # Config snapshot
+    # ------------------------------------------------------------------
+
+    def scrub_config(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy with inventory sections summarised and values scrubbed."""
+        return self._scrub_node(snapshot, ())
+
+    def _scrub_node(self, node: Any, path: tuple) -> Any:
+        if isinstance(node, dict):
+            out: Dict[str, Any] = {}
+            for key, value in node.items():
+                child = path + (str(key),)
+                dotted = ".".join(child)
+                if dotted in INVENTORY_SECTIONS and value:
+                    out[key] = _omitted_label(value)
+                elif _is_omitted(dotted) and value:
+                    out[key] = "<omitted>"
+                elif isinstance(value, str) and value:
+                    out[key] = self._scrub_field(str(key), value)
+                else:
+                    out[key] = self._scrub_node(value, child)
+            return out
+        if isinstance(node, list):
+            return [self._scrub_node(item, path) for item in node]
+        if isinstance(node, str):
+            return self.scrub_text(node)
+        return node
+
+    def _scrub_field(self, key: str, value: str) -> str:
+        if key in _USERNAME_FIELDS:
+            return self._redaction.redact_username(value)
+        if key in _HOST_FIELDS:
+            return self._redaction.redact_host(value)
+        return self.scrub_text(value)
+
+
+def _redact_arn(match: "re.Match[str]") -> str:
+    """Keep an ARN's service, region and resource type; drop the rest."""
+    account = "000000000000" if match.group("account") else ""
+    resource = match.group("resource")
+    split = re.search(r"[/:]", resource)
+    tail = f"{resource[:split.end()]}redacted" if split else "redacted"
+    return (
+        f"arn:{match.group('partition')}:{match.group('service')}:"
+        f"{match.group('region')}:{account}:{tail}"
+    )
+
+
+def _is_omitted(dotted: str) -> bool:
+    return dotted in OMITTED_FIELDS or dotted.startswith(OMITTED_PREFIXES)
+
+
+def _omitted_label(value: Any) -> str:
+    count = len(value) if hasattr(value, "__len__") else 1
+    noun = "entry" if count == 1 else "entries"
+    return f"<omitted: {count} {noun}>"
+
+
+class _IdentifierCollector:
+    """Gathers real identifier -> stand-in pairs from the fleet and config."""
+
+    def __init__(self, redaction: RedactionService) -> None:
+        self._redaction = redaction
+        self.found: Dict[str, str] = {}
+
+    def add(self, value: Any, redact: Callable[[str], str]) -> None:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return
+        value = str(value).strip()
+        if len(value) < _MIN_IDENTIFIER_LENGTH or value in self.found:
+            return
+        if value.lower() in _GENERIC_VALUES:
+            return
+        fake = redact(value)
+        if fake and fake != value:
+            self.found[value] = fake
+
+    def add_id(self, value: Any) -> None:
+        self.add(value, self._redaction.redact_identifier)
+        # OVH Public Cloud ids are "<project>/<instance>": each half too.
+        if isinstance(value, str) and "/" in value:
+            for part in value.split("/"):
+                self.add(part, self._redaction.redact_identifier)
+
+    def add_key(self, value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        self.add(value, self._redaction.redact_key_name)
+        self.add(value.rstrip("/").rsplit("/", 1)[-1], self._redaction.redact_key_name)
+
+    def add_host(self, value: Any) -> None:
+        if isinstance(value, str):
+            value = value.rstrip(".")
+        self.add(value, self._redaction.redact_host)
+
+    def add_name(self, value: Any) -> None:
+        self.add(value, self._redaction.redact_name)
+
+    def add_username(self, value: Any) -> None:
+        self.add(value, self._redaction.redact_username)
+
+    def add_instance(self, instance: Dict[str, Any], labels: bool = True) -> None:
+        """A server's identifying values; with *labels*, its group and tags."""
+        self.add_id(instance.get("id"))
+        self.add_name(instance.get("name"))
+        for field in ("public_ip", "private_ip", "host"):
+            self.add_host(instance.get(field))
+        self.add_username(instance.get("username"))
+        self.add_key(instance.get("key_name"))
+        self.add_key(instance.get("ssh_key"))
+        if not labels:
+            return
+        self.add(instance.get("group"), self._redaction.redact_group)
+        tags = instance.get("tags")
+        if isinstance(tags, dict):
+            for tag_value in tags.values():
+                self.add_name(tag_value)
+
+    def add_config(self, config: Dict[str, Any]) -> None:
+        for server in _items(config, "custom_servers"):
+            self.add_instance(server)
+        for instance_id, key_path in _mapping(config, "instance_keys").items():
+            self.add_id(instance_id)
+            self.add_key(key_path)
+        for profile in _items(config, "connection_profiles"):
+            self.add_name(profile.get("name"))
+            self.add_host(profile.get("bastion_host"))
+            self.add_username(profile.get("bastion_user"))
+            self.add_username(profile.get("username"))
+            self.add_key(profile.get("bastion_key"))
+        for rule in _items(config, "connection_rules") + _items(config, "scan_rules"):
+            self.add_name(rule.get("name"))
+            for condition in (rule.get("match_conditions") or {}).values():
+                self.add_name(condition)
+        for db in _items(config, "db_profiles"):
+            self.add_id(db.get("instance"))
+            self.add_host(db.get("host"))
+            self.add_username(db.get("user"))
+            self.add_name(db.get("database"))
+        for ban in _items(config, "ip_ban_configs"):
+            self.add_name(ban.get("name"))
+            self.add_name(ban.get("ip_set_name"))
+            for field in ("ip_set_id", "security_group_id", "nacl_id"):
+                self.add_id(ban.get(field))
+        for section in ("log_viewer_custom_paths", "db_scan_roots"):
+            for instance_id in _mapping(config, section):
+                self.add_id(instance_id)
+        for instance_id in _mapping(_mapping(config, "memory"), "per_server_overrides"):
+            self.add_id(instance_id)
+        for path in ("ovh.cloud_project_ids", "gcp.project_ids", "azure.subscription_ids"):
+            for value in _values(config, path):
+                self.add_id(value)
+        for value in _values(config, "azure.resource_groups"):
+            self.add_name(value)
+        for path in ("ovh.client_id", "aws.control_plane_external_id"):
+            self.add_id(_value(config, path))
+        for key_path in (
+            _value(config, "default_key"),
+            _value(config, "ovh.default_ssh_key"),
+            _value(config, "hetzner.default_local_ssh_key"),
+            _value(config, "hetzner.default_hetzner_ssh_key"),
+            _value(config, "gcp.credentials_path"),
+        ):
+            self.add_key(key_path)
+        for username in (
+            _value(config, "default_username"),
+            _value(config, "ovh.default_username"),
+            _value(config, "hetzner.default_username"),
+        ):
+            self.add_username(username)
+
+
+def _value(config: Dict[str, Any], path: str) -> Any:
+    node: Any = config
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _values(config: Dict[str, Any], path: str) -> List[Any]:
+    value = _value(config, path)
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _items(config: Dict[str, Any], path: str) -> List[Dict[str, Any]]:
+    return [item for item in _values(config, path) if isinstance(item, dict)]
+
+
+def _mapping(config: Any, path: str) -> Dict[str, Any]:
+    value = _value(config, path) if isinstance(config, dict) else None
+    return value if isinstance(value, dict) else {}

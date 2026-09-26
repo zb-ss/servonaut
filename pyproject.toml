@@ -66,6 +66,9 @@ e2e = [
     "playwright==1.62.0",
     "mcp>=1.0.0,<2",
     "pytest-xdist>=3.8,<4",
+    # Loopback SSH servers for the remote journeys (pinned: the harness
+    # subclasses its server and SFTP classes).
+    "asyncssh==2.24.0",
     "build>=1.2,<2",
     "hatchling>=1.26,<2",
     "pipx>=1.17,<2",
@@ -154,4 +157,5 @@ markers = [
     "e2e_pr: fast hermetic end-to-end journey, run on every pull request",
     "e2e_quarantine: known-flaky end-to-end journey, excluded from pull requests",
     "needs_browser: end-to-end journey that drives headless Chromium (desktop frontend)",
+    "needs_sshd: end-to-end journey against the loopback SSH servers (needs the OpenSSH client)",
 ]

@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.sidebar import Sidebar
 
@@ -139,6 +140,7 @@ class OVHDNSScreen(Screen):
         self._selected_zone = None
         self._edit_record_id = None
         self._rdns_entries = []
+        self._rdns_loaded = False
         self._edit_rdns_ip_block = None
         self._edit_rdns_ip = None
         self._setup_tables()
@@ -193,6 +195,30 @@ class OVHDNSScreen(Screen):
             return self.app.redaction_service.redact_host(value)
         return value
 
+    def _display_subdomain(self, sub_domain: str) -> str:
+        """A record's zone-relative name; a demo-mode stand-in when redacted.
+
+        Sub-domains are often single labels (``api``, a project name) that
+        no host rule recognises, so they get the DNS-label redactor.
+        """
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_dns_label(sub_domain)
+        return sub_domain
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw zones, records and reverse DNS from what was fetched.
+
+        Open forms hold values rendered for the previous mode, so they close.
+        """
+        self._hide_form()
+        self._hide_rdns_form()
+        with keep_cursor(self):
+            self._render_domains()
+            if self._selected_zone:
+                self._render_records(self._selected_zone)
+            if self._rdns_loaded:
+                self._render_rdns()
+
     def _provider_error(self, error: Exception) -> str:
         """Provider diagnostics may contain identifiers outside the current row."""
         if self.app.demo_mode:
@@ -213,7 +239,7 @@ class OVHDNSScreen(Screen):
         self._edit_target_raw = str(record.get("target", ""))
         self._edit_target_display = self._display_record_target(record)
         self._edit_subdomain_raw = str(record.get("subDomain", ""))
-        self._edit_subdomain_display = self.redact_rdns_host(self._edit_subdomain_raw)
+        self._edit_subdomain_display = self._display_subdomain(self._edit_subdomain_raw)
         self.query_one("#input_type", Input).value = str(record.get("fieldType", ""))
         self.query_one("#input_subdomain", Input).value = self._edit_subdomain_display
         self.query_one("#input_target", Input).value = self._edit_target_display
@@ -276,18 +302,10 @@ class OVHDNSScreen(Screen):
             self.notify("OVH DNS service not available", severity="error")
             return
 
-        def _h(x: str) -> str:
-            # Zone names are hostnames by definition -- the stream scrubber
-            # has no bare-hostname rule, so route through redact_host.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_host(x)
-            return x
-
         try:
             domains = await svc.list_domains()
             self._domains = domains
-            for domain in domains:
-                tbl.add_row(_h(domain))
+            self._render_domains()
             if domains:
                 self._set_domains_status(None)
             else:
@@ -304,6 +322,14 @@ class OVHDNSScreen(Screen):
                 f"Error loading domains: {self._provider_error(exc)}",
                 severity="error", markup=False,
             )
+
+    def _render_domains(self) -> None:
+        tbl = self.query_one("#domains_table", DataTable)
+        tbl.clear()
+        for domain in self._domains:
+            # Zone names are hostnames by definition -- the stream scrubber
+            # has no bare-hostname rule, so they go through redact_host.
+            tbl.add_row(self.redact_rdns_host(domain))
 
     def _set_domains_status(self, error: Optional[str]) -> None:
         """Show or clear an OVH credential error under the Domains header.
@@ -325,44 +351,40 @@ class OVHDNSScreen(Screen):
 
     async def _load_records(self, zone_name: str) -> None:
         svc = self._get_dns_service()
-        tbl = self.query_one("#records_table", DataTable)
-        tbl.clear()
+        self.query_one("#records_table", DataTable).clear()
         self._records = []
 
         if svc is None:
             return
 
-        def _h(x: str) -> str:
-            # Zone, sub-domain and target are hosts (or an IP) by definition.
-            if self.app.demo_mode and self.app.redaction_service:
-                return self.app.redaction_service.redact_host(x)
-            return x
-
-        self.query_one("#selected_zone", Static).update(
-            f"Records for: [bold]{_h(zone_name)}[/bold]"
-        )
-
+        self._render_records(zone_name)
         try:
-            records = await svc.list_records(zone_name)
-            self._records = records
-            for rec in records:
-                sub = rec.get("subDomain") or "@"
-                tbl.add_row(
-                    str(rec.get("fieldType", "")),
-                    _h(sub),
-                    self._display_record_target(rec),
-                    str(rec.get("ttl", "")),
-                )
+            self._records = await svc.list_records(zone_name)
+            self._render_records(zone_name)
         except Exception as exc:
             logger.error("_load_records(%r) failed: %s", zone_name, exc)
-            self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error loading records: {self._provider_error(exc)}", severity="error", markup=False)
+
+    def _render_records(self, zone_name: str) -> None:
+        self.query_one("#selected_zone", Static).update(
+            f"Records for: [bold]{escape(self.redact_rdns_host(zone_name))}[/bold]"
+        )
+        tbl = self.query_one("#records_table", DataTable)
+        tbl.clear()
+        for rec in self._records:
+            tbl.add_row(
+                str(rec.get("fieldType", "")),
+                self._display_subdomain(rec.get("subDomain") or "@"),
+                self._display_record_target(rec),
+                str(rec.get("ttl", "")),
+            )
 
     async def _load_rdns(self) -> None:
         """Load reverse DNS entries for all IP blocks on the account."""
         ip_svc = self._get_ip_service()
-        tbl = self.query_one("#rdns_table", DataTable)
-        tbl.clear()
+        self.query_one("#rdns_table", DataTable).clear()
         self._rdns_entries = []
+        self._rdns_loaded = False
 
         if ip_svc is None:
             return
@@ -373,6 +395,7 @@ class OVHDNSScreen(Screen):
             logger.error("_load_rdns: list_ips failed: %s", exc)
             return
 
+        entries_found: List[dict] = []
         for ip_info in ip_blocks:
             ip_block = ip_info.get("ip", "")
             if not ip_block:
@@ -381,22 +404,29 @@ class OVHDNSScreen(Screen):
                 entries = await ip_svc.list_reverse_dns(ip_block)
                 for entry in entries:
                     ip_addr = entry.get("ipReverse", "")
-                    hostname = entry.get("reverse", "")
                     if ip_addr:
-                        record = {
+                        entries_found.append({
                             "ip": ip_addr,
-                            "hostname": hostname,
+                            "hostname": entry.get("reverse", ""),
                             "ip_block": ip_block,
-                        }
-                        self._rdns_entries.append(record)
-                        tbl.add_row(
-                            self.redact_rdns_host(ip_addr),
-                            self.redact_rdns_host(hostname) if hostname else "[dim]not set[/dim]",
-                            self.redact_rdns_host(ip_block),
-                        )
+                        })
             except Exception as exc:
                 logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
 
+        self._rdns_entries = entries_found
+        self._rdns_loaded = True
+        self._render_rdns()
+
+    def _render_rdns(self) -> None:
+        tbl = self.query_one("#rdns_table", DataTable)
+        tbl.clear()
+        for record in self._rdns_entries:
+            hostname = record.get("hostname", "")
+            tbl.add_row(
+                self.redact_rdns_host(record.get("ip", "")),
+                self.redact_rdns_host(hostname) if hostname else "[dim]not set[/dim]",
+                self.redact_rdns_host(record.get("ip_block", "")),
+            )
         if not self._rdns_entries:
             tbl.add_row("[dim]No reverse DNS entries found[/dim]", "", "")
 
@@ -549,7 +579,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_create_record failed: %s", exc)
-            self.notify(f"Error creating record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error creating record: {self._provider_error(exc)}", severity="error", markup=False)
 
     async def _update_record(
         self,
@@ -579,7 +609,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_update_record failed: %s", exc)
-            self.notify(f"Error updating record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error updating record: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Delete record
@@ -598,7 +628,7 @@ class OVHDNSScreen(Screen):
         record_id = record.get("id")
         raw_target = str(record.get("target", str(record_id)))
         confirm_text = self._display_record_target(record) if self.app.demo_mode else raw_target
-        display_subdomain = self.redact_rdns_host(record.get("subDomain") or "@")
+        display_subdomain = self._display_subdomain(record.get("subDomain") or "@")
 
         async def _confirm_and_delete() -> None:
             confirmed = await self.app.push_screen_wait(
@@ -643,7 +673,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_delete_record failed: %s", exc)
-            self.notify(f"Error deleting record: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error deleting record: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Refresh zone
@@ -666,7 +696,7 @@ class OVHDNSScreen(Screen):
             await self._load_records(zone_name)
         except Exception as exc:
             logger.error("_do_refresh_zone(%r) failed: %s", zone_name, exc)
-            self.notify(f"Error refreshing zone: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error refreshing zone: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Reverse DNS — edit
@@ -724,7 +754,7 @@ class OVHDNSScreen(Screen):
             await self._load_rdns()
         except Exception as exc:
             logger.error("_save_rdns failed: %s", exc)
-            self.notify(f"Error setting rDNS: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error setting rDNS: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Reverse DNS — delete
@@ -783,4 +813,4 @@ class OVHDNSScreen(Screen):
             await self._load_rdns()
         except Exception as exc:
             logger.error("_do_delete_rdns failed: %s", exc)
-            self.notify(f"Error deleting rDNS: {self._provider_error(exc)}", severity="error")
+            self.notify(f"Error deleting rDNS: {self._provider_error(exc)}", severity="error", markup=False)

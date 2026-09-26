@@ -189,7 +189,7 @@ class BackupRestoreScreen(Screen):
             self._refresh()
         except Exception as exc:
             logger.error("Restore failed: %s", exc)
-            self.notify(f"Restore failed: {exc}", severity="error")
+            self.notify(f"Restore failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Helpers
