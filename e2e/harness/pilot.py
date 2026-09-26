@@ -19,7 +19,7 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional, TypeVar, Union
+from typing import Any, AsyncIterator, Callable, ContextManager, Optional, TypeVar, Union
 
 from rich.console import Console
 from textual.css.query import NoMatches
@@ -158,11 +158,22 @@ class TuiDriver:
             legacy_windows=False,
             safe_box=False,
         )
-        update = self.app.screen._compositor.render_update(
-            full=True, screen_stack=self.app._background_screens, simplify=True
-        )
-        console.print(update)
+        with self._as_the_app():
+            update = self.app.screen._compositor.render_update(
+                full=True, screen_stack=self.app._background_screens, simplify=True
+            )
+            console.print(update)
         return console.export_text()
+
+    def _as_the_app(self) -> ContextManager[None]:
+        """Run a render the way the app's own tasks do, as Textual's active app.
+
+        A widget not drawn since its last change is rendered on the spot,
+        and Textual looks the app up from a context variable to do it. Under
+        ``run_test`` the journey already runs with that set; under the
+        desktop host the app has tasks of its own and the journey does not.
+        """
+        return self.app._context()
 
     @staticmethod
     def log_text(widget: RichLog) -> str:
@@ -495,7 +506,8 @@ class TuiDriver:
         """Save ``<label>.svg`` and ``state.json`` into the artifact folder."""
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         try:
-            svg = self.app.export_screenshot(title=f"servonaut e2e: {label}")
+            with self._as_the_app():
+                svg = self.app.export_screenshot(title=f"servonaut e2e: {label}")
             (self.artifact_dir / f"{label}.svg").write_text(svg, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001 - diagnostics only
             (self.artifact_dir / f"{label}.svg.error.txt").write_text(repr(exc), encoding="utf-8")

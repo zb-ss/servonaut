@@ -1,0 +1,37 @@
+"""Self-tests for the TUI driver's own observations and waits.
+
+Each check drives a small app of its own, so it shows what the driver does
+rather than what Servonaut does.
+"""
+
+from __future__ import annotations
+
+import contextvars
+
+import pytest
+from rich.panel import Panel
+from textual.app import App, ComposeResult
+from textual.widgets import Static
+
+from e2e.harness.pilot import TuiDriver
+
+pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
+
+
+class _Label(App):
+    def compose(self) -> ComposeResult:
+        # A Rich renderable, which Textual renders through the active app.
+        yield Static(Panel("first draw"), id="label")
+
+
+async def test_rendered_text_works_outside_the_apps_own_context(journey):
+    app = _Label()
+    async with app.run_test(size=(60, 10)) as pilot:
+        t = TuiDriver(app, pilot, [], journey.staging)
+        await t.wait_for_text("first draw")
+        app.query_one("#label", Static).update(Panel("second draw"))
+        # The desktop host runs the app in tasks of its own, so a journey
+        # there reads the screen from a context without an active app, and
+        # a widget not drawn since its last change is rendered right here.
+        text = contextvars.Context().run(t.rendered_text)
+        assert "second draw" in text
