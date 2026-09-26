@@ -12,12 +12,14 @@ stub, never run.
 from __future__ import annotations
 
 import dataclasses
+import gzip
 import hashlib
 import io
 import json
 import os
 import struct
 import tarfile
+import time
 import zipfile
 from collections.abc import Callable
 from email.message import Message
@@ -102,16 +104,24 @@ def _sha256(data: bytes) -> str:
 
 
 def _archive(archive_format: str, member: str, data: bytes) -> bytes:
+    """The same bytes on every call, so a digest pinned from one build still matches.
+
+    gzip records the compression time in its header; it is fixed here, otherwise
+    two builds on either side of a second boundary would differ.
+    """
     buffer = io.BytesIO()
     if archive_format == "zip":
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(zipfile.ZipInfo(member), data)
     else:
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        tar_bytes = io.BytesIO()
+        with tarfile.open(fileobj=tar_bytes, mode="w") as archive:
             info = tarfile.TarInfo(member)
             info.mode = 0o755
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+        with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as compressed:
+            compressed.write(tar_bytes.getvalue())
     return buffer.getvalue()
 
 
@@ -388,3 +398,11 @@ def test_a_well_formed_but_wrong_digest_is_refused_before_provisioning(
         manager.provision()
 
     assert manager.status().state is VoiceRuntimeState.NOT_INSTALLED
+
+
+def test_stand_in_archives_do_not_depend_on_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fixture pins the digest of one build and later tests build again.
+    first = {fmt: _archive(fmt, "uv", b"stub") for fmt in ("zip", "tar.gz")}
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 3600)
+    assert {fmt: _archive(fmt, "uv", b"stub") for fmt in ("zip", "tar.gz")} == first
