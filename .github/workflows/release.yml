@@ -158,44 +158,6 @@ jobs:
             | python3 .github/scripts/release-policy.py "$STAGE" --bump "$BUMP" "${index[@]}" \
                 --summary "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
 
-      # A job that names an environment nobody configured creates it without
-      # protection rules, and would run without waiting for anyone. Refuse to
-      # ask for approval unless a reviewer is actually required.
-      - name: Require a reviewer for the promotion
-        if: >-
-          steps.stage.outputs.stage == 'final'
-          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          reviewers="$(gh api "repos/$REPO/environments/release-approval" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' \
-            2> /dev/null || true)"
-          case "$reviewers" in
-            ''|*[!0-9]*|0)
-              echo "::error::The release-approval environment must require a reviewer before a candidate can be promoted. Add one under Settings > Environments."
-              exit 1
-              ;;
-          esac
-          echo "The release-approval environment requires a reviewer."
-
-      - name: Require the candidate on PyPI
-        if: >-
-          steps.stage.outputs.stage == 'final'
-          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
-        env:
-          ACTION: ${{ steps.plan.outputs.action }}
-          CANDIDATE: ${{ steps.plan.outputs.candidate }}
-          TAG: ${{ steps.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          args=("$CANDIDATE")
-          # The tag is already pushed when only its release is missing.
-          [ "$ACTION" = "release" ] && args+=("$TAG")
-          bash .github/scripts/candidate-on-pypi.sh "${args[@]}"
-
       # The plan reads releases with the built-in token, which cannot see
       # drafts. A tag whose release is a draft has nothing left to approve.
       - name: Look for a draft release
@@ -220,6 +182,46 @@ jobs:
             echo "::notice::$msg"
             echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # A job that names an environment nobody configured creates it without
+      # protection rules, and would run without waiting for anyone. Refuse to
+      # ask for approval unless a reviewer is actually required.
+      - name: Require a reviewer for the promotion
+        if: >-
+          steps.stage.outputs.stage == 'final'
+          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
+          && steps.draft.outputs.waiting != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          reviewers="$(gh api "repos/$REPO/environments/release-approval" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length' \
+            2> /dev/null || true)"
+          case "$reviewers" in
+            ''|*[!0-9]*|0)
+              echo "::error::The release-approval environment must require a reviewer before a candidate can be promoted. Add one under Settings > Environments."
+              exit 1
+              ;;
+          esac
+          echo "The release-approval environment requires a reviewer."
+
+      - name: Require the candidate on PyPI
+        if: >-
+          steps.stage.outputs.stage == 'final'
+          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
+          && steps.draft.outputs.waiting != 'true'
+        env:
+          ACTION: ${{ steps.plan.outputs.action }}
+          CANDIDATE: ${{ steps.plan.outputs.candidate }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          args=("$CANDIDATE")
+          # The tag is already pushed when only its release is missing.
+          [ "$ACTION" = "release" ] && args+=("$TAG")
+          bash .github/scripts/candidate-on-pypi.sh "${args[@]}"
 
   candidate:
     needs: plan

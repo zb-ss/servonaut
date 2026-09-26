@@ -2296,3 +2296,12 @@ def test_pypi_step_names_the_pushed_tag_only_when_it_exists(
     )
     assert yanked.returncode == 1
     assert ("refs/tags/v1.2.4" in yanked.stdout) is names_tag
+
+
+def test_a_waiting_draft_is_found_before_any_approval_prerequisite() -> None:
+    plan = release_jobs()["plan"]
+    names = re.findall(r"^      - name: (.+)$", plan, re.MULTILINE)
+    assert names[names.index("Plan the release") + 1] == "Look for a draft release"
+    for name in ("Require a reviewer for the promotion", "Require the candidate on PyPI"):
+        assert names.index(name) > names.index("Look for a draft release")
+        assert "&& steps.draft.outputs.waiting != 'true'" in workflow_step("release.yml", name)
