@@ -1338,6 +1338,57 @@
         "classification": {
           "collected": false,
           "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "excluded-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "276be27a7a00cb9288511d13c0ee5549bac25174f1ae1903246c43b97b3a0752",
+        "importers": [
+          {
+            "module": "servonaut.services.voice_input_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_output_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_setup_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_streaming_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          }
+        ],
+        "module": "sounddevice",
+        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
+        "target_facts": {
+          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
+          "target": "linux-x64-ubuntu-22.04",
+          "toolchain_sha256": "33021d7b99b66fc726a223b6d65b8cf860b4261eabbba9585ac54146272a3069"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
         },
@@ -3204,64 +3255,6 @@
         ],
         "module": "websockets.frames",
         "reason": "Reviewed PyInstaller missing-module for websockets.frames.",
-        "target_facts": {
-          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
-          "target": "linux-x64-ubuntu-22.04",
-          "toolchain_sha256": "33021d7b99b66fc726a223b6d65b8cf860b4261eabbba9585ac54146272a3069"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "excluded-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "7ae2b45ac6d6bd7eeed53c8434b3687ce59e2db6a747cc27f84216462f85205b",
-        "importers": [
-          {
-            "module": "servonaut.desktop.voice.worker",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_input_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_output_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_setup_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_streaming_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          }
-        ],
-        "module": "sounddevice",
-        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
         "target_facts": {
           "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
           "target": "linux-x64-ubuntu-22.04",
@@ -5527,6 +5520,110 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "d2d9aca51f060adada13c619f05299e99983f33b1228aea5a3bae3c2d88423d1",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "encodings",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "mimetypes",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.connection",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.heap",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.reduction",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.shared_memory",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "ntpath",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "shutil",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "conditional"
+            ]
+          }
+        ],
+        "module": "_winapi",
+        "reason": "Reviewed PyInstaller missing-module for _winapi.",
+        "target_facts": {
+          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
+          "target": "linux-x64-ubuntu-22.04",
+          "toolchain_sha256": "33021d7b99b66fc726a223b6d65b8cf860b4261eabbba9585ac54146272a3069"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -5727,117 +5824,6 @@
         ],
         "module": "wsproto.extensions",
         "reason": "Reviewed PyInstaller missing-module for wsproto.extensions.",
-        "target_facts": {
-          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
-          "target": "linux-x64-ubuntu-22.04",
-          "toolchain_sha256": "33021d7b99b66fc726a223b6d65b8cf860b4261eabbba9585ac54146272a3069"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "e082381890e5c3567c0cbdb3153d092f9427de7e52b38eb4bea005ae8beeb138",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "encodings",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "mimetypes",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.connection",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.heap",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.reduction",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.shared_memory",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "ntpath",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "shutil",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "venv",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          }
-        ],
-        "module": "_winapi",
-        "reason": "Reviewed PyInstaller missing-module for _winapi.",
         "target_facts": {
           "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
           "target": "linux-x64-ubuntu-22.04",
@@ -7883,6 +7869,57 @@
       {
         "classification": {
           "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "excluded-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "37c64b74c782797c503a55e38b92c531222f468c9e85ee9b95d85b3e7ed4793d",
+        "importers": [
+          {
+            "module": "servonaut.services.voice_input_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_output_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_setup_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_streaming_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          }
+        ],
+        "module": "sounddevice",
+        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
+        "target_facts": {
+          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
+          "target": "macos-arm64",
+          "toolchain_sha256": "0703ac4c1be45c26e544df5f958514b38c84fd9bd129a3f34fea509f8c7d2dd2"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": true,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -8148,6 +8185,110 @@
         ],
         "module": "pydantic.PydanticUserError",
         "reason": "Reviewed PyInstaller missing-module for pydantic.PydanticUserError.",
+        "target_facts": {
+          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
+          "target": "macos-arm64",
+          "toolchain_sha256": "0703ac4c1be45c26e544df5f958514b38c84fd9bd129a3f34fea509f8c7d2dd2"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "3d6b1f738019eea549b8de2df0adc4d0d91e0402767e859eb5a64f9799baae7c",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "encodings",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "mimetypes",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.connection",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.heap",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.reduction",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.shared_memory",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "ntpath",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "shutil",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "conditional"
+            ]
+          }
+        ],
+        "module": "_winapi",
+        "reason": "Reviewed PyInstaller missing-module for _winapi.",
         "target_facts": {
           "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
           "target": "macos-arm64",
@@ -9611,117 +9752,6 @@
       {
         "classification": {
           "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "70badf56bc85f95b92f9ec14ff7fc255cdc502439982b3ab95792079bf9a6b2b",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "encodings",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "mimetypes",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.connection",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.heap",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.reduction",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.shared_memory",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "ntpath",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "shutil",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "venv",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          }
-        ],
-        "module": "_winapi",
-        "reason": "Reviewed PyInstaller missing-module for _winapi.",
-        "target_facts": {
-          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
-          "target": "macos-arm64",
-          "toolchain_sha256": "0703ac4c1be45c26e544df5f958514b38c84fd9bd129a3f34fea509f8c7d2dd2"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
           "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -10544,64 +10574,6 @@
         ],
         "module": "multiprocessing.set_start_method",
         "reason": "Reviewed PyInstaller missing-module for multiprocessing.set_start_method.",
-        "target_facts": {
-          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
-          "target": "macos-arm64",
-          "toolchain_sha256": "0703ac4c1be45c26e544df5f958514b38c84fd9bd129a3f34fea509f8c7d2dd2"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "excluded-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "930b0a5be3722cbb65ccda3d9a01123c2b2c0ee00fc1eb54758bf6a9fbd3deaf",
-        "importers": [
-          {
-            "module": "servonaut.desktop.voice.worker",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_input_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_output_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_setup_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_streaming_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          }
-        ],
-        "module": "sounddevice",
-        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
         "target_facts": {
           "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
           "target": "macos-arm64",
@@ -13793,6 +13765,57 @@
         ],
         "module": "pywintypes",
         "reason": "Reviewed PyInstaller missing-module for pywintypes.",
+        "target_facts": {
+          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
+          "target": "macos-x64",
+          "toolchain_sha256": "b221dcb78b8c2db268a40cb59f04844066ed8cd80d176f30213c1338d4fbc007"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "excluded-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "36b56aed47e5cbcd9c9ddb3b1b5001de55dd7a813a263a4e14f34792f7d0429f",
+        "importers": [
+          {
+            "module": "servonaut.services.voice_input_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_output_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_setup_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_streaming_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          }
+        ],
+        "module": "sounddevice",
+        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
         "target_facts": {
           "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
           "target": "macos-x64",
@@ -17217,117 +17240,6 @@
       {
         "classification": {
           "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "af2f69c5575b1f50cc7cb4c74df870c37c3ec24652e53a10730e712ae4c626c8",
-        "importers": [
-          {
-            "module": "asyncio.windows_events",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "asyncio.windows_utils",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "encodings",
-            "qualifiers": [
-              "conditional",
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "mimetypes",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.connection",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "multiprocessing.heap",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.popen_spawn_win32",
-            "qualifiers": [
-              "top-level"
-            ]
-          },
-          {
-            "module": "multiprocessing.reduction",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.shared_memory",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "multiprocessing.spawn",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          },
-          {
-            "module": "ntpath",
-            "qualifiers": [
-              "optional"
-            ]
-          },
-          {
-            "module": "shutil",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "subprocess",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "venv",
-            "qualifiers": [
-              "conditional",
-              "delayed"
-            ]
-          }
-        ],
-        "module": "_winapi",
-        "reason": "Reviewed PyInstaller missing-module for _winapi.",
-        "target_facts": {
-          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
-          "target": "macos-x64",
-          "toolchain_sha256": "b221dcb78b8c2db268a40cb59f04844066ed8cd80d176f30213c1338d4fbc007"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
           "conditional": false,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -18788,6 +18700,110 @@
           "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
         },
         "expires_on": "2027-09-18",
+        "fingerprint": "edd1d51a7583eb7da8d07c682e86e063ac53b1b511013754d60af6c1077e9ace",
+        "importers": [
+          {
+            "module": "asyncio.windows_events",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "asyncio.windows_utils",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "encodings",
+            "qualifiers": [
+              "conditional",
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "mimetypes",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.connection",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "multiprocessing.heap",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.popen_spawn_win32",
+            "qualifiers": [
+              "top-level"
+            ]
+          },
+          {
+            "module": "multiprocessing.reduction",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.shared_memory",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "multiprocessing.spawn",
+            "qualifiers": [
+              "conditional",
+              "delayed"
+            ]
+          },
+          {
+            "module": "ntpath",
+            "qualifiers": [
+              "optional"
+            ]
+          },
+          {
+            "module": "shutil",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "subprocess",
+            "qualifiers": [
+              "conditional"
+            ]
+          }
+        ],
+        "module": "_winapi",
+        "reason": "Reviewed PyInstaller missing-module for _winapi.",
+        "target_facts": {
+          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
+          "target": "macos-x64",
+          "toolchain_sha256": "b221dcb78b8c2db268a40cb59f04844066ed8cd80d176f30213c1338d4fbc007"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
         "fingerprint": "ef86a3a1ec7ea026badb5d0e8b837c3c7584cf91aa364a61e6fcd88de66915ed",
         "importers": [
           {
@@ -19016,64 +19032,6 @@
         ],
         "module": "pydantic.PydanticSchemaGenerationError",
         "reason": "Reviewed PyInstaller missing-module for pydantic.PydanticSchemaGenerationError.",
-        "target_facts": {
-          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
-          "target": "macos-x64",
-          "toolchain_sha256": "b221dcb78b8c2db268a40cb59f04844066ed8cd80d176f30213c1338d4fbc007"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "excluded-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "fa5724e12f075d56a5b6deade38f53d71893e77b253812e912e9916edbdbbaab",
-        "importers": [
-          {
-            "module": "servonaut.desktop.voice.worker",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_input_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_output_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_setup_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_streaming_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          }
-        ],
-        "module": "sounddevice",
-        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
         "target_facts": {
           "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
           "target": "macos-x64",
@@ -22796,64 +22754,6 @@
           "optional": true,
           "origin_class": "hook-or-source"
         },
-        "code": "excluded-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "8b30427da0faa06fa6dc24ffeb11b104f1f991d214f8ec252857d3577eeb6575",
-        "importers": [
-          {
-            "module": "servonaut.desktop.voice.worker",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_input_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_output_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_setup_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          },
-          {
-            "module": "servonaut.services.voice_streaming_service",
-            "qualifiers": [
-              "delayed",
-              "optional"
-            ]
-          }
-        ],
-        "module": "sounddevice",
-        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
-        "target_facts": {
-          "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
-          "target": "windows-x64",
-          "toolchain_sha256": "deb4d0b379b7ec800401f29f8808b0627a7cacc6a550d20342f08844b5da386a"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": false,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
         "code": "missing-module",
         "collection_facts": {
           "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
@@ -25533,6 +25433,57 @@
         ],
         "module": "asyncio.DefaultEventLoopPolicy",
         "reason": "Reviewed PyInstaller missing-module for asyncio.DefaultEventLoopPolicy.",
+        "target_facts": {
+          "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
+          "target": "windows-x64",
+          "toolchain_sha256": "deb4d0b379b7ec800401f29f8808b0627a7cacc6a550d20342f08844b5da386a"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": false,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "excluded-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "fa4e57713c8a3f62cf96352bc1be40455124f6a98c82cc66c121c5eee214630f",
+        "importers": [
+          {
+            "module": "servonaut.services.voice_input_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_output_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_setup_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          },
+          {
+            "module": "servonaut.services.voice_streaming_service",
+            "qualifiers": [
+              "delayed",
+              "optional"
+            ]
+          }
+        ],
+        "module": "sounddevice",
+        "reason": "Reviewed PyInstaller excluded-module for sounddevice.",
         "target_facts": {
           "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
           "target": "windows-x64",

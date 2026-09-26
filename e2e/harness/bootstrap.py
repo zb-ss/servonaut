@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -408,6 +409,10 @@ def _apply_environment(ctx: E2EContext, original_env: Mapping[str, str], base: s
     os.environ.clear()
     os.environ.update(env)
     tempfile.tempdir = None  # re-read TMPDIR
+    if hasattr(time, "tzset"):
+        # TZ=UTC must reach this process's own clock too, not only children:
+        # local-time conversions would otherwise follow the host's zone.
+        time.tzset()
     # Bytecode caches would be written next to the sources, outside the root.
     sys.dont_write_bytecode = True
 

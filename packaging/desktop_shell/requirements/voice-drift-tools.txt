@@ -1,0 +1,8 @@
+# Hash-locked tools for the voice runtime drift check.
+# pip 26.0 is the first release with --uploaded-prior-to, which the check uses
+# to hold every voice lock wheel to the supply-chain cooldown; 26.0.1 is the
+# release the voice locks were generated with.
+
+pip==26.0.1 \
+    --hash=sha256:bdb1b08f4274833d62c1aa29e20907365a2ceb950410df15fc9521bad440122b
+    # pip-26.0.1-py3-none-any.whl

@@ -58,7 +58,7 @@ desktop-test = ["aiohttp==3.14.3", "textual-serve==1.1.3"]
 # `python -m playwright install chromium`. mcp keeps the
 # upper bound of the `mcp` extra below.
 e2e = [
-    "moto[ec2,s3]>=5.2.3,<6",
+    "moto[ec2,iam,logs,s3,sts,wafv2]>=5.2.3,<6",
     "flask>=3.1,<4",
     "flask-cors>=6,<7",
     "aiohttp==3.14.3",

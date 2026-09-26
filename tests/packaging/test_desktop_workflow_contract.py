@@ -151,3 +151,55 @@ def test_selftest_skip_is_documented(workflow_content: str):
     smoke = qualify.split("- name: Run policy-bound smoke checks", 1)
     assert "# --skip-selftest:" in smoke[0].rsplit("\n      - ", 1)[-1]
     assert "--skip-selftest" in smoke[1]
+
+
+_DRIFT_WORKFLOW_PATH = _WORKFLOW_PATH.with_name("voice-runtime-drift.yml")
+
+
+def test_voice_runtime_drift_check_is_scheduled_and_read_only() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"\n  schedule:\n    - cron: '[0-9 *]+'\n", content)
+    assert "\npermissions:\n  contents: read\n" in content
+    assert "persist-credentials: false" in content
+    assert "secrets." not in content
+    assert re.search(r"\n    timeout-minutes: \d+\n", content)
+    assert "python -m scripts.desktop_shell.voice_drift" in content
+    uses = re.findall(r"uses:\s*(\S+)(.*)", content)
+    assert uses
+    for reference, comment in uses:
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", reference), reference
+        assert re.fullmatch(r"\s*# v\d+\.\d+\.\d+", comment), reference
+
+
+def test_voice_runtime_drift_check_uses_the_same_action_pins(workflow_content: str) -> None:
+    drift = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    pinned = set(re.findall(r"uses:\s*(\S+)", workflow_content))
+
+    assert set(re.findall(r"uses:\s*(\S+)", drift)) <= pinned
+
+
+def test_voice_runtime_drift_check_runs_when_its_inputs_change() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    paths = content.split("  pull_request:\n", 1)[1].split("\n  workflow_dispatch", 1)[0]
+
+    for path in (
+        "packaging/desktop_shell/voice-runtime.json",
+        "packaging/desktop_shell/target-policy.json",
+        "packaging/desktop_shell/requirements/voice*",
+        "scripts/desktop_shell/voice_*.py",
+        "scripts/desktop_shell/model.py",
+        "scripts/desktop_shell/native_headers.py",
+        "scripts/standalone_cli/pinned_asset.py",
+    ):
+        assert f"- '{path}'" in paths, path
+
+
+def test_voice_runtime_drift_check_uses_a_hash_locked_pip_and_a_read_only_token() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "--require-hashes" in content
+    assert "-r packaging/desktop_shell/requirements/voice-drift-tools.txt" in content
+    assert "GITHUB_TOKEN: ${{ github.token }}" in content
+    assert re.search(r"permissions:\n  contents: read\n", content)
+    assert "write" not in content.split("\njobs:", 1)[1]

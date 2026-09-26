@@ -224,3 +224,47 @@ class TestLegacyKwargs:
     def test_raises_when_neither_tools_nor_config_manager_given(self):
         with pytest.raises(ValueError, match="config_manager"):
             ChatToolExecutor()
+
+
+# ---------------------------------------------------------------------------
+# Guard level follows config live (no restart)
+# ---------------------------------------------------------------------------
+
+
+def _live_executor(level: str):
+    """Executor wired like the app: tools and guard read the same config."""
+    tools = _fake_tools()
+    config = AppConfig(mcp=MCPConfig(), chat_tool_guard_level=level)
+    tools.config_manager.get.return_value = config
+    return ChatToolExecutor.from_config(tools, tools.config_manager), config
+
+
+class TestLiveGuardLevel:
+    def test_lowered_level_applies_to_the_next_tool_call(self):
+        executor, config = _live_executor("dangerous")
+        names = {t["name"] for t in executor.get_tool_definitions()}
+        assert "run_command" in names
+
+        config.chat_tool_guard_level = "readonly"  # Settings save
+
+        result = _run(executor.execute("run_command", {"command": "uptime"}))
+        assert result.startswith("Blocked:")
+        names = {t["name"] for t in executor.get_tool_definitions()}
+        assert "run_command" not in names
+        assert executor.guard_level == "readonly"
+
+    def test_raised_level_also_applies_live(self):
+        executor, config = _live_executor("readonly")
+        config.chat_tool_guard_level = "standard"
+        names = {t["name"] for t in executor.get_tool_definitions()}
+        assert "run_command" in names
+
+    @pytest.mark.parametrize("level", ["", "admin", None])
+    def test_invalid_level_falls_back_to_readonly(self, level):
+        executor, _config = _live_executor("standard")
+        _config.chat_tool_guard_level = level
+        assert executor.guard_level == "readonly"
+
+    def test_level_label_is_normalised(self):
+        executor, _config = _live_executor(" Standard ")
+        assert executor.guard_level == "standard"

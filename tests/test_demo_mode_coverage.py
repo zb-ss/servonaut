@@ -920,7 +920,7 @@ class TestCloudTrailCopy:
         screen._events = [event]
         # Paging reads the narrowed view; unfiltered it mirrors _events.
         screen._visible = list(screen._events)
-        screen._selected_row = 0
+        screen._selected_event = event
 
         copied: list = []
 
@@ -1632,19 +1632,11 @@ class TestRenderToolSkippedReason:
                         )
 
         assert mounted, "Expected a widget to be mounted"
-        rendered = mounted[-1].renderable if hasattr(mounted[-1], "renderable") else str(mounted[-1])
-        # The rendered text is in the Static widget's first positional arg
-        import inspect
+        # _render_tool_skipped_row mounts a real Static; read the markup it
+        # was given (Textual 8 exposes it as ``content``).
         widget = mounted[-1]
-        # Get the markup passed to Static.__init__
-        rendered_text = widget.args[0] if hasattr(widget, "args") else str(widget)
-        # For MagicMock-constructed Statics we check the call args
-        # Actually _render_tool_skipped_row creates a real Static
-        # so we check its _renderable / content attribute
-        if hasattr(widget, "_renderable"):
-            rendered_text = str(widget._renderable)
-        else:
-            rendered_text = str(widget)
+        rendered_text = str(widget.content)
+        assert "unreachable" in rendered_text, rendered_text
         # The key assertion: real IP must not appear anywhere in the rendered output
         assert "10.20.30.40" not in rendered_text, (
             f"Real IP leaked in skipped-tool row: {rendered_text!r}"
@@ -2384,10 +2376,8 @@ class TestServerActionsRdnsDemoMode:
         )
 
         mock_info_widget = MagicMock()
-        # Simulate current widget content containing the Public IP line
-        mock_info_widget.renderable = (
-            f"[dim]Public IP:[/dim] {public_ip}"
-        )
+        # The screen keeps the markup it wrote to the info widget.
+        screen._server_info_text = f"[dim]Public IP:[/dim] {public_ip}"
 
         updated_texts: list = []
         mock_info_widget.update.side_effect = lambda t: updated_texts.append(t)
@@ -2434,7 +2424,7 @@ class TestServerActionsRdnsDemoMode:
         screen._instance = {"id": "vps-123"}
 
         mock_info_widget = MagicMock()
-        mock_info_widget.renderable = f"[dim]Public IP:[/dim] {public_ip}"
+        screen._server_info_text = f"[dim]Public IP:[/dim] {public_ip}"
 
         updated_texts: list = []
         mock_info_widget.update.side_effect = lambda t: updated_texts.append(t)

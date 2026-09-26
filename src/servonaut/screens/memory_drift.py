@@ -15,6 +15,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
+from textual.widgets.data_table import CellDoesNotExist
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
@@ -266,16 +267,17 @@ class MemoryDriftScreen(Screen):
     def _render_table(self) -> None:
         table = self.query_one("#drift-table", DataTable)
         table.clear()
-        events = self._events
-        if self._show_unack_only:
-            events = [e for e in events if getattr(e, "acknowledged_at", None) is None]
         label = self.query_one("#drift-filter-label", Static)
         label.update(
             "[dim]Showing: unacknowledged only[/dim]"
             if self._show_unack_only
             else "[dim]Showing: all events[/dim]"
         )
-        for idx, evt in enumerate(events):
+        # Row keys index ``self._events`` (the unfiltered list) so a row still
+        # maps to its own event while the unack-only filter hides others.
+        for idx, evt in enumerate(self._events):
+            if self._show_unack_only and getattr(evt, "acknowledged_at", None) is not None:
+                continue
             raw_instance_id = str(getattr(evt, "instance_id", "?"))
             # Use the sharper redact_instance_id primitive — instance IDs are
             # more identifying than freeform text and deserve precise masking.
@@ -309,20 +311,34 @@ class MemoryDriftScreen(Screen):
     def action_refresh(self) -> None:
         self._load_drift_events()
 
+    def _event_for_row_key(self, row_key_value: Optional[str]) -> Optional[Any]:
+        """Map a table row key (an index into ``self._events``) to its event."""
+        try:
+            idx = int(row_key_value) if row_key_value is not None else -1
+        except ValueError:
+            return None
+        if idx < 0 or idx >= len(self._events):
+            return None
+        return self._events[idx]
+
+    def _event_at_cursor(self) -> Optional[Any]:
+        """Return the event under the table cursor, or ``None``."""
+        table = self.query_one("#drift-table", DataTable)
+        try:
+            cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+        except CellDoesNotExist:
+            return None
+        return self._event_for_row_key(cell_key.row_key.value)
+
     def action_ack_selected(self) -> None:
         table = self.query_one("#drift-table", DataTable)
         if table.row_count == 0:
             self.app.notify("No events to acknowledge.", severity="warning")
             return
-        try:
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate)
-            idx = int(row_key.row_key.value or -1)
-        except Exception:
+        evt = self._event_at_cursor()
+        if evt is None:
             self.app.notify("Select an event row first.", severity="warning")
             return
-        if idx < 0 or idx >= len(self._events):
-            return
-        evt = self._events[idx]
         self.run_worker(
             self._do_ack(evt),
             group="memory_drift",
@@ -347,17 +363,23 @@ class MemoryDriftScreen(Screen):
         self._render_table()
 
     def action_view_diff(self) -> None:
-        table = self.query_one("#drift-table", DataTable)
-        if table.row_count == 0:
-            return
-        try:
-            row_key = table.coordinate_to_cell_key(table.cursor_coordinate)
-            idx = int(row_key.row_key.value or -1)
-        except Exception:
-            return
-        if idx < 0 or idx >= len(self._events):
-            return
-        evt = self._events[idx]
+        evt = self._event_at_cursor()
+        if evt is not None:
+            self._open_diff(evt)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter (or a click) on a focused row opens that event's diff.
+
+        The focused DataTable consumes Enter for its own ``select_cursor``
+        binding, so the screen-level ``enter`` binding never fires while the
+        table has focus; the table reports the choice as ``RowSelected``.
+        """
+        event.stop()
+        evt = self._event_for_row_key(event.row_key.value)
+        if evt is not None:
+            self._open_diff(evt)
+
+    def _open_diff(self, evt: Any) -> None:
         retrieval = getattr(self.app, "memory_retrieval_service", None)
         self.app.push_screen(DriftDiffScreen(evt, retrieval_service=retrieval))
 
