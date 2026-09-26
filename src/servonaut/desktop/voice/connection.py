@@ -74,16 +74,25 @@ from servonaut.desktop.voice.protocol import (
     encode_voice_message,
     raw_chunk_reader,
 )
+from servonaut.utils.credential_scrub import scrub_credentials
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CAPABILITIES: Final = ("stt_batch", "stt_streaming", "tts", "vad", "conversation")
 _STDERR_CHUNK_BYTES: Final[int] = 4096
+_MAX_STDERR_LINE_BYTES: Final[int] = 16 * 1024
 # How often an idle writer checks whether its session is closing.
 _WRITER_POLL_SECONDS: Final[float] = 0.2
 # Wait for a killed worker to be reaped.
 _KILL_WAIT_SECONDS: Final[float] = 1.0
 _USE_POLICY: Final = object()
+# Windows: start the console-mode worker without a console window, so no
+# window flashes up when a windowed app launches it. Spelled out because the
+# subprocess constant only exists on Windows.
+_CREATE_NO_WINDOW: Final[int] = 0x08000000
+
+WorkerEnv = Union[Mapping[str, str], Callable[[], Mapping[str, str]]]
+"""A worker environment, or a callable resolving it at spawn time."""
 
 
 class VoiceConnectionError(RuntimeError):
@@ -186,7 +195,8 @@ class VoiceConnection:
         stdout: Optional[BinaryIO] = None,
         stderr: Optional[BinaryIO] = None,
         process: Optional[subprocess.Popen[bytes]] = None,
-        env: Optional[Mapping[str, str]] = None,
+        env: Optional[WorkerEnv] = None,
+        inherit_env: bool = True,
         config: Optional[VoiceWorkerConfig] = None,
         policy: Optional[VoiceConnectionPolicy] = None,
     ) -> None:
@@ -197,7 +207,12 @@ class VoiceConnection:
             stdin/stdout/stderr/process: Pre-opened streams of a worker
                 started elsewhere. Such a connection cannot respawn it, so
                 the end of that session closes the connection.
-            env: Extra environment for spawned workers.
+            env: Environment for spawned workers, or a callable resolving
+                it at each spawn.
+            inherit_env: When True, *env* is laid over a copy of this
+                process's environment. When False, *env* is the worker's
+                complete environment, so nothing else from this process
+                (credentials, tokens, loader settings) reaches the worker.
             config: Voice settings handed to the worker in the handshake.
             policy: Timeouts and restart limits.
         """
@@ -207,7 +222,8 @@ class VoiceConnection:
         if stdin is not None and stdout is not None:
             self._injected = self._new_session(stdin, stdout, stderr, process)
         self._restartable = self._injected is None
-        self._env = dict(env) if env is not None else None
+        self._env: Optional[WorkerEnv] = env if env is None or callable(env) else dict(env)
+        self._inherit_env = inherit_env
         self._worker_config = config or VoiceWorkerConfig()
         self._epoch_provider: Callable[[], int] = lambda: 0
 
@@ -352,8 +368,11 @@ class VoiceConnection:
     def _open_session(self) -> _WorkerSession:
         """Spawn (or take the injected) session and make it current."""
         command = self._resolve_worker_cmd()
+        # Resolved outside the failure accounting, like the command: an
+        # environment that cannot be built yet is not a worker crash.
+        run_env = self._spawn_env() if command is not None else None
         try:
-            session = self._spawn_if_needed(command)
+            session = self._spawn_if_needed(command, run_env)
         except VoiceConnectionError:
             with self._lock:
                 self._record_failure_locked(lived_seconds=0.0)
@@ -477,19 +496,19 @@ class VoiceConnection:
         except Exception as e:
             raise VoiceConnectionError(f"Voice worker is not available: {e}") from e
 
-    def _spawn_if_needed(self, resolved_cmd: Optional[List[str]] = None) -> _WorkerSession:
+    def _spawn_if_needed(
+        self,
+        resolved_cmd: Optional[List[str]] = None,
+        run_env: Optional[Dict[str, str]] = None,
+    ) -> _WorkerSession:
         """Return the session to handshake: injected streams, or a new process."""
         if self._injected is not None:
             session, self._injected = self._injected, None
             return session
         if resolved_cmd is None:
             resolved_cmd = self._resolve_worker_cmd() or []
-
-        run_env = os.environ.copy()
-        if self._env:
-            run_env.update(self._env)
-        run_env["PYTHONUNBUFFERED"] = "1"
-        run_env["PYTHONIOENCODING"] = "utf-8"
+        if run_env is None:
+            run_env = self._spawn_env()
 
         try:
             process = subprocess.Popen(
@@ -498,8 +517,9 @@ class VoiceConnection:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=run_env,
+                **_platform_spawn_options(),
             )
-        except Exception as e:
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as e:
             raise VoiceConnectionError(f"Failed to spawn voice worker process: {e}") from e
         return self._new_session(
             process.stdin,  # type: ignore[arg-type]
@@ -507,6 +527,18 @@ class VoiceConnection:
             process.stderr,
             process,
         )
+
+    def _spawn_env(self) -> Dict[str, str]:
+        """Environment for one spawn, resolved now so it reflects the present."""
+        try:
+            extra = dict(self._env()) if callable(self._env) else dict(self._env or {})
+        except (OSError, ValueError, TypeError) as e:
+            raise VoiceConnectionError(f"Voice worker environment is not available: {e}") from e
+        run_env = os.environ.copy() if self._inherit_env else {}
+        run_env.update(extra)
+        run_env["PYTHONUNBUFFERED"] = "1"
+        run_env["PYTHONIOENCODING"] = "utf-8"
+        return run_env
 
     def _start_writer(self, session: _WorkerSession) -> None:
         session.writer = threading.Thread(
@@ -978,7 +1010,7 @@ class VoiceConnection:
     def _stderr_reader_loop(stream: BinaryIO) -> None:
         """Forward worker stderr to the parent log without buffered-IO locks."""
         read = raw_chunk_reader(stream)
-        pending = b""
+        lines = _StderrLines()
         while True:
             try:
                 chunk = read(_STDERR_CHUNK_BYTES)
@@ -986,11 +1018,55 @@ class VoiceConnection:
                 break
             if not chunk:
                 break
-            pending += chunk
-            *lines, pending = pending.split(b"\n")
-            for line in lines:
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    logger.debug("[voice-worker] %s", text)
+            for line in lines.feed(chunk):
+                _log_worker_stderr_line(line)
         with contextlib.suppress(OSError, ValueError):
             stream.close()
+
+
+class _StderrLines:
+    """Split worker stderr into lines, bounding what is buffered per line.
+
+    A line longer than the cap (a progress bar redrawn with ``\r``, say) is
+    reported only by its length, and the rest of it up to its newline is
+    dropped: logging its tail as a line of its own could leak part of a
+    credential that the scrubber no longer sees whole.
+    """
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self._dropped = 0
+
+    def feed(self, chunk: bytes) -> List[Union[bytes, int]]:
+        """Complete lines in *chunk*; an over-long line appears as its length."""
+        *lines, self._pending = (self._pending + chunk).split(b"\n")
+        complete: List[Union[bytes, int]] = []
+        for line in lines:
+            complete.append(self._dropped + len(line) if self._dropped else line)
+            self._dropped = 0
+        if len(self._pending) > _MAX_STDERR_LINE_BYTES:
+            self._dropped += len(self._pending)
+            self._pending = b""
+        return complete
+
+
+def _log_worker_stderr_line(line: Union[bytes, int]) -> None:
+    """Log one worker stderr line, with URL credentials scrubbed.
+
+    An over-long line is summarised instead of logged: truncating it could
+    cut a credential before the part the scrubber recognises.
+    """
+    if isinstance(line, int) or len(line) > _MAX_STDERR_LINE_BYTES:
+        size = line if isinstance(line, int) else len(line)
+        logger.debug("[voice-worker] <%d-byte line omitted>", size)
+        return
+    text = line.decode("utf-8", errors="replace").rstrip()
+    if text:
+        # A failed model download can quote a proxy URL.
+        logger.debug("[voice-worker] %s", scrub_credentials(text))
+
+def _platform_spawn_options() -> Dict[str, Any]:
+    """Extra ``Popen`` options for this platform (no console window on Windows)."""
+    if sys.platform == "win32":
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}

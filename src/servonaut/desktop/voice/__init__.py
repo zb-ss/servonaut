@@ -92,6 +92,7 @@ _EXPORTS_BY_MODULE: Dict[str, Tuple[str, ...]] = {
         "VoiceModelAsset",
         "VoiceModelCache",
         "VoiceModelCacheState",
+        "VoiceModelCancelledError",
         "VoiceModelError",
         "VoiceModelExtractionError",
         "VoiceModelIntegrityError",

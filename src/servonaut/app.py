@@ -691,7 +691,14 @@ class ServonautApp(App):
         # caller then leaves voice unavailable.
         runtime_mgr = desktop_voice.VoiceRuntimeManager.for_runtime(self.runtime_layout)
         model_cache = desktop_voice.VoiceModelCache(root_dir=runtime_mgr.models_root)
-        conn = desktop_voice.VoiceConnection(worker_cmd=runtime_mgr.get_worker_cmd)
+        # The worker gets the runtime's environment and nothing else: this
+        # process holds cloud credentials and API tokens the speech engines
+        # have no business seeing.
+        conn = desktop_voice.VoiceConnection(
+            worker_cmd=runtime_mgr.get_worker_cmd,
+            env=runtime_mgr.worker_env,
+            inherit_env=False,
+        )
         self.voice_setup_service = desktop_voice.DesktopVoiceSetupService(
             voice_config,
             runtime_layout=self.runtime_layout,

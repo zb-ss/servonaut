@@ -14,9 +14,10 @@ takes toward anything that leaves or enters the machine.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Coroutine, Dict, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
@@ -31,6 +32,7 @@ from servonaut.config.schema import (
     VAD_SILENCE_MS_MAX,
     VAD_SILENCE_MS_MIN,
 )
+from servonaut.runtime import DistributionKind
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.services.voice_engines import (
     DEFAULT_TTS_VOICE,
@@ -41,6 +43,7 @@ from servonaut.services.voice_engines import (
     engine_spec,
     human_bytes,
 )
+from servonaut.utils.credential_scrub import scrub_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -887,6 +890,9 @@ class VoicePanel(SettingsPanel):
         engines are different classes, so reconfiguring the old instance
         would leave the batch engine running under a streaming label.
         """
+        if self._is_packaged_desktop():
+            self._rebind_worker_services(updated)
+            return
         if engine_spec(updated.engine).id != self._loaded_engine:
             try:
                 from servonaut.services.voice_engines import build_voice_input_service
@@ -950,9 +956,22 @@ class VoicePanel(SettingsPanel):
                 "Could not rebuild the voice conversation service", exc_info=True
             )
 
-        for attr in (
-            "voice_input_service", "voice_setup_service", "voice_output_service",
-        ):
+        self._rebind_configs(updated, ("voice_input_service", "voice_output_service"))
+        self._use_config(updated)
+
+    def _use_config(self, config: Any) -> None:
+        """Point the setup service at *config* (a pending selection or a save)."""
+        service = self._setup_service()
+        if service is None:
+            return
+        try:
+            service.use_config(config)
+        except Exception:  # noqa: BLE001 — UI boundary; a stale verdict must not fail the save
+            logger.debug("Could not point the voice setup service at new settings", exc_info=True)
+
+    def _rebind_configs(self, updated: Any, attrs: tuple) -> None:
+        """Hand *updated* to each named service and drop its cached verdict."""
+        for attr in attrs:
             service = getattr(self.app, attr, None)
             if service is None:
                 continue
@@ -963,6 +982,52 @@ class VoicePanel(SettingsPanel):
                     reset()
             except Exception:  # noqa: BLE001 — a stale service must not fail the save
                 logger.debug("Could not rebind %s to the new voice config", attr, exc_info=True)
+
+    def _is_packaged_desktop(self) -> bool:
+        """Whether voice runs in the packaged desktop's separate worker process."""
+        layout = getattr(self.app, "runtime_layout", None)
+        return getattr(layout, "kind", None) is DistributionKind.PACKAGED_DESKTOP
+
+    def _rebind_worker_services(self, updated: Any) -> None:
+        """Apply saved settings to the packaged desktop's worker-backed services.
+
+        Those services forward to one voice worker process. Rebuilding them
+        in-process, as a save does elsewhere, would swap the worker for
+        engines this build does not carry, so they are kept: their settings
+        are rebound here and the worker gets the new settings off the event
+        loop (reconfiguring it can wait on a model load).
+        """
+        self._rebind_configs(
+            updated,
+            ("voice_input_service", "voice_output_service", "voice_conversation_service"),
+        )
+        # Synchronously first, so the re-probe right after the save already
+        # answers for the new settings.
+        self._use_config(updated)
+        service = self._setup_service()
+        if service is None:
+            return
+        self._run_app_worker(self._do_apply_config(service, updated), "voice_apply_config")
+
+    async def _do_apply_config(self, service: Any, updated: Any) -> None:
+        """Worker: hand the saved settings to the voice worker, reporting failure."""
+        try:
+            success, message = await service.apply_config(updated)
+        except Exception as exc:  # noqa: BLE001 — UI boundary; must never end the app
+            reason = scrub_credentials(str(exc))
+            logger.error("Applying voice settings to the worker raised: %s", reason)
+            success, message = False, f"Voice settings were saved but not applied: {reason}"
+        if not success:
+            self.app.notify(message, severity="warning", markup=False)
+
+    def _run_app_worker(self, work: Coroutine[Any, Any, None], name: str) -> None:
+        """Run *work* on the app rather than this panel.
+
+        Leaving Settings removes the panel and cancels its workers; an
+        install, a runtime repair or a settings hand-off must finish (and
+        report) regardless.
+        """
+        self.app.run_worker(work, name=name, group="voice_setup", exclusive=False)
 
     # ------------------------------------------------------------------
     # Readiness card
@@ -996,10 +1061,7 @@ class VoicePanel(SettingsPanel):
             )
         except Exception:  # noqa: BLE001 — called before compose completes
             return
-        service._config = pending  # noqa: SLF001 — services take config at construction
-        reset = getattr(service, "reset_availability", None)
-        if callable(reset):
-            reset()
+        self._use_config(pending)
 
     def _selected_engine(self) -> str:
         """Engine currently chosen in the dropdown, saved or not."""
@@ -1096,8 +1158,9 @@ class VoicePanel(SettingsPanel):
         try:
             self._readiness = service.probe(force=force)
         except Exception as exc:  # noqa: BLE001 — a probe failure must not blank the panel
-            logger.error("Voice readiness probe failed: %s", exc)
-            self._render_unavailable(str(exc))
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice readiness probe failed: %s", reason)
+            self._render_unavailable(reason)
             return
 
         self._render_banner()
@@ -1174,18 +1237,11 @@ class VoicePanel(SettingsPanel):
                 ),
             )
         )
-        if not readiness.packages_ok and service is not None:
+        if service is not None and service.runtime_maintenance_available:
+            self._render_runtime_actions(container, readiness)
+        elif not readiness.packages_ok and service is not None:
             if service.package_install_available:
-                container.mount(
-                    Horizontal(
-                        Button(
-                            "Install packages (~200 MB)",
-                            id="voice_btn_install",
-                            variant="primary",
-                        ),
-                        classes="voice-action-row",
-                    )
-                )
+                container.mount(self._install_row())
             else:
                 # Source checkouts own their dependencies. Packaged builds
                 # require a complete managed runtime rather than an embedded
@@ -1231,40 +1287,87 @@ class VoicePanel(SettingsPanel):
             )
         )
 
-        # --- Model weights ---
+        self._render_model_rows(container, service, readiness)
+
+    def _render_model_rows(
+        self, container: Vertical, service: Optional[Any], readiness: Any
+    ) -> None:
+        """Mount the selected model's row, the on-disk inventory and the model action.
+
+        When the engine fetches its own weights on first use and nothing
+        can fetch them ahead of time, the row says so instead of offering
+        a download button that could not do anything.
+        """
         engine_id = self._selected_engine()
-        size = self._selected_model_size()
-        label = self._pending_model_label()
         cached = bool(service and service.is_model_present_for(
-            engine_id, model_size=size, latency_ms=self._selected_latency()
+            engine_id, model_size=self._selected_model_size(),
+            latency_ms=self._selected_latency(),
         ))
-        if cached and service is not None:
-            footprint = service.model_bytes_for(
-                engine_id, model_size=size, latency_ms=self._selected_latency()
-            )
-            note = f"cached, {self._human_bytes(footprint)} on disk"
-        elif service is not None:
-            note = f"{service.download_size_hint_for(engine_id, model_size=size)} download"
-        else:
-            note = ""
-        container.mount(self._requirement_row(label, cached, note))
+        downloadable = service is None or service.can_download_model_for(engine_id)
+        note = self._model_note(service, cached, downloadable)
+        container.mount(self._requirement_row(self._pending_model_label(), cached, note))
 
         self._render_installed_models(container, service)
 
-        if service is not None and readiness.packages_ok:
-            buttons = []
-            if not cached:
-                buttons.append(
-                    Button(
-                        "Download model "
-                        f"({service.download_size_hint_for(engine_id, model_size=size)})",
-                        id="voice_btn_download",
-                        variant="primary",
-                    )
-                )
-            else:
-                buttons.append(Button("Remove model", id="voice_btn_remove_model", variant="error"))
-            container.mount(Horizontal(*buttons, classes="voice-action-row"))
+        if service is None or not readiness.packages_ok:
+            return
+        button = self._model_action(service, cached, downloadable)
+        if button is not None:
+            container.mount(Horizontal(button, classes="voice-action-row"))
+
+    def _model_note(self, service: Optional[Any], cached: bool, downloadable: bool) -> str:
+        """Note beside the selected model: its footprint, or what fetching it costs."""
+        if service is None:
+            return ""
+        engine_id = self._selected_engine()
+        size = self._selected_model_size()
+        if cached:
+            footprint = service.model_bytes_for(
+                engine_id, model_size=size, latency_ms=self._selected_latency()
+            )
+            return f"cached, {self._human_bytes(footprint)} on disk"
+        hint = service.download_size_hint_for(engine_id, model_size=size)
+        return f"{hint} download" if downloadable else f"{hint}, downloads on first use"
+
+    def _model_action(self, service: Any, cached: bool, downloadable: bool) -> Optional[Button]:
+        """Remove or download button for the selected model; none when neither applies."""
+        if cached:
+            return Button("Remove model", id="voice_btn_remove_model", variant="error")
+        if not downloadable:
+            return None
+        hint = service.download_size_hint_for(
+            self._selected_engine(), model_size=self._selected_model_size()
+        )
+        return Button(f"Download model ({hint})", id="voice_btn_download", variant="primary")
+
+    @staticmethod
+    def _install_row() -> Horizontal:
+        """The package install button, stating its size first."""
+        return Horizontal(
+            Button("Install packages (~200 MB)", id="voice_btn_install", variant="primary"),
+            classes="voice-action-row",
+        )
+
+    def _render_runtime_actions(self, container: Vertical, readiness: Any) -> None:
+        """Install, update, repair or remove a voice runtime the app manages itself.
+
+        The runtime's own account of its state is shown too: a damaged or
+        outdated runtime would otherwise read like a plain missing install.
+        """
+        state = getattr(readiness, "runtime_state", "")
+        if readiness.detail:
+            container.mount(Static(escape(readiness.detail), classes="voice-command"))
+        if state == "installing":
+            return
+        if not readiness.packages_ok and state != "broken":
+            container.mount(self._install_row())
+            return
+        repair = "Update voice runtime" if state == "update_available" else "Repair voice runtime"
+        container.mount(Horizontal(
+            Button(repair, id="voice_btn_repair_runtime"),
+            Button("Remove voice runtime", id="voice_btn_remove_runtime", variant="error"),
+            classes="voice-action-row",
+        ))
 
     def _render_tts_requirements(self) -> None:
         """Rebuild the spoken-replies readiness rows and their action button.
@@ -1462,6 +1565,12 @@ class VoicePanel(SettingsPanel):
         elif button_id == "voice_btn_install":
             event.stop()
             self._start_install()
+        elif button_id == "voice_btn_repair_runtime":
+            event.stop()
+            self._start_runtime_action("repair")
+        elif button_id == "voice_btn_remove_runtime":
+            event.stop()
+            self._start_runtime_action("remove")
         elif button_id == "voice_btn_download":
             event.stop()
             self._start_download()
@@ -1532,11 +1641,11 @@ class VoicePanel(SettingsPanel):
             return
 
     def _on_download_progress(self, label: str, done: int, total: int) -> None:
-        """Progress callback for the downloader.
+        """Progress callback for the downloader; always runs on the event loop.
 
-        Called directly rather than marshalled: the streaming download is a
-        coroutine awaited on the event loop, not a worker thread, so we are
-        already where widgets may be touched.
+        The in-process setup service downloads in a coroutine on the loop;
+        the desktop service downloads on a worker thread and delivers each
+        report back onto the loop. Either way widgets may be touched here.
         """
         self._render_download_progress(label, done, total)
 
@@ -1567,23 +1676,74 @@ class VoicePanel(SettingsPanel):
             severity="information",
             markup=False,
         )
-        self.run_worker(
-            self._do_install(service),
-            name="voice_install",
-            group="voice_setup",
-            exclusive=False,
-        )
+        self._run_app_worker(self._do_install(service), "voice_install")
 
     async def _do_install(self, service: Any) -> None:
         """Worker: run the package install and repaint the card."""
         try:
-            success, message = await service.install_packages()
+            success, message = await service.install_packages(
+                progress=self._on_install_progress
+            )
         except Exception as exc:  # noqa: BLE001 — the installer surface is broad
-            logger.error("Voice package install raised: %s", exc)
-            success, message = False, f"Install failed: {exc}"
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice package install raised: %s", reason)
+            success, message = False, f"Install failed: {reason}"
         finally:
             self._busy = False
 
+        self._hide_download_progress()
+        self.app.notify(
+            message,
+            severity="information" if success else "error",
+            markup=False,
+        )
+        self._refresh_readiness(force=True)
+        self._set_actions_enabled(True)
+
+    def _on_install_progress(self, label: str, done: int, total: int) -> None:
+        """Progress callback for installs, reported in steps rather than bytes.
+
+        The setup service delivers it on the event loop. The row appears
+        only once a report arrives, so an installer that reports nothing
+        leaves the card as it was.
+        """
+        try:
+            row = self.query_one("#voice_download_row", Vertical)
+            text = self.query_one("#voice_download_label", Static)
+            bar = self.query_one("#voice_download_bar", ProgressBar)
+        except Exception:  # noqa: BLE001 — panel closed mid-install
+            return
+        row.remove_class("hidden")
+        text.update(escape(label))
+        bar.update(total=total or None, progress=done)
+
+    def _start_runtime_action(self, action: str) -> None:
+        """Repair or remove the managed voice runtime in a worker."""
+        service = self._setup_service()
+        if service is None or self._busy:
+            return
+        self._busy = True
+        self._set_actions_enabled(False)
+        verb = "Repairing" if action == "repair" else "Removing"
+        self.app.notify(f"{verb} the voice runtime.", severity="information", markup=False)
+        self._run_app_worker(self._do_runtime_action(service, action), f"voice_runtime_{action}")
+
+    async def _do_runtime_action(self, service: Any, action: str) -> None:
+        """Worker: repair or remove the voice runtime and repaint the card."""
+        try:
+            if action == "repair":
+                result = await service.repair_runtime(progress=self._on_install_progress)
+            else:
+                result = await service.remove_runtime()
+            success, message = result
+        except Exception as exc:  # noqa: BLE001 — UI boundary; must never end the app
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice runtime %s raised: %s", action, reason)
+            success, message = False, f"Voice runtime {action} failed: {reason}"
+        finally:
+            self._busy = False
+
+        self._hide_download_progress()
         self.app.notify(
             message,
             severity="information" if success else "error",
@@ -1605,23 +1765,22 @@ class VoicePanel(SettingsPanel):
             severity="information",
             markup=False,
         )
-        self.run_worker(
-            self._do_tts_install(service),
-            name="voice_tts_install",
-            group="voice_setup",
-            exclusive=False,
-        )
+        self._run_app_worker(self._do_tts_install(service), "voice_tts_install")
 
     async def _do_tts_install(self, service: Any) -> None:
         """Worker: run the speech-package install and repaint the card."""
         try:
-            success, message = await service.install_tts_packages()
+            success, message = await service.install_tts_packages(
+                progress=self._on_install_progress
+            )
         except Exception as exc:  # noqa: BLE001 — the installer surface is broad
-            logger.error("Speech package install raised: %s", exc)
-            success, message = False, f"Install failed: {exc}"
+            reason = scrub_credentials(str(exc))
+            logger.error("Speech package install raised: %s", reason)
+            success, message = False, f"Install failed: {reason}"
         finally:
             self._busy = False
 
+        self._hide_download_progress()
         self.app.notify(
             message,
             severity="information" if success else "error",
@@ -1663,9 +1822,13 @@ class VoicePanel(SettingsPanel):
             success, message = await service.download_model(
                 size, progress=self._on_download_progress
             )
+        except asyncio.CancelledError:
+            self._notify_stopped("The model download")
+            raise
         except Exception as exc:  # noqa: BLE001 — hub/network/disk errors
-            logger.error("Voice model download raised: %s", exc)
-            success, message = False, f"Download failed: {exc}"
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice model download raised: %s", reason)
+            success, message = False, f"Download failed: {reason}"
         finally:
             self._busy = False
 
@@ -1705,9 +1868,13 @@ class VoicePanel(SettingsPanel):
             success, message = await service.download_tts_model(
                 progress=self._on_download_progress
             )
+        except asyncio.CancelledError:
+            self._notify_stopped("The speech model download")
+            raise
         except Exception as exc:  # noqa: BLE001 — network/disk errors vary widely
-            logger.error("Speech model download raised: %s", exc)
-            success, message = False, f"Download failed: {exc}"
+            reason = scrub_credentials(str(exc))
+            logger.error("Speech model download raised: %s", reason)
+            success, message = False, f"Download failed: {reason}"
         finally:
             self._busy = False
 
@@ -1747,9 +1914,13 @@ class VoicePanel(SettingsPanel):
             success, message = await service.download_vad_model(
                 progress=self._on_download_progress
             )
+        except asyncio.CancelledError:
+            self._notify_stopped("The voice-detection model download")
+            raise
         except Exception as exc:  # noqa: BLE001 — network/disk errors vary widely
-            logger.error("Voice-detection model download raised: %s", exc)
-            success, message = False, f"Download failed: {exc}"
+            reason = scrub_credentials(str(exc))
+            logger.error("Voice-detection model download raised: %s", reason)
+            success, message = False, f"Download failed: {reason}"
         finally:
             self._busy = False
 
@@ -1761,6 +1932,17 @@ class VoicePanel(SettingsPanel):
         )
         self._refresh_readiness(force=True)
         self._set_actions_enabled(True)
+
+    def _notify_stopped(self, what: str) -> None:
+        """Say that *what* stopped part-way because Settings closed or the app exited."""
+        try:
+            self.app.notify(
+                f"{what} stopped before it finished; start it again from Settings.",
+                severity="warning",
+                markup=False,
+            )
+        except Exception:  # noqa: BLE001 — the app may already be shutting down
+            logger.debug("Could not report a stopped voice setup action", exc_info=True)
 
     def _remove_vad_model(self) -> None:
         """Delete the voice-activity model from disk."""

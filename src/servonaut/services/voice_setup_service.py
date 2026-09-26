@@ -38,6 +38,7 @@ from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 from servonaut.utils.archive_safety import tar_member_rejection
 from servonaut.utils.platform_utils import command_exists, get_os
 from servonaut.runtime import RuntimeCapabilityError, RuntimeLayout, detect_runtime
+from servonaut.services.interfaces import VoiceSetupProgress, VoiceSetupServiceInterface
 from servonaut.services.voice_engines import (
     KOKORO_ARCHIVE_BYTES,
     KOKORO_ARCHIVE_URL,
@@ -50,7 +51,6 @@ from servonaut.services.voice_engines import (
     SILERO_VAD_MODEL_ID,
     SILERO_VAD_URL,
     TTS_PACKAGES,
-    VOICE_MODEL_ROOT,
     directory_bytes,
     engine_spec,
     human_bytes,
@@ -62,6 +62,7 @@ from servonaut.services.voice_engines import (
     nemotron_repo,
     silero_vad_model_dir,
     silero_vad_model_path,
+    voice_models_root,
 )
 
 if TYPE_CHECKING:
@@ -108,6 +109,21 @@ _PORTAUDIO_COMMANDS: Tuple[Tuple[str, str], ...] = (
 )
 
 _PORTAUDIO_MACOS = "brew install portaudio"
+
+
+def portaudio_install_command() -> str:
+    """The command that installs the PortAudio system library.
+
+    Resolved against the package manager actually present so the
+    instruction is runnable rather than a list of maybes.
+    """
+    if get_os() == "macos":
+        return _PORTAUDIO_MACOS
+    for binary, command in _PORTAUDIO_COMMANDS:
+        if command_exists(binary):
+            return command
+    return "install the PortAudio library for your distribution"
+
 
 # Ceiling for the package install subprocess. A cold install pulls a
 # multi-hundred-megabyte runtime, which is slow on a thin connection but
@@ -179,6 +195,14 @@ class VoiceReadiness:
             on disk. A filesystem check like ``tts_model_ok`` — the
             detector runs on the same runtime spoken replies use, so
             there is no separate package dimension for it.
+        model_downloads_on_first_use: The weights are not on disk, but the
+            engine fetches them itself when first used and nothing can
+            fetch them ahead of time. A missing model then does not block
+            dictation; it only makes the first one slower.
+        runtime_state: Lifecycle state of a separately managed voice runtime
+            (``not_installed``, ``installing``, ``ready``,
+            ``update_available`` or ``broken``); empty when voice runs in
+            this application's own environment.
 
     The ``tts_*`` and ``vad_*`` dimensions describe spoken replies and
     conversation mode — separate, independently optional features — so
@@ -196,6 +220,13 @@ class VoiceReadiness:
     tts_packages_ok: bool = False
     tts_model_ok: bool = False
     vad_model_ok: bool = False
+    model_downloads_on_first_use: bool = False
+    runtime_state: str = ""
+
+    @property
+    def model_usable(self) -> bool:
+        """Whether the model requirement is out of dictation's way."""
+        return self.model_ok or self.model_downloads_on_first_use
 
     @property
     def is_ready(self) -> bool:
@@ -204,7 +235,7 @@ class VoiceReadiness:
             self.packages_ok
             and self.portaudio_ok
             and self.device_ok
-            and self.model_ok
+            and self.model_usable
         )
 
     @property
@@ -224,12 +255,12 @@ class VoiceReadiness:
             return "portaudio"
         if not self.device_ok:
             return "device"
-        if not self.model_ok:
+        if not self.model_usable:
             return "model"
         return ""
 
 
-class VoiceSetupService:
+class VoiceSetupService(VoiceSetupServiceInterface):
     """Detects what voice input still needs, and installs it on request."""
 
     def __init__(
@@ -259,6 +290,25 @@ class VoiceSetupService:
     def package_install_available(self) -> bool:
         """Whether this runtime may automatically add voice dependencies."""
         return self.install_command() is not None
+
+    @property
+    def runtime_maintenance_available(self) -> bool:
+        """Always False: the packages live in Servonaut's own environment."""
+        return False
+
+    def reset_availability(self) -> None:
+        """Drop the cached readiness verdict after the settings changed."""
+        self._cached = None
+
+    def use_config(self, config: 'VoiceConfig') -> None:
+        """Answer for *config* from now on and drop the cached verdict."""
+        self._config = config
+        self._cached = None
+
+    async def apply_config(self, config: 'VoiceConfig') -> Tuple[bool, str]:
+        """Adopt saved settings; voice runs in this process, so nothing else to reach."""
+        self.use_config(config)
+        return True, ""
 
     def _engine(self):
         """Spec for the currently configured engine."""
@@ -430,6 +480,10 @@ class VoiceSetupService:
             return f"~{human_bytes(NEMOTRON_DOWNLOAD_BYTES)}"
         return MODEL_DOWNLOAD_SIZES.get(model_size, "size unknown")
 
+    def can_download_model_for(self, engine_id: str) -> bool:
+        """Always True: both engines' weights can be fetched from here."""
+        return True
+
     def packages_size_hint(self, engine_id: Optional[str] = None) -> str:
         """Rough install footprint for an engine's packages.
 
@@ -600,8 +654,9 @@ class VoiceSetupService:
                 in_use=(engine_id == "whisper" and size == active_size),
             ))
 
-        if VOICE_MODEL_ROOT.is_dir():
-            for entry in sorted(VOICE_MODEL_ROOT.iterdir()):
+        models_root = voice_models_root()
+        if models_root.is_dir():
+            for entry in sorted(models_root.iterdir()):
                 if not entry.is_dir() or not entry.name.startswith("nemotron"):
                     continue
                 latency = self._latency_from_dirname(entry.name)
@@ -759,23 +814,20 @@ class VoiceSetupService:
         return f"pip install {' '.join(self.tts_packages())}"
 
     def portaudio_command(self) -> str:
-        """The command that installs the PortAudio system library.
+        """The command that installs the PortAudio system library."""
+        return portaudio_install_command()
 
-        Resolved against the package manager actually present so the
-        instruction is runnable rather than a list of maybes.
-        """
-        if get_os() == "macos":
-            return _PORTAUDIO_MACOS
-        for binary, command in _PORTAUDIO_COMMANDS:
-            if command_exists(binary):
-                return command
-        return "install the PortAudio library for your distribution"
-
-    async def install_packages(self) -> Tuple[bool, str]:
+    async def install_packages(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> Tuple[bool, str]:
         """Install the engine's packages into Servonaut's own environment.
 
         Runs the package manager as a subprocess and, on success, asks the
         input service to re-import so the feature works without a restart.
+
+        Args:
+            progress: Accepted for the shared interface; the package
+                manager reports no progress, so it is never called.
 
         Returns:
             Tuple of (success, message) fit for display.
@@ -806,13 +858,18 @@ class VoiceSetupService:
             return True, "Packages installed. Restart Servonaut to finish enabling voice input."
         return True, "Voice packages installed."
 
-    async def install_tts_packages(self) -> Tuple[bool, str]:
+    async def install_tts_packages(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> Tuple[bool, str]:
         """Install the spoken-replies packages into Servonaut's own environment.
 
         Driven by :meth:`tts_packages` rather than the input engine's list:
         a whisper-engine user has dictation fully working while missing the
         synthesis runtime entirely, and the two requirement sets must be
         able to converge independently.
+
+        Args:
+            progress: Accepted for the shared interface; never called.
 
         Returns:
             Tuple of (success, message) fit for display.
@@ -841,6 +898,16 @@ class VoiceSetupService:
                 "spoken replies."
             )
         return True, "Speech packages installed."
+
+    async def repair_runtime(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> Tuple[bool, str]:
+        """Not applicable: there is no separate runtime to repair here."""
+        return False, "Voice runs in Servonaut's own environment; reinstall the packages instead."
+
+    async def remove_runtime(self) -> Tuple[bool, str]:
+        """Not applicable: there is no separate runtime to remove here."""
+        return False, "Voice runs in Servonaut's own environment; there is no runtime to remove."
 
     def _package_install_guidance(self, manual_command: str) -> str:
         """Explain why a package install was not started.
@@ -1095,7 +1162,7 @@ class VoiceSetupService:
         staging = model_dir.with_name(model_dir.name + ".partial")
 
         try:
-            VOICE_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+            voice_models_root().mkdir(parents=True, exist_ok=True)
             if staging.exists():
                 shutil.rmtree(staging)
             archive_path.unlink(missing_ok=True)

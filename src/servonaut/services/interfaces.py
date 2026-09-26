@@ -5,7 +5,11 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
-    from servonaut.config.schema import AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig
+    from servonaut.config.schema import (
+        AIProviderConfig, ConnectionProfile, CustomServer, IPBanConfig, VoiceConfig,
+    )
+    from servonaut.runtime import RuntimeLayout
+    from servonaut.services.voice_setup_service import InstalledModel, VoiceReadiness
 
 
 class InstanceServiceInterface(ABC):
@@ -1922,4 +1926,230 @@ class VoiceConversationServiceInterface(ABC):
     @abstractmethod
     def set_stopped_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Register a callback fired with a reason whenever the loop lands in IDLE."""
+        pass
+
+
+VoiceSetupProgress = Callable[[str, int, int], None]
+"""Receives ``(label, done, total)``; ``total`` is 0 when the size is unknown.
+
+Downloads report bytes and installs report steps. Callbacks run on the
+event loop that awaited the operation, never on a worker thread, so they
+may touch widgets directly.
+"""
+
+
+class VoiceSetupServiceInterface(ABC):
+    """Interface for voice readiness probing and guided setup.
+
+    One implementation installs into the application's own Python
+    environment; another provisions an isolated runtime for the packaged
+    desktop build and talks to a separate voice worker. The settings panel
+    and the chat panel drive either through this surface.
+
+    Settings reach a service two ways: :meth:`use_config` for a selection
+    the settings panel is about to act on (answered for at once), and
+    :meth:`apply_config` for saved settings, which may also have to reach a
+    separate voice process.
+
+    Probing and inventory methods are cheap and safe on the UI thread.
+    The ``async`` methods never block the event loop: long-running work
+    runs off it, and progress callbacks are delivered back on it.
+    """
+
+    @property
+    @abstractmethod
+    def runtime(self) -> 'RuntimeLayout':
+        """Runtime layout of the running application."""
+        pass
+
+    @property
+    @abstractmethod
+    def package_install_available(self) -> bool:
+        """Whether :meth:`install_packages` may install voice dependencies."""
+        pass
+
+    @property
+    @abstractmethod
+    def runtime_maintenance_available(self) -> bool:
+        """Whether :meth:`repair_runtime` and :meth:`remove_runtime` apply."""
+        pass
+
+    @abstractmethod
+    def reset_availability(self) -> None:
+        """Drop the cached readiness verdict after the settings changed."""
+        pass
+
+    @abstractmethod
+    def use_config(self, config: 'VoiceConfig') -> None:
+        """Answer for *config* from now on and drop the cached verdict."""
+        pass
+
+    @abstractmethod
+    async def apply_config(self, config: 'VoiceConfig') -> tuple[bool, str]:
+        """Adopt saved settings everywhere they are used.
+
+        Returns:
+            (success, message); the message is empty on success.
+        """
+        pass
+
+    @abstractmethod
+    def probe(self, *, force: bool = False) -> 'VoiceReadiness':
+        """Resolve which requirements are met, cached until *force* is set."""
+        pass
+
+    @abstractmethod
+    def packages_size_hint(self, engine_id: Optional[str] = None) -> str:
+        """Approximate install footprint of the packages *engine_id* needs."""
+        pass
+
+    @abstractmethod
+    def manual_install_command(self) -> str:
+        """Copy-pasteable install command, or guidance when there is none."""
+        pass
+
+    @abstractmethod
+    def tts_manual_install_command(self) -> str:
+        """Spoken-replies counterpart of :meth:`manual_install_command`."""
+        pass
+
+    @abstractmethod
+    def portaudio_command(self) -> str:
+        """Command that installs the PortAudio system library."""
+        pass
+
+    @abstractmethod
+    def is_model_present_for(
+        self, engine_id: str, *, model_size: str, latency_ms: int
+    ) -> bool:
+        """Whether the weights for an engine/model choice are on disk."""
+        pass
+
+    @abstractmethod
+    def model_bytes_for(
+        self, engine_id: str, *, model_size: str, latency_ms: int
+    ) -> int:
+        """On-disk size of the weights for an engine/model choice, or 0."""
+        pass
+
+    @abstractmethod
+    def download_size_hint_for(self, engine_id: str, *, model_size: str) -> str:
+        """Download size for an engine/model choice, as display text."""
+        pass
+
+    @abstractmethod
+    def can_download_model_for(self, engine_id: str) -> bool:
+        """Whether :meth:`download_model` can fetch *engine_id*'s weights.
+
+        False when the engine fetches its weights itself on first use, so
+        the settings panel shows that instead of a download button.
+        """
+        pass
+
+    @abstractmethod
+    def is_tts_model_present(self) -> bool:
+        """Whether the speech-synthesis model is complete on disk."""
+        pass
+
+    @abstractmethod
+    def tts_model_bytes(self) -> int:
+        """On-disk size of the speech-synthesis model, or 0 when absent."""
+        pass
+
+    @abstractmethod
+    def tts_download_size_hint(self) -> str:
+        """Download footprint of the speech-synthesis model, as display text."""
+        pass
+
+    @abstractmethod
+    def is_vad_model_present(self) -> bool:
+        """Whether the voice-activity model is on disk."""
+        pass
+
+    @abstractmethod
+    def vad_model_bytes(self) -> int:
+        """On-disk size of the voice-activity model, or 0 when absent."""
+        pass
+
+    @abstractmethod
+    def vad_download_size_hint(self) -> str:
+        """Download footprint of the voice-activity model, as display text."""
+        pass
+
+    @abstractmethod
+    def installed_models(
+        self,
+        *,
+        active_engine: Optional[str] = None,
+        active_model_size: Optional[str] = None,
+        active_latency_ms: Optional[int] = None,
+        active_tts_enabled: Optional[bool] = None,
+        active_conversation_mode: Optional[bool] = None,
+    ) -> List['InstalledModel']:
+        """Every set of weights on disk; ``in_use`` follows the given choice."""
+        pass
+
+    @abstractmethod
+    def stale_models(self, **active: Any) -> List['InstalledModel']:
+        """Weights on disk the given (or current) choice does not use."""
+        pass
+
+    @abstractmethod
+    def remove_installed(self, model: 'InstalledModel') -> tuple[bool, str]:
+        """Delete the weights *model* describes; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    def remove_model(self, model_size: str) -> tuple[bool, str]:
+        """Delete the configured engine's weights; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def install_packages(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> tuple[bool, str]:
+        """Install what dictation needs; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def install_tts_packages(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> tuple[bool, str]:
+        """Install what spoken replies need; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def repair_runtime(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> tuple[bool, str]:
+        """Rebuild the managed voice runtime; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def remove_runtime(self) -> tuple[bool, str]:
+        """Delete the managed voice runtime; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def download_model(
+        self,
+        model_size: Optional[str] = None,
+        *,
+        progress: Optional[VoiceSetupProgress] = None,
+    ) -> tuple[bool, str]:
+        """Fetch the configured speech-recognition weights ahead of first use."""
+        pass
+
+    @abstractmethod
+    async def download_tts_model(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> tuple[bool, str]:
+        """Fetch the speech-synthesis model; returns (success, message)."""
+        pass
+
+    @abstractmethod
+    async def download_vad_model(
+        self, *, progress: Optional[VoiceSetupProgress] = None
+    ) -> tuple[bool, str]:
+        """Fetch the voice-activity model; returns (success, message)."""
         pass
