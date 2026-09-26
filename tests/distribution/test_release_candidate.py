@@ -22,6 +22,7 @@ from scripts.distribution.release_candidate import (
     load_evidence,
     main,
     plan_candidate,
+    verified_candidate,
     verify_candidate,
 )
 from servonaut.distribution.builder import ManifestBuilder
@@ -345,6 +346,8 @@ def test_evidence_round_trips_and_gates_publishing(tmp_path: Path) -> None:
         b"{}",
         b'{"schema_version": 2}',
         b'{"schema_version": 1, "artifacts": []}',
+        b"[" * 100_000,
+        b" " * 1_000_001,
     ],
 )
 def test_load_evidence_fails_closed(tmp_path: Path, payload: bytes) -> None:
@@ -551,13 +554,16 @@ def test_cli_check_publish_rejects_hand_written_evidence(
     release_file.write_bytes(b"PAYLOAD")
     artifact = {
         "artifact_id": "x",
+        "kind": "standalone_cli",
+        "platform": "linux",
+        "arch": "x86_64",
         "filename": release_file.name,
         "byte_size": 1,
         "sha256": "0" * 64,
         "signature": "x",
     }
     document = {
-        "schema_version": 2,
+        "schema_version": 3,
         "channel": "stable",
         "tag": "v2.27.0",
         "product_version": "2.27.0",
@@ -732,3 +738,192 @@ def test_old_schema_version_evidence_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(CandidatePolicyError) as raised:
         load_evidence(path)
     assert raised.value.code == "evidence-invalid"
+
+
+def test_evidence_carries_the_manifest_labels_of_each_artifact(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    assert document["schema_version"] == 3
+    (artifact,) = document["artifacts"]
+    assert (artifact["kind"], artifact["platform"], artifact["arch"]) == (
+        "standalone_cli",
+        "linux",
+        "x86_64",
+    )
+    assert candidate_from_evidence(document).artifacts == candidate.artifacts
+
+
+@pytest.mark.parametrize(
+    "field,relabel",
+    [("kind", "ubuntu_deb"), ("platform", "windows"), ("arch", "arm64")],
+)
+def test_relabelling_an_artifact_changes_the_candidate_digest(
+    tmp_path: Path, field: str, relabel: str
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["artifacts"][0][field] = relabel
+    assert candidate_digest(candidate_from_evidence(document).artifacts) != (
+        candidate.digest
+    )
+    with pytest.raises(CandidatePolicyError) as raised:
+        _publish(document, tmp_path)
+    assert raised.value.code == "candidate-digest-mismatch"
+
+
+def test_verify_rejects_an_artifact_relabelled_after_planning(tmp_path: Path) -> None:
+    root = _package_tree(tmp_path / "repo")
+    candidate, files = _candidate(tmp_path)
+    relabelled = replace(
+        candidate,
+        artifacts=(replace(candidate.artifacts[0], platform="darwin"),),
+    )
+    with pytest.raises(CandidatePolicyError) as raised:
+        verify_candidate(
+            relabelled,
+            expected_digest=candidate.digest,
+            root=root,
+            artifact_files=files,
+        )
+    assert raised.value.code == "digest-changed"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("kind", "tarball"),
+        ("kind", ["standalone_cli"]),
+        ("platform", "freebsd"),
+        ("platform", None),
+        ("arch", "riscv64"),
+        ("arch", {"arch": "x86_64"}),
+    ],
+)
+def test_evidence_with_unknown_artifact_labels_is_malformed(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["artifacts"][0][field] = value
+    with pytest.raises(CandidatePolicyError) as raised:
+        candidate_from_evidence(document)
+    assert raised.value.code == "evidence-invalid"
+
+
+@pytest.mark.parametrize("field", ["kind", "platform", "arch"])
+def test_evidence_without_artifact_labels_is_malformed(
+    tmp_path: Path, field: str
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    del document["artifacts"][0][field]
+    with pytest.raises(CandidatePolicyError) as raised:
+        candidate_from_evidence(document)
+    assert raised.value.code == "evidence-invalid"
+
+
+def test_schema_two_evidence_without_labels_is_rejected(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["schema_version"] = 2
+    for artifact in document["artifacts"]:
+        for field in ("kind", "platform", "arch"):
+            del artifact[field]
+    path = tmp_path / "evidence.json"
+    path.write_bytes(canonicalize_json(document) + b"\n")
+    with pytest.raises(CandidatePolicyError) as raised:
+        load_evidence(path)
+    assert raised.value.code == "evidence-invalid"
+
+
+def test_a_duplicate_key_cannot_hide_an_evidence_value(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    text = canonicalize_json(candidate.to_evidence()).decode()
+    path = tmp_path / "evidence.json"
+    path.write_text(
+        text.replace('"channel":"stable"', '"channel":"preview","channel":"stable"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(CandidatePolicyError) as raised:
+        load_evidence(path)
+    assert raised.value.code == "evidence-invalid"
+
+
+def _manifest_with_artifact_id(tmp_path: Path, artifact_id: str) -> ReleaseManifest:
+    artifact = tmp_path / "servonaut.tar.gz"
+    artifact.write_bytes(b"PAYLOAD")
+    builder = ManifestBuilder(
+        product_version="2.27.0", channel=ReleaseChannel.STABLE, expires_at=_EXPIRES_AT
+    )
+    builder.add_artifact_file(
+        artifact,
+        kind=ArtifactKind.STANDALONE_CLI,
+        distribution=DistributionKind.FROZEN_CLI,
+        platform="linux",
+        arch="x86_64",
+        download_url="https://example.com/servonaut.tar.gz",
+        artifact_id=artifact_id,
+    )
+    return builder.build()
+
+
+@pytest.mark.parametrize("artifact_id", ["cli\nlinux", "x" * 257, "\u200b"])
+def test_plan_refuses_artifact_ids_evidence_cannot_carry(
+    tmp_path: Path, artifact_id: str
+) -> None:
+    manifest = _manifest_with_artifact_id(tmp_path, artifact_id)
+    with pytest.raises(CandidatePolicyError) as raised:
+        plan_candidate(
+            manifest, tag="v2.27.0", source_commit="a" * 40, requires_signing=False
+        )
+    assert raised.value.code == "invalid-artifact-id"
+
+
+@pytest.mark.parametrize("artifact_id", ["servonaut cli linux", "cli-\u00fc", "x" * 256])
+def test_printable_artifact_ids_survive_the_evidence_round_trip(
+    tmp_path: Path, artifact_id: str
+) -> None:
+    manifest = _manifest_with_artifact_id(tmp_path, artifact_id)
+    candidate = plan_candidate(
+        manifest, tag="v2.27.0", source_commit="a" * 40, requires_signing=False
+    )
+    path = tmp_path / "evidence.json"
+    path.write_bytes(canonicalize_json(candidate.to_evidence()) + b"\n")
+    assert verified_candidate(load_evidence(path)).artifacts == candidate.artifacts
+
+
+@pytest.mark.parametrize("artifact_id", ["", "cli\nlinux", "x" * 257, 7])
+def test_evidence_refuses_unprintable_or_oversized_artifact_ids(
+    tmp_path: Path, artifact_id: object
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    document["artifacts"][0]["artifact_id"] = artifact_id
+    with pytest.raises(CandidatePolicyError) as raised:
+        candidate_from_evidence(document)
+    assert raised.value.code == "evidence-invalid"
+
+
+def test_verified_candidate_rebuilds_self_consistent_evidence(tmp_path: Path) -> None:
+    candidate, _ = _candidate(tmp_path)
+    assert verified_candidate(candidate.to_evidence()) == candidate
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        (lambda doc: doc.update(tag="v2.27.1"), "evidence-invalid"),
+        (lambda doc: doc.update(channel="preview"), "evidence-invalid"),
+        (lambda doc: doc.update(digest="0" * 64), "candidate-digest-mismatch"),
+        (lambda doc: doc["artifacts"][0].update(byte_size=99), "candidate-digest-mismatch"),
+    ],
+)
+def test_verified_candidate_refuses_inconsistent_evidence(
+    tmp_path: Path, change, expected: str
+) -> None:
+    candidate, _ = _candidate(tmp_path)
+    document = candidate.to_evidence()
+    change(document)
+    with pytest.raises(CandidatePolicyError) as raised:
+        verified_candidate(document)
+    assert raised.value.code == expected
