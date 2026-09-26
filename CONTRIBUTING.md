@@ -96,34 +96,60 @@ only after a maintainer approves it. The Release workflow runs in two stages:
    While `release/X.Y.Z` is open, the next run cuts `rcN+1` from the head of
    that branch instead: fix a problem on master, then cherry-pick the fix onto
    the release branch. A run with nothing new to release, or with no change on
-   the branch since its last candidate, does nothing. Candidate numbers are
-   never reused.
+   the branch since its last candidate, does nothing.
 2. **Final** (Thursdays, or run by hand with `stage: final`). With no open
    candidate it does nothing, and there is no release that week. Otherwise it
    checks that the latest candidate is the head of the release branch, was
-   published as a prerelease and is on PyPI, then waits for approval in the
-   `release-approval` environment. Once approved, and only if the release
-   branch has not changed meanwhile, it changes nothing but the version to
-   `X.Y.Z`, tags `vX.Y.Z` and creates the stable GitHub release with generated
-   notes, which the publish workflow ships to PyPI and the MCP registry.
-   Master's version is raised to `X.Y.Z` if it is lower, and the release
-   branch is deleted. Rejecting the approval, or letting it expire, publishes
-   nothing. The final stage refuses when a stable release already went out
-   that UTC day.
+   published as a prerelease, is on PyPI and is not yanked there, then waits
+   for approval in the `release-approval` environment. Once approved, and only
+   if the release branch has not changed meanwhile, it changes nothing but the
+   version to `X.Y.Z`, tags `vX.Y.Z` and creates the stable GitHub release
+   with generated notes, which the publish workflow ships to PyPI and the MCP
+   registry. Master's version is raised to `X.Y.Z` if it is lower, and the
+   release branch is deleted. Rejecting the approval, or letting it expire,
+   publishes nothing. The final stage refuses when a stable release already
+   went out that UTC day.
+
+A week's release is what master held when the Monday run cut `rc1`. A change
+merged after that ships the following week, unless it is cherry-picked onto
+the open release branch and tested in a new candidate. The first Monday run
+after this workflow reaches master cuts the first candidate; until one exists,
+the Thursday run has nothing to promote.
+
+Candidate numbers are never reused: PyPI accepts a version only once, even
+after it is deleted. To withdraw a candidate, yank it on PyPI and leave its tag
+and GitHub release in place; a yanked candidate is never promoted. Cut a new
+candidate instead.
+
+If a run pushed its tag but failed to create the GitHub release, run the same
+stage again: it creates only the missing release (for the final stage, after
+approval). Until a stable tag has a published release, the candidate stage
+refuses to start the next release.
 
 To try a candidate without touching an existing installation, run
 `pipx run --spec 'servonaut==X.Y.ZrcN' servonaut`, or install it in its own
 environment with `pip install --pre servonaut`.
 
-Both stages accept `dry_run` to report what they would do without pushing,
-tagging or publishing, and `draft` to create the GitHub release as a draft for
-editing the notes before publishing it. `bump` overrides the version bump when
-a candidate opens a new release branch.
+Rehearse either stage without pushing, tagging or publishing anything:
+
+```bash
+gh workflow run release.yml -f stage=candidate -f dry_run=true
+gh workflow run release.yml -f stage=final -f dry_run=true
+```
+
+`bump` overrides the version bump when a candidate opens a new release branch.
+`draft` creates the GitHub release as a draft, to edit the notes before
+publishing it; publishing the draft is what uploads the package. On the final
+stage, `draft` still tags `vX.Y.Z`, raises master's version and deletes the
+release branch: only the release itself waits for you to publish it, and the
+next candidate run refuses to start until you do.
 
 The workflow needs a `RELEASE_TOKEN` repository secret (a fine-grained personal
 access token with Contents: read/write on this repository) and a
 `release-approval` environment with at least one required reviewer; the final
-stage refuses to run while that environment requires no reviewer.
+stage refuses to run while that environment requires no reviewer. The token is
+never stored in the checkout: only the steps that push and create releases
+receive it.
 
 ## Release qualification
 
@@ -159,7 +185,8 @@ second round of testing.
 
 The publish workflow enforces qualification only while the
 `REQUIRE_RELEASE_CANDIDATE` repository variable is `true`. While it is off,
-pip/pipx releases are unaffected. While it is on, every stable release,
+pip/pipx releases are unaffected. Python release candidates (`vX.Y.ZrcN`
+prereleases) are never subject to it. While it is on, every stable release,
 including its PyPI upload, needs at least one fully qualified binary artifact:
 the release must carry `candidate-evidence.json`, the release files it names,
 and a `qualification-record.json` in which every row that applies to those
