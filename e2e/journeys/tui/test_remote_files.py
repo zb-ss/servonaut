@@ -153,7 +153,7 @@ async def _wait_for_worker_log(t):
     await t.wait_for_screen("LogViewerScreen")
     output = t.on_screen("#log_output")
     await t.wait_until(lambda: "worker: job 2 done" in t.log_text(output), desc="file content")
-    assert "Viewing: /var/log/app/worker.log" in t.rendered_text()
+    await t.wait_for_text("Viewing: /var/log/app/worker.log")
 
 
 async def test_open_a_file_found_by_browsing(tui, seed, journey, sshd):

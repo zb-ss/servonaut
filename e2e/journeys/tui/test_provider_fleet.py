@@ -78,12 +78,12 @@ async def test_every_provider_shows_up_in_the_fleet(tui, seed, moto, providers):
             lambda: (r := _rows_by_name(t)) and set(r) == expected and r,
             desc="every provider's servers in the fleet table",
         )
-        screen = t.rendered_text()
-        for name in expected:
-            assert name in screen, name
-        for address in (fleet.HZ_CACHE_1.public_ip, fleet.OVH_VPS_MAIL_1.ips[0],
-                        fleet.OVH_BATCH_1.public_ip):
-            assert address in screen, address
+        await t.wait_for_text(
+            *expected,
+            fleet.HZ_CACHE_1.public_ip,
+            fleet.OVH_VPS_MAIL_1.ips[0],
+            fleet.OVH_BATCH_1.public_ip,
+        )
         assert _state(rows[fleet.HZ_BUILD_1.name]) == "stopped"
         assert _state(rows[fleet.OVH_VPS_PROXY_1.display_name]) == "stopped"
         assert _state(rows[fleet.OVH_BATCH_1.name]) == "running"
@@ -112,7 +112,6 @@ async def test_hetzner_servers_load_with_a_fresh_aws_cache(tui, seed, providers)
         try:
             await t.wait_until(
                 lambda: fleet.HZ_CACHE_1.name in _rows_by_name(t),
-                timeout=5,
                 desc="Hetzner rows",
             )
         except JourneyTimeout as exc:

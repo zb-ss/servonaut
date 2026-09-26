@@ -88,9 +88,9 @@ async def _create_web_2(t, providers) -> None:
     await t.fill("#hetzner_input_name", NEW_SERVER)
     await t.click("#btn_hetzner_create_submit")
     await t.wait_for_screen("ConfirmActionScreen")
-    text = t.rendered_text()
-    for part in (NEW_SERVER, "nbg1", "cx32", "debian-12", DEPLOY_KEY[0], "6.80"):
-        assert part in text, part
+    await t.wait_for_text(
+        NEW_SERVER, "nbg1", "cx32", "debian-12", DEPLOY_KEY[0], "6.80", screen_only=True
+    )
     assert t.on_screen("#btn_confirm").disabled
     await t.fill("#confirm_input", "create")
     await t.wait_until(lambda: not t.on_screen("#btn_confirm").disabled, desc="confirm enabled")
@@ -152,7 +152,6 @@ async def test_manager_lists_the_new_server_after_create(tui, seed, providers):
         try:
             await t.wait_until(
                 lambda: NEW_SERVER in [row[1] for row in t.table_rows("#hetzner_mgr_table")],
-                timeout=5,
                 desc="new server in the manager",
             )
         except JourneyTimeout as exc:
@@ -218,7 +217,7 @@ async def test_ssh_keys_add_and_delete(tui, seed, providers):
         await _pick(t, "#hetzner_ssh_keys_table", CI_KEY[0])
         await t.click("#btn_hetzner_ssh_delete")
         await t.wait_for_screen("ConfirmActionScreen")
-        assert CI_KEY[0] in t.rendered_text()
+        await t.wait_for_text(CI_KEY[0], screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("HetznerSSHKeysScreen")
         await t.settle()

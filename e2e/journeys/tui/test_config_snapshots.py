@@ -75,7 +75,7 @@ async def _pull_latest(t, passphrase: str) -> None:
     await t.wait_for_screen("ConfirmModal")
     await t.click("#btn_confirm_yes")
     await t.wait_for_screen("PassphraseModal")
-    assert "Enter Sync Passphrase" in t.rendered_text()
+    await t.wait_for_text("Enter Sync Passphrase")
     await t.fill("#input_passphrase", passphrase)
     await t.click("#btn_passphrase_ok")
 
@@ -92,7 +92,7 @@ async def test_push_list_and_restore_on_a_new_device(tui, seed, fake_cloud):
 
         await _push(t, "e2e-laptop")
         await t.wait_for_screen("PassphraseModal")
-        assert "Set Sync Passphrase" in t.rendered_text()
+        await t.wait_for_text("Set Sync Passphrase")
         await t.fill("#input_passphrase", SYNC_PASSPHRASE)
         await t.fill("#input_passphrase_confirm", SYNC_PASSPHRASE + "x")
         await t.click("#btn_passphrase_ok")

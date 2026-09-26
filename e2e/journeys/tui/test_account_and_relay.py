@@ -189,12 +189,11 @@ async def test_relay_status_screen_stops_and_restarts(tui, seed, fake_cloud):
 
         await t.click(_indicator(t))
         await t.wait_for_screen("RelayStatusScreen")
-        await t.wait_until(
-            lambda: "Backend: connected" in t.rendered_text(), desc="the service's view"
+        await t.wait_for_text(
+            "Backend: connected",
+            f"Local: connected — lock owner: tui (PID {os.getpid()})",
+            client_id,
         )
-        text = t.rendered_text()
-        assert f"Local: connected — lock owner: tui (PID {os.getpid()})" in text
-        assert client_id in text
 
         stopped = _live(fake_cloud)[0]["number"]
         await t.press("s")
