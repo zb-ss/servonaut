@@ -2117,12 +2117,16 @@ def test_release_token_is_only_in_the_steps_that_write() -> None:
 
 
 def run_pypi_check(
-    tmp_path: Path, *args: str, served: bool = True, yanked: bool = False
+    tmp_path: Path,
+    *args: str,
+    served: bool = True,
+    yanked: bool = False,
+    body: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the PyPI check with a curl stand-in on PATH."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    document = json.dumps({"info": {"version": "1.2.4rc1", "yanked": yanked}})
+    document = body or json.dumps({"info": {"version": "1.2.4rc1", "yanked": yanked}})
     body = f"printf '%s' '{document}'" if served else "exit 22"
     (bin_dir / "curl").write_text(
         f'#!/bin/sh\necho "$*" >> "{tmp_path / "curl.log"}"\n{body}\n', encoding="utf-8"
@@ -2305,3 +2309,13 @@ def test_a_waiting_draft_is_found_before_any_approval_prerequisite() -> None:
     for name in ("Require a reviewer for the promotion", "Require the candidate on PyPI"):
         assert names.index(name) > names.index("Look for a draft release")
         assert "&& steps.draft.outputs.waiting != 'true'" in workflow_step("release.yml", name)
+
+
+
+@needs_jq
+@pytest.mark.parametrize("body", ["<html>busy</html>", "{}", '{"info": {"yanked": null}}'])
+def test_an_unreadable_pypi_answer_is_refused_as_unreadable(tmp_path: Path, body: str) -> None:
+    result = run_pypi_check(tmp_path, "v1.2.4rc1", body=body)
+    assert result.returncode == 1
+    assert "PyPI's answer for v1.2.4rc1 could not be read" in result.stdout
+    assert "yanked on PyPI" not in result.stdout

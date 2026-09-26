@@ -411,6 +411,7 @@ def test_run_upgrade_limits_a_prerelease_with_a_constraint(monkeypatch):
     monkeypatch.setattr(
         service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc2"])
     )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: "2.28.0rc1")
     monkeypatch.setenv("PIP_CONSTRAINT", "/etc/pip/site-constraints.txt")
     record = {}
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
@@ -486,3 +487,90 @@ def test_update_command_line_names_the_prerelease_limit(monkeypatch, capsys):
         f"Running: {sys.executable} -m pip install --upgrade servonaut"
         " (limited to servonaut==2.28.0rc2)"
     ) in printed
+
+
+
+# --- a pre-release upgrade re-checks what an open TUI offered ---------------
+
+def _prerelease_upgrade(monkeypatch, *, document, offered, installed, after):
+    """Run the upgrade of a running 2.28.0rc1 whose TUI once offered *offered*."""
+    service = _svc(current="2.28.0rc1", latest=offered, kind=DistributionKind.PIPX)
+    service._opener = _Opener(document)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=[installed, after])
+    )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: installed)
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+    ok, message = asyncio.run(service.run_upgrade())
+    return ok, message, record
+
+
+def test_a_candidate_yanked_after_the_offer_is_not_installed(monkeypatch):
+    # rc2 was offered, then yanked: a constraint naming it would still install it.
+    document = _index(
+        "2.27.0",
+        {"2.27.0": [_file()], "2.28.0rc1": [_file()], "2.28.0rc2": [_file(yanked=True)]},
+    )
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0rc1", after="2.28.0rc1",
+    )
+    assert record["env"] is None
+    assert record["argv"] == (str(Path("/usr/bin/pipx")), "upgrade", "servonaut")
+    assert ok is True and "Already on the latest version (v2.28.0rc1)" in message
+
+
+def test_an_installation_upgraded_elsewhere_is_never_moved_back(monkeypatch):
+    # Another terminal already installed rc3; this process still runs rc1.
+    document = _index(
+        "2.27.0",
+        {"2.27.0": [_file()], "2.28.0rc2": [_file()], "2.28.0rc3": [_file()]},
+    )
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0rc3", after="2.28.0rc3",
+    )
+    assert record["env"] is None
+    assert ok is True and "Updated v2.28.0rc1" not in message
+
+
+def test_an_installation_moved_to_stable_elsewhere_is_not_limited(monkeypatch):
+    document = _index("2.28.0", {"2.28.0": [_file()], "2.29.0rc1": [_file()]})
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=document, offered="2.28.0rc2",
+        installed="2.28.0", after="2.28.0",
+    )
+    assert record["env"] is None
+
+
+def test_an_offline_recheck_never_reuses_the_old_offer(monkeypatch):
+    service = _svc(current="2.28.0rc1", latest="2.28.0rc2", kind=DistributionKind.PIPX)
+    service._opener = _RaisingOpener()
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc1"])
+    )
+    monkeypatch.setattr(service, "_installed_package_version", lambda: "2.28.0rc1")
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+    asyncio.run(service.run_upgrade())
+    assert record["env"] is None
+
+
+def test_a_fresh_newer_candidate_is_still_limited_to(monkeypatch):
+    ok, message, record = _prerelease_upgrade(
+        monkeypatch, document=_PRERELEASE_PUBLISHED, offered="2.28.0rc2",
+        installed="2.28.0rc1", after="2.28.0rc2",
+    )
+    assert record["constraint"] == "servonaut==2.28.0rc2\n"
+    assert ok is True, message
+
+
+class _RaisingOpener:
+    def open(self, request, timeout):
+        raise OSError("network is unreachable")
+
+
+def test_highest_version_prefers_the_newest_readable_one():
+    assert UpdateService._highest_version(None, "2.28.0rc1", "2.28.0rc3", "junk") == "2.28.0rc3"
+    assert UpdateService._highest_version(None, "junk") is None

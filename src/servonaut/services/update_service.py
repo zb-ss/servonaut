@@ -500,18 +500,31 @@ class UpdateService:
         except RuntimeCapabilityError:
             return None
 
-    def prerelease_target(self) -> Optional[str]:
-        """The version a running pre-release upgrades to, or None.
+    def prerelease_target(self, installed: Optional[str] = None) -> Optional[str]:
+        """The version a pre-release installation upgrades to, or None.
 
-        Only for an installation that follows pre-releases, and only when the
-        last check found a version newer than the running one: an upgrade
-        never reinstalls the same version or moves back to an older one, even
-        if a later check lowered the version on offer.
+        ``installed`` is the version installed now, the running version by
+        default. Only while that is itself a pre-release, and only for a
+        version newer than it: an upgrade never reinstalls the same version or
+        moves back to an older one.
         """
+        current = PackageVersion.parse_installed(installed or self._current)
         latest = PackageVersion.parse(self._latest)
-        if latest is None or not self.follows_prereleases:
+        if current is None or latest is None or not current.is_prerelease:
             return None
-        return latest.text if self._is_newer(latest.text, self._current) else None
+        return latest.text if latest > current else None
+
+    @staticmethod
+    def _installed_package_version() -> Optional[str]:
+        """The version the installed package metadata records at this moment.
+
+        Another terminal may have upgraded the installation since this
+        process started, so this can differ from :attr:`current_version`.
+        """
+        try:
+            return importlib.metadata.version("servonaut")
+        except importlib.metadata.PackageNotFoundError:
+            return None
 
     def installed_version_external(self) -> Optional[str]:
         """Query the target mutable environment after an upgrade."""
@@ -563,9 +576,21 @@ class UpdateService:
             return False, self._update_status
 
         before = self.installed_version_external() or self._current
-        target = self._latest or self.check_for_update()
+        if self.follows_prereleases:
+            # An offer can be days old in an open TUI: since then the version
+            # may have been yanked, which pip would still install when a
+            # constraint names it. Check again, and never reuse the old offer.
+            self._latest = None
+            await asyncio.to_thread(self.check_for_update)
+            target = self._latest
+        else:
+            target = self._latest or self.check_for_update()
+        # The installation may also have moved on since this process started.
+        installed = self._highest_version(
+            self._installed_package_version(), before, self._current
+        )
         try:
-            with _upgrade_environment(self.prerelease_target()) as environment:
+            with _upgrade_environment(self.prerelease_target(installed)) as environment:
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     stdout=asyncio.subprocess.PIPE,
@@ -651,6 +676,16 @@ class UpdateService:
                 f"Install with: sudo apt install {path}"
             )
         return f"Downloaded verified update to {path}."
+
+    @staticmethod
+    def _highest_version(*versions: Optional[str]) -> Optional[str]:
+        """The highest of the versions that can be ordered, or None."""
+        parsed = [
+            (version, found)
+            for found in versions
+            if (version := PackageVersion.parse_installed(found)) is not None
+        ]
+        return max(parsed, key=lambda pair: pair[0])[1] if parsed else None
 
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:

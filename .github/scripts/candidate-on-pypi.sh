@@ -12,7 +12,12 @@ if ! meta="$(curl -sf --retry 3 "$url")"; then
   echo "::error::$candidate is not on PyPI, or PyPI could not be read, so it cannot be promoted. Check its publish run, or try again later."
   exit 1
 fi
-if [ "$(jq -r '.info.yanked' <<< "$meta")" != "false" ]; then
+yanked="$(jq -r '.info.yanked' <<< "$meta" 2> /dev/null)" || yanked=""
+if [ "$yanked" != "true" ] && [ "$yanked" != "false" ]; then
+  echo "::error::PyPI's answer for $candidate could not be read (no yanked status), so it cannot be promoted. Try again later."
+  exit 1
+fi
+if [ "$yanked" = "true" ]; then
   if [ -n "$tag" ]; then
     echo "::error::$candidate is yanked on PyPI, but $tag was already tagged from it and has no release. Either create the $tag release by hand to ship it anyway, or delete the never-released tag by hand (git push origin :refs/tags/$tag) and cut a new candidate."
   else
