@@ -12,8 +12,12 @@ drive it and returns ``App.export_screenshot()``, Textual's own SVG export.
 - with ``--update-snapshots`` the snapshot is (re)written instead, and the
   Textual version that rendered it is recorded in ``TEXTUAL_VERSION``.
 
-Textual's rendering can change between its releases, so a mismatch message
-says when the installed Textual differs from the recorded one.
+Textual's rendering can change between its releases, and the tests run
+against whatever Textual is installed. When that is not the recorded version,
+the tests are skipped (see :func:`version_mismatch`), so a Textual release
+cannot fail unrelated changes. With ``SERVONAUT_SNAPSHOTS_STRICT=1`` they run
+and fail instead: a screen that renders differently fails as usual, and one
+that renders the same fails because the recorded version is out of date.
 
 The failure files hold only the rendering and the diff, nothing about the
 machine that produced them.
@@ -25,9 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 import pytest
 import textual
@@ -39,6 +45,7 @@ SNAPSHOT_DIR = _HERE / "__snapshots__"
 FAILURE_DIR = _HERE / "__failures__"
 VERSION_FILE = SNAPSHOT_DIR / "TEXTUAL_VERSION"
 UPDATE_OPTION = "--update-snapshots"
+STRICT_ENV = "SERVONAUT_SNAPSHOTS_STRICT"
 
 # Rich prefixes every class and clip-path id in an SVG export with
 # "terminal-<hash of the whole content>-". Dropping the hash keeps the ids
@@ -52,6 +59,46 @@ Scenario = Callable[[Any], Awaitable[None]]
 # how many exports to take before giving up.
 _SETTLE_DELAY = 0.1
 _SETTLE_ATTEMPTS = 30
+
+
+@dataclass(frozen=True)
+class Mode:
+    """How one run treats its snapshots.
+
+    Attributes:
+        update: Rewrite the snapshots instead of comparing.
+        strict: Fail, rather than skip, when Textual is not the recorded version.
+        mismatch: Why the installed Textual is not the recorded one, or None.
+    """
+
+    update: bool
+    strict: bool
+    mismatch: Optional[str]
+
+
+def current_mode(config: pytest.Config) -> Mode:
+    """The mode for this run, from the command line and the environment."""
+    return Mode(
+        update=bool(config.getoption(UPDATE_OPTION)),
+        strict=os.environ.get(STRICT_ENV) == "1",
+        mismatch=version_mismatch(),
+    )
+
+
+def version_mismatch() -> Optional[str]:
+    """Why the installed Textual is not the one that rendered the snapshots."""
+    try:
+        recorded = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        recorded = ""
+    installed = textual.__version__
+    if recorded == installed:
+        return None
+    return (
+        f"snapshots recorded with Textual {recorded or '(no version recorded)'}, "
+        f"installed {installed}: review the new rendering and run with "
+        f"{UPDATE_OPTION}"
+    )
 
 
 def normalize_svg(svg: str) -> str:
@@ -97,8 +144,12 @@ def snapshot_path(node: pytest.Item) -> Path:
     return SNAPSHOT_DIR / node.path.stem / f"{node.name}.svg"
 
 
-def check_snapshot(node: pytest.Item, svg: str, *, update: bool) -> None:
-    """Compare *svg* with the stored snapshot of *node*, or store it."""
+def check_snapshot(node: pytest.Item, svg: str, mode: Mode) -> None:
+    """Compare *svg* with the stored snapshot of *node*, or store it.
+
+    The caller skips the test before capturing when the Textual versions
+    differ outside strict mode (see ``conftest.snapshot_mode``).
+    """
     expected_path = snapshot_path(node)
     relative = expected_path.relative_to(_REPO_ROOT)
     failure_svg = FAILURE_DIR / expected_path.parent.name / expected_path.name
@@ -106,7 +157,7 @@ def check_snapshot(node: pytest.Item, svg: str, *, update: bool) -> None:
     for stale in (failure_svg, failure_diff):
         stale.unlink(missing_ok=True)
 
-    if update:
+    if mode.update:
         expected_path.parent.mkdir(parents=True, exist_ok=True)
         expected_path.write_text(svg, encoding="utf-8", newline="\n")
         VERSION_FILE.write_text(f"{textual.__version__}\n", encoding="utf-8", newline="\n")
@@ -119,6 +170,11 @@ def check_snapshot(node: pytest.Item, svg: str, *, update: bool) -> None:
         )
     expected = expected_path.read_text(encoding="utf-8")
     if expected == svg:
+        if mode.mismatch:
+            pytest.fail(
+                f"{relative} renders the same, but {mode.mismatch}",
+                pytrace=False,
+            )
         return
 
     failure_svg.parent.mkdir(parents=True, exist_ok=True)
@@ -134,20 +190,7 @@ def check_snapshot(node: pytest.Item, svg: str, *, update: bool) -> None:
         f"{relative} does not match the rendering; the new rendering is in "
         f"{failure_svg.relative_to(_REPO_ROOT)} and the diff in "
         f"{failure_diff.relative_to(_REPO_ROOT)}. If the change is intended, "
-        f"rerun with {UPDATE_OPTION}.{_version_note()}",
+        f"rerun with {UPDATE_OPTION}."
+        + (f" Note: {mode.mismatch}." if mode.mismatch else ""),
         pytrace=False,
-    )
-
-
-def _version_note() -> str:
-    """A hint when the installed Textual is not the one the snapshots came from."""
-    try:
-        recorded = VERSION_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    if not recorded or recorded == textual.__version__:
-        return ""
-    return (
-        f" The snapshots were rendered with Textual {recorded} and this run "
-        f"uses {textual.__version__}; the difference may come from Textual."
     )

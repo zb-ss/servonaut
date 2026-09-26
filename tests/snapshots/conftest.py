@@ -130,21 +130,35 @@ def offline_services(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture
+def snapshot_mode(request: pytest.FixtureRequest) -> _snapshot.Mode:
+    """Update, strict or plain comparison; skips on a Textual version mismatch.
+
+    Runs before ``clean_environment``, which removes the ``SERVONAUT_*``
+    variables, so it can still read the strict-mode switch.
+    """
+    mode = _snapshot.current_mode(request.config)
+    if mode.mismatch and not (mode.update or mode.strict):
+        pytest.skip(mode.mismatch)
+    return mode
+
+
 @pytest.fixture(autouse=True)
-def snapshot_state(empty_home, clean_environment, frozen_clock, offline_services) -> None:
+def snapshot_state(
+    snapshot_mode, empty_home, clean_environment, frozen_clock, offline_services
+) -> None:
     """The seeded state every screenshot test starts from."""
     _harness.seed_home()
 
 
 @pytest.fixture
 def screen_snapshot(
-    request: pytest.FixtureRequest,
+    request: pytest.FixtureRequest, snapshot_mode: _snapshot.Mode
 ) -> Callable[[App, Tuple[int, int], _snapshot.Scenario], None]:
     """Capture *app* at a size after a scenario and check it against its snapshot."""
-    update = bool(request.config.getoption(_snapshot.UPDATE_OPTION))
 
     def check(app: App, size: Tuple[int, int], scenario: _snapshot.Scenario) -> None:
         svg = _snapshot.capture_svg(app, size, scenario)
-        _snapshot.check_snapshot(request.node, svg, update=update)
+        _snapshot.check_snapshot(request.node, svg, snapshot_mode)
 
     return check

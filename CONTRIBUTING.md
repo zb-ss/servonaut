@@ -151,11 +151,23 @@ checked. Look at every changed SVG before committing, and commit the SVGs
 together with the change that caused them. A failure you did not expect is a
 regression to fix, not a snapshot to update.
 
-Textual's rendering can change from one release to the next, so the
-snapshots record the Textual version they were made with
-(`tests/snapshots/__snapshots__/TEXTUAL_VERSION`), and a failure message says
-when the installed version differs. Run the tests with that version; when
-you upgrade Textual, update all the snapshots in the same change.
+Textual's rendering can change from one release to the next, and the tests
+use whatever Textual is installed, as users do. The snapshots record the
+Textual version they were made with
+(`tests/snapshots/__snapshots__/TEXTUAL_VERSION`). When the installed version
+is a different one, the tests are skipped with the reason ("snapshots
+recorded with Textual X, installed Y"), so a new Textual release cannot fail
+changes that have nothing to do with it. Set `SERVONAUT_SNAPSHOTS_STRICT=1`
+to run them anyway: a screen that renders differently fails as usual, and one
+that renders the same fails because the recorded version is out of date.
+
+CI runs the tests in both ways. The test jobs skip them on a version
+mismatch; the `screenshots / Python 3.12` job runs them in strict mode on
+every pull request and on master, and uploads the new renderings and diffs as
+the `screenshot-failures` artifact when it fails. That job is not a required
+check: when it fails because Textual changed, install the new version, review
+the renderings, and update all the snapshots in one change with
+`--update-snapshots`, which also records the new version.
 
 Every screen starts from the same state, so the rendering does not depend on
 the machine, the Python version or the time of day:
