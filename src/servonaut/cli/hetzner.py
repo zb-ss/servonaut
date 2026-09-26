@@ -16,7 +16,7 @@ Subcommand tree::
                                                  [--image ubuntu-22.04]
                                                  [--location fsn1]
                                                  [--ssh-key NAME|ID] (repeatable)
-                                                 [--no-wait] [--json]
+                                                 [--no-wait] [--yes] [--json]
     servonaut hetzner destroy NAME_OR_ID         [--yes] [--json]
     servonaut hetzner ssh-keys list              [--json]
     servonaut hetzner ssh-keys add NAME --public-key-file PATH [--json]
@@ -28,7 +28,8 @@ Exit codes:
     0 — success
     1 — generic error / API failure
     2 — Hetzner not configured (no enabled flag, or no token)
-    3 — typed confirmation declined for destroy
+    3 — confirmation declined (create's y/N, destroy's typed name), or
+        create run without a terminal to ask on and without --yes
     4 — argparse / validation error (argparse already exits 2 for usage,
         we use 4 to differentiate semantic input-validation failures)
 """
@@ -39,9 +40,11 @@ import argparse
 import asyncio
 import json
 import logging
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Coroutine, List, Optional
+from typing import Any, Coroutine, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,10 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
                                'config.hetzner.default_hetzner_ssh_key when omitted.')
     p_create.add_argument('--no-wait', action='store_true',
                           help='Do not block until the server reaches running.')
+    p_create.add_argument('--yes', '-y', action='store_true',
+                          help='Create without showing the summary and asking '
+                               'y/N. Required when standard input is not a '
+                               'terminal (scripts, CI).')
     p_create.add_argument('--json', action='store_true',
                           help='Emit the new instance dict as JSON.')
 
@@ -292,8 +299,80 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return _EXIT_SUCCESS
 
 
+def _stdin_is_terminal() -> bool:
+    """Whether standard input is a terminal someone can answer a question on."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (AttributeError, ValueError):  # replaced or closed stdin
+        return False
+
+
+@contextmanager
+def _ctrl_c_interrupts() -> Iterator[None]:
+    """Make Ctrl-C raise KeyboardInterrupt while a prompt waits for input.
+
+    The create question is asked from inside ``asyncio.run``, which (from
+    Python 3.11) handles Ctrl-C by cancelling its task instead of raising.
+    ``input()`` would then keep waiting and a later "y" would still create
+    the server. Python's default handler raises at the prompt instead, where
+    it counts as "no", so nothing is created.
+    """
+    try:
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    except ValueError:
+        # Not the main thread: asyncio.run installed no handler there either.
+        yield
+        return
+    try:
+        yield
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+
+
+def _confirm_create(summary: dict, out) -> bool:
+    """Show what is about to be created and ask y/N (default: no).
+
+    Args:
+        summary: Resolved values from ``create_server``'s confirm callback.
+        out: Stream for the summary and prompt (stderr under ``--json`` so
+            stdout stays machine-readable).
+    """
+    keys = ', '.join(summary.get('ssh_keys') or []) or '(none)'
+    print(f"About to create Hetzner server {summary['name']!r}:", file=out)
+    print(f"  type:      {summary['server_type']}", file=out)
+    print(f"  image:     {summary['image']}", file=out)
+    print(f"  location:  {summary['location'] or '(Hetzner default)'}", file=out)
+    print(f"  SSH keys:  {keys}", file=out)
+    print("Billing starts once the server exists and continues until it is deleted.",
+          file=out)
+    print("Create it? [y/N]: ", end='', file=out, flush=True)
+    try:
+        with _ctrl_c_interrupts():
+            answer = input()
+    except (EOFError, KeyboardInterrupt):
+        print(file=out)
+        return False
+    return answer.strip().lower() in ('y', 'yes')
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
+    from servonaut.services.hetzner_service import HetznerCreateDeclined
+
+    if not args.yes and not _stdin_is_terminal():
+        # A script or pipe cannot answer y/N: refuse up front instead of
+        # waiting on input that may never come.
+        print(
+            "servonaut hetzner create asks before creating a server, but "
+            "standard input is not a terminal. Pass --yes to create it "
+            "without asking.",
+            file=sys.stderr,
+        )
+        return _EXIT_DECLINED
+
     svc = _build_service()
+    prompt_out = sys.stderr if args.json else sys.stdout
+    confirm = None if args.yes else (lambda summary: _confirm_create(summary, prompt_out))
     try:
         instance = _run_async(svc.create_server(
             name=args.name,
@@ -302,7 +381,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
             location=args.location,
             ssh_keys=args.ssh_keys,
             wait_until_running=not args.no_wait,
+            confirm=confirm,
         ))
+    except HetznerCreateDeclined:
+        print("Cancelled.", file=prompt_out)
+        return _EXIT_DECLINED
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_VALIDATION

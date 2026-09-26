@@ -528,3 +528,24 @@ def test_listener_dedups_dual_published_tool_call():
     run(listener._handle_event(event))
     run(listener._handle_event(event))
     executor.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "envelope_guard, expected_sent, expected_guard",
+    [(None, "", "readonly"), ("standard", "standard", "standard")],
+)
+def test_parse_keeps_the_guard_label_as_sent(
+    envelope_guard, expected_sent, expected_guard,
+):
+    """No label on the wire → mirror for the effective level, "" as sent."""
+    envelope = {
+        "tool_call_id": "tc-3",
+        "tool": "list_instances",
+        "args": {},
+        "conversation_id": "conv-1",
+    }
+    if envelope_guard is not None:
+        envelope["guard_level"] = envelope_guard
+    call = parse_mercure_tool_call(envelope)
+    assert call.server_guard_level == expected_sent
+    assert call.guard_level == expected_guard

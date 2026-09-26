@@ -9,6 +9,8 @@ Covers the architect plan §T2 minimum-test list:
 - ``rate_limited`` carries ``retry_after``
 - ``ping`` events absorbed (never yielded)
 - heartbeat watchdog (>35s silence) raises :class:`SSEStreamDead`
+- the watchdog counts server silence only: time the consumer spends on a
+  tool prompt is excluded, and ``silence_timeout`` overrides the default
 - caller cancellation unwinds the connection cleanly
 - ``fallback_used`` surfaces in usage
 - soft-cap model swap visible in usage event
@@ -23,8 +25,10 @@ without burning real wall-clock. The same trick keeps
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from servonaut.services import ai_sse
@@ -339,3 +343,244 @@ def test_soft_cap_model_swap_visible(monkeypatch):
     # Server force-downgraded — model field reflects the swap.
     assert usage["data"]["model"] == "gemini-2-flash-002"
     assert usage["data"]["quota"]["soft_capped"] is True
+
+
+# ---------------------------------------------------------------------------
+# 11. The watchdog counts server silence only, never consumer busy time
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_CHUNK = (
+    b'event: tool_call\n'
+    b'data: {"tool_call_id": "tc_1", "tool": "check_status", "args": {}, '
+    b'"guard_level": "standard"}\n\n'
+)
+_PING_CHUNK = b"event: ping\ndata: {}\n\n"
+_USAGE_CHUNK = b'event: usage\ndata: {"model": "m", "input_tokens": 1}\n\n'
+
+
+def _build_scheduled_transport(schedule):
+    """Serve chunks on a wall-clock schedule, like a live server would.
+
+    ``schedule`` is a list of ``(delay_before_s, chunk)``. A background
+    "server" task pushes each chunk into a queue at its time whether or
+    not the client is reading, so chunks sent while the consumer is busy
+    pile up unread — exactly what a socket buffer does.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def server():
+        for delay, chunk in schedule:
+            await asyncio.sleep(delay)
+            await queue.put(chunk)
+        await queue.put(None)
+
+    async def stream_body():
+        task = asyncio.ensure_future(server())
+        try:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    return
+                yield chunk
+        finally:
+            task.cancel()
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body(),
+        )
+
+    return httpx.MockTransport(handler)
+
+
+async def _consume_with_busy_tool_call(gen, busy_seconds):
+    """Collect events, holding the stream while a tool_call is 'answered'."""
+    out = []
+    async for event in gen:
+        out.append(event)
+        if event["event"] == "tool_call":
+            # The user reads the tool prompt / the tool runs.
+            await asyncio.sleep(busy_seconds)
+    return out
+
+
+def test_time_spent_on_a_tool_prompt_does_not_trip_the_watchdog(monkeypatch):
+    """A tool prompt open longer than the limit must not drop the turn.
+
+    The server keeps pinging while the user answers; those pings are
+    buffered while the consumer is busy and must count as proof of life.
+    """
+    # Limit 0.6 s; the prompt stays open 1.5 s (2.5x the limit) while the
+    # server pings every 0.1 s — a 0.5 s margin on every real wait.
+    monkeypatch.setattr(ai_sse, "SSE_HEARTBEAT_DEAD_S", 0.6)
+    schedule = [(0.0, _TOOL_CALL_CHUNK)]
+    schedule += [(0.1, _PING_CHUNK) for _ in range(20)]
+    schedule.append((0.1, _USAGE_CHUNK))
+    monkeypatch.setattr(
+        ai_sse, "_TEST_TRANSPORT", _build_scheduled_transport(schedule),
+    )
+
+    api = _make_api_client()
+    gen = stream_sse(api, "/api/ai/chat", {"task": "chat"})
+    events = run(_consume_with_busy_tool_call(gen, busy_seconds=1.5))
+
+    assert [e["event"] for e in events] == ["tool_call", "usage"]
+
+
+def test_real_silence_after_a_tool_prompt_still_trips_the_watchdog(monkeypatch):
+    """Excluding consumer time must not disable the watchdog itself."""
+    monkeypatch.setattr(ai_sse, "SSE_HEARTBEAT_DEAD_S", 0.3)
+    schedule = [(0.0, _TOOL_CALL_CHUNK), (2.0, _USAGE_CHUNK)]
+    monkeypatch.setattr(
+        ai_sse, "_TEST_TRANSPORT", _build_scheduled_transport(schedule),
+    )
+
+    api = _make_api_client()
+    gen = stream_sse(api, "/api/ai/chat", {"task": "chat"})
+    with pytest.raises(SSEStreamDead):
+        run(_consume_with_busy_tool_call(gen, busy_seconds=0.1))
+
+
+def test_long_tool_wait_then_real_silence_still_trips_the_watchdog(monkeypatch):
+    """A prompt held past the limit, then a dead server: the watchdog fires.
+
+    Resuming after the prompt restarts the clock; it must still run out
+    when the server then says nothing at all.
+    """
+    monkeypatch.setattr(ai_sse, "SSE_HEARTBEAT_DEAD_S", 0.3)
+    schedule = [(0.0, _TOOL_CALL_CHUNK), (5.0, _USAGE_CHUNK)]
+    monkeypatch.setattr(
+        ai_sse, "_TEST_TRANSPORT", _build_scheduled_transport(schedule),
+    )
+
+    api = _make_api_client()
+    gen = stream_sse(api, "/api/ai/chat", {"task": "chat"})
+    t0 = time.monotonic()
+    with pytest.raises(SSEStreamDead):
+        run(_consume_with_busy_tool_call(gen, busy_seconds=1.0))
+    # Fired about limit-after-resume (~1.3 s), long before the 5 s event.
+    assert time.monotonic() - t0 < 3.0
+
+
+def test_silence_timeout_argument_overrides_the_default(monkeypatch):
+    """``silence_timeout`` replaces the module default for one stream."""
+    monkeypatch.setattr(ai_sse, "SSE_HEARTBEAT_DEAD_S", 30.0)
+    monkeypatch.setattr(ai_sse, "SSE_SILENCE_MIN_S", 0.1)
+    transport = build_mock_transport_with_delay(
+        fixture_for("mid_stream_silence"), delay_at_event=4, delay_seconds=1.0,
+    )
+    monkeypatch.setattr(ai_sse, "_TEST_TRANSPORT", transport)
+
+    api = _make_api_client()
+    gen = stream_sse(
+        api, "/api/ai/chat", {"task": "chat"}, silence_timeout=0.3,
+    )
+    with pytest.raises(SSEStreamDead):
+        run(_drain(gen))
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (90, 90.0),
+        (None, 35.0),
+        # Out of range: clamped to [20, 600].
+        (12.5, 20.0),
+        (1000, 600.0),
+        # Invalid: the default.
+        (0, 35.0),
+        (-5, 35.0),
+        (float("inf"), 35.0),
+        (float("nan"), 35.0),
+        (True, 35.0),
+        ("60", 35.0),
+    ],
+)
+def test_resolve_silence_timeout_clamps_and_falls_back(value, expected):
+    assert ai_sse.resolve_silence_timeout(value) == expected
+
+
+@pytest.mark.parametrize("value", ["60", 5, 1000, float("nan")])
+def test_resolve_silence_timeout_warns_when_it_changes_the_value(value, caplog):
+    with caplog.at_level("WARNING", logger="servonaut.services.ai_sse"):
+        ai_sse.resolve_silence_timeout(value)
+    assert "silence timeout" in caplog.text
+
+
+def test_default_silence_timeout_logs_nothing(caplog):
+    with caplog.at_level("WARNING", logger="servonaut.services.ai_sse"):
+        assert ai_sse.resolve_silence_timeout(None) == 35.0
+        assert ai_sse.resolve_silence_timeout(90) == 90.0
+    assert caplog.text == ""
+
+
+def test_read_timeout_is_raised_to_outlast_the_silence_limit(monkeypatch):
+    """With a limit above the read timeout, httpx must not give up first."""
+    seen = []
+    real_client = ai_sse.httpx.AsyncClient
+
+    def _recording_client(**kwargs):
+        seen.append(kwargs["timeout"])
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(ai_sse.httpx, "AsyncClient", _recording_client)
+    monkeypatch.setattr(
+        ai_sse, "_TEST_TRANSPORT", build_mock_transport(fixture_for("tokens_only")),
+    )
+    api = _make_api_client()
+    run(_drain(stream_sse(
+        api, "/api/ai/chat", {"task": "chat"}, timeout=120.0, silence_timeout=300,
+    )))
+    run(_drain(stream_sse(api, "/api/ai/chat", {"task": "chat"}, timeout=120.0)))
+
+    assert seen == [305.0, 120.0]
+
+
+# ---------------------------------------------------------------------------
+# 12. retry_after parsing never raises and stays bounded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (30, 30),
+        ("12", 12),
+        (12.7, 12),
+        (99999, 3600),
+        (None, None),
+        (True, None),
+        (0, None),
+        (-4, None),
+        (float("inf"), None),
+        (float("nan"), None),
+        ("1e999", None),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+        ({"x": 1}, None),
+    ],
+)
+def test_coerce_retry_after(raw, expected):
+    assert ai_sse.coerce_retry_after(raw) == expected
+
+
+def test_sse_error_with_infinite_retry_after_does_not_overflow(monkeypatch):
+    """JSON ``Infinity`` must surface as a normal SSEStreamError."""
+    body = (
+        b'event: error\n'
+        b'data: {"code": "rate_limited", "message": "slow down", '
+        b'"retry_after": Infinity}\n\n'
+    )
+
+    def handler(request):
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body,
+        )
+
+    monkeypatch.setattr(ai_sse, "_TEST_TRANSPORT", httpx.MockTransport(handler))
+    api = _make_api_client()
+    with pytest.raises(SSEStreamError) as exc_info:
+        run(_drain(stream_sse(api, "/api/ai/chat", {"task": "chat"})))
+    assert exc_info.value.code == "rate_limited"
+    assert exc_info.value.retry_after is None

@@ -469,10 +469,11 @@ class TestFetchDedicated:
         result = service_with_client._fetch_dedicated()
         assert result == []
 
-    def test_error_listing_returns_empty(self, service_with_client, mock_client):
+    def test_error_listing_is_raised(self, service_with_client, mock_client):
+        # A refused listing must not look like "no servers" (it would be cached).
         mock_client.get.side_effect = Exception("API error")
-        result = service_with_client._fetch_dedicated()
-        assert result == []
+        with pytest.raises(Exception, match="API error"):
+            service_with_client._fetch_dedicated()
 
     def test_individual_server_error_skipped(self, service_with_client, mock_client):
         def side_effect(path, **kw):
@@ -585,10 +586,10 @@ class TestFetchVps:
         result = service_with_client._fetch_vps()
         assert result == []
 
-    def test_error_listing_returns_empty(self, service_with_client, mock_client):
+    def test_error_listing_is_raised(self, service_with_client, mock_client):
         mock_client.get.side_effect = Exception("API unavailable")
-        result = service_with_client._fetch_vps()
-        assert result == []
+        with pytest.raises(Exception, match="API unavailable"):
+            service_with_client._fetch_vps()
 
     def test_individual_vps_error_skipped(self, service_with_client, mock_client):
         def side_effect(path, **kw):
@@ -670,10 +671,10 @@ class TestFetchCloud:
         assert inst["provider_type"] == "cloud"
         assert inst["is_ovh"] is True
 
-    def test_error_returns_empty(self, service_with_client, mock_client):
+    def test_error_listing_is_raised(self, service_with_client, mock_client):
         mock_client.get.side_effect = Exception("Cloud project inaccessible")
-        result = service_with_client._fetch_cloud("proj-123")
-        assert result == []
+        with pytest.raises(Exception, match="Cloud project inaccessible"):
+            service_with_client._fetch_cloud("proj-123")
 
     def test_empty_instance_list_returns_empty(self, service_with_client, mock_client):
         mock_client.get.return_value = []

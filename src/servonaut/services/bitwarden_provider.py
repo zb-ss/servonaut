@@ -30,8 +30,8 @@ Authentication model:
 
     The CLI is responsible for setting the env var BEFORE invoking
     ``bws``. We resolve the value at *call time*, not construction
-    time, so a user who sets the var via ``servonaut secrets refresh``
-    mid-session has it picked up without restarting.
+    time, so a variable exported (or loaded from the secrets env file)
+    mid-session is picked up without restarting.
 
 Naming model:
     Bitwarden addresses secrets by UUID, not by name. We translate

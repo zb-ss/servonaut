@@ -40,6 +40,15 @@ _EXIT_SUCCESS = 0
 _EXIT_VERIFY_FAILED = 1   # BW or SSH probe returned a non-verified status
 _EXIT_FATAL = 2           # No ref stored / BW CLI missing / session locked / not logged in
 
+# There is no CLI command that links a Bitwarden SSH key to a server; the TUI's
+# SSH Ref editor does it (``k`` on the instance list). Team refs are shared
+# per team and are set by a team admin.
+_LINK_PERSONAL_REF_HINT = (
+    "Link a Bitwarden SSH key in the Servonaut TUI first "
+    "(run `servonaut`, select the server, press k)."
+)
+_LINK_TEAM_REF_HINT = "A team admin needs to link a Bitwarden SSH key for this server first."
+
 # UUID-v4 regex for detecting team SharedServer ids.
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -147,6 +156,7 @@ def _run_ssh_probe(
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=accept-new",
         "-i", key_path,
+        "--",
         f"{user}@{host}",
         "true",
     ]
@@ -279,6 +289,17 @@ def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str
     return instance.get("username") or "ec2-user"
 
 
+def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
+    """Return the SSH port: ``--port``, else the port saved with the server."""
+    if port_override is not None:
+        return port_override
+    saved = instance.get("port")
+    try:
+        return int(saved) if saved else None
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Main verify handler
 # ---------------------------------------------------------------------------
@@ -370,7 +391,7 @@ async def _cmd_verify(args: Any) -> int:
     if personal_instance is not None:
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
-        port = port_override
+        port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
             f"({personal_instance.get('provider', 'unknown')}/{personal_instance.get('id')})"
@@ -383,8 +404,7 @@ async def _cmd_verify(args: Any) -> int:
     else:
         # UUID not in any local cache and not in any team — no ref stored.
         print(
-            f"No SSH ref stored for instance {instance_arg!r}. "
-            "Run `servonaut bw link` to register a Bitwarden item ref first.",
+            f"No SSH ref stored for instance {instance_arg!r}. {_LINK_PERSONAL_REF_HINT}",
             file=sys.stderr,
         )
         return _EXIT_FATAL
@@ -411,8 +431,7 @@ async def _cmd_verify(args: Any) -> int:
             )
             if status is None:
                 print(
-                    f"No SSH ref stored for {label}. "
-                    "Run `servonaut bw link` to register a Bitwarden item ref first.",
+                    f"No SSH ref stored for {label}. {_LINK_PERSONAL_REF_HINT}",
                     file=sys.stderr,
                 )
                 return _EXIT_FATAL
@@ -432,8 +451,7 @@ async def _cmd_verify(args: Any) -> int:
             )
             if status is None:
                 print(
-                    f"No SSH ref stored for {label}. "
-                    "Run `servonaut bw link` to register a Bitwarden item ref first.",
+                    f"No SSH ref stored for {label}. {_LINK_TEAM_REF_HINT}",
                     file=sys.stderr,
                 )
                 return _EXIT_FATAL

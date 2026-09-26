@@ -1,34 +1,76 @@
 """Voice model asset cache, verification, and integrity store for Servonaut Desktop.
 
-Manages download, cryptographic verification, safe archive extraction, status
-inspection, and eviction of voice model weights under the companion runtime
-models directory (~/.servonaut/runtimes/voice/models/).
+Downloads, verifies, safely unpacks, inspects and evicts voice model weights.
+Every model lands in the directory the speech engines load it from (see
+:mod:`servonaut.services.voice_engines`), so a model fetched here is used by
+the voice worker and by the terminal app alike, and a model the terminal app
+already downloaded is reused rather than fetched again.
+
+Every asset is pinned by its exact byte size and SHA-256; those pins, not
+the URL, are what make a download trustworthy. Hugging Face assets are
+addressed by commit revision, so their URL is immutable too. Release
+assets are addressed by their release tag, and a publisher can replace an
+asset under an existing tag: such a replacement fails the download (the
+pins no longer match) rather than installing different bytes. A download
+that grows past the pinned size is aborted mid-stream, redirects may never
+leave HTTPS, and nothing reaches the model directory until every byte
+verified.
 """
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 import hashlib
-import io
+import http.client
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import tarfile
 import tempfile
 import time
-from typing import Any, Callable, Dict, Final, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Final, List, Mapping, Optional, Tuple
+import urllib.error
 import urllib.request
 
-from servonaut.desktop.voice.runtime import DEFAULT_RUNTIME_ROOT, VoiceRuntimeLock
+from servonaut.desktop.voice.runtime import VoiceRuntimeLock
+from servonaut.services.voice_engines import (
+    KOKORO_ARCHIVE_URL,
+    KOKORO_DISK_BYTES,
+    KOKORO_MODEL_ID,
+    KOKORO_REQUIRED_FILES,
+    NEMOTRON_DEFAULT_LATENCY_MS,
+    NEMOTRON_FILES,
+    NEMOTRON_LATENCY_OPTIONS,
+    SILERO_VAD_FILE,
+    SILERO_VAD_MODEL_ID,
+    SILERO_VAD_URL,
+    directory_bytes,
+    kokoro_model_dir,
+    nemotron_model_dir,
+    nemotron_repo,
+    normalise_nemotron_latency,
+    silero_vad_model_dir,
+    voice_models_root,
+)
+from servonaut.utils.archive_safety import UnsafeArchiveError, extract_tar_safely
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODELS_ROOT: Final[Path] = DEFAULT_RUNTIME_ROOT / "models"
+#: The models root at import time. :class:`VoiceModelCache` resolves the
+#: live root on construction instead, so prefer that.
+DEFAULT_MODELS_ROOT: Final[Path] = voice_models_root()
+
 _LOCK_FILENAME: Final[str] = ".models.lock"
+_STAGING_PREFIX: Final[str] = ".staging."
 _DOWNLOAD_CHUNK_SIZE: Final[int] = 1024 * 1024  # 1 MiB
+_USER_AGENT: Final[str] = "Servonaut-VoiceModelCache/1.0"
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+|\*)")
+_HTTP_PARTIAL_CONTENT: Final[int] = 206
 
 
 class VoiceModelError(Exception):
@@ -43,6 +85,32 @@ class VoiceModelExtractionError(VoiceModelError):
     """Raised when an archive extraction violates safety invariants (e.g. path traversal)."""
 
 
+class _TransferInterrupted(ConnectionError):
+    """The body ended before the pinned size arrived; resumable."""
+
+
+@dataclass(frozen=True)
+class VoiceModelDownloadPolicy:
+    """Timing limits for model downloads.
+
+    There is deliberately no total deadline: a large model on a slow link
+    legitimately takes long. What is bounded is silence.
+
+    Attributes:
+        stall_timeout_seconds: A transfer that delivers no bytes for this
+            long is abandoned, then resumed.
+        max_resume_attempts: Interruptions tolerated per asset; each attempt
+            continues where the last stopped (an HTTP Range request).
+        retry_delay_seconds: Pause before each resume attempt.
+        lock_timeout_seconds: Wait for another download into the same cache.
+    """
+
+    stall_timeout_seconds: float = 60.0
+    max_resume_attempts: int = 5
+    retry_delay_seconds: float = 2.0
+    lock_timeout_seconds: float = 15.0
+
+
 class VoiceModelCacheState(str, Enum):
     """State of an on-disk model asset."""
 
@@ -54,123 +122,184 @@ class VoiceModelCacheState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class VoiceModelAsset:
-    """Individual file or archive belonging to a model package."""
+    """One pinned file or archive belonging to a model package.
+
+    The URL must be HTTPS, and the exact size and SHA-256 are mandatory:
+    an asset without them cannot be verified, so it cannot be constructed.
+    """
 
     filename: str
     url: str
-    expected_size: Optional[int] = None
-    expected_sha256: Optional[str] = None
+    expected_size: int
+    expected_sha256: str
     is_archive: bool = False
-    archive_format: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.url.startswith("https://"):
+            raise ValueError(f"Model asset '{self.filename}' must use an https:// URL")
+        if self.expected_size <= 0:
+            raise ValueError(f"Model asset '{self.filename}' needs its exact size")
+        if not _SHA256_HEX.fullmatch(self.expected_sha256):
+            raise ValueError(
+                f"Model asset '{self.filename}' needs a lowercase hex SHA-256"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class VoiceModelSpec:
-    """Complete specification of a downloadable voice model package."""
+    """Complete specification of a downloadable voice model package.
+
+    ``model_dir`` maps a models root to the directory the engine loads this
+    model from — one of the :mod:`~servonaut.services.voice_engines` path
+    helpers, so the cache and the engines can never disagree on where a
+    model lives.
+    """
 
     model_id: str
     display_name: str
     description: str
     engine: str  # "vad", "tts", "stt"
     assets: Tuple[VoiceModelAsset, ...]
-    local_dir_name: str
     required_files: Tuple[str, ...]
-    total_download_bytes: int
+    model_dir: Callable[[Path], Path]
     total_disk_bytes: int
 
+    @property
+    def total_download_bytes(self) -> int:
+        """Exact number of bytes the download transfers."""
+        return sum(asset.expected_size for asset in self.assets)
 
-# Standard model registry
+
+# ---------------------------------------------------------------------------
+# Pinned registry
+# ---------------------------------------------------------------------------
+# The speech-synthesis archive and the voice-activity model are published
+# only as release assets (no commit-addressed copy of the same bytes exists
+# from the publisher), so their URLs are tag-addressed; see the module
+# docstring for what the pins guarantee when a tag's asset is replaced.
+
 SILERO_VAD_SPEC: Final[VoiceModelSpec] = VoiceModelSpec(
-    model_id="silero-vad-v4-16k",
+    model_id=SILERO_VAD_MODEL_ID,
     display_name="Silero VAD (Voice Activity Detection)",
     description="Low-latency neural voice activity detector (16 kHz onnx)",
     engine="vad",
     assets=(
         VoiceModelAsset(
-            filename="silero_vad.onnx",
-            url="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+            filename=SILERO_VAD_FILE,
+            url=SILERO_VAD_URL,
             expected_size=643_854,
-            is_archive=False,
+            expected_sha256="9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
         ),
     ),
-    local_dir_name="",  # Lives directly as silero_vad.onnx or under silero-vad-v4-16k
-    required_files=("silero_vad.onnx",),
-    total_download_bytes=643_854,
+    required_files=(SILERO_VAD_FILE,),
+    model_dir=silero_vad_model_dir,
     total_disk_bytes=643_854,
 )
 
 KOKORO_TTS_SPEC: Final[VoiceModelSpec] = VoiceModelSpec(
-    model_id="kokoro-int8-multi-lang-v1_0",
+    model_id=KOKORO_MODEL_ID,
     display_name="Kokoro TTS (Speech Synthesis)",
     description="Multilingual 82M-parameter int8 text-to-speech engine",
     engine="tts",
     assets=(
         VoiceModelAsset(
-            filename="kokoro-int8-multi-lang-v1_0.tar.bz2",
-            url="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2",
-            expected_size=131_839_838,
+            filename=f"{KOKORO_MODEL_ID}.tar.bz2",
+            url=KOKORO_ARCHIVE_URL,
+            expected_size=132_303_094,
+            expected_sha256="4c3052abaa60943a341f193888cf6abd68787dae6ab8ae5c925a706caa247e4e",
             is_archive=True,
-            archive_format="tar.bz2",
         ),
     ),
-    local_dir_name="kokoro-int8-multi-lang-v1_0",
-    required_files=(
-        "model.int8.onnx",
-        "voices.bin",
-        "tokens.txt",
-        "lexicon-us-en.txt",
-        "lexicon-gb-en.txt",
-        "espeak-ng-data/phontab",
-        "espeak-ng-data/phonindex",
-        "espeak-ng-data/phondata",
-        "espeak-ng-data/intonations",
-    ),
-    total_download_bytes=131_839_838,
-    total_disk_bytes=189_455_587,
+    required_files=KOKORO_REQUIRED_FILES,
+    model_dir=kokoro_model_dir,
+    total_disk_bytes=KOKORO_DISK_BYTES,
 )
 
-NEMOTRON_ASR_SPEC: Final[VoiceModelSpec] = VoiceModelSpec(
-    model_id="nemotron-3.5-asr-streaming-0.6b-320ms-int8",
-    display_name="Nemotron Streaming ASR",
-    description="Quantized 0.6B transducer streaming speech recognition engine",
-    engine="stt",
-    assets=(
-        VoiceModelAsset(
-            filename="encoder.int8.onnx",
-            url="https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-320ms-int8-2026-06-11/resolve/main/encoder.int8.onnx",
-            expected_size=638_000_000,
-        ),
-        VoiceModelAsset(
-            filename="decoder.int8.onnx",
-            url="https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-320ms-int8-2026-06-11/resolve/main/decoder.int8.onnx",
-            expected_size=15_000_000,
-        ),
-        VoiceModelAsset(
-            filename="joiner.int8.onnx",
-            url="https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-320ms-int8-2026-06-11/resolve/main/joiner.int8.onnx",
-            expected_size=63_000_000,
-        ),
-        VoiceModelAsset(
-            filename="tokens.txt",
-            url="https://huggingface.co/csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-320ms-int8-2026-06-11/resolve/main/tokens.txt",
-            expected_size=120_000,
-        ),
+# Streaming ASR: one repository per latency variant, each pinned to a
+# commit. The decoder, joiner and token table are byte-identical across
+# variants; only the encoder differs.
+_HF_RESOLVE_URL: Final[str] = "https://huggingface.co/{repo}/resolve/{revision}/{filename}"
+_NEMOTRON_SHARED_FILES: Final[Mapping[str, Tuple[int, str]]] = {
+    "decoder.int8.onnx": (
+        14_978_075, "19f9c98fc6d0a2c33a65a43b36fdb2e914c26c0aa9764be3aebc502a1e982fb0",
     ),
-    local_dir_name="nemotron",
-    required_files=(
-        "encoder.int8.onnx",
-        "decoder.int8.onnx",
-        "joiner.int8.onnx",
-        "tokens.txt",
+    "joiner.int8.onnx": (
+        9_504_438, "4101c7c679a0bc30483794b27a059e34e79232aa2068d78d51231a22c8b0d7ce",
     ),
-    total_download_bytes=716_120_000,
-    total_disk_bytes=716_120_000,
-)
+    "tokens.txt": (
+        131_440, "729cc103155bafa785f9cd45746cd41cabe97eab7182fc04d594129587958f8a",
+    ),
+}
+# latency_ms -> (commit revision, encoder size, encoder SHA-256)
+_NEMOTRON_VARIANTS: Final[Mapping[int, Tuple[str, int, str]]] = {
+    80: (
+        "2ac5952ae18a2cc010c25e3fd96ad20cf254bd09", 657_601_516,
+        "411e1222810f4a4cf0a3704c7609597a12def5b4ad2c7347a24ccd40d895484d",
+    ),
+    160: (
+        "b3a4dbde84fba1a13cb4270e6730b525ac6a2db6", 657_601_518,
+        "e1b39e5e16bef578a54ed2fba5f031438e000cc36c3ea2ca49d55699d5baebd4",
+    ),
+    320: (
+        "424ce58898995b713f84341f2e1492f9207a26aa", 657_601_518,
+        "f79c3fcc149f268b54b7d5754bdc2ba5c47c16b1fc70d15728a56f6efbf60ca5",
+    ),
+    560: (
+        "ab43d895f5985b1bbab8b6eac8607fcdc05343f3", 657_601_403,
+        "012e9321373af99021415e0b0eb3ec827b4be3153be6f30d9b448fe65e896e68",
+    ),
+    1120: (
+        "cba1c96ca5ef0e8393b50584ae153a79145dc492", 657_601_521,
+        "2fff2166acaa535bd969fb223c1f0783d71029f143cb298bc54c2afe85abf772",
+    ),
+}
+
+
+def nemotron_model_id(latency_ms: int) -> str:
+    """Registry id of the streaming ASR variant for *latency_ms*."""
+    latency = normalise_nemotron_latency(latency_ms)
+    return f"nemotron-3.5-asr-streaming-0.6b-{latency}ms-int8"
+
+
+def _nemotron_spec(latency_ms: int) -> VoiceModelSpec:
+    revision, encoder_size, encoder_sha256 = _NEMOTRON_VARIANTS[latency_ms]
+    pins = {"encoder.int8.onnx": (encoder_size, encoder_sha256), **_NEMOTRON_SHARED_FILES}
+    repo = nemotron_repo(latency_ms)
+    assets = tuple(
+        VoiceModelAsset(
+            filename=local_name,
+            url=_HF_RESOLVE_URL.format(repo=repo, revision=revision, filename=remote_name),
+            expected_size=pins[remote_name][0],
+            expected_sha256=pins[remote_name][1],
+        )
+        for remote_name, local_name in NEMOTRON_FILES.items()
+    )
+    return VoiceModelSpec(
+        model_id=nemotron_model_id(latency_ms),
+        display_name=f"Nemotron Streaming ASR ({latency_ms} ms)",
+        description="Quantized 0.6B transducer streaming speech recognition engine",
+        engine="stt",
+        assets=assets,
+        required_files=tuple(NEMOTRON_FILES.values()),
+        model_dir=partial(nemotron_model_dir, latency_ms),
+        total_disk_bytes=sum(asset.expected_size for asset in assets),
+    )
+
+
+_NEMOTRON_SPECS: Final[Mapping[int, VoiceModelSpec]] = {
+    latency: _nemotron_spec(latency) for latency in NEMOTRON_LATENCY_OPTIONS
+}
+NEMOTRON_ASR_SPEC: Final[VoiceModelSpec] = _NEMOTRON_SPECS[NEMOTRON_DEFAULT_LATENCY_MS]
+
+
+def nemotron_spec(latency_ms: int) -> VoiceModelSpec:
+    """Streaming ASR spec for *latency_ms*, snapped to a published variant."""
+    return _NEMOTRON_SPECS[normalise_nemotron_latency(latency_ms)]
+
 
 MODEL_REGISTRY: Final[Dict[str, VoiceModelSpec]] = {
-    SILERO_VAD_SPEC.model_id: SILERO_VAD_SPEC,
-    KOKORO_TTS_SPEC.model_id: KOKORO_TTS_SPEC,
-    NEMOTRON_ASR_SPEC.model_id: NEMOTRON_ASR_SPEC,
+    spec.model_id: spec
+    for spec in (SILERO_VAD_SPEC, KOKORO_TTS_SPEC, *_NEMOTRON_SPECS.values())
 }
 
 
@@ -202,48 +331,130 @@ def compute_file_sha256(path: Path) -> str:
 
 
 def safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
-    """Safely extract tar members, strictly preventing directory traversal / zip-slip.
-
-    Args:
-        tar: Open TarFile instance.
-        destination: Absolute resolved destination directory.
+    """Extract *tar* into *destination*, refusing any unsafe member.
 
     Raises:
-        VoiceModelExtractionError: If any archive member attempts directory traversal.
+        VoiceModelExtractionError: If any member is a link, a special file,
+            or a path that could escape *destination*. Nothing is extracted.
     """
-    dest_path = destination.resolve()
-    for member in tar.getmembers():
-        member_name = member.name.replace("\\", "/")
-        target_path = (dest_path / member_name).resolve()
+    try:
+        extract_tar_safely(tar, destination)
+    except UnsafeArchiveError as e:
+        raise VoiceModelExtractionError(str(e)) from e
 
+
+class HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only while they stay on HTTPS.
+
+    A plain-HTTP hop would let anyone on the path substitute the payload
+    before the hash check ever sees it (and leak the request), so the
+    download fails instead.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        if not newurl.lower().startswith("https://"):
+            raise VoiceModelError(f"Refusing a non-HTTPS redirect to '{newurl}'")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def build_https_only_opener() -> urllib.request.OpenerDirector:
+    """URL opener whose redirects can never downgrade to plain HTTP."""
+    return urllib.request.build_opener(HttpsOnlyRedirectHandler)
+
+
+def _header(response: Any, name: str) -> Optional[str]:
+    headers = getattr(response, "headers", None)
+    return headers.get(name) if headers is not None else None
+
+
+def _reject_wrong_length(asset: VoiceModelAsset, response: Any, start: int) -> None:
+    """Fail before transferring anything when the advertised length is wrong."""
+    advertised = _header(response, "Content-Length")
+    if advertised is None or not str(advertised).isdigit():
+        return
+    if start + int(advertised) != asset.expected_size:
+        raise VoiceModelIntegrityError(
+            f"Server offers '{asset.filename}' as {advertised} bytes from offset "
+            f"{start}; expected {asset.expected_size} in total"
+        )
+
+
+def _resume_offset(asset: VoiceModelAsset, response: Any, requested: int) -> int:
+    """Where the response body starts: *requested*, or 0 if the server restarted.
+
+    A server may ignore a Range header and send the whole file again;
+    that restarts the transfer. A partial response for a range that was
+    not asked for is refused.
+    """
+    status = getattr(response, "status", 200)
+    if status != _HTTP_PARTIAL_CONTENT:
+        return 0
+    match = _CONTENT_RANGE.fullmatch(str(_header(response, "Content-Range") or "").strip())
+    if (
+        requested == 0
+        or match is None
+        or int(match.group(1)) != requested
+        or match.group(3) not in ("*", str(asset.expected_size))
+    ):
+        raise VoiceModelIntegrityError(
+            f"Server sent an unexpected range of '{asset.filename}' "
+            f"({_header(response, 'Content-Range')!r} for offset {requested})"
+        )
+    return requested
+
+
+def _is_transient(error: BaseException) -> bool:
+    """Whether a failed transfer is worth resuming (network, not content)."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500 or error.code == 429
+    return isinstance(
+        error, (TimeoutError, ConnectionError, http.client.IncompleteRead, urllib.error.URLError),
+    )
+
+
+class _ProgressTracker:
+    """Reports overall progress across every asset of one download."""
+
+    def __init__(self, total: int, callback: Optional[Callable[[float, int, int], None]]) -> None:
+        self._total = max(1, total)
+        self._callback = callback
+        self.received = 0
+
+    def advance(self, count: int) -> None:
+        self.received += count
+        self.report(min(0.95, self.received / self._total))
+
+    def report(self, fraction: float) -> None:
+        if self._callback is None:
+            return
         try:
-            target_path.relative_to(dest_path)
-        except ValueError:
-            raise VoiceModelExtractionError(
-                f"Path traversal detected in archive member: '{member.name}' escapes '{dest_path}'"
-            )
-
-        if member.islnk() or member.issym():
-            link_target = (target_path.parent / member.linkname).resolve()
-            try:
-                link_target.relative_to(dest_path)
-            except ValueError:
-                raise VoiceModelExtractionError(
-                    f"Symlink traversal detected in member: '{member.name}' -> '{member.linkname}'"
-                )
-
-    # All members validated; safe to extract
-    if hasattr(tarfile, "data_filter"):
-        tar.extractall(path=dest_path, filter="data")
-    else:
-        tar.extractall(path=dest_path)
+            self._callback(fraction, self.received, self._total)
+        except Exception:  # noqa: BLE001 — a progress consumer must not break the download
+            logger.debug("Model download progress callback failed", exc_info=True)
 
 
 class VoiceModelCache:
     """Manages downloading, verification, caching, and eviction of voice model weights."""
 
-    def __init__(self, root_dir: Optional[Path] = None) -> None:
-        self._root_dir = (root_dir or DEFAULT_MODELS_ROOT).resolve()
+    def __init__(
+        self,
+        root_dir: Optional[Path] = None,
+        *,
+        opener: Optional[urllib.request.OpenerDirector] = None,
+        policy: Optional[VoiceModelDownloadPolicy] = None,
+    ) -> None:
+        """Build a cache over *root_dir* (the engines' models root by default).
+
+        Args:
+            root_dir: Models root; ``None`` uses
+                :func:`~servonaut.services.voice_engines.voice_models_root`.
+            opener: URL opener for downloads; defaults to one whose
+                redirects must stay on HTTPS.
+            policy: Stall, resume and lock limits for downloads.
+        """
+        self._root_dir = Path(root_dir if root_dir is not None else voice_models_root()).resolve()
+        self._opener = opener or build_https_only_opener()
+        self._policy = policy or VoiceModelDownloadPolicy()
 
     @property
     def root_dir(self) -> Path:
@@ -255,79 +466,13 @@ class VoiceModelCache:
         """Advisory concurrency lock path."""
         return self._root_dir / _LOCK_FILENAME
 
-    def _get_target_path(self, spec: VoiceModelSpec) -> Path:
-        """Return the target directory or file path for a model."""
-        if spec.local_dir_name:
-            return self._root_dir / spec.local_dir_name
-        # Models with empty local_dir_name live directly under root_dir
-        return self._root_dir
+    def model_dir(self, spec: VoiceModelSpec) -> Path:
+        """Directory *spec* lives in under this cache's root."""
+        return spec.model_dir(self._root_dir)
 
-    def _check_files(
-        self, spec: VoiceModelSpec, target_path: Path, deep_verify: bool = False
-    ) -> VoiceModelStatus:
-        """Internal inspection of model files on disk."""
-        missing: list[str] = []
-        total_size = 0
-        for req in spec.required_files:
-            file_path = target_path / req
-            if not file_path.is_file():
-                missing.append(req)
-                continue
-            try:
-                sz = file_path.stat().st_size
-                if sz == 0:
-                    missing.append(f"{req} (0 bytes)")
-                else:
-                    total_size += sz
-            except OSError:
-                missing.append(req)
-
-        if missing:
-            # If nothing exists, it's NOT_DOWNLOADED; if partial files exist, it's CORRUPTED
-            if len(missing) == len(spec.required_files) and not target_path.exists():
-                return VoiceModelStatus(
-                    model_id=spec.model_id,
-                    state=VoiceModelCacheState.NOT_DOWNLOADED,
-                    model_dir=target_path,
-                    size_bytes=0,
-                    missing_files=tuple(missing),
-                    message="Model is not downloaded",
-                )
-            return VoiceModelStatus(
-                model_id=spec.model_id,
-                state=VoiceModelCacheState.CORRUPTED,
-                model_dir=target_path,
-                size_bytes=total_size,
-                missing_files=tuple(missing),
-                message=f"Model files are missing or incomplete: {', '.join(missing)}",
-            )
-
-        if deep_verify:
-            corrupted: list[str] = []
-            for asset in spec.assets:
-                if not asset.is_archive and asset.expected_sha256:
-                    asset_path = target_path / asset.filename
-                    if asset_path.is_file():
-                        digest = compute_file_sha256(asset_path)
-                        if digest.lower() != asset.expected_sha256.lower():
-                            corrupted.append(f"{asset.filename} checksum mismatch")
-
-            if corrupted:
-                return VoiceModelStatus(
-                    model_id=spec.model_id,
-                    state=VoiceModelCacheState.CORRUPTED,
-                    model_dir=target_path,
-                    size_bytes=total_size,
-                    message=f"Deep verification failed: {', '.join(corrupted)}",
-                )
-
-        return VoiceModelStatus(
-            model_id=spec.model_id,
-            state=VoiceModelCacheState.VERIFIED,
-            model_dir=target_path,
-            size_bytes=total_size,
-            message="Model weights are verified and ready",
-        )
+    # ------------------------------------------------------------------
+    # Inspection
+    # ------------------------------------------------------------------
 
     def status(self, model_id: str, *, deep_verify: bool = False) -> VoiceModelStatus:
         """Inspect the presence and integrity of a model on disk without mutating state."""
@@ -340,33 +485,122 @@ class VoiceModelCache:
                 message=f"Unknown model identifier: '{model_id}'",
             )
 
-        target_path = self._get_target_path(spec)
-
-        # Check for concurrency lock
-        lock = VoiceRuntimeLock(self.lock_path)
-        if lock.is_locked():
+        target_path = self.model_dir(spec)
+        if VoiceRuntimeLock(self.lock_path).is_locked():
             return VoiceModelStatus(
                 model_id=model_id,
                 state=VoiceModelCacheState.DOWNLOADING,
                 model_dir=target_path,
                 message="Model download or maintenance is currently in progress",
             )
-
         return self._check_files(spec, target_path, deep_verify=deep_verify)
+
+    def inventory(self) -> List[VoiceModelStatus]:
+        """Return the status and disk footprint of all registered models."""
+        return [self.status(mid) for mid in MODEL_REGISTRY]
+
+    def _check_files(
+        self, spec: VoiceModelSpec, target_path: Path, *, deep_verify: bool = False
+    ) -> VoiceModelStatus:
+        """Classify the on-disk state of *spec* at *target_path*."""
+        present = [name for name in spec.required_files if (target_path / name).is_file()]
+        if not present:
+            return self._status(
+                spec, target_path, VoiceModelCacheState.NOT_DOWNLOADED,
+                "Model is not downloaded", missing=spec.required_files,
+            )
+
+        problems = self._missing_or_empty(spec, target_path)
+        if problems:
+            return self._status(
+                spec, target_path, VoiceModelCacheState.CORRUPTED,
+                f"Model files are missing or incomplete: {', '.join(problems)}",
+                missing=tuple(problems),
+            )
+
+        mismatched = self._mismatched_assets(spec, target_path, deep_verify=deep_verify)
+        if mismatched:
+            return self._status(
+                spec, target_path, VoiceModelCacheState.CORRUPTED,
+                f"Model files failed verification: {', '.join(mismatched)}",
+            )
+
+        return self._status(
+            spec, target_path, VoiceModelCacheState.VERIFIED,
+            "Model weights are verified and ready",
+        )
+
+    @staticmethod
+    def _missing_or_empty(spec: VoiceModelSpec, target_path: Path) -> List[str]:
+        problems: List[str] = []
+        for name in spec.required_files:
+            path = target_path / name
+            try:
+                if path.stat().st_size == 0:
+                    problems.append(f"{name} (0 bytes)")
+            except OSError:
+                problems.append(name)
+        return problems
+
+    @staticmethod
+    def _mismatched_assets(
+        spec: VoiceModelSpec, target_path: Path, *, deep_verify: bool
+    ) -> List[str]:
+        """Loose assets whose size (always) or digest (deep) is wrong."""
+        mismatched: List[str] = []
+        for asset in spec.assets:
+            if asset.is_archive:
+                continue
+            path = target_path / asset.filename
+            try:
+                size = path.stat().st_size
+            except OSError:
+                mismatched.append(f"{asset.filename} missing")
+                continue
+            if size != asset.expected_size:
+                mismatched.append(f"{asset.filename} size mismatch")
+            elif deep_verify and compute_file_sha256(path) != asset.expected_sha256:
+                mismatched.append(f"{asset.filename} checksum mismatch")
+        return mismatched
+
+    @staticmethod
+    def _status(
+        spec: VoiceModelSpec,
+        target_path: Path,
+        state: VoiceModelCacheState,
+        message: str,
+        *,
+        missing: Tuple[str, ...] = (),
+    ) -> VoiceModelStatus:
+        size = 0 if state is VoiceModelCacheState.NOT_DOWNLOADED else directory_bytes(target_path)
+        return VoiceModelStatus(
+            model_id=spec.model_id,
+            state=state,
+            model_dir=target_path,
+            size_bytes=size,
+            missing_files=tuple(missing),
+            message=message,
+        )
+
+    # ------------------------------------------------------------------
+    # Download
+    # ------------------------------------------------------------------
 
     def download(
         self,
         model_id: str,
         *,
         progress_callback: Optional[Callable[[float, int, int], None]] = None,
-        timeout: float = 600.0,
     ) -> VoiceModelStatus:
         """Atomically download, verify, and unpack model assets into the cache directory.
 
+        Interrupted or stalled transfers resume where they stopped (see
+        :class:`VoiceModelDownloadPolicy`); nothing reaches the model
+        directory until every asset matched its pinned size and SHA-256.
+
         Args:
             model_id: Identifier of the model to download.
-            progress_callback: Callable receiving (percentage: float, downloaded_bytes: int, total_bytes: int).
-            timeout: Maximum download timeout in seconds.
+            progress_callback: Callable receiving (fraction, downloaded_bytes, total_bytes).
 
         Returns:
             VoiceModelStatus after provisioning.
@@ -379,184 +613,184 @@ class VoiceModelCache:
             raise VoiceModelError(f"Cannot download unknown model: '{model_id}'")
 
         self._root_dir.mkdir(parents=True, exist_ok=True)
-        target_path = self._get_target_path(spec)
+        target_path = self.model_dir(spec)
+        progress = _ProgressTracker(spec.total_download_bytes, progress_callback)
 
-        def report(pct: float, cur: int, total: int) -> None:
-            if progress_callback:
-                try:
-                    progress_callback(pct, cur, total)
-                except Exception:
-                    pass
-
-        with VoiceRuntimeLock(self.lock_path, timeout=15.0):
-            # Check if already installed and verified
-            current = self._check_files(spec, target_path, deep_verify=False)
+        with VoiceRuntimeLock(self.lock_path, timeout=self._policy.lock_timeout_seconds):
+            self._sweep_stale_staging()
+            current = self._check_files(spec, target_path)
             if current.is_verified:
                 return current
 
-            staging_dir = self._root_dir / f".staging.{spec.model_id}.{os.getpid()}"
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir, ignore_errors=True)
-            staging_dir.mkdir(parents=True, exist_ok=True)
-
+            staging_dir = Path(tempfile.mkdtemp(
+                prefix=f"{_STAGING_PREFIX}{spec.model_id}.", dir=self._root_dir,
+            ))
             try:
-                total_expected = spec.total_download_bytes or 1
-                bytes_accumulated = 0
-
-                for asset in spec.assets:
-                    dest_file = staging_dir / asset.filename
-                    bytes_accumulated = self._download_single_asset(
-                        asset=asset,
-                        destination=dest_file,
-                        bytes_accumulated=bytes_accumulated,
-                        total_expected=total_expected,
-                        progress_callback=report,
-                        timeout=timeout,
-                    )
-
-                    if asset.is_archive:
-                        report(0.90, bytes_accumulated, total_expected)
-                        extract_dir = staging_dir / "extracted"
-                        extract_dir.mkdir(parents=True, exist_ok=True)
-                        with tarfile.open(dest_file, "r:*") as tar:
-                            safe_extract_tar(tar, extract_dir)
-
-                        # Clean up archive tarball after extraction
-                        with contextlib.suppress(OSError):
-                            dest_file.unlink()
-
-                        # Detect content root (support flat or nested archive layouts)
-                        source_content_dir = extract_dir
-                        if spec.required_files and not (source_content_dir / spec.required_files[0]).is_file():
-                            for sub in extract_dir.iterdir():
-                                if sub.is_dir() and (sub / spec.required_files[0]).is_file():
-                                    source_content_dir = sub
-                                    break
-
-                        # Move extracted content to staging_dir
-                        for item in list(source_content_dir.iterdir()):
-                            dest_item = staging_dir / item.name
-                            if dest_item.exists():
-                                if dest_item.is_dir():
-                                    shutil.rmtree(dest_item, ignore_errors=True)
-                                else:
-                                    dest_item.unlink()
-                            shutil.move(str(item), str(dest_item))
-
-                        shutil.rmtree(extract_dir, ignore_errors=True)
-
-                # Verify all required files are present in staging_dir
-                for req in spec.required_files:
-                    req_path = staging_dir / req
-                    if not req_path.is_file() or req_path.stat().st_size == 0:
-                        raise VoiceModelIntegrityError(
-                            f"Model archive did not contain required file '{req}'"
-                        )
-
-                # Atomic commit to target_path
-                report(0.98, total_expected, total_expected)
-                if spec.local_dir_name:
-                    if target_path.exists():
-                        shutil.rmtree(target_path, ignore_errors=True)
-                    staging_dir.rename(target_path)
-                else:
-                    # Target is directly under root_dir (single file model)
-                    for item in staging_dir.iterdir():
-                        final_dest = self._root_dir / item.name
-                        if final_dest.exists():
-                            if final_dest.is_dir():
-                                shutil.rmtree(final_dest, ignore_errors=True)
-                            else:
-                                final_dest.unlink()
-                        shutil.move(str(item), str(final_dest))
-                    shutil.rmtree(staging_dir, ignore_errors=True)
-
-                report(1.0, total_expected, total_expected)
-
-            except Exception:
+                self._stage_assets(spec, staging_dir, progress)
+                progress.report(0.98)
+                self._commit(staging_dir, target_path)
+            finally:
                 shutil.rmtree(staging_dir, ignore_errors=True)
-                raise
+            progress.report(1.0)
+            return self._check_files(spec, target_path)
 
-        return self.status(model_id)
+    def _sweep_stale_staging(self) -> None:
+        """Remove staging leftovers from downloads that were killed mid-way.
 
-    def _download_single_asset(
+        Runs under the cache lock, so no live download can own any of them.
+        """
+        for entry in self._root_dir.glob(f"{_STAGING_PREFIX}*"):
+            logger.info("Removing stale model staging entry %s", entry.name)
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+
+    def _stage_assets(
+        self,
+        spec: VoiceModelSpec,
+        staging_dir: Path,
+        progress: _ProgressTracker,
+    ) -> None:
+        """Download, verify and unpack every asset of *spec* into *staging_dir*."""
+        for asset in spec.assets:
+            dest_file = staging_dir / asset.filename
+            self._download_asset(asset, dest_file, progress)
+            if asset.is_archive:
+                progress.report(0.90)
+                self._unpack_archive(spec, dest_file, staging_dir)
+
+        for name in spec.required_files:
+            path = staging_dir / name
+            if not path.is_file() or path.stat().st_size == 0:
+                raise VoiceModelIntegrityError(
+                    f"Model archive did not contain required file '{name}'"
+                )
+
+    def _download_asset(
         self,
         asset: VoiceModelAsset,
         destination: Path,
-        bytes_accumulated: int,
-        total_expected: int,
-        progress_callback: Callable[[float, int, int], None],
-        timeout: float,
-    ) -> int:
-        """Download one asset to a destination path with progress and hash checking."""
-        temp_dest = destination.with_suffix(f"{destination.suffix}.partial.{os.getpid()}")
-        hasher = hashlib.sha256() if asset.expected_sha256 else None
-        current_bytes = bytes_accumulated
-        start_time = time.time()
-
-        try:
-            req = urllib.request.Request(
-                asset.url,
-                headers={"User-Agent": "Servonaut-VoiceModelCache/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                with temp_dest.open("wb") as out_f:
-                    while True:
-                        if time.time() - start_time > timeout:
-                            raise VoiceModelError(
-                                f"Download of '{asset.filename}' timed out after {timeout}s"
-                            )
-                        chunk = resp.read(_DOWNLOAD_CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        out_f.write(chunk)
-                        if hasher:
-                            hasher.update(chunk)
-                        current_bytes += len(chunk)
-                        pct = min(0.95, current_bytes / max(1, total_expected))
-                        progress_callback(pct, current_bytes, total_expected)
-
-            # Check size
-            file_size = temp_dest.stat().st_size
-            if asset.expected_size is not None and file_size != asset.expected_size:
-                raise VoiceModelIntegrityError(
-                    f"Downloaded '{asset.filename}' size mismatch: expected {asset.expected_size} bytes, got {file_size}"
+        progress: _ProgressTracker,
+    ) -> None:
+        """Fetch one asset into *destination*, resuming after interruptions."""
+        failures = 0
+        while True:
+            try:
+                self._transfer(asset, destination, progress)
+                break
+            except Exception as e:
+                if not _is_transient(e):
+                    raise
+                failures += 1
+                if failures > self._policy.max_resume_attempts:
+                    raise VoiceModelError(
+                        f"Download of '{asset.filename}' kept failing "
+                        f"({failures} attempts): {e}"
+                    ) from e
+                logger.warning(
+                    "Download of %s interrupted (%s); resuming", asset.filename, e,
                 )
+                time.sleep(self._policy.retry_delay_seconds)
+        self._verify_downloaded(asset, destination)
 
-            # Check SHA-256
-            if hasher and asset.expected_sha256:
-                digest = hasher.hexdigest()
-                if digest.lower() != asset.expected_sha256.lower():
-                    raise VoiceModelIntegrityError(
-                        f"Cryptographic hash mismatch for '{asset.filename}': "
-                        f"expected {asset.expected_sha256}, got {digest}"
-                    )
+    def _transfer(
+        self,
+        asset: VoiceModelAsset,
+        destination: Path,
+        progress: _ProgressTracker,
+    ) -> None:
+        """One attempt: continue *destination* from its current length.
 
-            temp_dest.replace(destination)
-            return current_bytes
+        The stall timeout is the socket timeout, so it bounds each wait for
+        more bytes, never the transfer as a whole.
+        """
+        offset = destination.stat().st_size if destination.exists() else 0
+        headers = {"User-Agent": _USER_AGENT}
+        if offset:
+            headers["Range"] = f"bytes={offset}-"
+        request = urllib.request.Request(asset.url, headers=headers)
+        with self._opener.open(request, timeout=self._policy.stall_timeout_seconds) as response:
+            start = _resume_offset(asset, response, offset)
+            _reject_wrong_length(asset, response, start)
+            progress.advance(start - offset)  # a restart gives back what was counted
+            received = start
+            with destination.open("r+b" if start else "wb") as out:
+                out.seek(start)
+                out.truncate()
+                while chunk := response.read(_DOWNLOAD_CHUNK_SIZE):
+                    received += len(chunk)
+                    if received > asset.expected_size:
+                        raise VoiceModelIntegrityError(
+                            f"Download of '{asset.filename}' exceeded its expected "
+                            f"{asset.expected_size} bytes; aborted"
+                        )
+                    out.write(chunk)
+                    progress.advance(len(chunk))
+        if received < asset.expected_size:
+            raise _TransferInterrupted(
+                f"transfer ended after {received} of {asset.expected_size} bytes"
+            )
 
-        except Exception:
-            with contextlib.suppress(OSError):
-                temp_dest.unlink()
-            raise
+    @staticmethod
+    def _verify_downloaded(asset: VoiceModelAsset, destination: Path) -> None:
+        """Check the whole file — including resumed parts — against its pins."""
+        size = destination.stat().st_size
+        if size != asset.expected_size:
+            raise VoiceModelIntegrityError(
+                f"Downloaded '{asset.filename}' size mismatch: expected "
+                f"{asset.expected_size} bytes, got {size}"
+            )
+        digest = compute_file_sha256(destination)
+        if digest != asset.expected_sha256:
+            raise VoiceModelIntegrityError(
+                f"Cryptographic hash mismatch for '{asset.filename}': "
+                f"expected {asset.expected_sha256}, got {digest}"
+            )
+
+    @staticmethod
+    def _unpack_archive(spec: VoiceModelSpec, archive_path: Path, staging_dir: Path) -> None:
+        """Extract *archive_path* and lift its content root into *staging_dir*."""
+        extract_dir = staging_dir / "extracted"
+        with tarfile.open(archive_path, "r:*") as tar:
+            safe_extract_tar(tar, extract_dir)
+        archive_path.unlink()
+
+        # Archives ship either flat or wrapped in one top-level directory.
+        content_dir = extract_dir
+        marker = spec.required_files[0]
+        if not (content_dir / marker).is_file():
+            content_dir = next(
+                (sub for sub in extract_dir.iterdir() if sub.is_dir() and (sub / marker).is_file()),
+                extract_dir,
+            )
+        for item in list(content_dir.iterdir()):
+            shutil.move(str(item), str(staging_dir / item.name))
+        shutil.rmtree(extract_dir, ignore_errors=True)
+
+    def _commit(self, staging_dir: Path, target_path: Path) -> None:
+        """Swap the verified staging tree into place.
+
+        Any previous (incomplete or corrupt) tree is renamed aside first
+        and removed only after the new one is in place.
+        """
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        retired: Optional[Path] = None
+        if target_path.exists():
+            retired = Path(tempfile.mkdtemp(prefix=f"{_STAGING_PREFIX}retired.", dir=self._root_dir))
+            target_path.rename(retired / target_path.name)
+        os.replace(staging_dir, target_path)
+        if retired is not None:
+            shutil.rmtree(retired, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Eviction
+    # ------------------------------------------------------------------
 
     def evict(self, model_id: str) -> None:
         """Evict model files from disk."""
         spec = MODEL_REGISTRY.get(model_id)
         if spec is None:
             return
-
-        with VoiceRuntimeLock(self.lock_path, timeout=5.0):
-            target_path = self._get_target_path(spec)
-            if spec.local_dir_name:
-                if target_path.exists():
-                    shutil.rmtree(target_path, ignore_errors=True)
-            else:
-                for req in spec.required_files:
-                    f = self._root_dir / req
-                    with contextlib.suppress(OSError):
-                        f.unlink()
-
-    def inventory(self) -> List[VoiceModelStatus]:
-        """Return the status and disk footprint of all registered models."""
-        return [self.status(mid) for mid in MODEL_REGISTRY]
+        with VoiceRuntimeLock(self.lock_path, timeout=self._policy.lock_timeout_seconds):
+            shutil.rmtree(self.model_dir(spec), ignore_errors=True)

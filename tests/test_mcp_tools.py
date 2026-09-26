@@ -730,6 +730,42 @@ class TestOVHSnapshots:
         assert "plain-id-only" in result
 
 
+class TestOVHCloudSnapshots:
+    """Public Cloud rows carry the project only inside their composite id."""
+
+    CLOUD_ROW = {
+        "id": "proj1/inst-1",
+        "name": "batch-1",
+        "state": "running",
+        "provider_type": "cloud",
+        "is_ovh": True,
+    }
+
+    def _tools(self):
+        snap_svc = MagicMock()
+        snap_svc.list_cloud_snapshots = AsyncMock(return_value=[
+            {"id": "snap-c1", "name": "nightly", "creationDate": "2026-01-15T10:00:00Z"},
+        ])
+        tools = make_tools(ovh_instances=[self.CLOUD_ROW], ovh_snapshot_service=snap_svc)
+        return tools, snap_svc
+
+    @pytest.mark.parametrize("target", ["batch-1", "proj1/inst-1"])
+    def test_lists_the_instances_project_snapshots(self, target):
+        tools, snap_svc = self._tools()
+        result = run(tools.ovh_snapshots(target))
+        snap_svc.list_cloud_snapshots.assert_awaited_once_with("proj1")
+        assert "snap-c1" in result
+        assert "nightly" in result
+
+    def test_row_without_a_project_is_reported(self):
+        tools, snap_svc = self._tools()
+        broken = dict(self.CLOUD_ROW, id="inst-1", name="orphan")
+        tools = make_tools(ovh_instances=[broken], ovh_snapshot_service=snap_svc)
+        result = run(tools.ovh_snapshots("orphan"))
+        assert "Cannot determine project_id" in result
+        snap_svc.list_cloud_snapshots.assert_not_awaited()
+
+
 class TestOVHDNSRecords:
     def test_returns_error_when_service_none(self):
         tools = make_tools()

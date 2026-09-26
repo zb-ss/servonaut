@@ -8,8 +8,8 @@ Parametrised over the 10 codes from the plan
     context_too_large, content_blocked, validation_failed
 
 Plus dedicated cases for:
-    - retry_after honouring on rate_limited
-    - context_too_large → AUTO_CHUNK_AND_RETRY
+    - retry_after honouring on rate_limited (attribute, details, header)
+    - no message promises a retry that nothing performs
     - content_blocked NEVER includes raw payload in user_message
     - SSEStreamDead → BANNER_UPSTREAM_FLAKY
     - Unknown codes default to TOAST_ERROR with raw message
@@ -76,14 +76,14 @@ def _sse_error(
 @pytest.mark.parametrize(
     "err_factory, expected_action, expected_code",
     [
-        # rate_limited — auto-retry with backoff. Retry-after surfaces
-        # on the payload, not just the exception.
+        # rate_limited — a warning toast naming the wait. Nothing
+        # retries the turn automatically.
         (
             lambda: _make_api_error(
                 cls=RateLimitedError, code="rate_limited", status=429,
                 headers={"retry-after": "5"},
             ),
-            UserFacingAction.AUTO_RETRY_WITH_BACKOFF,
+            UserFacingAction.TOAST_WARNING,
             "rate_limited",
         ),
         (
@@ -124,7 +124,7 @@ def _sse_error(
         ),
         (
             lambda: _make_api_error(code="context_too_large", status=400),
-            UserFacingAction.AUTO_CHUNK_AND_RETRY,
+            UserFacingAction.TOAST_WARNING,
             "context_too_large",
         ),
         (
@@ -169,12 +169,9 @@ def test_rate_limited_payload_carries_retry_after_from_header():
         headers={"retry-after": "12"},
     )
     payload = map_error_to_action(err)
-    # The error_handler reads ``retry_after`` directly off the err
-    # attribute or details — header parsing happens in the provider's
-    # retry loop. Our payload's ``retry_after_seconds`` therefore tracks
-    # whatever attribute the exception exposes, which for APIError is
-    # ``details.retry_after`` if present.
-    assert payload.action is UserFacingAction.AUTO_RETRY_WITH_BACKOFF
+    assert payload.action is UserFacingAction.TOAST_WARNING
+    assert payload.retry_after_seconds == 12
+    assert payload.user_message == "Rate limited — try again in 12 s."
 
 
 def test_rate_limited_with_details_retry_after():
@@ -184,18 +181,57 @@ def test_rate_limited_with_details_retry_after():
     )
     payload = map_error_to_action(err)
     assert payload.retry_after_seconds == 8
+    assert "8 s" in payload.user_message
+
+
+def test_rate_limited_sse_error_uses_its_retry_after():
+    payload = map_error_to_action(_sse_error("rate_limited", retry_after=30))
+    assert payload.retry_after_seconds == 30
+    assert payload.user_message == "Rate limited — try again in 30 s."
+
+
+@pytest.mark.parametrize("header", [None, "Wed, 21 Oct 2026 07:28:00 GMT", "0"])
+def test_rate_limited_without_usable_retry_after_says_wait(header):
+    headers = {"retry-after": header} if header is not None else {}
+    err = _make_api_error(
+        cls=RateLimitedError, code="rate_limited", status=429, headers=headers,
+    )
+    payload = map_error_to_action(err)
+    assert payload.retry_after_seconds is None
+    assert payload.user_message == "Rate limited — wait a moment, then try again."
 
 
 # ---------------------------------------------------------------------------
-# 3. context_too_large triggers chunk-and-retry path.
+# 3. No message promises a retry — nothing retries a failed turn.
 # ---------------------------------------------------------------------------
 
 
-def test_context_too_large_action_is_chunk_and_retry():
+@pytest.mark.parametrize(
+    "err_factory",
+    [
+        lambda: _make_api_error(
+            cls=RateLimitedError, code="rate_limited", status=429,
+        ),
+        lambda: _sse_error("rate_limited", retry_after=5),
+        lambda: SSEStreamDead("heartbeat watchdog tripped"),
+        lambda: _make_api_error(code="upstream_unavailable", status=503),
+        lambda: _make_api_error(code="context_too_large", status=400),
+    ],
+)
+def test_messages_tell_the_user_what_to_do_instead_of_promising_a_retry(
+    err_factory,
+):
+    message = map_error_to_action(err_factory()).user_message.lower()
+    assert "retrying" not in message
+    next_steps = ("try again", "new chat", "send your message again")
+    assert any(step in message for step in next_steps)
+
+
+def test_context_too_large_suggests_a_new_chat():
     err = _make_api_error(code="context_too_large", status=400)
     payload = map_error_to_action(err)
-    assert payload.action is UserFacingAction.AUTO_CHUNK_AND_RETRY
-    assert "chunking" in payload.user_message.lower() or "long" in payload.user_message.lower()
+    assert payload.action is UserFacingAction.TOAST_WARNING
+    assert "new chat" in payload.user_message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -350,3 +386,41 @@ def test_validation_failed_log_only_with_generic_user_message():
     assert "messages.0" not in payload.user_message
     # Debug detail preserved on the payload for logging.
     assert payload.details.get("detail") == "messages.0.content too short"
+
+
+# ---------------------------------------------------------------------------
+# Malformed retry_after values never raise and stay bounded.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "details, headers, expected",
+    [
+        ({"retry_after": float("inf")}, {}, None),
+        ({"retry_after": True}, {}, None),
+        ({"retry_after": 99999}, {}, 3600),
+        ({}, {"retry-after": "1e999"}, None),
+    ],
+)
+def test_malformed_retry_after_is_ignored_or_capped(details, headers, expected):
+    err = _make_api_error(
+        cls=RateLimitedError, code="rate_limited", status=429,
+        details=details, headers=headers,
+    )
+    payload = map_error_to_action(err)
+    assert payload.retry_after_seconds == expected
+
+
+def test_map_error_to_action_never_raises_when_a_mapper_fails(monkeypatch):
+    from servonaut.services import ai_error_handler
+
+    def _boom(err):
+        raise OverflowError("bad payload")
+
+    monkeypatch.setitem(ai_error_handler._CODE_DISPATCH, "rate_limited", _boom)
+    err = _make_api_error(cls=RateLimitedError, code="rate_limited", status=429)
+
+    payload = map_error_to_action(err)
+
+    assert payload.action is UserFacingAction.TOAST_ERROR
+    assert payload.code == "rate_limited"

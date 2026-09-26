@@ -21,6 +21,8 @@ one entry rather than editing branches in five files.
 
 from __future__ import annotations
 
+import glob
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple, TYPE_CHECKING
@@ -31,10 +33,51 @@ if TYPE_CHECKING:
 # Shared by both engines: capture and buffer handling.
 _AUDIO_PACKAGES: Tuple[str, ...] = ("sounddevice>=0.4", "numpy>=1.24")
 
+# Environment override for the models root. The packaged desktop worker
+# is launched with an explicit root; this variable lets any process
+# (including tests and support sessions) point every helper elsewhere.
+VOICE_MODELS_DIR_ENV = "SERVONAUT_VOICE_MODELS_DIR"
+
+_DEFAULT_VOICE_MODEL_ROOT = Path("~/.servonaut/voice_models")
+
+
+def default_voice_models_root() -> Path:
+    """The models root this process starts with.
+
+    ``SERVONAUT_VOICE_MODELS_DIR`` when set, otherwise the directory under
+    the Servonaut data root that the terminal app has always used — so a
+    model downloaded by one install is found by every other.
+    """
+    override = os.environ.get(VOICE_MODELS_DIR_ENV, "").strip()
+    return Path(override or _DEFAULT_VOICE_MODEL_ROOT).expanduser()
+
+
 # Root for weights we manage ourselves. Whisper's are handled by the
-# transcription backend's own Hugging Face cache instead, so only the
-# streaming engine keeps files here.
-VOICE_MODEL_ROOT = Path("~/.servonaut/voice_models").expanduser()
+# transcription backend's own Hugging Face cache instead, so it keeps no
+# files here. Every path helper below takes an explicit ``root`` and
+# falls back to this one.
+VOICE_MODEL_ROOT = default_voice_models_root()
+
+
+def voice_models_root() -> Path:
+    """The root the path helpers use when no explicit one is passed."""
+    return VOICE_MODEL_ROOT
+
+
+def set_voice_models_root(root: Path) -> None:
+    """Point every path helper at *root* for the rest of this process.
+
+    For a process that is told its root on the command line (the voice
+    worker): it must run before any voice service is built, so the
+    services and the status it reports read the same directory.
+    """
+    global VOICE_MODEL_ROOT
+    VOICE_MODEL_ROOT = Path(root).expanduser()
+
+
+def _root(root: Optional[Path]) -> Path:
+    return VOICE_MODEL_ROOT if root is None else Path(root)
+
 
 # Streaming latency variants published for the transducer model. Smaller
 # chunks show words sooner and cost slightly more accuracy; every variant
@@ -90,7 +133,7 @@ KOKORO_ARCHIVE_URL = (
 
 # Measured sizes for the confirmation copy: the archive as served, and the
 # extracted tree on disk.
-KOKORO_ARCHIVE_BYTES = 131_839_838
+KOKORO_ARCHIVE_BYTES = 132_303_094
 KOKORO_DISK_BYTES = 189_455_587
 
 # Files the synthesiser is pointed at (relative to the model directory).
@@ -167,17 +210,17 @@ SILERO_VAD_BYTES = 643_854
 SILERO_VAD_FILE = "silero_vad.onnx"
 
 
-def silero_vad_model_dir() -> Path:
+def silero_vad_model_dir(root: Optional[Path] = None) -> Path:
     """Local directory the voice-activity model lives in."""
-    return VOICE_MODEL_ROOT / SILERO_VAD_MODEL_ID
+    return _root(root) / SILERO_VAD_MODEL_ID
 
 
-def silero_vad_model_path() -> Path:
+def silero_vad_model_path(root: Optional[Path] = None) -> Path:
     """Full path of the voice-activity model file."""
-    return silero_vad_model_dir() / SILERO_VAD_FILE
+    return silero_vad_model_dir(root) / SILERO_VAD_FILE
 
 
-def is_silero_vad_model_present() -> bool:
+def is_silero_vad_model_present(root: Optional[Path] = None) -> bool:
     """Whether a usable voice-activity model is on disk.
 
     Checks for a non-empty file, not mere existence: a download that was
@@ -185,7 +228,7 @@ def is_silero_vad_model_present() -> bool:
     treating that as installed pushes the failure to the first
     conversation instead of surfacing it in the settings panel.
     """
-    path = silero_vad_model_path()
+    path = silero_vad_model_path(root)
     try:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
@@ -253,16 +296,27 @@ def engine_spec(engine_id: str) -> VoiceEngineSpec:
 
 def nemotron_repo(latency_ms: int) -> str:
     """Repository id holding the streaming weights for *latency_ms*."""
-    return _NEMOTRON_REPO_TEMPLATE.format(latency=_normalise_latency(latency_ms))
+    return _NEMOTRON_REPO_TEMPLATE.format(latency=normalise_nemotron_latency(latency_ms))
 
 
-def nemotron_model_dir(latency_ms: int) -> Path:
+def nemotron_model_dir(latency_ms: int, root: Optional[Path] = None) -> Path:
     """Local directory the streaming weights for *latency_ms* live in."""
-    latency = _normalise_latency(latency_ms)
-    return VOICE_MODEL_ROOT / f"nemotron-3.5-{latency}ms-int8"
+    latency = normalise_nemotron_latency(latency_ms)
+    return _root(root) / f"nemotron-3.5-{latency}ms-int8"
 
 
-def _normalise_latency(latency_ms: int) -> int:
+def is_nemotron_model_present(latency_ms: int, root: Optional[Path] = None) -> bool:
+    """Whether the streaming weights for *latency_ms* are complete on disk.
+
+    Every file is checked, not just the directory: an interrupted
+    download leaves a partial set behind, and treating that as done
+    pushes the failure to the first dictation.
+    """
+    model_dir = nemotron_model_dir(latency_ms, root)
+    return all((model_dir / name).is_file() for name in NEMOTRON_FILES.values())
+
+
+def normalise_nemotron_latency(latency_ms: int) -> int:
     """Snap *latency_ms* to a published variant.
 
     An unpublished value would resolve to a repository that does not exist
@@ -281,7 +335,7 @@ def _normalise_latency(latency_ms: int) -> int:
 def model_label(engine_id: str, *, model_size: str, latency_ms: int) -> str:
     """Human-readable name for the model an engine is configured to use."""
     if engine_spec(engine_id).streaming:
-        return f"Nemotron streaming {_normalise_latency(latency_ms)}ms"
+        return f"Nemotron streaming {normalise_nemotron_latency(latency_ms)}ms"
     return f"Whisper {model_size}"
 
 
@@ -303,21 +357,53 @@ def directory_bytes(path: Path) -> int:
     return total
 
 
-def kokoro_model_dir() -> Path:
+def kokoro_model_dir(root: Optional[Path] = None) -> Path:
     """Local directory the speech-synthesis model lives in."""
-    return VOICE_MODEL_ROOT / KOKORO_MODEL_ID
+    return _root(root) / KOKORO_MODEL_ID
 
 
-def is_kokoro_model_present() -> bool:
+def is_kokoro_model_present(root: Optional[Path] = None) -> bool:
     """Whether a complete set of speech-synthesis files is on disk.
 
     Every required file is checked, not just the directory: an interrupted
     download or extraction must not read as an installed model.
     """
-    model_dir = kokoro_model_dir()
+    model_dir = kokoro_model_dir(root)
     if not model_dir.is_dir():
         return False
     return all((model_dir / name).is_file() for name in KOKORO_REQUIRED_FILES)
+
+
+def huggingface_hub_cache_root() -> Path:
+    """Locate the Hugging Face hub cache the batch Whisper weights land in.
+
+    Honours the same environment overrides the hub library does, so a
+    user who redirected their cache is not told the model is missing.
+    """
+    for env_var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        value = os.environ.get(env_var)
+        if value:
+            return Path(value).expanduser()
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        return Path(xdg_cache).expanduser() / "huggingface" / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def is_whisper_model_cached(model_size: str, cache_root: Optional[Path] = None) -> bool:
+    """Whether usable Whisper weights for *model_size* are downloaded.
+
+    Matches cache directories by glob rather than an exact repository id
+    (the publishing org has moved before) and checks for the weights file
+    itself: an interrupted download leaves the folder and refs behind.
+    """
+    root = huggingface_hub_cache_root() if cache_root is None else cache_root
+    pattern = str(root / f"models--*whisper*{model_size}" / "snapshots" / "*" / "model.bin")
+    # A blob symlink that outlived its target reads as missing.
+    return any(Path(match).exists() for match in glob.glob(pattern))
 
 
 def kokoro_voice_sid(voice_name: str) -> int:
