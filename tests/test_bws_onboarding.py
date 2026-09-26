@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,6 +70,20 @@ class TestListProjects:
         # The token IS present in the subprocess env, though.
         env = spy.call_args.kwargs["env"]
         assert env["BWS_ACCESS_TOKEN"] == "tok-secret"
+
+    def test_custom_token_env_var_reaches_bws_as_bws_access_token(self, monkeypatch):
+        """``--token-env MY_VAR``: bws only reads BWS_ACCESS_TOKEN, so the child
+        gets the value under that name while the parent env stays unchanged."""
+        monkeypatch.setattr(bws.shutil, "which", lambda _: "/usr/bin/bws")
+        monkeypatch.delenv("BWS_ACCESS_TOKEN", raising=False)
+        monkeypatch.setenv("TEAM_BWS_TOKEN", "tok-custom")
+        spy = AsyncMock(return_value=_fake_proc(stdout=b"[]"))
+        with patch("asyncio.create_subprocess_exec", spy):
+            run(bws.list_bws_projects("TEAM_BWS_TOKEN"))
+        env = spy.call_args.kwargs["env"]
+        assert env["BWS_ACCESS_TOKEN"] == "tok-custom"
+        assert "tok-custom" not in spy.call_args.args
+        assert "BWS_ACCESS_TOKEN" not in os.environ
 
     def test_missing_bws_raises(self, monkeypatch):
         monkeypatch.setattr(bws.shutil, "which", lambda _: None)

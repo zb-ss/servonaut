@@ -13,6 +13,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from servonaut.config.manager import MAX_BACKUPS, MAX_UPGRADE_BACKUPS, describe_backup
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -77,8 +78,9 @@ class BackupRestoreScreen(Screen):
                 Static("[bold cyan]Local Config Backups[/bold cyan]", id="backups_header"),
                 Static(
                     "[dim]Every time the config is saved (settings edit, sync pull, "
-                    "setup wizard…) the previous version is snapshotted here. The 5 "
-                    "most recent are kept.[/dim]",
+                    "setup wizard…) the previous version is snapshotted here. The "
+                    f"{MAX_BACKUPS} most recent are kept, plus the copies taken before "
+                    f"the last {MAX_UPGRADE_BACKUPS} config format upgrades.[/dim]",
                     id="backups_hint",
                 ),
                 DataTable(id="backups_table", zebra_stripes=True, cursor_type="row"),
@@ -94,7 +96,7 @@ class BackupRestoreScreen(Screen):
 
     def on_mount(self) -> None:
         table = self.query_one("#backups_table", DataTable)
-        table.add_columns("#", "Timestamp", "Size", "Custom Servers", "OVH Enabled")
+        table.add_columns("#", "Timestamp", "Kind", "Size", "Custom Servers", "OVH Enabled")
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -130,6 +132,7 @@ class BackupRestoreScreen(Screen):
             table.add_row(
                 str(idx),
                 self._format_timestamp(entry["timestamp"]),
+                describe_backup(entry),
                 self._format_size(entry["size_bytes"]),
                 str(summary.get("custom_servers_count", "?")),
                 "yes" if summary.get("ovh_enabled") else "no",
@@ -160,7 +163,7 @@ class BackupRestoreScreen(Screen):
         ts = self._format_timestamp(entry["timestamp"])
         summary = self._summarize(path)
         detail = (
-            f"[bold]{ts}[/bold]\n"
+            f"[bold]{ts}[/bold] ({describe_backup(entry)})\n"
             f"Custom servers: {summary.get('custom_servers_count', '?')}\n"
             f"OVH enabled: {'yes' if summary.get('ovh_enabled') else 'no'}\n\n"
             "Your current config will itself be backed up before the restore, "

@@ -25,7 +25,6 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO, TextIO
 
@@ -330,6 +329,7 @@ def _create_fixtures(data_root: Path) -> tuple[Path, Path, dict[Path, str]]:
     from servonaut.config.schema import AppConfig
     from servonaut.services.auth_service import _api_base
     from servonaut.services.relay_manager import derive_relay_urls
+    from servonaut.services.cache_service import timestamp_fields
 
     config = asdict(AppConfig())
     if config["ovh"]["enabled"] or config["hetzner"]["enabled"]:
@@ -342,10 +342,10 @@ def _create_fixtures(data_root: Path) -> tuple[Path, Path, dict[Path, str]]:
     config["relay"]["mercure_url"] = relay_mercure
     config_path = data_root / "config.json"
     cache_path = data_root / "cache.json"
-    # CacheService currently stores and compares naive local ISO timestamps.
-    # Match its public save format so the real initial screen can consume this
-    # fresh isolated fixture without scheduling a provider fetch.
-    cache = {"timestamp": datetime.now().isoformat(), "instances": [_FIXTURE_INSTANCE]}
+    # Stamp the fixture exactly as CacheService.save does so the real initial
+    # screen can consume this fresh isolated fixture without scheduling a
+    # provider fetch.
+    cache = {**timestamp_fields(), "instances": [_FIXTURE_INSTANCE]}
     _write_exclusive_json(config_path, config)
     _write_exclusive_json(cache_path, cache)
     return config_path, cache_path, {config_path: _sha256(config_path), cache_path: _sha256(cache_path)}

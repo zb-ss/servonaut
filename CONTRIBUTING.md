@@ -122,6 +122,63 @@ a draft, uploading the files, and then publishing it.
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 
+## End-to-end tests
+
+The `e2e/` directory holds end-to-end journeys. They start the real TUI, CLI
+and MCP server and use them the way a person or an MCP client would: keys and
+clicks in the TUI, commands on the command line, tool calls over stdio. They
+run as their own pytest process, separate from the unit tests in `tests/`:
+
+```bash
+pip install -e ".[test,e2e]"
+python -m pytest e2e                            # one process
+python -m pytest e2e -n auto --dist loadgroup   # in parallel, as CI runs it
+```
+
+A plain `pytest` still runs only `tests/`. Never run `e2e` and `tests` in the
+same command: the suite has to set up its environment before Servonaut is
+first imported.
+
+Every run is sealed off from your machine:
+
+- A temporary test root holds the home directory, config, caches and temp
+  files. Nothing reads or writes your own `~/.servonaut`, and the root is
+  deleted at the end (set `SERVONAUT_E2E_KEEP=1` to keep it for inspection,
+  and `SERVONAUT_E2E_ROOT` to choose the directory it is created in).
+- The environment is rebuilt from an allowlist. `PATH` contains only scripted
+  stand-ins for `ssh`, `scp`, `ssh-agent`, the terminal emulator, the browser
+  and the editor, so no real session or window is ever opened.
+- Network access is limited to loopback. AWS calls go to a local moto server;
+  the Servonaut API and the package index go to a local HTTPS stand-in with a
+  throwaway certificate authority. An attempt to reach any other host, to
+  write outside the test root or to start any program other than the
+  stand-ins, fails the test that made it. Python child processes install the
+  same guards at start-up and stop at once if they cannot.
+
+When a journey fails, its diagnostics are written to `e2e-artifacts/<test>/`:
+an SVG screenshot of the TUI and `state.json`, the calls the stand-in tools
+received, the requests the local API received, and the relevant logs. CI
+uploads that folder for failed runs, and the upload is public: paths and
+anything shaped like a credential are scrubbed, but keep every fixture neutral
+anyway (see [Avoiding accidental disclosure](#avoiding-accidental-disclosure));
+the shared inventory in `e2e/harness/fleet.py` is the place to start.
+`SERVONAUT_E2E_ARTIFACTS` picks another folder; the suite only ever empties a
+folder it created itself.
+
+When you add a journey:
+
+- Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
+  (config and cache, built through the real config schema), `moto`,
+  `fake_cloud`, `cli` and `mcp` (real child processes).
+- Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
+  never for a fixed time.
+- Mark it `e2e_pr` to run it on every pull request. A journey that turns out
+  to be flaky gets `e2e_quarantine` until it is fixed. Every journey needs one
+  of the two; collection stops with an error otherwise.
+- A journey that documents a known bug is marked `xfail(strict=True)`: the fix
+  makes it fail as "unexpectedly passing", so remove the marker in the same
+  change as the fix.
+
 ## Code of Conduct
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.
 

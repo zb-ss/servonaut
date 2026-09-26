@@ -7,7 +7,7 @@ import json
 import re
 import time
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +19,18 @@ import boto3
 # investigation toward a false "WAF bypass" hypothesis. Alphanumeric-only tokens
 # (e.g. ``ERROR``) match fine unquoted, so we leave those alone.
 _BARE_LITERAL_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _epoch_seconds(value: datetime) -> float:
+    """Epoch seconds for *value*, reading a naive datetime as UTC.
+
+    Callers build their windows from ``datetime.utcnow()``, which is naive;
+    ``datetime.timestamp()`` would read that as local time and shift the
+    window by the machine's UTC offset.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
 
 
 class CloudWatchService:
@@ -154,8 +166,8 @@ class CloudWatchService:
         events: List[Dict[str, Any]] = []
         params: Dict[str, Any] = {
             "logGroupName": log_group,
-            "startTime": int(start_time.timestamp() * 1000),
-            "endTime": int(end_time.timestamp() * 1000),
+            "startTime": int(_epoch_seconds(start_time) * 1000),
+            "endTime": int(_epoch_seconds(end_time) * 1000),
             "limit": 10000,
         }
         if filter_pattern:
@@ -229,8 +241,8 @@ class CloudWatchService:
         client = self._logs_client(region)
         start = client.start_query(
             logGroupNames=log_groups,
-            startTime=int(start_time.timestamp()),
-            endTime=int(end_time.timestamp()),
+            startTime=int(_epoch_seconds(start_time)),
+            endTime=int(_epoch_seconds(end_time)),
             queryString=query,
             limit=max(1, limit),
         )

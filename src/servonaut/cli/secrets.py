@@ -16,14 +16,14 @@ MVP surface — kept deliberately small:
     when it was last refreshed. Useful for "is my team's BWS config
     actually being used?" debugging — no other side effects.
 
-Future commands (NOT in MVP — listed here so the dispatch shape is
-forward-compatible):
+``servonaut secrets setup``
+    Guided Bitwarden onboarding: pick a project by name, test the
+    connection, and save it as the personal secret store.
 
-- ``servonaut secrets refresh`` — force a refetch of the team's
-  :class:`SecretsConfig` from the API.
-- ``servonaut secrets get <name>`` / ``set <name>`` / ``delete <name>``
-  / ``list`` — direct provider CRUD from the CLI for headless
-  workflows.
+There is no CLI command to refetch the team's :class:`SecretsConfig` or
+to read and write individual secrets; the cached config expires on its
+own, the TUI Secrets screen can clear it (``c``) and lists secrets
+(``l``). The dispatch shape leaves room for adding such commands.
 
 Design choices:
 

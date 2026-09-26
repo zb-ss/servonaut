@@ -181,8 +181,10 @@ class TestTokenResolution:
         script = ScriptedProc([("[]", "", 0)])
         with _patch_subprocess(script):
             run(provider.list_secrets())
-        # Token reaches subprocess via env.
-        assert script.calls[0]["env"]["MY_PROJ_BWS_TOKEN"] == "scoped-token"
+        # Token reaches subprocess via env, under the one name bws reads.
+        assert script.calls[0]["env"]["BWS_ACCESS_TOKEN"] == "scoped-token"
+        # The parent environment is untouched: nothing is persisted.
+        assert "BWS_ACCESS_TOKEN" not in os.environ
 
 
 # ---------------------------------------------------------------------------

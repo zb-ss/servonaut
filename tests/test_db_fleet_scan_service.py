@@ -76,7 +76,7 @@ class TestScan:
     def test_per_box_failure_isolated(self):
         tools = MagicMock()
 
-        async def _scan(iid):
+        async def _scan(iid, **_kwargs):
             if iid == "bad":
                 raise RuntimeError("ssh down")
             return {"error": None, "candidates": [_candidate()]}
@@ -102,7 +102,7 @@ class TestScan:
         tools = MagicMock()
         state = {"current": 0, "peak": 0}
 
-        async def _scan(iid):
+        async def _scan(iid, **_kwargs):
             state["current"] += 1
             state["peak"] = max(state["peak"], state["current"])
             await asyncio.sleep(0)  # yield so tasks overlap
@@ -160,3 +160,89 @@ class TestCommitAll:
         ok, why = run(svc.commit_row(FleetDbScanRow("a", "a", True)))
         assert ok is False and "already vaulted" in why
         tools.db_setup_save.assert_not_awaited()
+
+
+class TestStagingCap:
+    """A fleet batch is not limited by the per-agent staging cap."""
+
+    _SOURCE = "/srv/app/" + ".env"
+
+    @classmethod
+    def _real_tools(cls, cfg, instances):
+        from servonaut.mcp.guards import CommandGuard
+        from servonaut.mcp.tools import ServonautTools
+
+        cm = MagicMock()
+        cm.get.return_value = cfg
+
+        def _update(**kwargs):
+            for key, value in kwargs.items():
+                setattr(cfg, key, value)
+
+        cm.update.side_effect = _update
+        secret_provider = MagicMock()
+        secret_provider.set_secret = AsyncMock()
+        tools = ServonautTools(
+            config_manager=cm, aws_service=MagicMock(),
+            custom_server_service=MagicMock(), cache_service=MagicMock(),
+            ssh_service=MagicMock(), connection_service=MagicMock(),
+            scp_service=MagicMock(), guard=CommandGuard(cfg.mcp),
+            audit=MagicMock(), secret_provider=secret_provider,
+        )
+        by_id = {inst["id"]: inst for inst in instances}
+
+        async def _find_instance(key):
+            return by_id.get(key)
+
+        async def _exec_ssh(inst, command, **_kwargs):
+            return (
+                f"===FILE:{cls._SOURCE}===\n"
+                "DB_CONNECTION=mysql\nDB_HOST=localhost\nDB_PORT=3306\n"
+                f"DB_USERNAME=app\nDB_PASSWORD=pw-{inst['id']}\n"
+                "DB_DATABASE=appdb\n"
+            ), ""
+
+        tools._find_instance = _find_instance
+        tools._exec_ssh = _exec_ssh
+        return tools
+
+    def test_fleet_larger_than_the_cap_stores_every_candidate(self):
+        from servonaut.mcp.db_staging import DEFAULT_MAX_TOKENS
+
+        cfg = AppConfig()
+        assert cfg.mcp.db_staging_max_tokens == DEFAULT_MAX_TOKENS
+        instances = _instances(*[f"box-{n:03d}" for n in range(DEFAULT_MAX_TOKENS + 10)])
+        tools = self._real_tools(cfg, instances)
+        svc = DbFleetScanService(tools, MagicMock(get=MagicMock(return_value=cfg)))
+
+        result = run(svc.scan(instances))
+        assert all(len(r.candidates) == 1 for r in result.rows)
+        summary = run(svc.commit_all(result))
+
+        assert (summary.stored, summary.failed) == (len(instances), 0), summary.failures
+        stored = {
+            c.args[0]: c.args[1]
+            for c in tools._secret_provider.set_secret.call_args_list
+        }
+        assert len(stored) == len(instances)
+        for inst in instances:
+            (name,) = [n for n in stored if n.startswith(f"db/{inst['id']}")]
+            assert stored[name] == f"pw-{inst['id']}"
+        assert {p.instance for p in cfg.db_profiles} == {i["id"] for i in instances}
+        # The batch left the agent's store alone and nothing stays staged.
+        assert len(tools._db_staging) == 0
+        assert len(tools._db_staging_batch) == 0
+
+    def test_a_new_scan_drops_the_previous_batch(self):
+        cfg = AppConfig()
+        instances = _instances("box-a")
+        tools = self._real_tools(cfg, instances)
+        svc = DbFleetScanService(tools, MagicMock(get=MagicMock(return_value=cfg)))
+
+        first = run(svc.scan(instances))
+        old_token = first.rows[0].top_candidate["token"]
+        second = run(svc.scan(instances))
+
+        assert tools._staged_db_entry(old_token) == (None, None)
+        new_token = second.rows[0].top_candidate["token"]
+        assert tools._staged_db_entry(new_token)[1] is not None
