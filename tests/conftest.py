@@ -133,6 +133,17 @@ E2E_MARKER_ENV_VARS = {
 }
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register ``--update-snapshots`` for the screenshot tests in tests/snapshots."""
+    parser.addoption(
+        "--update-snapshots",
+        action="store_true",
+        default=False,
+        help="rewrite the screenshot-test snapshots in tests/snapshots/__snapshots__ "
+        "instead of comparing against them",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Register the env-var-gated markers so strict-markers mode is happy."""
     for marker, env_var in E2E_MARKER_ENV_VARS.items():

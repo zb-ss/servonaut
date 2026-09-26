@@ -48,6 +48,8 @@ nosetests.xml
 coverage.xml
 *.cover
 *.log
+# Written by the screenshot tests when a snapshot does not match.
+tests/snapshots/__failures__/
 
 # Hatchling specific (build backend)
 .hatch/

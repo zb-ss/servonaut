@@ -41,6 +41,8 @@ test = [
     "pytest-cov>=4.0",
     "pytest-asyncio>=0.21",
     "pytest-timeout>=2.3",
+    # Freezes the wall clock for the screenshot tests in tests/snapshots.
+    "time-machine>=2.16,<4",
 ]
 # Runs the desktop host tests (authenticated loopback server, Origin checks,
 # packaged assets) that otherwise skip. Pinned to the versions the desktop

@@ -74,6 +74,45 @@ jobs:
           SERVONAUT_REQUIRE_DESKTOP_TESTS: "1"
         run: python -m pytest --tb=short -q tests/desktop
 
+  screenshots:
+    # The screenshot tests against the Textual a fresh install gets. The test
+    # jobs skip them when that Textual is not the version the snapshots were
+    # recorded with; this job fails instead, so a Textual release that
+    # changes the rendering shows up here without failing unrelated changes.
+    name: screenshots / Python 3.12
+    runs-on: ubuntu-latest
+    # The tests take about a minute; the limit only stops a hung run.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Run screenshot tests
+        env:
+          # Fail, rather than skip, when the installed Textual is not the
+          # version the snapshots were recorded with.
+          SERVONAUT_SNAPSHOTS_STRICT: "1"
+        run: python -m pytest --tb=short -q tests/snapshots
+
+      - name: Upload the new renderings
+        # Public: the renderings show only the neutral test fixtures.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: screenshot-failures
+          path: tests/snapshots/__failures__/
+          retention-days: 7
+          if-no-files-found: ignore
+
   e2e:
     name: end-to-end journeys / Python 3.12
     runs-on: ubuntu-latest
