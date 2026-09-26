@@ -122,6 +122,67 @@ a draft, uploading the files, and then publishing it.
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 
+## Screenshot tests
+
+`tests/snapshots/` renders the main screens with the real app and its real
+stylesheets, at 160x50 and at 100x30, and compares each rendering with an SVG
+stored in `tests/snapshots/__snapshots__/`. A change to layout, styling or
+wording on those screens fails the comparison. They are part of the unit
+tests, so CI runs them on every Python version. The screen is captured with
+Textual's own SVG export and compared as text by a small helper in the
+suite (`tests/snapshots/_snapshot.py`); the only extra dependency is
+time-machine, in the `test` extra:
+
+```bash
+pip install -e ".[test]"
+python -m pytest tests/snapshots                      # compare
+python -m pytest tests/snapshots --update-snapshots   # accept the current rendering
+```
+
+A test fails when its rendering differs from the stored SVG, naming the file,
+or when it has no stored SVG yet. On a difference it writes the new rendering
+and a unified diff of the two SVGs to `tests/snapshots/__failures__/`
+(ignored by Git); open the SVG in a browser to see the screen. Nothing about
+your machine goes into these files.
+
+Update the snapshots only when the change on screen is intended: a UI change
+you made on purpose, or a Textual upgrade whose new rendering you have
+checked. Look at every changed SVG before committing, and commit the SVGs
+together with the change that caused them. A failure you did not expect is a
+regression to fix, not a snapshot to update.
+
+Textual's rendering can change from one release to the next, so the
+snapshots record the Textual version they were made with
+(`tests/snapshots/__snapshots__/TEXTUAL_VERSION`), and a failure message says
+when the installed version differs. Run the tests with that version; when
+you upgrade Textual, update all the snapshots in the same change.
+
+Every screen starts from the same state, so the rendering does not depend on
+the machine, the Python version or the time of day:
+
+- Each test runs in an empty home directory with a clean environment. The
+  config, the instance cache and one server's memory are written through the
+  application's own schema and stores (`tests/snapshots/_harness.py`).
+- Nothing reaches the network: the update check and the AWS fetch return
+  fixed data, and the OVH and Hetzner services are stand-ins with a fixed
+  inventory.
+- The wall clock is frozen, so ages such as "Cache: 5m 0s ago" never change,
+  and the sidebar shows a fixed version instead of the release number.
+- Animations, notifications and tooltips are off, text cursors do not blink,
+  and the screen is captured only once two captures in a row are identical.
+
+Fixtures follow the same rules as the rest of the suite (see
+[Avoiding accidental disclosure](#avoiding-accidental-disclosure)): generic
+server names, RFC1918 private addresses and well-known public resolver
+addresses only, since every snapshot is committed. Unset `TEXTUAL_*`
+variables such as `TEXTUAL_THEME` before running the tests: Textual reads
+them when it is imported.
+
+To add a screen, write a scenario in `tests/snapshots/test_screens.py` that
+drives the app there with keys or the app's own navigation, waiting for
+conditions rather than for a fixed time, then run it with `--update-snapshots`
+and review the new SVGs.
+
 ## End-to-end tests
 
 The `e2e/` directory holds end-to-end journeys. They start the real TUI, CLI
