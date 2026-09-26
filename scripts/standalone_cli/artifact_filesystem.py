@@ -25,6 +25,10 @@ from scripts.standalone_cli.embedded_notices import (
 )
 from scripts.standalone_cli.evidence_policy_types import EvidenceLimits
 from scripts.standalone_cli.model import _wheel_product_version
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentityError,
+    validate_marker_identity,
+)
 
 _GLOB_SEGMENT_TOKENS = {"*": "[^/]*", "?": "[^/]"}
 _REQUIRED_METADATA = (
@@ -533,6 +537,8 @@ def _validate_marker(
         "distribution",
         "product_version",
         "build_revision",
+        "channel",
+        "packaging_revision",
         "console_helper",
         "desktop_child",
     }
@@ -552,6 +558,12 @@ def _validate_marker(
         )
     if not isinstance(marker.get("build_revision"), str):
         raise ArtifactEvidenceError("payload runtime marker has an invalid revision")
+    try:
+        validate_marker_identity(marker)
+    except ReleaseIdentityError:
+        raise ArtifactEvidenceError(
+            "payload runtime marker has an invalid release identity"
+        ) from None
     if marker.get("desktop_child") is not None:
         raise ArtifactEvidenceError(
             "payload runtime marker has an invalid desktop helper"

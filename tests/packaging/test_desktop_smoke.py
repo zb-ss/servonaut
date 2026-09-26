@@ -27,6 +27,9 @@ def _make_mock_payload(
     fail_help: bool = False,
     fail_child: bool = False,
     fail_selftest: bool = False,
+    reported_revision: int = 1,
+    skipped_host_step: str | None = None,
+    rejection_error: str = "authentication-failed",
 ) -> Path:
     """Create a mock desktop onedir payload with lightweight executable scripts."""
     root = tmp_path / "servonaut-desktop"
@@ -74,14 +77,35 @@ if args and args[0] == "--_artifact-selftest":
     try:
         data = json.loads(sys.stdin.read())
         token = data.get("token")
-        if token != expected:
-            sys.exit(1)
     except Exception:
+        sys.exit(1)
+    if token != expected:
+        print(json.dumps({{"schema_version": 1, "ok": False, "error": {rejection_error!r}}}))
         sys.exit(1)
     if {fail_selftest}:
         print(json.dumps({{"schema_version": 1, "ok": False, "error": "test-err"}}))
-        sys.exit(0)
-    print(json.dumps({{"schema_version": 1, "ok": True}}))
+        sys.exit(1)
+    host = {{
+        "page": True,
+        "refused_unauthenticated": True,
+        "window": data["check"] == "desktop-window",
+        "session_rendered": True,
+        "session_answered": True,
+        "child_exited": True,
+    }}
+    host.pop({skipped_host_step!r}, None)
+    print(json.dumps({{
+        "schema_version": 1,
+        "ok": True,
+        "check": data["check"],
+        "runtime": {{
+            "kind": "packaged-desktop",
+            "marker": True,
+            "channel": "stable",
+            "packaging_revision": {reported_revision},
+        }},
+        "host": host,
+    }}))
     sys.exit(0)
 sys.exit(0)
 """
@@ -94,6 +118,17 @@ sys.exit(0)
         file_path.write_text(content, encoding="utf-8")
         file_path.chmod(0o755)
 
+    marker = {
+        "schema_version": 1,
+        "distribution": "packaged-desktop",
+        "product_version": version,
+        "build_revision": "ci-r1",
+        "channel": "stable",
+        "packaging_revision": 1,
+        "console_helper": f"servonaut{ext}",
+        "desktop_child": f"servonaut-desktop-child{ext}",
+    }
+    (root / "servonaut-runtime.json").write_text(json.dumps(marker), encoding="utf-8")
     return root
 
 
@@ -154,7 +189,6 @@ def test_smoke_desktop_payload_version_mismatch(tmp_path: Path):
             target,
             product_version="9.9.9",
             skip_mcp=True,
-            skip_selftest=True,
         )
 
 
@@ -169,7 +203,6 @@ def test_smoke_desktop_payload_child_failure(tmp_path: Path):
             target,
             product_version="1.2.3",
             skip_mcp=True,
-            skip_selftest=True,
         )
 
 
@@ -239,7 +272,7 @@ def test_smoke_refuses_to_skip_an_embedded_runnable_selftest(tmp_path: Path):
             product_version="1.2.3",
             policy=policy,
             skip_mcp=True,
-            skip_selftest=True,
+            run_selftest=False,
             build_metadata_dir=_build_metadata(tmp_path, embedded=True),
         )
 
@@ -256,7 +289,7 @@ def test_smoke_requires_build_metadata_to_skip_a_runnable_selftest(tmp_path: Pat
             product_version="1.2.3",
             policy=policy,
             skip_mcp=True,
-            skip_selftest=True,
+            run_selftest=False,
         )
 
 
@@ -271,7 +304,7 @@ def test_smoke_allows_skip_when_the_build_did_not_embed_the_selftest(tmp_path: P
         product_version="1.2.3",
         policy=policy,
         skip_mcp=True,
-        skip_selftest=True,
+        run_selftest=False,
         build_metadata_dir=_build_metadata(tmp_path, embedded=False),
     )
 
@@ -281,3 +314,100 @@ def test_smoke_allows_skip_when_the_build_did_not_embed_the_selftest(tmp_path: P
 def test_smoke_policy_rejects_unknown_selftest_targets(tmp_path: Path):
     with pytest.raises(DesktopSmokeError, match="selftest_targets"):
         _selftest_policy(tmp_path, ["not-a-target"])
+
+
+def test_selftest_result_must_carry_the_marker_identity(tmp_path: Path):
+    """The frozen app must report the channel and revision its build wrote."""
+    payload = _make_mock_payload(tmp_path, reported_revision=2)
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="marker identity"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
+
+
+@pytest.mark.parametrize("step", ["page", "session_rendered", "child_exited"])
+def test_selftest_result_must_complete_every_host_step(tmp_path: Path, step: str):
+    payload = _make_mock_payload(tmp_path, skipped_host_step=step)
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="every host step"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
+
+
+def test_window_check_is_requested_and_required_only_when_asked(tmp_path: Path):
+    payload = _make_mock_payload(tmp_path)
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    report = smoke_desktop_payload(
+        payload, target, product_version="1.2.3", skip_mcp=True, selftest_window=True
+    )
+
+    assert "desktop-window" in report.checks["gui_selftest"].details
+    with pytest.raises(DesktopSmokeError, match="part of the GUI self-test"):
+        smoke_desktop_payload(
+            payload,
+            target,
+            product_version="1.2.3",
+            skip_mcp=True,
+            run_selftest=False,
+            selftest_window=True,
+        )
+
+
+def test_selftest_needs_a_valid_marker_identity(tmp_path: Path):
+    payload = _make_mock_payload(tmp_path)
+    marker_path = payload / "servonaut-runtime.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    del marker["packaging_revision"]
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="packaging revision"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
+
+
+def test_cli_runs_the_selftest_unless_explicitly_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The flag defaults to running the self-test and can actually be turned off."""
+    import scripts.desktop_shell.smoke_artifact as smoke_module
+
+    calls: list[dict[str, object]] = []
+
+    def record(**kwargs: object) -> DesktopSmokeReport:
+        calls.append(kwargs)
+        return DesktopSmokeReport("root", "linux-x64-ubuntu-22.04", "1.2.3", True, 0.0, {})
+
+    monkeypatch.setattr(smoke_module, "smoke_desktop_payload", record)
+    base = [
+        "--payload-root",
+        str(tmp_path),
+        "--target",
+        "linux-x64-ubuntu-22.04",
+        "--product-version",
+        "1.2.3",
+    ]
+
+    assert smoke_module.main(base) == 0
+    assert smoke_module.main([*base, "--selftest"]) == 0
+    assert smoke_module.main([*base, "--no-selftest"]) == 0
+    assert smoke_module.main([*base, "--selftest-window"]) == 0
+
+    assert [(call["run_selftest"], call["selftest_window"]) for call in calls] == [
+        (True, False),
+        (True, False),
+        (False, False),
+        (True, True),
+    ]
+    with pytest.raises(SystemExit):
+        smoke_module.main([*base, "--skip-selftest"])
+
+
+@pytest.mark.parametrize("error", ["request-invalid", "selftest-failed"])
+def test_wrong_token_must_be_refused_as_unauthenticated(tmp_path: Path, error: str):
+    """Exit code 1 alone could be any failure; the refusal must be the auth check."""
+    payload = _make_mock_payload(tmp_path, rejection_error=error)
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="invalid token as unauthenticated"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)

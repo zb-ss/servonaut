@@ -2,8 +2,11 @@
 
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
-package index (the JSON the update check reads and a simple index pip and
-pipx install from), and the ``/__e2e/`` control plane.
+relay (subscriber token, Mercure hub, heartbeat, results, status), account
+data, the AI routes and hosted-MCP endpoint, the package index (the JSON
+the update check reads and a simple index pip and pipx install from), and
+the ``/__e2e/`` control plane. Each path belongs to exactly one route
+module; registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
 """
@@ -19,9 +22,19 @@ from typing import Any, Optional
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud import control, routes_auth, routes_pypi
+from e2e.harness.fake_cloud import (
+    control,
+    routes_account,
+    routes_ai,
+    routes_auth,
+    routes_pypi,
+    routes_relay,
+)
 from e2e.harness.fake_cloud.log import RequestLog, redact
-from e2e.harness.fake_cloud.state import ACCESS_TOKEN, ScenarioStore
+from e2e.harness.fake_cloud.relay import RelayHub
+from e2e.harness.fake_cloud.routes_account import AccountData
+from e2e.harness.fake_cloud.routes_ai import AiState
+from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
 
 _START_TIMEOUT_SECONDS = 15
@@ -34,6 +47,12 @@ class FakeCloud:
         self._tls = tls
         self._store = ScenarioStore(default_pypi_version)
         self._log = RequestLog()
+        self.relay = RelayHub(lambda: self._store.snapshot().user_id)
+        # Bumped by reset(): a request that began before a reset (a relay
+        # stream that outlived its journey) is not logged into the next one.
+        self._epoch = 0
+        self.account = AccountData()
+        self.ai = AiState()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ready = threading.Event()
@@ -58,12 +77,38 @@ class FakeCloud:
 
     def reset(self) -> None:
         """Restore the default scenario and forget logged requests."""
+        self._epoch += 1
         self._store.reset()
         self._log.clear()
+        self.relay.reset()
+        self.account.reset()
+        self.ai.reset()
+
+    # The account's OAuth session (see ``session.TokenSession``).
+
+    def tokens(self) -> tuple[str, str]:
+        """The account's current (access, refresh) token pair."""
+        return self._store.session.tokens()
+
+    def expire_access_token(self) -> None:
+        """The next API call with the current access token answers 401."""
+        self._store.session.expire_access()
+
+    def revoke_session(self) -> None:
+        """Access and refresh tokens both stop working (refresh: invalid_grant)."""
+        self._store.session.revoke()
+
+    def entitlements(self) -> dict:
+        """The document ``/api/entitlements`` currently returns."""
+        return routes_auth.entitlements_payload(self._store)
 
     def requests(self, path: Optional[str] = None, method: Optional[str] = None) -> list[dict]:
         """Requests received so far, oldest first (control routes excluded)."""
         return self._log.entries(path=path, method=method)
+
+    def statuses(self, path: str) -> list[int]:
+        """The HTTP statuses FakeCloud answered on *path*, oldest first."""
+        return [entry["status"] for entry in self._log.entries(path=path)]
 
     def write_log(self, destination: Path) -> None:
         self._log.write_jsonl(destination)
@@ -78,6 +123,7 @@ class FakeCloud:
         return self
 
     def stop(self) -> None:
+        self.relay.drop_streams()  # open subscriptions would hold up shutdown
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread is not None:
@@ -90,13 +136,20 @@ class FakeCloud:
     def _build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._log_middleware])
         routes_auth.add_routes(app, self._store, lambda: self.url)
+        routes_relay.add_routes(app, self._store, self.relay)
+        routes_account.add_routes(app, self._store, self.account)
+        routes_ai.add_routes(app, self._store, self.ai)
         routes_pypi.add_routes(app, self._store)
         control.add_routes(app, self._store, self._log)
+        require_unique_routes(app)
         return app
 
     @web.middleware
     async def _log_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        epoch = self._epoch
         body: Any = None
+        authorization = request.headers.get("Authorization")
+        bearer_ok = self._store.session.bearer_valid(authorization)
         if request.can_read_body:
             raw = await request.read()
             try:
@@ -107,8 +160,7 @@ class FakeCloud:
             response = await handler(request)
         except web.HTTPNotFound:
             response = web.json_response({"error": "not provided by FakeCloud"}, status=404)
-        if not request.path.startswith(control.CONTROL_PREFIX):
-            authorization = request.headers.get("Authorization")
+        if epoch == self._epoch and not request.path.startswith(control.CONTROL_PREFIX):
             self._log.add(
                 {
                     "method": request.method,
@@ -116,7 +168,7 @@ class FakeCloud:
                     "query": redact(dict(request.query)),
                     "body": body,
                     "authorization": "Bearer <redacted>" if authorization else None,
-                    "bearer_ok": authorization == f"Bearer {ACCESS_TOKEN}",
+                    "bearer_ok": bearer_ok,
                     "status": response.status,
                 }
             )
@@ -146,3 +198,15 @@ class FakeCloud:
         finally:
             loop.run_until_complete(runner.cleanup())
             loop.close()
+
+
+def require_unique_routes(app: web.Application) -> None:
+    """Fail when two route modules register the same method and path."""
+    seen: set[tuple[str, str]] = set()
+    for route in app.router.routes():
+        info = route.resource.get_info() if route.resource is not None else {}
+        path = info.get("path") or info.get("formatter") or ""
+        key = (route.method, path)
+        if key in seen:
+            raise RuntimeError(f"FakeCloud route registered twice: {route.method} {path}")
+        seen.add(key)

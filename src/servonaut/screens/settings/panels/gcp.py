@@ -37,6 +37,12 @@ class GcpPanel(SettingsPanel):
     PANEL_ID = "gcp"
     TITLE = "GCP (Google Cloud)"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "gcp_credentials_path": "redact_file_path",
+        "gcp_project_ids": "redact_identifier",
+    }
+
     DEFAULT_CSS = """
     GcpPanel .gcp-section-label {
         color: $accent;
@@ -102,10 +108,8 @@ class GcpPanel(SettingsPanel):
         """Populate widgets from config and snapshot for dirty tracking."""
         gcp = self.app.config_manager.get().gcp
         self.query_one("#gcp_enabled", Switch).value = gcp.enabled
-        self.query_one("#gcp_credentials_path", Input).value = gcp.credentials_path
-        self.query_one("#gcp_project_ids", StringListEditor).set_values(
-            list(gcp.project_ids)
-        )
+        self._show_field("gcp_credentials_path", gcp.credentials_path)
+        self._show_field("gcp_project_ids", list(gcp.project_ids))
         self.query_one("#gcp_zones", StringListEditor).set_values(list(gcp.zones))
         self._snapshot_now()
 
@@ -118,9 +122,9 @@ class GcpPanel(SettingsPanel):
         return {
             "enabled": self.query_one("#gcp_enabled", Switch).value,
             "credentials_path": (
-                self.query_one("#gcp_credentials_path", Input).value.strip()
+                self._field_value("gcp_credentials_path").strip()
             ),
-            "project_ids": self.query_one("#gcp_project_ids", StringListEditor).get_values(),
+            "project_ids": self._field_value("gcp_project_ids"),
             "zones": self.query_one("#gcp_zones", StringListEditor).get_values(),
         }
 
@@ -152,7 +156,7 @@ class GcpPanel(SettingsPanel):
                 check on the locally-owned path input).
         """
         credentials_path = (
-            self.query_one("#gcp_credentials_path", Input).value.strip()
+            self._field_value("gcp_credentials_path").strip()
         )
         if credentials_path and (
             "\n" in credentials_path or "\x00" in credentials_path
@@ -166,7 +170,7 @@ class GcpPanel(SettingsPanel):
             "enabled": self.query_one("#gcp_enabled", Switch).value,
             "credentials_path": credentials_path,
             "project_ids": (
-                self.query_one("#gcp_project_ids", StringListEditor).get_values()
+                self._field_value("gcp_project_ids")
             ),
             "zones": self.query_one("#gcp_zones", StringListEditor).get_values(),
         }

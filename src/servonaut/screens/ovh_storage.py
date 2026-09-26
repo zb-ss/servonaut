@@ -221,7 +221,7 @@ class OVHStorageScreen(Screen):
                 all_volumes.extend(vols)
             except Exception as exc:
                 logger.error("list_volumes failed for project %s: %s", pid, exc)
-                self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error")
+                self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error", markup=False)
 
         self._volumes: List[dict] = all_volumes
 
@@ -331,7 +331,7 @@ class OVHStorageScreen(Screen):
             await self._load_volumes()
         except Exception as exc:
             logger.error("create_volume failed: %s", exc)
-            self.app.notify(f"Failed to create volume: {self._provider_error(exc)}", severity="error")
+            self.app.notify(f"Failed to create volume: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Delete volume
@@ -387,7 +387,7 @@ class OVHStorageScreen(Screen):
             await self._load_volumes()
         except Exception as exc:
             logger.error("delete_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to delete volume: {self._provider_error(exc)}", severity="error")
+            self.app.notify(f"Failed to delete volume: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Attach volume
@@ -464,7 +464,7 @@ class OVHStorageScreen(Screen):
             await self._load_volumes()
         except Exception as exc:
             logger.error("attach_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to attach volume: {self._provider_error(exc)}", severity="error")
+            self.app.notify(f"Failed to attach volume: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Detach volume
@@ -537,7 +537,7 @@ class OVHStorageScreen(Screen):
             await self._load_volumes()
         except Exception as exc:
             logger.error("detach_volume failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to detach volume: {self._provider_error(exc)}", severity="error")
+            self.app.notify(f"Failed to detach volume: {self._provider_error(exc)}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Snapshot
@@ -592,4 +592,4 @@ class OVHStorageScreen(Screen):
             )
         except Exception as exc:
             logger.error("create_volume_snapshot failed for %s: %s", volume_id, exc)
-            self.app.notify(f"Failed to create snapshot: {self._provider_error(exc)}", severity="error")
+            self.app.notify(f"Failed to create snapshot: {self._provider_error(exc)}", severity="error", markup=False)

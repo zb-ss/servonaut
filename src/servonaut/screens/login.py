@@ -451,7 +451,7 @@ class LoginScreen(Screen):
         except Exception as exc:
             logger.error("Device flow initiation failed: %s", exc)
             msg = str(exc)[:200]
-            self.notify(f"Login failed: {msg}", severity="error")
+            self.notify(f"Login failed: {msg}", severity="error", markup=False)
             self._hide_all_sections()
             self._show_logged_out_state()
             return
@@ -523,7 +523,7 @@ class LoginScreen(Screen):
             )
         except Exception as exc:
             logger.error("Logout error: %s", exc)
-            self.notify(f"Logout error: {exc}", severity="error")
+            self.notify(f"Logout error: {exc}", severity="error", markup=False)
 
     def _confirm_local_sign_out(self) -> None:
         """Ask before forgetting the session without revoking it."""

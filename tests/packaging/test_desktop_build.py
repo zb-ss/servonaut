@@ -45,7 +45,6 @@ def test_desktop_build_request_fields(
         build_revision="rev1",
         source_commit="commit1",
         output_dir=tmp_path / "out",
-        require_artifact_selftest=True,
     )
     assert req.wheel == wheel
     assert req.target == sample_target_spec
@@ -53,7 +52,6 @@ def test_desktop_build_request_fields(
     assert req.build_revision == "rev1"
     assert req.source_commit == "commit1"
     assert req.output_dir == tmp_path / "out"
-    assert req.require_artifact_selftest is True
 
 
 def test_validate_desktop_build_request_rejects_non_file(

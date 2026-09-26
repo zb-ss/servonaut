@@ -30,10 +30,10 @@ def main(argv: list[str] | None = None) -> int:
             current_executable=runtime.executable,
         )
 
-    if args and args[0] == "--_artifact-selftest":
-        from servonaut._artifact_selftest import run_artifact_selftest
+    if args == ["--_artifact-selftest"]:
+        from servonaut.desktop.artifact_selftest import run_desktop_artifact_selftest
 
-        return run_artifact_selftest(runtime)
+        return run_desktop_artifact_selftest(runtime)
 
     log_file = configure_rotating_log(
         runtime.data_root / "logs", filename=_GUI_LOG_NAME

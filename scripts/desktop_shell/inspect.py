@@ -49,6 +49,10 @@ from scripts.standalone_cli.artifact_types import (
 )
 from scripts.standalone_cli.embedded_notices import load_embedded_notice_policy
 from scripts.standalone_cli.model import BuildValidationError
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentityError,
+    validate_marker_identity,
+)
 from scripts.standalone_cli.toc_policy import validate_toc_policy
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -150,6 +154,10 @@ def _verify_marker(
         raise DesktopInspectionError(
             f"Product version mismatch in marker: {raw.get('product_version')} != {product_version}"
         )
+    try:
+        validate_marker_identity(raw)
+    except ReleaseIdentityError as err:
+        raise DesktopInspectionError(str(err)) from None
 
     ext = ".exe" if target.platform == "win32" else ""
     expected_console = f"servonaut{ext}"

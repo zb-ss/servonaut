@@ -540,7 +540,7 @@ class TeamManagementScreen(Screen):
             self._populate_teams_table(teams)
         except Exception as exc:
             logger.error("Failed to load teams: %s", exc)
-            self.notify(f"Failed to load teams: {exc}", severity="error")
+            self.notify(f"Failed to load teams: {exc}", severity="error", markup=False)
 
     async def _load_team_detail(self, slug: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -589,7 +589,7 @@ class TeamManagementScreen(Screen):
             self._refresh_member_buttons()
         except Exception as exc:
             logger.error("Failed to load team detail: %s", exc)
-            self.notify(f"Failed to load team: {exc}", severity="error")
+            self.notify(f"Failed to load team: {exc}", severity="error", markup=False)
 
     def _infer_caller_role(self, members: list[dict]) -> Optional[str]:
         """Fallback when GET /teams/{slug} omits a top-level ``role`` field.
@@ -622,10 +622,10 @@ class TeamManagementScreen(Screen):
             # "You already own a team workspace...". Both are user-actionable —
             # surface the message verbatim rather than the generic stringified exc.
             logger.error("Failed to create team: %s", exc.message)
-            self.notify(exc.message, severity="error", timeout=10)
+            self.notify(exc.message, severity="error", timeout=10, markup=False)
         except Exception as exc:
             logger.error("Failed to create team: %s", exc)
-            self.notify(f"Failed to create team: {exc}", severity="error")
+            self.notify(f"Failed to create team: {exc}", severity="error", markup=False)
 
     async def _do_invite_member(self, slug: str, email: str, role: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -640,7 +640,7 @@ class TeamManagementScreen(Screen):
             self._notify_member_write_error(exc, fallback="Failed to invite member")
         except Exception as exc:
             logger.error("Failed to invite member: %s", exc)
-            self.notify(f"Failed to invite member: {exc}", severity="error")
+            self.notify(f"Failed to invite member: {exc}", severity="error", markup=False)
 
     async def _do_resend_invite(self, slug: str, member_id: str, email: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -654,7 +654,7 @@ class TeamManagementScreen(Screen):
             self._notify_member_write_error(exc, fallback="Failed to resend invite")
         except Exception as exc:
             logger.error("Failed to resend invite: %s", exc)
-            self.notify(f"Failed to resend invite: {exc}", severity="error")
+            self.notify(f"Failed to resend invite: {exc}", severity="error", markup=False)
 
     def _notify_member_write_error(self, exc: APIError, *, fallback: str) -> None:
         """Render a context-aware notification for invite/resend API errors.
@@ -674,17 +674,18 @@ class TeamManagementScreen(Screen):
                 hint = "Manage your subscription at https://servonaut.dev/account/billing."
             else:
                 hint = "Ask the team owner to renew the Teams subscription."
-            self.notify(f"{exc.message} {hint}", severity="warning", timeout=12)
+            self.notify(f"{exc.message} {hint}", severity="warning", timeout=12, markup=False)
             return
         if exc.status == 422:
             self.notify(
                 f"{exc.message} Remove an existing member, or upgrade the seat cap.",
                 severity="warning",
                 timeout=12,
+                markup=False,
             )
             return
         # All other 4xx — show the server's message rather than the wrapped repr.
-        self.notify(f"{fallback}: {exc.message}", severity="error")
+        self.notify(f"{fallback}: {exc.message}", severity="error", markup=False)
 
     async def _do_remove_member(self, slug: str, member_id: str, email: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -696,7 +697,7 @@ class TeamManagementScreen(Screen):
             await self._load_team_detail(slug)
         except Exception as exc:
             logger.error("Failed to remove member: %s", exc)
-            self.notify(f"Failed to remove member: {exc}", severity="error")
+            self.notify(f"Failed to remove member: {exc}", severity="error", markup=False)
 
     async def _do_update_role(self, slug: str, member_id: str, email: str, role: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
@@ -709,7 +710,7 @@ class TeamManagementScreen(Screen):
             await self._load_team_detail(slug)
         except Exception as exc:
             logger.error("Failed to update role: %s", exc)
-            self.notify(f"Failed to update role: {exc}", severity="error")
+            self.notify(f"Failed to update role: {exc}", severity="error", markup=False)
 
     def _notify_invite_outcome(self, email: str, response: dict, *, action: str) -> None:
         """Render a context-aware notification for invite/resend responses.
@@ -744,10 +745,10 @@ class TeamManagementScreen(Screen):
         except APIError as exc:
             logger.error("Failed to share server (%s): %s", exc.status, exc.message)
             # Backend 409 example: "A server with this hostname is already shared."
-            self.notify(f"Failed to share server: {exc.message}", severity="error")
+            self.notify(f"Failed to share server: {exc.message}", severity="error", markup=False)
         except Exception as exc:
             logger.error("Failed to share server: %s", exc)
-            self.notify(f"Failed to share server: {exc}", severity="error")
+            self.notify(f"Failed to share server: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Table population
@@ -1135,7 +1136,7 @@ class TeamManagementScreen(Screen):
             self.app.copy_to_clipboard(accept_url)
         except Exception as exc:  # noqa: BLE001
             logger.warning("copy_to_clipboard failed: %s", exc)
-            self.notify(f"Could not copy to clipboard: {exc}", severity="error")
+            self.notify(f"Could not copy to clipboard: {exc}", severity="error", markup=False)
             return
         email = self._member_display_email(member)
         self.notify(f"Accept URL for {email} copied to clipboard.", severity="information")
@@ -1247,10 +1248,10 @@ class TeamManagementScreen(Screen):
                     severity="error",
                 )
             else:
-                self.notify(f"Push failed: {exc.message}", severity="error")
+                self.notify(f"Push failed: {exc.message}", severity="error", markup=False)
         except Exception as exc:  # noqa: BLE001
             logger.error("Push team config failed: %s", exc)
-            self.notify(f"Push failed: {exc}", severity="error")
+            self.notify(f"Push failed: {exc}", severity="error", markup=False)
 
     def _action_pull_config(self) -> None:
         """Fetch the team's latest config and open the apply-confirmation form."""
@@ -1271,11 +1272,11 @@ class TeamManagementScreen(Screen):
             latest = await team_svc.get_latest_team_config(slug)
         except APIError as exc:
             logger.error("Pull team config failed (%s): %s", exc.status, exc.message)
-            self.notify(f"Pull failed: {exc.message}", severity="error")
+            self.notify(f"Pull failed: {exc.message}", severity="error", markup=False)
             return
         except Exception as exc:  # noqa: BLE001
             logger.error("Pull team config failed: %s", exc)
-            self.notify(f"Pull failed: {exc}", severity="error")
+            self.notify(f"Pull failed: {exc}", severity="error", markup=False)
             return
         if latest is None:
             self.notify("No team config has been pushed yet.", severity="warning")
@@ -1304,7 +1305,7 @@ class TeamManagementScreen(Screen):
             config_manager.save()
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
-            self.notify(f"Apply failed: {exc}", severity="error")
+            self.notify(f"Apply failed: {exc}", severity="error", markup=False)
             return
         self._pending_pull_payload = None
         self._hide_pull_config_form()

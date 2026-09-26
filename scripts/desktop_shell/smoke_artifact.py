@@ -20,6 +20,11 @@ from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_target_spec,
 )
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentity,
+    ReleaseIdentityError,
+    validate_marker_identity,
+)
 from scripts.standalone_cli.smoke_artifact import isolated_child_environment
 from scripts.standalone_cli.smoke_mcp import (
     MCPCheck,
@@ -30,6 +35,21 @@ from scripts.standalone_cli.smoke_mcp import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "smoke-policy.json"
+_MARKER_NAME = "servonaut-runtime.json"
+# The marker is a handful of scalar fields; anything larger is not a marker.
+_MAX_MARKER_BYTES = 256 * 1024
+# The packaged GUI self-test runs headlessly; the window check needs a display.
+_SELFTEST_CHECK = "desktop"
+_SELFTEST_WINDOW_CHECK = "desktop-window"
+# How much of a failed self-test's stderr the error message carries.
+_STDERR_TAIL_CHARS = 2000
+_HOST_RESULT_KEYS = (
+    "page",
+    "refused_unauthenticated",
+    "session_rendered",
+    "session_answered",
+    "child_exited",
+)
 
 _POLICY_KEYS = frozenset(
     {
@@ -253,17 +273,25 @@ def smoke_desktop_payload(
     *,
     policy: DesktopSmokePolicy | None = None,
     evidence_dir: Path | None = None,
-    skip_selftest: bool = False,
+    run_selftest: bool = True,
+    selftest_window: bool = False,
     skip_mcp: bool = False,
     build_metadata_dir: Path | None = None,
 ) -> DesktopSmokeReport:
-    """Run all end-to-end smoke checks on a packaged desktop payload."""
+    """Run all end-to-end smoke checks on a packaged desktop payload.
+
+    The GUI self-test runs unless ``run_selftest`` is false, which the policy
+    refuses for a target that can run a self-test the build embedded.
+    ``selftest_window`` also opens the native window and needs a display.
+    """
     payload_root = payload_root.resolve(strict=True)
     if not payload_root.is_dir():
         raise DesktopSmokeError(f"Payload root not found: {payload_root}")
 
     active_policy = policy or load_desktop_smoke_policy()
-    if skip_selftest:
+    if not run_selftest:
+        if selftest_window:
+            raise DesktopSmokeError("The window check is part of the GUI self-test")
         _require_selftest_skip_allowed(target, active_policy, build_metadata_dir)
     total_start = time.monotonic()
 
@@ -403,63 +431,17 @@ def smoke_desktop_payload(
                     detail = f"{detail} (cause: {err.__cause__})"
                 raise DesktopSmokeError(f"MCP stdio smoke failed: {detail}") from err
 
-        # 6. Desktop GUI --_artifact-selftest (if not skipped)
-        if not skip_selftest:
-            # First, check authentication rejection on bad token
-            selftest_env_bad = dict(env)
-            bad_token = secrets.token_hex(16)
-            selftest_env_bad["SERVONAUT_ARTIFACT_SELFTEST_TOKEN"] = bad_token
-            bad_stdin = json.dumps(
-                {"schema_version": 1, "token": "mismatched-token", "check": "tui"}
-            ).encode("utf-8")
-            res_st_bad = _run_process(
-                [str(gui_path), "--_artifact-selftest"],
-                cwd=scratch_home,
-                env=selftest_env_bad,
-                stdin_data=bad_stdin,
-                timeout=active_policy.public_command_timeout_seconds,
-                max_output_bytes=active_policy.stdout_stderr_max_bytes,
-            )
-            if res_st_bad.exit_code != 1:
-                raise DesktopSmokeError(
-                    f"GUI selftest accepted invalid token (exit code {res_st_bad.exit_code})"
+        # 6. Desktop GUI --_artifact-selftest
+        if run_selftest:
+            checks.update(
+                _run_gui_selftest(
+                    gui_path,
+                    scratch_home,
+                    env,
+                    active_policy,
+                    check=_SELFTEST_WINDOW_CHECK if selftest_window else _SELFTEST_CHECK,
+                    identity=_marker_identity(payload_root),
                 )
-            checks["gui_selftest_auth_rejection"] = res_st_bad.to_check_result(
-                ok=True, details="Unauthenticated selftest rejected"
-            )
-
-            # Second, run authenticated selftest
-            valid_token = secrets.token_hex(32)
-            selftest_env_good = dict(env)
-            selftest_env_good["SERVONAUT_ARTIFACT_SELFTEST_TOKEN"] = valid_token
-            good_stdin = json.dumps(
-                {"schema_version": 1, "token": valid_token, "check": "tui"}
-            ).encode("utf-8")
-            res_st_good = _run_process(
-                [str(gui_path), "--_artifact-selftest"],
-                cwd=scratch_home,
-                env=selftest_env_good,
-                stdin_data=good_stdin,
-                timeout=active_policy.selftest_timeout_seconds,
-                max_output_bytes=active_policy.stdout_stderr_max_bytes,
-            )
-            if res_st_good.exit_code != 0:
-                raise DesktopSmokeError(
-                    f"GUI selftest failed with exit code {res_st_good.exit_code}: {res_st_good.stderr.decode('utf-8', errors='replace')}"
-                )
-            try:
-                st_payload = json.loads(res_st_good.stdout.decode("utf-8"))
-            except Exception as err:
-                raise DesktopSmokeError(
-                    f"GUI selftest returned non-JSON stdout: {err}"
-                ) from err
-
-            if not st_payload.get("ok"):
-                raise DesktopSmokeError(
-                    f"GUI selftest reported failure: {st_payload.get('error')}"
-                )
-            checks["gui_selftest"] = res_st_good.to_check_result(
-                ok=True, details="Authenticated selftest passed"
             )
 
     total_duration = time.monotonic() - total_start
@@ -479,6 +461,119 @@ def smoke_desktop_payload(
         report_file.write_text(report.to_json(), encoding="utf-8")
 
     return report
+
+
+def _marker_identity(payload_root: Path) -> ReleaseIdentity:
+    """Read the release identity the build wrote into the payload's marker."""
+    try:
+        with (payload_root / _MARKER_NAME).open("rb") as handle:
+            raw = handle.read(_MAX_MARKER_BYTES + 1)
+        if len(raw) > _MAX_MARKER_BYTES:
+            raise DesktopSmokeError("Runtime marker is too large")
+        marker = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+        raise DesktopSmokeError("Runtime marker is unavailable") from err
+    if not isinstance(marker, dict):
+        raise DesktopSmokeError("Runtime marker must be a JSON object")
+    try:
+        return validate_marker_identity(marker)
+    except ReleaseIdentityError as err:
+        raise DesktopSmokeError(str(err)) from None
+
+
+def _selftest_request(token: str, check: str) -> bytes:
+    return json.dumps({"schema_version": 1, "token": token, "check": check}).encode(
+        "utf-8"
+    )
+
+
+def _run_gui_selftest(
+    gui_path: Path,
+    cwd: Path,
+    env: dict[str, str],
+    policy: DesktopSmokePolicy,
+    *,
+    check: str,
+    identity: ReleaseIdentity,
+) -> dict[str, CheckResult]:
+    """Require the GUI to refuse a wrong token, then pass the authenticated check."""
+    rejected = _run_process(
+        [str(gui_path), "--_artifact-selftest"],
+        cwd=cwd,
+        env={**env, "SERVONAUT_ARTIFACT_SELFTEST_TOKEN": secrets.token_hex(16)},
+        stdin_data=_selftest_request("mismatched-token", check),
+        timeout=policy.public_command_timeout_seconds,
+        max_output_bytes=policy.stdout_stderr_max_bytes,
+    )
+    if rejected.exit_code != 1 or _selftest_error(rejected) != "authentication-failed":
+        raise DesktopSmokeError(
+            "GUI selftest did not refuse an invalid token as unauthenticated "
+            f"(exit code {rejected.exit_code})"
+        )
+
+    token = secrets.token_hex(32)
+    passed = _run_process(
+        [str(gui_path), "--_artifact-selftest"],
+        cwd=cwd,
+        env={**env, "SERVONAUT_ARTIFACT_SELFTEST_TOKEN": token},
+        stdin_data=_selftest_request(token, check),
+        timeout=policy.selftest_timeout_seconds,
+        max_output_bytes=policy.stdout_stderr_max_bytes,
+    )
+    _validate_selftest_result(passed, check, identity)
+    return {
+        "gui_selftest_auth_rejection": rejected.to_check_result(
+            ok=True, details="Unauthenticated selftest rejected"
+        ),
+        "gui_selftest": passed.to_check_result(
+            ok=True, details=f"Authenticated {check} selftest passed"
+        ),
+    }
+
+
+def _selftest_payload(result: _ProcessResult) -> object:
+    try:
+        return json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _selftest_error(result: _ProcessResult) -> object:
+    """The error code a failed self-test reported, or None without one."""
+    payload = _selftest_payload(result)
+    if not isinstance(payload, dict) or payload.get("ok") is not False:
+        return None
+    return payload.get("error")
+
+
+def _validate_selftest_result(
+    result: _ProcessResult, check: str, identity: ReleaseIdentity
+) -> None:
+    """Require every step of the packaged check and the build's own identity."""
+    payload = _selftest_payload(result)
+    if result.exit_code != 0 or not isinstance(payload, dict) or payload.get("ok") is not True:
+        reason = payload.get("error") if isinstance(payload, dict) else None
+        if reason is None:
+            reason = result.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL_CHARS:]
+        raise DesktopSmokeError(
+            f"GUI selftest reported failure (exit code {result.exit_code}): {reason}"
+        )
+    if payload.get("check") != check:
+        raise DesktopSmokeError("GUI selftest ran a different check")
+    expected_runtime = {
+        "kind": "packaged-desktop",
+        "marker": True,
+        "channel": identity.channel,
+        "packaging_revision": identity.packaging_revision,
+    }
+    if payload.get("runtime") != expected_runtime:
+        raise DesktopSmokeError(
+            "GUI selftest runtime does not match the payload's marker identity"
+        )
+    host = payload.get("host")
+    required = (*_HOST_RESULT_KEYS, *(("window",) if check == _SELFTEST_WINDOW_CHECK else ()))
+    if not isinstance(host, dict) or any(host.get(key) is not True for key in required):
+        raise DesktopSmokeError("GUI selftest did not complete every host step")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -526,9 +621,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Build metadata directory recording whether the self-test is embedded",
     )
     parser.add_argument(
-        "--skip-selftest",
+        "--selftest",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run the packaged GUI self-test (default). --no-selftest is refused "
+            "for a target that can run a self-test the build embedded"
+        ),
+    )
+    parser.add_argument(
+        "--selftest-window",
         action="store_true",
-        help="Skip GUI --_artifact-selftest execution where the smoke policy allows it",
+        default=False,
+        help=(
+            "Also open the native window during the self-test. Needs a display; "
+            "CI does not run it, and the tests check it only against a stand-in "
+            "window toolkit"
+        ),
     )
     parser.add_argument(
         "--skip-mcp",
@@ -547,7 +656,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             product_version=args.product_version,
             policy=policy,
             evidence_dir=args.evidence_dir,
-            skip_selftest=args.skip_selftest,
+            run_selftest=args.selftest,
+            selftest_window=args.selftest_window,
             skip_mcp=args.skip_mcp,
             build_metadata_dir=args.build_metadata,
         )

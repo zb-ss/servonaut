@@ -12,6 +12,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sta
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import replace_instances
 
 
 class CustomServersScreen(Screen):
@@ -102,6 +103,18 @@ class CustomServersScreen(Screen):
         self._populate_table()
         self._hide_form()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the table; close an open form when demo mode turns on.
+
+        An open form is bound to the real record, so its fields hold the
+        real host, key path and SSH options — the same reason editing is
+        refused in demo mode.
+        """
+        self._populate_table()
+        if self.app.demo_mode and self.query_one("#add_form").display:
+            self._show_form()  # resets every field to the blank "add" state
+            self._hide_form()
+
     def _setup_table(self) -> None:
         """Configure DataTable columns."""
         table = self.query_one("#custom_servers_table", DataTable)
@@ -166,7 +179,7 @@ class CustomServersScreen(Screen):
             # the raw host, key path and SSH options on screen.
             self.app.notify(
                 "Editing is disabled in demo mode — the form would show "
-                "the real values.",
+                "the real values. Press ctrl+shift+d to turn demo mode off.",
                 severity="warning",
             )
             return
@@ -293,7 +306,7 @@ class CustomServersScreen(Screen):
             try:
                 self.app.custom_server_service.add_server(server)
             except ValueError as e:
-                self.app.notify(str(e), severity="error")
+                self.app.notify(str(e), severity="error", markup=False)
                 return
 
         self._populate_table()
@@ -302,24 +315,15 @@ class CustomServersScreen(Screen):
         self.app.notify(f"Saved server: {name}", severity="information")
 
     def _refresh_app_instances(self) -> None:
-        """Rebuild app.instances to include updated custom servers.
+        """Replace the custom-server rows in ``app.instances``.
 
-        Demo mode: the fresh custom rows are raw, so they go into the
-        pre-redaction snapshot first and are then redacted in place like the
-        rest of the list — otherwise a save or remove would put real names
-        back on the fleet table.
+        In demo mode the fresh rows are kept aside as the real records and
+        listed redacted, like every other row — otherwise a save or remove
+        would put real names back on the fleet table.
         """
-        import copy
-        other_instances = [i for i in self.app.instances if not i.get('is_custom')]
-        custom = self.app.custom_server_service.list_as_instances()
-        pristine = getattr(self.app, "_instances_pristine", None)
-        if pristine is not None:
-            self.app._instances_pristine = [
-                i for i in pristine if not i.get('is_custom')
-            ] + copy.deepcopy(custom)
-        if self.app.demo_mode and self.app.redaction_service:
-            self.app.redaction_service.redact_instances(custom)
-        self.app.instances = other_instances + custom
+        replace_instances(
+            self.app, "custom", self.app.custom_server_service.list_as_instances()
+        )
 
     def action_back(self) -> None:
         """Navigate back to main menu."""
