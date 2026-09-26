@@ -476,4 +476,12 @@ Once connected, the exit code is the remote command's (or the session's);
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
 | `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |
 
+`servonaut --update` and the in-app update check offer stable releases only.
+New versions are published as release candidates (for example `2.28.0rc1`)
+a few days before the stable release; pip and pipx install them only when asked
+for pre-releases. To try one without touching your installation, run
+`pipx run --spec 'servonaut==2.28.0rc1' servonaut`. An installation that is
+itself a release candidate is offered newer candidates and the stable release
+that follows them.
+
 See [MCP Tools reference](mcp-tools.md) for the full list of MCP tools.
