@@ -606,9 +606,11 @@ class ServonautApp(App):
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
         )
-        tool_executor = ChatToolExecutor(
-            tools=self.servonaut_tools,
-            guard_level=config.chat_tool_guard_level,
+        # Follows chat_tool_guard_level live: bring-your-own providers run
+        # tools without per-call prompts, so a lowered level must apply to
+        # the next call, not after a restart.
+        tool_executor = ChatToolExecutor.from_config(
+            self.servonaut_tools, self.config_manager,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor,
@@ -982,11 +984,7 @@ class ServonautApp(App):
                     logger.debug("Servonaut AI provider registration skipped: %s", e)
             # Expose the ServonautProvider directly for chat-panel streaming.
             try:
-                from servonaut.services.ai_providers import ServonautProvider
-                self.servonaut_provider = ServonautProvider(
-                    api_client=self.api_client,
-                    auth_service=self.auth_service,
-                )
+                self.servonaut_provider = self._build_servonaut_provider()
             except Exception as e:  # pragma: no cover
                 logger.debug("ServonautProvider direct init skipped: %s", e)
                 self.servonaut_provider = None
@@ -1020,6 +1018,9 @@ class ServonautApp(App):
                 from servonaut.services.relay_executors import RelayExecutors
                 from servonaut.mcp.audit import AuditTrail
                 from servonaut.services.ai_tool_bridge import AIToolBridge
+                from servonaut.screens.tool_confirm_modal import (
+                    build_modal_confirm,
+                )
                 relay = RelayExecutors(
                     self.config_manager,
                     self.aws_service,
@@ -1032,28 +1033,11 @@ class ServonautApp(App):
                 cfg = self.config_manager.get()
                 ai_audit = AuditTrail(cfg.mcp.audit_path)
 
-                async def _ai_confirm_callback(call) -> bool:
-                    """Push the right confirm modal for *call* and await the user's choice."""
-                    from servonaut.screens.tool_confirm_modal import (
-                        DangerousToolConfirmModal,
-                        ToolConfirmModal,
-                    )
-                    if call.guard_level == "dangerous":
-                        modal = DangerousToolConfirmModal(call.tool, dict(call.args))
-                    else:
-                        modal = ToolConfirmModal(call.tool, dict(call.args))
-                    try:
-                        result = await self.push_screen_wait(modal)
-                    except Exception:  # pragma: no cover — defensive
-                        logger.exception("push_screen_wait failed for tool confirm")
-                        return False
-                    return bool(result)
-
                 self.ai_tool_bridge = AIToolBridge(
                     api_client=self.api_client,
                     relay_executors=relay,
                     mcp_audit=ai_audit,
-                    confirm_callback=_ai_confirm_callback,
+                    confirm_callback=build_modal_confirm(self),
                     auth_service=self.auth_service,
                     # Inject the same ServonautTools the MCP server uses
                     # so AI-driven readonly tools (list_instances,
@@ -1061,6 +1045,12 @@ class ServonautApp(App):
                     # surface instead of the SSH/Mercure relay.
                     servonaut_tools=getattr(self, "servonaut_tools", None),
                     ip_ban_service=getattr(self, "ip_ban_service", None),
+                    # Read per call: an unanswered prompt is closed and
+                    # the tool refused once this many seconds pass.
+                    confirm_timeout=lambda: (
+                        self.config_manager.get()
+                        .ai_provider.tool_confirm_timeout_seconds
+                    ),
                 )
                 # Demo mode: the model reasons over redacted rows and asks for
                 # tools by fake id; the relay needs the real one.
@@ -1074,6 +1064,19 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Paid-tier services init failed: %s", e)
         self._init_memory_cloud_services()
+
+    def _build_servonaut_provider(self):
+        """Hosted-AI provider for chat-panel streaming.
+
+        ``config_manager`` lets the provider send ``chat_max_tool_rounds``
+        on each chat request.
+        """
+        from servonaut.services.ai_providers import ServonautProvider
+        return ServonautProvider(
+            api_client=self.api_client,
+            auth_service=self.auth_service,
+            config_manager=self.config_manager,
+        )
 
     def _init_memory_cloud_services(self) -> None:
         """Wire memory cloud-sync services (Stream 2 + 3).
