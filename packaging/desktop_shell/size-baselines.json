@@ -3,27 +3,27 @@
   "baselines": {
     "linux-x64-ubuntu-22.04": {
       "target": "linux-x64-ubuntu-22.04",
-      "max_expanded_bytes": 268435456,
+      "max_expanded_bytes": 335544320,
       "max_regular_file_count": 5000,
-      "rationale": "Desktop shell internal payload baseline for Linux x64 Ubuntu 22.04"
+      "rationale": "Desktop shell internal payload baseline for Linux x64 Ubuntu 22.04: the 256 MiB application ceiling plus 64 MiB for the managed voice runtime inputs (a pinned uv executable of up to 48 MiB, the product wheel, the voice lock and its manifest, with headroom for uv updates)"
     },
     "windows-x64": {
       "target": "windows-x64",
-      "max_expanded_bytes": 268435456,
+      "max_expanded_bytes": 335544320,
       "max_regular_file_count": 5000,
-      "rationale": "Desktop shell internal payload baseline for Windows x64"
+      "rationale": "Desktop shell internal payload baseline for Windows x64: the 256 MiB application ceiling plus 64 MiB for the managed voice runtime inputs (a pinned uv executable of up to 48 MiB, the product wheel, the voice lock and its manifest, with headroom for uv updates)"
     },
     "macos-x64": {
       "target": "macos-x64",
-      "max_expanded_bytes": 268435456,
+      "max_expanded_bytes": 335544320,
       "max_regular_file_count": 5000,
-      "rationale": "Desktop shell internal payload baseline for macOS Intel x64"
+      "rationale": "Desktop shell internal payload baseline for macOS Intel x64: the 256 MiB application ceiling plus 64 MiB for the managed voice runtime inputs (a pinned uv executable of up to 48 MiB, the product wheel, the voice lock and its manifest, with headroom for uv updates)"
     },
     "macos-arm64": {
       "target": "macos-arm64",
-      "max_expanded_bytes": 268435456,
+      "max_expanded_bytes": 335544320,
       "max_regular_file_count": 5000,
-      "rationale": "Desktop shell internal payload baseline for macOS Apple Silicon arm64"
+      "rationale": "Desktop shell internal payload baseline for macOS Apple Silicon arm64: the 256 MiB application ceiling plus 64 MiB for the managed voice runtime inputs (a pinned uv executable of up to 48 MiB, the product wheel, the voice lock and its manifest, with headroom for uv updates)"
     }
   }
 }

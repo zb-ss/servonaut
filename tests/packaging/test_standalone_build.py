@@ -332,6 +332,33 @@ def test_wheel_version_reads_servonaut_distribution_metadata(tmp_path: Path) -> 
     assert _wheel_product_version(_wheel(tmp_path)) == "1.2.3"
 
 
+@pytest.mark.parametrize(
+    "target_name", ("windows-x64", "macos-x64", "macos-arm64", _LINUX_TARGET)
+)
+def test_resolved_profile_excludes_every_forbidden_module_of_the_policy(
+    tmp_path: Path, target_name: str
+) -> None:
+    target = load_target_spec(standalone_build._POLICY_PATH, target_name)
+    request = BuildRequest(
+        wheel=tmp_path / "servonaut-1.2.3-py3-none-any.whl",
+        target=target,
+        product_version="1.2.3",
+        build_revision="build-1",
+        source_commit="abc1234",
+        output_dir=tmp_path / "output",
+        require_artifact_selftest=False,
+    )
+    profile_path = tmp_path / "profile.json"
+
+    standalone_build._write_profile(
+        profile_path, request, tmp_path / "site-packages", tmp_path / "hooks"
+    )
+
+    excluded = json.loads(profile_path.read_text(encoding="utf-8"))["excluded_modules"]
+    assert set(target.forbidden_modules) <= set(excluded)
+    assert "servonaut.desktop" in excluded
+
+
 def test_build_environment_removes_inherited_python_and_profile_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

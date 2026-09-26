@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import copy
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -18,6 +20,8 @@ from scripts.standalone_cli.model import load_target_spec
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_ROOT = _REPOSITORY_ROOT / "packaging" / "standalone_cli"
 _POLICY_PATH = _POLICY_ROOT / "target-policy.json"
+_SOURCE_ROOT = _REPOSITORY_ROOT / "src"
+_DESKTOP_PACKAGE = "servonaut.desktop"
 _SCHEMA_PATH = _POLICY_ROOT / "build-policy.schema.json"
 _TARGETS = {
     "windows-x64",
@@ -302,3 +306,52 @@ def test_policy_excludes_desktop_voice_readline_and_development_content() -> Non
             for pattern in target["forbidden_path_patterns"]
             if pattern.startswith(".") and pattern not in {".*", ".*/**"}
         }
+
+
+def test_policy_forbids_the_desktop_package_for_every_target() -> None:
+    """The lean CLI never bundles the desktop app or its voice runtime."""
+    for name in sorted(_TARGETS):
+        target = load_target_spec(_POLICY_PATH, name)
+        assert _DESKTOP_PACKAGE in target.forbidden_modules
+
+
+def _module_name(path: Path) -> str:
+    parts = path.relative_to(_SOURCE_ROOT).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _static_imports(path: Path) -> set[str]:
+    """Every module an import statement in ``path`` names, as PyInstaller sees it."""
+    module = _module_name(path)
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                base = importlib.util.resolve_name("." * node.level + base, package)
+            names.add(base)
+            names.update(f"{base}.{alias.name}" for alias in node.names)
+    return names
+
+
+def test_no_module_outside_the_desktop_package_statically_imports_it() -> None:
+    """A static import would drag the excluded package back into the analysis.
+
+    PyInstaller follows every import statement, including ones that only run
+    in the packaged desktop app, so a forbidden package imported that way is
+    reported as a missing module in every lean CLI build.
+    """
+    desktop_root = _SOURCE_ROOT / "servonaut" / "desktop"
+    offenders = sorted(
+        str(path.relative_to(_REPOSITORY_ROOT))
+        for path in (_SOURCE_ROOT / "servonaut").rglob("*.py")
+        if not path.is_relative_to(desktop_root)
+        and any(
+            name == _DESKTOP_PACKAGE or name.startswith(f"{_DESKTOP_PACKAGE}.")
+            for name in _static_imports(path)
+        )
+    )
+    assert offenders == []

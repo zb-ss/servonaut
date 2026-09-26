@@ -1,14 +1,16 @@
 """Candidate-first release policy: deterministic identity and fail-closed verification.
 
-Phase 6 replaces publish-first release automation with a candidate-first state
-machine. This module is the read-only policy core: it turns a validated release
+Releases follow a candidate-first state machine instead of publish-first
+automation. This module is the read-only policy core: it turns a validated release
 manifest into a *candidate* with a deterministic digest, and verifies that a
 candidate being published is exactly the one that was built, smoke-tested,
 signed and reviewed. It performs no network access and mutates nothing.
 
 The plan, verify and check-publish commands all hash the real artifact files:
-their sizes and SHA-256 digests must match the candidate. Artifact signatures
-are checked for presence only.
+their sizes and SHA-256 digests must match the candidate. Each artifact's kind,
+platform and architecture are copied from the release manifest and bound into
+the digest, so an artifact relabelled between jobs is detected. Artifact
+signatures are checked for presence only.
 The detached-signature format is not defined yet, so a non-empty signature
 field counts as signed and no signature is verified cryptographically here.
 """
@@ -22,9 +24,12 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from servonaut.distribution.manifest import (
+    SUPPORTED_ARCHITECTURES,
+    SUPPORTED_PLATFORMS,
+    ArtifactKind,
     ManifestError,
     ReleaseChannel,
     ReleaseManifest,
@@ -40,7 +45,11 @@ _PYPROJECT_VERSION = re.compile(r'^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', re.MU
 _INIT_VERSION = re.compile(
     r"^__version__ = ['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]$", re.MULTILINE
 )
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+ARTIFACT_KINDS = frozenset(kind.value for kind in ArtifactKind)
+# Artifact ids are compared, never interpreted, so any printable text works;
+# the bound keeps evidence and qualification records small.
+ARTIFACT_ID_MAX_LENGTH = 256
 _EVIDENCE_MAX_BYTES = 1_000_000
 _EVIDENCE_FIELDS = frozenset(
     {
@@ -55,10 +64,57 @@ _EVIDENCE_FIELDS = frozenset(
     }
 )
 _ARTIFACT_FIELDS = frozenset(
-    {"artifact_id", "filename", "byte_size", "sha256", "signature"}
+    {
+        "artifact_id",
+        "kind",
+        "platform",
+        "arch",
+        "filename",
+        "byte_size",
+        "sha256",
+        "signature",
+    }
 )
 _SIGNING_FIELDS = frozenset({"required", "satisfied"})
-_EVIDENCE_SCHEMA_VERSION = 2
+_EVIDENCE_SCHEMA_VERSION = 3
+
+
+def is_member(value: Any, allowed: Iterable[str]) -> bool:
+    """Whether a value is a string in the allowed set; other types never are."""
+    return isinstance(value, str) and value in allowed
+
+
+def is_artifact_id(value: Any) -> bool:
+    """Whether a value is a non-empty, printable artifact id within the length bound."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= ARTIFACT_ID_MAX_LENGTH
+        and value.isprintable()
+    )
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("A JSON object repeats a key.")
+    return dict(pairs)
+
+
+def read_json(path: Path, max_bytes: int) -> Any:
+    """Read a bounded JSON document in which no object repeats a key.
+
+    Raises OSError when the file cannot be read, and ValueError when it is
+    empty, larger than ``max_bytes``, nested too deeply or not valid JSON.
+    A repeated key is refused because it could hide a value from review.
+    """
+    with open(path, "rb") as stream:
+        raw = stream.read(max_bytes + 1)
+    if not raw or len(raw) > max_bytes:
+        raise ValueError("The JSON document is empty or too large.")
+    try:
+        return json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+    except RecursionError as error:
+        raise ValueError("The JSON document is nested too deeply.") from error
 
 
 class CandidatePolicyError(ManifestError):
@@ -93,9 +149,16 @@ def tag_product_version(tag: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class CandidateArtifact:
-    """A single artifact's immutable identity within a candidate."""
+    """A single artifact's immutable identity within a candidate.
+
+    ``kind``, ``platform`` and ``arch`` come from the release manifest and say
+    which platform rows the artifact is qualified on.
+    """
 
     artifact_id: str
+    kind: str
+    platform: str
+    arch: str
     filename: str
     byte_size: int
     sha256: str
@@ -138,6 +201,9 @@ class ReleaseCandidate:
             "artifacts": [
                 {
                     "artifact_id": artifact.artifact_id,
+                    "kind": artifact.kind,
+                    "platform": artifact.platform,
+                    "arch": artifact.arch,
                     "filename": artifact.filename,
                     "byte_size": artifact.byte_size,
                     "sha256": artifact.sha256,
@@ -156,6 +222,9 @@ def _candidate_artifacts(manifest: ReleaseManifest) -> tuple[CandidateArtifact, 
     artifacts = tuple(
         CandidateArtifact(
             artifact_id=artifact.artifact_id,
+            kind=artifact.kind.value,
+            platform=artifact.platform,
+            arch=artifact.arch,
             filename=artifact.filename,
             byte_size=artifact.byte_size,
             sha256=artifact.sha256.lower(),
@@ -163,6 +232,11 @@ def _candidate_artifacts(manifest: ReleaseManifest) -> tuple[CandidateArtifact, 
         )
         for artifact in manifest.artifacts
     )
+    if not all(is_artifact_id(artifact.artifact_id) for artifact in artifacts):
+        raise CandidatePolicyError(
+            "invalid-artifact-id",
+            "A candidate artifact id is empty, too long or not printable.",
+        )
     _reject_duplicate_filenames(artifacts)
     return tuple(sorted(artifacts, key=lambda artifact: artifact.artifact_id))
 
@@ -180,6 +254,9 @@ def candidate_digest(artifacts: Sequence[CandidateArtifact]) -> str:
     payload = [
         {
             "artifact_id": artifact.artifact_id,
+            "kind": artifact.kind,
+            "platform": artifact.platform,
+            "arch": artifact.arch,
             "filename": artifact.filename,
             "byte_size": artifact.byte_size,
             "sha256": artifact.sha256,
@@ -327,7 +404,7 @@ def verify_candidate(
     Signing is enforced only when the candidate requires it, and only as the
     presence of a signature on every artifact.
     """
-    if not isinstance(expected_digest, str) or _SHA256.fullmatch(expected_digest) is None:
+    if not isinstance(expected_digest, str) or SHA256_HEX.fullmatch(expected_digest) is None:
         raise CandidatePolicyError(
             "invalid-digest", "The expected candidate digest is not a valid SHA-256."
         )
@@ -359,20 +436,15 @@ def verify_candidate(
 def load_evidence(path: Path) -> dict[str, Any]:
     """Load and structurally validate a public candidate-evidence document."""
     try:
-        raw = path.read_bytes()
+        document = read_json(path, _EVIDENCE_MAX_BYTES)
     except OSError as error:
         raise CandidatePolicyError(
             "evidence-unreadable", "The candidate evidence file could not be read."
         ) from error
-    if not raw or len(raw) > _EVIDENCE_MAX_BYTES:
+    except ValueError as error:
         raise CandidatePolicyError(
-            "evidence-invalid", "The candidate evidence file has an invalid size."
-        )
-    try:
-        document = json.loads(raw)
-    except (ValueError, UnicodeDecodeError) as error:
-        raise CandidatePolicyError(
-            "evidence-invalid", "The candidate evidence file is not valid JSON."
+            "evidence-invalid",
+            "The candidate evidence file is empty, too large or not valid JSON.",
         ) from error
     if (
         not isinstance(document, dict)
@@ -407,18 +479,21 @@ def evidence_matches_tag(document: Mapping[str, Any], tag: str) -> bool:
         and document.get("channel") == channel.value
         and document.get("product_version") == tag_product_version(tag)
         and isinstance(digest, str)
-        and _SHA256.fullmatch(digest) is not None
+        and SHA256_HEX.fullmatch(digest) is not None
     )
 
 
 def _is_valid_evidence_artifact(artifact: CandidateArtifact) -> bool:
     return (
-        isinstance(artifact.artifact_id, str)
+        is_artifact_id(artifact.artifact_id)
+        and is_member(artifact.kind, ARTIFACT_KINDS)
+        and is_member(artifact.platform, SUPPORTED_PLATFORMS)
+        and is_member(artifact.arch, SUPPORTED_ARCHITECTURES)
         and isinstance(artifact.filename, str)
         and type(artifact.byte_size) is int
         and artifact.byte_size > 0
         and isinstance(artifact.sha256, str)
-        and _SHA256.fullmatch(artifact.sha256) is not None
+        and SHA256_HEX.fullmatch(artifact.sha256) is not None
         and (artifact.signature is None or isinstance(artifact.signature, str))
     )
 
@@ -435,6 +510,9 @@ def _evidence_artifacts(entries: Any) -> tuple[CandidateArtifact, ...]:
         artifacts = tuple(
             CandidateArtifact(
                 artifact_id=entry["artifact_id"],
+                kind=entry["kind"],
+                platform=entry["platform"],
+                arch=entry["arch"],
                 filename=entry["filename"],
                 byte_size=entry["byte_size"],
                 sha256=entry["sha256"],
@@ -478,6 +556,27 @@ def candidate_from_evidence(document: Mapping[str, Any]) -> ReleaseCandidate:
     )
 
 
+def verified_candidate(document: Mapping[str, Any]) -> ReleaseCandidate:
+    """Rebuild a candidate from evidence whose tag, channel and digest agree.
+
+    Refuses evidence whose tag, channel and product version disagree, and
+    evidence whose recorded digest does not match its own artifacts.
+    """
+    tag = document.get("tag")
+    if not isinstance(tag, str) or not evidence_matches_tag(document, tag):
+        raise CandidatePolicyError(
+            "evidence-invalid",
+            "The candidate evidence tag, channel or digest is malformed.",
+        )
+    candidate = candidate_from_evidence(document)
+    if candidate_digest(candidate.artifacts) != candidate.digest:
+        raise CandidatePolicyError(
+            "candidate-digest-mismatch",
+            "The candidate evidence digest does not match its artifacts.",
+        )
+    return candidate
+
+
 def _ensure_signing_proven(
     document: Mapping[str, Any], candidate: ReleaseCandidate
 ) -> None:
@@ -519,7 +618,7 @@ def ensure_publishable(
             "candidate-missing",
             "No verified candidate evidence matches this release tag.",
         )
-    candidate = candidate_from_evidence(document)
+    candidate = verified_candidate(document)
     if candidate.channel is not channel:
         raise CandidatePolicyError(
             "candidate-channel-mismatch",
@@ -531,11 +630,6 @@ def ensure_publishable(
             "The candidate evidence was not built from the commit being released.",
         )
     _ensure_signing_proven(document, candidate)
-    if candidate_digest(candidate.artifacts) != candidate.digest:
-        raise CandidatePolicyError(
-            "candidate-digest-mismatch",
-            "The candidate evidence digest does not match its artifacts.",
-        )
     verify_artifact_files(
         candidate.artifacts, artifact_files_in(artifacts_dir, candidate.artifacts)
     )
