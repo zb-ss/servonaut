@@ -76,6 +76,49 @@ from automatically generated release notes. Do not apply it to user-facing fixes
 or features. The label affects notes only: it does not hide a PR, change its
 release eligibility, or prevent its files from being included in source archives.
 
+## Release qualification
+
+Standalone CLI archives and desktop installers are qualified per platform row
+on clean machines. `packaging/distribution/qualification-matrix.json` lists the
+rows (Windows 10 22H2 and Windows 11 on x64, macOS 13 or later on Intel and
+Apple Silicon, Ubuntu 22.04 and 24.04 on x64, and X11 and Wayland sessions for
+the desktop app) and the checks each row requires.
+
+After verifying a candidate, the Release candidate workflow uploads a
+`qualification-record-template` artifact containing `qualification-record.json`,
+with one untested entry per row and artifact. Testers fill in their entries:
+
+- `result`: `pass`, `fail` or `blocked`, and each check as `pass` or `fail`;
+- `machine_image`: a short description of the clean machine;
+- `tested_on`: the test date as `YYYY-MM-DD` (not a future date);
+- `tester`: a short handle, never a name or email address;
+- `failure_link`: for a failed or blocked row, a public issue or Actions run in
+  this repository; otherwise `null`.
+
+Leave rows that were not tested as `untested`.
+`python -m scripts.distribution.qualification summarize --evidence candidate-evidence.json --record qualification-record.json`
+refuses a malformed record and prints the rows that pass so far as a Markdown
+table. `check --channel stable` applies the release gate; `--channel preview`
+validates a preview candidate's record without requiring passes.
+
+A platform is advertised as stable only when its row passes; failing rows stay
+preview or absent. To ship while a platform is failing, cut the stable
+candidate without that artifact. A record made for a preview tag of the same
+version (`vX.Y.Z-preview.N` for `vX.Y.Z`) carries over to the stable candidate
+when its candidate digest is identical, so unchanged preview artifacts need no
+second round of testing.
+
+The publish workflow enforces qualification only while the
+`REQUIRE_RELEASE_CANDIDATE` repository variable is `true`. While it is off,
+pip/pipx releases are unaffected. While it is on, every stable release,
+including its PyPI upload, needs at least one fully qualified binary artifact:
+the release must carry `candidate-evidence.json`, the release files it names,
+and a `qualification-record.json` in which every row that applies to those
+files passes against the same artifact SHA-256 and candidate digest. The
+Release workflow attaches none of these, so before turning the variable on,
+the release process must attach them, for example by creating the release as
+a draft, uploading the files, and then publishing it.
+
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 

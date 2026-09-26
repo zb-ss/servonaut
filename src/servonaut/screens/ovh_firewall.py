@@ -284,7 +284,7 @@ class OVHFirewallScreen(Screen):
                 ),
                 consequences=[
                     f"The firewall will be {'enabled' if new_state else 'disabled'}",
-                    "Traffic filtering rules will {'take effect' if new_state else 'be suspended'}",
+                    f"Traffic filtering rules will {'take effect' if new_state else 'be suspended'}",
                 ],
                 confirm_text="confirm",
                 action_label=f"{action_word} Firewall",

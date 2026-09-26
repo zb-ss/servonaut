@@ -20,7 +20,7 @@ file read is done by the caller and the raw text handed in here.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from urllib.parse import urlparse, unquote
 
@@ -45,7 +45,8 @@ class DBCandidate:
     host: str
     port: int
     user: str
-    password: str
+    # Kept out of repr() so a logged or printed candidate never shows it.
+    password: str = field(repr=False)
     database: str = ""
     source: str = ""
 

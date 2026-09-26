@@ -233,8 +233,51 @@ Keywords=ssh;server;aws;ec2;
         print(f"You can launch Servonaut with: {shlex.join(app_argv)}")
 
 
+# Exit status of `servonaut connect` once the server rejects the relay's
+# credentials (session expired or revoked). Distinct from the generic 1 so a
+# service manager can be told not to restart a listener that cannot sign in.
+RELAY_EXIT_SESSION_EXPIRED = 4
+
+
+def _relay_session_expired_message(uses_env_token: bool) -> str:
+    """Explain why the relay stopped and how to bring it back."""
+    restart = (
+        "then start the relay again with `servonaut connect` "
+        "(or `servonaut connect --bg` to run it in the background)."
+    )
+    if uses_env_token:
+        return (
+            "Relay stopped: the server rejected SERVONAUT_RELAY_TOKEN "
+            f"(expired or revoked). Set a valid token, {restart}"
+        )
+    return (
+        "Relay stopped: your Servonaut session has expired or was revoked. "
+        f"Run `servonaut login`, {restart}"
+    )
+
+
+def _report_relay_session_expired(uses_env_token: bool) -> None:
+    """Report a rejected session where both run modes can see it.
+
+    The foreground listener prints to the terminal. A ``--bg`` listener
+    runs with its output discarded, so the same text also goes to the relay
+    lifecycle log and the application log.
+    """
+    from servonaut.utils.relay_log import log_relay_event
+
+    message = _relay_session_expired_message(uses_env_token)
+    print(message, flush=True)
+    logging.getLogger(__name__).error(message)
+    log_relay_event("session_expired", mode="bg", message=message)
+
+
 def _relay_run_foreground() -> None:
-    """Run the relay listener in the foreground (blocks until interrupted).
+    """Run the relay listener in the foreground.
+
+    Blocks until interrupted. If the server rejects the session, the
+    listener stops, the reason is reported, and the process exits with
+    :data:`RELAY_EXIT_SESSION_EXPIRED`. ``connect --bg`` runs this same
+    path in a detached process.
 
     Guarded by :class:`RelayLock` so a TUI in-process listener and this
     foreground listener cannot both talk to Mercure at the same time.
@@ -281,9 +324,12 @@ def _relay_run_foreground() -> None:
             "AuthService unavailable for relay: %s", exc,
         )
 
+    uses_env_token = bool(auth_token and user_id)
     token_source = auth_token  # str (legacy) or callable (OAuth session)
     refresh_callback = None
-    if not (auth_token and user_id):
+    # Without a probe (env-token mode) a rejected heartbeat is final.
+    session_alive = None
+    if not uses_env_token:
         if auth_service is None:
             print(
                 "Error: no Servonaut session found. Run `servonaut login` "
@@ -294,6 +340,9 @@ def _relay_run_foreground() -> None:
         from servonaut.services.relay_manager import _extract_user_id
         token_source = lambda: auth_service.access_token  # noqa: E731
         refresh_callback = auth_service.refresh_token
+        # A failed refresh ends the relay only once the session is really
+        # gone; a transient failure leaves it authenticated and retrying.
+        session_alive = lambda: auth_service.is_authenticated  # noqa: E731
         user_id = _extract_user_id(auth_service) or ''
         if not user_id:
             print(
@@ -432,6 +481,16 @@ def _relay_run_foreground() -> None:
                 "AI tool executor init failed",
             )
 
+    session_expired = False
+
+    async def on_session_expired() -> None:
+        # The server rejected the credentials. Say so and stop, rather than
+        # idle on a subscription the server will no longer serve.
+        nonlocal session_expired
+        session_expired = True
+        _report_relay_session_expired(uses_env_token)
+        listener.stop()
+
     listener = RelayListener(
         executors=executors,
         base_url=relay_cfg.base_url,
@@ -439,7 +498,10 @@ def _relay_run_foreground() -> None:
         auth_token=token_source,
         user_id=user_id,
         heartbeat_interval=relay_cfg.heartbeat_interval,
+        heartbeat_rejection_alert_after=relay_cfg.heartbeat_rejection_alert_after,
+        on_session_expired=on_session_expired,
         refresh_callback=refresh_callback,
+        session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
         probe_bridge=probe_bridge,
     )
@@ -454,8 +516,13 @@ def _relay_run_foreground() -> None:
     try:
         asyncio.run(listener.run())
     finally:
-        log_relay_event("stopped", mode="bg", reason="shutdown")
+        log_relay_event(
+            "stopped", mode="bg",
+            reason="session_expired" if session_expired else "shutdown",
+        )
         lock.release()
+    if session_expired:
+        sys.exit(RELAY_EXIT_SESSION_EXPIRED)
 
 
 def _relay_paths(runtime) -> tuple[Path, Path, Path]:

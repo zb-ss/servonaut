@@ -109,13 +109,9 @@ def _load_all_instances(
     custom_server_service: Any,
 ) -> List[Dict[str, Any]]:
     """Return combined list of cached AWS + custom server instances."""
-    instances: List[Dict[str, Any]] = []
-    try:
-        cached = aws_service._cache.load_any()
-        if cached:
-            instances.extend(cached)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    # No try/except: the cache layer already absorbs a missing or corrupt
+    # file, so anything raised here is a bug that must surface loudly.
+    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
     try:
         instances.extend(custom_server_service.list_as_instances())
     except Exception as exc:  # noqa: BLE001
@@ -160,6 +156,7 @@ def _run_ssh_probe(
         "-o", f"ConnectTimeout={timeout}",
         "-o", "StrictHostKeyChecking=accept-new",
         "-i", key_path,
+        "--",
         f"{user}@{host}",
         "true",
     ]
@@ -292,6 +289,17 @@ def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str
     return instance.get("username") or "ec2-user"
 
 
+def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
+    """Return the SSH port: ``--port``, else the port saved with the server."""
+    if port_override is not None:
+        return port_override
+    saved = instance.get("port")
+    try:
+        return int(saved) if saved else None
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Main verify handler
 # ---------------------------------------------------------------------------
@@ -383,7 +391,7 @@ async def _cmd_verify(args: Any) -> int:
     if personal_instance is not None:
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
-        port = port_override
+        port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
             f"({personal_instance.get('provider', 'unknown')}/{personal_instance.get('id')})"

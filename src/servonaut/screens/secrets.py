@@ -563,8 +563,11 @@ class SecretsScreen(Screen):
 
     def action_clear_cache(self) -> None:
         from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal
+        auth = getattr(self.app, "auth_service", None)
+        # Clearing drops only the team cache; say what takes over instead.
+        personal_cached = bool(auth and auth.is_user_secrets_cache_present())
         self.app.push_screen(
-            ConfirmClearCacheModal(),
+            ConfirmClearCacheModal(personal_config_cached=personal_cached),
             self._handle_clear_cache_result,
         )
 

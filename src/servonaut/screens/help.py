@@ -131,8 +131,8 @@ Send log text to an AI provider for analysis. Requires `httpx` (`pip install 'se
 
 | Provider | Config |
 |----------|--------|
-| **OpenAI** | Set `api_key`, default model: `gpt-4o-mini` |
-| **Anthropic** | Set `api_key`, default model: `claude-sonnet-4-20250514` |
+| **OpenAI** | Set `openai_api_key`, default model: `gpt-4o-mini` |
+| **Anthropic** | Set `anthropic_api_key`, default model: `claude-sonnet-4-20250514` |
 | **Ollama** | Set `base_url` (default: `http://localhost:11434`), default model: `llama3` |
 
 Configure in Settings or in `config.json` under `ai_provider`.
@@ -140,7 +140,8 @@ Large logs are automatically chunked. Token count and estimated cost are display
 
 ### API Key Formats
 
-The `api_key` field supports three formats so you don't have to store secrets in `config.json`:
+The per-provider key fields (`openai_api_key`, `anthropic_api_key`, `gemini_api_key`,
+`ollama_api_key`) support three formats so you don't have to store secrets in `config.json`:
 
 | Format | Example | How it resolves |
 |--------|---------|-----------------|

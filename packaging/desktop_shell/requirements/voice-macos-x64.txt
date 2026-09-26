@@ -1,0 +1,112 @@
+# Managed voice runtime lock for the macos-x64 desktop target.
+# Generated from voice.in by scripts/desktop_shell/voice_lock.py with
+# pip 26.0.1:
+#   pip install --dry-run --ignore-installed --report <report.json>
+#     --only-binary :all: --platform macosx_13_0_x86_64
+#     --python-version 3.12.14 --implementation cp --abi cp312
+#     --uploaded-prior-to 2026-09-18T00:00:00Z
+#     --target <empty directory> -r voice.in
+# The cutoff enforces the supply-chain cooldown in voice-runtime.json: pins
+# must be at least minimum_release_age_days old when they are chosen.
+# The generator evaluates environment markers for the target rather than the
+# build host, adds dependencies only the target selects to that command, and
+# keeps the one wheel pip selected for each distribution. The desktop app
+# installs this file with --require-hashes --only-binary :all: --no-deps.
+# Regenerate: python -m scripts.desktop_shell.voice_lock --target macos-x64
+
+anyio==4.15.1 \
+    --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101
+    # anyio-4.15.1-py3-none-any.whl
+av==18.1.0 \
+    --hash=sha256:ae75d8bb6467895ed1f8572ededf7ffa49eac07f6e483222f5d7d62a41d12f04
+    # av-18.1.0-cp311-abi3-macosx_11_0_x86_64.whl
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+    # certifi-2026.7.22-py3-none-any.whl
+cffi==2.1.1 \
+    --hash=sha256:c8c69575568085ba0b1b10c0249d779a214aea6f6522e949a0fc9fb0fcb449d0
+    # cffi-2.1.1-cp312-cp312-macosx_10_15_x86_64.whl
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
+    # click-8.5.0-py3-none-any.whl
+coloredlogs==15.0.1 \
+    --hash=sha256:612ee75c546f53e92e70049c9dbfcc18c935a2b9a53b66085ce9ef6a6e5c0934
+    # coloredlogs-15.0.1-py2.py3-none-any.whl
+ctranslate2==4.8.2 \
+    --hash=sha256:5385f15493e7b6f41377da83d0d5afeb8e0f36188260722f3800c3c7121455af
+    # ctranslate2-4.8.2-cp312-cp312-macosx_11_0_x86_64.whl
+faster-whisper==1.2.1 \
+    --hash=sha256:79a66ad50688c0b794dd501dc340a736992a6342f7f95e5811be60b5224a26a7
+    # faster_whisper-1.2.1-py3-none-any.whl
+filelock==4.0.0 \
+    --hash=sha256:a850aa9ec2acba8db9ca2e9fcf8a327fbc2f85e432725715b37bd76b7dd1f798
+    # filelock-4.0.0-py3-none-any.whl
+flatbuffers==25.12.19 \
+    --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4
+    # flatbuffers-25.12.19-py2.py3-none-any.whl
+fsspec==2026.7.0 \
+    --hash=sha256:b57ddbafedfaef7018c1ecab32aa200a9d7ca26b77965f64e48b70061249d279
+    # fsspec-2026.7.0-py3-none-any.whl
+h11==0.16.0 \
+    --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
+    # h11-0.16.0-py3-none-any.whl
+hf-xet==1.6.0 \
+    --hash=sha256:633dc0cd71d32da58ab8c03ad38e2fac452c15c2b0a2866ebf6ededfe0a5061d
+    # hf_xet-1.6.0-cp38-abi3-macosx_10_12_x86_64.whl
+httpcore==1.0.9 \
+    --hash=sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55
+    # httpcore-1.0.9-py3-none-any.whl
+httpx==0.28.1 \
+    --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
+    # httpx-0.28.1-py3-none-any.whl
+huggingface-hub==1.32.0 \
+    --hash=sha256:b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8
+    # huggingface_hub-1.32.0-py3-none-any.whl
+humanfriendly==10.0 \
+    --hash=sha256:1697e1a8a8f550fd43c2865cd84542fc175a61dcb779b6fee18cf6b6ccba1477
+    # humanfriendly-10.0-py2.py3-none-any.whl
+idna==3.20 \
+    --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+    # idna-3.20-py3-none-any.whl
+mpmath==1.3.0 \
+    --hash=sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
+    # mpmath-1.3.0-py3-none-any.whl
+numpy==2.5.3 \
+    --hash=sha256:cb189f09db39283b26bfd061ec16189e14f71c6755207f72a0f7540867afe5b9
+    # numpy-2.5.3-cp312-cp312-macosx_10_13_x86_64.whl
+onnxruntime==1.23.2 \
+    --hash=sha256:218295a8acae83905f6f1aed8cacb8e3eb3bd7513a13fe4ba3b2664a19fc4a6b
+    # onnxruntime-1.23.2-cp312-cp312-macosx_13_0_x86_64.whl
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+    # packaging-26.3-py3-none-any.whl
+protobuf==7.36.2 \
+    --hash=sha256:cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e
+    # protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+    # pycparser-3.0-py3-none-any.whl
+pyyaml==6.0.3 \
+    --hash=sha256:7f047e29dcae44602496db43be01ad42fc6f1cc0d8cd6c83d342306c32270196
+    # pyyaml-6.0.3-cp312-cp312-macosx_10_13_x86_64.whl
+sherpa-onnx==1.13.8 \
+    --hash=sha256:ef218d6545a9dcc2aff7043f39026c7d78d6cf46a3876d450d508feebffc00a9
+    # sherpa_onnx-1.13.8-cp312-cp312-macosx_10_15_x86_64.whl
+sherpa-onnx-core==1.13.8 \
+    --hash=sha256:917422880287baa0f0ae1bd10d9528fa78af8cc7c233d2a953a185a4fe8d83f2
+    # sherpa_onnx_core-1.13.8-py3-none-macosx_10_15_x86_64.whl
+sounddevice==0.5.6 \
+    --hash=sha256:e3aef00ad8b1d1740eb66d9a7671eab88a4d2b8fa4ab33498d742e63b65c309c
+    # sounddevice-0.5.6-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl
+sympy==1.14.0 \
+    --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
+    # sympy-1.14.0-py3-none-any.whl
+tokenizers==0.23.2 \
+    --hash=sha256:85a9a357a3764aecc904ee76bdaf8cf1ad8e5a67a1b929a487c4a39b49ed0e90
+    # tokenizers-0.23.2-cp310-abi3-macosx_10_12_x86_64.whl
+tqdm==4.70.1 \
+    --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
+    # tqdm-4.70.1-py3-none-any.whl
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+    # typing_extensions-4.16.0-py3-none-any.whl

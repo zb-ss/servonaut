@@ -337,6 +337,226 @@ def test_audit_row_written_with_source_ai_chat(tmp_path):
     assert entry["status"] == "ok"
 
 
+def _rows_with_reason(audit, reason: str) -> list:
+    return [c for c in audit.log.call_args_list if c.args[4] == reason]
+
+
+def test_client_guard_escalation_writes_its_own_audit_row():
+    """A server label below the client floor is escalated AND audited."""
+    bridge, _, _, audit, _ = _make_bridge()
+    # db_processlist: client mirror "standard", not in the dangerous floor.
+    call = _call(
+        tool="db_processlist", guard_level="readonly",
+        args={"instance_id": "i-abc"}, conv="conv-esc", tcid="tc_esc",
+    )
+
+    run(bridge.handle_tool_call(call))
+
+    rows = _rows_with_reason(audit, "client_guard_escalation")
+    assert len(rows) == 1
+    kwargs = rows[0].kwargs
+    assert kwargs["source"] == "ai_chat"
+    assert kwargs["conversation_id"] == "conv-esc"
+    assert kwargs["tool_call_id"] == "tc_esc"
+    assert kwargs["server_tier"] == "readonly"
+    assert kwargs["client_tier"] == "standard"
+    assert kwargs["effective_tier"] == "standard"
+
+
+def test_client_guard_escalation_row_is_persisted(tmp_path):
+    audit = AuditTrail(str(tmp_path / "ai_audit.jsonl"))
+    bridge, _, _, _, _ = _make_bridge(audit_trail=audit)
+    call = _call(tool="db_processlist", guard_level="readonly",
+                 args={"instance_id": "i-abc"})
+
+    run(bridge.handle_tool_call(call))
+
+    rows = [e for e in audit.read_recent(10)
+            if e["reason"] == "client_guard_escalation"]
+    assert len(rows) == 1
+    assert rows[0]["source"] == "ai_chat"
+    assert rows[0]["server_tier"] == "readonly"
+    assert rows[0]["effective_tier"] == "standard"
+    assert rows[0]["conversation_id"] == call.conversation_id
+    assert rows[0]["tool_call_id"] == call.tool_call_id
+
+
+def test_no_escalation_row_when_server_label_meets_client_floor():
+    bridge, _, _, audit, _ = _make_bridge()
+    call = _call(tool="db_processlist", guard_level="standard",
+                 args={"instance_id": "i-abc"})
+
+    run(bridge.handle_tool_call(call))
+
+    assert _rows_with_reason(audit, "client_guard_escalation") == []
+
+
+def test_escalation_row_records_an_absent_label_as_empty():
+    """The chat default ("standard") must not appear as the server's claim."""
+    bridge, _, _, audit, _ = _make_bridge(has_dangerous=False)
+    call = _call(tool="deploy", guard_level="standard")
+    call.server_guard_level = ""  # the event carried no guard_level
+
+    run(bridge.handle_tool_call(call))
+
+    row = _rows_with_reason(audit, "client_guard_escalation")[0]
+    assert row.kwargs["server_tier"] == ""
+    assert row.kwargs["effective_tier"] == "dangerous"
+
+
+def test_unknown_guard_label_is_coerced_and_audited():
+    bridge, _, _, audit, _ = _make_bridge()
+    call = _call(tool="db_processlist", guard_level="superuser",
+                 args={"instance_id": "i-abc"}, tcid="tc_unknown")
+
+    run(bridge.handle_tool_call(call))
+
+    rows = _rows_with_reason(audit, "unknown_guard_level")
+    assert len(rows) == 1
+    assert rows[0].kwargs["server_tier"] == "superuser"
+    assert rows[0].kwargs["effective_tier"] == "standard"
+    assert rows[0].kwargs["tool_call_id"] == "tc_unknown"
+
+
+def test_guard_label_is_normalised_before_use():
+    """" ReadOnly " is a known label: no coercion, no prompt."""
+    bridge, _, _, audit, confirm_mock = _make_bridge()
+    call = _call(tool="list_instances", guard_level=" ReadOnly ", args={})
+
+    run(bridge.handle_tool_call(call))
+
+    assert call.guard_level == "readonly"
+    assert _rows_with_reason(audit, "unknown_guard_level") == []
+    confirm_mock.assert_not_called()
+
+
+def test_proactive_bridge_tags_its_escalation_row():
+    api = MagicMock()
+    api.post = AsyncMock(return_value={})
+    audit = MagicMock()
+    bridge = AIToolBridge(
+        api_client=api,
+        relay_executors=MagicMock(),
+        mcp_audit=audit,
+        confirm_callback=AsyncMock(return_value=True),
+        auth_service=MagicMock(),
+        audit_source="proactive",
+    )
+    call = _call(tool="db_processlist", guard_level="readonly",
+                 args={"instance_id": "i-abc"}, conv="", tcid="tc_probe")
+
+    run(bridge.handle_tool_call(call))
+
+    row = _rows_with_reason(audit, "client_guard_escalation")[0]
+    assert row.kwargs["source"] == "proactive"
+    assert row.kwargs["tool_call_id"] == "tc_probe"
+    assert row.kwargs["server_tier"] == "readonly"
+
+
+# ---------------------------------------------------------------------------
+# Confirmation deadline
+# ---------------------------------------------------------------------------
+
+
+def _deadline_bridge(confirm, timeout_getter):
+    tools = MagicMock()
+    tools.db_processlist = AsyncMock(return_value="rows")
+    audit = MagicMock()
+    api = MagicMock()
+    api.post = AsyncMock(return_value={})
+    bridge = AIToolBridge(
+        api_client=api,
+        relay_executors=MagicMock(),
+        mcp_audit=audit,
+        confirm_callback=confirm,
+        auth_service=MagicMock(),
+        servonaut_tools=tools,
+        confirm_timeout=timeout_getter,
+    )
+    return bridge, tools, audit
+
+
+def test_unanswered_prompt_is_refused_at_the_deadline():
+    cancelled = []
+
+    async def _never_answers(call):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)  # the prompt gets the chance to close
+            raise
+
+    bridge, tools, audit = _deadline_bridge(_never_answers, lambda: 0.1)
+    call = _call(tool="db_processlist", args={"instance_id": "i-abc"})
+
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "error"
+    assert "not answered within 0.1 s" in result.result
+    assert cancelled == [True]
+    tools.db_processlist.assert_not_awaited()
+    assert audit.log.call_args.args[4] == "confirm_timeout"
+
+
+def test_answer_within_the_deadline_runs_the_tool():
+    bridge, tools, _audit = _deadline_bridge(
+        AsyncMock(return_value=True), lambda: 5.0,
+    )
+    call = _call(tool="db_processlist", args={"instance_id": "i-abc"})
+
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "ok"
+    tools.db_processlist.assert_awaited_once()
+
+
+def test_deadline_is_read_on_every_call():
+    values = iter([5.0, 0.05])
+
+    async def _slow(call):
+        await asyncio.sleep(0.3)
+        return True
+
+    bridge, tools, _audit = _deadline_bridge(_slow, lambda: next(values))
+    first = run(bridge.handle_tool_call(
+        _call(tool="db_processlist", args={"instance_id": "i-1"}, tcid="a")))
+    second = run(bridge.handle_tool_call(
+        _call(tool="db_processlist", args={"instance_id": "i-2"}, tcid="b")))
+
+    assert first.status == "ok"
+    assert second.status == "error"
+
+
+@pytest.mark.parametrize("bad", ["soon", 0, -3, float("nan"), True])
+def test_invalid_deadline_falls_back_to_the_default(bad):
+    bridge, _tools, _audit = _deadline_bridge(AsyncMock(), lambda: bad)
+    assert bridge._confirm_deadline() == 50.0
+
+
+def test_default_deadline_matches_the_config_default():
+    from servonaut.config.schema import AIProviderConfig
+    from servonaut.services import ai_tool_bridge
+
+    assert (
+        AIProviderConfig().tool_confirm_timeout_seconds
+        == ai_tool_bridge._DEFAULT_CONFIRM_TIMEOUT_SECONDS
+    )
+
+
+def test_callback_timeout_without_a_deadline_is_a_confirm_error():
+    async def _raises(call):
+        raise asyncio.TimeoutError()
+
+    bridge, tools, audit = _deadline_bridge(_raises, None)
+    call = _call(tool="db_processlist", args={"instance_id": "i-abc"})
+
+    result = run(bridge.handle_tool_call(call))
+
+    assert result.status == "denied"
+    assert audit.log.call_args.args[4].startswith("confirm_error:")
+    tools.db_processlist.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # 10. post_tool_result POSTs to the right endpoint with the right body
 # ---------------------------------------------------------------------------

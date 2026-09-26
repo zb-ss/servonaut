@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
+from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 
 if TYPE_CHECKING:
@@ -242,7 +243,7 @@ class LogViewerService(LogViewerServiceInterface):
             return None
         if self._memory_cache_opted_out(instance_id, str(instance.get("name") or "")):
             return None
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
 
         try:
             logs_mod = self._memory_service.get(instance_id, "logs", provider)
