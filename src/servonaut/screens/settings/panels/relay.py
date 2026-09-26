@@ -24,6 +24,12 @@ from textual.containers import Horizontal
 from textual.widgets import Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.utils.endpoints import (
+    RELAY_BASE_URL_KEY,
+    RELAY_MERCURE_URL_KEY,
+    EndpointOverrideError,
+    validate_endpoint_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,10 +178,22 @@ class RelayPanel(SettingsPanel):
         """Validate and return the relay fields to persist.
 
         Raises:
-            ValidationError: When heartbeat_interval is not a positive integer.
+            ValidationError: When a URL is neither empty (derived from the API
+                base) nor https / loopback http, or heartbeat_interval is not
+                a positive integer.
         """
         base_url = self._field_value("relay_base_url").strip()
         mercure_url = self._field_value("relay_mercure_url").strip()
+        for field_id, key, url in (
+            ("relay_base_url", RELAY_BASE_URL_KEY, base_url),
+            ("relay_mercure_url", RELAY_MERCURE_URL_KEY, mercure_url),
+        ):
+            if not url:
+                continue
+            try:
+                validate_endpoint_url(url, source=key)
+            except EndpointOverrideError as exc:
+                raise ValidationError(field_id, str(exc)) from exc
 
         heartbeat_raw = self.query_one("#relay_heartbeat_interval", Input).value.strip()
         try:

@@ -404,8 +404,16 @@ proceeds even if the server is unreachable) and delete
 `~/.servonaut/auth.json`.
 
 ```bash
-servonaut logout
+servonaut logout           # revoke the session, then delete auth.json
+servonaut logout --local   # only delete auth.json; contact no server
 ```
+
+If `SERVONAUT_API_URL` holds a refused URL (see
+[Environment Variables](configuration.md#environment-variables)), `logout`
+stops with an error instead of signing you out unrevoked. `--local` signs
+you out on this device without contacting any server; the session stays
+valid on the server until it expires. The TUI offers the same as **Sign out
+on this device only** on the Account screen.
 
 ---
 

@@ -286,6 +286,7 @@ class ServonautApp(App):
             install_hangup_cleanup()
         except (ValueError, OSError) as e:  # not the main thread / unsupported
             logger.debug("Hangup cleanup not installed: %s", e)
+        self._warn_refused_endpoint_overrides()
         # Startup sweep for crash-left decrypted Bitwarden key files under
         # ~/.servonaut/tmp/ (>24 h old). Normal exits are covered by the
         # atexit sweeper / per-call cleanup; a crash or SIGKILL skips both,
@@ -368,6 +369,25 @@ class ServonautApp(App):
         # Start background fleet auto-scan loop (sleeps first, so safe to
         # call here even before the instance list is fully populated).
         self._start_fleet_auto_scan_loop()
+
+    def _warn_refused_endpoint_overrides(self) -> None:
+        """Show an error for each refused ``SERVONAUT_API_URL`` / ``SERVONAUT_MCP_URL``.
+
+        Runs after the config manager has loaded the secrets env file. Every
+        request that needs a refused variable fails before anything is sent,
+        so this notice gives the one reason up front rather than leaving each
+        account feature to fail on its own. It names the variable, never the
+        URL.
+        """
+        from servonaut.utils.endpoints import ACCOUNT_ENDPOINT_ENVS, endpoint_override_errors
+
+        for message in endpoint_override_errors(ACCOUNT_ENDPOINT_ENVS):
+            self.notify(
+                f"{message} Requests that need it are refused until it is fixed.",
+                severity="error",
+                timeout=20,
+                markup=False,
+            )
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -842,10 +862,11 @@ class ServonautApp(App):
                 severity="warning", timeout=6,
             )
         elif result.state is RelayState.ERROR:
+            # Long enough to read a refused-URL reason; also kept on the
+            # relay status screen. The message is plain text, not markup.
             self.notify(
                 f"MCP relay failed to start: {result.message}",
-                severity="error", timeout=6,
-                markup=False,
+                severity="error", timeout=20, markup=False,
             )
 
     def on_user_logout(self) -> None:

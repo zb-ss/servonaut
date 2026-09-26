@@ -15,6 +15,7 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from servonaut.utils.endpoints import EndpointOverrideError
 from servonaut.mcp.db_staging import (
     DEFAULT_MAX_TOKENS as DEFAULT_STAGING_MAX_TOKENS,
     DEFAULT_TTL_SECONDS as DEFAULT_STAGING_TTL_SECONDS,
@@ -98,6 +99,10 @@ _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
 _AWS_CALL_MAX_RESULT_CHARS = 200_000
 _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 
+
+# Error code when SERVONAUT_API_URL / SERVONAUT_MCP_URL holds a refused URL.
+# The message names the variable, never the URL; no request is made.
+_INVALID_ENDPOINT = "invalid_endpoint"
 
 def _run_capturing_stdout(func) -> str:
     """Run *func* and return what it printed.
@@ -1248,10 +1253,16 @@ class ServonautTools:
             "logged_in": True,
             "email": email,
             "plan": plan,
-            "base_url": self._api_base_url(),
+            "base_url": None,
             "token_expires_at": expires_iso,
             "token_expires_in_seconds": expires_in,
         }
+        try:
+            payload["base_url"] = self._api_base_url()
+        except EndpointOverrideError as exc:
+            # Only local state is reported here, so the session details stay
+            # useful; the error says why API calls will be refused.
+            payload["base_url_error"] = str(exc)
         self._audit.log("whoami", args, json.dumps(payload), True)
         return json.dumps(payload)
 
@@ -1333,7 +1344,10 @@ class ServonautTools:
                 "httpx is not installed. Install with `pip install 'servonaut[ai]'`.",
             )
 
-        base = self._api_base_url().rstrip("/")
+        try:
+            base = self._api_base_url()
+        except EndpointOverrideError as exc:
+            return _error(_INVALID_ENDPOINT, str(exc))
         url = f"{base}{path}"
 
         safe_headers: Dict[str, str] = {"Accept": "application/json"}
@@ -1420,7 +1434,11 @@ class ServonautTools:
         return True
 
     def _api_base_url(self) -> str:
-        """Resolve the API base URL from the same source AuthService uses."""
+        """Resolve the API base URL from the same source AuthService uses.
+
+        Raises:
+            EndpointOverrideError: ``SERVONAUT_API_URL`` is refused.
+        """
         from servonaut.services.auth_service import _api_base
         return _api_base()
 
@@ -1506,7 +1524,12 @@ class ServonautTools:
             return json.dumps(payload)
 
         from servonaut.mcp.remote_client import _mcp_base
-        url = f"{_mcp_base().rstrip('/')}/mcp/message"
+        try:
+            url = f"{_mcp_base()}/mcp/message"
+        except EndpointOverrideError as exc:
+            payload = _error(_INVALID_ENDPOINT, str(exc))
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
         request_headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",

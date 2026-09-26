@@ -12,9 +12,16 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
+
+# Shown with a refused SERVONAUT_API_URL, where a normal logout cannot revoke.
+_LOCAL_SIGN_OUT_HINT = (
+    "To sign out without contacting the server, use "
+    "'Sign out on this device only'."
+)
 
 
 # Features that exist on the backend's plan mapping but haven't shipped on
@@ -201,6 +208,11 @@ class LoginScreen(Screen):
                     # stable, which keeps the modal's visual rhythm.
                     Horizontal(
                         Button("Logout", variant="error", id="btn_logout"),
+                        Button(
+                            "Sign out on this device only",
+                            variant="warning",
+                            id="btn_logout_local",
+                        ),
                         Button("Back", id="btn_back"),
                         id="login_actions",
                     ),
@@ -265,6 +277,7 @@ class LoginScreen(Screen):
             "login_actions",
             "btn_back",
             "btn_logout",
+            "btn_logout_local",
         ):
             self.query_one(f"#{widget_id}").display = False
 
@@ -348,6 +361,7 @@ class LoginScreen(Screen):
         self.query_one("#logged_in_container").display = True
         self.query_one("#login_actions").display = True
         self.query_one("#btn_logout").display = True
+        self.query_one("#btn_logout_local").display = True
         self.query_one("#btn_back").display = True
 
     async def _validate_session(self) -> None:
@@ -358,6 +372,15 @@ class LoginScreen(Screen):
         """
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
+            return
+        refused = endpoint_override_errors((API_URL_ENV,))
+        if refused:
+            # The refresh would be refused before reaching the API. That is a
+            # configuration error, not a revoked session: keep the session
+            # shown and say which variable to fix.
+            self.notify(
+                f"{refused[0]} {_LOCAL_SIGN_OUT_HINT}", severity="error", markup=False,
+            )
             return
         try:
             valid = await auth.validate_token()
@@ -390,6 +413,8 @@ class LoginScreen(Screen):
             self._cancel_login()
         elif button_id == "btn_logout":
             self.run_worker(self._do_logout(), exclusive=True, name="logout")
+        elif button_id == "btn_logout_local":
+            self._confirm_local_sign_out()
         elif button_id == "btn_back":
             self.action_back()
 
@@ -490,9 +515,57 @@ class LoginScreen(Screen):
             self._hide_all_sections()
             self._show_logged_out_state()
             self.notify("Logged out.", severity="information")
+        except EndpointOverrideError as exc:
+            self.notify(
+                f"Logout error: {exc} {_LOCAL_SIGN_OUT_HINT}",
+                severity="error",
+                markup=False,
+            )
         except Exception as exc:
             logger.error("Logout error: %s", exc)
             self.notify(f"Logout error: {exc}", severity="error", markup=False)
+
+    def _confirm_local_sign_out(self) -> None:
+        """Ask before forgetting the session without revoking it."""
+        from servonaut.screens.confirm_action import ConfirmActionScreen
+
+        self.app.push_screen(
+            ConfirmActionScreen(
+                title="Sign out on this device only",
+                description=(
+                    "Forget your Servonaut session here without contacting "
+                    "the server, for when Logout cannot reach it."
+                ),
+                consequences=[
+                    "Delete the saved session and cached plan details on this device",
+                    "Leave the session valid on the server until it expires",
+                ],
+                confirm_text="sign out",
+                action_label="Sign out here",
+                severity="warning",
+            ),
+            self._on_local_sign_out_confirmed,
+        )
+
+    def _on_local_sign_out_confirmed(self, confirmed: Optional[bool]) -> None:
+        if not confirmed:
+            return
+        auth = getattr(self.app, "auth_service", None)
+        if auth is None:
+            return
+        auth.sign_out_locally()
+        on_logout = getattr(self.app, "on_user_logout", None)
+        if callable(on_logout):
+            on_logout()
+        self._hide_all_sections()
+        self._show_logged_out_state()
+        self.notify(
+            "Signed out on this device. The session was not revoked and stays "
+            "valid on the server until it expires.",
+            severity="warning",
+            timeout=12,
+            markup=False,
+        )
 
     # ------------------------------------------------------------------
     # Actions

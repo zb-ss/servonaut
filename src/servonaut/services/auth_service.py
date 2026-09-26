@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import AsyncIterator, Callable, Dict, List, Optional, Set
 
+from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_or_default
+
 from .interfaces import AuthServiceInterface
 from .relay_lock import try_lock_exclusive, unlock
 
@@ -30,8 +32,17 @@ CLIENT_ID = "servonaut-cli"
 
 
 def _api_base() -> str:
-    """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
+    """Return the API base URL, honouring a valid ``SERVONAUT_API_URL``.
+
+    Read at call time so secrets loaded after import are picked up.
+
+    Raises:
+        EndpointOverrideError: ``SERVONAUT_API_URL`` is set to a URL that is
+            not https (or http to a loopback host). Every request URL is built
+            from this value first, so the refusal happens before a token or
+            credential is sent, and never falls back to production.
+    """
+    return endpoint_or_default(API_URL_ENV, _DEFAULT_API_BASE)
 
 
 # Seconds allowed for one whole ``/api/oauth/refresh`` round-trip (enforced
@@ -854,8 +865,15 @@ class AuthService(AuthServiceInterface):
         """POST the held refresh token and act on the verdict (locks held)."""
         presented = self._token.refresh_token
         try:
+            refresh_url = f"{_api_base()}/api/oauth/refresh"
+        except EndpointOverrideError as exc:
+            # A configuration error, not a network blip and not a revoked
+            # session: keep the credentials and say why nothing was sent.
+            logger.warning("Token refresh skipped: %s", exc)
+            return False
+        try:
             response = await asyncio.wait_for(
-                self._post_refresh(presented),
+                self._post_refresh(refresh_url, presented),
                 timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
             )
         except Exception as e:
@@ -894,12 +912,12 @@ class AuthService(AuthServiceInterface):
         return False
 
     @staticmethod
-    async def _post_refresh(refresh_token: str) -> "httpx.Response":
+    async def _post_refresh(refresh_url: str, refresh_token: str) -> "httpx.Response":
         async with httpx.AsyncClient(
             timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
         ) as client:
             return await client.post(
-                f"{_api_base()}/api/oauth/refresh",
+                refresh_url,
                 json={
                     "client_id": CLIENT_ID,
                     "refresh_token": refresh_token,
@@ -1059,12 +1077,21 @@ class AuthService(AuthServiceInterface):
                     logger.warning("Could not delete %s: %s", AUTH_FILE, e)
 
     async def logout(self) -> None:
-        """Revoke tokens and clear local auth."""
+        """Revoke tokens and clear local auth.
+
+        Raises:
+            EndpointOverrideError: ``SERVONAUT_API_URL`` is refused. Nothing
+                is cleared, so the session can still be revoked once the
+                variable is fixed instead of being dropped unrevoked.
+        """
         if self._token and HAS_HTTPX:
+            # Outside the best-effort try: a refused override is a
+            # configuration error to report, not a network blip to skip.
+            revoke_url = f"{_api_base()}/api/oauth/revoke"
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
-                        f"{_api_base()}/api/oauth/revoke",
+                        revoke_url,
                         json={
                             "client_id": CLIENT_ID,
                             "token": self._token.access_token,
@@ -1073,17 +1100,32 @@ class AuthService(AuthServiceInterface):
             except Exception as e:
                 logger.warning("Token revocation failed (continuing logout): %s", e)
 
+        self._forget_session()
+        logger.info("Logged out")
+
+    def sign_out_locally(self) -> None:
+        """Forget the session on this device without contacting the server.
+
+        For when :meth:`logout` cannot reach the API, for example while
+        ``SERVONAUT_API_URL`` is refused. Pointing the variable elsewhere to
+        get a revoke through would send the token to a server that did not
+        issue it, so nothing is sent at all. The tokens stay valid on the
+        server until they expire.
+        """
+        self._forget_session()
+        logger.info("Signed out on this device only; the session was not revoked")
+
+    def _forget_session(self) -> None:
+        """Drop the in-memory token and delete ``auth.json``.
+
+        ``auth.json`` also holds the cached entitlements, team list and
+        secrets config, so they go with it; a later login starts with the
+        dataclass defaults (cold caches).
+        """
         self._token = None
         self._refresh_grant_revoked = False
         self._persisted_refresh_token = None
-        if AUTH_FILE.exists():
-            AUTH_FILE.unlink()
-        # Secrets cache lives inside the deleted token file, so dropping
-        # ``_token`` already clears it from memory. Nothing extra to do
-        # — but if ``auth.json`` is recreated by a subsequent login, the
-        # new ``AuthToken`` starts with the default empty cache thanks
-        # to the dataclass defaults (cold cache after re-login).
-        logger.info("Logged out")
+        AUTH_FILE.unlink(missing_ok=True)
 
     async def fetch_entitlements(self) -> Optional[dict]:
         """Fetch entitlements from API and cache them.
