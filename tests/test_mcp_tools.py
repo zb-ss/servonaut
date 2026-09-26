@@ -343,7 +343,7 @@ class TestGetLogs:
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
         with patch.object(tools, "run_command", new=AsyncMock(return_value="log output")) as mock_rc:
             result = run(tools.get_logs("i-abc123", "/var/log/syslog", 50))
-        mock_rc.assert_called_once_with("i-abc123", "tail -n 50 /var/log/syslog")
+        mock_rc.assert_called_once_with("i-abc123", "tail -n 50 -- /var/log/syslog")
         assert result == "log output"
 
     def test_default_log_path(self):
