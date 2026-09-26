@@ -840,67 +840,114 @@ def _relay_reconnect() -> None:
         _relay_start_background(runtime)
 
 
-def _list_backups_cli() -> None:
-    """Print the local config backup list and exit."""
-    from servonaut.config.manager import ConfigManager
-    cm = ConfigManager()
+# ``--restore-backup`` given without a number: pick from a prompt.
+_PROMPT_FOR_BACKUP = -1
+
+
+def _backup_number(value: str) -> int:
+    """argparse type for ``--restore-backup N``: a 1-based backup number."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"expected a backup number from --list-backups (1 = newest), got {value!r}"
+        )
+    return number
+
+
+def _format_backup_size(size: int) -> str:
+    """Render a backup's size for the backup tables."""
+    return f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
+
+
+def _list_backups_cli(config_path: Path | None = None) -> None:
+    """Print the local config backup list and exit.
+
+    Args:
+        config_path: Config file given with ``--config``; None for the default.
+    """
+    from servonaut.config.manager import ConfigManager, describe_backup
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
         print("No local backups yet.")
         return
-    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  Path")
-    print("-" * 70)
+    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  {'Kind':<16}  Path")
+    print("-" * 88)
     for idx, entry in enumerate(backups, start=1):
         ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-        size = entry['size_bytes']
-        size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
-        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {entry['path']}")
+        size_str = _format_backup_size(entry['size_bytes'])
+        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {describe_backup(entry):<16}  {entry['path']}")
 
 
-def _restore_backup_cli(index: int) -> None:
-    """Restore a local config backup by 1-based index. Prompts if index == -1."""
+def _prompt_for_backup(backups: list) -> str:
+    """Show the backups and read the user's choice ("" when they cancel)."""
+    from servonaut.config.manager import describe_backup
+
+    print("Available backups (newest first):")
+    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  Kind")
+    print("-" * 50)
+    for idx, entry in enumerate(backups, start=1):
+        ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+        size_str = _format_backup_size(entry['size_bytes'])
+        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {describe_backup(entry)}")
+    try:
+        return input("Enter number to restore (or Enter to cancel): ").strip()
+    except EOFError:
+        return ""
+
+
+def _restore_backup_cli(index: int | None, config_path: Path | None = None) -> int:
+    """Restore a local config backup by 1-based number; prompt when none is given.
+
+    Args:
+        index: Backup number from ``--list-backups`` (1 = newest).
+        config_path: Config file given with ``--config``; None for the default.
+
+    Returns:
+        Process exit code: 0 once restored, 1 when nothing was restored.
+    """
     from servonaut.config.manager import ConfigManager
-    cm = ConfigManager()
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
-        print("No local backups to restore.")
-        return
+        print("No local backups to restore.", file=sys.stderr)
+        return 1
 
-    # Interactive picker when no index given
-    if index is None or index == -1:
-        print("Available backups (newest first):")
-        print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}")
-        print("-" * 40)
-        for idx, entry in enumerate(backups, start=1):
-            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            size = entry['size_bytes']
-            size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
-            print(f"{idx:>3}  {ts:<19}  {size_str:>8}")
-        try:
-            choice = input("Enter number to restore (or Enter to cancel): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            return
+    if index is None or index == _PROMPT_FOR_BACKUP:
+        choice = _prompt_for_backup(backups)
         if not choice:
-            print("Cancelled.")
-            return
+            print("Cancelled; nothing was restored.", file=sys.stderr)
+            return 1
         try:
             index = int(choice)
         except ValueError:
-            print("Invalid choice.")
-            return
+            print(
+                f"Invalid choice {choice!r}: enter a number from 1 to {len(backups)}.",
+                file=sys.stderr,
+            )
+            return 1
 
     if index < 1 or index > len(backups):
-        print(f"Index {index} out of range (1-{len(backups)}).")
-        return
+        count = f"{len(backups)} backup{'s' if len(backups) != 1 else ''}"
+        print(
+            f"No backup #{index}: there {'is' if len(backups) == 1 else 'are'} {count} "
+            f"(1-{len(backups)}). Run 'servonaut --list-backups' to see them.",
+            file=sys.stderr,
+        )
+        return 1
 
     entry = backups[index - 1]
     try:
         cm.restore_backup(entry['path'])
-        print(f"Restored from {entry['path']}")
-        print("Your previous config was backed up; launch Servonaut to continue.")
-    except Exception as exc:
-        print(f"Restore failed: {exc}")
+    except (OSError, ValueError) as exc:
+        print(f"Restore failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Restored from {entry['path']}")
+    print("Your previous config was backed up; launch Servonaut to continue.")
+    return 0
 
 
 def _run_connect(args: argparse.Namespace) -> None:
@@ -996,9 +1043,12 @@ def _main() -> None:
                              'codex, agy, gemini, all)')
     parser.add_argument('--list-backups', action='store_true',
                         help='List local config backups and exit')
-    parser.add_argument('--restore-backup', type=int, metavar='N', nargs='?', const=-1,
+    parser.add_argument('--restore-backup', type=_backup_number, metavar='N', nargs='?',
+                        const=_PROMPT_FOR_BACKUP,
                         help='Restore a local config backup by index (1=newest). '
-                             'With no argument, prompts interactively.')
+                             'With no argument, prompts interactively. Exit codes: '
+                             '0 restored, 1 nothing restored, 2 bad argument, '
+                             '130 interrupted.')
     parser.add_argument('--ai-provider', type=str, default=None,
                         metavar='NAME',
                         help='Override AI provider for this process '
@@ -1255,13 +1305,13 @@ def _main() -> None:
         asyncio.run(run_server())
         return
 
+    backup_config = Path(args.config) if args.config else None
     if args.list_backups:
-        _list_backups_cli()
+        _list_backups_cli(backup_config)
         return
 
     if args.restore_backup is not None:
-        _restore_backup_cli(args.restore_backup)
-        return
+        raise SystemExit(_restore_backup_cli(args.restore_backup, backup_config))
 
     _setup_logging(debug=args.debug)
 
