@@ -6,8 +6,10 @@ import threading
 from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
-ACCESS_TOKEN = "at-fake"
-REFRESH_TOKEN = "rt-fake"
+from e2e.harness.fake_cloud.session import ACCESS_TOKEN, REFRESH_TOKEN, TokenSession
+
+__all__ = ["ACCESS_TOKEN", "REFRESH_TOKEN", "USER_CODE", "Scenario", "ScenarioStore"]
+
 USER_CODE = "E2E-0001"
 
 # Device-flow poll outcomes a scenario can script for /api/oauth/token.
@@ -27,6 +29,8 @@ class Scenario:
     plan: str = "solo"
     user_id: int = 4242
     premium_ai: bool = True
+    # Relay listeners the plan allows (0 keeps the relay off).
+    mcp_connections: int = 1
     quota: Optional[dict[str, Any]] = field(
         default_factory=lambda: {
             "tokens_used": 1200,
@@ -53,6 +57,7 @@ class ScenarioStore:
         self._default_pypi_version = default_pypi_version
         self._scenario = self._fresh()
         self._device_codes = 0
+        self.session = TokenSession()
 
     def _fresh(self) -> Scenario:
         return Scenario(pypi_version=self._default_pypi_version)
@@ -61,6 +66,7 @@ class ScenarioStore:
         with self._lock:
             self._scenario = self._fresh()
             self._device_codes = 0
+        self.session.reset()
 
     def configure(self, **changes: Any) -> None:
         known = {f.name for f in fields(Scenario)}

@@ -117,12 +117,26 @@ def run_cli(
 
 
 class McpSession:
-    """A live MCP client session with a ``servonaut --mcp`` child."""
+    """A live MCP client session with a ``servonaut --mcp`` child.
 
-    def __init__(self, session: Any, initialize_result: Any, stderr_path: Path) -> None:
+    ``protocol_errors`` collects every line the server wrote to stdout that
+    was not a valid JSON-RPC message: stdout is the protocol channel, so any
+    stray output there corrupts it.
+    """
+
+    def __init__(
+        self,
+        session: Any,
+        initialize_result: Any,
+        stderr_path: Path,
+        protocol_errors: Optional[list[Exception]] = None,
+    ) -> None:
         self.session = session
         self.initialize_result = initialize_result
         self.stderr_path = stderr_path
+        self.protocol_errors: list[Exception] = (
+            protocol_errors if protocol_errors is not None else []
+        )
 
     async def tool_names(self) -> list[str]:
         result = await self.session.list_tools()
@@ -162,18 +176,27 @@ async def mcp_session(
         cwd=str(cwd),
     )
     before = len(armed_records(armed_log))
+    protocol_errors: list[Exception] = []
+
+    async def on_message(message: Any) -> None:
+        # The stdio client hands over unparseable stdout lines as exceptions.
+        if isinstance(message, Exception):
+            protocol_errors.append(message)
+
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     with stderr_path.open("w", encoding="utf-8") as errlog:
         async with stdio_client(params, errlog=errlog) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
+            async with ClientSession(
+                read_stream, write_stream, message_handler=on_message
+            ) as session:
                 initialize_result = await session.initialize()
-                yield McpSession(session, initialize_result, stderr_path)
+                yield McpSession(session, initialize_result, stderr_path, protocol_errors)
     started = [r for r in armed_records(armed_log)[before:] if "--mcp" in r.get("cmdline", [])]
     if not started:
         raise UnguardedChildError("the MCP server process never armed the e2e guard")
 
 
-def _belongs_to_sandbox(pid: int, sandbox_root: Path) -> bool:
+def belongs_to_sandbox(pid: int, sandbox_root: Path) -> bool:
     """True when the process's environment points into *sandbox_root*."""
     try:
         environ = Path(f"/proc/{pid}/environ").read_bytes()
@@ -193,7 +216,17 @@ def stop_pid_file(path: Path, *, sandbox_root: Path, timeout: float = 5.0) -> st
         pid = int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return "no pid file"
-    if not _belongs_to_sandbox(pid, sandbox_root):
+    return stop_sandbox_pid(pid, sandbox_root=sandbox_root, timeout=timeout)
+
+
+def stop_sandbox_pid(pid: int, *, sandbox_root: Path, timeout: float = 5.0) -> str:
+    """SIGTERM, then SIGKILL, *pid*, but only if it is a sandbox process.
+
+    Never signals this process or its parent, whatever their environment.
+    """
+    if pid in (os.getpid(), os.getppid()) or pid <= 1:
+        return f"skipped pid {pid}: the test process itself"
+    if not belongs_to_sandbox(pid, sandbox_root):
         return f"skipped pid {pid}: not running, or not a sandbox process"
     deadline = time.monotonic() + timeout
     for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -202,7 +235,7 @@ def stop_pid_file(path: Path, *, sandbox_root: Path, timeout: float = 5.0) -> st
         except (ProcessLookupError, PermissionError):
             return f"pid {pid} already gone"
         while time.monotonic() < deadline:
-            if not _belongs_to_sandbox(pid, sandbox_root):
+            if not belongs_to_sandbox(pid, sandbox_root):
                 return f"stopped pid {pid}"
             time.sleep(0.05)
         deadline = time.monotonic() + timeout

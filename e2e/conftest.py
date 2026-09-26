@@ -23,10 +23,15 @@ from typing import Any, Callable, Optional  # noqa: E402
 
 import pytest  # noqa: E402
 
-from e2e.harness import artifacts, canary  # noqa: E402
+from e2e.harness import artifacts, canary, lifecycle  # noqa: E402
 from e2e.harness.bootstrap import E2EContext, Sandbox, build_env  # noqa: E402
 from e2e.harness.processes import ChildLog  # noqa: E402
 from e2e.harness.shims import ShimSet  # noqa: E402
+from e2e.harness.relay_fixtures import (  # noqa: E402,F401 (fixtures)
+    _stop_leftover_listeners,
+    account_home,
+    relay,
+)
 
 GUARD = _bootstrap.load_guard()
 JOURNEY_TIMEOUT_SECONDS = 90
@@ -44,6 +49,7 @@ _MAX_COMMAND_CHARS = 300
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    lifecycle.interrupt_on_sigterm()
     missing = [name for name in _REQUIRED_MODULES if importlib.util.find_spec(name) is None]
     if missing:
         raise pytest.UsageError(
@@ -74,8 +80,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     untiered = []
     for item in items:
-        if item.get_closest_marker("timeout") is None:
-            item.add_marker(pytest.mark.timeout(JOURNEY_TIMEOUT_SECONDS))
+        lifecycle.use_signal_timeout(item, JOURNEY_TIMEOUT_SECONDS)
         if not any(item.get_closest_marker(name) for name in TIER_MARKERS):
             untiered.append(item.nodeid)
     if untiered:
