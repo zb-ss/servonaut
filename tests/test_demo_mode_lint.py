@@ -93,6 +93,13 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Only displays instance counts, cache age, filter state, "
                    "and the DEMO badge constant — no user-origin streaming data."),
 
+    # safe_header.py — _refresh_title renders the app and screen titles,
+    # which come from code-controlled TITLE / SUB_TITLE constants; it only
+    # replaces the refresh Textual's own Header performs.
+    AllowlistEntry("widgets/safe_header.py", "_refresh_title", "update",
+                   "Renders the code-controlled app and screen titles, the same "
+                   "text Textual's Header shows — no user/server-origin data."),
+
     # command_output.py — append_command writes the command line typed by the
     # user (echo back) which is not a secret leak; the user typed it.
     AllowlistEntry("widgets/command_output.py", "append_command", "write",

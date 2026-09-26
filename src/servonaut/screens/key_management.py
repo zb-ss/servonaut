@@ -8,9 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, ScrollableContainer
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Input, Button, DataTable
+from textual.widgets import Footer, Static, Input, Button, DataTable
 from textual.worker import Worker
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -29,7 +30,7 @@ class KeyManagementScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the key management UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

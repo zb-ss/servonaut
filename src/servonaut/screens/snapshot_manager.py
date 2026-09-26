@@ -9,8 +9,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.services import config_crypto
 
@@ -143,7 +144,7 @@ class SnapshotManagerScreen(Screen):
         self._loading: bool = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

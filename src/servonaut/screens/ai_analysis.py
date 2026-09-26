@@ -12,7 +12,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
-from textual.widgets import Header, Footer, Static, Button, TextArea, Input
+from textual.widgets import Footer, Static, Button, TextArea, Input
 
 from rich.markup import escape
 
@@ -22,6 +22,7 @@ from servonaut.screens.log_picker import LogPickerModal, AddPathModal, ADD_PATH_
 from servonaut.utils.formatting import format_tokens_remaining
 from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 
@@ -61,7 +62,7 @@ class AIAnalysisScreen(Screen):
         self._token_debounce_timer: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

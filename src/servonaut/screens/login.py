@@ -9,10 +9,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,7 @@ class LoginScreen(Screen):
         self._return_to: Optional[str] = return_to
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

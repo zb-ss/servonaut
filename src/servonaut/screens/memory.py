@@ -25,7 +25,7 @@ from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
@@ -38,6 +38,7 @@ from servonaut.services.memory.status import (
     STATUS_STALE,
     compute_memory_status,
 )
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -389,7 +390,7 @@ class MemoryScreen(Screen):
 
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
         instance_name = self._instance.get("name") or instance_id
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
