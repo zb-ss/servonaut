@@ -254,7 +254,9 @@ async def test_an_unanswered_prompt_expires_and_the_tool_never_runs(
     async with tui() as t:
         await open_chat(t)
         await send(t, "How long has web-1 been up?")
-        await t.wait_for_screen("DangerousToolConfirmModal")
+        # The prompt is open for 1 s only, so check that it opened rather
+        # than catching it on screen.
+        await t.wait_for_screen_opened("DangerousToolConfirmModal")
         # Nobody answers: the prompt closes on its own and the service is
         # told the tool did not run.
         posted = await _posted(t, fake_cloud, "tc-late")

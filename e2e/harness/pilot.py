@@ -73,10 +73,18 @@ def reset_app_class_state() -> None:
 class TuiDriver:
     """User-level operations and observations on a running app."""
 
-    def __init__(self, app: Any, pilot: Any, notifications: list[Any], artifact_dir: Path) -> None:
+    def __init__(
+        self,
+        app: Any,
+        pilot: Any,
+        notifications: list[Any],
+        artifact_dir: Path,
+        opened_screens: Optional[list[str]] = None,
+    ) -> None:
         self.app = app
         self.pilot = pilot
         self._notifications = notifications
+        self._opened_screens = opened_screens if opened_screens is not None else []
         self.artifact_dir = artifact_dir
 
     # ------------------------------------------------------------------
@@ -92,6 +100,10 @@ class TuiDriver:
 
     def screen_name(self) -> str:
         return type(self.app.screen).__name__
+
+    def opened_screens(self) -> list[str]:
+        """Every screen pushed so far, oldest first, including closed ones."""
+        return list(self._opened_screens)
 
     def focused_id(self) -> Optional[str]:
         focused = self.app.focused
@@ -170,6 +182,7 @@ class TuiDriver:
         """Diagnostics for a failure artifact."""
         state: dict[str, Any] = {
             "stack": self.stack_names(),
+            "opened_screens": self.opened_screens(),
             "focused": self.focused_id(),
             "toasts": self.toasts(),
             "exception": repr(getattr(self.app, "_exception", None)),
@@ -231,6 +244,16 @@ class TuiDriver:
         )
         await self.pilot.pause()
         return self.app.screen
+
+    async def wait_for_screen_opened(self, name: str, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+        """Wait until a *name* screen has been pushed, even if it closed again.
+
+        For a screen that closes on its own after a short time: on a busy
+        machine it can open and close between two looks at the stack.
+        """
+        await self.wait_until(
+            lambda: name in self._opened_screens, timeout=timeout, desc=f"screen {name} opened"
+        )
 
     async def wait_for_widget(
         self,
@@ -481,6 +504,23 @@ class TuiDriver:
         )
 
 
+def _record_pushed_screens(app: Any) -> list[str]:
+    """Note the name of every screen *app* pushes; returns the live list.
+
+    Wraps this app instance's ``push_screen`` (not the class), so a screen
+    that opens and closes between two polls is still seen to have opened.
+    """
+    opened: list[str] = []
+    push_screen = app.push_screen
+
+    def recording_push_screen(screen: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(screen if isinstance(screen, str) else type(screen).__name__)
+        return push_screen(screen, *args, **kwargs)
+
+    app.push_screen = recording_push_screen
+    return opened
+
+
 @asynccontextmanager
 async def tui_session(
     artifact_dir: Path,
@@ -500,8 +540,9 @@ async def tui_session(
             notifications.append(message.notification)
 
     app = ServonautApp(runtime_layout=detect_runtime())
+    opened = _record_pushed_screens(app)
     async with app.run_test(size=size, notifications=True, message_hook=hook) as pilot:
-        driver = TuiDriver(app, pilot, notifications, artifact_dir)
+        driver = TuiDriver(app, pilot, notifications, artifact_dir, opened)
         try:
             if wait_for_fleet:
                 await driver.wait_for_screen("InstanceListScreen")
