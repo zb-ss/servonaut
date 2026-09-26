@@ -14,6 +14,8 @@ CTX = _bootstrap.bootstrap()
 import importlib.util  # noqa: E402
 import itertools  # noqa: E402
 import logging  # noqa: E402
+import os  # noqa: E402
+import shlex  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -32,6 +34,8 @@ JOURNEY_TIMEOUT_SECONDS = 90
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
 _REQUIRED_MODULES = ("moto", "aiohttp", "mcp")
 _SEQUENCE = itertools.count(1)
+# Escape reports name the offending command; a long ``python -c`` script is cut.
+_MAX_COMMAND_CHARS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +61,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         artifacts.prepare_artifacts_dir(CTX)
     except RuntimeError as exc:
         raise pytest.UsageError(str(exc)) from exc
+    # The packaged journeys' wheels, built once instead of once per worker.
+    from e2e.harness.installs import prebuild_for_workers
+
+    prebuild_for_workers(session.config, CTX)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -97,8 +105,36 @@ def pytest_runtest_call(item: pytest.Item) -> Any:
 
 
 def _describe_escapes(escapes: list[dict]) -> str:
-    lines = [f"  {e['kind']}: {e['target']} (pid {e['pid']})" for e in escapes]
-    return "the journey tried to leave the e2e sandbox:\n" + "\n".join(lines)
+    """One block per process: which command it was, then what it tried."""
+    by_pid: dict[Any, list[dict]] = {}
+    for escape in escapes:
+        by_pid.setdefault(escape.get("pid"), []).append(escape)
+    lines = ["the journey tried to leave the e2e sandbox:"]
+    for pid, attempts in by_pid.items():
+        lines.append(f"  pid {pid}: {attempts[0].get('command', 'command unknown')}")
+        lines.extend(f"    {e['kind']}: {e['target']}" for e in attempts)
+    return "\n".join(lines)
+
+
+def _name_processes(escapes: list[dict], armed: list[dict]) -> None:
+    """Add the command line of the process behind each escape.
+
+    A pid alone does not say which of a journey's many children escaped;
+    every guarded child records its command line in the armed log when its
+    guard is installed.
+    """
+    commands = {record["pid"]: record.get("cmdline", []) for record in armed if "pid" in record}
+    for escape in escapes:
+        pid = escape.get("pid")
+        if pid == os.getpid():
+            command = "this test process"
+        elif pid in commands:
+            command = shlex.join(commands[pid])
+            if len(command) > _MAX_COMMAND_CHARS:
+                command = command[:_MAX_COMMAND_CHARS] + "..."
+        else:
+            command = "command unknown (it never reported an armed guard)"
+        escape["command"] = command
 
 
 @pytest.fixture(scope="session")
@@ -162,6 +198,7 @@ class Journey:
         escapes = GUARD.violations() + GUARD.read_log(self.guard_log)
         GUARD.clear()
         if escapes:
+            _name_processes(escapes, GUARD.read_log(self.armed_log))
             self.staging.mkdir(parents=True, exist_ok=True)
             with (self.staging / "escapes.txt").open("a", encoding="utf-8") as handle:
                 handle.write(_describe_escapes(escapes) + "\n")
@@ -304,19 +341,17 @@ def _fake_cloud_server(e2e_ctx: E2EContext) -> Any:
 @pytest.fixture
 def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
     """FakeCloud, reset, with the Servonaut API and package index pointed at it."""
-    from servonaut.services import update_service
-
     _fake_cloud_server.reset()
     journey.fake_cloud = _fake_cloud_server
     urls = {
         "SERVONAUT_API_URL": _fake_cloud_server.url,
         "SERVONAUT_MCP_URL": _fake_cloud_server.url,
+        # The update check's package-index document.
+        "SERVONAUT_PYPI_URL": _fake_cloud_server.pypi_json_url,
     }
     for key, value in urls.items():
         monkeypatch.setenv(key, value)
     journey.env_overrides.update(urls)
-    # The update check reads the package index URL from a module constant.
-    monkeypatch.setattr(update_service, "PYPI_URL", _fake_cloud_server.pypi_json_url)
     return _fake_cloud_server
 
 
@@ -331,11 +366,21 @@ def _moto_server() -> Any:
 
 @pytest.fixture
 def moto(_moto_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The local AWS endpoint, emptied, with ``AWS_ENDPOINT_URL`` pointing at it."""
+    """The local AWS endpoint, emptied, with ``AWS_ENDPOINT_URL`` pointing at it.
+
+    CloudWatch Logs filter patterns are evaluated as AWS documents them; a
+    pattern the emulation cannot evaluate fails the journey that sent it.
+    """
+    from e2e.harness import aws_logs_filter
+
     _moto_server.reset()
     monkeypatch.setenv("AWS_ENDPOINT_URL", _moto_server.url)
     journey.env_overrides["AWS_ENDPOINT_URL"] = _moto_server.url
-    return _moto_server
+    aws_logs_filter.install(monkeypatch)
+    yield _moto_server
+    refused = aws_logs_filter.take_refused()
+    if refused:
+        pytest.fail("CloudWatch filter patterns the e2e emulation refused: " + "; ".join(refused))
 
 
 # ---------------------------------------------------------------------------
