@@ -142,6 +142,26 @@ class _ListenSession:
         self.queue: 'queue.Queue[Any]' = queue.Queue()
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        # Held while the session's thread is being started. The session is
+        # published before its thread starts, so a teardown on another
+        # thread takes this lock to read a thread it can join.
+        self.spawn_lock = threading.Lock()
+
+
+def _start_session_thread(
+    session: _ListenSession,
+    target: Callable[[_ListenSession, Any], None],
+    input_service: Any,
+    *,
+    name: str,
+) -> None:
+    """Start *session*'s daemon thread, then publish it for teardown."""
+    thread = threading.Thread(
+        target=target, args=(session, input_service), name=name, daemon=True,
+    )
+    with session.spawn_lock:
+        thread.start()
+        session.thread = thread
 
 
 class VoiceConversationService(VoiceConversationServiceInterface):
@@ -398,13 +418,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
 
     def _spawn_listener(self, session: _ListenSession, input_service: Any) -> None:
         """Start the daemon thread that owns this listening session."""
-        session.thread = threading.Thread(
-            target=self._listen_loop,
-            args=(session, input_service),
-            name="voice-conversation",
-            daemon=True,
+        _start_session_thread(
+            session, self._listen_loop, input_service, name="voice-conversation",
         )
-        session.thread.start()
 
     def _listen_loop(self, session: _ListenSession, input_service: Any) -> None:
         """One listening session: open the mic, watch the VAD, endpoint.
@@ -591,13 +607,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
                 return
             session = _ListenSession(monitor)
             self._barge_session = session
-        session.thread = threading.Thread(
-            target=self._barge_loop,
-            args=(session, input_service),
-            name="voice-barge",
-            daemon=True,
+        _start_session_thread(
+            session, self._barge_loop, input_service, name="voice-barge",
         )
-        session.thread.start()
 
     def _barge_loop(self, session: _ListenSession, input_service: Any) -> None:
         """Watch the microphone for sustained speech during playback.
@@ -759,8 +771,12 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         if input_service is not None:
             self._quiet(getattr(input_service, "set_frame_callback", lambda _cb: None), None)
             self._quiet(input_service.cancel_recording)
-        thread = session.thread
-        if join and thread is not None and thread is not threading.current_thread():
+        if not join:
+            return
+        # Waits out a start in progress: joining an unstarted thread raises.
+        with session.spawn_lock:
+            thread = session.thread
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=_JOIN_TIMEOUT_SECONDS)
             if thread.is_alive():
                 logger.warning("Conversation listener did not stop within %ss",

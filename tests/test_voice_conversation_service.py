@@ -9,6 +9,7 @@ assertions poll with a bounded wait rather than sleeping fixed amounts.
 
 from __future__ import annotations
 
+import threading
 import time
 from unittest.mock import patch
 
@@ -615,6 +616,40 @@ class TestStop:
         assert events.stops == [STOP_REASON_USER]
         assert fake_input.cancel_calls >= 1
         assert fake_output.stop_calls >= 1
+
+    def test_stop_while_the_listener_thread_is_still_starting(self):
+        """A stop racing start() waits for the listener thread to start
+        and then joins it, instead of failing to join an unstarted thread.
+        The thread's start is held until the stop is already tearing the
+        session down."""
+        service, fake_input, _out, _mon = _make()
+        launching = threading.Event()
+        release = threading.Event()
+        real_thread = threading.Thread
+
+        class _HeldThread(real_thread):
+            def start(self):
+                if self.name == "voice-conversation":
+                    launching.set()
+                    release.wait(5.0)
+                super().start()
+
+        cancel_recording = fake_input.cancel_recording
+
+        def cancel_then_release():
+            cancel_recording()
+            release.set()
+
+        fake_input.cancel_recording = cancel_then_release
+        with patch.object(threading, "Thread", _HeldThread):
+            starter = real_thread(target=service.start, daemon=True)
+            starter.start()
+            _wait_until(launching.is_set)
+            service.stop()
+        starter.join(5.0)
+        assert not starter.is_alive()
+        assert service.state is ConversationState.IDLE
+        assert release.is_set()
 
     def test_stop_while_thinking(self):
         monitor = _ScriptedMonitor(list(_ONE_UTTERANCE))
