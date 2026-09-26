@@ -126,7 +126,7 @@ class FakeCloud(LoopbackServer):
         routes_account.add_routes(app, self._store, self.account)
         routes_ai.add_routes(app, self._store, self.ai)
         routes_pypi.add_routes(app, self._store)
-        routes_misc.add_routes(app, lambda: self.url)
+        routes_misc.add_routes(app, self._store, lambda: self.url)
         control.add_routes(app, self._store, self._log)
         require_unique_routes(app)
         return app
