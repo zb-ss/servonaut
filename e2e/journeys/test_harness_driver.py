@@ -11,7 +11,8 @@ import contextvars
 import pytest
 from rich.panel import Panel
 from textual.app import App, ComposeResult
-from textual.widgets import Static
+from textual.containers import Container, VerticalScroll
+from textual.widgets import Button, Static
 
 from e2e.harness.pilot import TuiDriver
 
@@ -35,3 +36,42 @@ async def test_rendered_text_works_outside_the_apps_own_context(journey):
         # a widget not drawn since its last change is rendered right here.
         text = contextvars.Context().run(t.rendered_text)
         assert "second draw" in text
+
+
+class _Card(App):
+    """Mounts a card whose button only joins the screen when the card mounts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pressed: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(id="body")
+
+    def show_card(self) -> None:
+        self.query_one("#body").mount(Container(Button("Go", id="go")))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.pressed.append(event.button.id or "")
+
+
+async def test_a_click_waits_for_a_button_mounted_with_its_card(journey):
+    app = _Card()
+    async with app.run_test(size=(60, 10)) as pilot:
+        t = TuiDriver(app, pilot, [], journey.staging)
+        app.show_card()
+        button = await t.wait_for_widget("#go", Button)
+        assert button.is_mounted
+        await t.click("#go")
+        await t.wait_until(lambda: app.pressed == ["go"], desc="the press")
+
+
+async def test_a_click_on_a_hidden_widget_fails_at_once(journey):
+    app = _Card()
+    async with app.run_test(size=(60, 10)) as pilot:
+        t = TuiDriver(app, pilot, [], journey.staging)
+        app.show_card()
+        button = await t.wait_for_widget("#go", Button)
+        button.display = False
+        with pytest.raises(AssertionError, match="is hidden"):
+            await t.click("#go")

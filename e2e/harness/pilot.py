@@ -277,12 +277,17 @@ class TuiDriver:
 
         A screen can mount part of its content after it becomes active, for
         example a card it rebuilds when its state changes: the card joins the
-        screen at once, the buttons inside it a few frames later.
+        screen at once, the buttons inside it a few frames later. This waits
+        until the match exists and has finished mounting. It does not wait
+        for a layout pass to give it a place on screen; :meth:`click` does.
         """
+
+        def mounted() -> Optional[list[Any]]:
+            widget = self.on_screen(selector, expect_type)
+            return [widget] if widget.is_mounted else None
+
         found = await self.wait_until(
-            lambda: [self.on_screen(selector, expect_type)],
-            timeout=timeout,
-            desc=f"{selector} on {self.screen_name()}",
+            mounted, timeout=timeout, desc=f"{selector} mounted on {self.screen_name()}"
         )
         return found[0]
 
@@ -358,7 +363,9 @@ class TuiDriver:
 
         A selector is waited for (see :meth:`wait_for_widget`), the way a
         user waits for a button to appear; a hidden widget fails at once.
-        A button ignores clicks while its short "pressed" highlight is
+        The click waits for the widget to be scrolled into view and laid
+        out, so it lands on the widget rather than where it will be. A
+        button ignores clicks while its short "pressed" highlight is
         showing, exactly as it would a real double click, so a second click
         on the same button waits for the highlight to clear first.
         """
@@ -371,7 +378,10 @@ class TuiDriver:
             )
         widget.scroll_visible(animate=False, immediate=True)
         await self.pilot.pause()
-        region = widget.region
+        region = await self.wait_until(
+            lambda: widget.region if widget.region.area else None,
+            desc=f"{widget!r} laid out on screen",
+        )
         offset = (max(region.width // 2, 0), max(region.height // 2, 0))
         landed = await self.pilot.click(widget, offset=offset)
         if not landed:
