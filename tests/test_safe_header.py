@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import gc
 import hashlib
 import inspect
 import textwrap
@@ -69,6 +70,25 @@ def _shown_title(screen: Screen) -> str:
     return title.render().plain
 
 
+def _close_unstarted_title_refreshes() -> int:
+    """Close the stock header's title refreshes that were queued but never run.
+
+    Python warns when an unstarted coroutine is garbage collected, which
+    can happen during whichever test runs next. Closing them here keeps
+    that warning out of the rest of the suite.
+    """
+    closed = 0
+    for obj in gc.get_objects():
+        if (
+            inspect.iscoroutine(obj)
+            and obj.__qualname__ == "Header._on_mount.<locals>.set_title"
+            and inspect.getcoroutinestate(obj) == inspect.CORO_CREATED
+        ):
+            obj.close()
+            closed += 1
+    return closed
+
+
 @pytest.mark.xfail(
     raises=NoMatches,
     strict=False,
@@ -78,8 +98,11 @@ def _shown_title(screen: Screen) -> str:
 async def test_stock_header_crashes_when_closed_before_its_title_refresh():
     """Show the scenario below reaches the race SafeHeader exists for."""
     app = _OpenAndCloseApp(Header)
-    async with app.run_test(headless=True) as pilot:
-        await pilot.pause()
+    try:
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+    finally:
+        _close_unstarted_title_refreshes()
 
 
 @pytest.mark.asyncio
