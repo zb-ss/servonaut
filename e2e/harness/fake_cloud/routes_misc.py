@@ -1,9 +1,9 @@
-"""Routes for smaller features: SSH verify, bug reports and IP lookups.
+"""Routes for smaller features: bug reports and IP lookups.
 
-* ``GET /api/v1/me/instances/{provider}/{instance_id}/ssh-ref`` answers every
-  signed-in request with a Bitwarden item reference whose id is derived from
-  the instance (:func:`ssh_ref_item_id`), so a journey knows which item the
-  ``bw`` stand-in will be asked for.
+SSH key references and SSH verify reports are served by the secrets and
+account routes; :func:`ssh_ref_item_id` gives a journey a stable Bitwarden
+item id to store as an instance's reference.
+
 * ``POST /api/v1/bug-reports`` accepts a report, signed in or anonymous, and
   returns an id and a link.
 * ``POST /ip-api/batch`` answers like ip-api.com's batch lookup, for the
@@ -21,8 +21,6 @@ from typing import Callable
 
 from aiohttp import web
 
-from e2e.harness.fake_cloud.routes_auth import bearer_ok
-from e2e.harness.fake_cloud.state import ScenarioStore
 
 # Built at run time: no UUID literal is committed.
 _ITEM_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "ssh-ref.servonaut-e2e.test")
@@ -37,27 +35,9 @@ def ssh_ref_item_id(provider: str, instance_id: str) -> str:
     return str(uuid.uuid5(_ITEM_NAMESPACE, f"{provider}/{instance_id}"))
 
 
-def add_routes(
-    app: web.Application, store: ScenarioStore, base_url: Callable[[], str]
-) -> None:
-    """Register the routes on *app*; *base_url* gives FakeCloud's own URL.
-
-    Signed-in routes accept the account's current access token, the same
-    check every other route module uses.
-    """
+def add_routes(app: web.Application, base_url: Callable[[], str]) -> None:
+    """Register the routes on *app*; *base_url* gives FakeCloud's own URL."""
     report_ids = itertools.count(1)
-
-    async def ssh_ref(request: web.Request) -> web.Response:
-        if not bearer_ok(request, store):
-            return web.json_response({"error": "unauthorized"}, status=401)
-        provider = request.match_info["provider"]
-        instance_id = request.match_info["instance_id"]
-        return web.json_response(
-            {
-                "ssh_credential_provider": "bitwarden",
-                "ssh_credential_ref": {"item_id": ssh_ref_item_id(provider, instance_id)},
-            }
-        )
 
     async def bug_report(request: web.Request) -> web.Response:
         body = await request.json()
@@ -90,7 +70,5 @@ def add_routes(
             ]
         )
 
-    instance = "/api/v1/me/instances/{provider}/{instance_id}"
-    app.router.add_get(f"{instance}/ssh-ref", ssh_ref)
     app.router.add_post("/api/v1/bug-reports", bug_report)
     app.router.add_post(f"{IP_API_PREFIX}/batch", ip_api_batch)

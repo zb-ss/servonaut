@@ -60,6 +60,7 @@ def _prepare(journey, fake_cloud, cli, *, ssh_rc: int):
     bw.write_text(ssh_script.replace(' ssh "$@"', ' bw "$@"'), encoding="utf-8")
     bw.chmod(0o755)
     item_id = ssh_ref_item_id(WEB_1.provider, WEB_1_ID)
+    fake_cloud.secrets.set_ssh_ref(WEB_1.provider, WEB_1_ID, item_id)
     journey.shims.when(
         "bw", rf"^get item {item_id}$",
         stdout=json.dumps({"id": item_id, "sshKey": {"privateKey": KEY_BODY}}),
