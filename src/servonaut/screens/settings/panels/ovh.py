@@ -49,6 +49,16 @@ class OvhPanel(SettingsPanel):
     PANEL_ID = "ovh"
     TITLE = "OVHcloud"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "ovh_audit_path": "redact_path",
+        "ovh_s3_endpoint_url": "redact_url",
+        "ovh_client_id": "redact_identifier",
+        "ovh_default_ssh_key": "redact_key_name",
+        "ovh_default_username": "redact_username",
+        "ovh_cloud_project_ids": "redact_identifier",
+    }
+
     DEFAULT_CSS = """
     OvhPanel .ovh-status {
         height: auto;
@@ -225,19 +235,17 @@ class OvhPanel(SettingsPanel):
         endpoint = ovh.endpoint if ovh.endpoint in _KNOWN_ENDPOINTS else "ovh-eu"
         self.query_one("#ovh_endpoint", Select).value = endpoint
 
-        self.query_one("#ovh_client_id", Input).value = ovh.client_id
-        self.query_one("#ovh_default_ssh_key", Input).value = ovh.default_ssh_key
-        self.query_one("#ovh_default_username", Input).value = ovh.default_username
+        self._show_field("ovh_client_id", ovh.client_id)
+        self._show_field("ovh_default_ssh_key", ovh.default_ssh_key)
+        self._show_field("ovh_default_username", ovh.default_username)
 
         self.query_one("#ovh_include_dedicated", Switch).value = ovh.include_dedicated
         self.query_one("#ovh_include_vps", Switch).value = ovh.include_vps
         self.query_one("#ovh_include_cloud", Switch).value = ovh.include_cloud
 
-        self.query_one("#ovh_cloud_project_ids", StringListEditor).set_values(
-            ovh.cloud_project_ids
-        )
+        self._show_field("ovh_cloud_project_ids", list(ovh.cloud_project_ids))
 
-        self.query_one("#ovh_audit_path", Input).value = ovh.ovh_audit_path
+        self._show_field("ovh_audit_path", ovh.ovh_audit_path)
         self.query_one("#ovh_cost_threshold", Input).value = str(ovh.cost_alert_threshold)
         self.query_one("#ovh_cost_currency", Input).value = ovh.cost_alert_currency
 
@@ -245,7 +253,7 @@ class OvhPanel(SettingsPanel):
         self.query_one("#ovh_s3_access_key", EnvVarInput).value = s3.access_key
         self.query_one("#ovh_s3_secret_key", EnvVarInput).value = s3.secret_key
         self.query_one("#ovh_s3_region", Input).value = s3.region
-        self.query_one("#ovh_s3_endpoint_url", Input).value = s3.endpoint_url
+        self._show_field("ovh_s3_endpoint_url", s3.endpoint_url)
 
         self._snapshot_now()
 
@@ -254,16 +262,14 @@ class OvhPanel(SettingsPanel):
         return {
             "enabled": self.query_one("#ovh_enabled", Switch).value,
             "endpoint": str(self.query_one("#ovh_endpoint", Select).value),
-            "client_id": self.query_one("#ovh_client_id", Input).value.strip(),
-            "default_ssh_key": self.query_one("#ovh_default_ssh_key", Input).value.strip(),
-            "default_username": self.query_one("#ovh_default_username", Input).value.strip(),
+            "client_id": self._field_value("ovh_client_id").strip(),
+            "default_ssh_key": self._field_value("ovh_default_ssh_key").strip(),
+            "default_username": self._field_value("ovh_default_username").strip(),
             "include_dedicated": self.query_one("#ovh_include_dedicated", Switch).value,
             "include_vps": self.query_one("#ovh_include_vps", Switch).value,
             "include_cloud": self.query_one("#ovh_include_cloud", Switch).value,
-            "cloud_project_ids": self.query_one(
-                "#ovh_cloud_project_ids", StringListEditor
-            ).get_values(),
-            "ovh_audit_path": self.query_one("#ovh_audit_path", Input).value.strip(),
+            "cloud_project_ids": self._field_value("ovh_cloud_project_ids"),
+            "ovh_audit_path": self._field_value("ovh_audit_path").strip(),
             "cost_alert_threshold": self.query_one(
                 "#ovh_cost_threshold", Input
             ).value.strip(),
@@ -273,7 +279,7 @@ class OvhPanel(SettingsPanel):
             "s3_access_key": self.query_one("#ovh_s3_access_key", EnvVarInput).value,
             "s3_secret_key": self.query_one("#ovh_s3_secret_key", EnvVarInput).value,
             "s3_region": self.query_one("#ovh_s3_region", Input).value.strip(),
-            "s3_endpoint_url": self.query_one("#ovh_s3_endpoint_url", Input).value.strip(),
+            "s3_endpoint_url": self._field_value("ovh_s3_endpoint_url").strip(),
         }
 
     def collect(self) -> Dict[str, Any]:

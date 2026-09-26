@@ -98,6 +98,10 @@ class MemorySyncSetupScreen(Screen):
     # State machine
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Rebuild the status card for the new demo-mode state."""
+        self._render_state()
+
     def _render_state(self) -> None:
         body = self.query_one("#msync_body", VerticalScroll)
         body.remove_children()
@@ -653,7 +657,7 @@ class MemorySyncSetupScreen(Screen):
             queued = sync.backfill_from_local_store()
         except Exception as exc:
             self._clear_busy()
-            self.app.notify(f"Backfill failed: {escape(str(exc))}", severity="error")
+            self.app.notify(f"Backfill failed: {escape(str(exc))}", severity="error", markup=False)
             return
         work_queued = pending_before + queued
         if work_queued:
@@ -683,7 +687,7 @@ class MemorySyncSetupScreen(Screen):
                     break
         except Exception as exc:
             self._clear_busy()
-            self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error")
+            self.app.notify(f"Sync failed: {escape(str(exc))}", severity="error", markup=False)
             return
         self._publish_manual_sync_progress(
             "Upload finished · checking remote annotations and findings…"
@@ -716,6 +720,7 @@ class MemorySyncSetupScreen(Screen):
                 f"sync halted: {escape(str(reason))}",
                 severity="error",
                 timeout=10,
+                markup=False,
             )
         else:
             self.app.notify(

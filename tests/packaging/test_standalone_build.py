@@ -49,10 +49,12 @@ from scripts.standalone_cli.model import (
     load_target_spec,
     validate_build_request,
 )
+from scripts.standalone_cli.release_identity import ReleaseIdentity
 from scripts.standalone_cli.runtime_marker import (
     _marker_environment,
     write_runtime_marker,
 )
+from servonaut.runtime import RuntimeEvidence, resolve_runtime
 
 _LINUX_TARGET = "linux-x64-ubuntu-22.04"
 
@@ -990,6 +992,7 @@ def test_marker_validation_imports_only_the_isolated_wheel_runtime(
         source_commit="abc1234",
         output_dir=tmp_path / "output",
         require_artifact_selftest=False,
+        release_identity=ReleaseIdentity("preview", 3),
     )
     venv_root = tmp_path / "isolated"
     venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(venv_root)
@@ -1019,9 +1022,27 @@ def test_marker_validation_imports_only_the_isolated_wheel_runtime(
         working_directory=workdir,
     )
 
-    assert (
-        json.loads(marker.read_text(encoding="utf-8"))["distribution"] == "frozen-cli"
+    written = json.loads(marker.read_text(encoding="utf-8"))
+    assert written["distribution"] == "frozen-cli"
+    assert (written["channel"], written["packaging_revision"]) == ("preview", 3)
+    layout = resolve_runtime(
+        RuntimeEvidence(
+            executable=executable,
+            executable_root=payload,
+            resource_root=payload / "_internal",
+            home=tmp_path,
+            is_frozen=True,
+            package_version="1.2.3",
+            package_is_installed=False,
+            source_install_path=None,
+            path_console=None,
+            pipx_executable=None,
+            pipx_contains_servonaut=False,
+            marker=written,
+        )
     )
+    assert (layout.release_channel, layout.packaging_revision) == ("preview", 3)
+    assert layout.build_revision == "build-1"
 
 
 def test_real_venv_interpreter_keeps_private_prefix_and_base_unchanged(
@@ -1519,6 +1540,10 @@ def test_main_normalizes_an_invalid_output_path_error(
                 "abc1234",
                 "--output",
                 str(output),
+                "--channel",
+                "stable",
+                "--packaging-revision",
+                "1",
             ]
         )
 
@@ -1552,11 +1577,75 @@ def test_main_rejects_a_release_tag_it_would_not_record(
                 "abc1234",
                 "--output",
                 str(tmp_path / "output"),
+                "--channel",
+                "stable",
+                "--packaging-revision",
+                "1",
             ]
         )
 
     assert error.value.code == 2
     assert "--release-tag" in capsys.readouterr().err
+    assert builds == []
+
+
+def _main_argv(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "--wheel",
+        str(_wheel(tmp_path)),
+        "--target",
+        _LINUX_TARGET,
+        "--product-version",
+        "1.2.3",
+        "--revision",
+        "ci-r1",
+        "--commit",
+        "abc1234",
+        "--output",
+        str(tmp_path / "output"),
+        *extra,
+    ]
+
+
+def test_main_records_the_explicit_release_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builds: list[BuildRequest] = []
+    target = _target_spec(tmp_path)
+    monkeypatch.setattr(standalone_build, "load_target_spec", lambda *_args: target)
+    monkeypatch.setattr(standalone_build, "build_standalone", builds.append)
+
+    assert (
+        main(_main_argv(tmp_path, "--channel", "preview", "--packaging-revision", "4"))
+        == 0
+    )
+
+    assert builds[0].release_identity == ReleaseIdentity("preview", 4)
+    assert builds[0].build_revision == "ci-r1"
+
+
+@pytest.mark.parametrize(
+    "identity_args",
+    [
+        [],
+        ["--channel", "stable"],
+        ["--packaging-revision", "1"],
+        ["--channel", "stable", "--packaging-revision", "ci-r1"],
+        ["--channel", "nightly", "--packaging-revision", "1"],
+    ],
+)
+def test_main_requires_a_valid_explicit_release_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity_args: list[str]
+) -> None:
+    builds: list[BuildRequest] = []
+    target = _target_spec(tmp_path)
+    monkeypatch.setattr(standalone_build, "load_target_spec", lambda *_args: target)
+    monkeypatch.setattr(standalone_build, "build_standalone", builds.append)
+
+    with pytest.raises(SystemExit) as error:
+        main(_main_argv(tmp_path, *identity_args))
+
+    assert error.value.code == 2
     assert builds == []
 
 

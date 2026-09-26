@@ -38,6 +38,11 @@ from scripts.standalone_cli.model import (
     load_target_spec,
     validate_build_request,
 )
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentityError,
+    add_release_identity_arguments,
+    resolve_release_identity,
+)
 from scripts.standalone_cli.runtime_marker import write_runtime_marker
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -284,6 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--require-artifact-selftest", action="store_true")
+    add_release_identity_arguments(parser, required=True)
     args = parser.parse_args(argv)
     try:
         request = BuildRequest(
@@ -294,9 +300,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_commit=args.commit,
             output_dir=args.output,
             require_artifact_selftest=args.require_artifact_selftest,
+            release_identity=resolve_release_identity(
+                args.channel, args.packaging_revision, required=True
+            ),
         )
         build_standalone(request)
-    except (BuildValidationError, TypeError) as error:
+    except (BuildValidationError, ReleaseIdentityError, TypeError) as error:
         parser.error(str(error))
     return 0
 

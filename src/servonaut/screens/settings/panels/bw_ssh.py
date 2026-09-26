@@ -39,6 +39,13 @@ class BwSshPanel(SettingsPanel):
     PANEL_ID = "bw_ssh"
     TITLE = "Bitwarden SSH Vault"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "bw_ssh_vault_url": "redact_url",
+        "bw_ssh_default_collection_id": "redact_identifier",
+        "bw_ssh_vault_folder": "redact_name",
+    }
+
     DEFAULT_CSS = """
     BwSshPanel .bw-status-row {
         height: auto;
@@ -151,11 +158,9 @@ class BwSshPanel(SettingsPanel):
     def current_values(self) -> Dict[str, Any]:
         """Return current form values for dirty comparison."""
         try:
-            vault_url = self.query_one("#bw_ssh_vault_url", Input).value.strip()
-            collection_id = self.query_one(
-                "#bw_ssh_default_collection_id", Input
-            ).value.strip()
-            vault_folder = self.query_one("#bw_ssh_vault_folder", Input).value.strip()
+            vault_url = self._field_value("bw_ssh_vault_url").strip()
+            collection_id = self._field_value("bw_ssh_default_collection_id").strip()
+            vault_folder = self._field_value("bw_ssh_vault_folder").strip()
         except Exception:
             return {}
         return {
@@ -170,7 +175,7 @@ class BwSshPanel(SettingsPanel):
         Raises:
             ValidationError: When vault URL is empty or not http/https.
         """
-        vault_url = self.query_one("#bw_ssh_vault_url", Input).value.strip()
+        vault_url = self._field_value("bw_ssh_vault_url").strip()
         if not vault_url:
             raise ValidationError("bw_ssh_vault_url", "Vault URL is required.")
         if not (vault_url.startswith("http://") or vault_url.startswith("https://")):
@@ -179,7 +184,7 @@ class BwSshPanel(SettingsPanel):
                 "Vault URL must start with http:// or https://",
             )
         collection_id = (
-            self.query_one("#bw_ssh_default_collection_id", Input).value.strip() or None
+            self._field_value("bw_ssh_default_collection_id").strip() or None
         )
         return {"vault_url": vault_url, "default_collection_id": collection_id}
 
@@ -206,7 +211,7 @@ class BwSshPanel(SettingsPanel):
     def _persist_vault_folder(self) -> None:
         """Write the vault folder name to the local config (no API call)."""
         try:
-            folder = self.query_one("#bw_ssh_vault_folder", Input).value.strip() or "Servonaut"
+            folder = self._field_value("bw_ssh_vault_folder").strip() or "Servonaut"
         except Exception:
             return
         try:
@@ -394,18 +399,19 @@ class BwSshPanel(SettingsPanel):
 
         try:
             vault_url_input = self.query_one("#bw_ssh_vault_url", Input)
-            collection_input = self.query_one("#bw_ssh_default_collection_id", Input)
         except Exception:
             return
 
-        vault_url_input.value = inner.get("vault_url", "") if inner else ""
-        collection_input.value = inner.get("default_collection_id", "") if inner else ""
+        self._show_field("bw_ssh_vault_url", inner.get("vault_url", "") if inner else "")
+        self._show_field(
+            "bw_ssh_default_collection_id",
+            (inner.get("default_collection_id") or "") if inner else "",
+        )
         # Folder pre-fill is independent — a missing widget must not abort the
         # vault/collection population above.
         try:
             from servonaut.utils.bw_folder import resolved_bw_vault_folder
-            folder_input = self.query_one("#bw_ssh_vault_folder", Input)
-            folder_input.value = resolved_bw_vault_folder(self.app)
+            self._show_field("bw_ssh_vault_folder", resolved_bw_vault_folder(self.app))
         except Exception:
             pass
 
@@ -426,6 +432,11 @@ class BwSshPanel(SettingsPanel):
     # ------------------------------------------------------------------
     # Status line refresh
     # ------------------------------------------------------------------
+
+    def refresh_after_demo_toggle(self) -> None:
+        """The status line shows the vault URL, which demo mode hides."""
+        super().refresh_after_demo_toggle()
+        self._refresh_bw_ssh_status()
 
     def _refresh_bw_ssh_status(self) -> None:
         """Update the status Static from the cached ``_bw_ssh_config``."""

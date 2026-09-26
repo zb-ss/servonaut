@@ -390,6 +390,19 @@ class TuiDriver:
         assert selected is not None and selected.get("name") == name, selected
         return selected
 
+    async def wait_and_select_instance(
+        self, name: str, *, timeout: float = DEFAULT_TIMEOUT
+    ) -> dict:
+        """Wait until the fleet table lists *name*, then select it (see select_instance)."""
+        from servonaut.widgets.instance_table import InstanceTable
+
+        await self.wait_until(
+            lambda: name in [row[1] for row in self.table_rows(InstanceTable)],
+            timeout=timeout,
+            desc=f"{name} in the fleet table",
+        )
+        return await self.select_instance(name)
+
     def table_rows(self, selector: Union[str, type]) -> list[list[str]]:
         """Plain-text cells of a DataTable on the active screen."""
         table = self.on_screen(selector)

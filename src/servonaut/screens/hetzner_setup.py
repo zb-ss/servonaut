@@ -27,6 +27,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Select, Static
 
+from servonaut.screens._demo_resolve import replace_instances
 from servonaut.services.object_storage_regions import (
     HETZNER_S3_DEFAULT_REGION,
     HETZNER_S3_REGIONS,
@@ -792,10 +793,7 @@ class HetznerSetupScreen(Screen):
             return
 
         if instances:
-            non_hetzner = [
-                i for i in self.app.instances if not i.get("is_hetzner")
-            ]
-            self.app.instances = non_hetzner + instances
+            replace_instances(self.app, "hetzner", instances)
             self.app.notify(
                 f"Hetzner enabled — {len(instances)} server(s) loaded.",
                 severity="information",

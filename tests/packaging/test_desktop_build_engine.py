@@ -23,6 +23,7 @@ from scripts.desktop_shell.model import (
     load_voice_runtime_policy,
 )
 from scripts.desktop_shell.voice_bundle import VoiceBundleError
+from scripts.standalone_cli.release_identity import DEVELOPMENT_IDENTITY, ReleaseIdentity
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
@@ -79,7 +80,29 @@ def _stage_outputs(staging_root: Path) -> tuple[Path, Path]:
     return payload, metadata
 
 
-def test_main_accepts_disabling_the_artifact_selftest(
+def test_the_artifact_selftest_is_not_a_build_option(
+    wheel: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The GUI entry always bundles the self-test, so a build cannot claim otherwise."""
+    monkeypatch.setattr(desktop_build, "build_desktop", lambda _request: None)
+    base = [
+        "--wheel",
+        str(wheel),
+        "--target",
+        "linux-x64-ubuntu-22.04",
+        "--output-dir",
+        str(tmp_path / "out"),
+    ]
+
+    for option in ("--require-artifact-selftest", "--no-require-artifact-selftest"):
+        with pytest.raises(SystemExit) as error:
+            desktop_build.main([*base, option])
+        assert error.value.code == 2
+    assert "servonaut_desktop.py" in str(desktop_build._GUI_ENTRY)
+    assert "--_artifact-selftest" in desktop_build._GUI_ENTRY.read_text(encoding="utf-8")
+
+
+def test_main_stamps_the_development_identity_unless_told_otherwise(
     wheel: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     requests: list[DesktopBuildRequest] = []
@@ -94,9 +117,102 @@ def test_main_accepts_disabling_the_artifact_selftest(
     ]
 
     assert desktop_build.main(base) == 0
-    assert desktop_build.main([*base, "--no-require-artifact-selftest"]) == 0
+    assert (
+        desktop_build.main([*base, "--channel", "preview", "--packaging-revision", "3"])
+        == 0
+    )
 
-    assert [request.require_artifact_selftest for request in requests] == [True, False]
+    assert [request.release_identity for request in requests] == [
+        DEVELOPMENT_IDENTITY,
+        ReleaseIdentity("preview", 3),
+    ]
+
+
+def _release_argv(wheel: Path, tmp_path: Path, tag: str, *identity: str) -> list[str]:
+    return [
+        "--wheel",
+        str(wheel),
+        "--target",
+        "linux-x64-ubuntu-22.04",
+        "--output-dir",
+        str(tmp_path / "out"),
+        "--release-tag",
+        tag,
+        *identity,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tag", "identity_args", "reason"),
+    [
+        (f"v{_VERSION}", [], "require an explicit --packaging-revision"),
+        (f"v{_VERSION}", ["--channel", "stable"], "require an explicit --packaging-revision"),
+        (
+            f"v{_VERSION}",
+            ["--channel", "preview", "--packaging-revision", "2"],
+            "contradicts the stable release tag",
+        ),
+        (
+            f"v{_VERSION}-preview.1",
+            ["--channel", "stable", "--packaging-revision", "2"],
+            "contradicts the preview release tag",
+        ),
+        ("v9.9.9", ["--packaging-revision", "2"], "does not match the product version"),
+        (f"v{_VERSION}-rc.1", ["--packaging-revision", "2"], "must be a stable"),
+        (f"v{_VERSION}", ["--packaging-revision", "0"], "integer from 1 to 65535"),
+    ],
+)
+def test_release_builds_refuse_an_identity_their_tag_contradicts(
+    wheel: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tag: str,
+    identity_args: list[str],
+    reason: str,
+) -> None:
+    monkeypatch.setattr(
+        desktop_build,
+        "build_desktop",
+        lambda _request: pytest.fail("an inconsistent release build must not start"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        desktop_build.main(_release_argv(wheel, tmp_path, tag, *identity_args))
+
+    assert error.value.code == 2
+    assert reason in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("tag", "identity_args", "expected"),
+    [
+        (f"v{_VERSION}", ["--packaging-revision", "2"], ReleaseIdentity("stable", 2)),
+        (
+            f"v{_VERSION}-preview.3",
+            ["--packaging-revision", "1"],
+            ReleaseIdentity("preview", 1),
+        ),
+        (
+            f"v{_VERSION}-preview.3",
+            ["--channel", "preview", "--packaging-revision", "4"],
+            ReleaseIdentity("preview", 4),
+        ),
+    ],
+)
+def test_release_build_takes_its_channel_from_the_tag(
+    wheel: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+    identity_args: list[str],
+    expected: ReleaseIdentity,
+) -> None:
+    requests: list[DesktopBuildRequest] = []
+    monkeypatch.setattr(desktop_build, "build_desktop", requests.append)
+
+    assert desktop_build.main(_release_argv(wheel, tmp_path, tag, *identity_args)) == 0
+    assert requests[0].release_identity == expected
 
 
 def _pin_host_python(

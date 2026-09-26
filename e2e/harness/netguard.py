@@ -19,7 +19,12 @@ Filesystem
 Programs
     The same hook refuses to start any program other than the fake tools in
     the spawn directories, this Python interpreter and ``/bin/sh`` or
-    ``/bin/bash``; refused starts raise :class:`SpawnEscapeError`.
+    ``/bin/bash``; refused starts raise :class:`SpawnEscapeError`. The one
+    exception is granted by the OpenSSH pass-through of the loopback SSH
+    journeys, in its own process only (:func:`allow_ssh_clients`): the real
+    ``ssh`` and ``scp`` may start as ``<client> -F <sandbox config> ...``,
+    with no other config, and ``scp`` only with an ``ssh`` from the fake
+    tools.
 
 Every refusal is recorded. Children write their records as JSON lines to the
 file named by ``SERVONAUT_E2E_GUARD_LOG`` and, once armed, one line to
@@ -104,6 +109,15 @@ _allowed: tuple[str, ...] = ()
 _write_roots: tuple[str, ...] = ()
 _spawn_dirs: tuple[str, ...] = ()
 _spawn_programs: frozenset[str] = frozenset()
+_ssh_programs: dict[str, str] = {}  # resolved path -> "ssh" or "scp"
+_ssh_config: Optional[str] = None
+
+# OpenSSH's own option strings (ssh.c, scp.c): a letter followed by ":" takes
+# a value. scp's server-mode flags (d, f, t) are parsed so they can be refused.
+OPENSSH_OPTSTRINGS = {
+    "ssh": "1246ab:c:e:fgi:kl:m:no:p:qstvxyAB:CD:E:F:GI:J:KL:MNO:P:Q:R:S:TVw:W:XY",
+    "scp": "12346ABCOTdfpqRrstvc:D:F:i:J:l:o:P:S:X:",
+}
 
 _original_connect = socket.socket.connect
 _original_connect_ex = socket.socket.connect_ex
@@ -454,6 +468,94 @@ def program_allowed(program: str, env: object = None) -> bool:
     return any(within(os.path.dirname(path), directory) for directory in _spawn_dirs)
 
 
+def parse_openssh_argv(tool: str, args: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Split an ``ssh`` or ``scp`` argument list the way the client does.
+
+    Returns ``(options, operands)``; options are ``(letter, value)`` pairs in
+    order, with clustered flags (``-vF file``) taken apart. Like OpenSSH's
+    getopt, parsing stops at the first operand, except that ``ssh`` parses
+    options again after the destination unless ``--`` came first. Raises
+    ValueError for an unknown option or a missing value.
+    """
+    spec = OPENSSH_OPTSTRINGS[tool]
+    takes_value = {spec[i] for i in range(len(spec) - 1) if spec[i + 1] == ":"}
+    letters = set(spec) - {":"}
+    options: list[tuple[str, str]] = []
+    operands: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return options, operands + args[index + 1:]
+        if not arg.startswith("-") or arg == "-":
+            operands.append(arg)
+            index += 1
+            if tool == "ssh" and len(operands) == 1:
+                continue  # ssh reads options after the destination too
+            return options, operands + args[index:]
+        position = 1
+        while position < len(arg):
+            letter = arg[position]
+            if letter not in letters:
+                raise ValueError(f"unknown option -{letter}")
+            if letter not in takes_value:
+                options.append((letter, ""))
+                position += 1
+                continue
+            value = arg[position + 1:]
+            if not value:
+                index += 1
+                if index >= len(args):
+                    raise ValueError(f"option -{letter} needs a value")
+                value = args[index]
+            options.append((letter, value))
+            break
+        index += 1
+    return options, operands
+
+
+def allow_ssh_clients(programs: dict[str, str], config: Optional[str]) -> None:
+    """Allow the real OpenSSH clients in *programs* ({path: "ssh" | "scp"}).
+
+    Called by the OpenSSH pass-through for its own process only. A client may
+    then start as ``<client> -F <config> ...`` naming no other config; ``scp``
+    must also take its ``ssh`` (``-S``) from the fake tools and may not run a
+    local SFTP server (``-D``). Empty *programs* withdraws the allowance.
+    """
+    global _ssh_programs, _ssh_config
+    _ssh_programs = {_resolve(p): tool for p, tool in programs.items()} if config else {}
+    _ssh_config = config or None
+
+
+def _ssh_client_allowed(program: str, argv: object) -> bool:
+    """True for an allowed OpenSSH client started only with the sandbox config."""
+    tool = _ssh_programs.get(_resolve(program)) if os.sep in program else None
+    if tool is None or not isinstance(argv, (list, tuple)) or len(argv) < 3:
+        return False
+    words = [os.fsdecode(a) if isinstance(a, bytes) else str(a) for a in argv]
+    if words[1:3] != ["-F", _ssh_config]:
+        return False
+    try:
+        options, _operands = parse_openssh_argv(tool, words[1:])
+    except ValueError:
+        return False
+    for letter, value in options:
+        if letter == "F" and value != _ssh_config:
+            return False
+        if tool == "scp" and letter == "D":
+            return False
+        if tool == "scp" and letter == "S" and not any(
+            within(os.path.dirname(_resolve(value)), d) for d in _spawn_dirs
+        ):
+            return False
+    return True
+
+
+def _spawn_argv(event: str, args: tuple[Any, ...]) -> object:
+    position = {"os.spawn": 2, "pty.spawn": 0}.get(event, 1)
+    return args[position] if position < len(args) else None
+
+
 def _check_spawn_event(event: str, args: tuple[Any, ...]) -> None:
     if event == "os.system":
         _record("spawn", "os.system")
@@ -468,7 +570,7 @@ def _check_spawn_event(event: str, args: tuple[Any, ...]) -> None:
         return
     program = os.fsdecode(os.fspath(program))
     env = args[env_position] if env_position is not None and env_position < len(args) else None
-    if program_allowed(program, env):
+    if program_allowed(program, env) or _ssh_client_allowed(program, _spawn_argv(event, args)):
         return
     _record("spawn", f"{event} {program}")
     raise SpawnEscapeError(errno.EACCES, f"e2e guard refused to start {program}")
@@ -535,6 +637,7 @@ def disarm_filesystem_and_spawns() -> None:
     global _protected, _allowed, _write_roots, _spawn_dirs, _spawn_programs
     _protected = _allowed = _write_roots = _spawn_dirs = ()
     _spawn_programs = frozenset()
+    allow_ssh_clients({}, None)
 
 
 # ---------------------------------------------------------------------------

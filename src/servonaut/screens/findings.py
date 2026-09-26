@@ -39,6 +39,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.findings_service import (
     FINDING_SEVERITIES,
     FINDING_STATUSES,
@@ -269,9 +270,11 @@ class FindingsScreen(Screen):
 
     @property
     def _instance_id(self) -> Optional[str]:
+        """Real id of the scoped server; the row may carry demo-mode fakes."""
         if self._instance is None:
             return None
-        return str(self._instance.get("id") or self._instance.get("name") or "")
+        real = connection_instance(self.app, self._instance)
+        return str(real.get("id") or real.get("name") or "")
 
     def _instance_label(self, instance_id: str) -> str:
         """Best-effort name for an instance id from the shared list."""
@@ -491,6 +494,11 @@ class FindingsScreen(Screen):
         except (TypeError, ValueError):
             self._total = len(self._rows)
         self._populate_table()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched findings for the new demo-mode state."""
+        if self._rows:
+            self._populate_table()
 
     def _populate_table(self) -> None:
         table = self.query_one("#findings_table", DataTable)

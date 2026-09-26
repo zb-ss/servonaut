@@ -193,11 +193,10 @@ jobs:
             --product-version "${PRODUCT_VERSION}" \
             --output "${EVIDENCE_DIR}/inspection-report-${TARGET}.json"
 
-      # --skip-selftest: the artifact self-test only accepts the standalone
-      # frozen-CLI runtime and rejects the packaged-desktop marker, so no
-      # desktop target can pass it yet. The smoke refuses this skip for any
-      # target listed in smoke-policy.json selftest_targets whenever the build
-      # metadata records an embedded self-test.
+      # --selftest runs the packaged GUI self-test headlessly: desktop imports,
+      # bundled resources, the presence of the voice bundle and one
+      # authenticated session through the real child. Opening the native
+      # window needs a display, so --selftest-window stays off on these runners.
       - name: Run policy-bound smoke checks
         id: smoke
         env:
@@ -216,7 +215,7 @@ jobs:
             --target "${TARGET}" \
             --product-version "${PRODUCT_VERSION}" \
             --evidence-dir "${EVIDENCE_DIR}" \
-            --skip-selftest
+            --selftest
 
       - name: Prepare sanitized non-executable evidence
         id: sanitize

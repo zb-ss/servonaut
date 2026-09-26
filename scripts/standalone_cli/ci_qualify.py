@@ -62,6 +62,7 @@ from scripts.standalone_cli.artifact_inspect import (
     extract_archive_for_smoke,
 )
 from scripts.standalone_cli.model import BuildRequest, TargetSpec, load_target_spec
+from scripts.standalone_cli.release_identity import DEVELOPMENT_IDENTITY
 from scripts.standalone_cli.smoke_artifact import (
     SmokeRequest,
     assert_smoke,
@@ -738,6 +739,8 @@ def qualify(request: QualificationRequest) -> QualificationResult:
                 source_commit=request.source_commit,
                 output_dir=build_root,
                 require_artifact_selftest=True,
+                # A qualification build is a development build, never a release.
+                release_identity=DEVELOPMENT_IDENTITY,
             )
         )
         owned.append(_capture_direct_child(root, build_root, "build output"))

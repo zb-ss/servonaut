@@ -219,6 +219,12 @@ class CloudWatchBrowserScreen(Screen):
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched events and their top IPs for the new mode."""
+        self._populate_events_table()
+        if self._events:
+            self._refresh_ips_table()
+
     def _populate_events_table(self) -> None:
         """Fill the events table with the current page."""
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
@@ -544,10 +550,10 @@ class CloudWatchBrowserScreen(Screen):
     def _copy_text(self, text: str, message: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
         if copy_to_clipboard(text):
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
         else:
             self.app.copy_to_clipboard(text)
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
 
     def action_ban_ip(self) -> None:
         ip = self._get_selected_ip()
@@ -557,7 +563,11 @@ class CloudWatchBrowserScreen(Screen):
             )
             return
         from servonaut.screens.ip_ban import IPBanScreen
-        self.app.push_screen(IPBanScreen(prefill_ip=ip))
+        # Pre-fill what the table shows; a ban of it targets the real address.
+        shown = ip
+        if self.app.demo_mode and self.app.redaction_service:
+            shown = self.app.redaction_service.redact_ip(ip)
+        self.app.push_screen(IPBanScreen(prefill_ip=shown, prefill_real_ip=ip))
 
     def action_ip_info(self) -> None:
         """Look up geolocation and abuse info for the selected IP."""
