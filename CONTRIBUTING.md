@@ -217,6 +217,10 @@ When you add a journey:
   `fake_cloud`, `cli` and `mcp` (real child processes), and `sshd` (the
   loopback SSH servers; see `e2e/harness/remote_fleet.py` for fleet entries
   that point at them). A journey using `sshd` must be marked `needs_sshd`.
+- For AI journeys (`e2e/journeys/ai/`), `fake_ai` stands in for OpenAI,
+  Anthropic and Ollama through the provider base-URL setting, and
+  `fake_cloud.ai.script(...)` scripts the hosted chat, replaying the recorded
+  streams in `tests/fixtures/sse`.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - To prove a secret never reached the service, use
