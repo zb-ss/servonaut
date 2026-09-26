@@ -137,7 +137,9 @@ class CloudTrailBrowserScreen(Screen):
         super().__init__()
         self._events: List[Dict[str, Any]] = []
         self._visible: List[Dict[str, Any]] = []
-        self._selected_row: Optional[int] = None
+        # The event the reader selected, kept by identity: the table shows
+        # the filtered list, so a row number is not an index into _events.
+        self._selected_event: Optional[Dict[str, Any]] = None
         self._current_page: int = 0
         self._cap_reached: bool = False
         self._fleet_names_cache: Optional[Dict[str, str]] = None
@@ -530,14 +532,13 @@ class CloudTrailBrowserScreen(Screen):
     # ------------------------------------------------------------------
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        abs_index = self._current_page * _PAGE_SIZE + event.cursor_row
-        self._selected_row = abs_index
-        self._show_event_detail(abs_index)
-
-    def _show_event_detail(self, index: int) -> None:
-        if index < 0 or index >= len(self._events):
+        index = self._current_page * _PAGE_SIZE + event.cursor_row
+        if not 0 <= index < len(self._visible):
             return
-        event = self._events[index]
+        self._selected_event = self._visible[index]
+        self._show_event_detail(self._selected_event)
+
+    def _show_event_detail(self, event: Dict[str, Any]) -> None:
         event_time = event.get("event_time", "")
         if hasattr(event_time, "strftime"):
             event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -572,8 +573,8 @@ class CloudTrailBrowserScreen(Screen):
                 return self.app.redaction_service.scrub_stream(x)
             return x
 
-        if self._selected_row is not None and self._selected_row < len(self._events):
-            event = self._events[self._selected_row]
+        if self._selected_event is not None:
+            event = self._selected_event
             event_time = event.get("event_time", "")
             if hasattr(event_time, "strftime"):
                 event_time = event_time.strftime("%Y-%m-%d %H:%M:%S")

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -82,6 +84,20 @@ _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
 # context. Reads auto-paginate up to this many items when no max_items is given.
 _AWS_CALL_MAX_RESULT_CHARS = 200_000
 _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
+
+
+def _run_capturing_stdout(func) -> str:
+    """Run *func* and return what it printed.
+
+    The relay CLI helpers report progress with ``print``. Under the MCP stdio
+    server, stdout is the JSON-RPC channel (the transport holds its own
+    handle to it), so their output is captured and returned in the tool
+    result instead of reaching the protocol stream.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        func()
+    return buffer.getvalue()
 
 
 def _error(code: str, message: str) -> Dict[str, Any]:
@@ -354,6 +370,7 @@ class ServonautTools:
         if not cmd_allowed:
             self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
+        command = self._guard.command_for_execution(command)
 
         instance = await self._find_instance(instance_id)
         if not instance:
@@ -611,7 +628,15 @@ class ServonautTools:
 
     async def get_logs(self, instance_id: str, log_path: str = "/var/log/syslog", lines: int = 100) -> str:
         """Get log content from remote instance."""
-        return await self.run_command(instance_id, f"tail -n {lines} {log_path}")
+        try:
+            count = int(lines)
+        except (TypeError, ValueError):
+            return "validation: lines must be an integer (1-10000)"
+        if not 1 <= count <= 10000:
+            return "validation: lines must be an integer (1-10000)"
+        return await self.run_command(
+            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}"
+        )
 
     async def check_status(self, instance_id: str) -> str:
         """Get instance status (state, IPs, type, region)."""
@@ -622,6 +647,7 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('check_status', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         lines = [
@@ -652,6 +678,7 @@ class ServonautTools:
         # Instead, execute via SSH directly to avoid double guard checking.
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('get_server_info', {'instance_id': instance_id}, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
@@ -723,6 +750,10 @@ class ServonautTools:
 
         instance = await self._find_instance(instance_id)
         if not instance:
+            self._audit.log('transfer_file', {
+                'instance_id': instance_id, 'local_path': local_path,
+                'remote_path': remote_path, 'direction': direction,
+            }, '', False, 'instance_not_found')
             return f"Instance not found: {instance_id}"
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
@@ -1167,8 +1198,13 @@ class ServonautTools:
         (``{"error": {"code": ..., "message": ...}}``) rather than raised —
         MCP agents handle structured results far better than exceptions.
         """
-        started = time.monotonic()
         method_upper = (method or "").upper()
+        allowed, reason = self._guard.check_tool('api_request')
+        if not allowed:
+            self._audit.log('api_request', {'method': method_upper, 'path': path}, '', False, reason)
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
+        started = time.monotonic()
         result = await self._api_request_impl(method_upper, path, query, body, headers)
         duration_ms = int((time.monotonic() - started) * 1000)
 
@@ -1328,23 +1364,28 @@ class ServonautTools:
         last heartbeat, client_ids). Errors propagate as the normal
         ``{"error": ...}`` shape.
         """
-        raw = await self.api_request("GET", "/api/cli/status")
-        try:
-            wrapped = json.loads(raw)
-        except ValueError:
-            # api_request always returns JSON; preserve the raw string as a fallback
-            return raw
-        if not isinstance(wrapped, dict):
-            return json.dumps(_error("unexpected_response", "Non-object payload."))
+        wrapped = await self._fetch_relay_status()
         if "error" in wrapped:
+            self._audit.log("relay_status", {}, "", False, wrapped["error"].get("code"))
             return json.dumps(wrapped)
         body = wrapped.get("body")
         if not isinstance(body, dict):
+            self._audit.log("relay_status", {}, "", False, "unexpected_response")
             return json.dumps(_error(
                 "unexpected_response",
                 f"Expected JSON object body, got {type(body).__name__}.",
             ))
+        self._audit.log("relay_status", {}, "", True)
         return json.dumps(body)
+
+    async def _fetch_relay_status(self) -> Dict[str, Any]:
+        """Fetch ``GET /api/cli/status`` for the relay tools.
+
+        This is one fixed, read-only request, so it does not go through the
+        ``api_request`` tool and its guard tier: ``relay_status`` is a
+        readonly tool, and ``relay_reconnect`` checks its own tier.
+        """
+        return await self._api_request_impl("GET", "/api/cli/status", None, None, None)
 
     async def mcp_tool_call(self, name: str,
                             arguments: Optional[Dict[str, Any]] = None) -> str:
@@ -1356,6 +1397,13 @@ class ServonautTools:
         ``result`` or ``error`` without constructing the envelope themselves.
         One-shot 401 refresh + retry mirrors ``api_request``.
         """
+        allowed, reason = self._guard.check_tool('mcp_tool_call')
+        if not allowed:
+            self._audit.log(
+                'mcp_tool_call', {"name": name, "has_arguments": bool(arguments)}, '', False, reason
+            )
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
         import uuid
         request_id = str(uuid.uuid4())
         envelope: Dict[str, Any] = {
@@ -1468,14 +1516,15 @@ class ServonautTools:
         through the existing ``api_request`` tool envelope.
         """
         args = {"force": force}
+        allowed, reason = self._guard.check_tool('relay_reconnect')
+        if not allowed:
+            self._audit.log('relay_reconnect', args, '', False, reason)
+            return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
+
         now_connected = None
         if not force:
-            status_raw = await self.api_request("GET", "/api/cli/status")
-            try:
-                status = json.loads(status_raw)
-            except ValueError:
-                status = {}
-            body = status.get("body") if isinstance(status, dict) else None
+            status = await self._fetch_relay_status()
+            body = status.get("body")
             if isinstance(body, dict) and "connected" in body:
                 now_connected = bool(body.get("connected"))
             if now_connected is True:
@@ -1490,13 +1539,15 @@ class ServonautTools:
         try:
             from servonaut.main import _relay_reconnect as _do_reconnect
         except ImportError as e:
-            return json.dumps(_error(
+            payload = _error(
                 "reconnect_unavailable",
                 f"Cannot import relay reconnect helper: {e}",
-            ))
+            )
+            self._audit.log("relay_reconnect", args, json.dumps(payload), False, "reconnect_unavailable")
+            return json.dumps(payload)
 
         try:
-            await asyncio.to_thread(_do_reconnect)
+            output = await asyncio.to_thread(_run_capturing_stdout, _do_reconnect)
         except Exception as e:
             payload = _error("reconnect_failed", str(e))
             self._audit.log("relay_reconnect", args, json.dumps(payload), False)
@@ -1505,6 +1556,7 @@ class ServonautTools:
         payload = {
             "action": "restarted",
             "backend_connected_before": now_connected,
+            "details": output.splitlines(),
         }
         self._audit.log("relay_reconnect", args, json.dumps(payload), True)
         return json.dumps(payload)
@@ -3284,46 +3336,6 @@ class ServonautTools:
         self._audit.log('ip_ban_list_banned', args, result, True)
         return result
 
-    async def ip_ban_set(
-        self, ip_address: str, config_name: str, action: str = "ban",
-    ) -> str:
-        """Ban or unban an IP address via a named WAF/SG/NACL config.
-
-        ``action`` must be ``"ban"`` or ``"unban"``. The underlying
-        IPBanService validates the IP and records every action to its own
-        audit trail in addition to the MCP audit log.
-        """
-        args = {
-            'ip_address': ip_address, 'config_name': config_name,
-            'action': action,
-        }
-        allowed, reason = self._guard.check_tool('ip_ban_set')
-        if not allowed:
-            self._audit.log('ip_ban_set', args, '', False, reason)
-            return f"Blocked: {reason}"
-        if self._ip_ban_service is None:
-            self._audit.log('ip_ban_set', args, '', False, 'service_unavailable')
-            return "Error: IP ban service is not available."
-
-        action_norm = (action or "").strip().lower()
-        if action_norm not in ('ban', 'unban'):
-            self._audit.log('ip_ban_set', args, '', False, 'invalid_action')
-            return f"Error: action must be 'ban' or 'unban', got {action!r}."
-
-        try:
-            if action_norm == 'ban':
-                result = await self._ip_ban_service.ban_ip(ip_address, config_name)
-            else:
-                result = await self._ip_ban_service.unban_ip(ip_address, config_name)
-        except Exception as e:
-            self._audit.log('ip_ban_set', args, '', False, f"error: {e}")
-            return f"Error during {action_norm} of {ip_address}: {e}"
-
-        success = bool(result.get('success'))
-        message = result.get('message', '')
-        self._audit.log('ip_ban_set', args, message, success)
-        return f"{'OK' if success else 'Failed'}: {message}"
-
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
         profile = self._connection_service.resolve_profile(instance)
@@ -4443,7 +4455,7 @@ class ServonautTools:
 
         if log_path:
             quoted = shlex.quote(log_path)
-            remote = f'echo "===VHOST:{log_path}==="; tail -n {n} -- {quoted}'
+            remote = f"printf '===VHOST:%s===\\n' {quoted}; tail -n {n} -- {quoted}"
             hint = log_path
         else:
             remote = (
@@ -5538,6 +5550,12 @@ class ServonautTools:
         if not allowed:
             self._audit.log('db_setup_scan', args, '', False, reason)
             return f"Blocked: {reason}"
+        from servonaut.services.db_credential_scanner import validate_search_roots
+        try:
+            validate_search_roots(search_path)
+        except ValueError as e:
+            self._audit.log('db_setup_scan', args, '', False, f"validation: {e}")
+            return f"validation: {e}"
 
         instance = await self._find_instance(instance_id)
         if not instance:

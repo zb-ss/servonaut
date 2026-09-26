@@ -1,6 +1,6 @@
 """Tests for the MCP relay_reconnect tool.
 
-The tool consults ``/api/cli/status`` (through ``api_request``) before touching
+The tool consults ``/api/cli/status`` before touching
 the local listener, so we mock both the backend via httpx MockTransport and
 the ``_relay_reconnect`` helper in ``servonaut.main``.
 """
@@ -157,3 +157,18 @@ class TestFailures:
         reconnect.assert_called_once_with()
         assert result["action"] == "restarted"
         assert result["backend_connected_before"] is None
+
+
+class TestHelperOutput:
+    def test_helper_output_is_returned_not_written_to_stdout(self, capsys):
+        # Under the MCP stdio server, stdout carries JSON-RPC frames.
+        def noisy() -> None:
+            print("Relay listener started in background (PID 4242)")
+
+        tools, _ = _make_tools(auth_service=_authed_stub())
+        with patch("servonaut.main._relay_reconnect", side_effect=noisy):
+            result = json.loads(_run(tools.relay_reconnect(force=True)))
+
+        assert capsys.readouterr().out == ""
+        assert result["action"] == "restarted"
+        assert result["details"] == ["Relay listener started in background (PID 4242)"]

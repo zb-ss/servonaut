@@ -31,6 +31,9 @@ jobs:
     name: ${{ matrix.os }} / ${{ matrix.renderer }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      # Lengthens the probe's startup and shutdown budgets on slow runners.
+      SERVONAUT_PROBE_TIME_SCALE: ${{ matrix.time_scale || '1' }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +50,8 @@ jobs:
           - os: macos-15-intel
             renderer: cocoa
             python: local/desktop-probe-venv/bin/python
+            # The Intel runner is several times slower than the others.
+            time_scale: '3'
           - os: macos-15
             renderer: cocoa
             python: local/desktop-probe-venv/bin/python

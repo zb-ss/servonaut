@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, Any
-from pathlib import Path
-import json
-import shutil
-from datetime import datetime
 
 from .schema import CONFIG_VERSION
 
@@ -196,6 +192,12 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     out = data
     current = out.get('version')
+    if current is not None:
+        # A hand-edited config may carry the version as a string ("5").
+        try:
+            current = int(current)
+        except (TypeError, ValueError):
+            pass
     if current is None:
         out = migrate_v1_to_v2(out)
         current = out.get('version')
@@ -212,27 +214,3 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
         out = _migrate_v5_to_v6(out)
         current = out.get('version')
     return out
-
-
-def create_backup(config_path: Path) -> bool:
-    """Create backup of v1 config file before migration.
-
-    Args:
-        config_path: Path to the config file
-
-    Returns:
-        True if backup created successfully, False otherwise
-    """
-    if not config_path.exists():
-        return False
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_path = config_path.with_suffix(f'.v1.bak.{timestamp}')
-
-    try:
-        shutil.copy2(config_path, backup_path)
-        logger.info("Created backup: %s", backup_path)
-        return True
-    except Exception as e:
-        logger.warning("Failed to create backup: %s", e)
-        return False

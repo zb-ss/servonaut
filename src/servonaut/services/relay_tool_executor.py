@@ -189,11 +189,8 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
     # readonly-only auto-approve policy. The bridge re-escalates against
     # the mirror + dangerous floor regardless, so this can never relax
     # the effective tier.
-    guard_level = (
-        raw.get("guard_level")
-        or payload.get("guard_level")
-        or AIToolBridge.guard_for(tool)
-    )
+    sent_guard = raw.get("guard_level") or payload.get("guard_level") or ""
+    guard_level = sent_guard or AIToolBridge.guard_for(tool)
 
     return ToolCall(
         tool_call_id=str(tool_call_id),
@@ -201,6 +198,8 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
         args=args,
         guard_level=str(guard_level),  # type: ignore[arg-type]
         conversation_id=str(conversation_id),
+        # As sent ("" when absent) so audit rows don't record the mirror.
+        server_guard_level=str(sent_guard),
     )
 
 
