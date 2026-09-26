@@ -6,3 +6,6 @@ packaging/desktop_shell/frontend/**/*.html text eol=lf
 packaging/desktop_shell/frontend/**/*.json text eol=lf
 packaging/desktop_shell/requirements/voice-*.txt text eol=lf
 packaging/desktop_shell/requirements/voice.in text eol=lf
+# Screenshot-test snapshots: compared as text, so keep LF endings;
+# collapsed in pull request diffs.
+tests/snapshots/__snapshots__/**/*.svg text eol=lf linguist-generated=true
