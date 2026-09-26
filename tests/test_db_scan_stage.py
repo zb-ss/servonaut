@@ -140,8 +140,9 @@ class TestRoundTripResolveByName:
         # 2. Store the chosen candidate in the vault (same path as db_setup_save).
         save = asyncio.run(t.db_setup_save(token, instance_id="web"))
         assert save.startswith("Saved")
-        # The secret landed under the db/<instance> convention.
-        assert asyncio.run(provider.get_secret("db/web")) == _SECRET_PW
+        # The secret landed under db/<canonical instance id>, even though
+        # the caller named the instance.
+        assert asyncio.run(provider.get_secret("db/i-1")) == _SECRET_PW
 
         # 3. db_processlist's resolver now finds the credential BY NAME —
         #    no re-scan, no SSH-to-read.
@@ -150,5 +151,6 @@ class TestRoundTripResolveByName:
         )
         assert err == ""
         assert isinstance(profile, DBProfile)
-        assert profile.password_secret == "db/web"
+        assert profile.instance == "i-1"
+        assert profile.password_secret == "db/i-1"
         assert password == _SECRET_PW  # resolved from the store by name

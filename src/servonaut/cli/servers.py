@@ -109,13 +109,9 @@ def _load_all_instances(
     custom_server_service: Any,
 ) -> List[Dict[str, Any]]:
     """Return combined list of cached AWS + custom server instances."""
-    instances: List[Dict[str, Any]] = []
-    try:
-        cached = aws_service._cache.load_any()
-        if cached:
-            instances.extend(cached)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    # No try/except: the cache layer already absorbs a missing or corrupt
+    # file, so anything raised here is a bug that must surface loudly.
+    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
     try:
         instances.extend(custom_server_service.list_as_instances())
     except Exception as exc:  # noqa: BLE001

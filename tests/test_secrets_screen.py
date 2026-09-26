@@ -417,6 +417,46 @@ class TestConfirmClearCacheModal:
             await pilot.pause()
         assert results == [False]
 
+    @staticmethod
+    def _modal_text(app: App) -> str:
+        return str(app.screen.query_one("#confirm_clear_text", Static).render())
+
+    @pytest.mark.asyncio
+    async def test_text_names_local_store_without_personal_config(self):
+        from servonaut.screens.secrets_clear_modal import ConfirmClearCacheModal
+
+        class _App(App):
+            def on_mount(self) -> None:
+                self.push_screen(ConfirmClearCacheModal())
+
+        app = _App()
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            assert "fall back to the local store" in self._modal_text(app)
+
+    @pytest.mark.asyncio
+    async def test_clear_from_secrets_screen_names_personal_config(self):
+        """Clearing drops only the TEAM cache: with a personal config cached,
+        that config applies next, so the dialog must not promise the local
+        store."""
+        from servonaut.services.secret_provider import LocalProvider
+
+        auth = _mock_auth(plan="solo")
+        auth.is_user_secrets_cache_present = MagicMock(return_value=True)
+        guard = _mock_guard(allow_secrets=True)
+        with patch(
+            "servonaut.services.secret_provider_resolver.resolve_secret_provider",
+            return_value=LocalProvider(),
+        ):
+            app = _WrapperApp(auth=auth, guard=guard)
+            async with app.run_test(headless=True) as pilot:
+                await pilot.pause()
+                app.screen.action_clear_cache()
+                await pilot.pause()
+                text = self._modal_text(app)
+                assert "personal secrets-config is kept" in text
+                assert "local store" not in text
+
 
 # ---------------------------------------------------------------------------
 # Config hygiene — placeholder project ids + team-shadowed personal config

@@ -78,7 +78,7 @@ class CacheService:
         if cache_data is None:
             return None
 
-        instances = cache_data.get('instances')
+        instances = self._valid_instances(cache_data)
         age = self._raw_age(cache_data)
         if age is None or instances is None:
             logger.warning("Invalid cache file format (missing timestamp or instances)")
@@ -119,7 +119,7 @@ class CacheService:
         if cache_data is None:
             return None
 
-        instances = cache_data.get('instances')
+        instances = self._valid_instances(cache_data)
         if instances is None:
             return None
 
@@ -168,21 +168,42 @@ class CacheService:
             return None
         return max(age, timedelta(0))
 
+    # ------------------------------------------------------------------
+    # Parsing helpers — the cache file is user-writable, so every shape
+    # check degrades to "no usable cache" instead of raising.
+    # ------------------------------------------------------------------
+
     def _read(self) -> Optional[Dict[str, Any]]:
-        """Return the parsed cache file, or None if missing or unreadable."""
+        """Return the parsed cache file, or None if missing or unusable."""
         if not self.CACHE_PATH.exists():
             logger.debug("Cache file does not exist")
             return None
         try:
             with open(self.CACHE_PATH, 'r') as f:
                 cache_data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             logger.error("Error reading cache file: %s", e)
             return None
         if not isinstance(cache_data, dict):
-            logger.error("Error reading cache file: expected a JSON object")
+            logger.warning(
+                "Ignoring cache file: expected a JSON object, got %s",
+                type(cache_data).__name__,
+            )
             return None
         return cache_data
+
+    @staticmethod
+    def _valid_instances(cache_data: Dict[str, Any]) -> Optional[List[dict]]:
+        """Return ``instances`` when it is a list of dicts, else ``None``."""
+        instances = cache_data.get('instances')
+        if instances is None:
+            return None
+        if not isinstance(instances, list) or not all(
+            isinstance(item, dict) for item in instances
+        ):
+            logger.warning("Ignoring cache file: 'instances' is not a list of objects")
+            return None
+        return instances
 
     @staticmethod
     def _raw_age(cache_data: Dict[str, Any]) -> Optional[timedelta]:

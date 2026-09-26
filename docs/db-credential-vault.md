@@ -67,7 +67,14 @@ you can name one.
   files (`find` + `sed`, plus a read-only `sudo -n` fallback). It never writes.
 - **The password never enters an AI agent's context.** Candidates are held in
   server-side staging; agents and the audit trail only ever see the masked
-  preview and the opaque staging token.
+  preview and the opaque staging token. A staging token expires after 15
+  minutes (`mcp.db_staging_ttl_seconds`), and at most 50 are held at once
+  (`mcp.db_staging_max_tokens`, oldest dropped first); an expired token's
+  password is dropped from memory, so scan again to re-stage it.
+- **Each credential belongs to the scanned server.** It is stored under that
+  server's instance id (`db/<instance-id>[/<site>]`), never under the DB host,
+  so two servers whose apps both use `localhost` keep separate secrets. Naming
+  a different server when saving is allowed, but the result carries a warning.
 - **Only the password is encrypted in the vault.** The username, host, port, and
   database name are non-secret connection metadata kept in local config; if you
   open the vault entry on its own you'll see a password with no username by
