@@ -516,15 +516,17 @@ LabelInputModal {
     min-width: 12;
 }
 
-/* ---- Confirm modals (snapshot + backup flows) ---- */
+/* ---- Confirm modals (snapshot + backup flows, power actions) ---- */
 
 ConfirmModal,
-BackupConfirmModal {
+BackupConfirmModal,
+PowerActionConfirmModal {
     align: center middle;
 }
 
 #confirm_modal_container,
-#bkp_confirm_container {
+#bkp_confirm_container,
+#power_confirm_container {
     width: 60%;
     max-width: 70;
     height: auto;
@@ -534,26 +536,30 @@ BackupConfirmModal {
 }
 
 #confirm_modal_title,
-#bkp_confirm_title {
+#bkp_confirm_title,
+#power_confirm_title {
     padding: 0 0 1 0;
     text-style: bold;
 }
 
 #confirm_modal_message,
-#bkp_confirm_message {
+#bkp_confirm_message,
+#power_confirm_message {
     padding: 0 0 1 0;
     height: auto;
 }
 
 #confirm_modal_buttons,
-#bkp_confirm_buttons {
+#bkp_confirm_buttons,
+#power_confirm_buttons {
     layout: horizontal;
     height: auto;
     align: right middle;
 }
 
 #confirm_modal_buttons Button,
-#bkp_confirm_buttons Button {
+#bkp_confirm_buttons Button,
+#power_confirm_buttons Button {
     margin-left: 1;
     min-width: 12;
 }

@@ -286,6 +286,8 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 | `base_url` | string | `""` | Custom API base URL — set to `https://ollama.com` to point Ollama at the cloud instead of `http://localhost:11434` |
 | `max_tokens` | int | `2000` | Maximum response tokens |
 | `temperature` | float | `0.3` | Sampling temperature |
+| `stream_silence_timeout_seconds` | float | `35.0` | Servonaut AI only: how long a streamed reply may go without any data (the service sends a keep-alive about every 15 s) before the connection counts as lost. Accepted range 20–600; values outside it are clamped. Time spent answering a tool prompt or running a tool does not count |
+| `tool_confirm_timeout_seconds` | float | `50.0` | Servonaut AI only: how long a tool confirmation prompt stays open. When it passes, the prompt closes and the tool is not run. The service waits about 60 s for a tool result by default, so keep this below that |
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
@@ -359,6 +361,19 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_MCP_URL` | `https://mcp.servonaut.dev` | Base URL for the hosted MCP server (premium tools) |
 | `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
 | `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
+| `SERVONAUT_PYPI_URL` | `https://pypi.org/pypi/servonaut/json` | PyPI JSON document read by the update check (pip and pipx installs) |
+| `SERVONAUT_HETZNER_API_URL` | `https://api.hetzner.cloud/v1` | Hetzner Cloud API base URL, version path included |
+| `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
+| `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
+
+The last four accept only `https://` URLs; plain `http://` is allowed for `127.0.0.1`, `::1` and `localhost` only, so an override can point at a local test server but never sends requests unencrypted to another machine. URLs with embedded credentials, spaces or backslashes are refused too. An invalid value is refused rather than silently replaced by the default. The ip-api.com default itself is `http://` because its free tier does not offer HTTPS; an `http://` override of it is still accepted only for those loopback hosts.
+
+The relay listener's local timeouts can be lengthened on slow or heavily loaded machines. Values are in seconds; a missing, non-numeric, zero, negative or infinite value falls back to the default, so a typo can never make shutdown unbounded.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVONAUT_RELAY_CONTROL_TIMEOUT_SECONDS` | `2` | Bound on each local control request, such as the TUI asking a background listener to hand over |
+| `SERVONAUT_RELAY_CLEANUP_TIMEOUT_SECONDS` | `10` | Deadline for the listener's shutdown cleanup; never shorter than the control timeout |
 
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
@@ -379,6 +394,7 @@ TUI's in-process listener:
     "base_url": "https://api.servonaut.dev",
     "mercure_url": "https://servonaut.dev/.well-known/mercure",
     "heartbeat_interval": 30,
+    "heartbeat_rejection_alert_after": 3,
     "ai_tool_auto_approve": "standard"
   }
 }
@@ -389,6 +405,7 @@ TUI's in-process listener:
 | `base_url` | _(derived from API base)_ | REST API for heartbeats, Mercure JWTs, and results |
 | `mercure_url` | _(derived from API base)_ | The Mercure hub URL |
 | `heartbeat_interval` | `30` | Seconds between heartbeats |
+| `heartbeat_rejection_alert_after` | `3` | Rejected heartbeats (while your session is still valid) before the listener reports that commands are not being delivered: one `heartbeat_rejected` line in `~/.servonaut/logs/relay.log` and the TUI indicator changes from "connected" to "connecting…". The listener keeps retrying and returns to "connected" once a heartbeat is accepted; until then it renews the session on every Nth rejected heartbeat only. Minimum `1`; lower or non-numeric values are treated as `1` and the default respectively. |
 | `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
 
 ## Supported Terminals

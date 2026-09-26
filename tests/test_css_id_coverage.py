@@ -238,6 +238,8 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_pick_existing",
         "btn_pick_servonaut",
         "btn_pin_key",
+        "btn_power_confirm_no",
+        "btn_power_confirm_yes",
         "btn_prev_page",
         "btn_pull_latest",
         "btn_push_new",

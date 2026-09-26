@@ -36,6 +36,12 @@
         "**/readline.*",
         "**/libreadline*"
       ],
+      "voice_bundle_paths": [
+        "_internal/voice/uv.exe",
+        "_internal/voice/servonaut-*-py3-none-any.whl",
+        "_internal/voice/voice-requirements.txt",
+        "_internal/voice/voice-runtime.json"
+      ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
       "size_baselines": "size-baselines.json",
@@ -75,6 +81,12 @@
         "**/_sounddevice_data/**",
         "**/readline.*",
         "**/libreadline*"
+      ],
+      "voice_bundle_paths": [
+        "_internal/voice/uv",
+        "_internal/voice/servonaut-*-py3-none-any.whl",
+        "_internal/voice/voice-requirements.txt",
+        "_internal/voice/voice-runtime.json"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
@@ -116,6 +128,12 @@
         "**/readline.*",
         "**/libreadline*"
       ],
+      "voice_bundle_paths": [
+        "_internal/voice/uv",
+        "_internal/voice/servonaut-*-py3-none-any.whl",
+        "_internal/voice/voice-requirements.txt",
+        "_internal/voice/voice-runtime.json"
+      ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",
       "size_baselines": "size-baselines.json",
@@ -155,6 +173,12 @@
         "**/_sounddevice_data/**",
         "**/readline.*",
         "**/libreadline*"
+      ],
+      "voice_bundle_paths": [
+        "_internal/voice/uv",
+        "_internal/voice/servonaut-*-py3-none-any.whl",
+        "_internal/voice/voice-requirements.txt",
+        "_internal/voice/voice-runtime.json"
       ],
       "frontend_assets_lock": "frontend/assets.lock.json",
       "frontend_licenses": "frontend/licenses.json",

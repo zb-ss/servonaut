@@ -31,9 +31,9 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import (
     Any,
     Awaitable,
@@ -350,6 +350,13 @@ UNAVAILABLE_TOOL_HINTS: Dict[str, str] = {
 # still held while we run the command.
 _DEFAULT_TTL_SECONDS = 60
 
+# Default deadline for answering a tool confirmation prompt. The service
+# waits about 60 s (its default) for a tool result, counted from before
+# the tool_call reaches us; closing the prompt a little earlier leaves an
+# approved tool time to run. Configurable via
+# ``ai_provider.tool_confirm_timeout_seconds``.
+_DEFAULT_CONFIRM_TIMEOUT_SECONDS = 50.0
+
 # Tool-result endpoint per plan §"Tool-result POST".
 _TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
 
@@ -539,6 +546,11 @@ class ToolCall:
     args: Dict[str, Any] = field(default_factory=dict)
     guard_level: Literal["readonly", "standard", "dangerous"] = "standard"
     conversation_id: str = ""
+    # The guard label exactly as the service sent it ("" when the event
+    # carried none). ``guard_level`` may hold a caller-side default; this
+    # keeps audit rows faithful to what the server claimed. ``None`` means
+    # the caller did not distinguish, so ``guard_level`` is the label.
+    server_guard_level: Optional[str] = None
 
 
 @dataclass
@@ -639,6 +651,7 @@ class AIToolBridge(_FloorDangerousMixin):
         ip_ban_service: Optional["IPBanService"] = None,
         default_ttl_seconds: int = _DEFAULT_TTL_SECONDS,
         audit_source: str = "ai_chat",
+        confirm_timeout: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._api = api_client
         self._executors = relay_executors
@@ -653,6 +666,10 @@ class AIToolBridge(_FloorDangerousMixin):
         # trail's origin discrimination intact when the same bridge
         # machinery serves both flows.
         self._audit_source = audit_source
+        # Zero-argument getter for the confirmation deadline in seconds,
+        # read per call so config edits apply live. ``None`` = no
+        # deadline (policy callbacks that answer immediately).
+        self._confirm_timeout = confirm_timeout
         # conversation_id → {(tool, canonical_args_json): count}. Ordered so
         # the oldest conversation can be evicted when the bound is hit.
         self._repeated_call_counts: "OrderedDict[str, Dict[tuple, int]]" = (
@@ -705,65 +722,10 @@ class AIToolBridge(_FloorDangerousMixin):
         lands. ``handle_tool_call`` itself does NOT post; we keep the
         two phases separate so tests can verify each in isolation.
         """
-        # 0. Defensive normalisation. A model could theoretically emit a
-        # guard_level we don't recognise; downgrade to 'standard' so we
-        # always require confirmation.
-        if call.guard_level not in ("readonly", "standard", "dangerous"):
-            logger.warning(
-                "Unexpected guard_level %r on tool_call %s; coercing to 'standard'",
-                call.guard_level, call.tool_call_id,
-            )
-            call.guard_level = "standard"
-
-        # 0a. A3 fix — escalate the guard level to the *max* of the
-        # server-supplied value and our client-side mirror. A buggy or
-        # malicious server cannot downgrade ``deploy`` to ``standard``
-        # to bypass the typed-RUN modal + dangerous entitlement gate.
-        # The client mirror is the floor.
-        client_guard = self.guard_for(call.tool)
-        effective_guard = _escalate_guard(call.guard_level, client_guard)
-        if effective_guard != call.guard_level:
-            logger.warning(
-                "Guard escalation: server sent %r for tool %r; client mirror "
-                "is %r — using effective guard %r (A3)",
-                call.guard_level, call.tool, client_guard, effective_guard,
-            )
-            call.guard_level = effective_guard
-
-        # 0b. PR5' dangerous-tool name-pattern floor (defense-in-depth).
-        # Chat tool_calls arrive without explicit tier info from the server
-        # catalog; we default server_tier to call.guard_level so the floor
-        # uses whatever guard was resolved above. Any tool whose NAME matches
-        # a known-destructive pattern is escalated to dangerous regardless.
-        server_tier = call.guard_level  # default: use already-resolved guard
-        effective_tier, was_escalated = self._floor_dangerous(call.tool, server_tier)
-        if was_escalated:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            logger.warning(
-                "Dangerous-floor escalation: tool %r arrived with tier %r — "
-                "escalated to 'dangerous' by pattern floor (PR5')",
-                call.tool, server_tier,
-            )
-            try:
-                self._audit.log(
-                    call.tool,
-                    dict(call.args),
-                    "",
-                    False,
-                    "dangerous_floor_escalation",
-                    source=self._audit_source,
-                    conversation_id=call.conversation_id,
-                    tool_call_id=call.tool_call_id,
-                    server_tier=server_tier,
-                    effective_tier=effective_tier,
-                    timestamp=ts,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "Failed to audit dangerous-floor escalation for tool %s",
-                    call.tool,
-                )
-            call.guard_level = effective_tier  # type: ignore[assignment]
+        # 0. Resolve the level the call runs at: normalise, then apply
+        # the client mirror floor and the dangerous name-pattern floor.
+        # Each escalation writes its own audit row.
+        self._resolve_guard_level(call)
 
         # 0c. Agentic-loop circuit breaker. Refuse the Nth identical call
         # (same tool + same canonical args) in one conversation with an
@@ -797,27 +759,9 @@ class AIToolBridge(_FloorDangerousMixin):
 
         # 2. Confirmation modal (skipped for readonly).
         if call.guard_level != "readonly":
-            try:
-                allowed = await self._confirm(call)
-            except ToolConfirmDenied as exc:
-                return self._deny_with_audit(
-                    call,
-                    reason=exc.reason,
-                    error_message=str(exc),
-                )
-            except Exception as exc:  # noqa: BLE001 — defensive
-                logger.exception("confirm_callback raised; treating as denied")
-                return self._deny_with_audit(
-                    call,
-                    reason=f"confirm_error:{exc.__class__.__name__}",
-                    error_message=f"Confirmation prompt failed: {exc}",
-                )
-            if not allowed:
-                return self._deny_with_audit(
-                    call,
-                    reason="user_declined",
-                    error_message="User declined.",
-                )
+            refusal = await self._confirm_or_refuse(call)
+            if refusal is not None:
+                return refusal
 
         # 3. Dispatch — three possible routes, in priority order:
         #    a) relay (SSH/Mercure to a managed server)
@@ -852,6 +796,172 @@ class AIToolBridge(_FloorDangerousMixin):
             reason="tool_unavailable",
             error_message=hint,
         )
+
+    async def _confirm_or_refuse(self, call: ToolCall) -> Optional[ToolResult]:
+        """Ask for confirmation; return a refusal result, or ``None`` if approved.
+
+        The prompt runs under a deadline. Once it passes, the prompt is
+        cancelled (the modal callback closes itself) and an error result
+        tells the model the tool did not run, so a late answer can never
+        execute a tool the service has already given up on.
+        """
+        deadline = self._confirm_deadline()
+        try:
+            allowed = await asyncio.wait_for(self._confirm(call), timeout=deadline)
+        except asyncio.TimeoutError as exc:
+            if deadline is None:  # raised by the callback, not by our deadline
+                return self._confirm_failed(call, exc)
+            return self._error_with_audit(
+                call,
+                reason="confirm_timeout",
+                error_message=(
+                    f"The confirmation prompt for {call.tool} was not answered "
+                    f"within {deadline:g} s, so the tool was not run."
+                ),
+            )
+        except ToolConfirmDenied as exc:
+            return self._deny_with_audit(
+                call, reason=exc.reason, error_message=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive
+            return self._confirm_failed(call, exc)
+        if not allowed:
+            return self._deny_with_audit(
+                call, reason="user_declined", error_message="User declined.",
+            )
+        return None
+
+    def _confirm_failed(self, call: ToolCall, exc: BaseException) -> ToolResult:
+        """Deny a call whose confirmation callback raised."""
+        logger.error(
+            "confirm_callback raised; treating as denied", exc_info=exc,
+        )
+        return self._deny_with_audit(
+            call,
+            reason=f"confirm_error:{exc.__class__.__name__}",
+            error_message=f"Confirmation prompt failed: {exc}",
+        )
+
+    def _confirm_deadline(self) -> Optional[float]:
+        """Seconds allowed for a confirmation answer, or ``None`` for no limit."""
+        if self._confirm_timeout is None:
+            return None
+        try:
+            value = self._confirm_timeout()
+        except Exception:  # noqa: BLE001 — config read must not break the call
+            logger.exception("Reading the tool confirmation timeout failed")
+            return _DEFAULT_CONFIRM_TIMEOUT_SECONDS
+        is_number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not is_number or not math.isfinite(value) or value <= 0:
+            logger.warning(
+                "Invalid tool_confirm_timeout_seconds %r — using %s s",
+                value, _DEFAULT_CONFIRM_TIMEOUT_SECONDS,
+            )
+            return _DEFAULT_CONFIRM_TIMEOUT_SECONDS
+        return float(value)
+
+    def _resolve_guard_level(self, call: ToolCall) -> None:
+        """Set ``call.guard_level`` to the level the call runs at.
+
+        Steps, in order:
+
+        - Normalise: an unrecognised label becomes ``standard`` so a typo
+          never skips confirmation.
+        - A3 client floor: never go below the client mirror
+          (:func:`_escalate_guard`). A buggy or malicious server cannot
+          downgrade ``deploy`` to ``standard`` to bypass the typed-RUN
+          modal and the dangerous-entitlement gate.
+        - Dangerous name-pattern floor (:meth:`_floor_dangerous`).
+
+        Every change writes an audit row carrying ``server_tier`` (the
+        label exactly as the service sent it, ``""`` when it sent none)
+        and ``effective_tier`` (the level after that step), so the trail
+        keeps what the server claimed.
+        """
+        server_tier = (
+            call.server_guard_level
+            if call.server_guard_level is not None
+            else str(call.guard_level or "")
+        )
+        self._normalise_guard_label(call, server_tier)
+        self._apply_client_floor(call, server_tier)
+        self._apply_dangerous_floor(call, server_tier)
+
+    def _normalise_guard_label(self, call: ToolCall, server_tier: str) -> None:
+        """Trim and lower-case the label; coerce an unknown one to ``standard``."""
+        label = str(call.guard_level or "").strip().lower()
+        if label not in _GUARD_ORDER:
+            logger.warning(
+                "Unexpected guard_level %r on tool_call %s; coercing to 'standard'",
+                call.guard_level, call.tool_call_id,
+            )
+            self._audit_guard_change(
+                call, "unknown_guard_level", server_tier, "standard",
+            )
+            label = "standard"
+        call.guard_level = label  # type: ignore[assignment]
+
+    def _apply_client_floor(self, call: ToolCall, server_tier: str) -> None:
+        """Raise the level to the client mirror when the server's is lower."""
+        client_guard = self.guard_for(call.tool)
+        effective_guard = _escalate_guard(call.guard_level, client_guard)
+        if effective_guard == call.guard_level:
+            return
+        logger.warning(
+            "Guard escalation: server sent %r for tool %r; client mirror "
+            "is %r — using effective guard %r (A3)",
+            server_tier, call.tool, client_guard, effective_guard,
+        )
+        self._audit_guard_change(
+            call, "client_guard_escalation", server_tier, effective_guard,
+            client_tier=client_guard,
+        )
+        call.guard_level = effective_guard
+
+    def _apply_dangerous_floor(self, call: ToolCall, server_tier: str) -> None:
+        """Raise a known-destructive tool to ``dangerous`` by name pattern."""
+        effective_tier, was_escalated = self._floor_dangerous(
+            call.tool, call.guard_level,
+        )
+        if not was_escalated:
+            return
+        logger.warning(
+            "Dangerous-floor escalation: tool %r arrived with tier %r — "
+            "escalated to 'dangerous' by pattern floor (PR5')",
+            call.tool, server_tier,
+        )
+        self._audit_guard_change(
+            call, "dangerous_floor_escalation", server_tier, effective_tier,
+        )
+        call.guard_level = effective_tier  # type: ignore[assignment]
+
+    def _audit_guard_change(
+        self,
+        call: ToolCall,
+        reason: str,
+        server_tier: str,
+        effective_tier: str,
+        **extras: Any,
+    ) -> None:
+        """Audit one guard-level change (coercion or escalation); never raises."""
+        try:
+            self._audit.log(
+                call.tool,
+                dict(call.args),
+                "",
+                False,
+                reason,
+                source=self._audit_source,
+                conversation_id=call.conversation_id,
+                tool_call_id=call.tool_call_id,
+                server_tier=server_tier,
+                effective_tier=effective_tier,
+                **extras,
+            )
+        except Exception:  # noqa: BLE001 — audit must not block the call
+            logger.exception(
+                "Failed to audit %s for tool %s", reason, call.tool,
+            )
 
     async def post_tool_result(self, result: ToolResult) -> None:
         """POST the result envelope to ``/api/ai/chat/tool-result``.

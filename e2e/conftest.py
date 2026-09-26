@@ -329,11 +329,21 @@ def _moto_server() -> Any:
 
 @pytest.fixture
 def moto(_moto_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """The local AWS endpoint, emptied, with ``AWS_ENDPOINT_URL`` pointing at it."""
+    """The local AWS endpoint, emptied, with ``AWS_ENDPOINT_URL`` pointing at it.
+
+    CloudWatch Logs filter patterns are evaluated as AWS documents them; a
+    pattern the emulation cannot evaluate fails the journey that sent it.
+    """
+    from e2e.harness import aws_logs_filter
+
     _moto_server.reset()
     monkeypatch.setenv("AWS_ENDPOINT_URL", _moto_server.url)
     journey.env_overrides["AWS_ENDPOINT_URL"] = _moto_server.url
-    return _moto_server
+    aws_logs_filter.install(monkeypatch)
+    yield _moto_server
+    refused = aws_logs_filter.take_refused()
+    if refused:
+        pytest.fail("CloudWatch filter patterns the e2e emulation refused: " + "; ".join(refused))
 
 
 # ---------------------------------------------------------------------------

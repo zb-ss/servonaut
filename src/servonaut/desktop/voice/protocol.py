@@ -8,13 +8,28 @@ Pure standard library — zero external or audio dependencies.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, Field, dataclass, field, fields
 from enum import Enum
+import io
 import json
-from typing import Any, BinaryIO, Dict, Final, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+import math
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    Dict,
+    Final,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+    get_args,
+)
 
-VOICE_PROTOCOL_VERSION: Final[int] = 1
+VOICE_PROTOCOL_VERSION: Final[int] = 2
 MAX_FRAME_BYTES: Final[int] = 65536  # 64 KiB line limit
+_READ_CHUNK_BYTES: Final[int] = 4096
 
 
 class VoiceErrorCode(str, Enum):
@@ -50,6 +65,33 @@ class VoiceProtocolEofError(VoiceProtocolError):
 
     def __init__(self, message: str = "Unexpected end of stream") -> None:
         super().__init__(VoiceErrorCode.PROTOCOL_VIOLATION, message)
+
+
+class VoiceProtocolVersionError(VoiceProtocolError):
+    """Raised for a well-formed frame written in another protocol version.
+
+    Carries what could still be read from the envelope so the receiver can
+    answer the request (or fail the pending call) instead of waiting for a
+    reply it will never be able to decode.
+    """
+
+    def __init__(
+        self,
+        received_version: int,
+        *,
+        msg_type: Optional[str] = None,
+        msg_id: Optional[str] = None,
+        ref_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            VoiceErrorCode.UNSUPPORTED_VERSION,
+            f"Peer speaks voice protocol v{received_version}; "
+            f"this side speaks v{VOICE_PROTOCOL_VERSION}",
+        )
+        self.received_version = received_version
+        self.msg_type = msg_type
+        self.msg_id = msg_id
+        self.ref_id = ref_id
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +142,28 @@ def _check_int(val: Any, field_name: str) -> int:
     return val
 
 
-def _check_opt_int(val: Any, field_name: str) -> Optional[int]:
+def _check_non_negative_int(val: Any, field_name: str) -> int:
+    number = _check_int(val, field_name)
+    if number < 0:
+        raise VoiceProtocolError(
+            VoiceErrorCode.PROTOCOL_VIOLATION, f"Field '{field_name}' must not be negative"
+        )
+    return number
+
+
+def _check_opt_epoch(val: Any, field_name: str) -> Optional[int]:
     if val is None:
         return None
-    return _check_int(val, field_name)
+    return _check_non_negative_int(val, field_name)
+
+
+def _check_positive_int(val: Any, field_name: str) -> int:
+    number = _check_int(val, field_name)
+    if number <= 0:
+        raise VoiceProtocolError(
+            VoiceErrorCode.PROTOCOL_VIOLATION, f"Field '{field_name}' must be positive"
+        )
+    return number
 
 
 def _check_float_or_int(val: Any, field_name: str) -> float:
@@ -113,6 +173,22 @@ def _check_float_or_int(val: Any, field_name: str) -> float:
             f"Field '{field_name}' must be float/int, got {type(val).__name__}",
         )
     return float(val)
+
+
+def _check_positive_float(val: Any, field_name: str) -> float:
+    number = _check_float_or_int(val, field_name)
+    if not math.isfinite(number) or number <= 0:
+        raise VoiceProtocolError(
+            VoiceErrorCode.PROTOCOL_VIOLATION,
+            f"Field '{field_name}' must be a finite positive number",
+        )
+    return number
+
+
+def _check_opt_str(val: Any, field_name: str) -> Optional[str]:
+    if val is None:
+        return None
+    return _check_str(val, field_name)
 
 
 def _check_str_tuple(val: Any, field_name: str) -> tuple[str, ...]:
@@ -142,16 +218,155 @@ def _check_dict(val: Any, field_name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Worker configuration (Parent -> Worker)
+# ---------------------------------------------------------------------------
+
+# Validator per declared field type of VoiceWorkerConfig.
+_CONFIG_CHECKS: Final[Mapping[str, Callable[[Any, str], Any]]] = {
+    "str": _check_str,
+    "Optional[str]": _check_opt_str,
+    "int": _check_positive_int,
+    "float": _check_positive_float,
+    "bool": _check_bool,
+}
+
+
+def _coerce_optional_str(value: Any) -> Optional[str]:
+    return None if value in (None, "") else str(value)
+
+
+# Lenient converters used when snapshotting a user's settings object.
+_CONFIG_COERCIONS: Final[Mapping[str, Callable[[Any], Any]]] = {
+    "str": str,
+    "Optional[str]": _coerce_optional_str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceWorkerConfig:
+    """The voice settings the worker builds its services from.
+
+    A validated subset of the user's voice configuration: only what the
+    worker-side capture, recognition, synthesis and conversation loop read.
+    Defaults mirror the application's voice defaults. Every value is
+    type-checked on construction, and unknown keys are rejected on decode.
+    """
+
+    engine: str = "whisper"
+    model_size: str = "small"
+    nemotron_latency_ms: int = 320
+    language: str = "en"
+    input_device: Optional[str] = None
+    output_device: Optional[str] = None
+    max_recording_seconds: int = 60
+    auto_submit: bool = False
+    tts_voice: str = "af_heart"
+    tts_speed: float = 1.0
+    vad_silence_ms: int = 800
+    vad_min_speech_ms: int = 250
+    conversation_idle_seconds: int = 60
+    barge_in: bool = False
+
+    def __post_init__(self) -> None:
+        for f in fields(self):
+            checked = _CONFIG_CHECKS[f.type](getattr(self, f.name), f"config.{f.name}")
+            object.__setattr__(self, f.name, checked)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> VoiceWorkerConfig:
+        """Decode a config object received over the wire, strictly."""
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(data) - known)
+        if unknown:
+            raise VoiceProtocolError(
+                VoiceErrorCode.PROTOCOL_VIOLATION,
+                f"Unknown voice config keys: {', '.join(unknown)}",
+            )
+        missing = sorted(known - set(data))
+        if missing:
+            raise VoiceProtocolError(
+                VoiceErrorCode.PROTOCOL_VIOLATION,
+                f"Missing voice config keys: {', '.join(missing)}",
+            )
+        return cls(**data)
+
+    @classmethod
+    def from_voice_config(cls, config: Any) -> VoiceWorkerConfig:
+        """Snapshot the worker-relevant fields of a user's voice settings.
+
+        Lenient like the settings loader itself: a value that cannot be
+        converted (a hand-edited config, say) falls back to its default
+        rather than taking voice down.
+        """
+        defaults = cls()
+        values: dict[str, Any] = {}
+        for f in fields(cls):
+            default = getattr(defaults, f.name)
+            raw = getattr(config, f.name, default)
+            try:
+                value = _CONFIG_COERCIONS[f.type](raw)
+                _CONFIG_CHECKS[f.type](value, f.name)
+            except (TypeError, ValueError, OverflowError, VoiceProtocolError):
+                value = default
+            values[f.name] = value
+        return cls(**values)
+
+
+def _lenient_error_code(fallback: VoiceErrorCode) -> Callable[[Any, str], VoiceErrorCode]:
+    """Decoder for an error code in an event: unknown codes degrade to *fallback*."""
+
+    def check(val: Any, field_name: str) -> VoiceErrorCode:
+        try:
+            return VoiceErrorCode(_check_str(val, field_name))
+        except ValueError:
+            return fallback
+
+    return check
+
+
+# Field metadata read by the codec below: ``check`` replaces the validator
+# the field's declared type implies; ``required`` makes a field with a
+# default mandatory on the wire anyway.
+_EPOCH: Final[Mapping[str, Any]] = {"check": _check_opt_epoch}
+
+
+# ---------------------------------------------------------------------------
 # Request Models (Parent -> Worker)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
 class HandshakeRequest:
+    """Opens a session: negotiates the version and hands over the settings.
+
+    ``epoch`` is the parent's current playback-cancellation epoch, so a
+    worker started after the parent already stopped playback agrees on
+    which utterances are current.
+    """
+
     id: str
     client_version: str
+    config: VoiceWorkerConfig = field(
+        default_factory=VoiceWorkerConfig, metadata={"required": True},
+    )
+    epoch: int = field(default=0, metadata={"check": _check_non_negative_int, "required": True})
     protocol_version: int = VOICE_PROTOCOL_VERSION
     capabilities_requested: tuple[str, ...] = ()
     name: Literal["handshake"] = "handshake"
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigureRequest:
+    """Applies changed settings to a running worker without a restart."""
+
+    id: str
+    config: VoiceWorkerConfig
+    name: Literal["configure"] = "configure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +379,7 @@ class ProbeRequest:
 class InputStartRequest:
     id: str
     streaming: bool = False
-    max_seconds: float = 30.0
+    max_seconds: float = field(default=30.0, metadata={"check": _check_positive_float})
     name: Literal["input_start"] = "input_start"
 
 
@@ -191,7 +406,7 @@ class InputResetBudgetRequest:
 class OutputSpeakRequest:
     id: str
     text: str
-    epoch: Optional[int] = None
+    epoch: Optional[int] = field(default=None, metadata=_EPOCH)
     name: Literal["output_speak"] = "output_speak"
 
 
@@ -199,7 +414,7 @@ class OutputSpeakRequest:
 class OutputEnqueueRequest:
     id: str
     text: str
-    epoch: Optional[int] = None
+    epoch: Optional[int] = field(default=None, metadata=_EPOCH)
     name: Literal["output_enqueue"] = "output_enqueue"
 
 
@@ -207,7 +422,7 @@ class OutputEnqueueRequest:
 class OutputUtteranceBeginRequest:
     id: str
     session_id: str
-    epoch: Optional[int] = None
+    epoch: Optional[int] = field(default=None, metadata=_EPOCH)
     name: Literal["output_utterance_begin"] = "output_utterance_begin"
 
 
@@ -229,7 +444,7 @@ class OutputUtteranceEndRequest:
 @dataclass(frozen=True, slots=True)
 class OutputStopRequest:
     id: str
-    epoch: Optional[int] = None
+    epoch: Optional[int] = field(default=None, metadata=_EPOCH)
     name: Literal["output_stop"] = "output_stop"
 
 
@@ -275,11 +490,13 @@ class PingRequest:
 @dataclass(frozen=True, slots=True)
 class ShutdownRequest:
     id: str
+    reason: str = "client"
     name: Literal["shutdown"] = "shutdown"
 
 
 VoiceRequest = Union[
     HandshakeRequest,
+    ConfigureRequest,
     ProbeRequest,
     InputStartRequest,
     InputStopRequest,
@@ -507,7 +724,10 @@ class ConversationTranscriptEvent:
 class ConversationErrorEvent:
     id: str
     message: str
-    code: VoiceErrorCode = VoiceErrorCode.CONVERSATION_ERROR
+    code: VoiceErrorCode = field(
+        default=VoiceErrorCode.CONVERSATION_ERROR,
+        metadata={"check": _lenient_error_code(VoiceErrorCode.CONVERSATION_ERROR)},
+    )
     name: Literal["conversation_error"] = "conversation_error"
 
 
@@ -521,7 +741,9 @@ class ConversationStoppedEvent:
 @dataclass(frozen=True, slots=True)
 class WorkerErrorEvent:
     id: str
-    code: VoiceErrorCode
+    code: VoiceErrorCode = field(
+        metadata={"check": _lenient_error_code(VoiceErrorCode.PROTOCOL_VIOLATION)},
+    )
     message: str
     fatal: bool = False
     name: Literal["worker_error"] = "worker_error"
@@ -541,6 +763,91 @@ VoiceEvent = Union[
 ]
 
 VoiceMessage = Union[VoiceRequest, VoiceResponse, VoiceEvent]
+
+
+# ---------------------------------------------------------------------------
+# Table-driven payload codec
+# ---------------------------------------------------------------------------
+#
+# A request's or event's payload is every dataclass field except ``id`` and
+# ``name``. Encoders and validators are chosen by the field's declared type;
+# a field's ``check`` metadata overrides the validator, and ``required``
+# metadata makes a field with a default mandatory on the wire.
+
+def _decode_worker_config(val: Any, field_name: str) -> VoiceWorkerConfig:
+    return VoiceWorkerConfig.from_dict(_check_dict(val, field_name))
+
+
+_FIELD_ENCODERS: Final[Mapping[str, Callable[[Any], Any]]] = {
+    "tuple[str, ...]": list,
+    "VoiceWorkerConfig": lambda config: config.to_dict(),
+    "VoiceErrorCode": lambda code: code.value,
+}
+
+_FIELD_DECODERS: Final[Mapping[str, Callable[[Any, str], Any]]] = {
+    "str": _check_str,
+    "bool": _check_bool,
+    "int": _check_int,
+    "float": _check_float_or_int,
+    "tuple[str, ...]": _check_str_tuple,
+    "VoiceWorkerConfig": _decode_worker_config,
+}
+
+
+def _registry(union: Any) -> Dict[str, type]:
+    """Message classes of *union*, keyed by their wire ``name``."""
+    return {cls.__dataclass_fields__["name"].default: cls for cls in get_args(union)}
+
+
+_REQUEST_TYPES: Final[Dict[str, type]] = _registry(VoiceRequest)
+_EVENT_TYPES: Final[Dict[str, type]] = _registry(VoiceEvent)
+_MESSAGE_KINDS: Final[Dict[type, str]] = {
+    **{cls: "request" for cls in _REQUEST_TYPES.values()},
+    **{cls: "event" for cls in _EVENT_TYPES.values()},
+}
+_PAYLOAD_FIELDS: Final[Dict[type, Tuple[Field[Any], ...]]] = {
+    cls: tuple(f for f in fields(cls) if f.name not in ("id", "name"))
+    for cls in _MESSAGE_KINDS
+}
+
+
+def _field_decoder(f: Field[Any]) -> Callable[[Any, str], Any]:
+    return f.metadata.get("check") or _FIELD_DECODERS[f.type]  # type: ignore[index]
+
+
+def _assert_codec_complete() -> None:
+    """Fail at import, not on the first frame, if a field has no validator."""
+    for cls, payload_fields in _PAYLOAD_FIELDS.items():
+        for f in payload_fields:
+            if "check" not in f.metadata and f.type not in _FIELD_DECODERS:
+                raise TypeError(f"{cls.__name__}.{f.name}: no wire validator for type {f.type!r}")
+
+
+_assert_codec_complete()
+
+
+def _has_default(f: Field[Any]) -> bool:
+    return f.default is not MISSING or f.default_factory is not MISSING
+
+
+def _identity(value: Any) -> Any:
+    return value
+
+
+def _encode_payload(msg: Any) -> dict[str, Any]:
+    return {
+        f.name: _FIELD_ENCODERS.get(f.type, _identity)(getattr(msg, f.name))  # type: ignore[arg-type]
+        for f in _PAYLOAD_FIELDS[type(msg)]
+    }
+
+
+def _decode_payload(cls: type, msg_id: str, payload: dict[str, Any]) -> Any:
+    values: dict[str, Any] = {"id": msg_id}
+    for f in _PAYLOAD_FIELDS[cls]:
+        if f.name not in payload and _has_default(f) and not f.metadata.get("required"):
+            continue  # the dataclass default applies
+        values[f.name] = _field_decoder(f)(payload.get(f.name), f.name)
+    return cls(**values)
 
 
 # ---------------------------------------------------------------------------
@@ -565,85 +872,30 @@ def encode_voice_message(msg: VoiceMessage) -> bytes:
             "payload": payload_dict,
             "error": msg.error.to_dict() if msg.error is not None else None,
         }
-    elif isinstance(msg, (
-        InputPartialEvent,
-        InputEndpointEvent,
-        InputCapHitEvent,
-        OutputStateEvent,
-        UtteranceCompletedEvent,
-        ConversationStateEvent,
-        ConversationTranscriptEvent,
-        ConversationErrorEvent,
-        ConversationStoppedEvent,
-        WorkerErrorEvent,
-    )):
-        event_dict: dict[str, Any] = {"version": version, "msg_type": "event", "id": msg.id, "name": msg.name}
-        payload: dict[str, Any] = {}
-        if isinstance(msg, InputPartialEvent):
-            payload["text"] = msg.text
-        elif isinstance(msg, (InputEndpointEvent, InputCapHitEvent)):
-            pass
-        elif isinstance(msg, OutputStateEvent):
-            payload["is_speaking"] = msg.is_speaking
-            payload["current_epoch"] = msg.current_epoch
-        elif isinstance(msg, UtteranceCompletedEvent):
-            payload["session_id"] = msg.session_id
-            payload["played_to_end"] = msg.played_to_end
-        elif isinstance(msg, ConversationStateEvent):
-            payload["old_state"] = msg.old_state
-            payload["new_state"] = msg.new_state
-        elif isinstance(msg, ConversationTranscriptEvent):
-            payload["text"] = msg.text
-        elif isinstance(msg, ConversationErrorEvent):
-            payload["message"] = msg.message
-            payload["code"] = msg.code.value
-        elif isinstance(msg, ConversationStoppedEvent):
-            payload["reason"] = msg.reason
-        elif isinstance(msg, WorkerErrorEvent):
-            payload["code"] = msg.code.value
-            payload["message"] = msg.message
-            payload["fatal"] = msg.fatal
-        event_dict["payload"] = payload
-        raw_dict = event_dict
     else:
-        # VoiceRequest
-        req_dict: dict[str, Any] = {"version": version, "msg_type": "request", "id": msg.id, "name": msg.name}
-        payload = {}
-        if isinstance(msg, HandshakeRequest):
-            payload["client_version"] = msg.client_version
-            payload["protocol_version"] = msg.protocol_version
-            payload["capabilities_requested"] = list(msg.capabilities_requested)
-        elif isinstance(msg, (ProbeRequest, InputCancelRequest, InputResetBudgetRequest, OutputCloseRequest, ConversationInterruptRequest, PingRequest, ShutdownRequest)):
-            pass
-        elif isinstance(msg, InputStartRequest):
-            payload["streaming"] = msg.streaming
-            payload["max_seconds"] = msg.max_seconds
-        elif isinstance(msg, InputStopRequest):
-            payload["initial_prompt"] = msg.initial_prompt
-        elif isinstance(msg, (OutputSpeakRequest, OutputEnqueueRequest)):
-            payload["text"] = msg.text
-            payload["epoch"] = msg.epoch
-        elif isinstance(msg, OutputUtteranceBeginRequest):
-            payload["session_id"] = msg.session_id
-            payload["epoch"] = msg.epoch
-        elif isinstance(msg, OutputUtteranceEnqueueRequest):
-            payload["session_id"] = msg.session_id
-            payload["text"] = msg.text
-        elif isinstance(msg, OutputUtteranceEndRequest):
-            payload["session_id"] = msg.session_id
-        elif isinstance(msg, OutputStopRequest):
-            payload["epoch"] = msg.epoch
-        elif isinstance(msg, ConversationStartRequest):
-            payload["barge_in"] = msg.barge_in
-        elif isinstance(msg, ConversationStopRequest):
-            payload["reason"] = msg.reason
-        elif isinstance(msg, ConversationSignalRequest):
-            payload["signal"] = msg.signal
-        req_dict["payload"] = payload
-        raw_dict = req_dict
+        kind = _MESSAGE_KINDS.get(type(msg))
+        if kind is None:
+            raise VoiceProtocolError(
+                VoiceErrorCode.PROTOCOL_VIOLATION,
+                f"Not a voice protocol message: {type(msg).__name__}",
+            )
+        raw_dict = {
+            "version": version,
+            "msg_type": kind,
+            "id": msg.id,
+            "name": msg.name,
+            "payload": _encode_payload(msg),
+        }
 
-    text = json.dumps(raw_dict, separators=(",", ":"), ensure_ascii=False)
-    encoded = (text + "\n").encode("utf-8")
+    try:
+        text = json.dumps(raw_dict, separators=(",", ":"), ensure_ascii=False)
+        encoded = (text + "\n").encode("utf-8")
+    except (TypeError, ValueError) as e:
+        # Unserialisable payload values, or text that is not valid Unicode
+        # (a lone surrogate): the frame cannot be sent at all.
+        raise VoiceProtocolError(
+            VoiceErrorCode.PROTOCOL_VIOLATION, f"Cannot encode frame: {e}"
+        ) from None
     if len(encoded) > MAX_FRAME_BYTES:
         raise VoiceProtocolError(
             VoiceErrorCode.PROTOCOL_VIOLATION,
@@ -680,7 +932,9 @@ def decode_voice_message(raw: Union[bytes, str]) -> VoiceMessage:
             object_pairs_hook=_detect_duplicate_pairs,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        # ValueError also covers JSONDecodeError and the integer
+        # string-conversion limit a hostile frame can trigger.
         raise VoiceProtocolError(
             VoiceErrorCode.PROTOCOL_VIOLATION, f"Malformed JSON: {e}"
         ) from None
@@ -692,9 +946,11 @@ def decode_voice_message(raw: Union[bytes, str]) -> VoiceMessage:
 
     version = _check_int(data.get("version"), "version")
     if version != VOICE_PROTOCOL_VERSION:
-        raise VoiceProtocolError(
-            VoiceErrorCode.UNSUPPORTED_VERSION,
-            f"Unsupported protocol version {version} (expected {VOICE_PROTOCOL_VERSION})",
+        raise VoiceProtocolVersionError(
+            version,
+            msg_type=_optional_envelope_str(data, "msg_type"),
+            msg_id=_optional_envelope_str(data, "id"),
+            ref_id=_optional_envelope_str(data, "ref_id"),
         )
 
     msg_type = _check_str(data.get("msg_type"), "msg_type")
@@ -722,163 +978,27 @@ def decode_voice_message(raw: Union[bytes, str]) -> VoiceMessage:
         )
 
 
+def _optional_envelope_str(data: dict[str, Any], key: str) -> Optional[str]:
+    value = data.get(key)
+    return value if type(value) is str else None
+
+
 def _decode_request(msg_id: str, name: str, payload: dict[str, Any]) -> VoiceRequest:
-    if name == "handshake":
-        return HandshakeRequest(
-            id=msg_id,
-            client_version=_check_str(payload.get("client_version"), "client_version"),
-            protocol_version=_check_int(
-                payload.get("protocol_version", VOICE_PROTOCOL_VERSION), "protocol_version"
-            ),
-            capabilities_requested=_check_str_tuple(
-                payload.get("capabilities_requested", ()), "capabilities_requested"
-            ),
-        )
-    elif name == "probe":
-        return ProbeRequest(id=msg_id)
-    elif name == "input_start":
-        return InputStartRequest(
-            id=msg_id,
-            streaming=_check_bool(payload.get("streaming", False), "streaming"),
-            max_seconds=_check_float_or_int(payload.get("max_seconds", 30.0), "max_seconds"),
-        )
-    elif name == "input_stop":
-        return InputStopRequest(
-            id=msg_id,
-            initial_prompt=_check_str(payload.get("initial_prompt", ""), "initial_prompt"),
-        )
-    elif name == "input_cancel":
-        return InputCancelRequest(id=msg_id)
-    elif name == "input_reset_budget":
-        return InputResetBudgetRequest(id=msg_id)
-    elif name == "output_speak":
-        return OutputSpeakRequest(
-            id=msg_id,
-            text=_check_str(payload.get("text"), "text"),
-            epoch=_check_opt_int(payload.get("epoch"), "epoch"),
-        )
-    elif name == "output_enqueue":
-        return OutputEnqueueRequest(
-            id=msg_id,
-            text=_check_str(payload.get("text"), "text"),
-            epoch=_check_opt_int(payload.get("epoch"), "epoch"),
-        )
-    elif name == "output_utterance_begin":
-        return OutputUtteranceBeginRequest(
-            id=msg_id,
-            session_id=_check_str(payload.get("session_id"), "session_id"),
-            epoch=_check_opt_int(payload.get("epoch"), "epoch"),
-        )
-    elif name == "output_utterance_enqueue":
-        return OutputUtteranceEnqueueRequest(
-            id=msg_id,
-            session_id=_check_str(payload.get("session_id"), "session_id"),
-            text=_check_str(payload.get("text"), "text"),
-        )
-    elif name == "output_utterance_end":
-        return OutputUtteranceEndRequest(
-            id=msg_id,
-            session_id=_check_str(payload.get("session_id"), "session_id"),
-        )
-    elif name == "output_stop":
-        return OutputStopRequest(
-            id=msg_id,
-            epoch=_check_opt_int(payload.get("epoch"), "epoch"),
-        )
-    elif name == "output_close":
-        return OutputCloseRequest(id=msg_id)
-    elif name == "conversation_start":
-        return ConversationStartRequest(
-            id=msg_id,
-            barge_in=_check_bool(payload.get("barge_in", False), "barge_in"),
-        )
-    elif name == "conversation_stop":
-        return ConversationStopRequest(
-            id=msg_id,
-            reason=_check_str(payload.get("reason", "user"), "reason"),
-        )
-    elif name == "conversation_interrupt":
-        return ConversationInterruptRequest(id=msg_id)
-    elif name == "conversation_signal":
-        return ConversationSignalRequest(
-            id=msg_id,
-            signal=_check_str(payload.get("signal"), "signal"),
-        )
-    elif name == "ping":
-        return PingRequest(id=msg_id)
-    elif name == "shutdown":
-        return ShutdownRequest(id=msg_id)
-    else:
+    cls = _REQUEST_TYPES.get(name)
+    if cls is None:
         raise VoiceProtocolError(
             VoiceErrorCode.PROTOCOL_VIOLATION, f"Unknown request operation: {name}"
         )
+    return _decode_payload(cls, msg_id, payload)
 
 
 def _decode_event(msg_id: str, name: str, payload: dict[str, Any]) -> VoiceEvent:
-    if name == "input_partial":
-        return InputPartialEvent(
-            id=msg_id,
-            text=_check_str(payload.get("text", ""), "text"),
-        )
-    elif name == "input_endpoint":
-        return InputEndpointEvent(id=msg_id)
-    elif name == "input_cap_hit":
-        return InputCapHitEvent(id=msg_id)
-    elif name == "output_state":
-        return OutputStateEvent(
-            id=msg_id,
-            is_speaking=_check_bool(payload.get("is_speaking"), "is_speaking"),
-            current_epoch=_check_int(payload.get("current_epoch"), "current_epoch"),
-        )
-    elif name == "utterance_completed":
-        return UtteranceCompletedEvent(
-            id=msg_id,
-            session_id=_check_str(payload.get("session_id"), "session_id"),
-            played_to_end=_check_bool(payload.get("played_to_end"), "played_to_end"),
-        )
-    elif name == "conversation_state":
-        return ConversationStateEvent(
-            id=msg_id,
-            old_state=_check_str(payload.get("old_state"), "old_state"),
-            new_state=_check_str(payload.get("new_state"), "new_state"),
-        )
-    elif name == "conversation_transcript":
-        return ConversationTranscriptEvent(
-            id=msg_id,
-            text=_check_str(payload.get("text"), "text"),
-        )
-    elif name == "conversation_error":
-        code_str = _check_str(payload.get("code", VoiceErrorCode.CONVERSATION_ERROR.value), "code")
-        try:
-            code = VoiceErrorCode(code_str)
-        except ValueError:
-            code = VoiceErrorCode.CONVERSATION_ERROR
-        return ConversationErrorEvent(
-            id=msg_id,
-            message=_check_str(payload.get("message"), "message"),
-            code=code,
-        )
-    elif name == "conversation_stopped":
-        return ConversationStoppedEvent(
-            id=msg_id,
-            reason=_check_str(payload.get("reason", "user"), "reason"),
-        )
-    elif name == "worker_error":
-        code_str = _check_str(payload.get("code"), "code")
-        try:
-            code = VoiceErrorCode(code_str)
-        except ValueError:
-            code = VoiceErrorCode.PROTOCOL_VIOLATION
-        return WorkerErrorEvent(
-            id=msg_id,
-            code=code,
-            message=_check_str(payload.get("message"), "message"),
-            fatal=_check_bool(payload.get("fatal", False), "fatal"),
-        )
-    else:
+    cls = _EVENT_TYPES.get(name)
+    if cls is None:
         raise VoiceProtocolError(
             VoiceErrorCode.PROTOCOL_VIOLATION, f"Unknown event name: {name}"
         )
+    return _decode_payload(cls, msg_id, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1043,80 @@ def read_voice_frame(stream: BinaryIO) -> Optional[VoiceMessage]:
             )
 
     return decode_voice_message(bytes(buffer))
+
+
+def raw_chunk_reader(stream: BinaryIO) -> Callable[[int], bytes]:
+    """Chunk reader for *stream* that never parks inside buffered IO.
+
+    File-backed streams are read through their unbuffered raw file object:
+    a thread blocked there holds no ``BufferedReader`` lock, so interpreter
+    shutdown cannot abort on a reader thread still waiting for its peer,
+    and a closed stream still raises instead of reading a reused
+    descriptor. In-memory streams fall back to ``read1``/``read``.
+    """
+    raw = stream if isinstance(stream, io.RawIOBase) else getattr(stream, "raw", None)
+    if isinstance(raw, io.RawIOBase):
+        return lambda size: raw.read(size) or b""
+    return getattr(stream, "read1", stream.read)
+
+
+class VoiceFrameReader:
+    """Incremental, chunked frame reader (see :func:`raw_chunk_reader`).
+
+    An oversized frame raises once and is then skipped up to its newline,
+    so the stream re-synchronises on the next frame.
+    """
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._read = raw_chunk_reader(stream)
+        self._buffer = bytearray()
+        self._skipping = False
+
+    def read_frame(self) -> Optional[VoiceMessage]:
+        """Return the next decoded frame, or None on a clean EOF.
+
+        Raises:
+            VoiceProtocolError: For an oversized, malformed or foreign frame.
+            VoiceProtocolEofError: If the stream ends mid-frame.
+        """
+        while True:
+            line = self._take_line()
+            if line is not None:
+                return decode_voice_message(line)
+            chunk = self._read(_READ_CHUNK_BYTES)
+            if not chunk:
+                pending = bool(self._buffer) and not self._skipping
+                self._buffer.clear()
+                if pending:
+                    raise VoiceProtocolEofError("Stream closed mid-frame")
+                return None
+            self._buffer += chunk
+
+    def _take_line(self) -> Optional[bytes]:
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline < 0:
+                if len(self._buffer) > MAX_FRAME_BYTES and not self._skipping:
+                    self._buffer.clear()
+                    self._skipping = True
+                    raise VoiceProtocolError(
+                        VoiceErrorCode.PROTOCOL_VIOLATION,
+                        f"Frame exceeds maximum length {MAX_FRAME_BYTES} bytes",
+                    )
+                if self._skipping:
+                    self._buffer.clear()
+                return None
+            line = bytes(self._buffer[:newline])
+            del self._buffer[: newline + 1]
+            if self._skipping:
+                self._skipping = False
+                continue
+            if len(line) > MAX_FRAME_BYTES:
+                raise VoiceProtocolError(
+                    VoiceErrorCode.PROTOCOL_VIOLATION,
+                    f"Frame exceeds maximum length {MAX_FRAME_BYTES} bytes",
+                )
+            return line
 
 
 def write_voice_frame(stream: BinaryIO, msg: VoiceMessage) -> None:

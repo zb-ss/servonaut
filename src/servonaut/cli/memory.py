@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
+from servonaut.services.memory.provider import instance_provider
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +110,9 @@ def _list_all_instances(
     hetzner_service: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Return combined list of AWS + custom + OVH + Hetzner instances."""
-    instances: List[Dict[str, Any]] = []
-    try:
-        cached = aws_service._cache.load_any()
-        if cached:
-            instances.extend(cached)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    # No try/except: the cache layer already absorbs a missing or corrupt
+    # file, so anything raised here is a bug that must surface loudly.
+    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
     try:
         instances.extend(custom_server_service.list_as_instances())
     except Exception as exc:  # noqa: BLE001
@@ -167,13 +164,7 @@ def _resolve_or_exit(
     if not instance_arg:
         return None
 
-    aws_instances: List[Dict[str, Any]] = []
-    try:
-        cached = aws_service._cache.load_any()
-        if cached:
-            aws_instances = cached
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    aws_instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
     custom_instances: List[Dict[str, Any]] = []
     try:
         custom_instances = custom_server_service.list_as_instances()
@@ -345,7 +336,7 @@ def _cmd_show(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any])
     async def _do_show() -> int:
         if module_filter:
             iid = inst.get("id") or inst.get("name", "")
-            provider = inst.get("provider", "custom")
+            provider = instance_provider(inst)
             data = memory_service.get(iid, module_filter, provider)
             if data is None:
                 msg = f"Module {module_filter!r} not found for {iid!r}."
@@ -361,7 +352,7 @@ def _cmd_show(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any])
             return _EXIT_SUCCESS
 
         iid = inst.get("id") or inst.get("name", "")
-        provider = inst.get("provider", "custom")
+        provider = instance_provider(inst)
 
         if fmt == "json":
             all_modules = memory_service.get_all_modules(iid, provider)
@@ -406,7 +397,7 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
     from datetime import datetime, timezone
 
     iid = inst.get("id") or inst.get("name", "")
-    provider = inst.get("provider", "custom")
+    provider = instance_provider(inst)
     path = memory_service.get_annotations_path(iid, provider)
 
     if not path.exists():
@@ -476,7 +467,7 @@ def _cmd_pin(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) 
 
     module, field = parts[0], parts[1]
     iid = inst.get("id") or inst.get("name", "")
-    provider = inst.get("provider", "custom")
+    provider = instance_provider(inst)
     pinned_by = getpass.getuser()
 
     async def _do_pin() -> int:
@@ -615,7 +606,7 @@ def _cmd_pull_annotations(
 
     iid = inst.get("id") or inst.get("name", "")
     name = inst.get("name", iid)
-    provider = inst.get("provider", "custom")
+    provider = instance_provider(inst)
 
     async def _do_pull() -> int:
         try:
@@ -728,7 +719,7 @@ def _cmd_purge(args: Any, memory_service: Any) -> int:
 def _cmd_clear(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory clear``."""
     iid = inst.get("id") or inst.get("name", "")
-    provider = inst.get("provider", "custom")
+    provider = instance_provider(inst)
     modules = getattr(args, "modules", None) or None
     clear_all = getattr(args, "all", False)
 

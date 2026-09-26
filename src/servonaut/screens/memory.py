@@ -27,6 +27,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -122,7 +123,7 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
         return label
 
     instance_id = instance.get("id") or instance.get("name", "")
-    provider = instance.get("provider", "custom")
+    provider = instance_provider(instance)
     try:
         modules = memory_service.get_all_modules(instance_id, provider)
     except Exception as exc:  # noqa: BLE001
@@ -494,7 +495,7 @@ class MemoryScreen(Screen):
         banner = self.query_one("#memory-opt-out-banner", Static)
 
         instance_id = self._instance.get("id") or self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
 
         # Opt-out check
         memory_service = getattr(self.app, "memory_service", None)
@@ -815,7 +816,7 @@ class MemoryScreen(Screen):
             return
 
         # Look up the current observed value for the placeholder text
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         try:
             data = memory_service.get(instance_id, module_name, provider)
             current_value = str(data.get("observed", {}).get(key, "")) if data else ""
@@ -848,7 +849,7 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         try:
             await memory_service.pin(
                 instance_id,
@@ -886,7 +887,7 @@ class MemoryScreen(Screen):
             if self._is_opted_out(instance_id, memory_service):
                 self.app.notify("Memory disabled for this server.", severity="warning")
                 return
-            provider = self._instance.get("provider", "custom")
+            provider = instance_provider(self._instance)
             try:
                 memory_service.clear(
                     instance_id, modules=[module_name], provider=provider
@@ -911,7 +912,7 @@ class MemoryScreen(Screen):
         distinction obvious without fighting the data-table surface.
         """
         name = self._instance.get("name") or instance_id
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         return (
             f"# Notes — {name} ({instance_id}) @ {provider}\n"
             "\n"
@@ -960,7 +961,7 @@ class MemoryScreen(Screen):
             self.app.notify("Memory disabled for this server.", severity="warning")
             return
 
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         path = self._prepare_annotations_file(instance_id, provider, memory_service)
         if path is None:
             return
@@ -1596,7 +1597,7 @@ class MemoryScreen(Screen):
     async def _do_sync_now(self, sync_service: Any) -> None:
         iid = self._instance.get("id") or self._instance.get("name", "")
         name = self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._instance)
         display_name = name or iid or "this server"
         try:
             queued = sync_service.backfill_from_local_store(instance_id=iid)

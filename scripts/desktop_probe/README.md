@@ -63,6 +63,10 @@ Use that full Python path instead of `python` in the following commands on Windo
 python -m scripts.desktop_probe.check --browser chromium --browser webkit --native
 ```
 
+On a slow machine or CI runner, set `SERVONAUT_PROBE_TIME_SCALE` (for example
+`3`) to multiply the startup and shutdown budgets. It only lengthens them; the
+Intel macOS CI runner uses it.
+
 This opens and closes a native window automatically. It checks authenticated
 WebSockets, rejection of invalid tokens/origins and duplicate sessions, real
 keyboard navigation and sidebar return, resize traffic, a real confirmation

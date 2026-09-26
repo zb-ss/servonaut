@@ -30,8 +30,8 @@ Authentication model:
 
     The CLI is responsible for setting the env var BEFORE invoking
     ``bws``. We resolve the value at *call time*, not construction
-    time, so a user who sets the var via ``servonaut secrets refresh``
-    mid-session has it picked up without restarting.
+    time, so a variable exported (or loaded from the secrets env file)
+    mid-session is picked up without restarting.
 
 Naming model:
     Bitwarden addresses secrets by UUID, not by name. We translate
@@ -124,6 +124,24 @@ DEFAULT_BWS_TIMEOUT_SECONDS = 15
 # customers running multiple Bitwarden orgs side by side don't have
 # their tokens collide.
 DEFAULT_TOKEN_ENV_VAR = "BWS_ACCESS_TOKEN"
+
+# The one env var name the ``bws`` CLI itself reads its access token from.
+# Distinct from DEFAULT_TOKEN_ENV_VAR on purpose: the configured name is a
+# Servonaut-side indirection, this one is bws's own contract.
+BWS_CLI_TOKEN_ENV_VAR = "BWS_ACCESS_TOKEN"
+
+
+def bws_subprocess_env(token: str) -> Dict[str, str]:
+    """Return the environment for a ``bws`` child process.
+
+    The token may live under a custom variable name (``token_env_var``),
+    but ``bws`` only reads ``BWS_ACCESS_TOKEN``. The value is therefore
+    exposed to the child under that name. Only the returned copy is
+    changed: the parent environment is left alone and nothing is persisted.
+    """
+    env = os.environ.copy()
+    env[BWS_CLI_TOKEN_ENV_VAR] = token
+    return env
 
 
 class BitwardenProviderError(RuntimeError):
@@ -368,8 +386,7 @@ class BitwardenProvider(SecretProviderInterface):
         # Inject the access token via env, not argv — argv is visible
         # in /proc/<pid>/cmdline on Linux, leaking the token to any
         # local process that can read /proc.
-        env = os.environ.copy()
-        env[self._token_env_var] = token
+        env = bws_subprocess_env(token)
         # Force JSON output where supported. ``bws`` accepts
         # ``--output json`` as a global flag in recent versions; for
         # subcommands that don't honour it (rare) we fall back to

@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from servonaut.config.schema import DEFAULT_SNAPSHOT_STALE_SECONDS
+from servonaut.services.memory.provider import instance_provider
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ def compute_memory_status(
 
     iid = instance.get("id") or instance.get("name", "")
     iname = instance.get("name", "")
-    provider = instance.get("provider", "custom")
+    provider = instance_provider(instance)
     if not iid:
         return STATUS_NONE
 
