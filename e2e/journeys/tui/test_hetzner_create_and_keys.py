@@ -88,7 +88,9 @@ async def _create_web_2(t, providers) -> None:
     await t.fill("#hetzner_input_name", NEW_SERVER)
     await t.click("#btn_hetzner_create_submit")
     await t.wait_for_screen("ConfirmActionScreen")
-    await t.wait_for_text(NEW_SERVER, "nbg1", "cx32", "debian-12", DEPLOY_KEY[0], "6.80")
+    await t.wait_for_text(
+        NEW_SERVER, "nbg1", "cx32", "debian-12", DEPLOY_KEY[0], "6.80", screen_only=True
+    )
     assert t.on_screen("#btn_confirm").disabled
     await t.fill("#confirm_input", "create")
     await t.wait_until(lambda: not t.on_screen("#btn_confirm").disabled, desc="confirm enabled")
@@ -215,7 +217,7 @@ async def test_ssh_keys_add_and_delete(tui, seed, providers):
         await _pick(t, "#hetzner_ssh_keys_table", CI_KEY[0])
         await t.click("#btn_hetzner_ssh_delete")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text(CI_KEY[0])
+        await t.wait_for_text(CI_KEY[0], screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("HetznerSSHKeysScreen")
         await t.settle()

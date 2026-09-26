@@ -23,7 +23,9 @@ from typing import Any, AsyncIterator, Callable, ContextManager, Optional, TypeV
 
 from rich.console import Console
 from textual.css.query import NoMatches
+from textual.geometry import Region
 from textual.notifications import Notify
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, RichLog
 
@@ -140,30 +142,50 @@ class TuiDriver:
         """Every notification shown so far, with its markup flag, oldest first."""
         return [Toast(n.severity, str(n.message), bool(n.markup)) for n in self._notifications]
 
-    def rendered_text(self) -> str:
+    def rendered_text(self, *, screen_only: bool = False) -> str:
         """Plain text of the screen as it is currently drawn.
+
+        With *screen_only*, keep only the areas the active screen's own
+        widgets cover: for a modal, its dialog without the screen that shows
+        through around it, whose text would otherwise satisfy a check too.
 
         Textual has no public plain-text export (``export_screenshot`` gives
         SVG), so this mirrors that method with its private compositor and
         background-screen attributes. Keep all private use here.
         """
-        width, height = self.app.size
-        console = Console(
-            width=width,
-            height=height,
-            file=io.StringIO(),
-            force_terminal=True,
-            color_system="truecolor",
-            record=True,
-            legacy_windows=False,
-            safe_box=False,
-        )
         with self._as_the_app():
             update = self.app.screen._compositor.render_update(
                 full=True, screen_stack=self.app._background_screens, simplify=True
             )
+            if screen_only:
+                return self._text_within_own_widgets(update.strips)
+            width, height = self.app.size
+            console = Console(
+                width=width,
+                height=height,
+                file=io.StringIO(),
+                force_terminal=True,
+                color_system="truecolor",
+                record=True,
+                legacy_windows=False,
+                safe_box=False,
+            )
             console.print(update)
         return console.export_text()
+
+    def _text_within_own_widgets(self, lines: list[Any]) -> str:
+        """The drawn rows cropped to each visible child of the active screen."""
+        rows = [Strip.join(line) for line in lines]
+        screen = Region(0, 0, *self.app.size)
+        parts = []
+        for child in self.app.screen.children:
+            area = child.region.intersection(screen) if child.display else Region()
+            if not area.area:
+                continue
+            parts.extend(
+                row.crop(area.x, area.right).text for row in rows[area.y : area.bottom]
+            )
+        return "\n".join(parts)
 
     def _as_the_app(self) -> ContextManager[None]:
         """Run a render the way the app's own tasks do, as Textual's active app.
@@ -291,18 +313,21 @@ class TuiDriver:
         )
         return found[0]
 
-    async def wait_for_text(self, *needles: str, timeout: float = DEFAULT_TIMEOUT) -> str:
+    async def wait_for_text(
+        self, *needles: str, screen_only: bool = False, timeout: float = DEFAULT_TIMEOUT
+    ) -> str:
         """Wait until the drawn screen shows every one of *needles*; return it.
 
         Widget state runs ahead of the screen: a table holds its new rows
         before it has sized its columns for them, so a name can be in the
         table yet still cut short on screen. Checks of what the user sees
-        wait for the drawing, not for the data behind it.
+        wait for the drawing, not for the data behind it. Pass
+        *screen_only* to check a modal's own text (see :meth:`rendered_text`).
         """
         missing = list(needles)
 
         def drawn() -> Optional[str]:
-            text = self.rendered_text()
+            text = self.rendered_text(screen_only=screen_only)
             missing[:] = [needle for needle in needles if needle not in text]
             return None if missing else text
 

@@ -164,7 +164,7 @@ async def test_deleting_a_cloud_instance_needs_the_typed_confirmation(tui, seed,
         # Cancelled: nothing is deleted.
         await press(t, "#btn_ovh_mgr_delete")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("Delete OVH Cloud Instance")
+        await t.wait_for_text("Delete OVH Cloud Instance", screen_only=True)
         await press(t, "#btn_cancel")
         await t.wait_for_screen("OVHManagerScreen")
         assert providers.mutations("ovh") == []
@@ -223,7 +223,7 @@ async def test_create_a_cloud_instance_through_the_wizard(tui, seed, providers):
         # The confirmation names the choice and the cost; escape backs out.
         await press(t, "#btn_create")
         await t.wait_for_screen("ConfirmActionScreen")
-        await t.wait_for_text("batch-3", "GRA7", "d2-2", "5.00 EUR")
+        await t.wait_for_text("batch-3", "GRA7", "d2-2", "5.00 EUR", screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("OVHCloudCreateScreen")
         assert providers.mutations("ovh") == []

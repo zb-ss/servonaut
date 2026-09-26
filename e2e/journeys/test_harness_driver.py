@@ -12,6 +12,7 @@ import pytest
 from rich.panel import Panel
 from textual.app import App, ComposeResult
 from textual.containers import Container, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from e2e.harness.pilot import TuiDriver
@@ -75,3 +76,30 @@ async def test_a_click_on_a_hidden_widget_fails_at_once(journey):
         button.display = False
         with pytest.raises(AssertionError, match="is hidden"):
             await t.click("#go")
+
+
+class _Dialog(ModalScreen[None]):
+    DEFAULT_CSS = """
+    _Dialog { align: center middle; }
+    _Dialog > Container { width: 30; height: 3; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Container(Static("Delete the server?"))
+
+
+class _Behind(App):
+    def compose(self) -> ComposeResult:
+        yield Static("Server name: web-2")
+
+
+async def test_screen_only_text_leaves_out_the_screen_behind_a_modal(journey):
+    app = _Behind()
+    async with app.run_test(size=(60, 12)) as pilot:
+        t = TuiDriver(app, pilot, [], journey.staging)
+        app.push_screen(_Dialog())
+        await t.wait_for_screen("_Dialog")
+        everything = await t.wait_for_text("Delete the server?", "Server name: web-2")
+        own = await t.wait_for_text("Delete the server?", screen_only=True)
+        assert "web-2" in everything
+        assert "web-2" not in own
