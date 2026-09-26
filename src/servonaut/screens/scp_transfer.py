@@ -1,7 +1,7 @@
 """SCP transfer screen for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import List, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -140,49 +140,10 @@ class SCPTransferScreen(Screen):
         # Update status
         status_output.update(f"[yellow]Preparing {self._transfer_direction}...[/yellow]")
 
-        # Resolve connection profile — demo mode redacts the row we display,
-        # so transfer against the real record.
+        # Demo mode redacts the row we display, so transfer against the real
+        # record.
         conn = connection_instance(self.app, self._instance)
-        profile = self.app.connection_service.resolve_profile(conn)
-
-        # Get SSH key
-        key_path = self.app.ssh_service.get_key_path(conn['id'])
-        if not key_path and conn.get('key_name'):
-            key_path = self.app.ssh_service.discover_key(conn['key_name'])
-
-        # Get target host and proxy args
-        host = self.app.connection_service.get_target_host(conn, profile)
-        proxy_args = []
-        if profile:
-            proxy_args = self.app.connection_service.get_proxy_args(profile)
-        extra_options = self.app.connection_service.get_extra_options(
-            conn, profile
-        )
-
-        # Get username from profile or use default
-        username = self.app.config_manager.get().default_username
-
-        # Build SCP command
-        if self._transfer_direction == "upload":
-            command = self.app.scp_service.build_upload_command(
-                local_path=local_path,
-                remote_path=remote_path,
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_args=proxy_args,
-                extra_options=extra_options,
-            )
-        else:  # download
-            command = self.app.scp_service.build_download_command(
-                remote_path=remote_path,
-                local_path=local_path,
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_args=proxy_args,
-                extra_options=extra_options,
-            )
+        command = self._build_transfer_command(conn, local_path, remote_path)
 
         # Execute transfer in worker
         status_output.update(f"[yellow]Transferring...[/yellow]")
@@ -190,6 +151,49 @@ class SCPTransferScreen(Screen):
             self.app.scp_service.execute_transfer(command),
             name="scp_transfer",
             exclusive=True
+        )
+
+    def _build_transfer_command(
+        self, conn: dict, local_path: str, remote_path: str,
+    ) -> List[str]:
+        """Build the scp argv for *conn* in the selected direction.
+
+        Custom servers use their own username, key and port, as the other
+        connect paths do; everything else takes the username from the
+        connection profile or the configured default.
+        """
+        connection_service = self.app.connection_service
+        profile = connection_service.resolve_profile(conn)
+
+        if conn.get('is_custom'):
+            username = conn.get('username') or 'root'
+            key_path = conn.get('ssh_key') or None
+        else:
+            username = (
+                (profile.username if profile else None)
+                or self.app.config_manager.get().default_username
+            )
+            key_path = None
+        # Per-instance / default key, then ~/.ssh discovery, as before.
+        key_path = key_path or self.app.ssh_service.get_key_path(conn['id'])
+        if not key_path and conn.get('key_name'):
+            key_path = self.app.ssh_service.discover_key(conn['key_name'])
+
+        options = {
+            'host': connection_service.get_target_host(conn, profile),
+            'username': username,
+            'key_path': key_path,
+            'proxy_args': connection_service.get_proxy_args(profile) if profile else [],
+            'port': connection_service.get_target_port(conn),
+            'extra_options': connection_service.get_extra_options(conn, profile),
+        }
+
+        if self._transfer_direction == "upload":
+            return self.app.scp_service.build_upload_command(
+                local_path=local_path, remote_path=remote_path, **options,
+            )
+        return self.app.scp_service.build_download_command(
+            remote_path=remote_path, local_path=local_path, **options,
         )
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:

@@ -124,19 +124,20 @@ class ServonautApp(App):
     memory_crypto = None
     _memory_key_material = None
 
-    # Shared state
-    instances: List[dict] = []  # all fetched instances
+    # Shared state. The mutable containers are created per app in __init__:
+    # a class-level default would be one list/set shared by every instance.
+    instances: List[dict]  # all fetched instances
     demo_mode: bool = False
     _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
-    memory_first_connect_seen: set = set()
+    memory_first_connect_seen: set
 
     # Instance IDs for which an annotation pull has already been kicked off
     # this session.  Kept separate from memory_first_connect_seen so that
     # banner-dismissal gating is untouched.
-    memory_annotations_pulled_seen: set = set()
+    memory_annotations_pulled_seen: set
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -180,6 +181,9 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        self.instances = []
+        self.memory_first_connect_seen = set()
+        self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
@@ -2214,6 +2218,29 @@ class ServonautApp(App):
             if str(pristine.get("id") or "") == real_id:
                 return copy.deepcopy(pristine)
         return instance
+
+    def open_settings_screen(self, panel_id: Optional[str] = None) -> None:
+        """Show Settings, opened on *panel_id* (e.g. ``"ai_provider"``) if given.
+
+        Replaces the current view, as the sidebar's Settings entry does. When a
+        Settings screen is already open, even under other screens (Help, a
+        management screen), those are closed and that Settings screen switches
+        category in place, so its unsaved edits and their prompt are kept.
+        """
+        from servonaut.screens.settings import SettingsScreen
+
+        stack = self.screen_stack
+        existing = next(
+            (screen for screen in reversed(stack) if isinstance(screen, SettingsScreen)),
+            None,
+        )
+        if existing is None:
+            self.switch_screen(SettingsScreen(initial_panel=panel_id))
+            return
+        for _ in range(len(stack) - 1 - stack.index(existing)):
+            self.pop_screen()
+        if panel_id:
+            existing.show_panel(panel_id)
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""

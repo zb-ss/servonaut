@@ -21,7 +21,7 @@ This document lists every exposed tool.  The full canonical list (with JSON Sche
 Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_level`:
 
 - `readonly` — only listing and status tools.
-- `standard` (default) — read + a curated command allowlist.
+- `standard` (default) — read + a curated command allowlist. `run_command` accepts one allowlisted command, optionally piped into other allowlisted commands (`ps aux | grep nginx`), with an optional leading `sudo`. Command lists (`;`, `&&`, `||`), redirects, background jobs, subshells and command substitution are refused, as are the options of allowlisted commands that write files or change the system (for example `find -exec`/`-delete`, `sort -o`, `ip ... add/del/set`, `ifconfig ... down`, `date -s`). Use `dangerous` for those.
 - `dangerous` — everything except a hard-coded blocklist (`rm -rf`, `shutdown`, `dd`, ...).
 
 Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, arguments, success flag, and short reason code on early returns.

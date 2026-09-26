@@ -145,3 +145,64 @@ class TestBackupRestore:
         rogue.write_text(json.dumps({"version": 2}))
         with pytest.raises(ValueError, match="outside"):
             cm.restore_backup(rogue)
+
+
+class TestBackupLocation:
+    """Backups belong to the config file a manager was built for."""
+
+    @staticmethod
+    def _seed_default_backups(backup_dir: Path, count: int) -> dict:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        seeded = {}
+        for index in range(count):
+            path = backup_dir / f"config-20200101T00000{index}.json"
+            path.write_text(json.dumps({"version": 2, "default_username": f"real-{index}"}))
+            seeded[path.name] = path.read_text()
+        return seeded
+
+    def test_default_manager_keeps_backups_in_the_default_directory(self, isolated_config):
+        config_dir, _, backup_dir = isolated_config
+        assert ConfigManager()._backup_dir() == backup_dir == config_dir / "backups"
+
+    def test_custom_config_writes_lists_and_prunes_only_its_own_backups(
+        self, isolated_config, tmp_path
+    ):
+        _, default_config_path, default_backup_dir = isolated_config
+        # More than MAX_BACKUPS, so a prune of the wrong directory would show.
+        seeded = self._seed_default_backups(default_backup_dir, MAX_BACKUPS + 2)
+        custom_path = tmp_path / "elsewhere" / "recording.json"
+
+        cm = ConfigManager(config_path=custom_path)
+        assert cm._backup_dir() == custom_path.parent / "backups"
+        cm.save(AppConfig(default_username="user-0"))
+        for index in range(1, MAX_BACKUPS + 4):
+            time.sleep(0.01)
+            cm.save(AppConfig(default_username=f"user-{index}"))
+
+        custom_backups = sorted(cm._backup_dir().glob("config-*.json"))
+        assert len(custom_backups) == MAX_BACKUPS
+        listed = cm.list_backups()
+        assert {entry["path"] for entry in listed} == set(custom_backups)
+        assert all(entry["path"].parent == cm._backup_dir() for entry in listed)
+
+        # The default config's backups are neither added to nor pruned.
+        remaining = {path.name: path.read_text() for path in default_backup_dir.iterdir()}
+        assert remaining == seeded
+        assert not default_config_path.exists()
+
+    def test_custom_config_restores_only_from_its_own_backups(
+        self, isolated_config, tmp_path
+    ):
+        _, _, default_backup_dir = isolated_config
+        seeded = self._seed_default_backups(default_backup_dir, 1)
+        cm = ConfigManager(config_path=tmp_path / "elsewhere" / "recording.json")
+        cm.save(AppConfig(default_username="first"))
+        time.sleep(0.01)
+        cm.save(AppConfig(default_username="second"))
+
+        foreign = default_backup_dir / next(iter(seeded))
+        with pytest.raises(ValueError, match="outside"):
+            cm.restore_backup(foreign)
+
+        own = cm.list_backups()[0]["path"]
+        assert cm.restore_backup(own).default_username == "first"

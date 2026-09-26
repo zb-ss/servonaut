@@ -60,6 +60,7 @@ class CommandOverlay(ModalScreen):
         self._extra_options: List[str] = []
         self._username = None
         self._key_path = None
+        self._port: Optional[int] = None
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -102,6 +103,7 @@ class CommandOverlay(ModalScreen):
         self._extra_options = self.app.connection_service.get_extra_options(
             conn, self._profile
         )
+        self._port = self.app.connection_service.get_target_port(conn)
 
         # Warn if a connection rule matched but the profile is missing
         self._missing_profile = self._detect_missing_profile()
@@ -269,6 +271,7 @@ class CommandOverlay(ModalScreen):
             key_path=self._key_path,
             remote_command=login_command,
             proxy_args=self._proxy_args,
+            port=self._port,
             extra_options=self._extra_options,
         )
 

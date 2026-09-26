@@ -71,6 +71,7 @@ class ScanService(ScanServiceInterface):
         if profile:
             proxy_args = connection_service.get_proxy_args(profile)
         extra_options = connection_service.get_extra_options(instance, profile)
+        port = connection_service.get_target_port(instance)
 
         if instance.get('is_custom'):
             username = instance.get('username') or 'root'
@@ -93,7 +94,8 @@ class ScanService(ScanServiceInterface):
         # Scan paths (run ls -la on each path)
         for path in scan_paths:
             result = await self._run_path_scan(
-                path, host, username, key_path, proxy_args, ssh_service, extra_options
+                path, host, username, key_path, proxy_args, ssh_service, extra_options,
+                port=port,
             )
             if result:
                 results.append(result)
@@ -101,7 +103,8 @@ class ScanService(ScanServiceInterface):
         # Run scan commands
         for command in scan_commands:
             result = await self._run_command_scan(
-                command, host, username, key_path, proxy_args, ssh_service, extra_options
+                command, host, username, key_path, proxy_args, ssh_service, extra_options,
+                port=port,
             )
             if result:
                 results.append(result)
@@ -143,6 +146,7 @@ class ScanService(ScanServiceInterface):
         proxy_args: List[str],
         ssh_service: SSHServiceInterface,
         extra_options: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> Optional[dict]:
         """Scan a remote path by running ls -la via SSH.
 
@@ -153,6 +157,8 @@ class ScanService(ScanServiceInterface):
             key_path: SSH key path (optional)
             proxy_args: SSH proxy arguments from ConnectionService.get_proxy_args()
             ssh_service: SSH service for building commands
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target
+            port: Target SSH port (None for the default)
 
         Returns:
             Scan result dictionary or None on failure
@@ -169,6 +175,7 @@ class ScanService(ScanServiceInterface):
             host, username, key_path,
             remote_command=remote_command,
             proxy_args=proxy_args,
+            port=port,
             extra_options=extra_options,
         )
 
@@ -205,6 +212,7 @@ class ScanService(ScanServiceInterface):
         proxy_args: List[str],
         ssh_service: SSHServiceInterface,
         extra_options: Optional[List[str]] = None,
+        port: Optional[int] = None,
     ) -> Optional[dict]:
         """Run a scan command via SSH and capture output.
 
@@ -215,6 +223,8 @@ class ScanService(ScanServiceInterface):
             key_path: SSH key path (optional)
             proxy_args: SSH proxy arguments from ConnectionService.get_proxy_args()
             ssh_service: SSH service for building commands
+            extra_options: Extra ``-o KEY=VALUE`` entries for the target
+            port: Target SSH port (None for the default)
 
         Returns:
             Scan result dictionary or None on failure
@@ -223,6 +233,7 @@ class ScanService(ScanServiceInterface):
             host, username, key_path,
             remote_command=command,
             proxy_args=proxy_args,
+            port=port,
             extra_options=extra_options,
         )
 
