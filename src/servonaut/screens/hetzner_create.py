@@ -495,7 +495,9 @@ class HetznerCreateScreen(Screen):
         except Exception as exc:
             logger.warning("Post-create instance refresh failed: %s", exc)
 
-        self.app.pop_screen()
+        # True tells the screen that opened the wizard (the Hetzner Manager)
+        # that a server was created, so it reloads its list.
+        self.dismiss(True)
 
     async def _refresh_instances_after_create(self) -> None:
         """Re-merge Hetzner instances into ``app.instances`` after create.

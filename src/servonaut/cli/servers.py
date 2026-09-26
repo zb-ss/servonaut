@@ -289,6 +289,17 @@ def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str
     return instance.get("username") or "ec2-user"
 
 
+def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
+    """Return the SSH port: ``--port``, else the port saved with the server."""
+    if port_override is not None:
+        return port_override
+    saved = instance.get("port")
+    try:
+        return int(saved) if saved else None
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Main verify handler
 # ---------------------------------------------------------------------------
@@ -380,7 +391,7 @@ async def _cmd_verify(args: Any) -> int:
     if personal_instance is not None:
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
-        port = port_override
+        port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
             f"({personal_instance.get('provider', 'unknown')}/{personal_instance.get('id')})"

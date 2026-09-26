@@ -126,6 +126,21 @@ def _sanitize_response_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in sensitive}
 
 
+def _ovh_cloud_project_id(instance: Dict) -> str:
+    """Public Cloud project of an OVH instance record.
+
+    Cloud rows carry no ``project_id`` key: the project is the first half of
+    their composite ``"<project_id>/<instance_id>"`` id.
+    """
+    explicit = str(instance.get('project_id') or '')
+    if explicit:
+        return explicit
+    if instance.get('provider_type') != 'cloud':
+        return ''
+    project_id, sep, instance_part = str(instance.get('id') or '').partition('/')
+    return project_id if sep and project_id and instance_part else ''
+
+
 class ServonautTools:
     """Implements all MCP tools using Servonaut services."""
 
@@ -316,7 +331,13 @@ class ServonautTools:
             ("Hetzner", self._hetzner_service),
         ):
             fetch_error = getattr(service, "last_fetch_error", None)
-            if isinstance(fetch_error, str) and fetch_error:
+            if getattr(service, "last_fetch_partial", False) is True and fetch_error:
+                # Only the named sources are stale; the other rows are fresh.
+                result += (
+                    f"\n\nWarning: the {label} inventory was only partly refreshed. "
+                    f"{fetch_error}"
+                )
+            elif isinstance(fetch_error, str) and fetch_error:
                 result += (
                     f"\n\nWarning: the {label} inventory could not be refreshed "
                     f"({fetch_error}); {label} rows come from the last successful fetch."
@@ -960,7 +981,7 @@ class ServonautTools:
         provider_type = instance.get('provider_type', '')
         name = instance.get('id', '') or instance.get('name', '')
         # Public Cloud snapshots are listed per project, not per instance.
-        project_id = instance.get('project_id', '')
+        project_id = '' if provider_type == 'vps' else _ovh_cloud_project_id(instance)
         if provider_type != 'vps' and not project_id:
             self._audit.log('ovh_snapshots', args, '', False, 'missing_project_id')
             return f"Error: Cannot determine project_id for instance {instance_id}. Provider type: {provider_type!r}"
