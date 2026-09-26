@@ -69,6 +69,7 @@ def _coerce(cls: type, data: Any, label: str) -> Any:
 
 CONFIG_DIR = Path.home() / '.servonaut'
 CONFIG_PATH = CONFIG_DIR / 'config.json'
+# Backups of the default config. A manager keeps backups beside its own file.
 BACKUP_DIR = CONFIG_DIR / 'backups'
 BACKUP_PREFIX = 'config-'
 BACKUP_SUFFIX = '.json'
@@ -224,7 +225,8 @@ class ConfigManager:
         Args:
             config_path: Alternative config file to read and write instead of
                 ``~/.servonaut/config.json`` (the TUI's ``--config`` flag).
-                Every other runtime file keeps its usual location.
+                Its local backups are kept in a ``backups`` directory beside
+                it; every other runtime file keeps its usual location.
         """
         self._config: Optional[AppConfig] = None
         self._load_error: Optional[str] = None
@@ -340,6 +342,15 @@ class ConfigManager:
     # Local backup rotation
     # ------------------------------------------------------------------
 
+    def _backup_dir(self) -> Path:
+        """Directory holding the local backups of this manager's config file.
+
+        Derived from the managed file rather than the module-level default,
+        so saving an alternative config can neither copy it into nor prune
+        the backups of the default one.
+        """
+        return self._config_path.parent / "backups"
+
     def _create_backup(self) -> Optional[Path]:
         """Copy the current config.json into the backups dir with a timestamp.
 
@@ -349,13 +360,14 @@ class ConfigManager:
         if not self._config_path.exists():
             return None
         try:
-            BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            backup_dir = self._backup_dir()
+            backup_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-            backup_path = BACKUP_DIR / f"{BACKUP_PREFIX}{timestamp}{BACKUP_SUFFIX}"
+            backup_path = backup_dir / f"{BACKUP_PREFIX}{timestamp}{BACKUP_SUFFIX}"
             # Avoid collisions within the same second
             counter = 1
             while backup_path.exists():
-                backup_path = BACKUP_DIR / (
+                backup_path = backup_dir / (
                     f"{BACKUP_PREFIX}{timestamp}-{counter}{BACKUP_SUFFIX}"
                 )
                 counter += 1
@@ -372,7 +384,7 @@ class ConfigManager:
         """Delete old backups, keeping the MAX_BACKUPS most recent."""
         try:
             backups = sorted(
-                BACKUP_DIR.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
+                self._backup_dir().glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -389,11 +401,12 @@ class ConfigManager:
 
         Each entry: {path, timestamp (datetime), size_bytes}.
         """
-        if not BACKUP_DIR.exists():
+        backup_dir = self._backup_dir()
+        if not backup_dir.exists():
             return []
         out: List[Dict[str, Any]] = []
         for path in sorted(
-            BACKUP_DIR.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
+            backup_dir.glob(f"{BACKUP_PREFIX}*{BACKUP_SUFFIX}"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         ):
@@ -415,23 +428,24 @@ class ConfigManager:
         reversible (you'll see the pre-restore state in the backup list).
 
         Args:
-            backup_path: Path to a backup file inside BACKUP_DIR.
+            backup_path: Path to a backup file inside ``_backup_dir()``.
 
         Returns:
             Freshly loaded AppConfig.
 
         Raises:
             FileNotFoundError: If backup_path doesn't exist.
-            ValueError: If backup_path is outside BACKUP_DIR.
+            ValueError: If backup_path is outside ``_backup_dir()``.
         """
         backup_path = Path(backup_path).expanduser().resolve()
         if not backup_path.exists():
             raise FileNotFoundError(f"Backup not found: {backup_path}")
+        backup_dir = self._backup_dir()
         try:
-            backup_path.relative_to(BACKUP_DIR.resolve())
+            backup_path.relative_to(backup_dir.resolve())
         except ValueError as exc:
             raise ValueError(
-                f"Refusing to restore from path outside {BACKUP_DIR}"
+                f"Refusing to restore from path outside {backup_dir}"
             ) from exc
 
         # Snapshot the current state before overwriting so the user can undo.
