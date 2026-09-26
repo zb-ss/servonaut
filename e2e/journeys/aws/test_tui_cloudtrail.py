@@ -172,13 +172,11 @@ async def test_next_reads_the_rest_of_the_window(tui, seed, cloudtrail):
         target = max(i for i, row in enumerate(rows) if row[1] == NAMES[3])
         assert target > 50
         await select_row(t, t.on_screen("#cloudtrail_table"), target)
-        await t.wait_until(
-            lambda: f"Time: {rows[target][0]}" in t.rendered_text(),
-            desc="details of the selected event",
+        await t.wait_for_text(
+            f"Time: {rows[target][0]}",
+            f"Event: {NAMES[3]}",
+            "Resource Name: sg-0e2e0000000000001",
         )
-        details = t.rendered_text()
-        assert f"Event: {NAMES[3]}" in details
-        assert "Resource Name: sg-0e2e0000000000001" in details
 
 
 async def test_selected_row_details_match_while_filtered(tui, seed, cloudtrail):

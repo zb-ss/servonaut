@@ -71,22 +71,19 @@ async def test_bitwarden_store_list_and_clear(tui, seed, fake_cloud, journey, mo
         await t.wait_until(
             lambda: _pill(t) == "● Bitwarden (personal) — active", desc="Bitwarden active"
         )
-        text = t.rendered_text()
-        assert project in text
-        assert f"{TOKEN_VARIABLE} (set)" in text
+        text = await t.wait_for_text(project, f"{TOKEN_VARIABLE} (set)")
         assert "not installed" not in text
 
         # Names only, never values.
         await t.press("l")
         await t.wait_for_screen("SecretsListScreen")
         await t.wait_until(lambda: sorted(_names(t)) == sorted(SECRETS), desc="secret names")
-        text = t.rendered_text()
-        assert "bitwarden — 2 secrets" in text
+        text = await t.wait_for_text("bitwarden — 2 secrets")
         for value in SECRETS.values():
             assert value not in text
         await t.fill("#secrets_list_filter", "db/")
         await t.wait_until(lambda: _names(t) == ["db/app-1"], desc="filtered names")
-        assert "(showing 1 of 2)" in t.rendered_text()
+        await t.wait_for_text("(showing 1 of 2)")
         calls = vault.calls("bws")
         assert calls and all(c.argv[-3:] == ["secret", "list", project] for c in calls)
         assert all(c.env[TOKEN_VARIABLE] and vault.access_token not in c.joined for c in calls)
@@ -111,9 +108,7 @@ async def test_team_store_shadows_personal_until_cleared(
         await t.wait_until(
             lambda: _pill(t) == "● Bitwarden (team) — active", desc="team store active"
         )
-        text = t.rendered_text()
-        assert team in text and personal in text
-        assert "hidden by team config" in text
+        await t.wait_for_text(team, personal, "hidden by team config")
 
         await t.press("c")
         await t.wait_for_screen("ConfirmClearCacheModal")

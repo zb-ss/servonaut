@@ -149,7 +149,7 @@ async def test_inbox_dry_run_remediate_and_undo(tui, seed, fake_cloud):
 
         await _open_flood(t)
         assert _text(t, "#finding_detail_pill") == "high · detected · personal"
-        assert f"source_ip: {SOURCE_IP}" in t.rendered_text()
+        await t.wait_for_text(f"source_ip: {SOURCE_IP}")
 
         # The live preview offers a dry run first.
         await _open_preview(t, "#btn_finding_remediate_0", "LIVE EXECUTION")

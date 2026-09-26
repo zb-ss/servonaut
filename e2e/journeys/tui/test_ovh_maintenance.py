@@ -159,7 +159,7 @@ async def test_firewall_toggle_add_and_delete_rules(tui, seed, providers):
     async with tui() as t:
         await _open_server_action(t, MAIL.display_name, "btn_ovh_firewall", "OVHFirewallScreen")
         await t.wait_until(lambda: len(t.table_rows("#rules_table")) == 1, desc="rules listed")
-        assert "Firewall: Enabled" in t.rendered_text()
+        await t.wait_for_text("Firewall: Enabled")
         assert plain(t.table_rows("#rules_table")[0][1]) == "permit"
 
         # Disable: backing out first, then the typed word.

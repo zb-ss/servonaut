@@ -252,6 +252,26 @@ class TuiDriver:
         )
         return found[0]
 
+    async def wait_for_text(self, *needles: str, timeout: float = DEFAULT_TIMEOUT) -> str:
+        """Wait until the drawn screen shows every one of *needles*; return it.
+
+        Widget state runs ahead of the screen: a table holds its new rows
+        before it has sized its columns for them, so a name can be in the
+        table yet still cut short on screen. Checks of what the user sees
+        wait for the drawing, not for the data behind it.
+        """
+        missing = list(needles)
+
+        def drawn() -> Optional[str]:
+            text = self.rendered_text()
+            missing[:] = [needle for needle in needles if needle not in text]
+            return None if missing else text
+
+        try:
+            return await self.wait_until(drawn, timeout=timeout, desc="text on screen")
+        except JourneyTimeout as exc:
+            raise JourneyTimeout(f"{exc}; not drawn: {missing}") from None
+
     async def wait_for_toast(
         self,
         pattern: str,

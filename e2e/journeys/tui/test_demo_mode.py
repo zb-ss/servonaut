@@ -478,7 +478,7 @@ async def _demo_session(tui: Any, seed: Any, moto: Any, providers: Any, monkeypa
     monkeypatch.setattr(ServonautApp, "demo_mode", True)
     async with tui(size=DEMO_SIZE) as t:
         await _wait_for_fleet(t)
-        assert "DEMO" in t.rendered_text()
+        await t.wait_for_text("DEMO")
         yield Tour(t, secrets)
 
 
@@ -579,10 +579,7 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
     async with tui(size=DEMO_SIZE) as t:
         await _wait_for_fleet(t)
         real_rows = sorted(map(tuple, t.table_rows("InstanceTable")))
-        shown = t.rendered_text()
-        for name in REAL_NAMES:
-            assert name in shown, name
-        assert fleet.HZ_CACHE_1.public_ip in shown
+        await t.wait_for_text(*REAL_NAMES, fleet.HZ_CACHE_1.public_ip)
 
         # Switched on mid-session: data loaded before the switch is hidden too.
         await t.press("ctrl+shift+d")
@@ -609,9 +606,7 @@ async def test_demo_toggle_hides_then_restores_real_data(tui, seed, moto, provid
             lambda: sorted(map(tuple, t.table_rows("InstanceTable"))) == real_rows,
             desc="the real fleet rows back",
         )
-        shown = t.rendered_text()
-        for name in REAL_NAMES:
-            assert name in shown, name
+        await t.wait_for_text(*REAL_NAMES)
         # Provider screens show real data again too.
         await t.nav("nav_hetzner_manage")
         await t.wait_for_screen("HetznerManagerScreen")
