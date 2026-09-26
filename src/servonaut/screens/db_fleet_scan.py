@@ -180,7 +180,7 @@ class DbFleetScanScreen(Screen):
             f"failed {summary.failed}."
         )
         self._set_status(msg, error=summary.failed > 0)
-        self.notify(msg, severity="information")
+        self.notify(msg, severity="information", markup=False)
 
     async def _commit_selected_worker(self, instance_id: str) -> None:
         row = self._rows_by_id.get(instance_id)

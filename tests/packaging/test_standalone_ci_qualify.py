@@ -3277,6 +3277,8 @@ elif args == ["--_artifact-selftest"]:
                 "distribution": "frozen-cli",
                 "product_version": "9.8.7",
                 "build_revision": "test",
+                "channel": "stable",
+                "packaging_revision": 1,
                 "console_helper": "servonaut",
                 "desktop_child": None,
             }

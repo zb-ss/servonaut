@@ -1,0 +1,226 @@
+"""Scripted fake tools for the suite's PATH.
+
+A :class:`ShimSet` is a directory holding one small script per tool. The
+directory is the *only* entry on ``PATH`` in the test process and in every
+child, so the application can never find the host's real ``ssh``, ``scp``,
+``ssh-agent`` or terminal emulator. Every call is recorded; answers come from
+rules a test adds with :meth:`ShimSet.when`::
+
+    shims.when("ssh", r"uptime", stdout=" 10:00:00 up 3 days\\n")
+    ...
+    assert "uptime" in shims.calls("ssh")[-1].joined
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import shlex
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from e2e.harness.bootstrap import HARNESS_DIR
+
+TERMINAL = "xterm"
+TOOLS = ("ssh", "scp", "ssh-add", "ssh-agent", "ssh-keygen", TERMINAL, "browser", "editor")
+
+# Answers used when no test rule matches. ``ssh`` and ``scp`` have none: they
+# exit 255, as if the host refused the connection, so an unscripted call looks
+# like an unreachable server rather than a silent success.
+_DEFAULT_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "name": "terminal-runs-command",
+        "tool": TERMINAL,
+        "match": "",
+        "action": "run_terminal_command",
+    },
+    {
+        "name": "agent-not-running",
+        "tool": "ssh-add",
+        "match": "",
+        "stderr": "Could not open a connection to your authentication agent.\n",
+        "rc": 2,
+    },
+    {
+        "name": "agent-start-refused",
+        "tool": "ssh-agent",
+        "match": "",
+        "stderr": "e2e: starting an agent is disabled in tests\n",
+        "rc": 1,
+    },
+    {"name": "browser-records-url", "tool": "browser", "match": "", "rc": 0},
+    {"name": "editor-noop", "tool": "editor", "match": "", "rc": 0},
+)
+
+
+def jump_host(argv: list[str]) -> Optional[str]:
+    """The jump host an ssh argv goes through, or None for a direct login.
+
+    That is the ``-J`` value, or the destination of a ``ssh ... -- <hop>``
+    ProxyCommand: the form Servonaut uses while it verifies host keys, so the
+    bastion's own key is checked too.
+    """
+    for index, arg in enumerate(argv[:-1]):
+        if arg == "-J":
+            return argv[index + 1]
+        value = argv[index + 1]
+        if arg == "-o" and value.startswith("ProxyCommand="):
+            words = shlex.split(value[len("ProxyCommand="):])
+            if words[:1] == ["ssh"] and "--" in words[:-1]:
+                return words[words.index("--") + 1]
+    return None
+
+
+@dataclass(frozen=True)
+class ShimCall:
+    """One recorded invocation of a fake tool."""
+
+    tool: str
+    argv: list[str]
+    cwd: str
+    rule: Optional[str]
+    stdin: Optional[str] = None
+    # With ``inspect_identity``: the ``-i`` file as it was during the call,
+    # ``{"path", "exists", "mode", "size", "sha256"}`` (never the contents).
+    identity: Optional[dict] = None
+    # Credential variables a Bitwarden fake saw: name -> present (never values).
+    env: Optional[dict] = None
+
+    @property
+    def joined(self) -> str:
+        return " ".join(self.argv)
+
+
+@dataclass
+class ShimSet:
+    """A directory of fake tools plus the rules that script their answers."""
+
+    directory: Path
+    _rules: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        runner = HARNESS_DIR / "shim_runner.py"
+        python = shlex.quote(sys.executable)
+        for tool in TOOLS:
+            # -B: isolated mode ignores PYTHONDONTWRITEBYTECODE, and the runner
+            # is unguarded, so it would compile the standard library into the
+            # toolchain unnoticed.
+            self._write_script(
+                tool,
+                f"exec {python} -I -B {shlex.quote(str(runner))} "
+                f"{shlex.quote(str(self.directory))} {shlex.quote(tool)} \"$@\"\n",
+            )
+        # Python itself is the one real program reachable by name.
+        for name in ("python", "python3"):
+            self._write_script(name, f"exec {python} \"$@\"\n")
+        self._save()
+
+    def _write_script(self, name: str, body: str) -> None:
+        path = self.directory / name
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def install(self, tool: str, runner: Path) -> Path:
+        """Put an extra fake tool on PATH, answered by the program *runner*.
+
+        *runner* is called like the built-in runner (``runner <shim-dir>
+        <tool> [arguments...]``, in Python's isolated mode) and should
+        record its calls in the same log, so :meth:`calls` sees them. The
+        default tools stay as they are: a journey opts in to each extra one.
+        """
+        if tool in TOOLS or tool in ("python", "python3"):
+            raise ValueError(f"{tool!r} is already a built-in fake tool")
+        python = shlex.quote(sys.executable)
+        self._write_script(
+            tool,
+            f"exec {python} -I {shlex.quote(str(runner))} "
+            f"{shlex.quote(str(self.directory))} {shlex.quote(tool)} \"$@\"\n",
+        )
+        return self.path_of(tool)
+
+    @property
+    def log_path(self) -> Path:
+        return self.directory / "argv.jsonl"
+
+    def path_of(self, tool: str) -> Path:
+        return self.directory / tool
+
+    def when(
+        self,
+        tool: str,
+        match: str = "",
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        rc: int = 0,
+        delay: float = 0.0,
+        capture_stdin: bool = False,
+        inspect_identity: bool = False,
+        name: Optional[str] = None,
+    ) -> None:
+        """Answer calls to *tool* whose joined argv matches *match* (a regex).
+
+        Rules are tried in the order they were added; the first match wins,
+        and the built-in defaults come last. *inspect_identity* records the
+        state of the file passed with ``-i`` at the moment of the call (see
+        :attr:`ShimCall.identity`), never its contents.
+        """
+        self._rules.append(
+            {
+                "name": name or f"{tool}:{match}",
+                "tool": tool,
+                "match": match,
+                "stdout": stdout,
+                "stderr": stderr,
+                "rc": rc,
+                "delay": delay,
+                "capture_stdin": capture_stdin,
+                "inspect_identity": inspect_identity,
+            }
+        )
+        self._save()
+
+    def _save(self) -> None:
+        payload = {"rules": [*self._rules, *_DEFAULT_RULES]}
+        tmp = self.directory / ".scenario.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(self.directory / "scenario.json")
+
+    def _read_log(self) -> list[str]:
+        """The log's lines, read under the lock the fake tools write with."""
+        try:
+            with self.log_path.open(encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_SH)
+                try:
+                    return handle.read().splitlines()
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        except FileNotFoundError:
+            return []
+
+    def calls(self, tool: Optional[str] = None) -> list[ShimCall]:
+        """Return the recorded calls, oldest first, optionally for one tool."""
+        records = []
+        for line in self._read_log():
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue  # blank or partial line
+            records.append((data.get("sequence", 0), data))
+        records.sort(key=lambda item: item[0])
+        out = [
+            ShimCall(
+                tool=data["tool"],
+                argv=list(data["argv"]),
+                cwd=data.get("cwd", ""),
+                rule=data.get("rule"),
+                stdin=data.get("stdin"),
+                identity=data.get("identity"),
+                env=data.get("env"),
+            )
+            for _, data in records
+        ]
+        return [call for call in out if tool is None or call.tool == tool]

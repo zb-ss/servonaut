@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
 
+from servonaut.screens._demo_resolve import replace_instances
 from servonaut.services.object_storage_regions import (
     OVH_S3_DEFAULT_REGION,
     OVH_S3_REGIONS,
@@ -512,6 +513,7 @@ class OVHSetupScreen(Screen):
                 self.app.notify(
                     f"OVH connected as: {result['account']}",
                     severity="information",
+                    markup=False,
                 )
             else:
                 self.query_one("#ovh_test_result", Static).update(
@@ -520,6 +522,7 @@ class OVHSetupScreen(Screen):
                 self.app.notify(
                     f"OVH connection failed: {result['message']}",
                     severity="error",
+                    markup=False,
                 )
         except Exception as e:
             logger.error("OVH connection test failed: %s", e)
@@ -640,6 +643,7 @@ class OVHSetupScreen(Screen):
             self.app.notify(
                 f"OVH service init failed: {e}",
                 severity="error",
+                markup=False,
             )
             self.action_back()
             return
@@ -650,8 +654,7 @@ class OVHSetupScreen(Screen):
             instances = await self.app.ovh_service.fetch_instances_cached(force_refresh=True)
             if instances:
                 # Merge into app instance list
-                non_ovh = [i for i in self.app.instances if not i.get('is_ovh')]
-                self.app.instances = non_ovh + instances
+                replace_instances(self.app, "ovh", instances)
                 self.app.notify(
                     f"OVH enabled — {len(instances)} instances loaded.",
                     severity="information",
@@ -669,6 +672,7 @@ class OVHSetupScreen(Screen):
                 f"OVH enabled but fetch failed: {e}",
                 severity="warning",
                 timeout=8,
+                markup=False,
             )
 
         self.action_back()

@@ -250,8 +250,8 @@ class TestCollectDiagnosticsConfigScrubbing:
         ]:
             section, field = path
             assert snap[section][field] == "<removed:secret-key>", f"{path} not scrubbed: {snap[section][field]!r}"
-        # client_id is an OAuth identifier, not a secret — must NOT be scrubbed
-        assert snap["ovh"]["client_id"] == "client-id-not-secret"
+        # client_id is not a secret, but it identifies the account: left out.
+        assert snap["ovh"]["client_id"] == "<omitted>"
         assert snap["ovh"]["endpoint"] == "ovh-eu"
         # No leaked value anywhere in the snapshot
         flat = json.dumps(snap)

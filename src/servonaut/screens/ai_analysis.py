@@ -157,17 +157,7 @@ class AIAnalysisScreen(Screen):
         model = escape(
             ai_config.model or self._default_model_for(ai_config.provider)
         )
-        api_key = ai_config.api_key
-        if ai_config.provider == 'ollama':
-            key_status = "[dim]n/a[/dim]"
-        elif ai_config.provider == 'servonaut':
-            key_status = "[dim]OAuth bearer[/dim]"
-        elif not api_key:
-            key_status = "[red]not set[/red]"
-        elif is_secret_ref(api_key) and not resolve_secret(api_key):
-            key_status = "[yellow]ref unresolved[/yellow]"
-        else:
-            key_status = "[green]set[/green]"
+        key_status = self._key_status_markup(ai_config)
 
         lines.append(
             f"Provider: [cyan]{provider}[/cyan]  "
@@ -175,6 +165,24 @@ class AIAnalysisScreen(Screen):
             f"API Key: {key_status}"
         )
         return lines
+
+    @staticmethod
+    def _key_status_markup(ai_config) -> str:
+        """Rich markup for the selected provider's API key state.
+
+        Reads the key via ``key_for`` so per-provider keys count (the
+        legacy shared field is only a fallback). Ollama needs a key only
+        for Ollama Cloud, so an empty one is "n/a" rather than missing.
+        """
+        provider = (ai_config.provider or "").strip().lower()
+        if provider == "servonaut":
+            return "[dim]OAuth bearer[/dim]"
+        api_key = ai_config.key_for(provider)
+        if not api_key:
+            return "[dim]n/a[/dim]" if provider == "ollama" else "[red]not set[/red]"
+        if is_secret_ref(api_key) and not resolve_secret(api_key):
+            return "[yellow]ref unresolved[/yellow]"
+        return "[green]set[/green]"
 
     def _compose_servonaut_row(self, auth) -> str:
         """Render the dedicated "Servonaut AI" row at the top of the picker.
@@ -335,7 +343,7 @@ class AIAnalysisScreen(Screen):
             try:
                 compiled = re.compile(regex_match.group(1), re.IGNORECASE)
             except re.error as e:
-                self.app.notify(f"Invalid regex: {e}", severity="error")
+                self.app.notify(f"Invalid regex: {e}", severity="error", markup=False)
                 return
             filtered = [
                 line for line in self._raw_text.splitlines()

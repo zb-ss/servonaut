@@ -9,6 +9,7 @@ import subprocess
 import threading
 from typing import List, Optional
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -17,6 +18,12 @@ from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Header, Footer, Static, RichLog
 
+from servonaut.utils.ssh_utils import (
+    SshLog,
+    background_process_kwargs,
+    track_background_process,
+    with_diagnostics,
+)
 from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.screens.log_picker import (
@@ -91,6 +98,7 @@ class LogViewerScreen(Screen):
         super().__init__()
         self._instance = instance
         self._process: Optional[subprocess.Popen] = None
+        self._ssh_log: Optional[SshLog] = None
         self._is_paused: bool = False
         self._current_log: Optional[str] = None
         self._available_logs: List[str] = []
@@ -249,13 +257,20 @@ class LogViewerScreen(Screen):
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
 
         try:
+            # ssh writes its own messages to a private log (see SshLog).
+            self._ssh_log = SshLog()
             # Use blocking Popen — the reader thread handles all I/O.
             self._process = subprocess.Popen(
-                [str(a) for a in ssh_cmd],
+                self._ssh_log.command(ssh_cmd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                env=self._ssh_log.environment(),
+                # No terminal: ssh cannot prompt over the TUI.
+                **background_process_kwargs(),
             )
+            # Its own session no longer ends it with the terminal: exit does.
+            track_background_process(self._process)
 
             self._stop_event.clear()
             self._reader_thread = threading.Thread(
@@ -297,19 +312,25 @@ class LogViewerScreen(Screen):
             if not self._stop_event.is_set():
                 logger.error("Reader thread error: %s", e)
         finally:
-            # Check stderr for errors when stdout ends
+            # Check stderr (and ssh's own log) for errors when stdout ends
             if proc and proc.stderr:
                 try:
                     stderr_data = proc.stderr.read()
-                    if stderr_data:
-                        err_text = stderr_data.decode("utf-8", errors="replace").strip()
+                    log = self._ssh_log
+                    err_text = with_diagnostics(
+                        log.read() if log else "",
+                        stderr_data.decode("utf-8", errors="replace") if stderr_data else "",
+                    ).strip()
+                    if err_text:
                         # Filter out SSH warnings, show real errors
                         err_lines = [
                             l for l in err_text.splitlines()
                             if not l.startswith("Warning:") and l.strip()
                         ]
                         if err_lines:
-                            self._line_queue.put(f"[red]SSH error: {err_lines[-1]}[/red]")
+                            self._line_queue.put(
+                                f"[red]SSH error: {escape(err_lines[-1])}[/red]"
+                            )
                 except Exception:
                     pass
             self._line_queue.put(_EOF)
@@ -415,6 +436,9 @@ class LogViewerScreen(Screen):
             except Exception:
                 pass
             self._process = None
+        if self._ssh_log is not None:
+            self._ssh_log.close()
+            self._ssh_log = None
 
         # Drain any stale items from the queue.
         while not self._line_queue.empty():
@@ -676,7 +700,7 @@ class LogViewerScreen(Screen):
             )
         except Exception as e:
             logger.error("Error adding directory %s: %s", directory, e)
-            self.app.notify(f"Error scanning {directory}: {e}", severity="error")
+            self.app.notify(f"Error scanning {directory}: {e}", severity="error", markup=False)
             self._resume_stream_after_modal()
             return
 
@@ -712,7 +736,7 @@ class LogViewerScreen(Screen):
         if result not in existing:
             existing.append(result)
             service.set_custom_paths(instance_id, existing)
-            self.app.notify(f"Added custom path: {result}")
+            self.app.notify(f"Added custom path: {result}", markup=False)
 
         # Add to available list if not already there
         if result not in self._available_logs:

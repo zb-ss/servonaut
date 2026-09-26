@@ -19,6 +19,7 @@ from servonaut.distribution.manifest import (
     ReleaseManifest,
     parse_semver,
     parse_timestamp,
+    validate_packaging_revision,
 )
 from servonaut.distribution.trust import sign_manifest
 from servonaut.runtime import DistributionKind
@@ -49,10 +50,8 @@ class ManifestBuilder:
             ) from None
         if not isinstance(channel, ReleaseChannel):
             raise ManifestSchemaError(f"Invalid release channel: {channel}")
-        if packaging_revision is not None and (
-            not isinstance(packaging_revision, int) or isinstance(packaging_revision, bool) or packaging_revision < 0
-        ):
-            raise ManifestSchemaError("packaging_revision must be a non-negative integer.")
+        if packaging_revision is not None:
+            validate_packaging_revision(packaging_revision)
 
         self._product_version = product_version
         self._channel = channel

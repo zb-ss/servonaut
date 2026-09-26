@@ -33,6 +33,32 @@ _KNOWN_VOICE_MODEL_SIZES: frozenset = frozenset({
     "distil-small.en", "distil-medium.en", "distil-large-v3",
 })
 
+# Values accepted by ``SSHConfig.host_key_checking``: ``accept-new`` trusts a
+# host on first use and refuses a changed key, ``yes`` accepts known hosts
+# only, ``off`` disables verification. Public because the host-key policy
+# that turns the setting into ssh options enforces the same set.
+HOST_KEY_CHECKING_MODES: tuple = ("accept-new", "yes", "off")
+DEFAULT_HOST_KEY_CHECKING = "accept-new"
+
+
+def normalize_host_key_checking(value: Any) -> str:
+    """Return *value* as a supported host-key mode, or the default.
+
+    Case and surrounding whitespace are ignored. Anything else falls back to
+    the verifying default rather than to ``off``: a typo in the config must
+    never silently disable host-key verification.
+    """
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in HOST_KEY_CHECKING_MODES:
+            return candidate
+    logger.warning(
+        "SSHConfig: host_key_checking %r is not one of %s; using %r.",
+        value, ", ".join(HOST_KEY_CHECKING_MODES), DEFAULT_HOST_KEY_CHECKING,
+    )
+    return DEFAULT_HOST_KEY_CHECKING
+
+
 # Bounds for the spoken-reply playback rate. Outside this window the
 # synthesis either drags unusably or degrades into noise, so — unlike the
 # advisory checks above — an out-of-range value IS clamped: an absurd rate
@@ -240,6 +266,16 @@ class AIProviderConfig:
             ``"ai.banner.paying_twice"``, ``"ai.banner.capability"``. The list
             is consulted by the T4.5 banner gating in
             ``ProviderPreferenceResolver``.
+        stream_silence_timeout_seconds: Hosted Servonaut AI only. How long a
+            streamed reply may stay silent (no event, not even a keep-alive
+            ping) before the connection is treated as lost. The service pings
+            every ~15 s. Accepted range 20–600 s; values outside it are
+            clamped. Time spent answering a tool prompt or running a tool is
+            not counted.
+        tool_confirm_timeout_seconds: Hosted Servonaut AI only. How long a
+            tool confirmation prompt stays open. Once it passes, the prompt
+            closes and the tool is not run. The service waits about 60 s for
+            a tool result by default, so keep this below that.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # legacy single-key field; kept for backward compat
@@ -264,6 +300,8 @@ class AIProviderConfig:
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
     ollama_api_key: str = ""
+    stream_silence_timeout_seconds: float = 35.0
+    tool_confirm_timeout_seconds: float = 50.0
 
     def key_for(self, provider_name: str) -> str:
         """Return the configured API key for *provider_name*.
@@ -406,6 +444,9 @@ class AzureConfig:
     resource_groups: List[str] = field(default_factory=list)
 
 
+DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER = 3
+
+
 @dataclass
 class RelayConfig:
     """Mercure relay listener configuration.
@@ -423,6 +464,12 @@ class RelayConfig:
     base_url: str = ""            # e.g. https://api.servonaut.dev
     mercure_url: str = ""         # e.g. https://servonaut.dev/.well-known/mercure
     heartbeat_interval: int = 30
+    # Heartbeat 401/403s on a still-valid session (a refresh did not cure
+    # them) before the listener reports that the relay is not delivering:
+    # one relay.log event, a warning, and the TUI indicator leaves
+    # "connected". The listener keeps retrying either way, refreshing the
+    # session on every Nth rejected heartbeat only. Minimum 1.
+    heartbeat_rejection_alert_after: int = DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
     # Maximum guard tier a headless `servonaut connect` listener may
     # auto-approve when executing AI-chat tool calls dispatched over the
     # relay (no human is present to confirm). One of: "readonly",
@@ -457,6 +504,11 @@ class SSHConfig:
         connect_timeout: Seconds before giving up on the initial TCP
             connection (``ConnectTimeout``). 0 means OS default, which can
             block for minutes on an unreachable host.
+        host_key_checking: How host keys are verified (one of
+            ``HOST_KEY_CHECKING_MODES``). ``accept-new`` records a host's
+            key on first connect and refuses a changed one; ``yes`` accepts
+            known hosts only; ``off`` skips verification entirely. An
+            unrecognised value falls back to ``accept-new`` with a warning.
     """
     server_alive_interval: int = 30
     server_alive_count_max: int = 5
@@ -465,6 +517,11 @@ class SSHConfig:
     # Live monitoring needs time for both the handshake and the remote sample.
     live_stats_timeout_seconds: float = 20.0
     live_stats_interval_seconds: float = 3.0
+    host_key_checking: str = DEFAULT_HOST_KEY_CHECKING
+
+    def __post_init__(self) -> None:
+        """Coerce ``host_key_checking`` into a supported mode."""
+        self.host_key_checking = normalize_host_key_checking(self.host_key_checking)
 
 
 @dataclass
@@ -704,6 +761,13 @@ class MCPConfig:
     # Configurable SCP transfer timeout. Large files or slow links may need
     # more than the default 300 s; set higher rather than retrying blind.
     transfer_timeout_seconds: int = 300
+    # db_setup_scan holds each discovered DB password in memory under a
+    # staging token until db_setup_save commits it. Tokens expire after this
+    # many seconds, and at most db_staging_max_tokens are held at once (the
+    # oldest is dropped first). A fleet DB scan stages its batch in a store of
+    # its own, so this cap does not limit how many boxes it can cover.
+    db_staging_ttl_seconds: int = 900
+    db_staging_max_tokens: int = 50
 
 
 @dataclass

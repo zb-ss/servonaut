@@ -107,18 +107,23 @@ def test_posix_process_tree_graceful_terminate() -> None:
 
 
 def test_posix_process_tree_forces_sigkill_on_stubborn_child() -> None:
-    # Child ignores SIGTERM and sleeps
+    # Child ignores SIGTERM, reports that it does, and sleeps
     cmd = [
         sys.executable,
         "-c",
         (
-            "import signal, time; "
+            "import signal, sys, time; "
             "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "sys.stdout.write('ready\\n'); sys.stdout.flush(); "
             "time.sleep(30)"
         ),
     ]
     tree = spawn_desktop_child(cmd, platform_name="posix")
     try:
+        assert tree.stdout is not None
+        # Terminating before the handler is installed would end a slow-starting
+        # child with SIGTERM, never reaching the SIGKILL path under test.
+        assert tree.stdout.readline() == b"ready\n"
         assert tree.poll() is None
         start_time = time.monotonic()
         # Should escalate to SIGKILL after grace_seconds
@@ -447,6 +452,66 @@ def test_launch_logs_child_stderr_when_handshake_fails(
     sock.close()
 
     assert "frontend assets are missing" in caplog.text
+
+
+def _partial_frame_child_script(after_close: str) -> str:
+    """A child that reads the start request, then sends half a frame and closes stdout.
+
+    Closing stdout before ``after_close`` runs forces the order a loaded
+    machine produces by chance: the parent sees end of stream while the
+    child is still running.
+    """
+    return (
+        "import os, struct, sys, time\n"
+        "from servonaut.desktop.control import read_parent_frame\n"
+        "read_parent_frame(sys.stdin.buffer, platform_name='posix')\n"
+        "os.write(1, struct.pack('>I', 64) + b'{\"version\":1')\n"
+        "os.close(1)\n"
+        f"{after_close}\n"
+    )
+
+
+def _launch_posix(script: str) -> None:
+    sock = _bind_loopback()
+    try:
+        launch_and_handshake_desktop_child(
+            [sys.executable, "-c", script],
+            origin=f"http://127.0.0.1:{sock.getsockname()[1]}",
+            token=SecretToken.generate(),
+            listener=sock,
+            startup_timeout=5.0,
+            platform_name="posix",
+        )
+    finally:
+        sock.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pipe semantics")
+def test_launch_reports_exit_when_child_dies_mid_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frame cut short by the child exiting is reported as the exit, not as framing."""
+    # Generous, so a loaded machine cannot stretch the pause past the grace.
+    monkeypatch.setattr(process_tree, "_CHILD_EXIT_GRACE_SECONDS", 10.0)
+    script = _partial_frame_child_script("time.sleep(0.5)\nos._exit(7)")
+
+    with pytest.raises(ProcessTreeError, match="^child-exited-early:7$"):
+        _launch_posix(script)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pipe semantics")
+def test_launch_reports_truncated_frame_when_child_keeps_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit grace is bounded: a child that stays up still gets a framing error."""
+    monkeypatch.setattr(process_tree, "_CHILD_EXIT_GRACE_SECONDS", 0.2)
+    # The child only exits once the parent closes its stdin during cleanup.
+    script = _partial_frame_child_script("sys.stdin.buffer.read()\nos._exit(0)")
+
+    with pytest.raises(
+        ProcessTreeError, match="^control-protocol-error:truncated-frame$"
+    ):
+        _launch_posix(script)
 
 
 class _FakeStartupInfo:

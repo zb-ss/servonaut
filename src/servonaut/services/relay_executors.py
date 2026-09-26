@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
-from servonaut.utils.ssh_utils import run_ssh_subprocess
+from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
+from servonaut.services.ssh_host_keys import (
+    SCP_REFUSAL_EXIT_CODES,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 if TYPE_CHECKING:
     from servonaut.services.ai_tool_bridge import ToolCall, ToolResult
@@ -238,6 +244,18 @@ class RelayExecutors:
                 return inst
         return None
 
+    def _host_key_policy(self) -> HostKeyPolicy:
+        """The host-key policy the SSH/SCP commands were built with."""
+        return HostKeyPolicy.from_ssh_config(self._config_manager.get().ssh)
+
+    @staticmethod
+    def _host_key_target(instance: Dict, conn: Dict) -> HostKeyTarget:
+        """The names a genuine host-key refusal for *conn* can report."""
+        return HostKeyTarget.for_connection(
+            conn.get('host') or '', conn.get('port'),
+            instance=instance, profile=conn.get('profile'),
+        )
+
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
         profile = self._connection_service.resolve_profile(instance)
@@ -320,11 +338,13 @@ class RelayExecutors:
             proxy_args=conn['proxy_args'],
             remote_command=command,
             port=conn.get('port'),
-            extra_options=conn.get('extra_options') or [],
+            # Nobody can answer a prompt here.
+            extra_options=["BatchMode=yes", *(conn.get('extra_options') or [])],
         )
 
         try:
-            stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=request.ttl_seconds)
+            ssh_output = await run_ssh_subprocess(ssh_cmd, timeout=request.ttl_seconds)
+            stdout, stderr = ssh_output
         except asyncio.TimeoutError:
             return CommandResponse(
                 request_id=request.id,
@@ -336,6 +356,18 @@ class RelayExecutors:
                 request_id=request.id,
                 status="error",
                 error_message=str(e),
+            )
+
+        host_key_problem = detect_host_key_problem(
+            ssh_diagnostics(ssh_output), ssh_returncode(ssh_output),
+            self._host_key_target(instance, conn), self._host_key_policy(),
+            stdout=stdout,
+        )
+        if host_key_problem is not None:
+            return CommandResponse(
+                request_id=request.id,
+                status="error",
+                error_message=host_key_problem.agent_message,
             )
 
         output = stdout.decode('utf-8', errors='replace')
@@ -437,7 +469,8 @@ class RelayExecutors:
         proxy_args = conn['proxy_args']
         profile = conn['profile']
         port = conn.get('port')
-        extra_options = conn.get('extra_options') or []
+        # Nobody can answer a prompt here.
+        extra_options = ["BatchMode=yes", *(conn.get('extra_options') or [])]
 
         proxy_jump = (
             self._connection_service.get_proxy_jump_string(profile) if profile else None
@@ -481,7 +514,17 @@ class RelayExecutors:
             )
         else:
             error_msg = f"Transfer failed (exit {returncode})"
-            if stderr:
+            # scp has no private log: its stderr is checked, and legacy scp
+            # (before OpenSSH 9, or -O) exits 1 rather than 255.
+            host_key_problem = detect_host_key_problem(
+                stderr, returncode, self._host_key_target(instance, conn),
+                self._host_key_policy(), stdout=stdout,
+                exit_codes=SCP_REFUSAL_EXIT_CODES,
+            )
+            if host_key_problem is not None:
+                # In place of OpenSSH's banner, which names local paths.
+                error_msg += f"\n{host_key_problem.agent_message}"
+            elif stderr:
                 error_msg += f"\n{stderr}"
             return CommandResponse(
                 request_id=request.id,

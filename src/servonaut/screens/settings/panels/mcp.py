@@ -62,6 +62,11 @@ class McpPanel(SettingsPanel):
     PANEL_ID = "mcp"
     TITLE = "MCP Server"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "mcp_audit_path": "redact_path",
+    }
+
     DEFAULT_CSS = """
     McpPanel .mcp-warn {
         color: $warning;
@@ -170,7 +175,7 @@ class McpPanel(SettingsPanel):
         self.query_one("#mcp_guard_level", Select).value = guard
         self._update_guard_warn(guard)
 
-        self.query_one("#mcp_audit_path", Input).value = mcp.audit_path
+        self._show_field("mcp_audit_path", mcp.audit_path)
         self.query_one("#mcp_max_output_lines", Input).value = str(mcp.max_output_lines)
 
         allow_destructive = bool(mcp.allow_destructive_aws_call)
@@ -187,7 +192,7 @@ class McpPanel(SettingsPanel):
         """Return current widget values for dirty comparison."""
         return {
             "guard_level": str(self.query_one("#mcp_guard_level", Select).value),
-            "audit_path": self.query_one("#mcp_audit_path", Input).value.strip(),
+            "audit_path": self._field_value("mcp_audit_path").strip(),
             "max_output_lines": self.query_one("#mcp_max_output_lines", Input).value.strip(),
             "allow_destructive": self.query_one("#mcp_allow_destructive", Switch).value,
             "blocklist": self.query_one("#mcp_blocklist", StringListEditor).get_values(),
@@ -201,7 +206,7 @@ class McpPanel(SettingsPanel):
             ValidationError: On invalid max_output_lines.
         """
         guard = str(self.query_one("#mcp_guard_level", Select).value)
-        audit_path = self.query_one("#mcp_audit_path", Input).value.strip()
+        audit_path = self._field_value("mcp_audit_path").strip()
         max_lines_raw = self.query_one("#mcp_max_output_lines", Input).value.strip()
 
         try:

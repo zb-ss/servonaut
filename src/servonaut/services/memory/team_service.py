@@ -216,9 +216,9 @@ class TeamMemoryService:
 
     **Crypto flow for ``share_instance``:**
     1. Fetch existing envelopes for the instance via ``retrieval_service``.
-    2. For each envelope, obtain the DEK by calling ``key_store_provider()``
-       to get the active key material, then use ``crypto.decrypt_envelope``
-       to unwrap the DEK.
+    2. For each envelope of a selected module, obtain the DEK by calling
+       ``key_store_provider()`` to get the active key material, then use
+       ``crypto.decrypt_envelope`` to unwrap the DEK.
     3. For each eligible team member (filtered by role), re-wrap the DEK
        with the member's public key using PyNaCl ``SealedBox``.
     4. POST the full wraps array to the grant endpoint.
@@ -371,7 +371,7 @@ class TeamMemoryService:
         team_slug: str,
         instance_id: str,
         required_role: str,
-        modules: Optional[List[str]],
+        modules: List[str],
         member_pubkeys: List[TeamMemberKey],
     ) -> Grant:
         """Share an instance with team members, re-wrapping all DEKs internally.
@@ -382,7 +382,9 @@ class TeamMemoryService:
         3. For each envelope, decrypt to obtain the raw DEK using the active
            key material from ``key_store_provider()``.
         4. Filter members to those whose role >= ``required_role``.
-        5. For each eligible member × envelope: wrap DEK with member's pubkey.
+        5. For each eligible member × envelope of a SELECTED module: wrap the
+           DEK with the member's pubkey. A wrap is what lets a member decrypt,
+           so envelopes of modules outside ``modules`` are never wrapped.
         6. POST grant with all wraps.
         7. On ``InsufficientWrapsError``: re-raise typed exception so the
            caller can refresh pubkeys and retry once.
@@ -393,13 +395,24 @@ class TeamMemoryService:
             instance_id: Instance identifier (must be owned by caller).
             required_role: Minimum role for members to read the grant
                 (``"viewer"`` | ``"member"`` | ``"admin"`` | ``"owner"``).
-            modules: Module whitelist, or ``None`` for all modules.
+            modules: Module whitelist (required, non-empty). Only these
+                modules' data keys are wrapped for the members; there is no
+                "share everything" value, so every grant names its modules.
             member_pubkeys: List of ``TeamMemberKey`` for eligible members.
 
         Returns:
             The created ``Grant``.
 
+        Note:
+            Narrowing an existing share is not possible in place: the API
+            has no per-module wrap revocation, and a second grant for the
+            same instance is refused (``grant_exists``). Revoke the grant,
+            purge its wraps (:meth:`revoke_grant` + :meth:`purge_grant`,
+            which drop every non-granter wrap on the instance), then share
+            again with the narrower module list.
+
         Raises:
+            ValueError: If ``modules`` is ``None`` or empty.
             UpsellRequired: If ``memory_team_share`` is not in the plan.
             InsufficientWrapsError: If the server reports missing wraps.
             GrantAlreadyExistsError: If a live grant already exists for
@@ -407,13 +420,18 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        if not modules:
+            raise ValueError("Select at least one module to share.")
 
         # Spec §3.2: GET /memory/{instance_id} returns
         # {"instance": ..., "modules": ["os", "runtimes", ...]}  — strings, not dicts.
         # Each envelope_id is resolved per-module via get_module_envelope_raw inside _build_wraps.
         module_list_data = await self._retrieval_service.list_instance_modules(instance_id)
         raw_modules = module_list_data.get("modules", []) or []
-        module_names: List[str] = [m for m in raw_modules if isinstance(m, str)]
+        selected = set(modules)
+        module_names: List[str] = [
+            m for m in raw_modules if isinstance(m, str) and m in selected
+        ]
 
         required_order = self._ROLE_ORDER.get(required_role, 0)
         eligible_members = [
@@ -435,7 +453,7 @@ class TeamMemoryService:
         body: Dict[str, Any] = {
             "instance_id": instance_id,
             "required_role": required_role,
-            "modules": modules,
+            "modules": list(modules),
             "wraps": wraps,
         }
 

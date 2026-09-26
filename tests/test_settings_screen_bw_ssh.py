@@ -79,6 +79,11 @@ class _FakePanel:
         config_folder: str = "Servonaut",
     ) -> None:
         self._bw_ssh_config: Optional[Dict[str, Any]] = bw_config
+        # Demo-mode field bookkeeping the real base class keeps.
+        self._demo_real: Dict[str, Any] = {}
+        self._demo_shown: Dict[str, Any] = {}
+        self._demo_pending: Dict[str, list] = {}
+        self._demo_edited: set = set()
 
         # Fake widgets
         self._status_widget = _FakeWidget()
@@ -156,6 +161,13 @@ class _FakePanel:
     _refresh_bw_ssh_status = BwSshPanel._refresh_bw_ssh_status
     _persist_vault_folder = BwSshPanel._persist_vault_folder
     current_values = BwSshPanel.current_values
+    # Fields go through the base class's demo-mode helpers.
+    DEMO_REDACTED_FIELDS = BwSshPanel.DEMO_REDACTED_FIELDS
+    _show_field = BwSshPanel._show_field
+    _field_value = BwSshPanel._field_value
+    _redact_for_display = BwSshPanel._redact_for_display
+    _read_field = BwSshPanel._read_field
+    _write_field = BwSshPanel._write_field
 
 
 # Shortcuts so tests can call the real method with the fake self.

@@ -14,7 +14,9 @@ refresh is refused and nothing is written. Only counts are printed.
 The candidates list only the warnings a run could not approve, so an approval
 missing from them may still be current. ``--prune-stale`` therefore reads the
 same run's ``warnings.json``, whose ``stale`` list names every approval the run
-did not observe, and resolves each of them:
+did not observe. The report must list every current approval exactly once, as
+approved or stale, with counts that match its lists; otherwise the refresh is
+refused. Each stale approval is then resolved:
 
 * a candidate with the same code and module whose importers are a strict
   subset of the stale approval's, with the same set of qualifiers, inherits
@@ -29,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections.abc import Collection, Mapping, Sequence
@@ -40,6 +43,7 @@ from scripts.standalone_cli.evidence_policy import (
     _POLICY_MAX_BYTES,
     _TARGET_NAMES,
     _WARNING_ALLOWLIST_FIELDS,
+    _WARNING_COUNTS_FIELDS,
     _WARNING_RECORD_FIELDS,
     _WARNING_REPORT_FIELDS,
     _fingerprint,
@@ -80,9 +84,9 @@ def refresh_warning_allowlist(
     candidates = _load_candidates(candidates_path, target)
     approvals = _index_by_approval_key(entries, "warning allowlist")
     replacements = _index_by_approval_key(candidates, "warning candidates")
-    stale: frozenset[str] = frozenset()
+    stale: frozenset[_ApprovalKey] = frozenset()
     if warnings_path is not None:
-        stale = _load_stale_fingerprints(warnings_path, entries, candidates)
+        stale = _load_stale_approvals(warnings_path, entries, candidates)
     narrowed = _narrowed_reviews(replacements, approvals, stale)
     unreviewed = replacements.keys() - approvals.keys() - narrowed.keys()
     if unreviewed:
@@ -96,7 +100,7 @@ def refresh_warning_allowlist(
         candidate_key = key if key in replacements else inherited_by.get(key)
         if candidate_key is not None:
             resolved.append(_refreshed_entry(entry, replacements[candidate_key]))
-        elif entry["fingerprint"] in stale:
+        elif key in stale:
             pruned += 1
         else:
             resolved.append(entry)
@@ -130,9 +134,21 @@ def _load_allowlist(path: Path) -> dict[str, dict[str, list[dict[str, object]]]]
             )
             for entries in raw["targets"].values()
         )
+        or not all(
+            _fingerprints_identify_rows(entries) for entries in raw["targets"].values()
+        )
     ):
         raise ArtifactEvidenceError("warning allowlist is invalid")
     return raw
+
+
+def _fingerprints_identify_rows(entries: Sequence[Mapping[str, object]]) -> bool:
+    """Each fingerprint is unique and recomputes from its own row's warning."""
+    fingerprints = [entry["fingerprint"] for entry in entries]
+    return len(set(map(str, fingerprints))) == len(fingerprints) and all(
+        entry["fingerprint"] == _fingerprint(_warning_record(entry))
+        for entry in entries
+    )
 
 
 def _load_candidates(path: Path, target: str) -> list[dict[str, object]]:
@@ -154,30 +170,77 @@ def _load_candidates(path: Path, target: str) -> list[dict[str, object]]:
     return candidates
 
 
-def _load_stale_fingerprints(
+def _load_stale_approvals(
     path: Path,
     entries: Sequence[Mapping[str, object]],
     candidates: Sequence[Mapping[str, object]],
-) -> frozenset[str]:
-    """Return the current approvals that the candidates' own run found stale."""
+) -> frozenset[_ApprovalKey]:
+    """Return the current approvals that the candidates' own run found stale.
+
+    The run classified every approval as either approved or stale, so the two
+    lists must partition exactly the approvals being refreshed.
+    """
     raw = load_bounded_json(path, "warning report", _metadata_max_bytes())
-    if (
-        not isinstance(raw, dict)
-        or set(raw) != _WARNING_REPORT_FIELDS
-        or type(raw["schema_version"]) is not int
-        or raw["schema_version"] != 1
-        or not isinstance(raw["stale"], list)
-    ):
+    if not _valid_report(raw):
         raise ArtifactEvidenceError("warning report is invalid")
     if raw["unknown"] != list(candidates):
         raise ArtifactEvidenceError(
             "warning report and candidates come from different runs"
         )
-    if any(row not in entries for row in raw["stale"]):
+    by_fingerprint = {str(entry["fingerprint"]): entry for entry in entries}
+    reported = [str(row["fingerprint"]) for row in (*raw["approved"], *raw["stale"])]
+    if (
+        len(reported) != len(entries)
+        or set(reported) != by_fingerprint.keys()
+        or any(
+            row != _warning_record_with_fingerprint(by_fingerprint[row["fingerprint"]])
+            for row in raw["approved"]
+        )
+        or any(row != by_fingerprint[row["fingerprint"]] for row in raw["stale"])
+    ):
         raise ArtifactEvidenceError(
             "warning report does not match the current allowlist"
         )
-    return frozenset(str(row["fingerprint"]) for row in raw["stale"])
+    return frozenset(_approval_key(row) for row in raw["stale"])
+
+
+def _valid_report(raw: object) -> bool:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != _WARNING_REPORT_FIELDS
+        or type(raw["schema_version"]) is not int
+        or raw["schema_version"] != 1
+    ):
+        return False
+    rows = {name: raw[name] for name in _WARNING_COUNTS_FIELDS}
+    if any(
+        not isinstance(listed, list)
+        or any(
+            not isinstance(row, dict) or not isinstance(row.get("fingerprint"), str)
+            for row in listed
+        )
+        for listed in rows.values()
+    ):
+        return False
+    counts = raw["counts"]
+    collection = raw["collection_facts"]
+    return (
+        isinstance(counts, dict)
+        and set(counts) == _WARNING_COUNTS_FIELDS
+        and all(
+            type(counts[name]) is int and counts[name] == len(listed)
+            for name, listed in rows.items()
+        )
+        and isinstance(collection, dict)
+        and (
+            "record_count" not in collection
+            or (
+                type(collection["record_count"]) is int
+                and collection["record_count"]
+                == len(rows["approved"]) + len(rows["unknown"])
+            )
+        )
+    )
 
 
 def _metadata_max_bytes() -> int:
@@ -203,6 +266,12 @@ def _warning_record(record: Mapping[str, object]) -> dict[str, object]:
     return {field: record[field] for field in _WARNING_RECORD_FIELDS - {"fingerprint"}}
 
 
+def _warning_record_with_fingerprint(
+    record: Mapping[str, object],
+) -> dict[str, object]:
+    return {field: record[field] for field in _WARNING_RECORD_FIELDS}
+
+
 def _approval_key(record: Mapping[str, object]) -> _ApprovalKey:
     return (
         str(record["code"]),
@@ -226,13 +295,13 @@ def _index_by_approval_key(
 def _narrowed_reviews(
     replacements: Mapping[_ApprovalKey, Mapping[str, object]],
     approvals: Mapping[_ApprovalKey, Mapping[str, object]],
-    stale: Collection[str],
+    stale: Collection[_ApprovalKey],
 ) -> dict[_ApprovalKey, _ApprovalKey]:
     """Pair each unreviewed candidate with the single stale approval it narrows."""
     available = {
         key: approval
         for key, approval in approvals.items()
-        if approval["fingerprint"] in stale and key not in replacements
+        if key in stale and key not in replacements
     }
     pairs: dict[_ApprovalKey, _ApprovalKey] = {}
     for key in sorted(replacements.keys() - approvals.keys()):
@@ -299,12 +368,17 @@ def _write_allowlist(path: Path, allowlist: Mapping[str, object]) -> None:
     encoded = (json.dumps(allowlist, indent=2, sort_keys=True) + "\n").encode("utf-8")
     if len(encoded) > _POLICY_MAX_BYTES:
         raise ArtifactEvidenceError("warning allowlist would exceed its size limit")
+    mode = stat.S_IMODE(path.stat().st_mode)
     descriptor, temporary = tempfile.mkstemp(
         prefix=".warnings-allowlist-", suffix=".tmp", dir=path.parent
     )
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # mkstemp creates the file owner-only; keep the reviewed file's mode.
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)

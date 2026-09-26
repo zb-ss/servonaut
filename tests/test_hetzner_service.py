@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,6 +120,71 @@ class TestClientInit:
 # fetch_instances + cache
 # ---------------------------------------------------------------------------
 
+def _api_server(**extra) -> dict:
+    """A server as the Hetzner API returns it (the parts hcloud requires)."""
+    data = {
+        "id": 7,
+        "name": "cache-1",
+        "status": "running",
+        "public_net": {
+            "ipv4": {"id": 3, "ip": "9.9.9.9", "blocked": False, "dns_ptr": "x"},
+            "ipv6": None, "floating_ips": [], "firewalls": [],
+        },
+        "server_type": {"id": 1, "name": "cx22"},
+        "created": "2026-05-09T00:00:00+00:00",
+        "labels": {},
+    }
+    data.update(extra)
+    return data
+
+
+class TestServerLocation:
+    """The Region column comes from the location current hcloud releases expose."""
+
+    @staticmethod
+    def _region(tmp_path, data: dict) -> str:
+        hcloud = pytest.importorskip("hcloud")
+        from hcloud.servers.client import BoundServer
+
+        client = hcloud.Client(token="unused")
+        svc = HetznerService(_make_config(tmp_path))
+        return svc._server_to_dict(BoundServer(client.servers, data))["region"]
+
+    def test_top_level_location(self, tmp_path):
+        data = _api_server(location={"id": 1, "name": "nbg1", "network_zone": "eu-central"})
+        assert self._region(tmp_path, data) == "nbg1"
+
+    def test_top_level_location_wins_over_the_datacenter(self, tmp_path):
+        data = _api_server(
+            location={"id": 1, "name": "nbg1", "network_zone": "eu-central"},
+            datacenter={"id": 2, "name": "fsn1-dc14", "location": {"id": 2, "name": "fsn1"}},
+        )
+        assert self._region(tmp_path, data) == "nbg1"
+
+    def test_older_responses_fall_back_to_the_datacenter(self):
+        # Older hcloud releases model only ``server.datacenter.location``;
+        # newer ones drop ``datacenter`` altogether, so the fallback is
+        # checked with a stand-in server rather than the installed library.
+        from types import SimpleNamespace
+
+        server = SimpleNamespace(
+            location=None,
+            datacenter=SimpleNamespace(location=SimpleNamespace(name="fsn1")),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert HetznerService._server_location_name(server) == "fsn1"
+
+    def test_a_release_without_the_datacenter_model_gives_a_blank_region(self):
+        from types import SimpleNamespace
+
+        server = SimpleNamespace(location=None)
+        assert HetznerService._server_location_name(server) == ""
+
+    def test_no_location_at_all_is_blank(self, tmp_path):
+        assert self._region(tmp_path, _api_server()) == ""
+
+
 class TestFetchInstances:
     def test_happy_path_shapes_instance_dict(self, tmp_path, monkeypatch):
         svc = HetznerService(_make_config(tmp_path))
@@ -204,6 +270,27 @@ class TestFetchInstances:
         asyncio.run(svc.fetch_instances_cached(force_refresh=True))
         mode = Path(cfg.cache_path).stat().st_mode & 0o777
         assert mode == 0o600
+
+    def test_failed_refresh_returns_the_cache_and_records_why(self, tmp_path, monkeypatch):
+        cfg = _make_config(tmp_path)
+        svc = HetznerService(cfg)
+        Path(cfg.cache_path).write_text(json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "instances": [{"id": "1", "name": "web-1"}],
+        }))
+        fake_client = MagicMock()
+        fake_client.servers.get_all.side_effect = RuntimeError("unable to authenticate")
+        monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+
+        out = asyncio.run(svc.fetch_instances_cached(force_refresh=True))
+
+        assert out == [{"id": "1", "name": "web-1"}]
+        assert "unable to authenticate" in svc.last_fetch_error
+
+        fake_client.servers.get_all.side_effect = None
+        fake_client.servers.get_all.return_value = []
+        assert asyncio.run(svc.fetch_instances_cached(force_refresh=True)) == []
+        assert svc.last_fetch_error is None
 
     def test_get_cached_instances_ignores_ttl(self, tmp_path):
         cfg = _make_config(tmp_path, cache_ttl_seconds=1)

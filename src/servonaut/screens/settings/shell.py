@@ -106,7 +106,13 @@ class SettingsScreen(Screen):
         Binding("ctrl+f", "focus_search", "Search", show=True),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, initial_panel: Optional[str] = None) -> None:
+        """Create the screen.
+
+        Args:
+            initial_panel: ``PanelSpec.id`` to open on, e.g. ``"ai_provider"``.
+                ``None`` or an unknown id opens the first category.
+        """
         super().__init__()
         # panel_id -> mounted SettingsPanel (only successfully-built panels).
         self._panels: Dict[str, SettingsPanel] = {}
@@ -120,6 +126,9 @@ class SettingsScreen(Screen):
         self._sections: Dict[str, SidebarSection] = {}
         self._group_of: Dict[str, str] = {spec.id: spec.group for spec in PANELS}
         self._spec_of: Dict[str, PanelSpec] = {spec.id: spec for spec in PANELS}
+        self._initial_panel: Optional[str] = (
+            initial_panel if initial_panel in self._spec_of else None
+        )
 
     # ------------------------------------------------------------------
     # Composition
@@ -138,9 +147,11 @@ class SettingsScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        """Build nav buttons and mount every panel (hidden except the first)."""
-        self._build_nav()
+        """Mount the initial panel, then build the nav around the one it chose."""
+        # Panels first: the nav expands the group of the panel that actually
+        # opened, which differs from the requested one if that panel failed.
         self._mount_panels()
+        self._build_nav()
         # Nav buttons live inside SidebarSections that mount asynchronously, so
         # the initial _set_nav_active (during _mount_panels) can run before the
         # active button exists. Re-assert the highlight once everything settled.
@@ -153,12 +164,21 @@ class SettingsScreen(Screen):
         if current is not None:
             current.refresh_external_state()
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Let every mounted panel re-show its identifiers for the new mode."""
+        for panel_id, panel in self._panels.items():
+            try:
+                panel.refresh_after_demo_toggle()
+            except Exception as exc:  # noqa: BLE001 — one panel must not block the rest
+                logger.warning("Demo toggle refresh failed on panel %s: %s", panel_id, exc)
+
     def _build_nav(self) -> None:
         """Mount one collapsible :class:`SidebarSection` per group.
 
-        Groups appear as contiguous runs in ``PANELS``. Only the first group
-        (which holds the initially-active panel) starts expanded; the rest
-        start collapsed so the rail stays compact, mirroring the main sidebar.
+        Groups appear as contiguous runs in ``PANELS``. Only the group holding
+        the active panel (set by :meth:`_mount_panels`, which runs first)
+        starts expanded; the rest start collapsed so the rail stays compact,
+        mirroring the main sidebar.
         Search re-expands groups that contain matches (see :meth:`_apply_filter`).
         """
         nav = self.query_one("#settings-nav-list", VerticalScroll)
@@ -181,12 +201,13 @@ class SettingsScreen(Screen):
                     classes="settings-nav-btn",
                 )
             )
+        open_group = self._group_of.get(self._active_id or "", ordered_groups[0])
         for index, group in enumerate(ordered_groups):
             section = SidebarSection(
                 group,
                 *buttons_by_group[group],
                 section_id=f"settings_sec_{index}",
-                collapsed=index != 0,
+                collapsed=group != open_group,
             )
             self._sections[group] = section
             nav.mount(section)
@@ -194,20 +215,24 @@ class SettingsScreen(Screen):
     def _mount_panels(self) -> None:
         """Build + show only the initial panel; the rest mount on first use.
 
-        Walks ``PANELS`` in order and stops at the first one that builds, so a
-        broken leading panel still falls through to the next (its placeholder is
-        mounted by :meth:`_ensure_content`, as before). Every other panel is
-        deferred to :meth:`_ensure_content` on first selection — see the module
-        docstring for why mounting all of them here was the wrong trade.
+        Tries the requested initial panel first, then walks ``PANELS`` in order
+        and stops at the first one that builds, so a broken leading panel still
+        falls through to the next (its placeholder is mounted by
+        :meth:`_ensure_content`, as before). Every other panel is deferred to
+        :meth:`_ensure_content` on first selection — see the module docstring
+        for why mounting all of them here was the wrong trade.
         """
-        for spec in PANELS:
-            self._ensure_content(spec.id)
-            panel = self._panels.get(spec.id)
+        candidates = [spec.id for spec in PANELS]
+        if self._initial_panel is not None:
+            candidates.insert(0, self._initial_panel)
+        for panel_id in candidates:
+            self._ensure_content(panel_id)
+            panel = self._panels.get(panel_id)
             if panel is None:
                 continue  # factory raised — try the next one for the initial view
             panel.display = True
-            self._active_id = spec.id
-            self._set_nav_active(spec.id)
+            self._active_id = panel_id
+            self._set_nav_active(panel_id)
             return
 
     def _ensure_content(self, panel_id: str) -> Optional[Widget]:
@@ -266,6 +291,10 @@ class SettingsScreen(Screen):
         event.stop()
         target_id = button_id[len("navbtn_"):]
         self._request_switch(target_id)
+
+    def show_panel(self, panel_id: str) -> None:
+        """Switch to *panel_id* as a nav click would, unsaved-changes prompt included."""
+        self._request_switch(panel_id)
 
     def _request_switch(self, target_id: str) -> None:
         """Switch to *target_id*, guarding unsaved changes in the current panel.

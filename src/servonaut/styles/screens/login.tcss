@@ -93,7 +93,7 @@
    margin separates them; row-level vertical spacing is owned by the parent
    Horizontal (#login_actions) so we don't push #btn_back down on OVH /
    other screens that put Back inline with other action buttons. */
-#btn_back, #btn_logout {
+#btn_back, #btn_logout, #btn_logout_local {
     width: auto;
     min-width: 16;
     margin: 0 1;

@@ -194,6 +194,7 @@ class StringListEditor(Vertical):
         # load() before this widget (or a dynamically-mounted parent card) has
         # finished mounting, when mounting into _rows would raise.
         self._pending: Optional[List[str]] = None
+        self._pending_tags: Optional[List[object]] = None
 
     def compose(self) -> ComposeResult:
         """Yield the value rows container and the add row."""
@@ -208,16 +209,41 @@ class StringListEditor(Vertical):
         """Flush any values buffered before the rows container was mounted."""
         if self._pending is not None:
             values, self._pending = self._pending, None
-            self.set_values(values)
+            tags, self._pending_tags = self._pending_tags, None
+            self.set_values(values, tags)
 
-    def set_values(self, values: List[str]) -> None:
-        """Replace all rows with *values* (buffered until the rows mount)."""
+    def set_values(self, values: List[str], tags: Optional[List[object]] = None) -> None:
+        """Replace all rows with *values* (buffered until the rows mount).
+
+        *tags* (one per value) travel with their rows, so a caller can tell
+        which original entry a row is after the user adds or removes rows,
+        even when two rows show the same text.
+        """
         if not self._rows.is_mounted:
             self._pending = list(values)
+            self._pending_tags = list(tags) if tags is not None else None
             return
         self._rows.remove_children()
-        for value in values:
-            self._rows.mount(self._make_row(value))
+        tags = list(tags) if tags is not None else [None] * len(values)
+        for value, tag in zip(values, tags):
+            row = self._make_row(value)
+            row.entry_tag = tag
+            self._rows.mount(row)
+
+    def get_entries(self) -> List[tuple]:
+        """``(value, tag)`` per non-empty row, in order (tag None if untagged)."""
+        if self._pending is not None:
+            tags = self._pending_tags or [None] * len(self._pending)
+            return [(v.strip(), t) for v, t in zip(self._pending, tags) if v.strip()]
+        out: List[tuple] = []
+        for row in self._rows.query(".list-row"):
+            inputs = list(row.query(Input))
+            if not inputs:
+                continue
+            value = inputs[0].value.strip()
+            if value:
+                out.append((value, getattr(row, "entry_tag", None)))
+        return out
 
     def get_values(self) -> List[str]:
         """Return the current non-empty values in row order.

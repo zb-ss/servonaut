@@ -24,6 +24,12 @@ from textual.containers import Horizontal
 from textual.widgets import Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
+from servonaut.utils.endpoints import (
+    RELAY_BASE_URL_KEY,
+    RELAY_MERCURE_URL_KEY,
+    EndpointOverrideError,
+    validate_endpoint_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,12 @@ class RelayPanel(SettingsPanel):
 
     PANEL_ID = "relay"
     TITLE = "Relay"
+
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "relay_base_url": "redact_url",
+        "relay_mercure_url": "redact_url",
+    }
 
     DEFAULT_CSS = """
     RelayPanel .relay-warn {
@@ -137,8 +149,8 @@ class RelayPanel(SettingsPanel):
         config = self.app.config_manager.get()
         relay = config.relay
 
-        self.query_one("#relay_base_url", Input).value = relay.base_url
-        self.query_one("#relay_mercure_url", Input).value = relay.mercure_url
+        self._show_field("relay_base_url", relay.base_url)
+        self._show_field("relay_mercure_url", relay.mercure_url)
         self.query_one("#relay_heartbeat_interval", Input).value = str(relay.heartbeat_interval)
 
         tier = (
@@ -154,8 +166,8 @@ class RelayPanel(SettingsPanel):
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
         return {
-            "base_url": self.query_one("#relay_base_url", Input).value.strip(),
-            "mercure_url": self.query_one("#relay_mercure_url", Input).value.strip(),
+            "base_url": self._field_value("relay_base_url").strip(),
+            "mercure_url": self._field_value("relay_mercure_url").strip(),
             "heartbeat_interval": self.query_one("#relay_heartbeat_interval", Input).value.strip(),
             "ai_tool_auto_approve": str(
                 self.query_one("#relay_ai_tool_auto_approve", Select).value
@@ -166,10 +178,22 @@ class RelayPanel(SettingsPanel):
         """Validate and return the relay fields to persist.
 
         Raises:
-            ValidationError: When heartbeat_interval is not a positive integer.
+            ValidationError: When a URL is neither empty (derived from the API
+                base) nor https / loopback http, or heartbeat_interval is not
+                a positive integer.
         """
-        base_url = self.query_one("#relay_base_url", Input).value.strip()
-        mercure_url = self.query_one("#relay_mercure_url", Input).value.strip()
+        base_url = self._field_value("relay_base_url").strip()
+        mercure_url = self._field_value("relay_mercure_url").strip()
+        for field_id, key, url in (
+            ("relay_base_url", RELAY_BASE_URL_KEY, base_url),
+            ("relay_mercure_url", RELAY_MERCURE_URL_KEY, mercure_url),
+        ):
+            if not url:
+                continue
+            try:
+                validate_endpoint_url(url, source=key)
+            except EndpointOverrideError as exc:
+                raise ValidationError(field_id, str(exc)) from exc
 
         heartbeat_raw = self.query_one("#relay_heartbeat_interval", Input).value.strip()
         try:

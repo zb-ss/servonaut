@@ -57,6 +57,13 @@ _OUTPUT_READ_BYTES: Final = 4096
 _OUTPUT_MAX_LINE_BYTES: Final = 4096
 _OUTPUT_DRAIN_WAIT_SECONDS: Final = 1.0
 
+# A child's control pipe reaches end of stream as the child exits, a moment
+# before the exit status can be collected. On a busy machine that moment can
+# be long enough for the reader to see a truncated frame first.
+_END_OF_STREAM_CODE: Final = "truncated-frame"
+_CHILD_EXIT_GRACE_SECONDS: Final = 1.0
+_CHILD_EXIT_POLL_SECONDS: Final = 0.01
+
 
 class ProcessTreeError(RuntimeError):
     """Raised when process spawning, job assignment, or tree lifecycle fails."""
@@ -672,18 +679,44 @@ def _read_child_frame_with_timeout(
             wait_slice = min(0.05, remaining)
             resp, exc = q.get(timeout=wait_slice)
             if exc is not None:
-                exit_code = poll_child()
-                if exit_code is not None:
-                    raise ProcessTreeError(f"child-exited-early:{exit_code}")
-                if isinstance(exc, DesktopControlError):
-                    raise ProcessTreeError(
-                        f"control-protocol-error:{exc.code}"
-                    ) from exc
-                raise ProcessTreeError(f"control-stream-error:{exc}") from exc
+                raise _classify_read_failure(exc, poll_child) from exc
             assert resp is not None
             return resp
         except queue.Empty:
             continue
+
+
+def _classify_read_failure(
+    exc: Exception, poll_child: Callable[[], int | None]
+) -> ProcessTreeError:
+    """Report a failed control-frame read, preferring the child's exit status.
+
+    End of stream before a whole frame usually means the child is exiting, so
+    it gets a short, bounded grace to finish: its exit code tells the user far
+    more than a framing error. Any other failure is classified at once.
+    """
+    is_end_of_stream = (
+        isinstance(exc, DesktopControlError) and exc.code == _END_OF_STREAM_CODE
+    )
+    grace = _CHILD_EXIT_GRACE_SECONDS if is_end_of_stream else 0.0
+    exit_code = _wait_for_child_exit(poll_child, grace)
+    if exit_code is not None:
+        return ProcessTreeError(f"child-exited-early:{exit_code}")
+    if isinstance(exc, DesktopControlError):
+        return ProcessTreeError(f"control-protocol-error:{exc.code}")
+    return ProcessTreeError(f"control-stream-error:{exc}")
+
+
+def _wait_for_child_exit(
+    poll_child: Callable[[], int | None], timeout: float
+) -> int | None:
+    """Poll the child until it exits or ``timeout`` elapses; None if still running."""
+    deadline = time.monotonic() + timeout
+    while (exit_code := poll_child()) is None:
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(_CHILD_EXIT_POLL_SECONDS)
+    return exit_code
 
 
 def launch_and_handshake_desktop_child(

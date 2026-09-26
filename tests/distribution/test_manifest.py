@@ -279,6 +279,7 @@ class TestReleaseManifest:
             ({"packaging_revision": 0}, "packaging_revision must be a positive integer"),
             ({"packaging_revision": -1}, "packaging_revision must be a positive integer"),
             ({"packaging_revision": True}, "packaging_revision must be a positive integer"),
+            ({"packaging_revision": 65536}, "packaging_revision must be a positive integer"),
             ({"artifacts": ()}, "must declare at least one artifact"),
             ({"expires_at": ""}, "expires_at must be a non-empty string"),
         ],

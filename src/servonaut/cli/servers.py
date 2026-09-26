@@ -29,6 +29,15 @@ from servonaut.services.bw_resolver import (
     BwSessionMissingError,
 )
 from servonaut.services.cache_service import CacheService
+from servonaut.services.ssh_host_keys import (
+    OFF_OPTIONS_ACCEPT_NEW,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+    host_key_alias_options,
+    identity_file_args,
+)
+from servonaut.utils.ssh_utils import run_ssh
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
 logger = logging.getLogger(__name__)
@@ -39,6 +48,15 @@ logger = logging.getLogger(__name__)
 _EXIT_SUCCESS = 0
 _EXIT_VERIFY_FAILED = 1   # BW or SSH probe returned a non-verified status
 _EXIT_FATAL = 2           # No ref stored / BW CLI missing / session locked / not logged in
+
+# There is no CLI command that links a Bitwarden SSH key to a server; the TUI's
+# SSH Ref editor does it (``k`` on the instance list). Team refs are shared
+# per team and are set by a team admin.
+_LINK_PERSONAL_REF_HINT = (
+    "Link a Bitwarden SSH key in the Servonaut TUI first "
+    "(run `servonaut`, select the server, press k)."
+)
+_LINK_TEAM_REF_HINT = "A team admin needs to link a Bitwarden SSH key for this server first."
 
 # UUID-v4 regex for detecting team SharedServer ids.
 _UUID_RE = re.compile(
@@ -100,13 +118,9 @@ def _load_all_instances(
     custom_server_service: Any,
 ) -> List[Dict[str, Any]]:
     """Return combined list of cached AWS + custom server instances."""
-    instances: List[Dict[str, Any]] = []
-    try:
-        cached = aws_service._cache.load_any()
-        if cached:
-            instances.extend(cached)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load AWS cached instances: %s", exc)
+    # No try/except: the cache layer already absorbs a missing or corrupt
+    # file, so anything raised here is a bug that must surface loudly.
+    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
     try:
         instances.extend(custom_server_service.list_as_instances())
     except Exception as exc:  # noqa: BLE001
@@ -138,35 +152,57 @@ def _run_ssh_probe(
     host: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
+    instance: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run ``ssh -o BatchMode=yes ... true`` and return the exit code.
 
     Treats :class:`subprocess.TimeoutExpired` as a connection failure (returns
     255 — same as ssh's own timeout exit code — so the caller maps it to
-    ``auth_failed`` without crashing).
+    ``auth_failed`` without crashing). A refused host key is printed to
+    stderr with the command that clears a stale key.
+
+    Args:
+        host_key_policy: The configured host-key policy; the default
+            (``accept-new``) when None.
+        instance: The probed instance, so a cloud instance is pinned by
+            its alias; None for a team server.
     """
+    policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={timeout}",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-i", key_path,
-        f"{user}@{host}",
-        "true",
+        # This probe verified keys before the setting existed, so "off"
+        # keeps what it sent then.
+        *policy.ssh_options(off_options=OFF_OPTIONS_ACCEPT_NEW),
     ]
+    for option in host_key_alias_options(instance, policy):
+        cmd += ["-o", option]
+    cmd += [*identity_file_args(key_path), "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
         # Insert -p <port> right after "ssh"
         cmd[1:1] = ["-p", str(port)]
     try:
-        result = subprocess.run(
+        # ssh's own messages go to a private log a remote command cannot write.
+        result = run_ssh(
             cmd,
             capture_output=True,
             timeout=timeout + 5,
         )
-        return result.returncode
     except subprocess.TimeoutExpired:
         logger.debug("SSH probe timed out for %s@%s:%s", user, host, port)
         return 255
+    problem = detect_host_key_problem(
+        getattr(result, "diagnostics", "") or "",
+        result.returncode,
+        HostKeyTarget.for_connection(host, port, instance=instance),
+        policy,
+        stdout=result.stdout,
+    )
+    if problem is not None:
+        print(problem.message, file=sys.stderr)
+    return result.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +217,7 @@ async def _probe_personal(
     user: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
 ) -> Optional[str]:
     """Probe personal instance.  Returns a status string or None if no ref stored.
 
@@ -214,7 +251,9 @@ async def _probe_personal(
         raise
 
     with ephemeral_ssh_key(key_body) as key_path:
-        rc = _run_ssh_probe(key_path, user, host, port, timeout)
+        rc = _run_ssh_probe(
+            key_path, user, host, port, timeout, host_key_policy, instance,
+        )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
 
@@ -232,6 +271,7 @@ async def _probe_team(
     user: str,
     port: Optional[int],
     timeout: int,
+    host_key_policy: Optional[HostKeyPolicy] = None,
 ) -> str:
     """Probe a team SharedServer.  Always returns a status string.
 
@@ -259,7 +299,9 @@ async def _probe_team(
         raise
 
     with ephemeral_ssh_key(key_body) as key_path:
-        rc = _run_ssh_probe(key_path, user, host, port, timeout)
+        rc = _run_ssh_probe(
+            key_path, user, host, port, timeout, host_key_policy,
+        )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
 
@@ -281,6 +323,17 @@ def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str
     if user_override:
         return user_override
     return instance.get("username") or "ec2-user"
+
+
+def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
+    """Return the SSH port: ``--port``, else the port saved with the server."""
+    if port_override is not None:
+        return port_override
+    saved = instance.get("port")
+    try:
+        return int(saved) if saved else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +366,7 @@ async def _cmd_verify(args: Any) -> int:
     config = config_manager.get()
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     aws_service = AWSService(cache_service)
+    host_key_policy = HostKeyPolicy.from_ssh_config(config.ssh)
 
     instance_arg: str = args.instance
     host_override: Optional[str] = getattr(args, "host", None)
@@ -374,7 +428,7 @@ async def _cmd_verify(args: Any) -> int:
     if personal_instance is not None:
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
-        port = port_override
+        port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
             f"({personal_instance.get('provider', 'unknown')}/{personal_instance.get('id')})"
@@ -387,8 +441,7 @@ async def _cmd_verify(args: Any) -> int:
     else:
         # UUID not in any local cache and not in any team — no ref stored.
         print(
-            f"No SSH ref stored for instance {instance_arg!r}. "
-            "Run `servonaut bw link` to register a Bitwarden item ref first.",
+            f"No SSH ref stored for instance {instance_arg!r}. {_LINK_PERSONAL_REF_HINT}",
             file=sys.stderr,
         )
         return _EXIT_FATAL
@@ -412,11 +465,11 @@ async def _cmd_verify(args: Any) -> int:
             status = await _probe_personal(
                 bw_ssh_cfg, bw_resolver,
                 personal_instance, host, user, port, timeout,
+                host_key_policy,
             )
             if status is None:
                 print(
-                    f"No SSH ref stored for {label}. "
-                    "Run `servonaut bw link` to register a Bitwarden item ref first.",
+                    f"No SSH ref stored for {label}. {_LINK_PERSONAL_REF_HINT}",
                     file=sys.stderr,
                 )
                 return _EXIT_FATAL
@@ -433,11 +486,11 @@ async def _cmd_verify(args: Any) -> int:
                 team_svc, bw_resolver,
                 team_slug, team_server_id,  # type: ignore[arg-type]
                 host, user, port, timeout,
+                host_key_policy,
             )
             if status is None:
                 print(
-                    f"No SSH ref stored for {label}. "
-                    "Run `servonaut bw link` to register a Bitwarden item ref first.",
+                    f"No SSH ref stored for {label}. {_LINK_TEAM_REF_HINT}",
                     file=sys.stderr,
                 )
                 return _EXIT_FATAL

@@ -1,0 +1,278 @@
+"""Failure artifacts: what a failed journey leaves behind for diagnosis.
+
+For every failed test the suite writes ``e2e-artifacts/<test-id>/`` with the
+driver's SVG screenshot and ``state.json`` (TUI journeys), the fake tools'
+argv log, the FakeCloud request log, guard logs, child output and the tail of
+each Servonaut log. CI uploads that folder, which is public, so every text
+file is scrubbed: absolute paths become ``$E2E_ROOT`` / ``$REPO`` / ``$HOME``
+style placeholders, the machine's host name (which relay client ids embed)
+becomes ``$HOSTNAME``, and anything shaped like a credential is replaced;
+JSON stays valid JSON. The fixtures themselves are neutral by construction.
+Fabricated secrets a journey hands to the product (vault tokens, passphrases,
+passwords, keys) are registered with :func:`register_secret` and replaced
+wherever they appear, whatever their shape.
+
+The folder is only ever deleted when it carries the suite's marker file, so
+pointing ``SERVONAUT_E2E_ARTIFACTS`` at an existing directory cannot remove it.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import socket
+import sys
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+from e2e.harness.bootstrap import ARTIFACTS_MARKER, REPO_ROOT, E2EContext
+
+_TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".svg", ".txt", ".md"}
+_TAIL_BYTES = 64 * 1024
+_REDACTED = "<redacted>"
+
+_SECRET_KEYS = (
+    r"authorization|access_token|refresh_token|id_token|token|device_code|api_key|apikey"
+    r"|x-api-key|password|passphrase|secret|client_secret|session_token"
+    r"|aws_secret_access_key|aws_session_token"
+)
+# Authorization: Bearer <token>
+_BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
+_SECRET_KEY = re.compile(rf"(?i)(?:{_SECRET_KEYS})")
+# "key": "value", key: value and key=value for credential-named keys. A bare
+# value never starts with a bracket and never runs into a quote: nested JSON
+# is redacted by the structured pass (_scrub_json), and a quoted string that
+# merely contains "token=..." keeps its closing quote.
+_KEY_VALUE = re.compile(
+    rf"(?i)(\"?\b(?:{_SECRET_KEYS})\b\"?\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s,&}\]{\[\"'][^\s,&}\]\"']*)"
+)
+# Query-string secrets, including signed URLs and OAuth codes.
+_QUERY = re.compile(
+    r"(?i)([?&](?:access_token|refresh_token|token|code|device_code|api_key|apikey|key"
+    r"|signature|x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid"
+    r"|password|secret|client_secret)=)[^&\s\"'<>]+"
+)
+# A long "code" value: an OAuth or device code, not a short error code.
+_LONG_CODE = re.compile(r'(?i)("code"\s*:\s*)"[^"]{20,}"')
+# Generic tokens: JWTs, long mixed-case alphanumerics (API keys) and long hex.
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?")
+_MIXED_CASE_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_+=-])(?=[A-Za-z0-9_+=-]*[0-9])(?=[A-Za-z0-9_+=-]*[a-z])"
+    r"(?=[A-Za-z0-9_+=-]*[A-Z])[A-Za-z0-9_+=-]{32,}"
+)
+_HEX_TOKEN = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{40,}(?![0-9a-z])")
+
+
+def journey_failed(node: object) -> bool:
+    """True when the test's setup or call failed (reports are kept on the item)."""
+    for when in ("setup", "call"):
+        report = getattr(node, f"rep_{when}", None)
+        if report is not None and report.failed:
+            return True
+    return False
+
+
+# Exact values to redact from this journey's artifacts (see register_secret).
+_REGISTERED: set[str] = set()
+
+
+def register_secret(*values: str) -> None:
+    """Redact these exact values (and their JSON-escaped lines) from artifacts.
+
+    Journeys and harness fakes call this for every fabricated secret they
+    hand to the product. A multi-line value (a key) is registered line by
+    line too, since logs quote it with escaped newlines.
+    """
+    for value in values:
+        if not value:
+            continue
+        _REGISTERED.add(value)
+        _REGISTERED.add(json.dumps(value)[1:-1])
+        _REGISTERED.update(line for line in value.splitlines() if len(line) >= 8)
+
+
+def forget_secrets() -> None:
+    """Start a journey with no registered secrets."""
+    _REGISTERED.clear()
+
+
+def redact_registered(text: str) -> str:
+    """Replace every registered secret in *text*, longest first."""
+    for secret in sorted(_REGISTERED, key=len, reverse=True):
+        text = text.replace(secret, _REDACTED)
+    return text
+
+
+def sanitize(nodeid: str) -> str:
+    """A filesystem-safe, bounded folder name for a pytest node id."""
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", nodeid).strip("_")
+    return name[-150:]
+
+
+def _redact_value(match: re.Match[str]) -> str:
+    key, value = match.group(1), match.group(2)
+    if _REDACTED in value or value in ("null", "true", "false"):
+        return match.group(0)
+    quote = value[0] if value[:1] in ("'", '"') else ""
+    if not quote and key.startswith('"'):
+        # A bare JSON value (a number, say): quote the placeholder so the
+        # artifact still parses.
+        quote = '"'
+    return f"{key}{quote}{_REDACTED}{quote}"
+
+
+def _redact_structure(value: Any) -> Any:
+    """Replace every credential-named field's value, however deeply nested."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            secret = isinstance(key, str) and _SECRET_KEY.fullmatch(key)
+            keep = item is None or isinstance(item, bool) or _REDACTED in str(item)
+            out[key] = _REDACTED if secret and not keep else _redact_structure(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_structure(item) for item in value]
+    return value
+
+
+def _scrub_json(text: str) -> str:
+    """Redact JSON documents and JSON lines structurally, so they stay valid."""
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            document = json.loads(stripped)
+        except ValueError:
+            pass
+        else:
+            return json.dumps(_redact_structure(document), indent=2) + "\n"
+    lines = []
+    for line in text.split("\n"):
+        if line.lstrip()[:1] in ("{", "["):
+            try:
+                line = json.dumps(_redact_structure(json.loads(line)))
+            except ValueError:
+                pass
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def scrub(text: str) -> str:
+    """Replace anything shaped like a credential."""
+    text = _scrub_json(text)
+    text = _BEARER.sub(rf"\1 {_REDACTED}", text)
+    text = _KEY_VALUE.sub(_redact_value, text)
+    text = _QUERY.sub(rf"\1{_REDACTED}", text)
+    text = _LONG_CODE.sub(rf'\1"{_REDACTED}"', text)
+    for pattern in (_JWT, _MIXED_CASE_TOKEN, _HEX_TOKEN):
+        text = pattern.sub(_REDACTED, text)
+    return text
+
+
+def _host_names() -> list[str]:
+    """This machine's name, as written raw and as relay client ids embed it."""
+    host = socket.gethostname()
+    names = {host, host.split(".")[0], re.sub(r"[^a-zA-Z0-9]+", "-", host).strip("-").lower()[:48]}
+    # Very short names would rewrite ordinary words.
+    return [name for name in names if len(name) >= 4 and name.lower() != "localhost"]
+
+
+def _rewrite(text: str, ctx: E2EContext) -> str:
+    replacements = [(name, "$HOSTNAME") for name in _host_names()]
+    replacements += [
+        (str(ctx.root), "$E2E_ROOT"),
+        (str(REPO_ROOT), "$REPO"),
+        (sys.executable, "$PYTHON"),
+        (sys.prefix, "$PYTHON_PREFIX"),
+        (sys.base_prefix, "$PYTHON_BASE_PREFIX"),
+    ]
+    replacements += [(home, "$HOME") for home in ctx.protected_dirs]
+    text = redact_registered(text)
+    for old, new in sorted(replacements, key=lambda item: -len(item[0])):
+        text = text.replace(old, new)
+    return scrub(text)
+
+
+def prepare_artifacts_dir(ctx: E2EContext) -> None:
+    """Empty the artifacts folder at the start of a run, if the suite owns it.
+
+    A folder without the marker is never deleted: an empty one is adopted,
+    anything else stops the run.
+    """
+    folder = ctx.artifacts_dir
+    if not folder.exists():
+        return
+    if (folder / ARTIFACTS_MARKER).is_file():
+        shutil.rmtree(folder)
+        return
+    if any(folder.iterdir()):
+        raise RuntimeError(
+            f"{folder} holds files the e2e suite did not create; choose an empty "
+            "directory for SERVONAUT_E2E_ARTIFACTS or remove it yourself."
+        )
+    (folder / ARTIFACTS_MARKER).write_text("created by the servonaut e2e suite\n")
+
+
+def _artifacts_root(ctx: E2EContext) -> Path:
+    folder = ctx.artifacts_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    marker = folder / ARTIFACTS_MARKER
+    if not marker.exists():
+        marker.write_text("created by the servonaut e2e suite\n")
+    return folder
+
+
+def _copy(source: Path, destination: Path, ctx: E2EContext, *, tail: bool = False) -> None:
+    if not source.is_file():
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.suffix not in _TEXT_SUFFIXES and not source.name.endswith(".jsonl"):
+        shutil.copyfile(source, destination)
+        return
+    data = source.read_bytes()
+    if tail and len(data) > _TAIL_BYTES:
+        data = data[-_TAIL_BYTES:]
+    destination.write_text(_rewrite(data.decode("utf-8", "replace"), ctx), encoding="utf-8")
+
+
+def collect(
+    ctx: E2EContext,
+    nodeid: str,
+    *,
+    staging: Path,
+    shim_dir: Optional[Path],
+    guard_logs: Iterable[Path],
+    homes: Iterable[Path],
+    fake_cloud: Optional[object] = None,
+) -> Path:
+    """Copy one failed journey's diagnostics into the artifacts folder."""
+    destination = _artifacts_root(ctx) / sanitize(nodeid)
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+
+    if staging.is_dir():
+        for item in staging.rglob("*"):
+            if item.is_file():
+                _copy(item, destination / item.relative_to(staging), ctx)
+    if shim_dir is not None:
+        _copy(shim_dir / "argv.jsonl", destination / "argv.jsonl", ctx)
+        _copy(shim_dir / "scenario.json", destination / "shim-scenario.json", ctx)
+        for transcript in sorted(shim_dir.glob("terminal-*.log")):
+            _copy(transcript, destination / "terminals" / transcript.name, ctx)
+    for index, log in enumerate(guard_logs):
+        _copy(log, destination / f"guard-{index}.jsonl", ctx)
+    for index, home in enumerate(homes):
+        data_dir = home / ".servonaut"
+        label = f"home-{index}"
+        for log in sorted((data_dir / "logs").glob("*.log")):
+            _copy(log, destination / label / "logs" / log.name, ctx, tail=True)
+        for name in ("mcp_audit.jsonl", "command_history.json", "config.json"):
+            _copy(data_dir / name, destination / label / name, ctx, tail=True)
+    if fake_cloud is not None:
+        fake_cloud.write_log(destination / "fake_cloud_requests.jsonl")  # type: ignore[attr-defined]
+        log = destination / "fake_cloud_requests.jsonl"
+        if log.exists():
+            log.write_text(_rewrite(log.read_text(encoding="utf-8"), ctx), encoding="utf-8")
+    return destination

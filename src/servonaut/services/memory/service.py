@@ -20,9 +20,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
+from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .store import MemoryStore, _validate_finding_id
 from .summariser import build_summary_markdown
+from servonaut.services.ssh_host_keys import (
+    SSH_FAILURE_EXIT_CODE,
+    HostKeyProblem,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 # TYPE_CHECKING import for sync service (break circular dep at runtime)
 if TYPE_CHECKING:
@@ -36,14 +43,20 @@ if TYPE_CHECKING:
 # a silent empty dict when probes fail.
 # ---------------------------------------------------------------------------
 
+# ``BuildReport.overall_reason`` when ssh refused the host key. Nothing is
+# persisted in that case: no output came from the real host.
+HOST_KEY_BUILD_REASON = "host_key_verification_failed"
+
 
 @dataclass
 class ModuleBuildFailure:
     """A single module probe that did not yield a ModuleResult.
 
     Attributes:
-        module: Prober name (``"os"``, ``"runtimes"``, …).
-        reason: Machine-readable code: ``"timeout"`` | ``"exception"``.
+        module: Prober name (``"os"``, ``"runtimes"``, …), or ``"ssh"``
+            for a refused host key.
+        reason: Machine-readable code: ``"timeout"`` | ``"exception"`` |
+            ``"ssh_host_key_<kind>"``.
         message: Short human-readable detail (redacted exception message).
     """
 
@@ -61,7 +74,8 @@ class BuildReport:
         failures: Per-module probe failures (timeouts, exceptions).
         overall_reason: Machine-readable code when ``successes`` is empty
             (``"opt_out"`` | ``"disabled"`` | ``"no_modules_matched"`` |
-            ``"all_probers_failed"``); ``None`` on partial / full success.
+            ``"all_probers_failed"`` | ``HOST_KEY_BUILD_REASON``); ``None``
+            on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
@@ -236,7 +250,7 @@ class MemoryService(MemoryServiceInterface):
         """
         instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
         name = instance.get("name", instance_id)
 
         if not self._config.enabled:
@@ -300,6 +314,20 @@ class MemoryService(MemoryServiceInterface):
 
         tasks = [run_one(p) for p in selected_probers]
         raw_results = await asyncio.gather(*tasks)
+
+        host_key_problem = getattr(ssh_runner, "host_key_problem", None)
+        if isinstance(host_key_problem, HostKeyProblem):
+            # Probers swallow runner errors into partial results; keep the
+            # stored snapshot instead of overwriting it with empty output.
+            return BuildReport(
+                failures=[ModuleBuildFailure(
+                    module="ssh",
+                    reason=host_key_problem.reason_code,
+                    # The report reaches MCP clients and hosted AI too.
+                    message=host_key_problem.agent_message,
+                )],
+                overall_reason=HOST_KEY_BUILD_REASON,
+            )
 
         successes: Dict[str, ModuleResult] = {}
         failures: List[ModuleBuildFailure] = []
@@ -411,7 +439,7 @@ class MemoryService(MemoryServiceInterface):
         instance_meta = self._resolve_instance(instance_meta)
         summary = await self.get_summary(instance_meta)
         instance_id = instance_meta.get("id") or instance_meta.get("name", "")
-        provider = instance_meta.get("provider", "custom")
+        provider = instance_provider(instance_meta)
         return self._store.write_summary(instance_id, summary, provider=provider)
 
     def clear(
@@ -729,7 +757,7 @@ class MemoryService(MemoryServiceInterface):
         """
         instance = self._resolve_instance(instance)
         instance_id = instance.get("id") or instance.get("name", "")
-        provider = instance.get("provider", "custom")
+        provider = instance_provider(instance)
         instance_name = instance.get("name", "")
 
         # Opt-out gate.
@@ -1307,6 +1335,7 @@ class MemoryService(MemoryServiceInterface):
         from servonaut.utils.ssh_utils import run_ssh_subprocess  # noqa: PLC0415
 
         # Resolve connection parameters once (not per command call).
+        profile = None
         if instance.get("is_custom"):
             conn: Dict[str, Any] = {
                 "host": instance.get("public_ip") or instance.get("private_ip", ""),
@@ -1374,9 +1403,27 @@ class MemoryService(MemoryServiceInterface):
                 stderr = stderr_bytes.decode("utf-8", errors="replace")
                 return stdout, stderr, 0
             except CalledProcessError as exc:
+                stderr = exc.stderr.decode("utf-8", errors="replace")
+                if exc.returncode == SSH_FAILURE_EXIT_CODE:
+                    problem = detect_host_key_problem(
+                        getattr(exc, "diagnostics", "") or "", exc.returncode,
+                        HostKeyTarget.for_connection(
+                            conn["host"], conn.get("port"),
+                            instance=instance, profile=profile,
+                        ),
+                        connection_service.host_key_policy(),
+                        stdout=exc.output,
+                    )
+                    # Every probe command is refused alike; log the first.
+                    if problem is not None and _real_runner.host_key_problem is None:  # type: ignore[attr-defined]
+                        logger.warning(
+                            "Memory probe of %s refused: %s",
+                            instance.get("id", "?"), problem.message,
+                        )
+                        _real_runner.host_key_problem = problem  # type: ignore[attr-defined]
                 return (
                     exc.output.decode("utf-8", errors="replace"),
-                    exc.stderr.decode("utf-8", errors="replace"),
+                    stderr,
                     exc.returncode,
                 )
             except asyncio.TimeoutError:
@@ -1397,4 +1444,6 @@ class MemoryService(MemoryServiceInterface):
         # Attach instance so LogsProber can read it from the runner directly,
         # eliminating the shared _instance field race in concurrent build_report calls.
         _real_runner.instance = instance  # type: ignore[attr-defined]
+        # Set when ssh refuses the host key; build_report() reports it.
+        _real_runner.host_key_problem = None  # type: ignore[attr-defined]
         return _real_runner
