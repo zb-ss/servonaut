@@ -155,9 +155,33 @@ Every run is sealed off from your machine:
   stand-ins, fails the test that made it. Python child processes install the
   same guards at start-up and stop at once if they cannot.
 
+Journeys marked `needs_sshd` use a real remote machine instead of the
+scripted `ssh`: two local SSH servers on loopback (a target and a bastion)
+and the OpenSSH client installed on your system (`ssh` and `scp` in
+`/usr/bin` or `/bin`; install `openssh-client` if they are missing, or
+deselect these journeys with `-m "not needs_sshd"`). For those journeys
+`ssh` and `scp` on `PATH` run the real client with a generated config file.
+Before each call, the settings OpenSSH will actually use are checked: the
+destination must be loopback, every file they name must be inside the test
+root, and no agent, local command or plugin may be involved, so your own
+`~/.ssh` is not used.
+
+Each server plays a small machine whose files live in the test root:
+`/var/log` holds fixture logs, `docker`, `journalctl` and `systemctl` are
+scripted, and absolute paths such as `/var/...` or `/home/...` in a command
+are mapped to the server's folder. Remote commands are still real programs
+on your machine. Where bubblewrap (`bwrap`) is installed and allowed to run,
+each command runs in a sandbox that sees your system read-only, cannot see
+your home directory or the rest of the test root, can write only the
+server's folder and has no network. Without it, the path mapping is only
+textual: it keeps journeys predictable but does not stop a command that
+goes around it (`cd ..`, a program's absolute path). The failure artifacts
+(`sshd-commands.jsonl`, `remote-files.txt`) say which mode was used.
+
 When a journey fails, its diagnostics are written to `e2e-artifacts/<test>/`:
 an SVG screenshot of the TUI and `state.json`, the calls the stand-in tools
-received, the requests the local API received, and the relevant logs. CI
+received, the requests the local API received, the SSH servers' command log,
+and the relevant logs. CI
 uploads that folder for failed runs, and the upload is public: paths and
 anything shaped like a credential are scrubbed, but keep every fixture neutral
 anyway (see [Avoiding accidental disclosure](#avoiding-accidental-disclosure));
@@ -189,7 +213,9 @@ When you add a journey:
 - Use the fixtures in `e2e/conftest.py`: `tui` (the TUI in-process), `seed`
   (config and cache, built through the real config schema), `moto`,
   `fake_cloud`, `providers` (local stand-ins for the Hetzner Cloud and
-  OVHcloud APIs), `cli` and `mcp` (real child processes).
+  OVHcloud APIs), `cli` and `mcp` (real child processes), and `sshd` (the
+  loopback SSH servers; see `e2e/harness/remote_fleet.py` for fleet entries
+  that point at them). A journey using `sshd` must be marked `needs_sshd`.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out

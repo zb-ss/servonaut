@@ -24,12 +24,19 @@ from typing import Any, Callable, Optional  # noqa: E402
 
 import pytest  # noqa: E402
 
-from e2e.harness import artifacts, canary  # noqa: E402
+from e2e.harness import artifacts, canary, lifecycle  # noqa: E402
 from e2e.harness.bootstrap import E2EContext, Sandbox, build_env  # noqa: E402
 from e2e.harness.processes import ChildLog  # noqa: E402
 from e2e.harness.shims import ShimSet  # noqa: E402
+from e2e.harness.relay_fixtures import (  # noqa: E402,F401 (fixtures)
+    _stop_leftover_listeners,
+    account_home,
+    relay,
+)
 
 GUARD = _bootstrap.load_guard()
+# Fixtures for journeys against the loopback SSH servers.
+pytest_plugins = ("e2e.harness.sshd_plugin",)
 JOURNEY_TIMEOUT_SECONDS = 90
 # Every journey declares which run it belongs to.
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
@@ -46,6 +53,7 @@ _MAX_COMMAND_CHARS = 300
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    lifecycle.interrupt_on_sigterm()
     missing = [name for name in _REQUIRED_MODULES if importlib.util.find_spec(name) is None]
     if missing:
         raise pytest.UsageError(
@@ -76,8 +84,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     untiered = []
     for item in items:
-        if item.get_closest_marker("timeout") is None:
-            item.add_marker(pytest.mark.timeout(JOURNEY_TIMEOUT_SECONDS))
+        lifecycle.use_signal_timeout(item, JOURNEY_TIMEOUT_SECONDS)
         if not any(item.get_closest_marker(name) for name in TIER_MARKERS):
             untiered.append(item.nodeid)
     if untiered:
@@ -286,11 +293,7 @@ def _close_journey(request: pytest.FixtureRequest, journey: Journey) -> list[dic
     leftover = journey.take_escapes()
     GUARD.set_spawn_dirs([str(journey.ctx.default_shims)])
     node = request.node
-    failed = any(
-        getattr(node, f"rep_{when}", None) is not None and getattr(node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
-    if failed or leftover:
+    if artifacts.journey_failed(node) or leftover:
         journey.staging.mkdir(parents=True, exist_ok=True)
         log = journey.directory / "servonaut.log"
         if log.exists():

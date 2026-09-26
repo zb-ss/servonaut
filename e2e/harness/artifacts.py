@@ -5,8 +5,9 @@ driver's SVG screenshot and ``state.json`` (TUI journeys), the fake tools'
 argv log, the FakeCloud request log, guard logs, child output and the tail of
 each Servonaut log. CI uploads that folder, which is public, so every text
 file is scrubbed: absolute paths become ``$E2E_ROOT`` / ``$REPO`` / ``$HOME``
-style placeholders and anything shaped like a credential is replaced. The
-fixtures themselves are neutral by construction.
+style placeholders, the machine's host name (which relay client ids embed)
+becomes ``$HOSTNAME``, and anything shaped like a credential is replaced;
+JSON stays valid JSON. The fixtures themselves are neutral by construction.
 
 The folder is only ever deleted when it carries the suite's marker file, so
 pointing ``SERVONAUT_E2E_ARTIFACTS`` at an existing directory cannot remove it.
@@ -14,11 +15,13 @@ pointing ``SERVONAUT_E2E_ARTIFACTS`` at an existing directory cannot remove it.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
+import socket
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from e2e.harness.bootstrap import ARTIFACTS_MARKER, REPO_ROOT, E2EContext
 
@@ -33,9 +36,14 @@ _SECRET_KEYS = (
 )
 # Authorization: Bearer <token>
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
-# "key": "value", key: value and key=value for credential-named keys.
+_SECRET_KEY = re.compile(rf"(?i)(?:{_SECRET_KEYS})")
+# "key": "value", key: value and key=value for credential-named keys. A bare
+# value never starts with a bracket and never runs into a quote: nested JSON
+# is redacted by the structured pass (_scrub_json), and a quoted string that
+# merely contains "token=..." keeps its closing quote.
 _KEY_VALUE = re.compile(
-    rf"(?i)(\"?\b(?:{_SECRET_KEYS})\b\"?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,&}}\]]+)"
+    rf"(?i)(\"?\b(?:{_SECRET_KEYS})\b\"?\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|[^\s,&}\]{\[\"'][^\s,&}\]\"']*)"
 )
 # Query-string secrets, including signed URLs and OAuth codes.
 _QUERY = re.compile(
@@ -54,6 +62,15 @@ _MIXED_CASE_TOKEN = re.compile(
 _HEX_TOKEN = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{40,}(?![0-9a-z])")
 
 
+def journey_failed(node: object) -> bool:
+    """True when the test's setup or call failed (reports are kept on the item)."""
+    for when in ("setup", "call"):
+        report = getattr(node, f"rep_{when}", None)
+        if report is not None and report.failed:
+            return True
+    return False
+
+
 def sanitize(nodeid: str) -> str:
     """A filesystem-safe, bounded folder name for a pytest node id."""
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", nodeid).strip("_")
@@ -62,14 +79,54 @@ def sanitize(nodeid: str) -> str:
 
 def _redact_value(match: re.Match[str]) -> str:
     key, value = match.group(1), match.group(2)
-    if _REDACTED in value:
+    if _REDACTED in value or value in ("null", "true", "false"):
         return match.group(0)
     quote = value[0] if value[:1] in ("'", '"') else ""
+    if not quote and key.startswith('"'):
+        # A bare JSON value (a number, say): quote the placeholder so the
+        # artifact still parses.
+        quote = '"'
     return f"{key}{quote}{_REDACTED}{quote}"
+
+
+def _redact_structure(value: Any) -> Any:
+    """Replace every credential-named field's value, however deeply nested."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            secret = isinstance(key, str) and _SECRET_KEY.fullmatch(key)
+            keep = item is None or isinstance(item, bool) or _REDACTED in str(item)
+            out[key] = _REDACTED if secret and not keep else _redact_structure(item)
+        return out
+    if isinstance(value, list):
+        return [_redact_structure(item) for item in value]
+    return value
+
+
+def _scrub_json(text: str) -> str:
+    """Redact JSON documents and JSON lines structurally, so they stay valid."""
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            document = json.loads(stripped)
+        except ValueError:
+            pass
+        else:
+            return json.dumps(_redact_structure(document), indent=2) + "\n"
+    lines = []
+    for line in text.split("\n"):
+        if line.lstrip()[:1] in ("{", "["):
+            try:
+                line = json.dumps(_redact_structure(json.loads(line)))
+            except ValueError:
+                pass
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def scrub(text: str) -> str:
     """Replace anything shaped like a credential."""
+    text = _scrub_json(text)
     text = _BEARER.sub(rf"\1 {_REDACTED}", text)
     text = _KEY_VALUE.sub(_redact_value, text)
     text = _QUERY.sub(rf"\1{_REDACTED}", text)
@@ -79,8 +136,17 @@ def scrub(text: str) -> str:
     return text
 
 
+def _host_names() -> list[str]:
+    """This machine's name, as written raw and as relay client ids embed it."""
+    host = socket.gethostname()
+    names = {host, host.split(".")[0], re.sub(r"[^a-zA-Z0-9]+", "-", host).strip("-").lower()[:48]}
+    # Very short names would rewrite ordinary words.
+    return [name for name in names if len(name) >= 4 and name.lower() != "localhost"]
+
+
 def _rewrite(text: str, ctx: E2EContext) -> str:
-    replacements = [
+    replacements = [(name, "$HOSTNAME") for name in _host_names()]
+    replacements += [
         (str(ctx.root), "$E2E_ROOT"),
         (str(REPO_ROOT), "$REPO"),
         (sys.executable, "$PYTHON"),

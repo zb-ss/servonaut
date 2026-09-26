@@ -2486,6 +2486,8 @@ def test_strict_reload_accepts_real_normalizer_closure_relationships(
                 "distribution": "frozen-cli",
                 "product_version": "1.2.3",
                 "build_revision": "build-1",
+                "channel": "stable",
+                "packaging_revision": 1,
                 "console_helper": "servonaut",
                 "desktop_child": None,
             }

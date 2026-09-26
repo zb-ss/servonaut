@@ -146,11 +146,31 @@ def test_inspect_and_smoke_receive_build_metadata(workflow_content: str):
         assert '--build-metadata "${METADATA_DIR}"' in step
 
 
-def test_selftest_skip_is_documented(workflow_content: str):
+def _step(qualify: str, module: str) -> str:
+    return qualify.split(module, 1)[1].split("\n      - ", 1)[0]
+
+
+def test_every_target_embeds_and_runs_the_gui_selftest(workflow_content: str):
+    """The matrix runs one qualify job per target, each with the self-test."""
     qualify = _job_block(workflow_content, "qualify")
-    smoke = qualify.split("- name: Run policy-bound smoke checks", 1)
-    assert "# --skip-selftest:" in smoke[0].rsplit("\n      - ", 1)[-1]
-    assert "--skip-selftest" in smoke[1]
+
+    # The build always embeds the self-test; it is not a build option.
+    assert "artifact-selftest" not in _step(qualify, "scripts.desktop_shell.build")
+    smoke = _step(qualify, "scripts.desktop_shell.smoke_artifact")
+    assert "--selftest" in smoke.split()
+    assert "--no-selftest" not in workflow_content
+    assert "--skip-selftest" not in workflow_content
+    # Opening the native window needs a display the runners do not have.
+    assert "--selftest-window" not in smoke
+
+
+def test_matrix_values_reach_run_steps_only_through_env(workflow_content: str):
+    qualify = _job_block(workflow_content, "qualify")
+    run_blocks = re.findall(r"\n        run: \|\n(.*?)(?=\n      - |\Z)", qualify, re.S)
+
+    assert run_blocks
+    for block in run_blocks:
+        assert "${{" not in block
 
 
 _DRIFT_WORKFLOW_PATH = _WORKFLOW_PATH.with_name("voice-runtime-drift.yml")

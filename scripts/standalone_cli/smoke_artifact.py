@@ -19,6 +19,10 @@ from typing import NoReturn
 from scripts.standalone_cli.bounded_command import (
     run_bounded_process as run_bounded_command_process,
 )
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentityError,
+    validate_marker_identity,
+)
 from scripts.standalone_cli.smoke_mcp import MCPCheck, MCPTimeouts, run_mcp_smoke
 
 _POLICY_KEYS = frozenset(
@@ -48,6 +52,8 @@ _MARKER_KEYS = frozenset(
         "distribution",
         "product_version",
         "build_revision",
+        "channel",
+        "packaging_revision",
         "console_helper",
         "desktop_child",
     }
@@ -302,6 +308,10 @@ def _validate_request(request: SmokeRequest) -> dict[str, object]:
         or not marker["build_revision"]
     ):
         _fail("runtime marker revision is invalid")
+    try:
+        validate_marker_identity(marker)
+    except ReleaseIdentityError:
+        _fail("runtime marker release identity is invalid")
     if marker.get("desktop_child") is not None:
         _fail("runtime marker desktop child is invalid")
     helper = marker.get("console_helper")

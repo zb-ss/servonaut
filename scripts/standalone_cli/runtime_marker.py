@@ -34,6 +34,7 @@ def write_runtime_marker(
         "distribution": "frozen-cli",
         "product_version": request.product_version,
         "build_revision": request.build_revision,
+        **request.release_identity.marker_fields(),
         "console_helper": relative_executable,
         "desktop_child": None,
     }
