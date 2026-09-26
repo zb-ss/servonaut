@@ -314,6 +314,16 @@ def test_package_capabilities_keep_pip_pipx_and_source_semantics() -> None:
         source.package_management.self_update_argv()
 
 
+def test_self_update_never_requests_prereleases() -> None:
+    pip = resolve_runtime(_evidence()).package_management
+    pipx = resolve_runtime(_evidence(pipx_contains_servonaut=True)).package_management
+    for capability in (pip, pipx):
+        argv = capability.self_update_argv()
+        assert argv[-1] == "servonaut"
+        assert "--pre" not in argv
+        assert not any(arg.startswith("--pip-args") for arg in argv)
+
+
 def test_argv_builders_preserve_spaced_unicode_arguments_and_return_fresh_lists() -> (
     None
 ):

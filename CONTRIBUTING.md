@@ -50,12 +50,17 @@ If the guard flags a line that is a genuinely safe, vetted fixture (e.g. a docum
 ## Release channels and notes
 
 Stable publishing requires a published, non-draft, non-prerelease GitHub release
-with a `vX.Y.Z` tag matching both package version declarations. Desktop previews
+with a `vX.Y.Z` tag matching both package version declarations. A release
+candidate is a published GitHub prerelease with a PEP 440 `vX.Y.ZrcN` tag
+matching both declarations; it publishes to PyPI but not to the MCP registry.
+pip and pipx install a candidate only when asked for pre-releases, and the
+in-app update check never offers one to a stable installation. Desktop previews
 must be marked as GitHub prereleases; they do not publish to PyPI or the MCP
-registry. Experimental CI artifacts are not stable downloads. The existing
-pip/pipx update behaviour is unchanged.
+registry. Experimental CI artifacts are not stable downloads.
 
-Release candidates are assembled and verified by the Release candidate workflow.
+Binary release candidates (standalone CLI archives and desktop installers)
+are assembled and verified by the Release candidate workflow, separately from
+the Python release candidates described under Releasing below.
 A stable candidate uses a `vX.Y.Z` tag; a preview candidate uses a
 `vX.Y.Z-preview.N` tag and reports the same product version `X.Y.Z` with a
 preview packaging revision. Each candidate is pinned to a digest and, when
@@ -65,16 +70,92 @@ stable release. Verification is staged behind the `REQUIRE_RELEASE_CANDIDATE`
 repository variable until a real candidate has been produced once.
 
 The Release workflow compares shipped Python source changes against the highest
-published stable version reachable from the branch. Preview, draft and unpublished
-tags do not set that baseline. CI-, test- and documentation-only changes do not
-trigger a version bump. Use its `dry_run` input to inspect the next version without
-committing, tagging or publishing. All published releases, including previews,
-count towards the one-release-per-UTC-day cadence.
+published stable version. Changes that release already contains, such as fixes
+cherry-picked onto its release branch, are not counted again. Candidate, preview,
+draft and unpublished tags do not set that baseline. CI-, test- and
+documentation-only changes do not trigger a version bump. Only stable releases
+count towards the one-release-per-UTC-day cadence: candidates and previews are
+never offered to people on a stable version.
 
 Maintainers can apply `skip-changelog` to development-only PRs to exclude them
 from automatically generated release notes. Do not apply it to user-facing fixes
 or features. The label affects notes only: it does not hide a PR, change its
 release eligibility, or prevent its files from being included in source archives.
+
+## Releasing
+
+Every release is published as a release candidate first, and reaches users
+only after a maintainer approves it. The Release workflow runs in two stages:
+
+1. **Candidate** (Mondays, or run by hand with `stage: candidate`). It picks
+   the next version from the commits since the last stable release (`feat:` or
+   a configuration migration makes a minor release, `!` or `BREAKING CHANGE` a
+   major one, anything else a patch), opens a `release/X.Y.Z` branch from
+   master, sets the version to `X.Y.ZrcN` on that branch, tags `vX.Y.ZrcN` and
+   creates a GitHub prerelease, which the publish workflow uploads to PyPI.
+   While `release/X.Y.Z` is open, the next run cuts `rcN+1` from the head of
+   that branch instead: fix a problem on master, then cherry-pick the fix onto
+   the release branch. A run with nothing new to release, or with no change on
+   the branch since its last candidate, does nothing.
+2. **Final** (Thursdays, or run by hand with `stage: final`). With no open
+   candidate it does nothing, and there is no release that week. Otherwise it
+   checks that the latest candidate is the head of the release branch, was
+   published as a prerelease, is on PyPI and is not yanked there, then waits
+   for approval in the `release-approval` environment. Once approved, and only
+   if the release branch has not changed meanwhile and PyPI still serves the
+   candidate unyanked, it changes nothing but the version to `X.Y.Z`, tags
+   `vX.Y.Z` and creates the stable GitHub release
+   with generated notes, which the publish workflow ships to PyPI and the MCP
+   registry. Master's version is raised to `X.Y.Z` if it is lower, and the
+   release branch is deleted. Rejecting the approval, or letting it expire,
+   publishes nothing. The final stage refuses when a stable release already
+   went out that UTC day.
+
+A week's release is what master held when the Monday run cut `rc1`. A change
+merged after that ships the following week, unless it is cherry-picked onto
+the open release branch and tested in a new candidate. The first Monday run
+after this workflow reaches master cuts the first candidate; until one exists,
+the Thursday run has nothing to promote.
+
+Candidate numbers are never reused: PyPI accepts a version only once, even
+after it is deleted. To withdraw a candidate, yank it on PyPI and leave its tag
+and GitHub release in place; a yanked candidate is never promoted. Cut a new
+candidate instead.
+
+If a run pushed its tag but failed to create the GitHub release, run the same
+stage again: it creates only the missing release (for the final stage, after
+approval). Until a stable tag has a published release, the candidate stage
+refuses to start the next release. If the candidate behind such a tag was
+yanked meanwhile, either create the release for the tag by hand to ship it
+anyway, or delete the never-released tag by hand
+(`git push origin :refs/tags/vX.Y.Z`); the next candidate run then starts
+over with the next candidate number.
+
+To try a candidate without touching an existing installation, run
+`pipx run --spec 'servonaut==X.Y.ZrcN' servonaut`, or install it in its own
+environment with `pip install --pre servonaut`.
+
+Rehearse either stage without pushing, tagging or publishing anything:
+
+```bash
+gh workflow run release.yml -f stage=candidate -f dry_run=true
+gh workflow run release.yml -f stage=final -f dry_run=true
+```
+
+`bump` overrides the version bump when a candidate opens a new release branch.
+`draft` creates the GitHub release as a draft, to edit the notes before
+publishing it; publishing the draft is what uploads the package. On the final
+stage, `draft` still tags `vX.Y.Z`, raises master's version and deletes the
+release branch: only the release itself waits for you to publish it, and the
+next candidate run refuses to start until you do. A final run that finds the
+draft reports it instead of asking for approval.
+
+The workflow needs a `RELEASE_TOKEN` repository secret (a fine-grained personal
+access token with Contents: read/write on this repository) and a
+`release-approval` environment with at least one required reviewer; the final
+stage refuses to run while that environment requires no reviewer. The token is
+never stored in the checkout: only the steps that push, create releases or
+look for a draft release receive it.
 
 ## Release qualification
 
@@ -110,7 +191,8 @@ second round of testing.
 
 The publish workflow enforces qualification only while the
 `REQUIRE_RELEASE_CANDIDATE` repository variable is `true`. While it is off,
-pip/pipx releases are unaffected. While it is on, every stable release,
+pip/pipx releases are unaffected. Python release candidates (`vX.Y.ZrcN`
+prereleases) are never subject to it. While it is on, every stable release,
 including its PyPI upload, needs at least one fully qualified binary artifact:
 the release must carry `candidate-evidence.json`, the release files it names,
 and a `qualification-record.json` in which every row that applies to those

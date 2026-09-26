@@ -67,7 +67,9 @@ def _run_update() -> None:
     print(f"Install method: {svc.detect_install_method()}")
     command = svc.get_upgrade_command()
     if command is not None:
-        print(f"Running: {' '.join(command)}")
+        pinned = svc.prerelease_target()
+        limit = f" (limited to servonaut=={pinned})" if pinned else ""
+        print(f"Running: {' '.join(command)}{limit}")
     elif svc.runtime.is_frozen:
         print("Downloading and verifying the update...")
 
