@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import inspect
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,12 @@ from textual.widgets import Header, Static
 from servonaut.widgets.safe_header import SafeHeader
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "servonaut"
+
+# SHA-256 of the source of Textual's Header._on_mount, which SafeHeader
+# replaces outright. Unchanged from Textual 8.0.0 through 8.2.8.
+_UPSTREAM_HEADER_ON_MOUNT_SHA256 = (
+    "b9434f369cf94f16503206b4a21ae9a6fade36c592fe6e57b33fe1f11d136897"
+)
 
 
 class _HeaderScreen(Screen):
@@ -105,6 +114,24 @@ async def test_safe_header_is_found_and_styled_as_a_header():
         header = app.screen_under_test.query_one(Header)
         assert isinstance(header, SafeHeader)
         assert header.region.height == 1
+
+
+def test_upstream_header_mount_handler_is_the_one_safe_header_replaces():
+    """SafeHeader skips Header._on_mount and reimplements what it does.
+
+    If a Textual release changes that handler, SafeHeader may now be
+    missing whatever the new version adds, so this fails until someone
+    re-checks it.
+    """
+    source = textwrap.dedent(inspect.getsource(Header._on_mount))
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert digest == _UPSTREAM_HEADER_ON_MOUNT_SHA256, (
+        "Textual's Header._on_mount has changed. SafeHeader "
+        "(src/servonaut/widgets/safe_header.py) replaces that handler "
+        "entirely: compare it with the new upstream version, carry over "
+        "anything the new version adds, then update "
+        "_UPSTREAM_HEADER_ON_MOUNT_SHA256 in this file."
+    )
 
 
 def test_screens_use_safe_header():
