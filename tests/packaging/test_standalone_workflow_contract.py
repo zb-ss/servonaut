@@ -951,17 +951,50 @@ def test_windows_observer_reader_tokens_match_the_fixture() -> None:
     assert helpers["_ERROR_TYPES"] == frozenset(_WINDOWS_DIAGNOSTIC_ERROR_TYPES)
 
 
+# Every bound on a portable observed-child run derives from this one value.
+# A child that is expected to exit on its own gets this long before the
+# runner stops it, so a slow or heavily loaded machine cannot turn a normal
+# exit status into a timeout kill. It stays well under the per-test timeout.
+_OBSERVED_CHILD_TIMEOUT_SECONDS = 15.0
+_OBSERVED_CHILD_STOP_WAIT_SECONDS = _OBSERVED_CHILD_TIMEOUT_SECONDS / 5
+# Children that must be stopped by the runner sleep far past every bound.
+_HANGING_CHILD_SLEEP_SECONDS = _OBSERVED_CHILD_TIMEOUT_SECONDS * 4
+
+
+class _ChildReadyClock:
+    """Monotonic clock whose deadline passes once the child reports it is up.
+
+    The runner stops a child when ``time.monotonic()`` reaches its deadline.
+    Reporting infinity as soon as the child has written its PID file makes
+    that deadline fire the moment the child is running, however long its
+    start-up took, while the configured deadline still bounds a child that
+    never gets that far.
+    """
+
+    def __init__(self, pid_path: Path) -> None:
+        self._pid_path = pid_path
+
+    def monotonic(self) -> float:
+        try:
+            has_started = self._pid_path.stat().st_size > 0
+        except FileNotFoundError:
+            has_started = False
+        return float("inf") if has_started else time.monotonic()
+
+
 def _run_portable_observed_child(
-    tmp_path: Path, source: str
+    tmp_path: Path, source: str, *, stop_once_started: bool = False
 ) -> tuple[tuple[int, str, str], Path, list[str]]:
     helpers = _load_windows_observer_helpers()
     run_child = helpers["_run_observed_child"]
     assert callable(run_child)
-    helpers["_CHILD_DEADLINE_SECONDS"] = 0.15
-    helpers["_CHILD_STOP_WAIT_SECONDS"] = 1.0
+    helpers["_CHILD_DEADLINE_SECONDS"] = _OBSERVED_CHILD_TIMEOUT_SECONDS
+    helpers["_CHILD_STOP_WAIT_SECONDS"] = _OBSERVED_CHILD_STOP_WAIT_SECONDS
     observer_path = tmp_path / "observer.json"
     stderr_path = tmp_path / "child.stderr"
     pid_path = tmp_path / "child.pid"
+    if stop_once_started:
+        helpers["time"] = _ChildReadyClock(pid_path)
     checkpoints: list[str] = []
     environment = {
         "PATH": os.defpath,
@@ -977,6 +1010,19 @@ def _run_portable_observed_child(
         set_checkpoint=checkpoints.append,
     )
     return result, stderr_path, checkpoints
+
+
+def _describe_child_exit(returncode: int, checkpoint: str) -> str:
+    """Explain an unexpected exit, naming a stop by the runner's deadline."""
+    if checkpoint == "child-timeout":
+        return (
+            "the runner stopped the child at its "
+            f"{_OBSERVED_CHILD_TIMEOUT_SECONDS:g}s deadline before it exited "
+            f"on its own (exit status {returncode})"
+        )
+    if returncode < 0:
+        return f"the child was killed by signal {-returncode} (checkpoint {checkpoint!r})"
+    return f"the child exited with status {returncode} (checkpoint {checkpoint!r})"
 
 
 @pytest.mark.parametrize(
@@ -1005,7 +1051,7 @@ def test_windows_observer_startup_fallbacks_are_bounded_and_private(
         _run_portable_observed_child(tmp_path, source)
     )
 
-    assert returncode == 1
+    assert returncode == 1, _describe_child_exit(returncode, checkpoint)
     assert checkpoint == expected_checkpoint
     assert error_type == "unavailable"
     assert checkpoints == [
@@ -1018,17 +1064,27 @@ def test_windows_observer_startup_fallbacks_are_bounded_and_private(
 def test_windows_observer_reaps_silent_timeout_and_stderr_overflow(
     tmp_path: Path,
 ) -> None:
-    """Run direct hanging children to prove deadline and live output bounds."""
-    for name, source, expected_checkpoint, expected_size in (
+    """Run direct hanging children to prove deadline and live output bounds.
+
+    The silent child is stopped by the deadline as soon as it is running, and
+    the noisy one by its output limit; both would otherwise sleep far past
+    every bound, so finishing inside the timeout proves the runner stopped them.
+    """
+    sleep = f"time.sleep({_HANGING_CHILD_SLEEP_SECONDS:g})"
+    for name, source, stop_once_started, expected_checkpoint, expected_size in (
         (
             "silent",
-            "import os, pathlib, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); time.sleep(60)",
+            "import os, pathlib, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); "
+            + sleep,
+            True,
             "child-timeout",
             0,
         ),
         (
             "overflow",
-            "import os, pathlib, sys, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); sys.stderr.buffer.write(b'x' * 4097); sys.stderr.flush(); time.sleep(60)",
+            "import os, pathlib, sys, time; pathlib.Path(os.environ['PID_FILE']).write_text(str(os.getpid())); sys.stderr.buffer.write(b'x' * 4097); sys.stderr.flush(); "
+            + sleep,
+            False,
             "child-stderr-overflow",
             4096,
         ),
@@ -1037,9 +1093,11 @@ def test_windows_observer_reaps_silent_timeout_and_stderr_overflow(
         case_root.mkdir()
         started = time.monotonic()
         (returncode, checkpoint, error_type), stderr_path, _checkpoints = (
-            _run_portable_observed_child(case_root, source)
+            _run_portable_observed_child(
+                case_root, source, stop_once_started=stop_once_started
+            )
         )
-        assert time.monotonic() - started < 3.0
+        assert time.monotonic() - started < _OBSERVED_CHILD_TIMEOUT_SECONDS, name
         assert returncode != 0
         assert checkpoint == expected_checkpoint
         assert error_type == "unavailable"
@@ -1063,7 +1121,7 @@ def test_windows_observer_rejects_invalid_record_without_stderr_fallback(
         _run_portable_observed_child(tmp_path, source)
     )
 
-    assert returncode == 0
+    assert returncode == 0, _describe_child_exit(returncode, checkpoint)
     assert checkpoint == "child-observer-invalid"
     assert error_type == "unavailable"
     assert "private-child-canary" not in checkpoint
@@ -1113,7 +1171,7 @@ def test_windows_observer_child_latches_primary_state_through_cleanup(
         _run_portable_observed_child(tmp_path, source)
     )
 
-    assert returncode == 1
+    assert returncode == 1, _describe_child_exit(returncode, checkpoint)
     assert (checkpoint, error_type) == expected_observation
 
 

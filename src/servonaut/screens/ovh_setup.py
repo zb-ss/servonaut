@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, Footer, Input, Label, Select, Static
 
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.services.object_storage_regions import (
@@ -18,6 +18,7 @@ from servonaut.services.object_storage_regions import (
     OVH_S3_REGIONS,
 )
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ class OVHSetupScreen(Screen):
         return super().app  # type: ignore
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

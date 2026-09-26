@@ -25,7 +25,6 @@ from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
-    Header,
     Input,
     OptionList,
     Static,
@@ -33,6 +32,7 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from servonaut.services import bws_onboarding as bws
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class SecretsSetupScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

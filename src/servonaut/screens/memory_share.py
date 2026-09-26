@@ -17,9 +17,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Label, Select, SelectionList, Static
+from textual.widgets import Button, Footer, Label, Select, SelectionList, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ class ShareInstanceScreen(Screen):
     def compose(self) -> ComposeResult:
         from rich.markup import escape as rich_escape
         name = rich_escape(str(self._instance.get("name") or self._instance.get("id", "?")))
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

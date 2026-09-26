@@ -8,9 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Button, DataTable
+from textual.widgets import Footer, Static, Button, DataTable
 from textual.worker import Worker
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
@@ -39,7 +40,7 @@ class ScanResultsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the scan results UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

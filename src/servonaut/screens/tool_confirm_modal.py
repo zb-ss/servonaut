@@ -26,7 +26,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Input, Static
+
+from servonaut.widgets.safe_header import SafeHeader
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ class ToolConfirmModal(ModalScreen[bool]):
         self._args = args or {}
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 f"[bold]{escape(self._tool)}[/bold]",
@@ -243,7 +245,7 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         self._args = args or {}
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 f"[bold]Dangerous tool:[/bold] [bold]{escape(self._tool)}[/bold]",

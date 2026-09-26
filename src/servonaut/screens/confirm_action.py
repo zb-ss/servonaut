@@ -8,7 +8,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Input, Static
+
+from servonaut.widgets.safe_header import SafeHeader
 
 
 class ConfirmActionScreen(ModalScreen[bool]):
@@ -129,7 +131,7 @@ class ConfirmActionScreen(ModalScreen[bool]):
             for c in self._consequences
         ]
 
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 f"[bold {title_color}]{self._title}[/bold {title_color}]",

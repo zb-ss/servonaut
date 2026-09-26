@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.events import Key
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, RichLog
+from textual.widgets import Footer, Static, RichLog
 
 from servonaut.utils.ssh_utils import (
     SshLog,
@@ -24,6 +24,7 @@ from servonaut.utils.ssh_utils import (
     track_background_process,
     with_diagnostics,
 )
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.screens.log_picker import (
@@ -122,7 +123,7 @@ class LogViewerScreen(Screen):
 
     def compose(self) -> ComposeResult:
         name = self._instance.get("name") or self._instance.get("id", "unknown")
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

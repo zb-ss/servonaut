@@ -22,7 +22,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Static
+
+from servonaut.widgets.safe_header import SafeHeader
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +150,7 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
         self._existing_short = _short_provider_name(self._existing_provider)
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 "[bold cyan]You're now subscribed to Servonaut AI.[/bold cyan]",
@@ -249,7 +251,7 @@ class AIEmptyStateModal(ModalScreen[Optional[str]]):
     """
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 "[bold cyan]Servonaut needs an AI provider.[/bold cyan]",

@@ -20,7 +20,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Static
+
+from servonaut.widgets.safe_header import SafeHeader
 
 
 # Display labels for known providers. Anything else falls through to a
@@ -141,7 +143,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
         self._keep_label = (keep_label or "").strip() or "Keep retrying"
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         children = [
             Static(
                 f"[bold yellow]{escape(self._title)}[/bold yellow]",

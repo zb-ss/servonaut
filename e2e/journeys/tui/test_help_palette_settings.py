@@ -82,9 +82,7 @@ async def test_help_opens_from_a_provider_screen_and_returns_there(tui, seed, pr
         await t.wait_for_screen("HetznerManagerScreen")
         await t.press("question_mark")
         await t.wait_for_screen("HelpScreen")
-        text = t.rendered_text()
-        assert "Servonaut — Help" in text
-        assert "Instance List" in text
+        await t.wait_for_text("Servonaut — Help", "Instance List")
         await t.press("escape")
         await t.wait_for_screen("HetznerManagerScreen")
 

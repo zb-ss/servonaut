@@ -79,9 +79,7 @@ async def test_seeded_home_shows_the_fleet_at_once(tui, seed):
         rows = await t.wait_until(lambda: t.table_rows("InstanceTable"), desc="fleet rows")
         names = [row[1] for row in rows]
         assert names == [host.name for host in fleet.AWS_FLEET]
-        screen_text = t.rendered_text()
-        assert all(name in screen_text for name in names)
-        assert fleet.EDGE_1.public_ip in screen_text
+        await t.wait_for_text(*names, fleet.EDGE_1.public_ip)
         # A fresh cache means no background refresh was needed.
         await t.settle()
         assert not any("Refreshing" in message for _, message in t.toasts())

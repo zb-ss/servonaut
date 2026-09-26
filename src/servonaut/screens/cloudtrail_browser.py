@@ -10,9 +10,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 import re
@@ -167,7 +168,7 @@ class CloudTrailBrowserScreen(Screen):
         return self._visible[start : start + _PAGE_SIZE]
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

@@ -8,9 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal, Grid
 from textual.screen import Screen
-from textual.widgets import Static, Button, Header, Footer
+from textual.widgets import Static, Button, Footer
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import (
     connection_instance,
@@ -71,7 +72,7 @@ class MainMenuScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the dashboard UI."""
-        yield Header()
+        yield SafeHeader()
         
         with Horizontal(id="main-layout"):
             # Left Navigation Sidebar

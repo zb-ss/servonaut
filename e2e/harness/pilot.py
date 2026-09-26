@@ -19,11 +19,13 @@ import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional, TypeVar, Union
+from typing import Any, AsyncIterator, Callable, ContextManager, Optional, TypeVar, Union
 
 from rich.console import Console
 from textual.css.query import NoMatches
+from textual.geometry import Region
 from textual.notifications import Notify
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, RichLog
 
@@ -73,10 +75,18 @@ def reset_app_class_state() -> None:
 class TuiDriver:
     """User-level operations and observations on a running app."""
 
-    def __init__(self, app: Any, pilot: Any, notifications: list[Any], artifact_dir: Path) -> None:
+    def __init__(
+        self,
+        app: Any,
+        pilot: Any,
+        notifications: list[Any],
+        artifact_dir: Path,
+        opened_screens: Optional[list[str]] = None,
+    ) -> None:
         self.app = app
         self.pilot = pilot
         self._notifications = notifications
+        self._opened_screens = opened_screens if opened_screens is not None else []
         self.artifact_dir = artifact_dir
 
     # ------------------------------------------------------------------
@@ -92,6 +102,10 @@ class TuiDriver:
 
     def screen_name(self) -> str:
         return type(self.app.screen).__name__
+
+    def opened_screens(self) -> list[str]:
+        """Every screen pushed so far, oldest first, including closed ones."""
+        return list(self._opened_screens)
 
     def focused_id(self) -> Optional[str]:
         focused = self.app.focused
@@ -128,29 +142,60 @@ class TuiDriver:
         """Every notification shown so far, with its markup flag, oldest first."""
         return [Toast(n.severity, str(n.message), bool(n.markup)) for n in self._notifications]
 
-    def rendered_text(self) -> str:
+    def rendered_text(self, *, screen_only: bool = False) -> str:
         """Plain text of the screen as it is currently drawn.
+
+        With *screen_only*, keep only the areas the active screen's own
+        widgets cover: for a modal, its dialog without the screen that shows
+        through around it, whose text would otherwise satisfy a check too.
 
         Textual has no public plain-text export (``export_screenshot`` gives
         SVG), so this mirrors that method with its private compositor and
         background-screen attributes. Keep all private use here.
         """
-        width, height = self.app.size
-        console = Console(
-            width=width,
-            height=height,
-            file=io.StringIO(),
-            force_terminal=True,
-            color_system="truecolor",
-            record=True,
-            legacy_windows=False,
-            safe_box=False,
-        )
-        update = self.app.screen._compositor.render_update(
-            full=True, screen_stack=self.app._background_screens, simplify=True
-        )
-        console.print(update)
+        with self._as_the_app():
+            update = self.app.screen._compositor.render_update(
+                full=True, screen_stack=self.app._background_screens, simplify=True
+            )
+            if screen_only:
+                return self._text_within_own_widgets(update.strips)
+            width, height = self.app.size
+            console = Console(
+                width=width,
+                height=height,
+                file=io.StringIO(),
+                force_terminal=True,
+                color_system="truecolor",
+                record=True,
+                legacy_windows=False,
+                safe_box=False,
+            )
+            console.print(update)
         return console.export_text()
+
+    def _text_within_own_widgets(self, lines: list[Any]) -> str:
+        """The drawn rows cropped to each visible child of the active screen."""
+        rows = [Strip.join(line) for line in lines]
+        screen = Region(0, 0, *self.app.size)
+        parts = []
+        for child in self.app.screen.children:
+            area = child.region.intersection(screen) if child.display else Region()
+            if not area.area:
+                continue
+            parts.extend(
+                row.crop(area.x, area.right).text for row in rows[area.y : area.bottom]
+            )
+        return "\n".join(parts)
+
+    def _as_the_app(self) -> ContextManager[None]:
+        """Run a render the way the app's own tasks do, as Textual's active app.
+
+        A widget not drawn since its last change is rendered on the spot,
+        and Textual looks the app up from a context variable to do it. Under
+        ``run_test`` the journey already runs with that set; under the
+        desktop host the app has tasks of its own and the journey does not.
+        """
+        return self.app._context()
 
     @staticmethod
     def log_text(widget: RichLog) -> str:
@@ -170,6 +215,7 @@ class TuiDriver:
         """Diagnostics for a failure artifact."""
         state: dict[str, Any] = {
             "stack": self.stack_names(),
+            "opened_screens": self.opened_screens(),
             "focused": self.focused_id(),
             "toasts": self.toasts(),
             "exception": repr(getattr(self.app, "_exception", None)),
@@ -232,6 +278,64 @@ class TuiDriver:
         await self.pilot.pause()
         return self.app.screen
 
+    async def wait_for_screen_opened(self, name: str, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+        """Wait until a *name* screen has been pushed, even if it closed again.
+
+        For a screen that closes on its own after a short time: on a busy
+        machine it can open and close between two looks at the stack.
+        """
+        await self.wait_until(
+            lambda: name in self._opened_screens, timeout=timeout, desc=f"screen {name} opened"
+        )
+
+    async def wait_for_widget(
+        self,
+        selector: Union[str, type],
+        expect_type: Optional[type] = None,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> Any:
+        """The match for *selector* on the active screen, once it is mounted.
+
+        A screen can mount part of its content after it becomes active, for
+        example a card it rebuilds when its state changes: the card joins the
+        screen at once, the buttons inside it a few frames later. This waits
+        until the match exists and has finished mounting. It does not wait
+        for a layout pass to give it a place on screen; :meth:`click` does.
+        """
+
+        def mounted() -> Optional[list[Any]]:
+            widget = self.on_screen(selector, expect_type)
+            return [widget] if widget.is_mounted else None
+
+        found = await self.wait_until(
+            mounted, timeout=timeout, desc=f"{selector} mounted on {self.screen_name()}"
+        )
+        return found[0]
+
+    async def wait_for_text(
+        self, *needles: str, screen_only: bool = False, timeout: float = DEFAULT_TIMEOUT
+    ) -> str:
+        """Wait until the drawn screen shows every one of *needles*; return it.
+
+        Widget state runs ahead of the screen: a table holds its new rows
+        before it has sized its columns for them, so a name can be in the
+        table yet still cut short on screen. Checks of what the user sees
+        wait for the drawing, not for the data behind it. Pass
+        *screen_only* to check a modal's own text (see :meth:`rendered_text`).
+        """
+        missing = list(needles)
+
+        def drawn() -> Optional[str]:
+            text = self.rendered_text(screen_only=screen_only)
+            missing[:] = [needle for needle in needles if needle not in text]
+            return None if missing else text
+
+        try:
+            return await self.wait_until(drawn, timeout=timeout, desc="text on screen")
+        except JourneyTimeout as exc:
+            raise JourneyTimeout(f"{exc}; not drawn: {missing}") from None
+
     async def wait_for_toast(
         self,
         pattern: str,
@@ -280,13 +384,29 @@ class TuiDriver:
         await self.pilot.press(*text)
 
     async def click(self, target: Union[str, Widget]) -> None:
-        """Click the middle of a visible widget on the active screen."""
-        widget = self.on_screen(target) if isinstance(target, str) else target
+        """Click the middle of a visible widget on the active screen.
+
+        A selector is waited for (see :meth:`wait_for_widget`), the way a
+        user waits for a button to appear; a hidden widget fails at once.
+        The click waits for the widget to be scrolled into view and laid
+        out, so it lands on the widget rather than where it will be. A
+        button ignores clicks while its short "pressed" highlight is
+        showing, exactly as it would a real double click, so a second click
+        on the same button waits for the highlight to clear first.
+        """
+        widget = await self.wait_for_widget(target) if isinstance(target, str) else target
         if not self.is_reachable(widget):
             raise AssertionError(f"{widget!r} is hidden, so a user cannot click it")
+        if isinstance(widget, Button):
+            await self.wait_until(
+                lambda: not widget.has_class("-active"), desc=f"{widget!r} ready for a click"
+            )
         widget.scroll_visible(animate=False, immediate=True)
         await self.pilot.pause()
-        region = widget.region
+        region = await self.wait_until(
+            lambda: widget.region if widget.region.area else None,
+            desc=f"{widget!r} laid out on screen",
+        )
         offset = (max(region.width // 2, 0), max(region.height // 2, 0))
         landed = await self.pilot.click(widget, offset=offset)
         if not landed:
@@ -294,7 +414,7 @@ class TuiDriver:
 
     async def fill(self, selector: str, text: str) -> None:
         """Focus an input on the active screen, clear it and type *text*."""
-        field = self.on_screen(selector, Input)
+        field = await self.wait_for_widget(selector, Input)
         await self.click(field)
         await self.wait_until(lambda: field.has_focus, desc=f"focus on {selector}")
         field.clear()
@@ -421,13 +541,31 @@ class TuiDriver:
         """Save ``<label>.svg`` and ``state.json`` into the artifact folder."""
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         try:
-            svg = self.app.export_screenshot(title=f"servonaut e2e: {label}")
+            with self._as_the_app():
+                svg = self.app.export_screenshot(title=f"servonaut e2e: {label}")
             (self.artifact_dir / f"{label}.svg").write_text(svg, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001 - diagnostics only
             (self.artifact_dir / f"{label}.svg.error.txt").write_text(repr(exc), encoding="utf-8")
         (self.artifact_dir / "state.json").write_text(
             json.dumps(self.state(), indent=2, default=str), encoding="utf-8"
         )
+
+
+def _record_pushed_screens(app: Any) -> list[str]:
+    """Note the name of every screen *app* pushes; returns the live list.
+
+    Wraps this app instance's ``push_screen`` (not the class), so a screen
+    that opens and closes between two polls is still seen to have opened.
+    """
+    opened: list[str] = []
+    push_screen = app.push_screen
+
+    def recording_push_screen(screen: Any, *args: Any, **kwargs: Any) -> Any:
+        opened.append(screen if isinstance(screen, str) else type(screen).__name__)
+        return push_screen(screen, *args, **kwargs)
+
+    app.push_screen = recording_push_screen
+    return opened
 
 
 @asynccontextmanager
@@ -449,8 +587,9 @@ async def tui_session(
             notifications.append(message.notification)
 
     app = ServonautApp(runtime_layout=detect_runtime())
+    opened = _record_pushed_screens(app)
     async with app.run_test(size=size, notifications=True, message_hook=hook) as pilot:
-        driver = TuiDriver(app, pilot, notifications, artifact_dir)
+        driver = TuiDriver(app, pilot, notifications, artifact_dir, opened)
         try:
             if wait_for_fleet:
                 await driver.wait_for_screen("InstanceListScreen")

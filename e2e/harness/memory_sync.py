@@ -52,10 +52,15 @@ async def open_memory_sync(t: Any) -> None:
 
 
 async def unlock(t: Any) -> None:
-    """Press "Unlock Memory Sync" and wait until the store is active."""
+    """Press "Unlock Memory Sync" and wait until the store is active.
+
+    The status line turns active first; the card with the actions is
+    rebuilt for the new state and its buttons follow a few frames later,
+    so the step ends when those are available too.
+    """
     await t.click("#msync_btn_setup")
     await t.wait_for_toast(r"^Memory Sync is now active\.$")
-    await t.wait_until(lambda: status(t) == ACTIVE, desc="Memory Sync active")
+    await t.wait_until(lambda: _idle(t), desc="Memory Sync active, with its actions")
 
 
 def synced_toasts(t: Any) -> int:
@@ -63,7 +68,9 @@ def synced_toasts(t: Any) -> int:
 
 
 def _idle(t: Any) -> bool:
-    return status(t) == ACTIVE and not t.on_screen("#msync_btn_sync_now").disabled
+    """Active, with "Sync all local memory" shown and enabled."""
+    button = t.on_screen("#msync_btn_sync_now")
+    return status(t) == ACTIVE and t.is_reachable(button) and not button.disabled
 
 
 async def sync_all(t: Any) -> str:
