@@ -102,8 +102,9 @@ only after a maintainer approves it. The Release workflow runs in two stages:
    checks that the latest candidate is the head of the release branch, was
    published as a prerelease, is on PyPI and is not yanked there, then waits
    for approval in the `release-approval` environment. Once approved, and only
-   if the release branch has not changed meanwhile, it changes nothing but the
-   version to `X.Y.Z`, tags `vX.Y.Z` and creates the stable GitHub release
+   if the release branch has not changed meanwhile and PyPI still serves the
+   candidate unyanked, it changes nothing but the version to `X.Y.Z`, tags
+   `vX.Y.Z` and creates the stable GitHub release
    with generated notes, which the publish workflow ships to PyPI and the MCP
    registry. Master's version is raised to `X.Y.Z` if it is lower, and the
    release branch is deleted. Rejecting the approval, or letting it expire,
@@ -124,7 +125,11 @@ candidate instead.
 If a run pushed its tag but failed to create the GitHub release, run the same
 stage again: it creates only the missing release (for the final stage, after
 approval). Until a stable tag has a published release, the candidate stage
-refuses to start the next release.
+refuses to start the next release. If the candidate behind such a tag was
+yanked meanwhile, either create the release for the tag by hand to ship it
+anyway, or delete the never-released tag by hand
+(`git push origin :refs/tags/vX.Y.Z`); the next candidate run then starts
+over with the next candidate number.
 
 To try a candidate without touching an existing installation, run
 `pipx run --spec 'servonaut==X.Y.ZrcN' servonaut`, or install it in its own
@@ -142,14 +147,15 @@ gh workflow run release.yml -f stage=final -f dry_run=true
 publishing it; publishing the draft is what uploads the package. On the final
 stage, `draft` still tags `vX.Y.Z`, raises master's version and deletes the
 release branch: only the release itself waits for you to publish it, and the
-next candidate run refuses to start until you do.
+next candidate run refuses to start until you do. A final run that finds the
+draft reports it instead of asking for approval.
 
 The workflow needs a `RELEASE_TOKEN` repository secret (a fine-grained personal
 access token with Contents: read/write on this repository) and a
 `release-approval` environment with at least one required reviewer; the final
 stage refuses to run while that environment requires no reviewer. The token is
-never stored in the checkout: only the steps that push and create releases
-receive it.
+never stored in the checkout: only the steps that push, create releases or
+look for a draft release receive it.
 
 ## Release qualification
 
