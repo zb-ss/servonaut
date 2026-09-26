@@ -22,10 +22,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Input, Static
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 
@@ -157,7 +158,7 @@ class DbCredentialScanScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         name = escape(str(self._instance.get("name") or self._instance.get("id") or "?"))
         with Horizontal(id="main-layout"):
             yield Sidebar()

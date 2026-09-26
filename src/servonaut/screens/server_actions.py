@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Static, Button, Header, Footer
+from textual.widgets import Static, Button, Footer
 
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_KEEP_KNOWN_HOSTS,
@@ -26,6 +26,7 @@ from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 
@@ -231,7 +232,7 @@ class ServerActionsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the server actions UI (narrow action rail + detail pane)."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Horizontal(id="sa-body"):

@@ -6,9 +6,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, TextArea
+from textual.widgets import Button, DataTable, Footer, Input, Label, Static, TextArea
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -29,7 +30,7 @@ class CustomServersScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the custom servers UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

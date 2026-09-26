@@ -28,10 +28,11 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Static, TabbedContent, TabPane,
+    Button, DataTable, Footer, Input, Static, TabbedContent, TabPane,
 )
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -335,7 +336,7 @@ class AIConversationsScreen(Screen):
         return "tab_local"
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Vertical(id="convs_container"):

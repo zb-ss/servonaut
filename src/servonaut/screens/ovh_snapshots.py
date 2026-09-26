@@ -10,9 +10,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Static
+from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class OVHSnapshotsScreen(Screen):
         instance_name = self._instance.get("name") or self._instance.get("id", "Unknown")
         is_vps = self._provider_type == "vps"
 
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with ScrollableContainer(id="snapshots_container"):

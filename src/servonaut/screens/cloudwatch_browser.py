@@ -10,9 +10,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
@@ -99,7 +100,7 @@ class CloudWatchBrowserScreen(Screen):
         return self._events[start : start + _PAGE_SIZE]
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

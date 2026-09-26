@@ -7,11 +7,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static
+from textual.widgets import Footer, Static
 
 from servonaut.widgets.sidebar import Sidebar
 
 from servonaut.widgets.remote_tree import RemoteTree
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.utils.match_utils import matches_conditions
 from servonaut.screens._demo_resolve import connection_instance
 
@@ -89,7 +90,7 @@ class FileBrowserScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the file browser UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

@@ -8,9 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Input, Button, RadioSet, RadioButton
+from textual.widgets import Footer, Static, Input, Button, RadioSet, RadioButton
 from textual.worker import Worker
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.ssh_host_keys import (
@@ -43,7 +44,7 @@ class SCPTransferScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the SCP transfer UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

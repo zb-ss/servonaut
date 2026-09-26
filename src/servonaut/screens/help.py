@@ -6,9 +6,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static, Markdown
+from textual.widgets import Footer, Static, Markdown
 
 
 HELP_TEXT = """
@@ -295,7 +296,7 @@ class HelpScreen(Screen):
     ]
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

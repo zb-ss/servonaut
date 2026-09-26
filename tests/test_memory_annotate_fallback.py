@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Footer, Header, Static, TextArea
+from textual.widgets import Button, Footer, Static, TextArea
 
 from servonaut.config.schema import MemoryConfig
 from servonaut.screens.memory import MemoryScreen
@@ -24,6 +24,7 @@ from servonaut.screens.text_editor_modal import TextEditorModal
 from servonaut.services.memory.redaction import noop_redactor
 from servonaut.services.memory.service import MemoryService
 from servonaut.services.memory.store import MemoryStore
+from servonaut.widgets.safe_header import SafeHeader
 
 _SECRET_NOTES = "db password=hunter2hunter2\n"
 
@@ -53,7 +54,7 @@ class _Host(App):
         self._instance = {**_INSTANCE, **instance}
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Footer()
 
     def on_mount(self) -> None:

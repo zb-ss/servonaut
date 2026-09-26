@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
-    Button, Checkbox, DataTable, Footer, Header, Input, Static,
+    Button, Checkbox, DataTable, Footer, Input, Static,
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
@@ -26,6 +26,7 @@ from servonaut.services.db_coverage import (
     coverage_summary,
     filter_coverage,
 )
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class DbCoverageScreen(Screen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
