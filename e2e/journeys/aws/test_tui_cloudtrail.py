@@ -186,6 +186,8 @@ async def test_selected_row_details_match_while_filtered(tui, seed, cloudtrail):
         await _open_and_fetch(t)
         await choose(t, "#ct_select_event_name", f"StopInstances  ({len(stops)})")
         await t.wait_until(lambda: len(_rows(t)) == len(stops), desc="narrowed to StopInstances")
+        first = _rows(t)[0]
+        assert first[1] == "StopInstances", first
         await select_row(t, t.on_screen("#cloudtrail_table"), 0)
-        await t.wait_until(lambda: "Event: " in t.rendered_text(), desc="event details")
-        assert "Event: StopInstances" in t.rendered_text()
+        # The details of the row now selected, not of an earlier selection.
+        await t.wait_for_text(f"Event: {first[1]}", f"Time: {first[0]}")

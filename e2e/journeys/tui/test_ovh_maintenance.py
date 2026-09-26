@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Optional
 
 import pytest
 
@@ -219,7 +220,13 @@ async def test_firewall_toggle_prompt_describes_the_effect(tui, seed, providers)
         await t.wait_until(lambda: "Firewall: Enabled" in t.rendered_text(), desc="state")
         await press(t, "#btn_toggle")
         await t.wait_for_screen("ConfirmActionScreen")
-        text = t.rendered_text()
+
+        def prompt() -> Optional[str]:
+            text = t.rendered_text(screen_only=True)
+            shown = ("rules will be suspended", "{'take effect'", "new_state")
+            return text if any(part in text for part in shown) else None
+
+        text = await t.wait_until(prompt, desc="the toggle prompt's description")
         if "{'take effect'" in text or "new_state" in text:
             raise FirewallPromptShowsTemplate("the prompt shows the raw template expression")
         assert "rules will be suspended" in text

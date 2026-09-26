@@ -26,7 +26,7 @@ from textual.widgets import Button, DataTable, Input
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import NIC_HANDLE
 from e2e.harness.known_bugs import ProductBug
-from e2e.harness.pilot import TuiDriver
+from e2e.harness.pilot import JourneyTimeout, TuiDriver
 
 # Each tour visits dozens of screens; the limit leaves room on a busy runner.
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio, pytest.mark.timeout(180)]
@@ -657,9 +657,10 @@ async def test_demo_toggle_shows_the_demo_badge(tui, seed, providers):
         await t.wait_until(
             lambda: fleet.APP_1.name not in t.rendered_text(), desc="fleet redrawn"
         )
-        await t.settle()
-        if "DEMO" not in t.rendered_text():
-            raise DemoBadgeNotUpdated("no DEMO badge after switching demo mode on")
+        try:
+            await t.wait_for_text("DEMO")
+        except JourneyTimeout:
+            raise DemoBadgeNotUpdated("no DEMO badge after switching demo mode on") from None
 
 
 
