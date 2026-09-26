@@ -22,7 +22,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Static
+
+from servonaut.widgets.safe_header import SafeHeader
 
 
 # Pack labels — server is authoritative on dollar amount + token count;
@@ -115,7 +117,7 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         self._reason = (reason or "").strip()
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         children = [
             Static(
                 "[bold cyan]Top up Servonaut AI[/bold cyan]",

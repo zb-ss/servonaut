@@ -142,6 +142,26 @@ class _ListenSession:
         self.queue: 'queue.Queue[Any]' = queue.Queue()
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        # Held while the session's thread is being started. The session is
+        # published before its thread starts, so a teardown on another
+        # thread takes this lock to read a thread it can join.
+        self.spawn_lock = threading.Lock()
+
+
+def _start_session_thread(
+    session: _ListenSession,
+    target: Callable[[_ListenSession, Any], None],
+    input_service: Any,
+    *,
+    name: str,
+) -> None:
+    """Start *session*'s daemon thread, then publish it for teardown."""
+    thread = threading.Thread(
+        target=target, args=(session, input_service), name=name, daemon=True,
+    )
+    with session.spawn_lock:
+        thread.start()
+        session.thread = thread
 
 
 class VoiceConversationService(VoiceConversationServiceInterface):
@@ -398,13 +418,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
 
     def _spawn_listener(self, session: _ListenSession, input_service: Any) -> None:
         """Start the daemon thread that owns this listening session."""
-        session.thread = threading.Thread(
-            target=self._listen_loop,
-            args=(session, input_service),
-            name="voice-conversation",
-            daemon=True,
+        _start_session_thread(
+            session, self._listen_loop, input_service, name="voice-conversation",
         )
-        session.thread.start()
 
     def _listen_loop(self, session: _ListenSession, input_service: Any) -> None:
         """One listening session: open the mic, watch the VAD, endpoint.
@@ -477,8 +493,11 @@ class VoiceConversationService(VoiceConversationServiceInterface):
 
         Returns:
             True when capture is running; False after reporting the
-            failure and landing in IDLE.
+            failure and landing in IDLE, or when the session was stopped
+            before or while the microphone opened.
         """
+        if session.stop_event.is_set():
+            return False
         try:
             input_service.set_frame_callback(
                 lambda block: self._enqueue_frame(session, block)
@@ -487,7 +506,23 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         except Exception as e:  # noqa: BLE001 — VoiceInputError and friends
             self._fail_from_loop(session, input_service, str(e))
             return False
+        if session.stop_event.is_set():
+            self._close_stopped_capture(input_service)
+            return False
         return True
+
+    def _close_stopped_capture(self, input_service: Any) -> None:
+        """Close a capture that opened after its session was stopped.
+
+        The stop's teardown ran before this capture existed, so nothing
+        else will close it. Once a newer session is active the input is
+        that session's, and it is left alone.
+        """
+        with self._lock:
+            if self._session is not None or self._barge_session is not None:
+                return
+            self._quiet(input_service.set_frame_callback, None)
+            self._quiet(input_service.cancel_recording)
 
     def _enqueue_frame(self, session: _ListenSession, block: Any) -> None:
         """Frame tap: audio thread -> session queue. O(1), never raises."""
@@ -591,13 +626,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
                 return
             session = _ListenSession(monitor)
             self._barge_session = session
-        session.thread = threading.Thread(
-            target=self._barge_loop,
-            args=(session, input_service),
-            name="voice-barge",
-            daemon=True,
+        _start_session_thread(
+            session, self._barge_loop, input_service, name="voice-barge",
         )
-        session.thread.start()
 
     def _barge_loop(self, session: _ListenSession, input_service: Any) -> None:
         """Watch the microphone for sustained speech during playback.
@@ -613,6 +644,8 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         this reply.
         """
         try:
+            if session.stop_event.is_set():
+                return
             try:
                 input_service.set_frame_callback(
                     lambda block: self._enqueue_frame(session, block)
@@ -621,6 +654,9 @@ class VoiceConversationService(VoiceConversationServiceInterface):
             except Exception:  # noqa: BLE001 — VoiceInputError and friends
                 logger.debug("Barge-in capture failed to open", exc_info=True)
                 self._clear_barge_session(session)
+                return
+            if session.stop_event.is_set():
+                self._close_stopped_capture(input_service)
                 return
             while not session.stop_event.is_set():
                 try:
@@ -759,8 +795,12 @@ class VoiceConversationService(VoiceConversationServiceInterface):
         if input_service is not None:
             self._quiet(getattr(input_service, "set_frame_callback", lambda _cb: None), None)
             self._quiet(input_service.cancel_recording)
-        thread = session.thread
-        if join and thread is not None and thread is not threading.current_thread():
+        if not join:
+            return
+        # Waits out a start in progress: joining an unstarted thread raises.
+        with session.spawn_lock:
+            thread = session.thread
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=_JOIN_TIMEOUT_SECONDS)
             if thread.is_alive():
                 logger.warning("Conversation listener did not stop within %ss",

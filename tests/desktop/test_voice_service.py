@@ -1061,7 +1061,9 @@ def test_oversized_sentence_is_split_and_later_sentences_still_arrive(pipes):
 
     assert _wait_for(lambda: texts and texts[-1] == "short sentence")
     assert "".join(texts[:-1]) == long_sentence
-    assert conn._pending == {}
+    # The responder records a text before it replies, so the last reply can
+    # still be on its way when the text shows up.
+    assert _wait_for(lambda: conn._pending == {}), conn._pending
     conn.close()
 
 

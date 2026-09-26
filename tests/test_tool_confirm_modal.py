@@ -18,6 +18,7 @@ from servonaut.screens.tool_confirm_modal import (
     DangerousToolConfirmModal,
     ToolConfirmModal,
 )
+from tests._async_bounds import wait_until
 
 
 class _WrapperApp(App):
@@ -139,6 +140,11 @@ async def test_standard_modal_denies_on_n_and_escape():
 # ---------------------------------------------------------------------------
 
 
+def _prompt_is_open(app: App) -> bool:
+    """True once a tool prompt is the active screen and has finished mounting."""
+    return isinstance(app.screen, ToolConfirmModal) and app.screen.is_mounted
+
+
 @pytest.mark.asyncio
 async def test_modal_confirm_closes_the_prompt_when_the_deadline_passes():
     import asyncio
@@ -148,6 +154,7 @@ async def test_modal_confirm_closes_the_prompt_when_the_deadline_passes():
 
     app = App()
     outcome = []
+    opened = []
     async with app.run_test(headless=True) as pilot:
         confirm = build_modal_confirm(app)
         call = SimpleNamespace(
@@ -155,16 +162,21 @@ async def test_modal_confirm_closes_the_prompt_when_the_deadline_passes():
         )
 
         async def _ask():
+            prompt = asyncio.ensure_future(confirm(call))
+            # The deadline passes only once the prompt is open, however long
+            # the machine takes to show it. A zero timeout makes wait_for
+            # cancel the pending prompt and raise TimeoutError, exactly as it
+            # does when the tool bridge's real deadline expires.
+            await wait_until(lambda: _prompt_is_open(app))
+            opened.append(app.screen)
             try:
-                outcome.append(await asyncio.wait_for(confirm(call), timeout=0.3))
+                outcome.append(await asyncio.wait_for(prompt, timeout=0))
             except asyncio.TimeoutError:
                 outcome.append("timeout")
 
         worker = app.run_worker(_ask(), exit_on_error=False)
-        await pilot.pause(0.1)
-        assert isinstance(app.screen, ToolConfirmModal)
-
         await worker.wait()
+        await wait_until(lambda: not opened[0].is_attached)
         await pilot.pause()
 
         assert outcome == ["timeout"]
@@ -188,7 +200,7 @@ async def test_modal_confirm_returns_the_answer():
             outcome.append(await confirm(call))
 
         worker = app.run_worker(_ask(), exit_on_error=False)
-        await pilot.pause(0.1)
+        await wait_until(lambda: _prompt_is_open(app))
         app.screen.dismiss(True)
         await worker.wait()
 

@@ -9,9 +9,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Header, Static
+from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class OVHResizeScreen(Screen):
     def compose(self) -> ComposeResult:
         """Compose the resize UI."""
         name = self._instance.get('name') or self._instance.get('id', 'VPS')
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with ScrollableContainer(id="resize_container"):

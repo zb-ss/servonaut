@@ -8,13 +8,14 @@ from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll, Horizontal
 from textual.screen import Screen
 from textual.timer import Timer
-from textual.widgets import Header, Footer, Input, Label, Static, TextArea
+from textual.widgets import Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 from typing import TYPE_CHECKING
@@ -88,7 +89,7 @@ class InstanceListScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Vertical(id="instance_list_container"):

@@ -16,10 +16,11 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widget import Widget
-from textual.widgets import Button, Footer, Header, Static
+from textual.widgets import Button, Footer, Static
 
 from servonaut.services.relay_manager import RelayState
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 
@@ -157,7 +158,7 @@ class RelayStatusScreen(Screen):
         return check_action_passthrough(self, action)
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(

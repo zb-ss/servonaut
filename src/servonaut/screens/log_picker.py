@@ -10,9 +10,10 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.events import Key
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Static
+from textual.widgets import Button, Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.widgets.safe_header import SafeHeader
 
 if TYPE_CHECKING:
     from servonaut.services.log_viewer_service import LogViewerService
@@ -663,7 +664,7 @@ class BrowseRemoteScreen(Screen[str]):
         self._instance = instance
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         yield Container(
             Static(
                 "[bold cyan]Browse Remote Server[/bold cyan]  "

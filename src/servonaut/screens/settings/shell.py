@@ -28,10 +28,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens.settings.base import SettingsPanel
 from servonaut.screens.settings.registry import PANELS, PanelSpec
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.sidebar_section import SidebarSection
 
@@ -136,7 +137,7 @@ class SettingsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose the nav rail + search + content switcher."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Horizontal(id="settings-body"):

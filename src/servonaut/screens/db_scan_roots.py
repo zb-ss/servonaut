@@ -20,10 +20,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, OptionList, Static
+from textual.widgets import Button, Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from servonaut.widgets.remote_tree import RemoteTree
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 
@@ -52,7 +53,7 @@ class DbScanRootsScreen(Screen):
         self._roots: List[str] = list(roots or [])
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield SafeHeader()
         name = escape(str(self._instance.get("name") or self._instance.get("id") or "?"))
         with Horizontal(id="main-layout"):
             yield Sidebar()

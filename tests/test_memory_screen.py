@@ -141,7 +141,8 @@ async def test_opt_out_banner_visible_by_name_override(tmp_path: Path) -> None:
     per_server_overrides is keyed by instance name rather than cloud id.
     """
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer, Static
+    from textual.widgets import DataTable, Footer, Static
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     # Instance has id="i-abc" but override is keyed by name "prod"
@@ -153,7 +154,7 @@ async def test_opt_out_banner_visible_by_name_override(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -278,7 +279,8 @@ class TestGetCursorModuleKeyEdgeCases:
 async def test_action_refresh_all_no_service_notifies_error(tmp_path: Path) -> None:
     """action_refresh_all notifies error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -289,7 +291,7 @@ async def test_action_refresh_all_no_service_notifies_error(tmp_path: Path) -> N
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -311,7 +313,8 @@ async def test_action_refresh_all_no_service_notifies_error(tmp_path: Path) -> N
 async def test_action_pin_key_no_service_notifies_error(tmp_path: Path) -> None:
     """action_pin_key notifies error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -322,7 +325,7 @@ async def test_action_pin_key_no_service_notifies_error(tmp_path: Path) -> None:
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -344,7 +347,8 @@ async def test_action_pin_key_no_service_notifies_error(tmp_path: Path) -> None:
 async def test_action_clear_module_no_service_notifies_error(tmp_path: Path) -> None:
     """action_clear_module notifies error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -355,7 +359,7 @@ async def test_action_clear_module_no_service_notifies_error(tmp_path: Path) -> 
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -378,7 +382,8 @@ async def test_render_table_with_stale_module_has_yellow_markup(tmp_path: Path) 
     """Stale module rows have yellow markup on the Age cell."""
     from datetime import datetime, timedelta, timezone
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer
+    from textual.widgets import DataTable, Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
     from servonaut.services.memory.store import MemoryStore
     from servonaut.services.memory.redaction import noop_redactor
@@ -416,7 +421,7 @@ async def test_render_table_with_stale_module_has_yellow_markup(tmp_path: Path) 
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -435,7 +440,8 @@ async def test_render_table_with_stale_module_has_yellow_markup(tmp_path: Path) 
 async def test_button_pin_key_triggers_action(tmp_path: Path) -> None:
     """Clicking 'p. Pin Key' button (no row selected) triggers pin action → notification."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button
+    from textual.widgets import Footer, Button
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -447,7 +453,7 @@ async def test_button_pin_key_triggers_action(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -474,7 +480,8 @@ async def test_button_pin_key_triggers_action(tmp_path: Path) -> None:
 async def test_action_annotate_no_service_notifies_error(tmp_path: Path) -> None:
     """action_annotate notifies error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -485,7 +492,7 @@ async def test_action_annotate_no_service_notifies_error(tmp_path: Path) -> None
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -507,7 +514,8 @@ async def test_action_annotate_no_service_notifies_error(tmp_path: Path) -> None
 async def test_on_button_pressed_refresh_all(tmp_path: Path) -> None:
     """Clicking 'r. Refresh All' button triggers action_refresh_all."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button
+    from textual.widgets import Footer, Button
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -517,7 +525,7 @@ async def test_on_button_pressed_refresh_all(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -540,7 +548,8 @@ async def test_on_button_pressed_refresh_all(tmp_path: Path) -> None:
 async def test_on_button_pressed_export(tmp_path: Path) -> None:
     """Clicking 'e. Export' button triggers action_export."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -550,7 +559,7 @@ async def test_on_button_pressed_export(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -573,7 +582,8 @@ async def test_on_button_pressed_export(tmp_path: Path) -> None:
 async def test_opt_out_banner_visible_when_per_server_disabled(tmp_path: Path) -> None:
     """Banner shows and table is empty when per-server override disables memory."""
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer, Static
+    from textual.widgets import DataTable, Footer, Static
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance(iid="i-no-memory")
@@ -584,7 +594,7 @@ async def test_opt_out_banner_visible_when_per_server_disabled(tmp_path: Path) -
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -607,14 +617,15 @@ async def test_opt_out_banner_visible_when_per_server_disabled(tmp_path: Path) -
 def _build_mock_app_class(memory_service: Any):
     """Build a minimal Textual App class with memory_service wired."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
 
     class _TestApp(App):
         CSS = ""
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
     _TestApp.memory_service = memory_service  # type: ignore[attr-defined]
@@ -625,7 +636,8 @@ def _build_mock_app_class(memory_service: Any):
 async def test_memory_screen_renders_with_two_modules(tmp_path: Path) -> None:
     """MemoryScreen with two seeded modules shows rows in the DataTable."""
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer
+    from textual.widgets import DataTable, Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -640,7 +652,7 @@ async def test_memory_screen_renders_with_two_modules(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -659,7 +671,8 @@ async def test_memory_screen_renders_with_two_modules(tmp_path: Path) -> None:
 async def test_memory_screen_opt_out_banner_visible(tmp_path: Path) -> None:
     """Opt-out banner is visible and DataTable is empty when instance is opted out."""
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer, Static
+    from textual.widgets import DataTable, Footer, Static
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance(iid="i-optout")
@@ -671,7 +684,7 @@ async def test_memory_screen_opt_out_banner_visible(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -691,7 +704,8 @@ async def test_memory_screen_opt_out_banner_visible(tmp_path: Path) -> None:
 async def test_memory_screen_press_r_calls_refresh(tmp_path: Path) -> None:
     """Pressing 'r' on MemoryScreen triggers memory_service.refresh."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -712,7 +726,7 @@ async def test_memory_screen_press_r_calls_refresh(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -732,7 +746,8 @@ async def test_memory_screen_press_r_calls_refresh(tmp_path: Path) -> None:
 async def test_memory_screen_press_e_calls_write_summary(tmp_path: Path) -> None:
     """Pressing 'e' triggers memory_service.write_summary."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -754,7 +769,7 @@ async def test_memory_screen_press_e_calls_write_summary(tmp_path: Path) -> None
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -780,7 +795,8 @@ async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None
     """
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.widgets.instance_table import InstanceTable
 
     instances = [_make_instance()]
@@ -792,7 +808,7 @@ async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None
         BINDINGS = [Binding("m", "open_memory", "Memory", show=True)]
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             tbl = InstanceTable()
             tbl.id = "inst_table"
             yield tbl
@@ -841,7 +857,8 @@ async def test_instance_table_m_key_pushes_memory_screen(tmp_path: Path) -> None
 async def test_memory_screen_no_service_renders_empty(tmp_path: Path) -> None:
     """MemoryScreen renders without error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer
+    from textual.widgets import DataTable, Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -851,7 +868,7 @@ async def test_memory_screen_no_service_renders_empty(tmp_path: Path) -> None:
         memory_service = None  # explicitly absent
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -897,7 +914,8 @@ def _build_mock_svc_with_events(tmp_path: Path) -> tuple:
 async def test_get_cursor_module_key_empty_table(tmp_path: Path) -> None:
     """_get_cursor_module_key returns ('', '') when table has no rows."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -907,7 +925,7 @@ async def test_get_cursor_module_key_empty_table(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -927,7 +945,8 @@ async def test_get_cursor_module_key_empty_table(tmp_path: Path) -> None:
 async def test_action_refresh_module_no_row_selected(tmp_path: Path) -> None:
     """action_refresh_module notifies when no row is selected (empty table)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -940,7 +959,7 @@ async def test_action_refresh_module_no_row_selected(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -967,7 +986,8 @@ async def test_action_refresh_module_no_row_selected(tmp_path: Path) -> None:
 async def test_action_clear_module_no_row_selected(tmp_path: Path) -> None:
     """action_clear_module notifies when no row is selected (empty table)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -979,7 +999,7 @@ async def test_action_clear_module_no_row_selected(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1006,7 +1026,8 @@ async def test_action_clear_module_no_row_selected(tmp_path: Path) -> None:
 async def test_action_pin_key_no_row_selected(tmp_path: Path) -> None:
     """action_pin_key notifies when no key row is selected."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1018,7 +1039,7 @@ async def test_action_pin_key_no_row_selected(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1045,7 +1066,8 @@ async def test_action_pin_key_no_row_selected(tmp_path: Path) -> None:
 async def test_action_refresh_all_opted_out_notifies(tmp_path: Path) -> None:
     """action_refresh_all notifies with warning when instance is opted out."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance(iid="i-optout2")
@@ -1057,7 +1079,7 @@ async def test_action_refresh_all_opted_out_notifies(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1080,7 +1102,8 @@ async def test_action_refresh_all_opted_out_notifies(tmp_path: Path) -> None:
 async def test_action_export_no_service_notifies(tmp_path: Path) -> None:
     """action_export notifies with error when memory_service is None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1091,7 +1114,7 @@ async def test_action_export_no_service_notifies(tmp_path: Path) -> None:
         memory_service = None
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1113,7 +1136,8 @@ async def test_action_export_no_service_notifies(tmp_path: Path) -> None:
 async def test_button_refresh_all_triggers_action(tmp_path: Path) -> None:
     """Button 'r. Refresh All' press triggers action_refresh_all (via keypress simulation)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1123,7 +1147,7 @@ async def test_button_refresh_all_triggers_action(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1146,7 +1170,8 @@ async def test_button_refresh_all_triggers_action(tmp_path: Path) -> None:
 async def test_button_export_triggers_action(tmp_path: Path) -> None:
     """Pressing 'e' keybinding triggers action_export (covers the export worker path)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1156,7 +1181,7 @@ async def test_button_export_triggers_action(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1178,7 +1203,8 @@ async def test_button_export_triggers_action(tmp_path: Path) -> None:
 async def test_action_refresh_module_with_row(tmp_path: Path) -> None:
     """action_refresh_module calls refresh with specific module when row selected."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1217,7 +1243,7 @@ async def test_action_refresh_module_with_row(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1248,7 +1274,8 @@ async def test_action_refresh_module_with_row(tmp_path: Path) -> None:
 async def test_pin_key_modal_dismiss_on_cancel_button(tmp_path: Path) -> None:
     """PinKeyModal Cancel button dismisses with None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import PinKeyModal
 
     dismissed_values = []
@@ -1257,7 +1284,7 @@ async def test_pin_key_modal_dismiss_on_cancel_button(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1280,7 +1307,8 @@ async def test_pin_key_modal_dismiss_on_cancel_button(tmp_path: Path) -> None:
 async def test_pin_key_modal_confirm_button_click(tmp_path: Path) -> None:
     """PinKeyModal Pin button click dismisses with entered value."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button, Input
+    from textual.widgets import Footer, Button, Input
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import PinKeyModal
 
     dismissed_values = []
@@ -1289,7 +1317,7 @@ async def test_pin_key_modal_confirm_button_click(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1317,7 +1345,8 @@ async def test_pin_key_modal_confirm_button_click(tmp_path: Path) -> None:
 async def test_pin_key_modal_cancel_button_click(tmp_path: Path) -> None:
     """PinKeyModal Cancel button click dismisses with None."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button
+    from textual.widgets import Footer, Button
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import PinKeyModal
 
     dismissed_values = []
@@ -1326,7 +1355,7 @@ async def test_pin_key_modal_cancel_button_click(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1354,7 +1383,8 @@ async def test_pin_key_modal_cancel_button_click(tmp_path: Path) -> None:
 async def test_simple_confirm_modal_yes_button(tmp_path: Path) -> None:
     """SimpleConfirmModal Yes button dismisses with True."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button
+    from textual.widgets import Footer, Button
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import SimpleConfirmModal
 
     dismissed_values = []
@@ -1363,7 +1393,7 @@ async def test_simple_confirm_modal_yes_button(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1387,7 +1417,8 @@ async def test_simple_confirm_modal_yes_button(tmp_path: Path) -> None:
 async def test_simple_confirm_modal_no_button(tmp_path: Path) -> None:
     """SimpleConfirmModal No button dismisses with False."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Button
+    from textual.widgets import Footer, Button
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import SimpleConfirmModal
 
     dismissed_values = []
@@ -1396,7 +1427,7 @@ async def test_simple_confirm_modal_no_button(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1420,7 +1451,8 @@ async def test_simple_confirm_modal_no_button(tmp_path: Path) -> None:
 async def test_simple_confirm_modal_escape_cancels(tmp_path: Path) -> None:
     """SimpleConfirmModal escape dismisses with False."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import SimpleConfirmModal
 
     dismissed_values = []
@@ -1429,7 +1461,7 @@ async def test_simple_confirm_modal_escape_cancels(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1455,7 +1487,8 @@ async def test_simple_confirm_modal_escape_cancels(tmp_path: Path) -> None:
 async def test_action_back_pops_screen(tmp_path: Path) -> None:
     """Pressing escape on MemoryScreen calls pop_screen (action_back)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1467,7 +1500,7 @@ async def test_action_back_pops_screen(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1495,7 +1528,8 @@ async def test_action_back_pops_screen(tmp_path: Path) -> None:
 async def test_do_refresh_all_exception_path(tmp_path: Path) -> None:
     """_do_refresh_all logs error and notifies on exception."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1515,7 +1549,7 @@ async def test_do_refresh_all_exception_path(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1542,7 +1576,8 @@ async def test_do_refresh_all_exception_path(tmp_path: Path) -> None:
 async def test_do_refresh_module_exception_path(tmp_path: Path) -> None:
     """_do_refresh_module logs error and notifies on exception."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1565,7 +1600,7 @@ async def test_do_refresh_module_exception_path(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1596,7 +1631,8 @@ async def test_action_clear_module_confirmed(tmp_path: Path) -> None:
     immediately invokes the callback with confirmed=True.
     """
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1615,7 +1651,7 @@ async def test_action_clear_module_confirmed(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1650,7 +1686,8 @@ async def test_action_clear_module_confirmed(tmp_path: Path) -> None:
 async def test_action_annotate_no_row_covers_full_path(tmp_path: Path) -> None:
     """action_annotate with valid service executes full path (annotations file path resolved)."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1667,7 +1704,7 @@ async def test_action_annotate_no_row_covers_full_path(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1707,7 +1744,8 @@ async def test_action_annotate_no_row_covers_full_path(tmp_path: Path) -> None:
 async def test_do_export_exception_path(tmp_path: Path) -> None:
     """_do_export notifies with error when write_summary raises."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1727,7 +1765,7 @@ async def test_do_export_exception_path(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1754,7 +1792,8 @@ async def test_do_export_exception_path(tmp_path: Path) -> None:
 async def test_action_pin_key_with_row_selected_pushes_modal(tmp_path: Path) -> None:
     """action_pin_key with a valid row selected pushes PinKeyModal."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen, PinKeyModal
 
     instance = _make_instance()
@@ -1773,7 +1812,7 @@ async def test_action_pin_key_with_row_selected_pushes_modal(tmp_path: Path) -> 
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1800,7 +1839,8 @@ async def test_action_pin_key_with_row_selected_pushes_modal(tmp_path: Path) -> 
 async def test_do_pin_calls_service_pin(tmp_path: Path) -> None:
     """_do_pin calls memory_service.pin and re-renders the table."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1824,7 +1864,7 @@ async def test_do_pin_calls_service_pin(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1846,7 +1886,8 @@ async def test_do_pin_calls_service_pin(tmp_path: Path) -> None:
 async def test_do_pin_exception_notifies_error(tmp_path: Path) -> None:
     """_do_pin notifies with error when pin raises."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1866,7 +1907,7 @@ async def test_do_pin_exception_notifies_error(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1895,7 +1936,8 @@ async def test_do_pin_exception_notifies_error(tmp_path: Path) -> None:
 async def test_render_table_with_declared_values(tmp_path: Path) -> None:
     """_render_table populates table rows with observed AND declared values."""
     from textual.app import App, ComposeResult
-    from textual.widgets import DataTable, Header, Footer
+    from textual.widgets import DataTable, Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.services.memory.store import MemoryStore
     from servonaut.services.memory.redaction import noop_redactor
     from servonaut.screens.memory import MemoryScreen
@@ -1926,7 +1968,7 @@ async def test_render_table_with_declared_values(tmp_path: Path) -> None:
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1949,7 +1991,8 @@ async def test_render_table_with_declared_values(tmp_path: Path) -> None:
 async def test_memory_screen_empty_state_cta_visible_when_no_modules(tmp_path: Path) -> None:
     """When no modules exist and no opt-out, the CTA banner is visible."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, DataTable
+    from textual.widgets import Footer, DataTable
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -1963,7 +2006,7 @@ async def test_memory_screen_empty_state_cta_visible_when_no_modules(tmp_path: P
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -1985,7 +2028,8 @@ async def test_memory_screen_empty_state_cta_visible_when_no_modules(tmp_path: P
 async def test_memory_screen_empty_state_hidden_when_modules_exist(tmp_path: Path) -> None:
     """CTA is hidden once modules are present."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -2011,7 +2055,7 @@ async def test_memory_screen_empty_state_hidden_when_modules_exist(tmp_path: Pat
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:
@@ -2031,7 +2075,8 @@ async def test_memory_screen_empty_state_hidden_when_modules_exist(tmp_path: Pat
 async def test_memory_screen_empty_state_hidden_when_opted_out(tmp_path: Path) -> None:
     """Opt-out takes precedence over the empty-state CTA."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Header, Footer, Static
+    from textual.widgets import Footer, Static
+    from servonaut.widgets.safe_header import SafeHeader
     from servonaut.screens.memory import MemoryScreen
 
     instance = _make_instance()
@@ -2045,7 +2090,7 @@ async def test_memory_screen_empty_state_hidden_when_opted_out(tmp_path: Path) -
         CSS = ""
 
         def compose(self) -> ComposeResult:
-            yield Header()
+            yield SafeHeader()
             yield Footer()
 
         def on_mount(self) -> None:

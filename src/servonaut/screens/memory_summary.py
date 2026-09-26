@@ -9,9 +9,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Markdown, Select, Static
+from textual.widgets import Button, Footer, Markdown, Select, Static
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
+from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 
@@ -96,7 +97,7 @@ class MemorySummaryScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Compose a focused, scrollable Markdown reading surface."""
-        yield Header()
+        yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
