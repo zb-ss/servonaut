@@ -32,6 +32,10 @@ MUTATE_ROLE_ACCOUNT = "444455556666"
 DEFAULT_ACCOUNT = "123456789012"
 # Newest seeded log event: a little in the past, well inside any time window.
 _NEWEST_LOG_EVENT_AGE_SECONDS = 30
+# Upper bound for one reset. A journey that listed the fleet touched every
+# region, and rebuilding all of them takes about 2 s on an idle machine and
+# several times that on a busy one; the journey timeout still bounds the run.
+_RESET_TIMEOUT_SECONDS = 60
 
 _CREDENTIALS = {
     "aws_access_key_id": "testing",
@@ -64,7 +68,7 @@ class MotoAws:
     def reset(self) -> None:
         """Drop every resource (moto's own reset endpoint)."""
         request = urllib.request.Request(f"{self.url}/moto-api/reset", data=b"", method="POST")
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=_RESET_TIMEOUT_SECONDS) as response:
             response.read()
         self._networks.clear()
         self._key_pairs.clear()

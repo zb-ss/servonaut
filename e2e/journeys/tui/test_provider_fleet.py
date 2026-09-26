@@ -112,7 +112,6 @@ async def test_hetzner_servers_load_with_a_fresh_aws_cache(tui, seed, providers)
         try:
             await t.wait_until(
                 lambda: fleet.HZ_CACHE_1.name in _rows_by_name(t),
-                timeout=5,
                 desc="Hetzner rows",
             )
         except JourneyTimeout as exc:

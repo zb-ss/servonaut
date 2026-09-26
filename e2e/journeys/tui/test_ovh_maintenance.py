@@ -22,6 +22,7 @@ import pytest
 from e2e.harness import fleet
 from e2e.harness.fake_providers.ovh import SeedBill, SeedFirewallRule
 from e2e.harness.known_bugs import ProductBug
+from e2e.harness.pilot import DEFAULT_TIMEOUT
 from e2e.journeys.tui.ovh_ui import (
     cancel_confirmation,
     confirm_typed,
@@ -87,11 +88,11 @@ async def test_vps_actions_show_the_reverse_dns(tui, seed, providers):
             await t.select_instance(MAIL.display_name)
             try:
                 # A crash mid-keypress leaves the key press waiting forever.
-                await asyncio.wait_for(t.press("enter"), timeout=8)
+                await asyncio.wait_for(t.press("enter"), timeout=DEFAULT_TIMEOUT)
                 await t.wait_for_screen("ServerActionsScreen")
                 await t.wait_until(
                     lambda: "mail-1.e2e.test" in t.rendered_text(),
-                    timeout=8,
+                    timeout=DEFAULT_TIMEOUT,
                     desc="reverse DNS shown",
                 )
             except (TimeoutError, AttributeError):
@@ -348,8 +349,8 @@ async def test_reinstall_a_vps_needs_the_server_name(tui, seed, providers):
             await select_row(t, "#images_table", 0, "Debian 12")
             try:
                 # A crash mid-click leaves the click waiting forever.
-                await asyncio.wait_for(t.click("#btn_reinstall"), timeout=8)
-                await t.wait_for_screen("ConfirmActionScreen", timeout=8)
+                await asyncio.wait_for(t.click("#btn_reinstall"), timeout=DEFAULT_TIMEOUT)
+                await t.wait_for_screen("ConfirmActionScreen", timeout=DEFAULT_TIMEOUT)
             except (TimeoutError, NoActiveWorker):
                 crash = t.state()["exception"]
                 if "NoActiveWorker" not in crash:

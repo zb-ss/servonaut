@@ -150,7 +150,6 @@ async def test_manager_lists_the_new_server_after_create(tui, seed, providers):
         try:
             await t.wait_until(
                 lambda: NEW_SERVER in [row[1] for row in t.table_rows("#hetzner_mgr_table")],
-                timeout=5,
                 desc="new server in the manager",
             )
         except JourneyTimeout as exc:
