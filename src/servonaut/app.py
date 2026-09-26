@@ -687,13 +687,11 @@ class ServonautApp(App):
     def _init_desktop_voice_services(self, voice_config: VoiceConfig) -> None:
         """Wire the isolated voice runtime bundled with the desktop app."""
         desktop_voice = importlib.import_module(_DESKTOP_VOICE_MODULE)
-        runtime_mgr = desktop_voice.VoiceRuntimeManager(
-            self.runtime_layout.data_root / "runtimes" / "voice"
-        )
-        model_cache = desktop_voice.VoiceModelCache(root_dir=runtime_mgr.models_dir)
-        conn = desktop_voice.VoiceConnection(
-            worker_cmd=lambda: runtime_mgr.get_worker_cmd()
-        )
+        # Raises when the build carries no valid voice runtime inputs; the
+        # caller then leaves voice unavailable.
+        runtime_mgr = desktop_voice.VoiceRuntimeManager.for_runtime(self.runtime_layout)
+        model_cache = desktop_voice.VoiceModelCache(root_dir=runtime_mgr.models_root)
+        conn = desktop_voice.VoiceConnection(worker_cmd=runtime_mgr.get_worker_cmd)
         self.voice_setup_service = desktop_voice.DesktopVoiceSetupService(
             voice_config,
             runtime_layout=self.runtime_layout,

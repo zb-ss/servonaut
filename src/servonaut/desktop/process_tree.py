@@ -50,6 +50,8 @@ _SW_HIDE: Final = 0
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: Final = 0x2000
 _JOB_OBJECT_LIMIT_BREAKAWAY_OK: Final = 0x0800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: Final = 9
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: Final = 1
+_TREE_EXIT_POLL_SECONDS: Final = 0.01
 
 _OUTPUT_READ_BYTES: Final = 4096
 _OUTPUT_MAX_LINE_BYTES: Final = 4096
@@ -92,6 +94,8 @@ class OwnedProcessTree(Protocol):
 
     def terminate(self, *, grace_seconds: float = 2.0) -> None: ...
 
+    def kill_all(self, timeout: float) -> bool: ...
+
     def close(self) -> None: ...
 
 
@@ -131,6 +135,19 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
         ("JobMemoryLimit", ctypes.c_size_t),
         ("PeakProcessMemoryLimit", ctypes.c_size_t),
         ("PeakJobMemoryLimit", ctypes.c_size_t),
+    ]
+
+
+class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", ctypes.c_uint32),
+        ("TotalProcesses", ctypes.c_uint32),
+        ("ActiveProcesses", ctypes.c_uint32),
+        ("TotalTerminatedProcesses", ctypes.c_uint32),
     ]
 
 
@@ -204,6 +221,29 @@ def _terminate_job(job_handle: ctypes.c_void_p, exit_code: int = 1) -> None:
     term_job.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     term_job.restype = ctypes.c_bool
     term_job(job_handle, exit_code)
+
+
+def _job_active_processes(job_handle: ctypes.c_void_p) -> int:
+    kernel32 = _kernel32()
+    query = kernel32.QueryInformationJobObject
+    query.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    query.restype = ctypes.c_bool
+    info = _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+    if not query(
+        job_handle,
+        _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        None,
+    ):
+        raise ProcessTreeError(f"query-job-failed:{ctypes.get_last_error()}")
+    return int(info.ActiveProcesses)
 
 
 def _close_handle(handle: ctypes.c_void_p) -> None:
@@ -282,6 +322,12 @@ class PosixProcessTree:
         self._signal_group(signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             self._proc.wait(timeout=1.0)
+
+    def kill_all(self, timeout: float) -> bool:
+        """Kill every process left in the group; True once none remains."""
+        self._signal_group(signal.SIGKILL)
+        self._wait_for_group_exit(timeout=timeout)
+        return not self._signal_group(0)
 
     def _signal_group(self, sig: int) -> bool:
         """Signal the owned process group; False once no member can be signalled."""
@@ -388,6 +434,27 @@ class WindowsJobProcessTree:
 
         with contextlib.suppress(subprocess.TimeoutExpired):
             self._proc.wait(timeout=1.0)
+
+    def kill_all(self, timeout: float) -> bool:
+        """Kill every process in the Job Object; True once none remains.
+
+        Killing a job is asynchronous: its processes keep their file handles
+        until the count of active processes reaches zero.
+        """
+        if not self._job_handle:
+            return True
+        with contextlib.suppress(OSError, ProcessTreeError):
+            _terminate_job(self._job_handle, 1)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if _job_active_processes(self._job_handle) == 0:
+                    return True
+            except (OSError, ProcessTreeError):
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(_TREE_EXIT_POLL_SECONDS)
 
     def close(self) -> None:
         """Idempotently terminate the process tree, release the Job Object, and clean up."""

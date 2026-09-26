@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.abc
 import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -33,9 +34,13 @@ from servonaut.desktop.voice.models import (
     VoiceModelCacheState,
     VoiceModelStatus,
 )
+from servonaut.desktop.voice.packaged_manifest import (
+    BundledFile,
+    PackagedVoiceManifest,
+    ProvisionTimeouts,
+)
 from servonaut.desktop.voice.runtime import (
     VoiceRuntimeManager,
-    VoiceRuntimeManifest,
     VoiceRuntimeState,
     VoiceRuntimeStatus,
 )
@@ -52,6 +57,42 @@ from servonaut.runtime import (
     RuntimeLayout,
 )
 from servonaut.services.voice_setup_service import InstalledModel, VoiceReadiness
+
+
+_PACKAGED_MANIFEST = PackagedVoiceManifest(
+    schema_version=1,
+    target="test-target",
+    python_version="3.12.7",
+    uv=BundledFile("uv", "a" * 64),
+    wheel=BundledFile("servonaut-2.26.3-py3-none-any.whl", "b" * 64),
+    requirements=BundledFile("voice-requirements.txt", "c" * 64),
+    timeouts=ProvisionTimeouts(uv_command_seconds=30, stall_seconds=10, provision_seconds=120),
+)
+
+
+def _runtime_manager(tmp_path: Path) -> VoiceRuntimeManager:
+    return VoiceRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        bundle_dir=tmp_path / "bundle",
+        manifest=_PACKAGED_MANIFEST,
+        models_root=tmp_path / "models",
+        product_version="2.26.3",
+    )
+
+
+def _write_packaged_manifest(layout: RuntimeLayout) -> None:
+    voice_dir = layout.resource_root / "voice"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "target": "test-target",
+        "python_version": "3.12.7",
+        "uv": {"filename": "uv", "sha256": "a" * 64},
+        "wheel": {"filename": "servonaut-2.26.3-py3-none-any.whl", "sha256": "b" * 64},
+        "requirements": {"filename": "voice-requirements.txt", "sha256": "c" * 64},
+        "timeouts": {"uv_command_seconds": 30, "stall_seconds": 10, "provision_seconds": 120},
+    }
+    (voice_dir / "voice-runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _make_dummy_layout(kind: DistributionKind, tmp_path: Path) -> RuntimeLayout:
@@ -80,7 +121,7 @@ class TestDesktopVoiceSetupService:
     def test_attributes_and_defaults(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="whisper")
         layout = _make_dummy_layout(DistributionKind.PACKAGED_DESKTOP, tmp_path)
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         service = DesktopVoiceSetupService(
@@ -100,7 +141,7 @@ class TestDesktopVoiceSetupService:
 
     def test_probe_not_installed(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         service = DesktopVoiceSetupService(cfg, runtime_manager=mgr, model_cache=cache)
@@ -115,14 +156,15 @@ class TestDesktopVoiceSetupService:
 
     def test_probe_packages_ready_model_missing(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         # Mock runtime as READY
         with patch.object(mgr, "status") as mock_st:
             mock_st.return_value = VoiceRuntimeStatus(
                 state=VoiceRuntimeState.READY,
-                runtime_dir=tmp_path / "runtime",
+                message="",
+                expected_runtime_id="test",
             )
             service = DesktopVoiceSetupService(cfg, runtime_manager=mgr, model_cache=cache)
             readiness = service.probe(force=True)
@@ -135,7 +177,7 @@ class TestDesktopVoiceSetupService:
 
     def test_probe_all_ready(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="whisper", tts_enabled=True, conversation_mode=True)
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         with (
@@ -144,7 +186,8 @@ class TestDesktopVoiceSetupService:
         ):
             mock_mgr_st.return_value = VoiceRuntimeStatus(
                 state=VoiceRuntimeState.READY,
-                runtime_dir=tmp_path / "runtime",
+                message="",
+                expected_runtime_id="test",
             )
             mock_cache_st.return_value = VoiceModelStatus(
                 model_id="any",
@@ -168,7 +211,7 @@ class TestDesktopVoiceSetupService:
 
     def test_install_packages_success(self, tmp_path: Path) -> None:
         cfg = VoiceConfig()
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
         conn = MagicMock(spec=VoiceConnection)
         conn.is_connected = False
@@ -176,7 +219,8 @@ class TestDesktopVoiceSetupService:
         with patch.object(mgr, "provision") as mock_prov:
             mock_prov.return_value = VoiceRuntimeStatus(
                 state=VoiceRuntimeState.READY,
-                runtime_dir=tmp_path / "runtime",
+                message="",
+                expected_runtime_id="test",
             )
             service = DesktopVoiceSetupService(
                 cfg, runtime_manager=mgr, model_cache=cache, connection=conn
@@ -186,9 +230,54 @@ class TestDesktopVoiceSetupService:
             assert "successfully installed" in msg
             conn.connect.assert_called_once()
 
+    def test_install_packages_restarts_a_running_worker(self, tmp_path: Path) -> None:
+        """A worker started before the install must move to the new release."""
+        mgr = _runtime_manager(tmp_path)
+        conn = MagicMock()
+        conn.is_connected = True
+        ready = VoiceRuntimeStatus(
+            state=VoiceRuntimeState.READY, message="", expected_runtime_id="test"
+        )
+
+        with patch.object(mgr, "provision", return_value=ready):
+            service = DesktopVoiceSetupService(
+                VoiceConfig(),
+                runtime_manager=mgr,
+                model_cache=VoiceModelCache(root_dir=tmp_path / "models"),
+                connection=conn,
+            )
+            ok, msg = service.install_packages()
+
+        assert ok is True and "successfully installed" in msg
+        conn.restart.assert_called_once_with()
+        conn.connect.assert_not_called()
+
+    def test_install_packages_reports_a_worker_that_cannot_start(self, tmp_path: Path) -> None:
+        from servonaut.desktop.voice.connection import VoiceConnectionError
+
+        mgr = _runtime_manager(tmp_path)
+        conn = MagicMock(spec=VoiceConnection)
+        conn.is_connected = False
+        conn.connect.side_effect = VoiceConnectionError("worker exited")
+        ready = VoiceRuntimeStatus(
+            state=VoiceRuntimeState.READY, message="", expected_runtime_id="test"
+        )
+
+        with patch.object(mgr, "provision", return_value=ready):
+            service = DesktopVoiceSetupService(
+                VoiceConfig(),
+                runtime_manager=mgr,
+                model_cache=VoiceModelCache(root_dir=tmp_path / "models"),
+                connection=conn,
+            )
+            ok, msg = service.install_packages()
+
+        assert ok is True
+        assert "could not start" in msg and "worker exited" in msg
+
     def test_install_packages_failure(self, tmp_path: Path) -> None:
         cfg = VoiceConfig()
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         with patch.object(mgr, "provision", side_effect=RuntimeError("pip failed")):
@@ -199,7 +288,7 @@ class TestDesktopVoiceSetupService:
 
     def test_download_models(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         with patch.object(cache, "download") as mock_download:
@@ -228,7 +317,7 @@ class TestDesktopVoiceSetupService:
 
     def test_installed_models_and_remove(self, tmp_path: Path) -> None:
         cfg = VoiceConfig(engine="nemotron")
-        mgr = VoiceRuntimeManager(runtime_dir=tmp_path / "runtime")
+        mgr = _runtime_manager(tmp_path)
         cache = VoiceModelCache(root_dir=tmp_path / "models")
 
         inv_items = [
@@ -331,6 +420,7 @@ class TestServonautAppDesktopVoiceBootstrap:
         from servonaut.app import ServonautApp
 
         layout = _make_dummy_layout(DistributionKind.PACKAGED_DESKTOP, tmp_path)
+        _write_packaged_manifest(layout)
         app = ServonautApp(runtime_layout=layout)
         app._init_services()
 
@@ -343,12 +433,15 @@ class TestServonautAppDesktopVoiceBootstrap:
         from servonaut.app import ServonautApp
 
         layout = _make_dummy_layout(DistributionKind.PACKAGED_DESKTOP, tmp_path)
+        _write_packaged_manifest(layout)
         app = ServonautApp(runtime_layout=layout)
         app._init_services()
 
         runtime_dir = app.voice_setup_service.runtime_manager.runtime_dir
-        assert runtime_dir == (layout.data_root / "runtimes" / "voice").resolve()
-        assert app.voice_setup_service.model_cache.root_dir == runtime_dir / "models"
+        assert runtime_dir == layout.data_root / "runtimes" / "voice"
+        assert app.voice_setup_service.model_cache.root_dir == (
+            layout.data_root / "voice_models"
+        ).resolve()
 
     @pytest.mark.parametrize("environment_value", [None, "1"])
     def test_app_init_services_standard_source_mode(
