@@ -1,4 +1,9 @@
-"""Read-only stable-release checks shared by the release workflows."""
+"""Release planning, publishing checks and version edits for the release workflows.
+
+Every command except ``set-version`` is read-only. Planning reads the GitHub
+releases API JSON on stdin and the local Git checkout; it never pushes, tags
+or edits files.
+"""
 
 import argparse
 import json
@@ -9,7 +14,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-STABLE_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+_NUMBER = r"(0|[1-9][0-9]*)"
+_CORE = rf"{_NUMBER}\.{_NUMBER}\.{_NUMBER}"
+STABLE_TAG = re.compile(rf"v{_CORE}")
+# PEP 440 release candidates in their normalized spelling, such as v1.2.3rc1.
+CANDIDATE_TAG = re.compile(rf"v{_CORE}rc([1-9][0-9]*)")
+PACKAGE_VERSION = re.compile(rf"{_CORE}(?:rc([1-9][0-9]*))?")
+RELEASE_BRANCH = re.compile(
+    r"release/((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))"
+)
+REMOTE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+VERSION_FILES = (
+    (
+        Path("pyproject.toml"),
+        re.compile(r'^version = "([^"\n]*)"$', re.MULTILINE),
+        'version = "{}"',
+    ),
+    (
+        Path("src/servonaut/__init__.py"),
+        re.compile(r"^__version__ = ['\"]([^'\"\n]*)['\"]$", re.MULTILINE),
+        "__version__ = '{}'",
+    ),
+)
+BUMPS = ("auto", "patch", "minor", "major")
 
 
 class ReleasePolicyError(ValueError):
@@ -22,30 +49,79 @@ def git(*args: str) -> str:
     return result.stdout.strip()
 
 
-def is_stable_release(release: dict[str, Any]) -> bool:
+def ref_exists(ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", ref],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise ReleasePolicyError("Could not check the release tags.")
+    return result.returncode == 0
+
+
+def commit_of(ref: str) -> str:
+    return git("rev-parse", "--verify", f"{ref}^{{commit}}")
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """Order X.Y.Z and X.Y.ZrcN versions; a final release follows its candidates."""
+    match = PACKAGE_VERSION.fullmatch(version)
+    if match is None:
+        raise ReleasePolicyError("Expected a version of the form X.Y.Z or X.Y.ZrcN.")
+    major, minor, patch, candidate = match.groups()
+    stage = (0, int(candidate)) if candidate else (1, 0)
+    return (int(major), int(minor), int(patch), *stage)
+
+
+def published_channel(release: dict[str, Any]) -> str | None:
+    """``stable`` or ``candidate`` for a publishable release, otherwise None.
+
+    A stable release is a published, non-draft, non-prerelease vX.Y.Z; a
+    candidate is a published, non-draft prerelease vX.Y.ZrcN. Anything else,
+    such as a desktop preview, never publishes the Python package.
+    """
     tag = release.get("tag_name")
-    if (
-        release.get("draft") is not False
-        or release.get("prerelease") is not False
-        or not isinstance(tag, str)
-        or STABLE_TAG.fullmatch(tag) is None
-    ):
-        return False
+    if release.get("draft") is not False or not isinstance(tag, str):
+        return None
     published_at = release.get("published_at")
     if not isinstance(published_at, str):
-        return False
+        return None
     try:
         timestamp = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return timestamp.utcoffset() is not None
+        return None
+    if timestamp.utcoffset() is None:
+        return None
+    prerelease = release.get("prerelease")
+    if prerelease is False and STABLE_TAG.fullmatch(tag):
+        return "stable"
+    if prerelease is True and CANDIDATE_TAG.fullmatch(tag):
+        return "candidate"
+    return None
 
 
-def package_version(path: Path, pattern: str) -> str:
-    matches = re.findall(pattern, path.read_text(encoding="utf-8"), re.MULTILINE)
-    if len(matches) != 1:
+def is_stable_release(release: dict[str, Any]) -> bool:
+    return published_channel(release) == "stable"
+
+
+def declared_version(text: str, pattern: re.Pattern[str]) -> str:
+    matches = pattern.findall(text)
+    if len(matches) != 1 or PACKAGE_VERSION.fullmatch(matches[0]) is None:
         raise ReleasePolicyError("Expected one static package version assignment.")
     return matches[0]
+
+
+def package_versions(revision: str | None = None) -> tuple[str, ...]:
+    """Both package version declarations, from the worktree or a commit."""
+    versions = []
+    for path, pattern, _ in VERSION_FILES:
+        if revision is None:
+            text = path.read_text(encoding="utf-8")
+        else:
+            text = git("show", f"{revision}:{path.as_posix()}")
+        versions.append(declared_version(text, pattern))
+    return tuple(versions)
 
 
 def check_event(event_path: Path, ref: str) -> dict[str, str]:
@@ -53,27 +129,24 @@ def check_event(event_path: Path, ref: str) -> dict[str, str]:
     if not isinstance(event, dict):
         raise TypeError("Expected a release event object.")
     release = event.get("release")
-    if (
-        event.get("action") != "published"
-        or not isinstance(release, dict)
-        or not is_stable_release(release)
-    ):
+    if event.get("action") != "published" or not isinstance(release, dict):
+        return {"publish": "false"}
+    channel = published_channel(release)
+    if channel is None:
         return {"publish": "false"}
     tag = release["tag_name"]
     if ref != f"refs/tags/{tag}":
         raise ReleasePolicyError("Release tag and workflow ref do not match.")
-    versions = (
-        package_version(Path("pyproject.toml"), r'^version = "([0-9.]+)"$'),
-        package_version(
-            Path("src/servonaut/__init__.py"), r"^__version__ = ['\"]([0-9.]+)['\"]$"
-        ),
-    )
-    if any(version != tag[1:] for version in versions):
+    if any(version != tag[1:] for version in package_versions()):
         raise ReleasePolicyError("Release tag and package versions do not match.")
     revision = git("rev-parse", "HEAD")
-    if revision != git("rev-parse", f"refs/tags/{tag}^{{commit}}"):
+    if revision != commit_of(f"refs/tags/{tag}"):
         raise ReleasePolicyError("Checkout does not match the release tag.")
-    return {"publish": "true", "revision": revision}
+    return {
+        "publish": "true",
+        "revision": revision,
+        "prerelease": "true" if channel == "candidate" else "false",
+    }
 
 
 def read_releases(payload: str) -> list[dict[str, Any]]:
@@ -95,31 +168,33 @@ def read_releases(payload: str) -> list[dict[str, Any]]:
 
 
 def stable_baseline(releases: list[dict[str, Any]]) -> str:
+    """The highest published stable release, wherever its tag was cut.
+
+    Stable releases are tagged on short-lived release branches, so the
+    baseline need not be an ancestor of the default branch. A new version is
+    always above every version users have already been offered.
+    """
     tags = {release["tag_name"] for release in releases if is_stable_release(release)}
-    ordered = sorted(
-        tags, key=lambda tag: tuple(map(int, tag[1:].split("."))), reverse=True
-    )
-    for tag in ordered:
-        # Missing tags indicate an incomplete checkout: do not silently use an
-        # older baseline and risk assigning an already-published version.
-        revision = git("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}")
-        result = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return tag
-        if result.returncode != 1:
-            raise ReleasePolicyError("Could not check stable-release ancestry.")
-    raise ReleasePolicyError(
-        "No published stable release is reachable from this checkout."
-    )
+    if not tags:
+        raise ReleasePolicyError("No published stable release was found.")
+    baseline = max(tags, key=lambda tag: version_key(tag[1:]))
+    # A missing tag indicates an incomplete checkout: do not silently use an
+    # older baseline and risk assigning an already-published version.
+    commit_of(f"refs/tags/{baseline}")
+    return baseline
 
 
-def shipped_messages(baseline: str) -> list[str]:
-    messages = []
-    for revision in git("rev-list", "--no-merges", f"{baseline}..HEAD").splitlines():
+def shipped_changes(baseline: str) -> list[tuple[str, list[str]]]:
+    """Messages and paths of the shipped-source commits since the baseline.
+
+    Commits whose change the baseline release already contains, such as
+    fixes cherry-picked onto its release branch, are not counted again.
+    """
+    changes = []
+    revisions = git(
+        "rev-list", "--no-merges", "--cherry-pick", "--right-only", f"{baseline}...HEAD"
+    )
+    for revision in revisions.splitlines():
         message = git("log", "-1", "--format=%B", revision)
         if message.startswith("chore: bump version"):
             continue
@@ -128,13 +203,14 @@ def shipped_messages(baseline: str) -> list[str]:
         ).splitlines()
         # These paths define the existing Python distribution's source surface.
         if any(path.startswith("src/") or path == "pyproject.toml" for path in paths):
-            messages.append(message)
-    return messages
+            changes.append((message, paths))
+    return changes
 
 
-def choose_bump(baseline: str, messages: list[str], requested: str) -> str:
+def choose_bump(changes: list[tuple[str, list[str]]], requested: str) -> str:
     if requested != "auto":
         return requested
+    messages = [message for message, _ in changes]
     if any(
         re.match(r"^[a-z]+(\([^)]*\))?!:", message)
         or re.search(r"^BREAKING CHANGE:", message, re.MULTILINE)
@@ -143,23 +219,16 @@ def choose_bump(baseline: str, messages: list[str], requested: str) -> str:
         return "major"
     if any(re.match(r"^feat(\(|!|:)", message) for message in messages):
         return "minor"
-    if git(
-        "diff",
-        "--name-only",
-        f"{baseline}..HEAD",
-        "--",
-        "src/servonaut/config/migration.py",
-    ):
+    if any("src/servonaut/config/migration.py" in paths for _, paths in changes):
         return "minor"
     return "patch"
 
 
-def plan_release(payload: str, requested: str) -> dict[str, str]:
-    baseline = stable_baseline(read_releases(payload))
-    messages = shipped_messages(baseline)
-    if not messages:
+def plan_next_version(baseline: str, requested: str) -> dict[str, str]:
+    changes = shipped_changes(baseline)
+    if not changes:
         return {"release": "false", "last_tag": baseline}
-    bump = choose_bump(baseline, messages, requested)
+    bump = choose_bump(changes, requested)
     major, minor, patch = map(int, baseline[1:].split("."))
     versions = {
         "major": f"v{major + 1}.0.0",
@@ -167,56 +236,255 @@ def plan_release(payload: str, requested: str) -> dict[str, str]:
         "patch": f"v{major}.{minor}.{patch + 1}",
     }
     next_tag = versions[bump]
-    result = subprocess.run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{next_tag}"],
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 1:
-        raise ReleasePolicyError(
-            "The next version tag already exists or could not be checked."
-        )
+    if ref_exists(f"refs/tags/{next_tag}"):
+        raise ReleasePolicyError("The next version tag already exists.")
     return {
         "release": "true",
         "last_tag": baseline,
         "next": next_tag,
         "bump": bump,
-        "count": str(len(messages)),
+        "count": str(len(changes)),
     }
 
 
-def write_summary(path: Path, output: dict[str, str]) -> None:
+def plan_release(payload: str, requested: str) -> dict[str, str]:
+    return plan_next_version(stable_baseline(read_releases(payload)), requested)
+
+
+def open_release_branches(remote: str) -> list[tuple[str, str]]:
+    """(version, commit) of every release/X.Y.Z branch on the remote."""
+    if REMOTE_NAME.fullmatch(remote) is None:
+        raise ReleasePolicyError("Expected a plain Git remote name.")
+    prefix = f"refs/remotes/{remote}/"
+    branches = []
+    refs = git("for-each-ref", "--format=%(refname)", f"{prefix}release/")
+    for ref in refs.splitlines():
+        match = RELEASE_BRANCH.fullmatch(ref[len(prefix) :])
+        if match:
+            branches.append((match.group(1), commit_of(ref)))
+    return sorted(branches, key=lambda branch: version_key(branch[0]))
+
+
+def single_release_branch(remote: str) -> tuple[str, str] | None:
+    branches = open_release_branches(remote)
+    if len(branches) > 1:
+        names = ", ".join(f"release/{version}" for version, _ in branches)
+        raise ReleasePolicyError(
+            f"More than one release branch is open ({names}). "
+            "Promote or delete all but one."
+        )
+    return branches[0] if branches else None
+
+
+def candidate_tags(version: str) -> list[tuple[int, str]]:
+    """(number, tag) of every vX.Y.ZrcN tag of one version, in order."""
+    found = []
+    for tag in git("tag", "--list", f"v{version}rc*").splitlines():
+        match = CANDIDATE_TAG.fullmatch(tag)
+        if match and ".".join(match.groups()[:3]) == version:
+            found.append((int(match.group(4)), tag))
+    return sorted(found)
+
+
+def require_unreleased(version: str, baseline: str) -> None:
+    if ref_exists(f"refs/tags/v{version}"):
+        raise ReleasePolicyError(
+            f"v{version} is already tagged, so release/{version} should have been "
+            "deleted. Delete the branch."
+        )
+    if version_key(version) <= version_key(baseline[1:]):
+        raise ReleasePolicyError(
+            f"release/{version} is not newer than the latest stable release "
+            f"{baseline}. Delete the branch."
+        )
+
+
+def plan_candidate(payload: str, requested: str, remote: str) -> dict[str, str]:
+    """Plan the next vX.Y.ZrcN: a new release branch, or the next candidate on it."""
+    baseline = stable_baseline(read_releases(payload))
+    branch = single_release_branch(remote)
+    if branch is None:
+        return plan_first_candidate(baseline, requested)
+    version, head = branch
+    if requested != "auto":
+        raise ReleasePolicyError(
+            f"release/{version} is open, so its version is already chosen. "
+            "Run with bump=auto, or delete the branch to plan again."
+        )
+    require_unreleased(version, baseline)
+    tags = candidate_tags(version)
+    plan = {
+        "last_tag": baseline,
+        "version": version,
+        "branch": f"release/{version}",
+        "base": head,
+    }
+    if tags and commit_of(f"refs/tags/{tags[-1][1]}") == head:
+        return {"action": "none", **plan, "tag": tags[-1][1]}
+    number = tags[-1][0] + 1 if tags else 1
+    return {"action": "next", **plan, "tag": f"v{version}rc{number}"}
+
+
+def plan_first_candidate(baseline: str, requested: str) -> dict[str, str]:
+    planned = plan_next_version(baseline, requested)
+    if planned["release"] == "false":
+        return {"action": "none", "last_tag": baseline}
+    version = planned["next"][1:]
+    tags = candidate_tags(version)
+    # Candidate numbers are never reused: an abandoned candidate's version
+    # stays taken on the package index.
+    number = tags[-1][0] + 1 if tags else 1
+    return {
+        "action": "new",
+        "last_tag": baseline,
+        "version": version,
+        "branch": f"release/{version}",
+        "base": git("rev-parse", "HEAD"),
+        "tag": f"v{version}rc{number}",
+        "bump": planned["bump"],
+        "count": planned["count"],
+    }
+
+
+def plan_final(payload: str, requested: str, remote: str) -> dict[str, str]:
+    """Plan promoting the open release branch's latest candidate to vX.Y.Z."""
+    if requested != "auto":
+        raise ReleasePolicyError(
+            "A bump applies to new candidates only; promotion keeps the "
+            "candidate's version."
+        )
+    releases = read_releases(payload)
+    baseline = stable_baseline(releases)
+    branch = single_release_branch(remote)
+    if branch is None:
+        return {"action": "none", "last_tag": baseline}
+    version, head = branch
+    require_unreleased(version, baseline)
+    tags = candidate_tags(version)
+    if not tags:
+        return {"action": "none", "last_tag": baseline, "branch": f"release/{version}"}
+    candidate = tags[-1][1]
+    if commit_of(f"refs/tags/{candidate}") != head:
+        raise ReleasePolicyError(
+            f"release/{version} has changes that no candidate contains yet (after "
+            f"{candidate}). Cut and test the next candidate before promoting."
+        )
+    if not any(
+        release.get("tag_name") == candidate and published_channel(release) == "candidate"
+        for release in releases
+    ):
+        raise ReleasePolicyError(
+            f"{candidate} is not a published pre-release. Publish and test it "
+            "before promoting."
+        )
+    if any(declared != candidate[1:] for declared in package_versions(head)):
+        raise ReleasePolicyError(
+            f"The package versions on release/{version} do not match {candidate}."
+        )
+    return {
+        "action": "promote",
+        "last_tag": baseline,
+        "version": version,
+        "branch": f"release/{version}",
+        "base": head,
+        "candidate": candidate,
+        "tag": f"v{version}",
+    }
+
+
+def set_version(version: str, only_if_newer: bool) -> dict[str, str]:
+    """Rewrite both package version declarations in the worktree."""
+    target = version_key(version)
+    current = set(package_versions())
+    if len(current) != 1:
+        raise ReleasePolicyError("The package version declarations disagree.")
+    previous = current.pop()
+    if only_if_newer and target <= version_key(previous):
+        return {"changed": "false", "previous": previous}
+    for path, pattern, template in VERSION_FILES:
+        text = path.read_text(encoding="utf-8")
+        line = template.format(version)
+        path.write_text(pattern.sub(lambda _: line, text), encoding="utf-8")
+    if package_versions() != (version,) * len(VERSION_FILES):
+        raise ReleasePolicyError("The package versions did not take the change.")
+    return {"changed": "true", "previous": previous}
+
+
+def summary_text(command: str, output: dict[str, str]) -> str:
     baseline = output["last_tag"]
-    if output["release"] == "false":
-        summary = f"Nothing to release since **{baseline}**.\n"
-    else:
-        summary = (
+    action = output.get("action")
+    if command == "plan":
+        if output["release"] == "false":
+            return f"Nothing to release since **{baseline}**.\n"
+        return (
             f"## {baseline} → {output['next']}\n\n"
             f"**{output['bump']}** bump; {output['count']} shipped-source change(s).\n"
         )
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(summary)
+    if action == "new":
+        return (
+            f"## Candidate {output['tag']}\n\n"
+            f"New branch `{output['branch']}` from the default branch: "
+            f"**{output['bump']}** bump over {baseline}; "
+            f"{output['count']} shipped-source change(s).\n"
+        )
+    if action == "next":
+        return f"## Candidate {output['tag']}\n\nCut from the head of `{output['branch']}`.\n"
+    if action == "promote":
+        return (
+            f"## Promote {output['candidate']} → {output['tag']}\n\n"
+            "Only the version changes from the tested candidate. The promotion "
+            "waits for approval in the `release-approval` environment.\n"
+        )
+    if command == "candidate":
+        if "branch" in output:
+            return (
+                f"No candidate to cut: `{output['branch']}` has not changed since "
+                f"{output['tag']}.\n"
+            )
+        return f"No candidate to cut: nothing to release since **{baseline}**.\n"
+    return "No candidate to promote, so there is no release this week.\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    event = commands.add_parser("check-event", help="Gate stable publishing")
+    event = commands.add_parser("check-event", help="Gate PyPI publishing")
     event.add_argument("event_path", type=Path)
     event.add_argument("--ref", required=True)
-    plan = commands.add_parser("plan", help="Plan from release API JSON on stdin")
-    plan.add_argument(
-        "--bump", choices=("auto", "patch", "minor", "major"), default="auto"
+    for name, text in (
+        ("plan", "Plan the next stable version from HEAD"),
+        ("candidate", "Plan the next release candidate"),
+        ("final", "Plan promoting the open release candidate"),
+    ):
+        command = commands.add_parser(name, help=f"{text} (release API JSON on stdin)")
+        command.add_argument("--bump", choices=BUMPS, default="auto")
+        command.add_argument("--summary", type=Path)
+        if name != "plan":
+            command.add_argument("--remote", default="origin")
+    edit = commands.add_parser("set-version", help="Set both package versions")
+    edit.add_argument("version")
+    edit.add_argument(
+        "--only-if-newer",
+        action="store_true",
+        help="Leave the files unchanged unless the version is above the current one",
     )
-    plan.add_argument("--summary", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "check-event":
             output = check_event(args.event_path, args.ref)
+        elif args.command == "set-version":
+            output = set_version(args.version, args.only_if_newer)
         else:
-            output = plan_release(sys.stdin.read(), args.bump)
+            payload = sys.stdin.read()
+            if args.command == "plan":
+                output = plan_release(payload, args.bump)
+            elif args.command == "candidate":
+                output = plan_candidate(payload, args.bump, args.remote)
+            else:
+                output = plan_final(payload, args.bump, args.remote)
             if args.summary:
-                write_summary(args.summary, output)
+                with args.summary.open("a", encoding="utf-8") as stream:
+                    stream.write(summary_text(args.command, output))
     except ReleasePolicyError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1

@@ -13,6 +13,7 @@ jobs:
     outputs:
       publish: ${{ steps.policy.outputs.publish }}
       revision: ${{ steps.policy.outputs.revision }}
+      prerelease: ${{ steps.policy.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,7 +22,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Validate the stable release and package versions
+      - name: Validate the release and package versions
         id: policy
         run: |
           set -euo pipefail
@@ -32,7 +33,9 @@ jobs:
   # and the update prompt has no snooze. Fixes ride a weekly train instead.
   # To ship anyway (user-blocking damage only: data loss, corruption, crash
   # on launch, broken upgrade path, security), set the repository variable
-  # ALLOW_SAME_DAY_RELEASE to "true" and re-run this workflow.
+  # ALLOW_SAME_DAY_RELEASE to "true" and re-run this workflow. Pre-releases
+  # are exempt, and do not count against a stable release: they are never
+  # offered to people on a stable version.
   cadence:
     needs: eligibility
     if: needs.eligibility.outputs.publish == 'true'
@@ -44,21 +47,28 @@ jobs:
           REPO: ${{ github.repository }}
           THIS_TAG: ${{ github.event.release.tag_name }}
           THIS_PUBLISHED: ${{ github.event.release.published_at }}
+          PRERELEASE: ${{ needs.eligibility.outputs.prerelease }}
           OVERRIDE: ${{ vars.ALLOW_SAME_DAY_RELEASE }}
         run: |
           set -euo pipefail
           today="${THIS_PUBLISHED%%T*}"
           echo "This release: $THIS_TAG published $THIS_PUBLISHED (day $today)"
 
+          if [ "${PRERELEASE:-}" = "true" ]; then
+            echo "Pre-release: only installed on request, so the daily limit does not apply."
+            exit 0
+          fi
+
           if [ "${OVERRIDE:-}" = "true" ]; then
             echo "::warning::ALLOW_SAME_DAY_RELEASE is set - skipping the cadence check."
             exit 0
           fi
 
-          # Every published release counts towards the daily limit, including
-          # previews. Compare UTC dates, which is what the API returns.
+          # Every published stable release counts towards the daily limit;
+          # pre-releases and previews do not. Compare UTC dates, which is what
+          # the API returns.
           clash=$(gh api --paginate "repos/$REPO/releases" \
-            --jq ".[] | select(.draft == false)
+            --jq ".[] | select(.draft == false) | select(.prerelease == false)
                       | select(.tag_name != \"$THIS_TAG\")
                       | select(.published_at != null)
                       | select((.published_at | split(\"T\")[0]) == \"$today\")
@@ -189,9 +199,10 @@ jobs:
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
+  # The registry lists the stable server only: pre-releases stay on PyPI.
   mcp-registry:
     needs: [eligibility, publish]
-    if: needs.eligibility.outputs.publish == 'true'
+    if: needs.eligibility.outputs.publish == 'true' && needs.eligibility.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
