@@ -52,13 +52,18 @@ desktop-test = ["aiohttp==3.14.3", "textual-serve==1.1.3"]
 # index, the mcp SDK drives the MCP server over stdio, and pytest-xdist
 # spreads the journeys across workers. build and hatchling build the wheel
 # without a download and pipx installs it, for the journeys that install
-# Servonaut as a package. aiohttp matches the desktop-test pin; mcp keeps the
+# Servonaut as a package. aiohttp and textual-serve match the desktop-test
+# pins (the desktop journeys host the real frontend), and playwright drives
+# it in headless Chromium; its browser is installed separately with
+# `python -m playwright install chromium`. mcp keeps the
 # upper bound of the `mcp` extra below.
 e2e = [
     "moto[ec2,iam,logs,s3,sts,wafv2]>=5.2.3,<6",
     "flask>=3.1,<4",
     "flask-cors>=6,<7",
     "aiohttp==3.14.3",
+    "textual-serve==1.1.3",
+    "playwright==1.62.0",
     "mcp>=1.0.0,<2",
     "pytest-xdist>=3.8,<4",
     # Loopback SSH servers for the remote journeys (pinned: the harness
@@ -151,5 +156,6 @@ timeout_method = "thread"
 markers = [
     "e2e_pr: fast hermetic end-to-end journey, run on every pull request",
     "e2e_quarantine: known-flaky end-to-end journey, excluded from pull requests",
+    "needs_browser: end-to-end journey that drives headless Chromium (desktop frontend)",
     "needs_sshd: end-to-end journey against the loopback SSH servers (needs the OpenSSH client)",
 ]

@@ -35,7 +35,7 @@ class TestBuildSshCommand(TestSSHService):
         cmd = ssh_service.build_ssh_command(host='9.9.9.9', username='ec2-user')
         assert cmd[0] == 'ssh'
         assert '-o' in cmd
-        assert 'StrictHostKeyChecking=no' in cmd
+        assert 'StrictHostKeyChecking=accept-new' in cmd
         assert 'ec2-user@9.9.9.9' in cmd
 
     def test_includes_keepalive_options(self, ssh_service):

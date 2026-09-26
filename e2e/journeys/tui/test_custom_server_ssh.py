@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from e2e.harness import fleet
+from e2e.harness.shims import jump_host
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -89,7 +90,7 @@ async def test_add_a_custom_server_and_ssh_into_it(tui, seed, journey):
         assert _pair(argv, "-p") == str(WEB_1.port)
         assert _pair(argv, "-i") == str(key)
         assert "IdentitiesOnly=yes" in argv
-        assert "-J" not in argv
+        assert jump_host(argv) is None
 
 
 async def test_ssh_through_a_bastion_and_refusals(tui, seed, journey):
@@ -121,7 +122,7 @@ async def test_ssh_through_a_bastion_and_refusals(tui, seed, journey):
         argv = await _launch_ssh(t, journey, fleet.APP_1.name)
         # A private-only instance is reached through the bastion by its
         # private address, with the key found for its AWS key pair.
-        assert _pair(argv, "-J") == f"{fleet.BASTION_USER}@{fleet.BASTION_1.public_ip}"
+        assert jump_host(argv) == f"{fleet.BASTION_USER}@{fleet.BASTION_1.public_ip}"
         assert argv[-1] == f"ec2-user@{fleet.APP_1.private_ip}"
         assert _pair(argv, "-i") == str(key)
         assert any(

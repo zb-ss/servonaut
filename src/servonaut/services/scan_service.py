@@ -15,7 +15,14 @@ from servonaut.services.interfaces import (
     ConnectionServiceInterface,
 )
 from servonaut.config.manager import ConfigManager
+from servonaut.services.ssh_host_keys import (
+    HostKeyPolicy,
+    HostKeyTarget,
+    HostKeyVerificationError,
+    detect_host_key_problem,
+)
 from servonaut.utils.match_utils import matches_conditions
+from servonaut.utils.ssh_utils import run_ssh
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +134,8 @@ class _ScanTarget:
     proxy_args: List[str]
     extra_options: List[str]
     port: Optional[int]
+    # Names a genuine host-key refusal can report.
+    host_key_target: HostKeyTarget
 
     def argv(self, remote_command: str) -> List[str]:
         return self.ssh_service.build_ssh_command(
@@ -176,6 +185,8 @@ class ScanService(ScanServiceInterface):
             ScanConnectionError: SSH could not connect or authenticate. One
                 connection check runs before the scan, so an unreachable
                 server costs one connect timeout, not one per path and command.
+            HostKeyVerificationError: ssh refused the host key; the message
+                names the host and the recovery command.
         """
         if not is_scannable(instance):
             logger.info(
@@ -238,6 +249,7 @@ class ScanService(ScanServiceInterface):
             if not key_path and instance.get('key_name'):
                 key_path = ssh_service.discover_key(instance['key_name'])
 
+        port = connection_service.get_target_port(instance)
         return _ScanTarget(
             ssh_service=ssh_service,
             host=host,
@@ -250,7 +262,10 @@ class ScanService(ScanServiceInterface):
                 'BatchMode=yes',
                 *connection_service.get_extra_options(instance, profile),
             ],
-            port=connection_service.get_target_port(instance),
+            port=port,
+            host_key_target=HostKeyTarget.for_connection(
+                host, port, instance=instance, profile=profile,
+            ),
         )
 
     async def _check_connection(self, target: _ScanTarget) -> None:
@@ -261,6 +276,7 @@ class ScanService(ScanServiceInterface):
         command can exit 255 itself (a PHP CLI fatal error does).
 
         Raises:
+            HostKeyVerificationError: ssh refused the host key.
             ScanConnectionError: ssh could not connect, log in, or answer in time.
         """
         try:
@@ -268,12 +284,31 @@ class ScanService(ScanServiceInterface):
         except subprocess.TimeoutExpired:
             logger.warning("Scan connection check to %s timed out", target.host)
             raise ScanConnectionError("connection timed out") from None
+        # A refused host key also exits 255; report it with its recovery
+        # command rather than as a generic connection failure.
+        self._raise_for_host_key_problem(result, target.host_key_target)
         if result.returncode == _SSH_CONNECTION_FAILED:
             error = ScanConnectionError.from_ssh_stderr(result.stderr)
             logger.warning(
                 "Scan could not connect to %s: %s", target.host, error.detail or error.reason
             )
             raise error
+
+    def _raise_for_host_key_problem(
+        self, result: subprocess.CompletedProcess, target: HostKeyTarget,
+    ) -> None:
+        """Stop the scan when ssh refused the host key.
+
+        Every further scan of the host would be refused the same way, and
+        the caller must be able to tell a changed key from "no matches".
+        """
+        problem = detect_host_key_problem(
+            getattr(result, "diagnostics", "") or "", result.returncode, target,
+            HostKeyPolicy.from_ssh_config(self._config_manager.get().ssh),
+            stdout=result.stdout,
+        )
+        if problem is not None:
+            raise HostKeyVerificationError(problem)
 
     def get_scan_config_for_instance(self, instance: dict) -> Tuple[List[str], List[str]]:
         """Get combined scan paths and commands for an instance.
@@ -325,6 +360,7 @@ class ScanService(ScanServiceInterface):
         except Exception as e:
             logger.error("Path scan failed for %s on %s: %s", path, target.host, e)
             return None
+        self._raise_for_host_key_problem(result, target.host_key_target)
 
         if result.returncode == 0 and result.stdout.strip():
             return {
@@ -349,6 +385,7 @@ class ScanService(ScanServiceInterface):
         except Exception as e:
             logger.error("Command scan failed for '%s' on %s: %s", command, target.host, e)
             return None
+        self._raise_for_host_key_problem(result, target.host_key_target)
 
         if result.returncode == 0 and result.stdout.strip():
             return {
@@ -368,7 +405,9 @@ class ScanService(ScanServiceInterface):
         """Run one non-interactive ssh call off the event loop.
 
         stdin is /dev/null so the child never inherits (and competes for)
-        the TUI's terminal input.
+        the TUI's terminal input, and ssh's own messages go to a private log
+        (``run_ssh``) so a host-key refusal can be told apart from command
+        output.
 
         Raises:
             subprocess.TimeoutExpired: the call outlived *timeout* seconds.
@@ -376,7 +415,7 @@ class ScanService(ScanServiceInterface):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
-            lambda: subprocess.run(
+            lambda: run_ssh(
                 ssh_cmd,
                 capture_output=True,
                 text=True,

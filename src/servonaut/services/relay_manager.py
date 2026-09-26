@@ -843,7 +843,7 @@ def _build_executors(config_manager):
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
-    scp_service = SCPService()
+    scp_service = SCPService(ssh_config=cfg.ssh)
     return RelayExecutors(
         config_manager, aws_service, custom_server_service,
         ssh_service, connection_service, scp_service,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import getpass
 import hashlib
+import inspect
 import logging
 import os
 import shlex
@@ -29,6 +30,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -789,12 +791,41 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            await memory_service.refresh(self._target)
+            host_key_message = await self._refresh_memory(memory_service)
             self._render_table()
-            self.app.notify("Memory refreshed.")
+            if host_key_message:
+                self._notify_host_key_refusal(host_key_message)
+            else:
+                self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
             self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
+
+    async def _refresh_memory(
+        self, memory_service: Any, modules: Optional[list] = None,
+    ) -> Optional[str]:
+        """Re-probe, returning the message when ssh refused the host key.
+
+        Uses the reporting API when the service provides it; services that
+        expose only the dict-returning ``refresh`` report nothing.
+        """
+        refresh_report = getattr(memory_service, "refresh_report", None)
+        # Probe the real server: in demo mode the row shows stand-ins.
+        target = self._target
+        if not inspect.iscoroutinefunction(refresh_report):
+            if modules is None:
+                await memory_service.refresh(target)
+            else:
+                await memory_service.refresh(target, modules=modules)
+            return None
+        report = await refresh_report(target, modules)
+        if report.overall_reason == HOST_KEY_BUILD_REASON and report.failures:
+            return report.failures[0].message
+        return None
+
+    def _notify_host_key_refusal(self, message: str) -> None:
+        """Show a refused host key; the message carries "[host]:port"."""
+        self.app.notify(message, severity="error", markup=False, timeout=20)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
@@ -824,9 +855,14 @@ class MemoryScreen(Screen):
             return
         self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            await memory_service.refresh(self._target, modules=[module_name])
+            host_key_message = await self._refresh_memory(
+                memory_service, modules=[module_name],
+            )
             self._render_table()
-            self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
+            if host_key_message:
+                self._notify_host_key_refusal(host_key_message)
+            else:
+                self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
             logger.error("Module refresh failed: %s", exc, exc_info=True)
             self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import fleet, remote_fleet
+from e2e.harness.shims import jump_host
 from e2e.harness.sshd import BASTION_ALIAS
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd, pytest.mark.asyncio]
@@ -41,7 +42,7 @@ async def test_command_and_session_through_the_bastion(tui, seed, journey, sshd)
         )
 
         argv = journey.shims.calls("ssh")[0].argv
-        assert argv[argv.index("-J") + 1] == JUMP
+        assert jump_host(argv) == JUMP
         assert argv[-2:] == [f"{fleet.BASTION_USER}@{APP_1.private_ip}", "bash -ic hostname"]
         assert [f["destination"] for f in _forwards(sshd)] == [f"{APP_1.private_ip}:22"]
         assert sshd.target.commands(user=fleet.BASTION_USER) == ["bash -ic hostname"]

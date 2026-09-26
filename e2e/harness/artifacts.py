@@ -8,6 +8,9 @@ file is scrubbed: absolute paths become ``$E2E_ROOT`` / ``$REPO`` / ``$HOME``
 style placeholders, the machine's host name (which relay client ids embed)
 becomes ``$HOSTNAME``, and anything shaped like a credential is replaced;
 JSON stays valid JSON. The fixtures themselves are neutral by construction.
+Fabricated secrets a journey hands to the product (vault tokens, passphrases,
+passwords, keys) are registered with :func:`register_secret` and replaced
+wherever they appear, whatever their shape.
 
 The folder is only ever deleted when it carries the suite's marker file, so
 pointing ``SERVONAUT_E2E_ARTIFACTS`` at an existing directory cannot remove it.
@@ -69,6 +72,37 @@ def journey_failed(node: object) -> bool:
         if report is not None and report.failed:
             return True
     return False
+
+
+# Exact values to redact from this journey's artifacts (see register_secret).
+_REGISTERED: set[str] = set()
+
+
+def register_secret(*values: str) -> None:
+    """Redact these exact values (and their JSON-escaped lines) from artifacts.
+
+    Journeys and harness fakes call this for every fabricated secret they
+    hand to the product. A multi-line value (a key) is registered line by
+    line too, since logs quote it with escaped newlines.
+    """
+    for value in values:
+        if not value:
+            continue
+        _REGISTERED.add(value)
+        _REGISTERED.add(json.dumps(value)[1:-1])
+        _REGISTERED.update(line for line in value.splitlines() if len(line) >= 8)
+
+
+def forget_secrets() -> None:
+    """Start a journey with no registered secrets."""
+    _REGISTERED.clear()
+
+
+def redact_registered(text: str) -> str:
+    """Replace every registered secret in *text*, longest first."""
+    for secret in sorted(_REGISTERED, key=len, reverse=True):
+        text = text.replace(secret, _REDACTED)
+    return text
 
 
 def sanitize(nodeid: str) -> str:
@@ -154,6 +188,7 @@ def _rewrite(text: str, ctx: E2EContext) -> str:
         (sys.base_prefix, "$PYTHON_BASE_PREFIX"),
     ]
     replacements += [(home, "$HOME") for home in ctx.protected_dirs]
+    text = redact_registered(text)
     for old, new in sorted(replacements, key=lambda item: -len(item[0])):
         text = text.replace(old, new)
     return scrub(text)
