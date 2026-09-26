@@ -3,17 +3,23 @@
 One instance per test process (session scope); tests call :meth:`reset`
 between journeys. It serves the account routes the CLI and TUI need, the
 relay (subscriber token, Mercure hub, heartbeat, results, status), account
-data, the AI routes and hosted-MCP endpoint, the package index (the JSON
-the update check reads and a simple index pip and pipx install from), and
-the ``/__e2e/`` control plane. Each path belongs to exactly one route
-module; registering one twice fails at start-up.
+data, the AI routes and hosted-MCP endpoint, the paid data features (Memory
+Sync and team sharing, config snapshots, the secret-store config and SSH key
+references, findings and remediation), the package index (the JSON the
+update check reads and a simple index pip and pipx install from), and the
+``/__e2e/`` control plane. Each path belongs to exactly one route module;
+registering one twice fails at start-up.
 Every request is logged with credentials redacted; unknown routes answer
 404 and are logged too, so a journey can assert it made no unexpected calls.
+The same requests are also kept unredacted, in memory only, so a journey can
+prove a secret never crossed the wire (``assert_absent_on_wire``); that copy
+is never written to the failure artifacts.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import ssl
 from pathlib import Path
 from typing import Any, Optional
@@ -25,16 +31,25 @@ from e2e.harness.fake_cloud import (
     routes_account,
     routes_ai,
     routes_auth,
+    routes_configs,
+    routes_findings,
+    routes_memory,
     routes_misc,
     routes_pypi,
     routes_relay,
+    routes_secrets,
 )
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
 from e2e.harness.fake_cloud.routes_account import AccountData
 from e2e.harness.fake_cloud.routes_ai import AiState
+from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
+from e2e.harness.fake_cloud.routes_findings import FindingsCloud
+from e2e.harness.fake_cloud.routes_memory import MemoryCloud
+from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
+from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 from e2e.harness.loopback import LoopbackServer
 
 class FakeCloud(LoopbackServer):
@@ -47,12 +62,17 @@ class FakeCloud(LoopbackServer):
         self._tls = tls
         self._store = ScenarioStore(default_pypi_version)
         self._log = RequestLog()
+        self._wire = WireCapture()
         self.relay = RelayHub(lambda: self._store.snapshot().user_id)
         # Bumped by reset(): a request that began before a reset (a relay
         # stream that outlived its journey) is not logged into the next one.
         self._epoch = 0
         self.account = AccountData()
         self.ai = AiState()
+        self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
+        self.configs = ConfigSnapshots()
+        self.secrets = SecretsData()
+        self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,9 +95,14 @@ class FakeCloud(LoopbackServer):
         self._epoch += 1
         self._store.reset()
         self._log.clear()
+        self._wire.clear()
         self.relay.reset()
         self.account.reset()
         self.ai.reset()
+        self.memory.reset()
+        self.configs.reset()
+        self.secrets.reset()
+        self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
 
@@ -106,7 +131,48 @@ class FakeCloud(LoopbackServer):
         return [entry["status"] for entry in self._log.entries(path=path)]
 
     def write_log(self, destination: Path) -> None:
+        """Write the redacted request log (never the unredacted wire capture)."""
         self._log.write_jsonl(destination)
+
+    # What crossed the wire, unredacted (see ``wire.py``).
+
+    def wire_mark(self) -> int:
+        """A position for ``assert_absent_on_wire(..., since=...)``."""
+        return self._wire.mark()
+
+    def assert_absent_on_wire(self, *values: Value, since: int = 0) -> None:
+        """Fail if any of *values* was sent to FakeCloud, in any encoding.
+
+        Looks at the raw path, query, every header and the raw body of every
+        request since *since*. The failure names the value's position and
+        where it was found, never the value.
+        """
+        requests = self._wire.requests(since)
+        problems = [
+            f"value #{index} ({len(value)} long): {where}"
+            for index, value in enumerate(values, 1)
+            for where in find_on_wire(requests, value)
+        ]
+        if problems:
+            raise AssertionError("sent to the service:\n  " + "\n  ".join(problems))
+
+    def assert_no_unexpected_errors(self, *allowed: tuple[str, str, int]) -> None:
+        """Fail on any 4xx or 5xx answer not matched by *allowed*.
+
+        Each allowed entry is ``(method, path regex, status)``; see
+        ``wire.EXPECTED`` for the named, shared ones.
+        """
+        unexpected = [
+            f"{e['method']} {e['path']} -> {e['status']}"
+            for e in self._log.entries()
+            if e["status"] >= 400
+            and not any(
+                e["method"] == method and re.fullmatch(pattern, e["path"]) and e["status"] == status
+                for method, pattern, status in allowed
+            )
+        ]
+        if unexpected:
+            raise AssertionError("unexpected error answers:\n  " + "\n  ".join(unexpected))
 
     # ------------------------------------------------------------------
     # Server
@@ -125,6 +191,10 @@ class FakeCloud(LoopbackServer):
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account)
         routes_ai.add_routes(app, self._store, self.ai)
+        routes_memory.add_routes(app, self._store, self.memory)
+        routes_configs.add_routes(app, self._store, self.configs)
+        routes_secrets.add_routes(app, self._store, self.secrets)
+        routes_findings.add_routes(app, self._store, self.findings)
         routes_pypi.add_routes(app, self._store)
         routes_misc.add_routes(app, self._store, lambda: self.url)
         control.add_routes(app, self._store, self._log)
@@ -137,12 +207,21 @@ class FakeCloud(LoopbackServer):
         body: Any = None
         authorization = request.headers.get("Authorization")
         bearer_ok = self._store.session.bearer_valid(authorization)
-        if request.can_read_body:
-            raw = await request.read()
+        raw = await request.read() if request.can_read_body else b""
+        if raw:
             try:
-                body = redact(json.loads(raw)) if raw else None
+                body = redact(json.loads(raw))
             except ValueError:
                 body = f"<{len(raw)} bytes>"
+        if epoch == self._epoch and not request.path.startswith(control.CONTROL_PREFIX):
+            self._wire.add(
+                WireRequest(
+                    method=request.method,
+                    target=request.raw_path.encode("utf-8", "surrogateescape"),
+                    headers=tuple(request.raw_headers),
+                    body=raw,
+                )
+            )
         try:
             response = await handler(request)
         except web.HTTPNotFound:

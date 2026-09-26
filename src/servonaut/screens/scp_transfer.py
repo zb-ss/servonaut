@@ -3,6 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, Horizontal
@@ -12,6 +13,12 @@ from textual.worker import Worker
 
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.services.ssh_host_keys import (
+    SCP_REFUSAL_EXIT_CODES,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
 
 class SCPTransferScreen(Screen):
@@ -187,6 +194,10 @@ class SCPTransferScreen(Screen):
             'port': connection_service.get_target_port(conn),
             'extra_options': connection_service.get_extra_options(conn, profile),
         }
+        # What a genuine host-key refusal for this transfer can name.
+        self._host_key_target = HostKeyTarget.for_connection(
+            options['host'], options['port'], instance=conn, profile=profile,
+        )
 
         if self._transfer_direction == "upload":
             return self.app.scp_service.build_upload_command(
@@ -222,9 +233,22 @@ class SCPTransferScreen(Screen):
                         status_output.update("[green]Transfer completed successfully![/green]")
                         self.app.notify("Transfer completed", severity="information")
                     else:
-                        error_msg = _s(stderr or "Unknown error")
-                        status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
-                        self.app.notify(f"Transfer failed: {error_msg}", severity="error", markup=False)
+                        # A refused host key gets the one-line explanation
+                        # instead of OpenSSH's full warning banner.
+                        target = getattr(self, "_host_key_target", None)
+                        # scp has no private log; legacy scp exits 1.
+                        problem = target and detect_host_key_problem(
+                            stderr or "", returncode, target,
+                            HostKeyPolicy.from_ssh_config(self.app.config_manager.get().ssh),
+                            stdout=stdout, exit_codes=SCP_REFUSAL_EXIT_CODES,
+                        )
+                        error_msg = _s(
+                            problem.message if problem else (stderr or "Unknown error")
+                        )
+                        status_output.update(f"[red]Transfer failed:[/red] {escape(error_msg)}")
+                        self.app.notify(
+                            f"Transfer failed: {error_msg}", severity="error", markup=False,
+                        )
 
     def action_back(self) -> None:
         """Navigate back to previous screen."""

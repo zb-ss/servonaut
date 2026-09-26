@@ -90,7 +90,7 @@ def _build_tools():
         cache_service=cache_service,
         ssh_service=SSHService(config_manager),
         connection_service=ConnectionService(config_manager),
-        scp_service=SCPService(),
+        scp_service=SCPService(ssh_config=config.ssh),
         guard=guard,
         audit=AuditTrail(config.mcp.audit_path),
         secret_provider=secret_provider,

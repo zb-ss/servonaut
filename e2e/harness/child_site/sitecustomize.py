@@ -7,6 +7,13 @@ armed, the child reports itself in ``SERVONAUT_E2E_ARMED_LOG``. When
 ``SERVONAUT_E2E_PROVIDER_REDIRECTS`` is set, the Hetzner and OVH client
 libraries are then pointed at the local fakes (see ``provider_redirects.py``).
 
+``SERVONAUT_E2E_REDIRECTS`` (JSON, ``{"module": {"ATTRIBUTE": value}}``)
+points endpoints that the application only defines as module constants at
+the suite's local fakes: each attribute is replaced as soon as its module has
+been imported. A redirect whose attribute no longer exists stops the child,
+so a renamed constant cannot silently send a child back to the real service
+(the network guard would refuse it anyway).
+
 Python's ``site`` module ignores errors raised here, which would let a child
 run unguarded. Any failure therefore ends the process at once (exit 70).
 
@@ -30,6 +37,7 @@ import time
 sys.dont_write_bytecode = True
 
 _MODULE_NAME = "_servonaut_e2e_netguard"
+_ENV_REDIRECTS = "SERVONAUT_E2E_REDIRECTS"
 _EXIT_UNGUARDED = 70
 _EXIT_ORPHANED = 75
 _OWNER_PID = "SERVONAUT_E2E_OWNER_PID"
@@ -125,8 +133,69 @@ def _redirect_providers() -> None:
     module.apply_from_environment()
 
 
+class _RedirectingLoader:
+    """Runs the real loader, then replaces the redirected attributes."""
+
+    def __init__(self, loader, attributes):
+        self._loader = loader
+        self._attributes = attributes
+
+    def create_module(self, spec):
+        return self._loader.create_module(spec)
+
+    def exec_module(self, module):
+        self._loader.exec_module(module)
+        for name, value in self._attributes.items():
+            if not hasattr(module, name):
+                sys.stderr.write(
+                    f"e2e redirect target {module.__name__}.{name} does not exist; "
+                    "stopping this process\n"
+                )
+                sys.stderr.flush()
+                os._exit(_EXIT_UNGUARDED)
+            setattr(module, name, value)
+
+    def __getattr__(self, name):
+        return getattr(self._loader, name)
+
+
+class _RedirectFinder:
+    """Meta path finder that wraps the loader of each redirected module."""
+
+    def __init__(self, redirects):
+        self._redirects = redirects
+
+    def find_spec(self, fullname, path, target=None):
+        attributes = self._redirects.get(fullname)
+        if attributes is None:
+            return None
+        for finder in sys.meta_path:
+            if finder is self or not hasattr(finder, "find_spec"):
+                continue
+            spec = finder.find_spec(fullname, path, target)
+            if spec is not None and spec.loader is not None:
+                spec.loader = _RedirectingLoader(spec.loader, attributes)
+                return spec
+        return None
+
+
+def _install_redirects() -> None:
+    raw = os.environ.get(_ENV_REDIRECTS)
+    if not raw:
+        return
+    import json
+
+    redirects = json.loads(raw)
+    if not isinstance(redirects, dict) or not all(
+        isinstance(attributes, dict) for attributes in redirects.values()
+    ):
+        raise ValueError(f"{_ENV_REDIRECTS} must map module names to attribute objects")
+    sys.meta_path.insert(0, _RedirectFinder(redirects))
+
+
 try:
     _install()
+    _install_redirects()
     _redirect_providers()
 except BaseException as exc:  # noqa: BLE001 - any failure must stop the child
     try:

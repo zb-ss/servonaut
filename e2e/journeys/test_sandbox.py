@@ -5,6 +5,7 @@ If any of these fails, no journey result can be trusted.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -248,3 +249,22 @@ def test_artifact_scrub_masks_credentials_and_keeps_json_valid():
     assert parsed["authorization"] is None
     assert parsed["token"] == parsed["access_token"] == "<redacted>"
     assert "fake-device-code" not in scrubbed and "fake-access" not in scrubbed
+
+
+def test_children_see_module_constants_redirected_to_the_fakes(journey, fake_cloud):
+    code = "import servonaut.services.update_service as u\nprint(u.PYPI_URL)\n"
+    completed, _pid = _run_child(journey, code)
+    assert completed.stdout.strip() == fake_cloud.pypi_json_url, completed.stderr
+
+
+def test_a_redirect_to_a_missing_constant_stops_the_child(journey):
+    redirects = {"servonaut.services.update_service": {"NO_SUCH_URL": "https://127.0.0.1:9"}}
+    completed, _pid = _run_child(
+        journey,
+        "import servonaut.services.update_service\nprint('imported')\n",
+        SERVONAUT_E2E_REDIRECTS=json.dumps(redirects),
+    )
+    assert completed.returncode == 70
+    assert "imported" not in completed.stdout
+    assert "does not exist" in completed.stderr
+

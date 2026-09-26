@@ -214,7 +214,8 @@ class ChatToolExecutor:
             raise ValueError(
                 "ChatToolExecutor needs either a ServonautTools or a config_manager."
             )
-        mcp_config = config_manager.get().mcp
+        config = config_manager.get()
+        mcp_config = config.mcp
         return ServonautTools(
             config_manager=config_manager,
             aws_service=aws_service,
@@ -222,7 +223,7 @@ class ChatToolExecutor:
             cache_service=cache_service,
             ssh_service=ssh_service,
             connection_service=connection_service,
-            scp_service=SCPService(),
+            scp_service=SCPService(ssh_config=config.ssh),
             guard=_CommandGuard(mcp_config, config_manager),
             audit=AuditTrail(mcp_config.audit_path),
             ovh_service=ovh_service,

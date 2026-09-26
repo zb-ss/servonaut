@@ -70,6 +70,12 @@ _CARRIED_VARIABLES = (
     "PYTEST_ADDOPTS",
 )
 
+# Where Playwright keeps its browsers. Playwright derives the default from
+# the home directory, which the sandbox replaces, so it is resolved against
+# the real one before that happens (see _playwright_browsers_path). Only the
+# test process gets it; children never start a browser.
+ENV_PLAYWRIGHT_BROWSERS = "PLAYWRIGHT_BROWSERS_PATH"
+
 
 class HermeticityError(RuntimeError):
     """The suite cannot guarantee isolation, so it refuses to run."""
@@ -373,6 +379,26 @@ def _make_context(
     )
 
 
+def _playwright_browsers_path(original_env: Mapping[str, str]) -> str:
+    """Playwright's browser directory, as it would resolve it outside the sandbox.
+
+    The browsers are read-only binaries that the headless browser (not a
+    Python process, so not under the guards) loads; nothing in the suite
+    writes there.
+    """
+    configured = original_env.get(ENV_PLAYWRIGHT_BROWSERS)
+    if configured:
+        return configured
+    home = Path(original_env.get("HOME") or Path.home())
+    if sys.platform == "darwin":
+        cache = home / "Library" / "Caches"
+    elif sys.platform == "win32":
+        cache = Path(original_env.get("LOCALAPPDATA") or home / "AppData" / "Local")
+    else:
+        cache = Path(original_env.get("XDG_CACHE_HOME") or home / ".cache")
+    return str(cache / "ms-playwright")
+
+
 def _apply_environment(ctx: E2EContext, original_env: Mapping[str, str], base: str) -> None:
     ctx.default_shims.mkdir()
     env = build_env(
@@ -384,6 +410,7 @@ def _apply_environment(ctx: E2EContext, original_env: Mapping[str, str], base: s
     for name in _CARRIED_VARIABLES:
         if name in original_env:
             env[name] = original_env[name]
+    env[ENV_PLAYWRIGHT_BROWSERS] = _playwright_browsers_path(original_env)
     env[_ENV_BASE_TMP] = base
     os.environ.clear()
     os.environ.update(env)
