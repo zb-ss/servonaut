@@ -920,7 +920,7 @@ class TestCloudTrailCopy:
         screen._events = [event]
         # Paging reads the narrowed view; unfiltered it mirrors _events.
         screen._visible = list(screen._events)
-        screen._selected_row = 0
+        screen._selected_event = event
 
         copied: list = []
 

@@ -283,7 +283,7 @@ class CloudWatchBrowserScreen(Screen):
                 prefix=prefix, region=region
             )
         except Exception as exc:
-            self.app.notify(f"Failed to load log groups: {exc}", severity="error")
+            self.app.notify(f"Failed to load log groups: {exc}", severity="error", markup=False)
             self.query_one("#cw_select_log_group", Select).prompt = "Error loading"
             return
 
@@ -334,7 +334,11 @@ class CloudWatchBrowserScreen(Screen):
 
         time_select = self.query_one("#cw_select_time_range", Select)
         minutes = int(time_select.value) if time_select.value is not Select.NULL else 60
-        filter_pattern = self.query_one("#cw_input_filter_pattern", Input).value.strip()
+        # A bare term such as an address or path only matches when quoted;
+        # apply the same rule the MCP tool uses.
+        filter_pattern = self.app.cloudwatch_service.normalize_filter_pattern(
+            self.query_one("#cw_input_filter_pattern", Input).value.strip()
+        )
 
         self.query_one("#cw_btn_fetch", Button).disabled = True
         self.query_one("#cloudwatch_detail_text", Static).update("Loading...")
@@ -369,7 +373,7 @@ class CloudWatchBrowserScreen(Screen):
                 max_events=0,  # Fetch all
             )
         except Exception as exc:
-            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error")
+            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error", markup=False)
             self.query_one("#cw_btn_fetch", Button).disabled = False
             return
 
@@ -387,7 +391,13 @@ class CloudWatchBrowserScreen(Screen):
         count = len(events)
         if count == 0:
             self.query_one("#cloudwatch_detail_text", Static).update("No events found.")
-            self.app.notify("No events found for the given filters.", severity="warning")
+            # Say whether the filter or the window came up empty.
+            reason = (
+                f"No events matched filter {filter_pattern} ({minutes}min window)."
+                if filter_pattern
+                else f"No events in this log group ({minutes}min window)."
+            )
+            self.app.notify(reason, severity="warning", markup=False)
         else:
             self.query_one("#cloudwatch_detail_text", Static).update(
                 "Select a log event to view the full message."
