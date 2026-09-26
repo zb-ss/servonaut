@@ -354,8 +354,12 @@ session (with automatic token refresh). Setting both
 revoked), the listener stops, reports it (on the terminal, and in
 `~/.servonaut/logs/relay.log` for `--bg`) and exits with code `4`. Run
 `servonaut login`, then start the relay again. A temporary failure to
-refresh the session (network error, rate limit, server error) does not
-stop the listener; it keeps retrying.
+refresh the session (network error, rate limit, server error, or a
+firewall or CDN in front of the API blocking the request) does not stop
+the listener; it keeps retrying. If the server keeps rejecting heartbeats
+while the session is still valid, the listener keeps retrying and writes
+one `heartbeat_rejected` line to `relay.log` (see
+`relay.heartbeat_rejection_alert_after`).
 
 **AI chat tool execution:** when started with a logged-in session, the
 listener also executes tool calls dispatched by Servonaut AI chats

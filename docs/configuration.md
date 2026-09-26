@@ -386,6 +386,7 @@ TUI's in-process listener:
     "base_url": "https://api.servonaut.dev",
     "mercure_url": "https://servonaut.dev/.well-known/mercure",
     "heartbeat_interval": 30,
+    "heartbeat_rejection_alert_after": 3,
     "ai_tool_auto_approve": "standard"
   }
 }
@@ -396,6 +397,7 @@ TUI's in-process listener:
 | `base_url` | _(derived from API base)_ | REST API for heartbeats, Mercure JWTs, and results |
 | `mercure_url` | _(derived from API base)_ | The Mercure hub URL |
 | `heartbeat_interval` | `30` | Seconds between heartbeats |
+| `heartbeat_rejection_alert_after` | `3` | Rejected heartbeats (while your session is still valid) before the listener reports that commands are not being delivered: one `heartbeat_rejected` line in `~/.servonaut/logs/relay.log` and the TUI indicator changes from "connected" to "connecting…". The listener keeps retrying and returns to "connected" once a heartbeat is accepted; until then it renews the session on every Nth rejected heartbeat only. Minimum `1`; lower or non-numeric values are treated as `1` and the default respectively. |
 | `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
 
 ## Supported Terminals

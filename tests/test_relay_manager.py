@@ -1354,3 +1354,64 @@ class TestSessionExpired:
 
         assert _run(scenario()) is True
         assert RelayState.SESSION_EXPIRED not in states
+
+
+class TestHeartbeatRejectionOnValidSession:
+    def test_persistent_rejection_leaves_connected_until_accepted_again(
+        self, lock_path, monkeypatch,
+    ):
+        """The manager's own listener: heartbeats rejected although the
+        refresh succeeds and the session stays valid flip the indicator
+        from CONNECTED to CONNECTING (not delivering); the relay keeps
+        running and returns to CONNECTED on the next accepted heartbeat."""
+        pytest.importorskip("httpx_sse")
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(heartbeat_statuses=[200] + [401] * 4 + [200])
+        server.install(monkeypatch)
+        auth = _make_auth()
+        auth.refresh_token = AsyncMock(return_value=True)
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=RelayConfig(
+            base_url=BASE_URL, mercure_url=MERCURE_URL, heartbeat_interval=0,
+            heartbeat_rejection_alert_after=2,
+        ))
+        states: list = []
+        manager = RelayManager(
+            config_manager=config_manager,
+            auth_service=auth,
+            lock_path=lock_path,
+            on_state_change=states.append,
+        )
+
+        async def scenario():
+            await manager.start()
+            await asyncio.wait_for(
+                _until(lambda: states.count(RelayState.CONNECTED) == 2),
+                timeout=5,
+            )
+            running = manager.is_running
+            await manager.stop()
+            return running
+
+        assert _run(scenario()) is True
+        assert states[:4] == [
+            RelayState.CONNECTING, RelayState.CONNECTED,
+            RelayState.CONNECTING, RelayState.CONNECTED,
+        ]
+        assert RelayState.SESSION_EXPIRED not in states
+        assert auth.refresh_token.await_count == 2
+
+    def test_degraded_hook_leaves_other_states_alone(self, lock_path):
+        states: list = []
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            on_state_change=states.append,
+        )
+        manager._set_state(RelayState.SESSION_EXPIRED)
+
+        _run(manager._handle_degraded())
+
+        assert states == [RelayState.SESSION_EXPIRED]
