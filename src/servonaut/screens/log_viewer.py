@@ -700,7 +700,7 @@ class LogViewerScreen(Screen):
             )
         except Exception as e:
             logger.error("Error adding directory %s: %s", directory, e)
-            self.app.notify(f"Error scanning {directory}: {e}", severity="error")
+            self.app.notify(f"Error scanning {directory}: {e}", severity="error", markup=False)
             self._resume_stream_after_modal()
             return
 
@@ -736,7 +736,7 @@ class LogViewerScreen(Screen):
         if result not in existing:
             existing.append(result)
             service.set_custom_paths(instance_id, existing)
-            self.app.notify(f"Added custom path: {result}")
+            self.app.notify(f"Added custom path: {result}", markup=False)
 
         # Add to available list if not already there
         if result not in self._available_logs:

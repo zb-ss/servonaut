@@ -7,6 +7,7 @@ import json
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Optional
+from unittest.mock import patch
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -34,6 +35,7 @@ from scripts.distribution.qualification import (
     summarize,
     supported_rows,
 )
+from scripts.distribution import release_candidate
 from scripts.distribution.release_candidate import (
     CandidatePolicyError,
     candidate_digest,
@@ -76,12 +78,20 @@ def _evidence(
 
     The same labels in the same directory always give the same digest, so a
     preview and a stable candidate can share identical artifacts.
+
+    The artifacts are placeholder bytes, not built packages, so the runtime
+    marker check that planning performs (covered by the release-candidate
+    tests) is skipped: qualification only consumes the planned evidence.
     """
     tmp_path.mkdir(parents=True, exist_ok=True)
     builder = ManifestBuilder(
-        product_version="2.27.0", channel=channel, expires_at="2099-01-01T00:00:00Z"
+        product_version="2.27.0",
+        channel=channel,
+        packaging_revision=1,
+        expires_at="2099-01-01T00:00:00Z",
     )
     key = Ed25519PrivateKey.generate()
+    files: dict[str, Path] = {}
     for index, (kind, platform, arch) in enumerate(labels or (CLI_LINUX,)):
         artifact = tmp_path / f"servonaut-{index}_{kind.value}.bin"
         artifact.write_bytes(f"PAYLOAD-{index}".encode())
@@ -95,7 +105,11 @@ def _evidence(
             artifact_id=artifact_ids[index] if artifact_ids else None,
         )
         builder.sign_artifact(record.artifact_id, key)
-    candidate = plan_candidate(builder.build(), tag=tag, source_commit="a" * 40)
+        files[record.artifact_id] = artifact
+    with patch.object(release_candidate, "_require_marker_identity"):
+        candidate = plan_candidate(
+            builder.build(), tag=tag, source_commit="a" * 40, artifact_files=files
+        )
     return candidate.to_evidence()
 
 

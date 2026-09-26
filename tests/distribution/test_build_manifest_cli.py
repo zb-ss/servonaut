@@ -17,12 +17,13 @@ from servonaut.distribution.trust import TrustPolicy, verify_manifest
 _EXPIRES_AT = "2099-01-01T00:00:00Z"
 
 
-def _argv(tmp_path: Path, *extra: str) -> list[str]:
+def _argv(tmp_path: Path, *extra: str, revision: str | None = "1") -> list[str]:
     artifact = tmp_path / "servonaut-linux-x64.tar.gz"
     artifact.write_bytes(b"PAYLOAD")
     return [
         "--version",
         "2.27.0",
+        *(("--revision", revision) if revision is not None else ()),
         "--artifact",
         f"file={artifact},kind=standalone_cli,distribution=frozen_cli,platform=linux,arch=x86_64,"
         "url=https://releases.servonaut.dev/servonaut-linux-x64.tar.gz",
@@ -53,6 +54,8 @@ class TestBuildManifestCLI:
             "2.27.0",
             "--channel",
             "stable",
+            "--revision",
+            "1",
             "--expires-at",
             _EXPIRES_AT,
             "--unsigned",
@@ -67,6 +70,7 @@ class TestBuildManifestCLI:
 
         manifest = ReleaseManifest.from_json(output_manifest.read_bytes())
         assert manifest.product_version == "2.27.0"
+        assert manifest.packaging_revision == 1
         assert len(manifest.artifacts) == 1
         assert manifest.artifacts[0].filename == "servonaut-linux-x64.tar.gz"
 
@@ -89,6 +93,8 @@ class TestBuildManifestCLI:
             "2.27.0",
             "--channel",
             "stable",
+            "--revision",
+            "1",
             "--expires-at",
             _EXPIRES_AT,
             "--key-file",
@@ -115,6 +121,25 @@ class TestBuildManifestCLI:
         # Verify manifest does not raise
         verify_manifest(manifest, policy)
         assert manifest.expires_at == _EXPIRES_AT
+
+    def test_main_requires_a_revision_for_packaged_builds(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as exit_info:
+            main(_argv(tmp_path, "--unsigned", "--expires-at", _EXPIRES_AT, revision=None))
+        assert exit_info.value.code == 2
+        assert "--revision is required" in capsys.readouterr().err
+        assert not (tmp_path / "manifest.json").exists()
+
+    @pytest.mark.parametrize("revision", ["0", "65536", "-1"])
+    def test_main_rejects_a_revision_outside_the_shared_range(
+        self, tmp_path: Path, revision: str
+    ) -> None:
+        argv = _argv(tmp_path, "--unsigned", "--expires-at", _EXPIRES_AT, revision=revision)
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv)
+        assert exit_info.value.code == 2
+        assert not (tmp_path / "manifest.json").exists()
 
     def test_main_requires_expires_at(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit) as exit_info:
@@ -179,3 +204,10 @@ class TestBuildManifestCLI:
         key_file.write_bytes(b"-----BEGIN PRIVATE KEY-----")
         with pytest.raises(RuntimeError, match="loader defect"):
             load_private_key(key_file)
+
+
+def test_main_with_a_revision_writes_it_into_the_manifest(tmp_path: Path) -> None:
+    assert main(_argv(tmp_path, "--unsigned", "--expires-at", _EXPIRES_AT, revision="3")) == 0
+
+    manifest = ReleaseManifest.from_json((tmp_path / "manifest.json").read_bytes())
+    assert manifest.packaging_revision == 3

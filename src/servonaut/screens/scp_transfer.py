@@ -225,7 +225,7 @@ class SCPTransferScreen(Screen):
                 if event.worker.error:
                     error_msg = _s(str(event.worker.error))
                     status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
-                    self.app.notify(f"Transfer failed: {error_msg}", severity="error")
+                    self.app.notify(f"Transfer failed: {error_msg}", severity="error", markup=False)
                 else:
                     returncode, stdout, stderr = event.worker.result
 

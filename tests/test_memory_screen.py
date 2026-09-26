@@ -295,7 +295,7 @@ async def test_action_refresh_all_no_service_notifies_error(tmp_path: Path) -> N
         def on_mount(self) -> None:
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -328,7 +328,7 @@ async def test_action_pin_key_no_service_notifies_error(tmp_path: Path) -> None:
         def on_mount(self) -> None:
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -361,7 +361,7 @@ async def test_action_clear_module_no_service_notifies_error(tmp_path: Path) -> 
         def on_mount(self) -> None:
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -454,7 +454,7 @@ async def test_button_pin_key_triggers_action(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -491,7 +491,7 @@ async def test_action_annotate_no_service_notifies_error(tmp_path: Path) -> None
         def on_mount(self) -> None:
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -947,7 +947,7 @@ async def test_action_refresh_module_no_row_selected(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -986,7 +986,7 @@ async def test_action_clear_module_no_row_selected(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1025,7 +1025,7 @@ async def test_action_pin_key_no_row_selected(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1064,7 +1064,7 @@ async def test_action_refresh_all_opted_out_notifies(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1097,7 +1097,7 @@ async def test_action_export_no_service_notifies(tmp_path: Path) -> None:
         def on_mount(self) -> None:
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1522,7 +1522,7 @@ async def test_do_refresh_all_exception_path(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1572,7 +1572,7 @@ async def test_do_refresh_module_exception_path(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1674,7 +1674,7 @@ async def test_action_annotate_no_row_covers_full_path(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1734,7 +1734,7 @@ async def test_do_export_exception_path(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()
@@ -1873,7 +1873,7 @@ async def test_do_pin_exception_notifies_error(tmp_path: Path) -> None:
             self.memory_service = svc
             self.push_screen(MemoryScreen(instance))
 
-        def notify(self, message, *, severity="information", title="", timeout=None):
+        def notify(self, message, *, severity="information", title="", timeout=None, markup=True):
             notified.append((message, severity))
 
     app = TestApp()

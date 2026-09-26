@@ -5,11 +5,16 @@
   "stdout_stderr_max_bytes": 65536,
   "transcript_max_bytes": 262144,
   "public_command_timeout_seconds": 20,
-  "selftest_timeout_seconds": 45,
+  "selftest_timeout_seconds": 120,
   "child_rejection_timeout_seconds": 10,
   "mcp_initialize_timeout_seconds": 20,
   "mcp_request_timeout_seconds": 20,
   "mcp_shutdown_timeout_seconds": 10,
   "mcp_frame_max_bytes": 1048576,
-  "selftest_targets": []
+  "selftest_targets": [
+    "linux-x64-ubuntu-22.04",
+    "windows-x64",
+    "macos-x64",
+    "macos-arm64"
+  ]
 }

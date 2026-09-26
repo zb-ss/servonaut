@@ -47,6 +47,18 @@ class AwsPanel(SettingsPanel):
     PANEL_ID = "aws"
     TITLE = "AWS"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "aws_cache_path": "redact_path",
+        "aws_audit_path": "redact_path",
+        "aws_s3_endpoint_url": "redact_url",
+        "aws_ctrl_role_arn": "redact_arn_value",
+        "aws_ctrl_plane_arns": ("redact_identifier", "redact_arn_value"),
+        "aws_ctrl_external_id": "redact_secret_reference",
+        "aws_mutate_role_arn": "redact_arn_value",
+        "aws_mutate_arns": ("redact_identifier", "redact_arn_value"),
+    }
+
     DEFAULT_CSS = """
     AwsPanel .aws-subheader {
         padding: 1 0 0 0;
@@ -216,8 +228,8 @@ class AwsPanel(SettingsPanel):
         self.query_one("#aws_enabled", Switch).value = aws.enabled
         self.query_one("#aws_default_region", Input).value = aws.default_region
         self.query_one("#aws_cache_ttl", Input).value = str(aws.cache_ttl_seconds)
-        self.query_one("#aws_cache_path", Input).value = aws.cache_path
-        self.query_one("#aws_audit_path", Input).value = aws.audit_path
+        self._show_field("aws_cache_path", aws.cache_path)
+        self._show_field("aws_audit_path", aws.audit_path)
 
         # S3
         self.query_one("#aws_s3_access_key", EnvVarInput).value = s3.access_key
@@ -228,27 +240,19 @@ class AwsPanel(SettingsPanel):
         s3_region_sel.value = (
             s3.region if s3.region in known_regions else AWS_S3_DEFAULT_REGION
         )
-        self.query_one("#aws_s3_endpoint_url", Input).value = s3.endpoint_url
+        self._show_field("aws_s3_endpoint_url", s3.endpoint_url)
 
         # Control-plane read roles
-        self.query_one("#aws_ctrl_role_arn", Input).value = aws.control_plane_role_arn
-        self.query_one("#aws_ctrl_plane_arns", KeyValueEditor).set_map(
-            aws.control_plane_role_arns
-        )
-        self.query_one("#aws_ctrl_external_id", EnvVarInput).value = (
-            aws.control_plane_external_id
-        )
+        self._show_field("aws_ctrl_role_arn", aws.control_plane_role_arn)
+        self._show_field("aws_ctrl_plane_arns", dict(aws.control_plane_role_arns))
+        self._show_field("aws_ctrl_external_id", aws.control_plane_external_id)
         self.query_one("#aws_ctrl_session_name", Input).value = (
             aws.assume_role_session_name
         )
 
         # Control-plane mutate roles
-        self.query_one("#aws_mutate_role_arn", Input).value = (
-            aws.control_plane_mutate_role_arn
-        )
-        self.query_one("#aws_mutate_arns", KeyValueEditor).set_map(
-            aws.control_plane_mutate_role_arns
-        )
+        self._show_field("aws_mutate_role_arn", aws.control_plane_mutate_role_arn)
+        self._show_field("aws_mutate_arns", dict(aws.control_plane_mutate_role_arns))
 
         self._update_status_label(aws)
         self._snapshot_now()
@@ -266,22 +270,18 @@ class AwsPanel(SettingsPanel):
                 "enabled": self.query_one("#aws_enabled", Switch).value,
                 "default_region": self.query_one("#aws_default_region", Input).value.strip(),
                 "cache_ttl_seconds": self.query_one("#aws_cache_ttl", Input).value.strip(),
-                "cache_path": self.query_one("#aws_cache_path", Input).value.strip(),
-                "audit_path": self.query_one("#aws_audit_path", Input).value.strip(),
+                "cache_path": self._field_value("aws_cache_path").strip(),
+                "audit_path": self._field_value("aws_audit_path").strip(),
                 "s3_access_key": self.query_one("#aws_s3_access_key", EnvVarInput).value.strip(),
                 "s3_secret_key": self.query_one("#aws_s3_secret_key", EnvVarInput).value.strip(),
                 "s3_region": s3_region,
-                "s3_endpoint_url": self.query_one("#aws_s3_endpoint_url", Input).value.strip(),
-                "ctrl_role_arn": self.query_one("#aws_ctrl_role_arn", Input).value.strip(),
-                "ctrl_plane_arns": str(
-                    self.query_one("#aws_ctrl_plane_arns", KeyValueEditor).get_map()
-                ),
-                "ctrl_external_id": self.query_one("#aws_ctrl_external_id", EnvVarInput).value.strip(),
+                "s3_endpoint_url": self._field_value("aws_s3_endpoint_url").strip(),
+                "ctrl_role_arn": self._field_value("aws_ctrl_role_arn").strip(),
+                "ctrl_plane_arns": str(self._field_value("aws_ctrl_plane_arns")),
+                "ctrl_external_id": self._field_value("aws_ctrl_external_id").strip(),
                 "ctrl_session_name": self.query_one("#aws_ctrl_session_name", Input).value.strip(),
-                "mutate_role_arn": self.query_one("#aws_mutate_role_arn", Input).value.strip(),
-                "mutate_arns": str(
-                    self.query_one("#aws_mutate_arns", KeyValueEditor).get_map()
-                ),
+                "mutate_role_arn": self._field_value("aws_mutate_role_arn").strip(),
+                "mutate_arns": str(self._field_value("aws_mutate_arns")),
             }
         except Exception:
             return {}
@@ -311,8 +311,8 @@ class AwsPanel(SettingsPanel):
             else str(s3_region_sel.value)
         )
 
-        ctrl_arns_raw = self.query_one("#aws_ctrl_plane_arns", KeyValueEditor).get_map()
-        mutate_arns_raw = self.query_one("#aws_mutate_arns", KeyValueEditor).get_map()
+        ctrl_arns_raw = self._field_value("aws_ctrl_plane_arns")
+        mutate_arns_raw = self._field_value("aws_mutate_arns")
 
         return {
             "enabled": self.query_one("#aws_enabled", Switch).value,
@@ -322,25 +322,25 @@ class AwsPanel(SettingsPanel):
             ),
             "cache_ttl_seconds": cache_ttl,
             "cache_path": (
-                self.query_one("#aws_cache_path", Input).value.strip()
+                self._field_value("aws_cache_path").strip()
                 or "~/.servonaut/aws_cache.json"
             ),
             "audit_path": (
-                self.query_one("#aws_audit_path", Input).value.strip()
+                self._field_value("aws_audit_path").strip()
                 or "~/.servonaut/aws_audit.jsonl"
             ),
             "s3_access_key": self.query_one("#aws_s3_access_key", EnvVarInput).value.strip(),
             "s3_secret_key": self.query_one("#aws_s3_secret_key", EnvVarInput).value.strip(),
             "s3_region": s3_region,
-            "s3_endpoint_url": self.query_one("#aws_s3_endpoint_url", Input).value.strip(),
-            "ctrl_role_arn": self.query_one("#aws_ctrl_role_arn", Input).value.strip(),
+            "s3_endpoint_url": self._field_value("aws_s3_endpoint_url").strip(),
+            "ctrl_role_arn": self._field_value("aws_ctrl_role_arn").strip(),
             "ctrl_plane_arns": {str(k): str(v) for k, v in ctrl_arns_raw.items()},
-            "ctrl_external_id": self.query_one("#aws_ctrl_external_id", EnvVarInput).value.strip(),
+            "ctrl_external_id": self._field_value("aws_ctrl_external_id").strip(),
             "ctrl_session_name": (
                 self.query_one("#aws_ctrl_session_name", Input).value.strip()
                 or "servonaut-control-plane"
             ),
-            "mutate_role_arn": self.query_one("#aws_mutate_role_arn", Input).value.strip(),
+            "mutate_role_arn": self._field_value("aws_mutate_role_arn").strip(),
             "mutate_arns": {str(k): str(v) for k, v in mutate_arns_raw.items()},
         }
 

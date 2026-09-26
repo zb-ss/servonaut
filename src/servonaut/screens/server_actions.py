@@ -27,7 +27,7 @@ from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -163,7 +163,12 @@ class ServerActionsScreen(Screen):
             instance: Instance dictionary with connection details.
         """
         super().__init__()
+        # The row as displayed: demo-mode stand-ins when demo mode is on (the
+        # app redacts and restores it in place). Anything that reaches a
+        # provider, SSH or a store resolves the real record through
+        # ``connection_instance`` first.
         self._instance = instance
+        self._reverse_dns = ""
         self._live_on = False
         # Id of the action button the focus-help line currently describes, so a
         # click on that (otherwise passive) line can re-dispatch to the button.
@@ -180,9 +185,8 @@ class ServerActionsScreen(Screen):
         self.query_one("#btn_browse", Button).focus()
         # Fetch reverse DNS for OVH VPS instances
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
-            public_ip = self._instance.get('public_ip')
-            if public_ip:
-                self.run_worker(self._fetch_rdns(public_ip), exclusive=False)
+            if self._instance.get('public_ip'):
+                self.run_worker(self._fetch_rdns(), exclusive=False)
         # Dynamically add OVH action buttons for OVH instances
         if self._instance.get('is_ovh'):
             action_buttons = self.query_one("#action_buttons")
@@ -195,6 +199,11 @@ class ServerActionsScreen(Screen):
                 before=self.query_one("#btn_back"),
             )
         # Populate the cached-memory snapshot pane.
+        self._render_memory_panel()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the identity and memory panes for the new demo-mode state."""
+        self._render_server_info()
         self._render_memory_panel()
 
     def on_key(self, event) -> None:
@@ -288,11 +297,16 @@ class ServerActionsScreen(Screen):
             server_type = field('type', '-')
             os_label = field('os', '-')
             ram = field('ram_gb', '-')
+            reverse_dns = self._display_reverse_dns()
+            rdns_line = (
+                f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
+            )
             return (
                 f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
                 f"[dim]ID:[/dim] {instance_id}\n"
                 f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
                 f"[dim]Public IP:[/dim] {public_ip}\n"
+                f"{rdns_line}"
                 f"[dim]Private IP:[/dim] {private_ip}\n"
                 f"[dim]Region:[/dim] {region}\n"
                 f"[dim]State:[/dim] {self._colorize_state(state)}\n"
@@ -324,10 +338,16 @@ class ServerActionsScreen(Screen):
         region = field('region', 'unknown')
         state = self._instance.get('state', 'unknown')
 
-        # Resolve connection method for AWS instances
-        profile = self.app.connection_service.resolve_profile(self._instance)
+        # Resolve connection method for AWS instances. Connection rules match
+        # the real record (names, tags); the bastion is shown redacted.
+        profile = self.app.connection_service.resolve_profile(
+            connection_instance(self.app, self._instance)
+        )
         if profile and profile.bastion_host:
-            connection_info = f"[cyan]via Bastion:[/cyan] {escape(str(profile.bastion_host))}"
+            bastion = str(profile.bastion_host)
+            if self.app.demo_mode and self.app.redaction_service:
+                bastion = self.app.redaction_service.redact_host(bastion)
+            connection_info = f"[cyan]via Bastion:[/cyan] {escape(bastion)}"
             target_ip = private_ip
         else:
             connection_info = "[cyan]Direct Connection[/cyan]"
@@ -362,25 +382,43 @@ class ServerActionsScreen(Screen):
         }
         return state_colors.get(state, escape(str(state)))
 
-    async def _fetch_rdns(self, public_ip: str) -> None:
-        """Fetch reverse DNS for a VPS IP and update the server info display."""
+    async def _fetch_rdns(self) -> None:
+        """Fetch the VPS's reverse DNS and show it in the server info pane.
+
+        OVH is asked about the real VPS and address: in demo mode the row
+        holds stand-ins OVH has never heard of. Only what is drawn is
+        redacted (see ``_display_reverse_dns``).
+        """
         vps_service = getattr(self.app, "ovh_vps_service", None)
         if vps_service is None:
             return
-        vps_name = self._instance.get('id', '')
-        if not vps_name:
+        has_real = getattr(self.app, "has_real_record", None)
+        if callable(has_real) and has_real(self._instance) is False:
+            return  # a stand-in with no real VPS behind it is never sent to OVH
+        real = connection_instance(self.app, self._instance)
+        vps_name = real.get('id', '')
+        public_ip = real.get('public_ip', '')
+        if not vps_name or not public_ip:
             return
         reverse = await vps_service.get_reverse_dns(vps_name, public_ip)
         if reverse:
-            if self.app.demo_mode and self.app.redaction_service:
-                reverse = self.app.redaction_service.redact_hostname(reverse)
-            # Insert rDNS line after Public IP line
-            shown_ip = escape(public_ip)
-            self._server_info_text = self._server_info_text.replace(
-                f"[dim]Public IP:[/dim] {shown_ip}",
-                f"[dim]Public IP:[/dim] {shown_ip}\n[dim]Reverse DNS:[/dim] {escape(reverse)}",
-            )
-            self.query_one("#server_info", Static).update(self._server_info_text)
+            self._reverse_dns = reverse
+            self._render_server_info()
+
+    def _display_reverse_dns(self) -> str:
+        reverse = getattr(self, "_reverse_dns", "")
+        if reverse and self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_hostname(reverse)
+        return reverse
+
+    def _render_server_info(self) -> None:
+        """Redraw the identity pane from the row (and any reverse DNS known).
+
+        Rebuilt from its source rather than edited in place, so a demo-mode
+        toggle and a late reverse-DNS answer both land in one consistent text.
+        """
+        self._server_info_text = self._build_server_info()
+        self.query_one("#server_info", Static).update(self._server_info_text)
 
     # ------------------------------------------------------------------
     # Detail pane: focus help, cached memory snapshot, live stats
@@ -630,6 +668,8 @@ class ServerActionsScreen(Screen):
             self.action_scan_db_creds()
         elif button_id == "btn_findings":
             self.action_open_findings()
+        elif (button_id or "").startswith("btn_ovh_") and self._refuse_if_unresolved():
+            return
         elif button_id == "btn_ovh_reinstall":
             from servonaut.screens.ovh_reinstall import OVHReinstallScreen
             self.app.push_screen(OVHReinstallScreen(self._instance))
@@ -649,12 +689,22 @@ class ServerActionsScreen(Screen):
         elif button_id == "btn_back":
             self.action_back()
 
+    def _refuse_if_unresolved(self) -> bool:
+        """True (and the user is told) when demo mode cannot name the real server."""
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 — not attached to an app: nothing to resolve
+            return False
+        return refuse_unresolved(app, self._instance)
+
     def _validate_instance_connection(self) -> bool:
         """Validate instance has required data for connection.
 
         Returns:
             True if instance can be connected to, False otherwise.
         """
+        if self._refuse_if_unresolved():
+            return False
         import logging
         logger = logging.getLogger(__name__)
 
@@ -1027,6 +1077,8 @@ class ServerActionsScreen(Screen):
 
     def action_action_5(self) -> None:
         """View Scan Results."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.scan_results import ScanResultsScreen
         self.app.push_screen(ScanResultsScreen(self._instance))
 
@@ -1039,27 +1091,39 @@ class ServerActionsScreen(Screen):
 
     def action_action_7(self) -> None:
         """AI Analysis — open AI log analysis screen."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.ai_analysis import AIAnalysisScreen
         self.app.push_screen(AIAnalysisScreen(text="", instance=self._instance))
 
     def action_action_8(self) -> None:
         """Ban IP — open IP ban manager pre-filled with this instance's public IP."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.ip_ban import IPBanScreen
-        public_ip = self._instance.get('public_ip') or ""
-        self.app.push_screen(IPBanScreen(prefill_ip=public_ip))
+        # Pre-fill what the screen shows; a ban of it targets the real address.
+        shown_ip = self._instance.get('public_ip') or ""
+        real_ip = connection_instance(self.app, self._instance).get('public_ip') or ""
+        self.app.push_screen(IPBanScreen(prefill_ip=shown_ip, prefill_real_ip=real_ip))
 
     def action_open_memory(self) -> None:
         """Open MemoryScreen for this instance."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.memory import MemoryScreen
         self.app.push_screen(MemoryScreen(self._instance))
 
     def action_scan_db_creds(self) -> None:
         """Open the DB-credential scan → review → store surface (B2)."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.db_credential_scan import DbCredentialScanScreen
         self.app.push_screen(DbCredentialScanScreen(self._instance))
 
     def action_open_findings(self) -> None:
         """Open the findings inbox scoped to this instance."""
+        if self._refuse_if_unresolved():
+            return
         from servonaut.screens.findings import FindingsScreen
         self.app.push_screen(FindingsScreen(instance=self._instance))
 
@@ -1073,6 +1137,8 @@ class ServerActionsScreen(Screen):
 
     def action_manage_ssh_ref(self) -> None:
         """Push SshRefEditorModal directly to add/edit/delete the BW SSH ref."""
+        if self._refuse_if_unresolved():
+            return
         self.run_worker(
             self._manage_ssh_ref_flow(),
             group="ssh_verify",
@@ -1131,6 +1197,8 @@ class ServerActionsScreen(Screen):
 
     def action_verify_ssh(self) -> None:
         """Launch the Verify SSH flow: show confirm modal, then run worker."""
+        if self._refuse_if_unresolved():
+            return
         self.run_worker(
             self._verify_ssh_flow(),
             group="ssh_verify",

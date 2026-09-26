@@ -37,9 +37,13 @@ class TestManifestBuilder:
         with pytest.raises(ManifestSchemaError, match="not a valid Semantic Version"):
             ManifestBuilder("invalid-semver", expires_at=_EXPIRES_AT)
 
-        # Negative revision
-        with pytest.raises(ManifestSchemaError, match="non-negative integer"):
-            ManifestBuilder("2.27.0", packaging_revision=-1, expires_at=_EXPIRES_AT)
+        # Revisions outside the range every package format can carry
+        for revision in (-1, 0, 65536, True):
+            with pytest.raises(ManifestSchemaError, match="positive integer"):
+                ManifestBuilder("2.27.0", packaging_revision=revision, expires_at=_EXPIRES_AT)
+        assert ManifestBuilder(
+            "2.27.0", packaging_revision=65535, expires_at=_EXPIRES_AT
+        ).packaging_revision == 65535
 
     def test_add_artifact(self) -> None:
         builder = ManifestBuilder("2.27.0", expires_at=_EXPIRES_AT)

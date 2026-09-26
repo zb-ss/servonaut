@@ -231,3 +231,20 @@ def test_every_import_time_path_is_inside_the_test_root(e2e_ctx):
     # Importing Servonaut must not touch the network, the real home or
     # start any program.
     assert GUARD.violations() == []
+
+
+def test_artifact_scrub_masks_credentials_and_keeps_json_valid():
+    import json
+
+    from e2e.harness.artifacts import scrub
+
+    line = json.dumps({
+        "authorization": None, "token": 12345, "access_token": "fake-access",
+        "url": "https://api.example.com/x?code=fake-device-code", "ok": True,
+    })
+    scrubbed = scrub(line)
+
+    parsed = json.loads(scrubbed)
+    assert parsed["authorization"] is None
+    assert parsed["token"] == parsed["access_token"] == "<redacted>"
+    assert "fake-device-code" not in scrubbed and "fake-access" not in scrubbed

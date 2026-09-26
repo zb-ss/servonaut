@@ -150,7 +150,7 @@ class MemoryPrompt(Widget):
                 app.notify(f"Memory probed for {name}.")
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.warning("First-connect build failed for %s: %s", name, exc)
-                app.notify(f"Memory probe failed: {exc}", severity="error")
+                app.notify(f"Memory probe failed: {exc}", severity="error", markup=False)
 
         # Spawn the worker on the *app*, not on this widget. The caller
         # (action_accept) immediately hides the banner with self.remove(),
