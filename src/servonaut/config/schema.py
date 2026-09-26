@@ -418,6 +418,9 @@ class AzureConfig:
     resource_groups: List[str] = field(default_factory=list)
 
 
+DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER = 3
+
+
 @dataclass
 class RelayConfig:
     """Mercure relay listener configuration.
@@ -435,6 +438,12 @@ class RelayConfig:
     base_url: str = ""            # e.g. https://api.servonaut.dev
     mercure_url: str = ""         # e.g. https://servonaut.dev/.well-known/mercure
     heartbeat_interval: int = 30
+    # Heartbeat 401/403s on a still-valid session (a refresh did not cure
+    # them) before the listener reports that the relay is not delivering:
+    # one relay.log event, a warning, and the TUI indicator leaves
+    # "connected". The listener keeps retrying either way, refreshing the
+    # session on every Nth rejected heartbeat only. Minimum 1.
+    heartbeat_rejection_alert_after: int = DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
     # Maximum guard tier a headless `servonaut connect` listener may
     # auto-approve when executing AI-chat tool calls dispatched over the
     # relay (no human is present to confirm). One of: "readonly",
@@ -716,6 +725,13 @@ class MCPConfig:
     # Configurable SCP transfer timeout. Large files or slow links may need
     # more than the default 300 s; set higher rather than retrying blind.
     transfer_timeout_seconds: int = 300
+    # db_setup_scan holds each discovered DB password in memory under a
+    # staging token until db_setup_save commits it. Tokens expire after this
+    # many seconds, and at most db_staging_max_tokens are held at once (the
+    # oldest is dropped first). A fleet DB scan stages its batch in a store of
+    # its own, so this cap does not limit how many boxes it can cover.
+    db_staging_ttl_seconds: int = 900
+    db_staging_max_tokens: int = 50
 
 
 @dataclass

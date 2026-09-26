@@ -14,6 +14,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from .config import time_scale
+
 
 class Results:
     """Keep only test identifiers and outcomes; deliberately discard tracebacks."""
@@ -170,6 +172,7 @@ def main() -> int:
         "release": platform.release(),
         "architecture": platform.machine(),
         "python": platform.python_version(),
+        "time_scale": time_scale(),
         "dependencies": versions,
         "requested_browsers": args.browser or [],
         "native_requested": args.native,

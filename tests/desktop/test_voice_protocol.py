@@ -52,11 +52,16 @@ from servonaut.desktop.voice.protocol import (
     VoiceProtocolError,
     VoiceResponse,
     WorkerErrorEvent,
+    ConfigureRequest,
+    VoiceFrameReader,
+    VoiceProtocolVersionError,
+    VoiceWorkerConfig,
     decode_voice_message,
     encode_voice_message,
     read_voice_frame,
     write_voice_frame,
 )
+from servonaut.config.schema import VoiceConfig
 
 
 class TestPureStdlibBoundary:
@@ -121,12 +126,12 @@ class TestFramingCodec:
         assert msg.id == "crlf-1"
 
     def test_mid_frame_eof_raises(self) -> None:
-        stream = io.BytesIO(b'{"version": 1, "msg_type": "request"')
+        stream = io.BytesIO((b'{"version": %d, "msg_type": "request"' % VOICE_PROTOCOL_VERSION))
         with pytest.raises(VoiceProtocolEofError, match="Stream closed mid-frame"):
             read_voice_frame(stream)
 
     def test_null_byte_in_stream_raises(self) -> None:
-        stream = io.BytesIO(b'{"version": 1, "msg_type":\x00 "request"}\n')
+        stream = io.BytesIO((b'{"version": %d, "msg_type":\x00 "request"}\n' % VOICE_PROTOCOL_VERSION))
         with pytest.raises(VoiceProtocolError) as exc_info:
             read_voice_frame(stream)
         assert exc_info.value.code == VoiceErrorCode.PROTOCOL_VIOLATION
@@ -134,7 +139,7 @@ class TestFramingCodec:
 
     def test_null_byte_in_decode_raises(self) -> None:
         with pytest.raises(VoiceProtocolError) as exc_info:
-            decode_voice_message(b'{"version": 1, "msg_type": \x00 "ping"}\n')
+            decode_voice_message((b'{"version": %d, "msg_type": \x00 "ping"}\n' % VOICE_PROTOCOL_VERSION))
         assert exc_info.value.code == VoiceErrorCode.PROTOCOL_VIOLATION
 
     def test_oversized_frame_rejected_on_encode(self) -> None:
@@ -175,21 +180,21 @@ class TestJsonSafety:
     """Verify strict JSON parsing: duplicate keys, forbidden constants, and non-dicts."""
 
     def test_duplicate_keys_rejected(self) -> None:
-        raw = b'{"version": 1, "version": 1, "msg_type": "request", "id": "1", "name": "ping", "payload": {}}\n'
+        raw = (b'{"version": %d, "version": %d, "msg_type": "request", "id": "1", "name": "ping", "payload": {}}\n' % (VOICE_PROTOCOL_VERSION, VOICE_PROTOCOL_VERSION))
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert exc_info.value.code == VoiceErrorCode.PROTOCOL_VIOLATION
         assert "Duplicate key" in exc_info.value.message
 
     def test_nan_constant_rejected(self) -> None:
-        raw = b'{"version": 1, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"max_seconds": NaN}}\n'
+        raw = (b'{"version": %d, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"max_seconds": NaN}}\n' % VOICE_PROTOCOL_VERSION)
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert exc_info.value.code == VoiceErrorCode.PROTOCOL_VIOLATION
         assert "Forbidden JSON constant" in exc_info.value.message
 
     def test_infinity_constant_rejected(self) -> None:
-        raw = b'{"version": 1, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"max_seconds": Infinity}}\n'
+        raw = (b'{"version": %d, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"max_seconds": Infinity}}\n' % VOICE_PROTOCOL_VERSION)
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert exc_info.value.code == VoiceErrorCode.PROTOCOL_VIOLATION
@@ -225,8 +230,10 @@ class TestRequestModelsRoundtrip:
         assert isinstance(res, HandshakeRequest)
         assert res.id == "hs-1"
         assert res.client_version == "0.8.0"
-        assert res.protocol_version == 1
+        assert res.protocol_version == VOICE_PROTOCOL_VERSION
         assert res.capabilities_requested == ("stt_batch", "stt_streaming", "tts")
+        assert res.config == VoiceWorkerConfig()
+        assert res.epoch == 0
 
     def test_probe_request(self) -> None:
         req = ProbeRequest(id="pr-1")
@@ -339,6 +346,25 @@ class TestRequestModelsRoundtrip:
         req = ShutdownRequest(id="sd-1")
         res = self._roundtrip(req)
         assert isinstance(res, ShutdownRequest)
+        assert res.reason == "client"
+
+    def test_shutdown_request_carries_its_reason(self) -> None:
+        res = self._roundtrip(ShutdownRequest(id="sd-2", reason="client_close"))
+        assert isinstance(res, ShutdownRequest)
+        assert res.reason == "client_close"
+
+    def test_handshake_carries_config_and_epoch(self) -> None:
+        config = VoiceWorkerConfig(engine="nemotron", input_device="USB mic", barge_in=True)
+        res = self._roundtrip(HandshakeRequest(id="hs-2", client_version="x", config=config, epoch=7))
+        assert isinstance(res, HandshakeRequest)
+        assert res.config == config
+        assert res.epoch == 7
+
+    def test_configure_request(self) -> None:
+        config = VoiceWorkerConfig(tts_voice="bf_emma", tts_speed=1.25, max_recording_seconds=90)
+        res = self._roundtrip(ConfigureRequest(id="cfg-1", config=config))
+        assert isinstance(res, ConfigureRequest)
+        assert res.config == config
 
 
 class TestResponseModelsRoundtrip:
@@ -525,7 +551,7 @@ class TestValidationAndTypeStrictness:
             decode_voice_message(raw)
 
     def test_int_where_bool_required_rejected(self) -> None:
-        raw = b'{"version": 1, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"streaming": 1}}\n'
+        raw = (b'{"version": %d, "msg_type": "request", "id": "1", "name": "input_start", "payload": {"streaming": 1}}\n' % VOICE_PROTOCOL_VERSION)
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert "must be bool" in exc_info.value.message
@@ -536,13 +562,13 @@ class TestValidationAndTypeStrictness:
             decode_voice_message(raw)
 
     def test_unknown_operation_rejected(self) -> None:
-        raw = b'{"version": 1, "msg_type": "request", "id": "1", "name": "execute_arbitrary_code", "payload": {}}\n'
+        raw = (b'{"version": %d, "msg_type": "request", "id": "1", "name": "execute_arbitrary_code", "payload": {}}\n' % VOICE_PROTOCOL_VERSION)
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert "Unknown request operation" in exc_info.value.message
 
     def test_unknown_event_rejected(self) -> None:
-        raw = b'{"version": 1, "msg_type": "event", "id": "1", "name": "unknown_event_name", "payload": {}}\n'
+        raw = (b'{"version": %d, "msg_type": "event", "id": "1", "name": "unknown_event_name", "payload": {}}\n' % VOICE_PROTOCOL_VERSION)
         with pytest.raises(VoiceProtocolError) as exc_info:
             decode_voice_message(raw)
         assert "Unknown event name" in exc_info.value.message
@@ -556,3 +582,264 @@ class TestValidationAndTypeStrictness:
         for code in VoiceErrorCode:
             assert isinstance(code.value, str)
             assert code.value == code.name
+
+
+def _request_frame(name: str, payload: str) -> bytes:
+    return (
+        '{"version": %d, "msg_type": "request", "id": "1", "name": "%s", "payload": %s}\n'
+        % (VOICE_PROTOCOL_VERSION, name, payload)
+    ).encode()
+
+
+class TestWorkerConfig:
+    """The settings object the parent hands to the worker."""
+
+    def test_defaults_match_the_application_defaults(self) -> None:
+        assert VoiceWorkerConfig.from_voice_config(VoiceConfig()) == VoiceWorkerConfig()
+
+    def test_snapshot_copies_every_worker_setting(self) -> None:
+        source = VoiceConfig(
+            engine="nemotron", model_size="base", nemotron_latency_ms=160, language="de",
+            input_device="mic-2", output_device="speakers-1", max_recording_seconds=45,
+            auto_submit=True, tts_voice="bm_george", tts_speed=1.5, vad_silence_ms=1200,
+            vad_min_speech_ms=300, conversation_idle_seconds=120, barge_in=True,
+        )
+        config = VoiceWorkerConfig.from_voice_config(source)
+        for key, value in config.to_dict().items():
+            assert value == getattr(source, key), key
+
+    def test_snapshot_falls_back_on_unusable_values(self) -> None:
+        source = VoiceConfig()
+        source.max_recording_seconds = "forever"  # type: ignore[assignment]
+        source.input_device = ""
+        config = VoiceWorkerConfig.from_voice_config(source)
+        assert config.max_recording_seconds == VoiceWorkerConfig().max_recording_seconds
+        assert config.input_device is None
+
+    def test_unknown_key_rejected(self) -> None:
+        data = dict(VoiceWorkerConfig().to_dict(), shell_command="rm")
+        with pytest.raises(VoiceProtocolError, match="Unknown voice config keys: shell_command"):
+            VoiceWorkerConfig.from_dict(data)
+
+    def test_missing_key_rejected(self) -> None:
+        data = VoiceWorkerConfig().to_dict()
+        del data["engine"]
+        with pytest.raises(VoiceProtocolError, match="Missing voice config keys: engine"):
+            VoiceWorkerConfig.from_dict(data)
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("max_recording_seconds", 0),
+            ("max_recording_seconds", True),
+            ("tts_speed", -1.0),
+            ("barge_in", 1),
+            ("input_device", 3),
+            ("engine", None),
+        ],
+    )
+    def test_bad_values_rejected(self, key: str, value: object) -> None:
+        data = dict(VoiceWorkerConfig().to_dict(), **{key: value})
+        with pytest.raises(VoiceProtocolError):
+            VoiceWorkerConfig.from_dict(data)
+
+    def test_handshake_with_unknown_config_key_rejected_on_decode(self) -> None:
+        config = dict(VoiceWorkerConfig().to_dict(), extra=1)
+        frame = (
+            '{"version": %d, "msg_type": "request", "id": "1", "name": "handshake", '
+            '"payload": {"client_version": "x", "epoch": 0, "config": %s}}\n'
+            % (VOICE_PROTOCOL_VERSION, __import__("json").dumps(config))
+        ).encode()
+        with pytest.raises(VoiceProtocolError, match="Unknown voice config keys"):
+            decode_voice_message(frame)
+
+
+class TestHostileFrames:
+    def test_integer_past_the_digit_limit_is_a_protocol_error(self) -> None:
+        frame = _request_frame("output_speak", '{"text": "x", "epoch": %s}' % ("9" * 5000))
+        with pytest.raises(VoiceProtocolError) as exc_info:
+            decode_voice_message(frame)
+        assert exc_info.value.code is VoiceErrorCode.PROTOCOL_VIOLATION
+
+    @pytest.mark.parametrize("value", ["0", "-3", "1e400"])
+    def test_max_seconds_must_be_finite_and_positive(self, value: str) -> None:
+        with pytest.raises(VoiceProtocolError, match="max_seconds"):
+            decode_voice_message(_request_frame("input_start", '{"max_seconds": %s}' % value))
+
+    def test_negative_epoch_rejected(self) -> None:
+        with pytest.raises(VoiceProtocolError, match="epoch"):
+            decode_voice_message(_request_frame("output_stop", '{"epoch": -1}'))
+
+
+class TestVersionSkew:
+    def test_foreign_version_reports_what_it_could_read(self) -> None:
+        frame = b'{"version": 1, "msg_type": "response", "id": "r1", "ref_id": "q1", "ok": true}\n'
+        with pytest.raises(VoiceProtocolVersionError) as exc_info:
+            decode_voice_message(frame)
+        err = exc_info.value
+        assert err.code is VoiceErrorCode.UNSUPPORTED_VERSION
+        assert (err.received_version, err.msg_type, err.msg_id, err.ref_id) == (1, "response", "r1", "q1")
+
+
+class TestFrameReader:
+    def test_reads_frames_from_a_raw_pipe(self) -> None:
+        import os
+
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(read_fd, "rb") as reader_stream, os.fdopen(write_fd, "wb") as writer:
+            for index in range(3):
+                write_voice_frame(writer, PingRequest(id=f"p{index}"))
+            writer.close()
+            reader = VoiceFrameReader(reader_stream)
+            ids = [reader.read_frame().id for _ in range(3)]  # type: ignore[union-attr]
+            assert ids == ["p0", "p1", "p2"]
+            assert reader.read_frame() is None
+
+    def test_oversized_frame_raises_once_then_resynchronises(self) -> None:
+        stream = io.BytesIO(
+            b"x" * (MAX_FRAME_BYTES + 10) + b"\n" + encode_voice_message(PingRequest(id="after"))
+        )
+        reader = VoiceFrameReader(stream)
+        with pytest.raises(VoiceProtocolError, match="maximum length"):
+            reader.read_frame()
+        frame = reader.read_frame()
+        assert isinstance(frame, PingRequest) and frame.id == "after"
+        assert reader.read_frame() is None
+
+    def test_mid_frame_eof_raises(self) -> None:
+        reader = VoiceFrameReader(io.BytesIO(b'{"version": 2'))
+        with pytest.raises(VoiceProtocolEofError):
+            reader.read_frame()
+
+
+class TestTableDrivenCodec:
+    """Every message type round-trips; the wire shape stays what it was."""
+
+    CONFIG = VoiceWorkerConfig(engine="nemotron", language="de", input_device="mic", tts_speed=1.5)
+
+    SAMPLES: dict = {
+        "handshake": lambda: HandshakeRequest(
+            id="1", client_version="9.9", config=TestTableDrivenCodec.CONFIG, epoch=4,
+            protocol_version=VOICE_PROTOCOL_VERSION, capabilities_requested=("tts", "vad"),
+        ),
+        "configure": lambda: ConfigureRequest(id="1", config=TestTableDrivenCodec.CONFIG),
+        "probe": lambda: ProbeRequest(id="1"),
+        "input_start": lambda: InputStartRequest(id="1", streaming=True, max_seconds=12.5),
+        "input_stop": lambda: InputStopRequest(id="1", initial_prompt="kubectl"),
+        "input_cancel": lambda: InputCancelRequest(id="1"),
+        "input_reset_budget": lambda: InputResetBudgetRequest(id="1"),
+        "output_speak": lambda: OutputSpeakRequest(id="1", text="hello", epoch=3),
+        "output_enqueue": lambda: OutputEnqueueRequest(id="1", text="next", epoch=0),
+        "output_utterance_begin": lambda: OutputUtteranceBeginRequest(id="1", session_id="s", epoch=2),
+        "output_utterance_enqueue": lambda: OutputUtteranceEnqueueRequest(id="1", session_id="s", text="t"),
+        "output_utterance_end": lambda: OutputUtteranceEndRequest(id="1", session_id="s"),
+        "output_stop": lambda: OutputStopRequest(id="1", epoch=7),
+        "output_close": lambda: OutputCloseRequest(id="1"),
+        "conversation_start": lambda: ConversationStartRequest(id="1", barge_in=True),
+        "conversation_stop": lambda: ConversationStopRequest(id="1", reason="start_timeout"),
+        "conversation_interrupt": lambda: ConversationInterruptRequest(id="1"),
+        "conversation_signal": lambda: ConversationSignalRequest(id="1", signal="reply_started"),
+        "ping": lambda: PingRequest(id="1"),
+        "shutdown": lambda: ShutdownRequest(id="1", reason="client_close"),
+        "input_partial": lambda: InputPartialEvent(id="1", text="partial"),
+        "input_endpoint": lambda: InputEndpointEvent(id="1"),
+        "input_cap_hit": lambda: InputCapHitEvent(id="1"),
+        "output_state": lambda: OutputStateEvent(id="1", is_speaking=True, current_epoch=5),
+        "utterance_completed": lambda: UtteranceCompletedEvent(id="1", session_id="s", played_to_end=False),
+        "conversation_state": lambda: ConversationStateEvent(id="1", old_state="idle", new_state="listening"),
+        "conversation_transcript": lambda: ConversationTranscriptEvent(id="1", text="restart nginx"),
+        "conversation_error": lambda: ConversationErrorEvent(
+            id="1", message="mic gone", code=VoiceErrorCode.AUDIO_DEVICE_ERROR,
+        ),
+        "conversation_stopped": lambda: ConversationStoppedEvent(id="1", reason="idle_timeout"),
+        "worker_error": lambda: WorkerErrorEvent(
+            id="1", code=VoiceErrorCode.MODEL_MISSING, message="no model", fatal=True,
+        ),
+    }
+
+    # Payload keys of every message as the hand-written codec emitted them.
+    WIRE_KEYS: dict = {
+        "handshake": {"client_version", "protocol_version", "capabilities_requested", "config", "epoch"},
+        "configure": {"config"},
+        "probe": set(), "input_cancel": set(), "input_reset_budget": set(), "output_close": set(),
+        "conversation_interrupt": set(), "ping": set(),
+        "input_start": {"streaming", "max_seconds"},
+        "input_stop": {"initial_prompt"},
+        "output_speak": {"text", "epoch"},
+        "output_enqueue": {"text", "epoch"},
+        "output_utterance_begin": {"session_id", "epoch"},
+        "output_utterance_enqueue": {"session_id", "text"},
+        "output_utterance_end": {"session_id"},
+        "output_stop": {"epoch"},
+        "conversation_start": {"barge_in"},
+        "conversation_stop": {"reason"},
+        "conversation_signal": {"signal"},
+        "shutdown": {"reason"},
+        "input_partial": {"text"}, "input_endpoint": set(), "input_cap_hit": set(),
+        "output_state": {"is_speaking", "current_epoch"},
+        "utterance_completed": {"session_id", "played_to_end"},
+        "conversation_state": {"old_state", "new_state"},
+        "conversation_transcript": {"text"},
+        "conversation_error": {"message", "code"},
+        "conversation_stopped": {"reason"},
+        "worker_error": {"code", "message", "fatal"},
+    }
+
+    def test_samples_cover_every_message_type(self) -> None:
+        from typing import get_args
+
+        from servonaut.desktop.voice.protocol import VoiceEvent, VoiceRequest
+
+        names = {cls.__dataclass_fields__["name"].default for cls in get_args(VoiceRequest) + get_args(VoiceEvent)}
+        assert names == set(self.SAMPLES) == set(self.WIRE_KEYS)
+
+    @pytest.mark.parametrize("name", sorted(SAMPLES))
+    def test_every_message_round_trips(self, name: str) -> None:
+        message = self.SAMPLES[name]()
+        assert decode_voice_message(encode_voice_message(message)) == message
+
+    @pytest.mark.parametrize("name", sorted(SAMPLES))
+    def test_wire_payload_keys_are_unchanged(self, name: str) -> None:
+        import json
+
+        frame = json.loads(encode_voice_message(self.SAMPLES[name]()))
+        assert frame["name"] == name
+        assert set(frame["payload"]) == self.WIRE_KEYS[name]
+
+    def test_error_codes_travel_as_their_value(self) -> None:
+        import json
+
+        frame = json.loads(encode_voice_message(self.SAMPLES["worker_error"]()))
+        assert frame["payload"]["code"] == "MODEL_MISSING"
+
+    def test_unknown_error_codes_degrade_instead_of_failing(self) -> None:
+        worker = decode_voice_message((
+            '{"version": %d, "msg_type": "event", "id": "1", "name": "worker_error", '
+            '"payload": {"code": "FUTURE_CODE", "message": "m"}}' % VOICE_PROTOCOL_VERSION
+        ).encode())
+        conversation = decode_voice_message((
+            '{"version": %d, "msg_type": "event", "id": "1", "name": "conversation_error", '
+            '"payload": {"code": "FUTURE_CODE", "message": "m"}}' % VOICE_PROTOCOL_VERSION
+        ).encode())
+        assert worker.code is VoiceErrorCode.PROTOCOL_VIOLATION  # type: ignore[union-attr]
+        assert conversation.code is VoiceErrorCode.CONVERSATION_ERROR  # type: ignore[union-attr]
+
+    def test_defaults_fill_optional_fields(self) -> None:
+        start = decode_voice_message(_request_frame("input_start", "{}"))
+        assert start == InputStartRequest(id="1")
+
+    @pytest.mark.parametrize(
+        ("name", "payload", "field_name"),
+        [
+            ("output_speak", '{"epoch": 1}', "text"),
+            ("handshake", '{"client_version": "x", "epoch": 0}', "config"),
+            ("handshake", '{"client_version": "x", "config": %s}' % __import__("json").dumps(VoiceWorkerConfig().to_dict()), "epoch"),
+        ],
+    )
+    def test_required_fields_are_enforced(self, name: str, payload: str, field_name: str) -> None:
+        with pytest.raises(VoiceProtocolError, match=field_name):
+            decode_voice_message(_request_frame(name, payload))
+
+    def test_non_message_cannot_be_encoded(self) -> None:
+        with pytest.raises(VoiceProtocolError, match="Not a voice protocol message"):
+            encode_voice_message(VoiceWorkerConfig())  # type: ignore[arg-type]

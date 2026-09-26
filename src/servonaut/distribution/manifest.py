@@ -30,8 +30,8 @@ _HEX_SIGNATURE_REGEX = re.compile(r"[0-9a-fA-F]{128}")
 _OS_VERSION_REGEX = re.compile(r"[0-9]+(?:\.[0-9]+){0,3}")
 _VERSIONED_OS_PLATFORMS = frozenset({"darwin", "windows"})
 _SUPPORTED_SCHEMA_VERSIONS = {1}
-_SUPPORTED_PLATFORMS = {"linux", "darwin", "windows"}
-_SUPPORTED_ARCHITECTURES = {"x86_64", "arm64"}
+SUPPORTED_PLATFORMS = frozenset({"linux", "darwin", "windows"})
+SUPPORTED_ARCHITECTURES = frozenset({"x86_64", "arm64"})
 
 # Manifest content is untrusted until verified, so values echoed into error
 # messages are escaped and truncated rather than interpolated verbatim.
@@ -178,8 +178,8 @@ class ReleaseArtifact:
             raise ManifestSchemaError(
                 f"Invalid distribution kind: {bounded_repr(self.distribution)}"
             )
-        _require_member(self.platform, _SUPPORTED_PLATFORMS, "Platform")
-        _require_member(self.arch, _SUPPORTED_ARCHITECTURES, "Architecture")
+        _require_member(self.platform, SUPPORTED_PLATFORMS, "Platform")
+        _require_member(self.arch, SUPPORTED_ARCHITECTURES, "Architecture")
         _require_bare_filename(self.filename)
         if not isinstance(self.download_url, str) or not self.download_url:
             raise ManifestSchemaError("Download URL must be a non-empty string.")

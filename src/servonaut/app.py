@@ -1,6 +1,7 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
+import importlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
@@ -9,7 +10,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.reactive import reactive
 
-from servonaut.runtime import RuntimeLayout, detect_runtime
+from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
@@ -31,7 +32,15 @@ _S3_NAV_TO_PROVIDER: dict[str, str] = {
 # that an overdue (persisted) scan still catches up promptly on launch.
 _FLEET_AUTO_SCAN_STARTUP_GRACE_SECONDS = 90
 
+# The desktop voice stack ships only with the packaged desktop app, whose
+# build collects the whole ``servonaut.desktop`` package through its own
+# PyInstaller hook. It is imported by name, and only after the runtime layout
+# says this process is that app, so the standalone CLI build (which excludes
+# the package) neither bundles it nor reports this import as missing.
+_DESKTOP_VOICE_MODULE = "servonaut.desktop.voice"
+
 if TYPE_CHECKING:
+    from servonaut.config.schema import VoiceConfig
     from servonaut.services.relay_manager import RelayManager
     from servonaut.widgets.sidebar import Sidebar
 
@@ -124,19 +133,20 @@ class ServonautApp(App):
     memory_crypto = None
     _memory_key_material = None
 
-    # Shared state
-    instances: List[dict] = []  # all fetched instances
+    # Shared state. The mutable containers are created per app in __init__:
+    # a class-level default would be one list/set shared by every instance.
+    instances: List[dict]  # all fetched instances
     demo_mode: bool = False
     _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
-    memory_first_connect_seen: set = set()
+    memory_first_connect_seen: set
 
     # Instance IDs for which an annotation pull has already been kicked off
     # this session.  Kept separate from memory_first_connect_seen so that
     # banner-dismissal gating is untouched.
-    memory_annotations_pulled_seen: set = set()
+    memory_annotations_pulled_seen: set
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -180,6 +190,9 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        self.instances = []
+        self.memory_first_connect_seen = set()
+        self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
@@ -420,71 +433,7 @@ class ServonautApp(App):
             config.ssh,
         )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
-        # Voice input — always constructed; the service itself reports whether
-        # the optional audio/STT libraries and a microphone are present, and
-        # its device probe is lazy so boot never waits on PortAudio.
-        try:
-            from servonaut.runtime import DistributionKind
-
-            if self.runtime_layout.kind is DistributionKind.PACKAGED_DESKTOP:
-                from servonaut.desktop.voice import (
-                    DesktopVoiceSetupService,
-                    VoiceConnection,
-                    VoiceModelCache,
-                    VoiceRuntimeManager,
-                    build_desktop_voice_services,
-                )
-
-                runtime_mgr = VoiceRuntimeManager(
-                    self.runtime_layout.data_root / "runtimes" / "voice"
-                )
-                model_cache = VoiceModelCache(root_dir=runtime_mgr.models_dir)
-                conn = VoiceConnection(worker_cmd=lambda: runtime_mgr.get_worker_cmd())
-
-                self.voice_setup_service = DesktopVoiceSetupService(
-                    config.voice,
-                    runtime_layout=self.runtime_layout,
-                    runtime_manager=runtime_mgr,
-                    model_cache=model_cache,
-                    connection=conn,
-                )
-                (
-                    self.voice_input_service,
-                    self.voice_output_service,
-                    self.voice_conversation_service,
-                ) = build_desktop_voice_services(
-                    config.voice,
-                    connection=conn,
-                )
-            else:
-                from servonaut.services.voice_engines import (
-                    build_voice_conversation_service,
-                    build_voice_input_service,
-                    build_voice_output_service,
-                )
-                from servonaut.services.voice_setup_service import build_voice_setup_service
-
-                self.voice_input_service = build_voice_input_service(config.voice)
-                self.voice_setup_service = build_voice_setup_service(
-                    config.voice,
-                    self.runtime_layout,
-                )
-                # Spoken replies share the laziness contract for the expensive
-                # parts: the device probe and the model load both wait for
-                # first use, so enabling the feature later needs no restart.
-                self.voice_output_service = build_voice_output_service(config.voice)
-                # The conversation loop re-resolves the capture/playback
-                # services through these callables on every cycle, so a
-                # settings save that rebuilds either service is picked up
-                # without rebuilding the loop. Construction is cheap; nothing
-                # is probed or loaded until the loop is started.
-                self.voice_conversation_service = build_voice_conversation_service(
-                    config.voice,
-                    input_service=lambda: self.voice_input_service,
-                    output_service=lambda: self.voice_output_service,
-                )
-        except Exception as e:
-            logger.warning("Voice services unavailable: %s", e)
+        self._init_voice_services(config.voice)
         # OVH — optional, requires python-ovh and enabled config
         try:
             ovh_config = config.ovh
@@ -659,6 +608,75 @@ class ServonautApp(App):
             self.bw_session_service = BwSessionService()
         except Exception as e:
             logger.debug("BwSessionService init skipped: %s", e)
+
+    def _init_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the voice services this distribution ships.
+
+        Voice input is always constructed; the service itself reports whether
+        the optional audio/STT libraries and a microphone are present, and its
+        device probe is lazy so boot never waits on PortAudio. Only the
+        packaged desktop app selects the desktop voice stack; every other
+        distribution, the standalone CLI included, never imports it.
+        """
+        try:
+            if self.runtime_layout.kind is DistributionKind.PACKAGED_DESKTOP:
+                self._init_desktop_voice_services(voice_config)
+            else:
+                self._init_standard_voice_services(voice_config)
+        except Exception as e:
+            logger.warning("Voice services unavailable: %s", e)
+
+    def _init_desktop_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the isolated voice runtime bundled with the desktop app."""
+        desktop_voice = importlib.import_module(_DESKTOP_VOICE_MODULE)
+        runtime_mgr = desktop_voice.VoiceRuntimeManager(
+            self.runtime_layout.data_root / "runtimes" / "voice"
+        )
+        model_cache = desktop_voice.VoiceModelCache(root_dir=runtime_mgr.models_dir)
+        conn = desktop_voice.VoiceConnection(
+            worker_cmd=lambda: runtime_mgr.get_worker_cmd()
+        )
+        self.voice_setup_service = desktop_voice.DesktopVoiceSetupService(
+            voice_config,
+            runtime_layout=self.runtime_layout,
+            runtime_manager=runtime_mgr,
+            model_cache=model_cache,
+            connection=conn,
+        )
+        (
+            self.voice_input_service,
+            self.voice_output_service,
+            self.voice_conversation_service,
+        ) = desktop_voice.build_desktop_voice_services(voice_config, connection=conn)
+
+    def _init_standard_voice_services(self, voice_config: VoiceConfig) -> None:
+        """Wire the in-process voice services of the non-desktop distributions."""
+        from servonaut.services.voice_engines import (
+            build_voice_conversation_service,
+            build_voice_input_service,
+            build_voice_output_service,
+        )
+        from servonaut.services.voice_setup_service import build_voice_setup_service
+
+        self.voice_input_service = build_voice_input_service(voice_config)
+        self.voice_setup_service = build_voice_setup_service(
+            voice_config,
+            self.runtime_layout,
+        )
+        # Spoken replies share the laziness contract for the expensive parts:
+        # the device probe and the model load both wait for first use, so
+        # enabling the feature later needs no restart.
+        self.voice_output_service = build_voice_output_service(voice_config)
+        # The conversation loop re-resolves the capture/playback services
+        # through these callables on every cycle, so a settings save that
+        # rebuilds either service is picked up without rebuilding the loop.
+        # Construction is cheap; nothing is probed or loaded until the loop is
+        # started.
+        self.voice_conversation_service = build_voice_conversation_service(
+            voice_config,
+            input_service=lambda: self.voice_input_service,
+            output_service=lambda: self.voice_output_service,
+        )
 
     @property
     def relay_lock_path(self) -> Path:
@@ -2215,6 +2233,29 @@ class ServonautApp(App):
                 return copy.deepcopy(pristine)
         return instance
 
+    def open_settings_screen(self, panel_id: Optional[str] = None) -> None:
+        """Show Settings, opened on *panel_id* (e.g. ``"ai_provider"``) if given.
+
+        Replaces the current view, as the sidebar's Settings entry does. When a
+        Settings screen is already open, even under other screens (Help, a
+        management screen), those are closed and that Settings screen switches
+        category in place, so its unsaved edits and their prompt are kept.
+        """
+        from servonaut.screens.settings import SettingsScreen
+
+        stack = self.screen_stack
+        existing = next(
+            (screen for screen in reversed(stack) if isinstance(screen, SettingsScreen)),
+            None,
+        )
+        if existing is None:
+            self.switch_screen(SettingsScreen(initial_panel=panel_id))
+            return
+        for _ in range(len(stack) - 1 - stack.index(existing)):
+            self.pop_screen()
+        if panel_id:
+            existing.show_panel(panel_id)
+
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
         target_id = message.target_id
@@ -2373,38 +2414,59 @@ class ServonautApp(App):
             self.exit()
 
     def _run_global_scan(self) -> None:
-        """Run keyword scan across all running instances."""
-        self.notify("Starting scan of all running servers...", severity="information")
+        """Run keyword scan across every server not known to be stopped."""
+        self.notify("Starting scan of all servers...", severity="information")
         self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
 
     async def _do_global_scan(self) -> None:
-        """Worker: scan all running instances for keywords."""
+        """Worker: scan every server not known to be stopped for keywords.
+
+        Custom servers have no power state, so they are always attempted; one
+        that cannot be reached is named in the summary instead of silently
+        counting as "nothing found".
+        """
+        from servonaut.services.scan_service import ScanConnectionError, is_scannable
+
         instances = self.instances
         if not instances:
             self.notify("No instances loaded. Load instances first.", severity="warning")
             return
 
-        running = [i for i in instances if i.get('state') == 'running']
-        if not running:
-            self.notify("No running instances to scan.", severity="warning")
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
             return
 
-        total = len(running)
+        total = len(targets)
         scanned = 0
-        for idx, instance in enumerate(running, 1):
+        unreachable: List[str] = []
+        for idx, instance in enumerate(targets, 1):
             name = instance.get('name') or instance.get('id', 'unknown')
-            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information")
+            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information", markup=False)
             try:
+                # Demo mode redacts the row; connect to and key by the real one.
                 results = await self.scan_service.scan_server(
-                    instance, self.ssh_service, self.connection_service
+                    self.connection_instance(instance),
+                    self.ssh_service, self.connection_service,
                 )
-                if results:
-                    self.keyword_store.save_results(instance['id'], results)
-                    scanned += 1
+            except ScanConnectionError as e:
+                unreachable.append(name)
+                # ssh's own message names the real host and user; demo mode
+                # shows only the reason category.
+                reason = e.describe(redact=bool(self.demo_mode))
+                self.notify(f"Could not connect to {name}: {reason}", severity="warning", markup=False)
+                continue
             except Exception as e:
-                self.notify(f"Scan failed for {name}: {e}", severity="error")
+                self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
+                continue
+            if results:
+                self.keyword_store.save_results(self.real_instance_id(instance['id']), results)
+                scanned += 1
 
-        self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+        summary = f"Scan complete. {scanned}/{total} servers scanned."
+        if unreachable:
+            summary += f" Could not connect to: {', '.join(unreachable)}."
+        self.notify(summary, severity="warning" if unreachable else "information", markup=False)
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

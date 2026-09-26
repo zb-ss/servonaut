@@ -15,6 +15,7 @@ from typing import Any, Dict
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
 logger = logging.getLogger(__name__)
@@ -190,8 +191,18 @@ class SettingsPanel(Vertical):
         avoids swallowing a user edit that lands after the editors are stable
         (such an edit yields equal consecutive reads, so we never re-baseline
         over it).
+
+        The callback is deferred, so the user may have left Settings before it
+        runs. The screen is then being torn down: the panel is detached, or
+        still linked while its fields are already removed. Either way there is
+        nothing left to re-baseline.
         """
-        settled = self.current_values()
+        if not self.is_attached:
+            return
+        try:
+            settled = self.current_values()
+        except NoMatches:
+            return
         if settled == self._snapshot:
             return  # Stable — rows mounted, nothing left to absorb.
         self._snapshot = settled

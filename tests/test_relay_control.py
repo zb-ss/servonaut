@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import pytest
 
 from servonaut.services import relay_control
 from servonaut.services.relay_control import (
+    CLEANUP_TIMEOUT_ENV,
     CONTROL_PROTOCOL_VERSION,
     CONTROL_TIMEOUT_ENV,
     ControlRecord,
@@ -21,6 +23,7 @@ from servonaut.services.relay_control import (
     request_relay_release,
 )
 from servonaut.services.relay_lock import RelayLock
+from tests._async_bounds import STEP_TIMEOUT_SECONDS, run_within, wait_until
 
 _VALID_TOKEN = "a" * 43
 
@@ -62,10 +65,7 @@ def test_authenticated_request_releases_lock_after_callback(tmp_path):
         response = await request_relay_release(record_path, lock_path)
         assert response.ok is True
         assert response.released is True
-        for _ in range(20):
-            if not record_path.exists():
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: not record_path.exists())
         assert not record_path.exists()
         assert server.is_running is False
         assert record.port > 0
@@ -95,7 +95,7 @@ def test_close_waits_for_pending_bind_and_removes_published_record(tmp_path, mon
 
     async def scenario():
         start_task = asyncio.create_task(server.start(release))
-        await asyncio.wait_for(bind_entered.wait(), timeout=0.2)
+        await asyncio.wait_for(bind_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
         close_task = asyncio.create_task(server.close())
         await asyncio.sleep(0)
         assert close_task.done() is False
@@ -142,7 +142,7 @@ def test_cancelled_close_cleans_partial_client_and_all_owned_state(tmp_path):
             await writer.drain()
 
             holder = asyncio.create_task(hold_close_lock())
-            await asyncio.wait_for(close_lock_held.wait(), timeout=0.2)
+            await asyncio.wait_for(close_lock_held.wait(), timeout=STEP_TIMEOUT_SECONDS)
             close_task = asyncio.create_task(server.close())
             await asyncio.sleep(0)
             close_task.cancel()
@@ -158,7 +158,7 @@ def test_cancelled_close_cleans_partial_client_and_all_owned_state(tmp_path):
             assert server._record is None
             assert server._release_callback is None
             assert server._release_started is False
-            assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+            assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
             with pytest.raises(OSError):
                 await asyncio.open_connection("127.0.0.1", record.port)
 
@@ -212,15 +212,12 @@ def test_completed_release_cleans_up_when_ack_drain_fails(tmp_path, monkeypatch)
                 + b"\n"
             )
             await writer.drain()
-            assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+            assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
         finally:
             writer.close()
             await writer.wait_closed()
 
-        for _ in range(20):
-            if not server.is_running and not record_path.exists():
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: not server.is_running and not record_path.exists())
         assert server.is_running is False
         assert not record_path.exists()
         assert lock.is_held is False
@@ -276,15 +273,12 @@ def test_completed_release_cleans_up_when_ack_task_is_cancelled(tmp_path, monkey
                 + b"\n"
             )
             await writer.drain()
-            assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+            assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
         finally:
             writer.close()
             await writer.wait_closed()
 
-        for _ in range(20):
-            if not server.is_running and not record_path.exists():
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: not server.is_running and not record_path.exists())
         assert server.is_running is False
         assert not record_path.exists()
         assert lock.is_held is False
@@ -323,11 +317,15 @@ def test_real_loopback_peer_loses_ack_after_completed_release(tmp_path):
             + b"\n"
         )
         await writer.drain()
-        await asyncio.wait_for(release_entered.wait(), timeout=0.2)
+        await asyncio.wait_for(release_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
         writer.transport.abort()
         await asyncio.sleep(0)
         permit_release.set()
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: not server.is_running
+            and not record_path.exists()
+            and not lock.is_held
+        )
 
         assert server.is_running is False
         assert not record_path.exists()
@@ -405,7 +403,7 @@ def test_non_ascii_token_is_rejected_and_connection_is_closed(tmp_path):
             await writer.drain()
             response = json.loads((await reader.readuntil(b"\n")).decode("utf-8"))
             assert response["ok"] is False
-            assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+            assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
         finally:
             writer.close()
             await server.close()
@@ -770,6 +768,17 @@ def test_configured_timeout_uses_finite_environment_value(monkeypatch):
     )
 
 
+def test_configured_cleanup_timeout_is_read_at_call_time(monkeypatch):
+    monkeypatch.delenv(CLEANUP_TIMEOUT_ENV, raising=False)
+    fallback = relay_control._FALLBACK_CLEANUP_TIMEOUT_SECONDS
+    assert relay_control.configured_cleanup_timeout_seconds() == fallback
+    monkeypatch.setenv(CLEANUP_TIMEOUT_ENV, "0.75")
+    assert relay_control.configured_cleanup_timeout_seconds() == 0.75
+    for invalid in ("0", "-1", "inf", "nan", "soon"):
+        monkeypatch.setenv(CLEANUP_TIMEOUT_ENV, invalid)
+        assert relay_control.configured_cleanup_timeout_seconds() == fallback
+
+
 def test_untrusted_response_error_text_is_not_returned():
     response = relay_control._parse_response(
         b'{"ok":false,"released":false,"error":"untrusted diagnostic"}\n'
@@ -792,7 +801,7 @@ def test_close_terminates_a_pending_client_connection(tmp_path):
             await writer.drain()
             await server.close()
             try:
-                assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+                assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
             except ConnectionError:
                 # A reset is also a completed close for a peer that had not
                 # finished sending a valid request.
@@ -825,7 +834,7 @@ def test_callback_cancellation_closes_the_client_and_leaves_server_clean(tmp_pat
             ).encode("utf-8") + b"\n"
             writer.write(payload)
             await writer.drain()
-            assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+            assert await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS) == b""
             assert server.is_running is True
         finally:
             writer.close()
@@ -835,3 +844,242 @@ def test_callback_cancellation_closes_the_client_and_leaves_server_clean(tmp_pat
     _run(scenario())
     assert callbacks == ["called"]
     assert not record_path.exists()
+
+
+def _attached_peer_count(server: asyncio.AbstractServer) -> int:
+    """Connections asyncio has attached to ``server`` (private, per version)."""
+    clients = getattr(server, "_clients", None)  # Python 3.13+
+    if clients is not None:
+        return len(clients)
+    return server._active_count  # Python 3.10-3.12
+
+
+def test_close_closes_a_peer_accepted_before_its_handler_first_ran(tmp_path):
+    """Close must not wait out the request timeout of a just-accepted peer.
+
+    On Python 3.12+ ``Server.wait_closed()`` waits for every accepted
+    connection. A peer accepted in the loop iterations before its handler
+    task first ran used to be missed by ``close()``, which then waited for
+    that handler's full request timeout. Close at each of the first loop
+    iterations after the peer is attached, with a request timeout far longer
+    than any close may take.
+    """
+    request_timeout = 30.0
+
+    async def release() -> None:
+        return None
+
+    async def scenario() -> list[float]:
+        loop = asyncio.get_running_loop()
+        durations = []
+        for iterations in range(4):
+            server = LocalControlServer(
+                tmp_path / f"relay-control-{iterations}.json",
+                timeout_seconds=request_timeout,
+            )
+            record = await server.start(release)
+            accept_server = server._server
+            assert accept_server is not None
+            # A blocking connect completes the handshake without running the
+            # loop, so the server has not accepted the peer yet.
+            peer = socket.create_connection(("127.0.0.1", record.port))
+            try:
+                # Only close once asyncio has attached the accepted peer to
+                # the server: closing between accept() and that attachment
+                # trips an internal asyncio assertion unrelated to this code.
+                # Poll every loop iteration so the close lands right after it.
+                deadline = loop.time() + STEP_TIMEOUT_SECONDS
+                while _attached_peer_count(accept_server) == 0:
+                    assert loop.time() < deadline, "peer was never accepted"
+                    await asyncio.sleep(0)
+                for _ in range(iterations):
+                    await asyncio.sleep(0)
+                started = loop.time()
+                await server.close()
+                durations.append(loop.time() - started)
+                assert server.is_running is False
+            finally:
+                peer.close()
+        return durations
+
+    durations = run_within(scenario(), 15)
+    assert max(durations) < request_timeout / 3
+
+
+def test_cleanup_that_never_finishes_is_cancelled_at_its_deadline():
+    unwound = asyncio.Event()
+
+    async def stuck_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwound.set()
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.TimeoutError):
+            await relay_control._complete_owned_cleanup(
+                stuck_cleanup(), timeout_seconds=0.2
+            )
+        # The cleanup was cancelled, so its ``finally`` block ran.
+        assert unwound.is_set()
+
+    run_within(scenario(), 10)
+
+
+def test_cancelled_caller_of_a_stuck_cleanup_is_released_by_the_deadline():
+    unwound = asyncio.Event()
+
+    async def stuck_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwound.set()
+
+    async def scenario() -> None:
+        caller = asyncio.create_task(
+            relay_control._complete_owned_cleanup(stuck_cleanup(), timeout_seconds=0.2)
+        )
+        await asyncio.sleep(0)
+        caller.cancel()
+        await asyncio.sleep(0)
+        caller.cancel()
+        # Caller cancellation wins over the deadline overrun.
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert unwound.is_set()
+
+    run_within(scenario(), 10)
+
+
+def test_loop_teardown_during_a_stuck_cleanup_finishes(tmp_path):
+    """A cleanup started after ``asyncio.run`` began cancelling its tasks is
+    never cancelled by that teardown; the deadline must still end it."""
+    unwound: list[bool] = []
+
+    async def stuck_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwound.append(True)
+
+    async def owner() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await relay_control._complete_owned_cleanup(
+                stuck_cleanup(), timeout_seconds=0.2
+            )
+            raise
+
+    async def scenario() -> None:
+        asyncio.get_running_loop().create_task(owner())
+        await asyncio.sleep(0)
+        # Returning now leaves ``owner`` to asyncio.run's task cancellation.
+
+    run_within(scenario(), 10)
+    assert unwound == [True]
+
+
+def test_record_written_after_an_abandoned_start_is_removed(tmp_path, monkeypatch):
+    """A record write that outlives its start (deadline passed) must not
+    publish a stale rendezvous once the worker thread finally finishes."""
+    record_path = tmp_path / "relay-control.json"
+    original_write = relay_control._write_record
+    finish_write = threading.Event()
+
+    def slow_write(path, record):
+        finish_write.wait(timeout=5)
+        original_write(path, record)
+
+    async def release() -> None:
+        return None
+
+    async def scenario() -> None:
+        server = LocalControlServer(
+            record_path, timeout_seconds=0.2, cleanup_timeout_seconds=0.2
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await server.start(release)
+        assert server.is_running is False
+        finish_write.set()
+        # asyncio.run waits for the worker thread when it shuts the loop down.
+
+    monkeypatch.setattr(relay_control, "_write_record", slow_write)
+
+    run_within(scenario(), 15)
+    assert not record_path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cleanup_deadline_is_never_shorter_than_the_control_timeout(monkeypatch):
+    monkeypatch.setenv(CLEANUP_TIMEOUT_ENV, "0.000001")
+    assert relay_control.cleanup_deadline_seconds(None, 2.0) == 2.0
+    assert relay_control.cleanup_deadline_seconds(0.5, 2.0) == 2.0
+    assert relay_control.cleanup_deadline_seconds(30.0, 2.0) == 30.0
+
+
+def test_tiny_configured_cleanup_timeout_does_not_break_start_or_close(
+    tmp_path, monkeypatch
+):
+    """A valid but tiny deadline must not cut the record write or close short."""
+    monkeypatch.setenv(CLEANUP_TIMEOUT_ENV, "0.000001")
+    record_path = tmp_path / "relay-control.json"
+
+    async def release() -> None:
+        return None
+
+    async def scenario() -> None:
+        server = LocalControlServer(record_path)
+        record = await server.start(release)
+        assert record_path.exists()
+        await server.close()
+        assert server.is_running is False
+        assert not record_path.exists()
+        with pytest.raises(OSError):
+            await asyncio.open_connection("127.0.0.1", record.port)
+
+    run_within(scenario(), 15)
+
+
+def test_late_abandoned_write_never_erases_the_next_record(tmp_path, monkeypatch):
+    """A slow write from an abandoned start must not replace or remove the
+    record of the start that followed it."""
+    record_path = tmp_path / "relay-control.json"
+    original_write = relay_control._write_record
+    finish_first_write = threading.Event()
+    calls: list[int] = []
+
+    def first_write_is_slow(path, record):
+        calls.append(record.port)
+        if len(calls) == 1:
+            finish_first_write.wait(timeout=5)
+        original_write(path, record)
+
+    async def release() -> None:
+        return None
+
+    async def scenario() -> None:
+        abandoned = LocalControlServer(
+            record_path, timeout_seconds=0.2, cleanup_timeout_seconds=0.2
+        )
+        with pytest.raises(asyncio.TimeoutError):
+            await abandoned.start(release)
+
+        current = LocalControlServer(record_path)
+        start = asyncio.create_task(current.start(release))
+        # Give the second write every chance to land before the first one.
+        await asyncio.wait((start,), timeout=0.3)
+        finish_first_write.set()
+        record = await asyncio.wait_for(start, timeout=STEP_TIMEOUT_SECONDS)
+        try:
+            on_disk = relay_control._read_record(record_path)
+            assert on_disk is not None
+            assert (on_disk.pid, on_disk.port) == (record.pid, record.port)
+            assert relay_control._tokens_match(on_disk.token, record.token)
+        finally:
+            await current.close()
+        assert not record_path.exists()
+
+    monkeypatch.setattr(relay_control, "_write_record", first_write_is_slow)
+
+    run_within(scenario(), 15)
