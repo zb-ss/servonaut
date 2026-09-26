@@ -426,3 +426,33 @@ async def test_cancelling_the_prompt_leaves_the_picker_unset() -> None:
         assert pilot.app.query_one("#ct_select_username", Select).value is Select.NULL
         assert pilot.app.lookup_mock.await_count == before
         assert screen._filter_values()["username"] == ""
+
+
+def test_selection_and_copy_follow_the_filtered_list():
+    # The table shows the filtered view, so a row number must index that view.
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    describe = {"event_name": "DescribeInstances", "event_time": "", "username": "web-ops"}
+    stop = {"event_name": "StopInstances", "event_time": "", "username": "web-ops"}
+    screen = object.__new__(CloudTrailBrowserScreen)
+    screen._events = [describe, stop]
+    screen._visible = [stop]
+    screen._current_page = 0
+    screen._selected_event = None
+    shown = []
+    screen._show_event_detail = shown.append
+
+    screen.on_data_table_row_selected(SimpleNamespace(cursor_row=0))
+
+    assert shown == [stop]
+    assert screen._selected_event is stop
+
+    copied = []
+    app = SimpleNamespace(demo_mode=False, redaction_service=None, notify=lambda *a, **k: None)
+    screen._u = lambda name: name
+    with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: app)), \
+            patch("servonaut.utils.platform_utils.copy_to_clipboard",
+                  lambda text: copied.append(text) or True):
+        screen.action_copy_output()
+    assert copied and "StopInstances" in copied[0] and "DescribeInstances" not in copied[0]

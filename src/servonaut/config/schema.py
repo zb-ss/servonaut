@@ -240,6 +240,16 @@ class AIProviderConfig:
             ``"ai.banner.paying_twice"``, ``"ai.banner.capability"``. The list
             is consulted by the T4.5 banner gating in
             ``ProviderPreferenceResolver``.
+        stream_silence_timeout_seconds: Hosted Servonaut AI only. How long a
+            streamed reply may stay silent (no event, not even a keep-alive
+            ping) before the connection is treated as lost. The service pings
+            every ~15 s. Accepted range 20–600 s; values outside it are
+            clamped. Time spent answering a tool prompt or running a tool is
+            not counted.
+        tool_confirm_timeout_seconds: Hosted Servonaut AI only. How long a
+            tool confirmation prompt stays open. Once it passes, the prompt
+            closes and the tool is not run. The service waits about 60 s for
+            a tool result by default, so keep this below that.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # legacy single-key field; kept for backward compat
@@ -264,6 +274,8 @@ class AIProviderConfig:
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
     ollama_api_key: str = ""
+    stream_silence_timeout_seconds: float = 35.0
+    tool_confirm_timeout_seconds: float = 50.0
 
     def key_for(self, provider_name: str) -> str:
         """Return the configured API key for *provider_name*.
@@ -406,6 +418,9 @@ class AzureConfig:
     resource_groups: List[str] = field(default_factory=list)
 
 
+DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER = 3
+
+
 @dataclass
 class RelayConfig:
     """Mercure relay listener configuration.
@@ -423,6 +438,12 @@ class RelayConfig:
     base_url: str = ""            # e.g. https://api.servonaut.dev
     mercure_url: str = ""         # e.g. https://servonaut.dev/.well-known/mercure
     heartbeat_interval: int = 30
+    # Heartbeat 401/403s on a still-valid session (a refresh did not cure
+    # them) before the listener reports that the relay is not delivering:
+    # one relay.log event, a warning, and the TUI indicator leaves
+    # "connected". The listener keeps retrying either way, refreshing the
+    # session on every Nth rejected heartbeat only. Minimum 1.
+    heartbeat_rejection_alert_after: int = DEFAULT_HEARTBEAT_REJECTION_ALERT_AFTER
     # Maximum guard tier a headless `servonaut connect` listener may
     # auto-approve when executing AI-chat tool calls dispatched over the
     # relay (no human is present to confirm). One of: "readonly",

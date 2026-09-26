@@ -124,19 +124,20 @@ class ServonautApp(App):
     memory_crypto = None
     _memory_key_material = None
 
-    # Shared state
-    instances: List[dict] = []  # all fetched instances
+    # Shared state. The mutable containers are created per app in __init__:
+    # a class-level default would be one list/set shared by every instance.
+    instances: List[dict]  # all fetched instances
     demo_mode: bool = False
     _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
-    memory_first_connect_seen: set = set()
+    memory_first_connect_seen: set
 
     # Instance IDs for which an annotation pull has already been kicked off
     # this session.  Kept separate from memory_first_connect_seen so that
     # banner-dismissal gating is untouched.
-    memory_annotations_pulled_seen: set = set()
+    memory_annotations_pulled_seen: set
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -180,6 +181,9 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        self.instances = []
+        self.memory_first_connect_seen = set()
+        self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
@@ -602,9 +606,11 @@ class ServonautApp(App):
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
         )
-        tool_executor = ChatToolExecutor(
-            tools=self.servonaut_tools,
-            guard_level=config.chat_tool_guard_level,
+        # Follows chat_tool_guard_level live: bring-your-own providers run
+        # tools without per-call prompts, so a lowered level must apply to
+        # the next call, not after a restart.
+        tool_executor = ChatToolExecutor.from_config(
+            self.servonaut_tools, self.config_manager,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor,
@@ -978,11 +984,7 @@ class ServonautApp(App):
                     logger.debug("Servonaut AI provider registration skipped: %s", e)
             # Expose the ServonautProvider directly for chat-panel streaming.
             try:
-                from servonaut.services.ai_providers import ServonautProvider
-                self.servonaut_provider = ServonautProvider(
-                    api_client=self.api_client,
-                    auth_service=self.auth_service,
-                )
+                self.servonaut_provider = self._build_servonaut_provider()
             except Exception as e:  # pragma: no cover
                 logger.debug("ServonautProvider direct init skipped: %s", e)
                 self.servonaut_provider = None
@@ -1016,6 +1018,9 @@ class ServonautApp(App):
                 from servonaut.services.relay_executors import RelayExecutors
                 from servonaut.mcp.audit import AuditTrail
                 from servonaut.services.ai_tool_bridge import AIToolBridge
+                from servonaut.screens.tool_confirm_modal import (
+                    build_modal_confirm,
+                )
                 relay = RelayExecutors(
                     self.config_manager,
                     self.aws_service,
@@ -1028,28 +1033,11 @@ class ServonautApp(App):
                 cfg = self.config_manager.get()
                 ai_audit = AuditTrail(cfg.mcp.audit_path)
 
-                async def _ai_confirm_callback(call) -> bool:
-                    """Push the right confirm modal for *call* and await the user's choice."""
-                    from servonaut.screens.tool_confirm_modal import (
-                        DangerousToolConfirmModal,
-                        ToolConfirmModal,
-                    )
-                    if call.guard_level == "dangerous":
-                        modal = DangerousToolConfirmModal(call.tool, dict(call.args))
-                    else:
-                        modal = ToolConfirmModal(call.tool, dict(call.args))
-                    try:
-                        result = await self.push_screen_wait(modal)
-                    except Exception:  # pragma: no cover — defensive
-                        logger.exception("push_screen_wait failed for tool confirm")
-                        return False
-                    return bool(result)
-
                 self.ai_tool_bridge = AIToolBridge(
                     api_client=self.api_client,
                     relay_executors=relay,
                     mcp_audit=ai_audit,
-                    confirm_callback=_ai_confirm_callback,
+                    confirm_callback=build_modal_confirm(self),
                     auth_service=self.auth_service,
                     # Inject the same ServonautTools the MCP server uses
                     # so AI-driven readonly tools (list_instances,
@@ -1057,6 +1045,12 @@ class ServonautApp(App):
                     # surface instead of the SSH/Mercure relay.
                     servonaut_tools=getattr(self, "servonaut_tools", None),
                     ip_ban_service=getattr(self, "ip_ban_service", None),
+                    # Read per call: an unanswered prompt is closed and
+                    # the tool refused once this many seconds pass.
+                    confirm_timeout=lambda: (
+                        self.config_manager.get()
+                        .ai_provider.tool_confirm_timeout_seconds
+                    ),
                 )
                 # Demo mode: the model reasons over redacted rows and asks for
                 # tools by fake id; the relay needs the real one.
@@ -1070,6 +1064,19 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Paid-tier services init failed: %s", e)
         self._init_memory_cloud_services()
+
+    def _build_servonaut_provider(self):
+        """Hosted-AI provider for chat-panel streaming.
+
+        ``config_manager`` lets the provider send ``chat_max_tool_rounds``
+        on each chat request.
+        """
+        from servonaut.services.ai_providers import ServonautProvider
+        return ServonautProvider(
+            api_client=self.api_client,
+            auth_service=self.auth_service,
+            config_manager=self.config_manager,
+        )
 
     def _init_memory_cloud_services(self) -> None:
         """Wire memory cloud-sync services (Stream 2 + 3).
@@ -2212,6 +2219,29 @@ class ServonautApp(App):
                 return copy.deepcopy(pristine)
         return instance
 
+    def open_settings_screen(self, panel_id: Optional[str] = None) -> None:
+        """Show Settings, opened on *panel_id* (e.g. ``"ai_provider"``) if given.
+
+        Replaces the current view, as the sidebar's Settings entry does. When a
+        Settings screen is already open, even under other screens (Help, a
+        management screen), those are closed and that Settings screen switches
+        category in place, so its unsaved edits and their prompt are kept.
+        """
+        from servonaut.screens.settings import SettingsScreen
+
+        stack = self.screen_stack
+        existing = next(
+            (screen for screen in reversed(stack) if isinstance(screen, SettingsScreen)),
+            None,
+        )
+        if existing is None:
+            self.switch_screen(SettingsScreen(initial_panel=panel_id))
+            return
+        for _ in range(len(stack) - 1 - stack.index(existing)):
+            self.pop_screen()
+        if panel_id:
+            existing.show_panel(panel_id)
+
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
         target_id = message.target_id
@@ -2370,38 +2400,59 @@ class ServonautApp(App):
             self.exit()
 
     def _run_global_scan(self) -> None:
-        """Run keyword scan across all running instances."""
-        self.notify("Starting scan of all running servers...", severity="information")
+        """Run keyword scan across every server not known to be stopped."""
+        self.notify("Starting scan of all servers...", severity="information")
         self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
 
     async def _do_global_scan(self) -> None:
-        """Worker: scan all running instances for keywords."""
+        """Worker: scan every server not known to be stopped for keywords.
+
+        Custom servers have no power state, so they are always attempted; one
+        that cannot be reached is named in the summary instead of silently
+        counting as "nothing found".
+        """
+        from servonaut.services.scan_service import ScanConnectionError, is_scannable
+
         instances = self.instances
         if not instances:
             self.notify("No instances loaded. Load instances first.", severity="warning")
             return
 
-        running = [i for i in instances if i.get('state') == 'running']
-        if not running:
-            self.notify("No running instances to scan.", severity="warning")
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
             return
 
-        total = len(running)
+        total = len(targets)
         scanned = 0
-        for idx, instance in enumerate(running, 1):
+        unreachable: List[str] = []
+        for idx, instance in enumerate(targets, 1):
             name = instance.get('name') or instance.get('id', 'unknown')
-            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information")
+            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information", markup=False)
             try:
+                # Demo mode redacts the row; connect to and key by the real one.
                 results = await self.scan_service.scan_server(
-                    instance, self.ssh_service, self.connection_service
+                    self.connection_instance(instance),
+                    self.ssh_service, self.connection_service,
                 )
-                if results:
-                    self.keyword_store.save_results(instance['id'], results)
-                    scanned += 1
+            except ScanConnectionError as e:
+                unreachable.append(name)
+                # ssh's own message names the real host and user; demo mode
+                # shows only the reason category.
+                reason = e.describe(redact=bool(self.demo_mode))
+                self.notify(f"Could not connect to {name}: {reason}", severity="warning", markup=False)
+                continue
             except Exception as e:
-                self.notify(f"Scan failed for {name}: {e}", severity="error")
+                self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
+                continue
+            if results:
+                self.keyword_store.save_results(self.real_instance_id(instance['id']), results)
+                scanned += 1
 
-        self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+        summary = f"Scan complete. {scanned}/{total} servers scanned."
+        if unreachable:
+            summary += f" Could not connect to: {', '.join(unreachable)}."
+        self.notify(summary, severity="warning" if unreachable else "information", markup=False)
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

@@ -1,8 +1,9 @@
-"""CLI subcommand handler for ``servonaut ssh <instance>``.
+"""CLI subcommand handler for ``servonaut ssh <instance> [-- <command>...]``.
 
 Resolves SSH credentials through the three-tier chain
 (personal BW ref → team BW ref → local ~/.ssh) and opens an interactive
-SSH session with the resolved key.
+SSH session with the resolved key, or runs a remote command and exits with
+its status when one follows the instance.
 
 Registration:
     :func:`add_ssh_parser` is called from ``main.py`` once, passing the
@@ -11,17 +12,18 @@ Registration:
     integer.
 
 Non-goals (handled elsewhere):
-    - ``servonaut servers ssh-ref set`` — BW ref CRUD
-    - ``servonaut auth login`` / ``servonaut auth logout`` — auth flows
+    - BW ref CRUD — the TUI's SSH Ref editor (instance list, ``k``)
+    - ``servonaut login`` / ``servonaut logout`` — auth flows
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ _EXIT_NO_CREDENTIAL = 2
 _EXIT_BW_ERROR = 3
 _EXIT_GENERIC_ERROR = 4
 _EXIT_AMBIGUOUS = 5
+
+# There is no CLI command for assigning a Bitwarden SSH key to a server; the
+# TUI's instance list has an editor for it on the ``k`` key.
+_ASSIGN_KEY_HINT = "in the Servonaut TUI (run `servonaut`, select the server, press k)"
 
 
 # ---------------------------------------------------------------------------
@@ -49,12 +55,44 @@ def _run_async(coro: Any) -> Any:
 # Parser registration
 # ---------------------------------------------------------------------------
 
+class _RemoteCommandParser(argparse.ArgumentParser):
+    """``ssh`` sub-parser that hands everything after a bare ``--`` to the remote.
+
+    argparse's own ``--`` handling differs between Python releases: 3.10 and
+    3.11 reject ``ssh web-1 --user root -- uname -a`` and drop every ``--``
+    inside the command. Splitting before argparse sees the tokens keeps the
+    remote command verbatim on every supported version.
+    """
+
+    def parse_known_args(  # type: ignore[override]
+        self,
+        args: Optional[Sequence[str]] = None,
+        namespace: Optional[argparse.Namespace] = None,
+    ) -> Tuple[argparse.Namespace, List[str]]:
+        tokens = list(sys.argv[1:] if args is None else args)
+        trailing: List[str] = []
+        if "--" in tokens:
+            cut = tokens.index("--")
+            tokens, trailing = tokens[:cut], tokens[cut + 1:]
+        parsed, extras = super().parse_known_args(tokens, namespace)
+        parsed.remote_command = list(getattr(parsed, "remote_command", None) or []) + trailing
+        return parsed, extras
+
+
 def add_ssh_parser(subparsers: Any) -> None:
-    """Register the ``servonaut ssh <instance>`` subcommand."""
+    """Register the ``servonaut ssh <instance> [-- <command>...]`` subcommand."""
     p = subparsers.add_parser(
         "ssh",
         help="Connect to a managed instance, resolving the SSH key from Bitwarden if configured.",
+        description=(
+            "Open an interactive SSH session, or run COMMAND on the instance "
+            "and exit with its status. Put the command after `--` so its own "
+            "flags are not read as servonaut options."
+        ),
     )
+    # argparse has no per-subparser class hook; the subclass only overrides
+    # parse_known_args, so re-classing the fresh instance is layout-safe.
+    p.__class__ = _RemoteCommandParser
     p.add_argument(
         "instance",
         help="Instance name or id (case-insensitive match).",
@@ -69,6 +107,16 @@ def add_ssh_parser(subparsers: Any) -> None:
         type=int,
         default=None,
         help="Override SSH port (default: 22 or per-instance config).",
+    )
+    p.add_argument(
+        "remote_command",
+        nargs="*",
+        metavar="COMMAND",
+        help=(
+            "Command to run on the instance instead of an interactive shell. "
+            "Put it after `--` when it has its own flags: "
+            "servonaut ssh web-1 -- uname -a"
+        ),
     )
 
 
@@ -187,6 +235,18 @@ def _resolve_username(args: Any, instance: Dict[str, Any], config: Any) -> str:
     return "ubuntu"
 
 
+def _remote_command_string(args: Any) -> Optional[str]:
+    """Join the words after the instance into one remote command, or ``None``.
+
+    OpenSSH joins its trailing arguments with single spaces and hands the
+    result to the remote shell; doing the same keeps ``servonaut ssh web-1
+    -- <cmd>`` behaving exactly like ``ssh host <cmd>``.
+    """
+    words = getattr(args, "remote_command", None) or []
+    command = " ".join(words)
+    return command if command.strip() else None
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -237,7 +297,7 @@ async def _handle_ssh_async(args: Any) -> int:
     if not matches:
         print(
             f"No instance found matching {args.instance!r}. "
-            "Run `servonaut servers list` to see available instances.",
+            "Run `servonaut` to see the available instances.",
             file=sys.stderr,
         )
         return _EXIT_NOT_FOUND
@@ -298,7 +358,7 @@ async def _handle_ssh_async(args: Any) -> int:
     if resolved is None:
         print(
             f"No SSH key configured for {iid!r}. "
-            "Add one with `servonaut servers ssh-ref set <id>` "
+            f"Assign a Bitwarden SSH key {_ASSIGN_KEY_HINT}, "
             "or place a key in ~/.ssh/.",
             file=sys.stderr,
         )
@@ -318,12 +378,15 @@ async def _handle_ssh_async(args: Any) -> int:
     # --- Determine port ---
     port = args.port or instance.get("port")
 
+    # --- Remote command (None = interactive shell) ---
+    remote_command = _remote_command_string(args)
+
     # --- Build + run SSH ---
     if resolved.source in ("personal", "team"):
         if not resolved.item_id:
             print(
                 f"BW ref for {iid!r} is missing item_id — the stored ref may be corrupt. "
-                "Re-register with `servonaut servers ssh-ref set <id>`.",
+                f"Re-assign the key {_ASSIGN_KEY_HINT}.",
                 file=sys.stderr,
             )
             return _EXIT_BW_ERROR
@@ -348,7 +411,7 @@ async def _handle_ssh_async(args: Any) -> int:
         except BwItemNotFoundError as exc:
             print(
                 f"Bitwarden item not found: {exc.message}\n"
-                "Verify the item UUID or re-register with `servonaut servers ssh-ref set <id>`.",
+                f"Verify the item UUID or re-assign the key {_ASSIGN_KEY_HINT}.",
                 file=sys.stderr,
             )
             return _EXIT_BW_ERROR
@@ -366,9 +429,12 @@ async def _handle_ssh_async(args: Any) -> int:
                 username=username,
                 key_path=tmpfile,
                 port=port,
+                remote_command=remote_command,
             )
             logger.debug("Running SSH (BW key): %s", " ".join(cmd))
-            result = subprocess.run(cmd)  # interactive — inherit stdin/stdout/stderr
+            # Inherit stdin/stdout/stderr: interactive shells, piped stdin and
+            # a remote command's output all pass straight through.
+            result = subprocess.run(cmd)
             return result.returncode
 
     else:
@@ -378,6 +444,7 @@ async def _handle_ssh_async(args: Any) -> int:
             username=username,
             key_path=resolved.local_key_path,
             port=port,
+            remote_command=remote_command,
         )
         logger.debug("Running SSH (local key): %s", " ".join(cmd))
         result = subprocess.run(cmd)

@@ -413,6 +413,9 @@ class TestNoRefStored:
         bw_cfg.report_personal_instance_verify.assert_not_awaited()
         err = capsys.readouterr().err
         assert "No SSH ref" in err
+        # Points at the TUI's SSH Ref editor, not a command that does not exist.
+        assert "press k" in err
+        assert "bw link" not in err
 
 
 # ---------------------------------------------------------------------------

@@ -433,6 +433,22 @@ def _from_compose(
     return _from_dotenv_fields(resolved, source)
 
 
+# A search root is a path or shell glob. It must not start with ``-`` (find
+# would read it as an option) and may contain no character with shell meaning
+# beyond globbing and a leading ``~``.
+_SEARCH_ROOT_RE = re.compile(r"^[A-Za-z0-9._/~*?\[\]@+=,:][A-Za-z0-9._/~*?\[\]@+=,:-]*$")
+_DEFAULT_SEARCH_ROOTS = ". /var/www /srv /home /opt /usr/share/nginx"
+
+
+def validate_search_roots(search_path: str) -> List[str]:
+    """Split a search path into roots, refusing anything that is not a path."""
+    roots = (search_path or "").split() or _DEFAULT_SEARCH_ROOTS.split()
+    for root in roots:
+        if not _SEARCH_ROOT_RE.match(root) or root.startswith("-"):
+            raise ValueError("search_path may only contain paths and glob patterns")
+    return roots
+
+
 class DBCredentialScanner:
     """Parse app-config text into staged DB credential candidates."""
 
@@ -445,7 +461,7 @@ class DBCredentialScanner:
         # filenames across stacks: dotenv, WordPress, Joomla (configuration.php),
         # Magento (app/etc/env.php), and docker-compose files (dockerised stacks
         # keep DB creds in `environment:` blocks, not always a readable .env).
-        roots = search_path.strip() or ". /var/www /srv /home /opt /usr/share/nginx"
+        roots = " ".join(validate_search_roots(search_path))
         names = (
             "\\( -name configuration.php -o -name wp-config.php -o -name env.php "
             "-o -name .env -o -name .env.local -o -name .env.production "

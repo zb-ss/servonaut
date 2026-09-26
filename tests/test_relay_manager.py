@@ -7,9 +7,10 @@ want to re-test Mercure semantics here.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -25,10 +26,17 @@ from servonaut.services.relay_manager import (
     RelayState,
     derive_relay_urls,
 )
+from tests._async_bounds import STEP_TIMEOUT_SECONDS, run_within, wait_until
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _until(condition) -> None:
+    """Yield to the loop until ``condition()`` holds; bound it with wait_for."""
+    while not condition():
+        await asyncio.sleep(0)
 
 
 def _make_auth(*, authenticated: bool = True, mcp_connections: int = 5,
@@ -269,9 +277,8 @@ class TestStartStop:
         async def scenario():
             result = await mgr.start()
             assert result.state is RelayState.CONNECTING
-            # Give the task a tick to run the listener and fire on_connected.
-            await asyncio.sleep(0.05)
-            assert mgr.state is RelayState.CONNECTED
+            # The listener task fires on_connected once it first runs.
+            await wait_until(lambda: mgr.state is RelayState.CONNECTED)
             await mgr.stop()
             assert mgr.state is RelayState.STOPPED
 
@@ -404,8 +411,7 @@ class TestStartStop:
         )
         async def scenario():
             await mgr.start()
-            await asyncio.sleep(0.05)
-            assert mgr.state is RelayState.ERROR
+            await wait_until(lambda: mgr.state is RelayState.ERROR)
             await mgr.stop()
         _run(scenario())
 
@@ -455,17 +461,16 @@ class TestStartStop:
 
         async def scenario():
             start_task = asyncio.create_task(manager.start())
-            await asyncio.wait_for(bind_entered.wait(), timeout=0.2)
+            await asyncio.wait_for(bind_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
             assert listener.started.is_set() is False
             assert not (tmp_path / "relay-control.json").exists()
 
             permit_bind.set()
             result = await start_task
             assert result.state is RelayState.CONNECTING
-            for _ in range(20):
-                if manager.state is RelayState.ERROR and not controls[0].is_running:
-                    break
-                await asyncio.sleep(0.01)
+            await wait_until(
+                lambda: manager.state is RelayState.ERROR and not controls[0].is_running
+            )
 
             control = controls[0]
             assert manager.state is RelayState.ERROR
@@ -529,7 +534,7 @@ class TestStartStop:
 
         async def scenario():
             start_task = asyncio.create_task(manager.start())
-            await asyncio.wait_for(bind_entered.wait(), timeout=0.2)
+            await asyncio.wait_for(bind_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
             stop_task = asyncio.create_task(manager.stop())
             await asyncio.sleep(0)
             assert stop_task.done() is False
@@ -601,17 +606,21 @@ class TestStartStop:
 
         async def scenario():
             start_task = asyncio.create_task(manager.start())
-            await asyncio.wait_for(control_bound.wait(), timeout=0.2)
-            control = controls[0]
-            record = control.bound_record
-            assert record is not None
-            assert (tmp_path / "relay-control.json").exists()
+            try:
+                await asyncio.wait_for(control_bound.wait(), timeout=STEP_TIMEOUT_SECONDS)
+                control = controls[0]
+                record = control.bound_record
+                assert record is not None
+                assert (tmp_path / "relay-control.json").exists()
 
-            start_task.cancel()
-            await asyncio.wait_for(close_entered.wait(), timeout=0.2)
-            await asyncio.sleep(0)
-            start_task.cancel()
-            permit_close.set()
+                start_task.cancel()
+                await asyncio.wait_for(close_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
+                await asyncio.sleep(0)
+                start_task.cancel()
+            finally:
+                # Never leave the product's rollback waiting on this test gate,
+                # even when a step above fails.
+                permit_close.set()
             with pytest.raises(asyncio.CancelledError):
                 await start_task
 
@@ -676,14 +685,18 @@ class TestStartStop:
 
         async def scenario():
             start_task = asyncio.create_task(manager.start())
-            await asyncio.wait_for(close_entered.wait(), timeout=0.2)
-            control = controls[0]
-            record = control.bound_record
-            assert record is not None
-            assert (tmp_path / "relay-control.json").exists()
+            try:
+                await asyncio.wait_for(close_entered.wait(), timeout=STEP_TIMEOUT_SECONDS)
+                control = controls[0]
+                record = control.bound_record
+                assert record is not None
+                assert (tmp_path / "relay-control.json").exists()
 
-            start_task.cancel()
-            permit_close.set()
+                start_task.cancel()
+            finally:
+                # Never leave the product's rollback waiting on this test gate,
+                # even when a step above fails.
+                permit_close.set()
             with pytest.raises(asyncio.CancelledError):
                 await start_task
 
@@ -751,11 +764,15 @@ class TestStartStop:
                 await writer.drain()
 
                 stop_task = asyncio.create_task(manager.stop())
-                await asyncio.wait_for(close_entered.wait(), timeout=0.2)
-                stop_task.cancel()
-                await asyncio.sleep(0)
-                stop_task.cancel()
-                permit_close.set()
+                try:
+                    await asyncio.wait_for(
+                        close_entered.wait(), timeout=STEP_TIMEOUT_SECONDS
+                    )
+                    stop_task.cancel()
+                    await asyncio.sleep(0)
+                    stop_task.cancel()
+                finally:
+                    permit_close.set()
                 with pytest.raises(asyncio.CancelledError):
                     await stop_task
 
@@ -767,7 +784,10 @@ class TestStartStop:
                 assert listener.stopped is True
                 assert active_owner(lock_path) is None
                 assert not (tmp_path / "relay-control.json").exists()
-                assert await asyncio.wait_for(reader.read(), timeout=0.2) == b""
+                assert (
+                    await asyncio.wait_for(reader.read(), timeout=STEP_TIMEOUT_SECONDS)
+                    == b""
+                )
                 with pytest.raises(OSError):
                     await asyncio.open_connection("127.0.0.1", record.port)
 
@@ -788,6 +808,203 @@ class TestStartStop:
                     pass
 
         _run(scenario())
+
+    def test_loop_teardown_during_startup_rollback_is_bounded(
+        self,
+        lock_path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """An interrupted start must not hang ``asyncio.run()`` teardown.
+
+        Teardown cancels a start whose control record is still being written
+        (a slow disk). The rollback then runs in a task created after teardown
+        chose which tasks to cancel, so only the cleanup deadline, set here
+        through its public environment variable, can end a rollback step that
+        never completes.
+        """
+        monkeypatch.setenv("SERVONAUT_RELAY_CLEANUP_TIMEOUT_SECONDS", "0.3")
+        original_write = relay_control._write_record
+        write_started = threading.Event()
+
+        def slow_write(path, record):
+            write_started.set()
+            time.sleep(0.5)
+            original_write(path, record)
+
+        class _NeverClosingControlServer(LocalControlServer):
+            async def close(self) -> None:
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(relay_control, "_write_record", slow_write)
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: _StubListener(**kwargs),
+            control_server_factory=lambda **kwargs: _NeverClosingControlServer(**kwargs),
+            # The cleanup deadline is never shorter than the control timeout.
+            control_timeout_seconds=0.3,
+        )
+
+        async def scenario() -> None:
+            asyncio.get_running_loop().create_task(manager.start())
+            await asyncio.to_thread(write_started.wait, STEP_TIMEOUT_SECONDS)
+            # Returning leaves the pending start to asyncio.run's teardown.
+
+        run_within(scenario(), 15)
+
+        assert write_started.is_set()
+        assert manager.state is RelayState.STOPPED
+        assert manager._control_server is None
+        assert manager._listener is None
+        assert active_owner(lock_path) is None
+        # The write finished after the rollback; it must not leave a record.
+        assert not (tmp_path / "relay-control.json").exists()
+
+    def test_stop_is_bounded_when_the_control_close_never_finishes(
+        self,
+        lock_path,
+        tmp_path,
+    ):
+        """Application exit must not wait forever on a stuck control close."""
+
+        class _NeverClosingControlServer(LocalControlServer):
+            async def close(self) -> None:
+                await asyncio.Event().wait()
+
+        listener = _StubListener()
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
+            control_server_factory=lambda **kwargs: _NeverClosingControlServer(**kwargs),
+            control_timeout_seconds=0.3,
+            cleanup_timeout_seconds=0.3,
+        )
+
+        async def scenario() -> None:
+            result = await manager.start()
+            assert result.state is RelayState.CONNECTING
+            control = manager._control_server
+            try:
+                await manager.stop(grace_seconds=0.2)
+
+                assert manager.state is RelayState.STOPPED
+                assert manager._control_server is None
+                assert manager._task is None
+                assert manager._listener is None
+                assert listener.stopped is True
+                assert active_owner(lock_path) is None
+            finally:
+                # The stuck double never closed its real socket; do it here.
+                await LocalControlServer.close(control)
+
+        run_within(scenario(), 15)
+
+    def test_stop_releases_the_lock_when_the_listener_ignores_cancellation(
+        self,
+        lock_path,
+    ):
+        """A listener that swallows cancellation must not keep the lock held.
+
+        The stop must still settle within its bound, a new start must work,
+        and the old task finishing later must not touch the new lifecycle.
+        """
+        let_listeners_finish = asyncio.Event()
+        listeners: list[_StubListener] = []
+
+        class _CancellationIgnoringListener(_StubListener):
+            async def run(self) -> None:
+                self.started.set()
+                while not let_listeners_finish.is_set():
+                    try:
+                        await let_listeners_finish.wait()
+                    except asyncio.CancelledError:
+                        pass  # Deliberately misbehaving.
+
+        def listener_factory(**kwargs):
+            listener = _CancellationIgnoringListener(**kwargs)
+            listeners.append(listener)
+            return listener
+
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=listener_factory,
+            control_timeout_seconds=0.2,
+            cleanup_timeout_seconds=0.2,
+        )
+
+        async def scenario() -> None:
+            try:
+                assert (await manager.start()).state is RelayState.CONNECTING
+                first_task = manager._task
+                await wait_until(listeners[0].started.is_set)
+
+                await manager.stop(grace_seconds=0.2)
+
+                assert manager.state is RelayState.STOPPED
+                assert manager._task is None
+                assert manager.is_running is False
+                assert listeners[0].stopped is True
+                assert active_owner(lock_path) is None
+                assert first_task is not None and not first_task.done()
+
+                replacement = await manager.start()
+                assert replacement.state is RelayState.CONNECTING
+                second_task = manager._task
+                owner = active_owner(lock_path)
+                assert owner is not None
+
+                # The ignored task finishing later leaves the new one alone.
+                let_listeners_finish.set()
+                await asyncio.wait_for(first_task, timeout=STEP_TIMEOUT_SECONDS)
+                await asyncio.sleep(0)
+                assert manager._task is second_task
+                assert active_owner(lock_path) == owner
+            finally:
+                let_listeners_finish.set()
+                await manager.stop()
+
+        run_within(scenario(), 15)
+        assert active_owner(lock_path) is None
+
+    def test_handover_reports_failure_while_the_lock_is_still_held(
+        self,
+        lock_path,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A handover must not be acknowledged unless the lock was released."""
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kwargs: _StubListener(**kwargs),
+        )
+
+        async def scenario() -> None:
+            assert (await manager.start()).state is RelayState.CONNECTING
+            lock = manager._lock
+            assert lock is not None
+            real_release = lock.release
+            monkeypatch.setattr(lock, "release", lambda: None)
+            try:
+                response = await request_relay_release(
+                    tmp_path / "relay-control.json", lock_path
+                )
+                assert response.ok is False
+                assert response.released is False
+                assert lock.is_held is True
+            finally:
+                real_release()
+                await manager.stop()
+
+        run_within(scenario(), 15)
+        assert active_owner(lock_path) is None
 
     def test_listener_factory_import_error_returns_error_state(self, lock_path):
         def factory(**kw):
@@ -927,13 +1144,13 @@ class TestSessionExpired:
             assert record is not None
 
             listener = listeners[0]
-            await asyncio.wait_for(listener.heartbeat_started.wait(), timeout=0.5)
-            await asyncio.wait_for(listener_task, timeout=0.5)
-            async def wait_for_expiry() -> None:
-                while manager.state is not RelayState.SESSION_EXPIRED:
-                    await asyncio.sleep(0)
-
-            await asyncio.wait_for(wait_for_expiry(), timeout=0.5)
+            await asyncio.wait_for(
+                listener.heartbeat_started.wait(), timeout=STEP_TIMEOUT_SECONDS
+            )
+            # The stop cancels the listener task, so it may end cancelled.
+            done, _ = await asyncio.wait({listener_task}, timeout=STEP_TIMEOUT_SECONDS)
+            assert done
+            await wait_until(lambda: manager.state is RelayState.SESSION_EXPIRED)
 
             assert manager.state is RelayState.SESSION_EXPIRED
             assert manager._control_server is None
@@ -946,6 +1163,125 @@ class TestSessionExpired:
                 await asyncio.open_connection("127.0.0.1", record.port)
 
         _run(scenario())
+
+    def test_heartbeat_401_on_idle_subscription_reaches_manager_hook(
+        self, lock_path, monkeypatch, capsys,
+    ):
+        """A real listener parked on an idle hub subscription still hands a
+        heartbeat 401 to the manager, which stops it and settles on
+        SESSION_EXPIRED. The headless CLI's stop message is not printed."""
+        pytest.importorskip("httpx_sse")
+        from servonaut.services.relay_listener import RelayListener
+
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(
+            heartbeat_statuses=[401], heartbeat_waits_for_subscription=True,
+        )
+        server.install(monkeypatch)
+        states: list = []
+        expired = asyncio.Event()
+
+        def on_state_change(state):
+            states.append(state)
+            if state is RelayState.SESSION_EXPIRED:
+                expired.set()
+
+        def listener_factory(**hooks):
+            return RelayListener(
+                executors=MagicMock(),
+                base_url=BASE_URL,
+                mercure_url=MERCURE_URL,
+                auth_token="tok",
+                user_id="42",
+                heartbeat_interval=30,
+                **hooks,
+            )
+
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=listener_factory,
+            on_state_change=on_state_change,
+        )
+
+        async def scenario():
+            await manager.start()
+            listener_task = manager._task
+            await asyncio.wait_for(server.subscribed.wait(), timeout=5)
+            await asyncio.wait_for(expired.wait(), timeout=5)
+            await asyncio.wait_for(
+                asyncio.gather(listener_task, return_exceptions=True), timeout=5,
+            )
+            current = asyncio.current_task()
+            return [
+                task for task in asyncio.all_tasks()
+                if task is not current and not task.done()
+            ]
+
+        leftover_tasks = _run(scenario())
+
+        assert states == [
+            RelayState.CONNECTING, RelayState.STOPPED, RelayState.SESSION_EXPIRED,
+        ]
+        assert server.heartbeats == 1
+        assert manager.is_running is False
+        assert active_owner(lock_path) is None
+        assert leftover_tasks == []
+        assert "Relay stopped" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("revoked_by_refresh", "expected_state"),
+        [(False, RelayState.CONNECTED), (True, RelayState.SESSION_EXPIRED)],
+        ids=["transient-refresh-failure", "revoked"],
+    )
+    def test_heartbeat_401_expires_only_a_revoked_session(
+        self, lock_path, monkeypatch, revoked_by_refresh, expected_state,
+    ):
+        """The manager's own listener: a heartbeat 401 whose refresh fails
+        transiently (the session stays authenticated) is retried and the
+        relay connects; a refresh that revokes the session expires it."""
+        pytest.importorskip("httpx_sse")
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(heartbeat_statuses=[401, 200])
+        server.install(monkeypatch)
+        auth = _make_auth()
+
+        async def refresh() -> bool:
+            if revoked_by_refresh:
+                auth.is_authenticated = False  # invalid_grant
+            return False  # a transient failure also returns False
+
+        auth.refresh_token = AsyncMock(side_effect=refresh)
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=RelayConfig(
+            base_url=BASE_URL, mercure_url=MERCURE_URL, heartbeat_interval=0,
+        ))
+        settled = asyncio.Event()
+
+        def on_state_change(state):
+            if state in (RelayState.CONNECTED, RelayState.SESSION_EXPIRED):
+                settled.set()
+
+        manager = RelayManager(
+            config_manager=config_manager,
+            auth_service=auth,
+            lock_path=lock_path,
+            on_state_change=on_state_change,
+        )
+
+        async def scenario():
+            await manager.start()
+            await asyncio.wait_for(settled.wait(), timeout=5)
+            state = manager.state
+            await manager.stop()
+            return state
+
+        assert _run(scenario()) is expected_state
+        assert server.heartbeat_replies[0] == 401
+        auth.refresh_token.assert_awaited_once()
 
     def test_handle_session_expired_is_idempotent(self, lock_path):
         states: list = []
@@ -976,9 +1312,10 @@ class TestSessionExpired:
         on a non-relay endpoint (e.g. AIConversationsScreen) can flip
         the indicator immediately instead of waiting up to 30s for the
         next heartbeat tick to notice."""
+        auth = _make_auth()
         mgr = RelayManager(
             config_manager=_make_config(),
-            auth_service=_make_auth(),
+            auth_service=auth,
             lock_path=lock_path,
             listener_factory=lambda **kw: _StubListener(**kw),
         )
@@ -986,7 +1323,95 @@ class TestSessionExpired:
         async def scenario():
             await mgr.start()
             await asyncio.sleep(0.02)
+            auth.is_authenticated = False  # the server revoked the session
             await mgr.notify_session_expired()
 
         _run(scenario())
         assert mgr.state is RelayState.SESSION_EXPIRED
+
+    def test_notify_session_expired_ignores_a_session_that_is_still_valid(
+        self, lock_path,
+    ):
+        """A 401/403 whose refresh failed transiently, or a 403 from
+        something in front of the API, leaves the session authenticated:
+        the relay keeps running and the indicator does not go red."""
+        states: list = []
+        mgr = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            listener_factory=lambda **kw: _StubListener(**kw),
+            on_state_change=states.append,
+        )
+
+        async def scenario():
+            await mgr.start()
+            await asyncio.wait_for(_until(lambda: mgr.state is RelayState.CONNECTED), 5)
+            await mgr.notify_session_expired()
+            running = mgr.is_running
+            await mgr.stop()
+            return running
+
+        assert _run(scenario()) is True
+        assert RelayState.SESSION_EXPIRED not in states
+
+
+class TestHeartbeatRejectionOnValidSession:
+    def test_persistent_rejection_leaves_connected_until_accepted_again(
+        self, lock_path, monkeypatch,
+    ):
+        """The manager's own listener: heartbeats rejected although the
+        refresh succeeds and the session stays valid flip the indicator
+        from CONNECTED to CONNECTING (not delivering); the relay keeps
+        running and returns to CONNECTED on the next accepted heartbeat."""
+        pytest.importorskip("httpx_sse")
+        from .relay_fake_server import BASE_URL, MERCURE_URL, FakeRelayServer
+
+        server = FakeRelayServer(heartbeat_statuses=[200] + [401] * 4 + [200])
+        server.install(monkeypatch)
+        auth = _make_auth()
+        auth.refresh_token = AsyncMock(return_value=True)
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig(relay=RelayConfig(
+            base_url=BASE_URL, mercure_url=MERCURE_URL, heartbeat_interval=0,
+            heartbeat_rejection_alert_after=2,
+        ))
+        states: list = []
+        manager = RelayManager(
+            config_manager=config_manager,
+            auth_service=auth,
+            lock_path=lock_path,
+            on_state_change=states.append,
+        )
+
+        async def scenario():
+            await manager.start()
+            await asyncio.wait_for(
+                _until(lambda: states.count(RelayState.CONNECTED) == 2),
+                timeout=5,
+            )
+            running = manager.is_running
+            await manager.stop()
+            return running
+
+        assert _run(scenario()) is True
+        assert states[:4] == [
+            RelayState.CONNECTING, RelayState.CONNECTED,
+            RelayState.CONNECTING, RelayState.CONNECTED,
+        ]
+        assert RelayState.SESSION_EXPIRED not in states
+        assert auth.refresh_token.await_count == 2
+
+    def test_degraded_hook_leaves_other_states_alone(self, lock_path):
+        states: list = []
+        manager = RelayManager(
+            config_manager=_make_config(),
+            auth_service=_make_auth(),
+            lock_path=lock_path,
+            on_state_change=states.append,
+        )
+        manager._set_state(RelayState.SESSION_EXPIRED)
+
+        _run(manager._handle_degraded())
+
+        assert states == [RelayState.SESSION_EXPIRED]

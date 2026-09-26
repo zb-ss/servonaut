@@ -233,8 +233,51 @@ Keywords=ssh;server;aws;ec2;
         print(f"You can launch Servonaut with: {shlex.join(app_argv)}")
 
 
+# Exit status of `servonaut connect` once the server rejects the relay's
+# credentials (session expired or revoked). Distinct from the generic 1 so a
+# service manager can be told not to restart a listener that cannot sign in.
+RELAY_EXIT_SESSION_EXPIRED = 4
+
+
+def _relay_session_expired_message(uses_env_token: bool) -> str:
+    """Explain why the relay stopped and how to bring it back."""
+    restart = (
+        "then start the relay again with `servonaut connect` "
+        "(or `servonaut connect --bg` to run it in the background)."
+    )
+    if uses_env_token:
+        return (
+            "Relay stopped: the server rejected SERVONAUT_RELAY_TOKEN "
+            f"(expired or revoked). Set a valid token, {restart}"
+        )
+    return (
+        "Relay stopped: your Servonaut session has expired or was revoked. "
+        f"Run `servonaut login`, {restart}"
+    )
+
+
+def _report_relay_session_expired(uses_env_token: bool) -> None:
+    """Report a rejected session where both run modes can see it.
+
+    The foreground listener prints to the terminal. A ``--bg`` listener
+    runs with its output discarded, so the same text also goes to the relay
+    lifecycle log and the application log.
+    """
+    from servonaut.utils.relay_log import log_relay_event
+
+    message = _relay_session_expired_message(uses_env_token)
+    print(message, flush=True)
+    logging.getLogger(__name__).error(message)
+    log_relay_event("session_expired", mode="bg", message=message)
+
+
 def _relay_run_foreground() -> None:
-    """Run the relay listener in the foreground (blocks until interrupted).
+    """Run the relay listener in the foreground.
+
+    Blocks until interrupted. If the server rejects the session, the
+    listener stops, the reason is reported, and the process exits with
+    :data:`RELAY_EXIT_SESSION_EXPIRED`. ``connect --bg`` runs this same
+    path in a detached process.
 
     Guarded by :class:`RelayLock` so a TUI in-process listener and this
     foreground listener cannot both talk to Mercure at the same time.
@@ -281,9 +324,12 @@ def _relay_run_foreground() -> None:
             "AuthService unavailable for relay: %s", exc,
         )
 
+    uses_env_token = bool(auth_token and user_id)
     token_source = auth_token  # str (legacy) or callable (OAuth session)
     refresh_callback = None
-    if not (auth_token and user_id):
+    # Without a probe (env-token mode) a rejected heartbeat is final.
+    session_alive = None
+    if not uses_env_token:
         if auth_service is None:
             print(
                 "Error: no Servonaut session found. Run `servonaut login` "
@@ -294,6 +340,9 @@ def _relay_run_foreground() -> None:
         from servonaut.services.relay_manager import _extract_user_id
         token_source = lambda: auth_service.access_token  # noqa: E731
         refresh_callback = auth_service.refresh_token
+        # A failed refresh ends the relay only once the session is really
+        # gone; a transient failure leaves it authenticated and retrying.
+        session_alive = lambda: auth_service.is_authenticated  # noqa: E731
         user_id = _extract_user_id(auth_service) or ''
         if not user_id:
             print(
@@ -432,6 +481,16 @@ def _relay_run_foreground() -> None:
                 "AI tool executor init failed",
             )
 
+    session_expired = False
+
+    async def on_session_expired() -> None:
+        # The server rejected the credentials. Say so and stop, rather than
+        # idle on a subscription the server will no longer serve.
+        nonlocal session_expired
+        session_expired = True
+        _report_relay_session_expired(uses_env_token)
+        listener.stop()
+
     listener = RelayListener(
         executors=executors,
         base_url=relay_cfg.base_url,
@@ -439,7 +498,10 @@ def _relay_run_foreground() -> None:
         auth_token=token_source,
         user_id=user_id,
         heartbeat_interval=relay_cfg.heartbeat_interval,
+        heartbeat_rejection_alert_after=relay_cfg.heartbeat_rejection_alert_after,
+        on_session_expired=on_session_expired,
         refresh_callback=refresh_callback,
+        session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
         probe_bridge=probe_bridge,
     )
@@ -454,8 +516,13 @@ def _relay_run_foreground() -> None:
     try:
         asyncio.run(listener.run())
     finally:
-        log_relay_event("stopped", mode="bg", reason="shutdown")
+        log_relay_event(
+            "stopped", mode="bg",
+            reason="session_expired" if session_expired else "shutdown",
+        )
         lock.release()
+    if session_expired:
+        sys.exit(RELAY_EXIT_SESSION_EXPIRED)
 
 
 def _relay_paths(runtime) -> tuple[Path, Path, Path]:
@@ -773,67 +840,114 @@ def _relay_reconnect() -> None:
         _relay_start_background(runtime)
 
 
-def _list_backups_cli() -> None:
-    """Print the local config backup list and exit."""
-    from servonaut.config.manager import ConfigManager
-    cm = ConfigManager()
+# ``--restore-backup`` given without a number: pick from a prompt.
+_PROMPT_FOR_BACKUP = -1
+
+
+def _backup_number(value: str) -> int:
+    """argparse type for ``--restore-backup N``: a 1-based backup number."""
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError(
+            f"expected a backup number from --list-backups (1 = newest), got {value!r}"
+        )
+    return number
+
+
+def _format_backup_size(size: int) -> str:
+    """Render a backup's size for the backup tables."""
+    return f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
+
+
+def _list_backups_cli(config_path: Path | None = None) -> None:
+    """Print the local config backup list and exit.
+
+    Args:
+        config_path: Config file given with ``--config``; None for the default.
+    """
+    from servonaut.config.manager import ConfigManager, describe_backup
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
         print("No local backups yet.")
         return
-    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  Path")
-    print("-" * 70)
+    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  {'Kind':<16}  Path")
+    print("-" * 88)
     for idx, entry in enumerate(backups, start=1):
         ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-        size = entry['size_bytes']
-        size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
-        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {entry['path']}")
+        size_str = _format_backup_size(entry['size_bytes'])
+        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {describe_backup(entry):<16}  {entry['path']}")
 
 
-def _restore_backup_cli(index: int) -> None:
-    """Restore a local config backup by 1-based index. Prompts if index == -1."""
+def _prompt_for_backup(backups: list) -> str:
+    """Show the backups and read the user's choice ("" when they cancel)."""
+    from servonaut.config.manager import describe_backup
+
+    print("Available backups (newest first):")
+    print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}  Kind")
+    print("-" * 50)
+    for idx, entry in enumerate(backups, start=1):
+        ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+        size_str = _format_backup_size(entry['size_bytes'])
+        print(f"{idx:>3}  {ts:<19}  {size_str:>8}  {describe_backup(entry)}")
+    try:
+        return input("Enter number to restore (or Enter to cancel): ").strip()
+    except EOFError:
+        return ""
+
+
+def _restore_backup_cli(index: int | None, config_path: Path | None = None) -> int:
+    """Restore a local config backup by 1-based number; prompt when none is given.
+
+    Args:
+        index: Backup number from ``--list-backups`` (1 = newest).
+        config_path: Config file given with ``--config``; None for the default.
+
+    Returns:
+        Process exit code: 0 once restored, 1 when nothing was restored.
+    """
     from servonaut.config.manager import ConfigManager
-    cm = ConfigManager()
+    cm = ConfigManager(config_path)
     backups = cm.list_backups()
     if not backups:
-        print("No local backups to restore.")
-        return
+        print("No local backups to restore.", file=sys.stderr)
+        return 1
 
-    # Interactive picker when no index given
-    if index is None or index == -1:
-        print("Available backups (newest first):")
-        print(f"{'#':>3}  {'Timestamp':<19}  {'Size':>8}")
-        print("-" * 40)
-        for idx, entry in enumerate(backups, start=1):
-            ts = entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
-            size = entry['size_bytes']
-            size_str = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
-            print(f"{idx:>3}  {ts:<19}  {size_str:>8}")
-        try:
-            choice = input("Enter number to restore (or Enter to cancel): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            return
+    if index is None or index == _PROMPT_FOR_BACKUP:
+        choice = _prompt_for_backup(backups)
         if not choice:
-            print("Cancelled.")
-            return
+            print("Cancelled; nothing was restored.", file=sys.stderr)
+            return 1
         try:
             index = int(choice)
         except ValueError:
-            print("Invalid choice.")
-            return
+            print(
+                f"Invalid choice {choice!r}: enter a number from 1 to {len(backups)}.",
+                file=sys.stderr,
+            )
+            return 1
 
     if index < 1 or index > len(backups):
-        print(f"Index {index} out of range (1-{len(backups)}).")
-        return
+        count = f"{len(backups)} backup{'s' if len(backups) != 1 else ''}"
+        print(
+            f"No backup #{index}: there {'is' if len(backups) == 1 else 'are'} {count} "
+            f"(1-{len(backups)}). Run 'servonaut --list-backups' to see them.",
+            file=sys.stderr,
+        )
+        return 1
 
     entry = backups[index - 1]
     try:
         cm.restore_backup(entry['path'])
-        print(f"Restored from {entry['path']}")
-        print("Your previous config was backed up; launch Servonaut to continue.")
-    except Exception as exc:
-        print(f"Restore failed: {exc}")
+    except (OSError, ValueError) as exc:
+        print(f"Restore failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"Restored from {entry['path']}")
+    print("Your previous config was backed up; launch Servonaut to continue.")
+    return 0
 
 
 def _run_connect(args: argparse.Namespace) -> None:
@@ -929,9 +1043,12 @@ def _main() -> None:
                              'codex, agy, gemini, all)')
     parser.add_argument('--list-backups', action='store_true',
                         help='List local config backups and exit')
-    parser.add_argument('--restore-backup', type=int, metavar='N', nargs='?', const=-1,
+    parser.add_argument('--restore-backup', type=_backup_number, metavar='N', nargs='?',
+                        const=_PROMPT_FOR_BACKUP,
                         help='Restore a local config backup by index (1=newest). '
-                             'With no argument, prompts interactively.')
+                             'With no argument, prompts interactively. Exit codes: '
+                             '0 restored, 1 nothing restored, 2 bad argument, '
+                             '130 interrupted.')
     parser.add_argument('--ai-provider', type=str, default=None,
                         metavar='NAME',
                         help='Override AI provider for this process '
@@ -1188,13 +1305,13 @@ def _main() -> None:
         asyncio.run(run_server())
         return
 
+    backup_config = Path(args.config) if args.config else None
     if args.list_backups:
-        _list_backups_cli()
+        _list_backups_cli(backup_config)
         return
 
     if args.restore_backup is not None:
-        _restore_backup_cli(args.restore_backup)
-        return
+        raise SystemExit(_restore_backup_cli(args.restore_backup, backup_config))
 
     _setup_logging(debug=args.debug)
 

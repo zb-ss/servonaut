@@ -1308,6 +1308,11 @@ class ServerActionsScreen(Screen):
             ]
             if tmp_key_path:
                 cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
+            port = self.app.connection_service.get_target_port(
+                connection_instance(self.app, self._instance)
+            )
+            if port is not None and port != 22:
+                cmd += ["-p", str(port)]
             # Use the configured username or default.
             username = (
                 self._instance.get("username")
