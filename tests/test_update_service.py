@@ -7,12 +7,19 @@ installs that can't be release-upgraded in place.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
-from servonaut.services.update_service import UpdateService
+from servonaut.services.update_service import (
+    UpdateCheckResult,
+    UpdateService,
+    latest_index_version,
+)
 
 
 def _svc(current="2.16.3", latest="2.17.0", kind=DistributionKind.PIP):
@@ -205,3 +212,156 @@ def test_run_upgrade_missing_command(monkeypatch):
                         AsyncMock(side_effect=OSError("no pipx")))
     ok, msg = asyncio.run(s.run_upgrade())
     assert ok is False and "Could not run" in msg
+
+
+# --- pre-releases are never offered to a stable installation ----------------
+
+def _file(yanked=False):
+    return {"filename": "servonaut.whl", "yanked": yanked}
+
+
+def _index(reported, releases=None):
+    document = {"info": {"name": "servonaut", "version": reported}}
+    if releases is not None:
+        document["releases"] = releases
+    return document
+
+
+class _Response:
+    def __init__(self, document):
+        self._body = json.dumps(document).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+
+class _Opener:
+    def __init__(self, document):
+        self._document = document
+
+    def open(self, request, timeout):
+        return _Response(self._document)
+
+
+# PyPI's JSON API reports the newest non-yanked stable release as
+# info.version even when a newer pre-release exists, and lists every
+# version, pre-releases included, in the releases table.
+_PRERELEASE_PUBLISHED = _index(
+    "2.27.0",
+    {
+        "2.26.0": [_file()],
+        "2.27.0": [_file()],
+        "2.28.0rc1": [_file()],
+        "2.28.0rc2": [_file()],
+    },
+)
+
+
+def test_index_version_skips_a_newer_prerelease_for_stable_installs():
+    assert latest_index_version(_PRERELEASE_PUBLISHED, include_prereleases=False) == "2.27.0"
+    assert latest_index_version(_PRERELEASE_PUBLISHED, include_prereleases=True) == "2.28.0rc2"
+
+
+def test_index_version_ignores_info_version_naming_a_prerelease():
+    # With every stable release yanked, the index reports its newest
+    # remaining release as info.version, even a pre-release.
+    document = _index(
+        "2.28.0rc1", {"2.27.0": [_file(yanked=True)], "2.28.0rc1": [_file()]}
+    )
+    assert latest_index_version(document, include_prereleases=False) is None
+    assert latest_index_version(document, include_prereleases=True) == "2.28.0rc1"
+
+
+def test_index_version_never_offers_yanked_or_empty_releases():
+    document = _index(
+        "2.27.2",
+        {
+            "2.27.0": [_file()],
+            "2.27.1": [_file(yanked=True), _file(yanked=True)],
+            "2.27.2": [],
+        },
+    )
+    assert latest_index_version(document, include_prereleases=False) == "2.27.0"
+
+
+def test_index_version_keeps_a_release_with_any_unyanked_file():
+    document = _index("2.27.0", {"2.27.0": [_file()], "2.27.1": [_file(yanked=True), _file()]})
+    assert latest_index_version(document, include_prereleases=False) == "2.27.1"
+
+
+def test_index_version_without_a_releases_table_uses_info_version():
+    # Some mirrors serve only info.version.
+    for releases in (None, {}):
+        stable = _index("2.27.0", releases)
+        candidate = _index("2.28.0rc1", releases)
+        assert latest_index_version(stable, include_prereleases=False) == "2.27.0"
+        assert latest_index_version(candidate, include_prereleases=False) is None
+        assert latest_index_version(candidate, include_prereleases=True) == "2.28.0rc1"
+
+
+def test_index_version_skips_versions_it_cannot_order():
+    document = _index("2.27.0", {"2.27.0": [_file()], "3.0.0-final": [_file()], "1!4.0": [_file()]})
+    assert latest_index_version(document, include_prereleases=True) == "2.27.0"
+
+
+def test_index_version_requires_info_version():
+    for document in ({}, {"info": {}}, {"info": None}, []):
+        with pytest.raises((KeyError, TypeError)):
+            latest_index_version(document, include_prereleases=False)
+
+
+@pytest.mark.parametrize(
+    "current,offered",
+    [
+        ("2.27.0", None),  # stable: the newer pre-release is not an update
+        ("2.26.0", "2.27.0"),  # stable: the newest stable release is
+        ("2.28.0rc1", "2.28.0rc2"),  # pre-release: newer candidates are
+        ("2.28.0rc2", None),
+    ],
+)
+def test_update_check_offers_prereleases_only_to_prereleases(current, offered):
+    service = _svc(current=current, latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+
+    assert service.check_for_update() == offered
+    assert service.follows_prereleases is (current.find("rc") > 0)
+    expected = UpdateCheckResult.UPDATE_AVAILABLE if offered else UpdateCheckResult.UP_TO_DATE
+    assert service.last_check_result is expected
+
+
+def test_update_check_moves_a_prerelease_to_the_final_release():
+    document = _index("2.28.0", {"2.28.0rc2": [_file()], "2.28.0": [_file()]})
+    service = _svc(current="2.28.0rc2", latest=None)
+    service._opener = _Opener(document)
+    assert service.check_for_update() == "2.28.0"
+
+
+def test_is_newer_orders_prereleases():
+    assert UpdateService._is_newer("2.28.0", "2.28.0rc2")
+    assert UpdateService._is_newer("2.28.0rc2", "2.28.0rc1")
+    assert UpdateService._is_newer("2.28.0rc1", "2.27.9")
+    assert UpdateService._is_newer("2.28.1rc1", "2.28.0rc1")
+    assert not UpdateService._is_newer("2.28.0rc1", "2.28.0")
+    assert not UpdateService._is_newer("not-a-version", "2.27.0")
+    assert not UpdateService._is_newer("2.28.0", "unknown")
+
+
+@pytest.mark.parametrize("kind", [DistributionKind.PIP, DistributionKind.PIPX])
+def test_stable_upgrade_commands_never_request_prereleases(kind):
+    command = _svc(current="2.27.0", kind=kind).get_upgrade_command()
+    assert command is not None
+    assert "--pre" not in command
+    assert not any(argument.startswith("--pip-args") for argument in command)
+
+
+def test_prerelease_upgrade_commands_request_prereleases():
+    pip = _svc(current="2.28.0rc1").get_upgrade_command()
+    pipx = _svc(current="2.28.0rc1", kind=DistributionKind.PIPX).get_upgrade_command()
+    assert pip == [sys.executable, "-m", "pip", "install", "--upgrade", "--pre", "servonaut"]
+    assert pipx == [str(Path("/usr/bin/pipx")), "upgrade", "--pip-args=--pre", "servonaut"]

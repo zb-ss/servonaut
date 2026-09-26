@@ -145,8 +145,14 @@ class PackageManagementCapability:
             "This Servonaut distribution cannot install Python dependencies."
         )
 
-    def self_update_argv(self, package: str = "servonaut") -> list[str]:
-        """Build a self-update argv when this distribution permits one."""
+    def self_update_argv(
+        self, package: str = "servonaut", *, include_prereleases: bool = False
+    ) -> list[str]:
+        """Build a self-update argv when this distribution permits one.
+
+        pip and pipx skip pre-releases unless asked, and a stable installation
+        never asks: ``include_prereleases`` is for a running pre-release only.
+        """
         if not isinstance(package, str) or not package:
             raise ValueError("package must be a non-empty string")
         if self.kind is PackageManagementKind.PIP:
@@ -154,9 +160,11 @@ class PackageManagementCapability:
                 raise RuntimeCapabilityError(
                     "Source installations cannot self-update; update from the source checkout."
                 )
-            return [*self.argv_prefix, "install", "--upgrade", package]
+            pre = ["--pre"] if include_prereleases else []
+            return [*self.argv_prefix, "install", "--upgrade", *pre, package]
         if self.kind is PackageManagementKind.PIPX:
-            return [*self.argv_prefix, "upgrade", package]
+            pre = ["--pip-args=--pre"] if include_prereleases else []
+            return [*self.argv_prefix, "upgrade", *pre, package]
         if self.kind is PackageManagementKind.UNSUPPORTED:
             raise RuntimeCapabilityError(
                 "Frozen Servonaut distributions cannot update themselves with pip."

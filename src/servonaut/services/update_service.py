@@ -41,6 +41,7 @@ from servonaut.runtime import (
     detect_runtime,
 )
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
+from servonaut.utils.package_version import PackageVersion
 
 log = logging.getLogger(__name__)
 
@@ -252,14 +253,24 @@ class UpdateService:
 
         self._latest = latest
         self._update_status = None
-        if self._is_newer(self._latest, self._current):
+        if latest is not None and self._is_newer(latest, self._current):
             self._last_result = UpdateCheckResult.UPDATE_AVAILABLE
             return self._latest
         self._last_result = UpdateCheckResult.UP_TO_DATE
         return None
 
-    def _fetch_pypi_version(self, url: str) -> str:
-        """Read ``info.version`` from a PyPI-style JSON document.
+    @property
+    def follows_prereleases(self) -> bool:
+        """True when the running version is itself a pre-release.
+
+        Only then are newer pre-releases offered and installed; a stable
+        installation is offered stable releases only.
+        """
+        current = PackageVersion.parse(self._current)
+        return current is not None and current.is_prerelease
+
+    def _fetch_pypi_version(self, url: str) -> Optional[str]:
+        """Return the version to offer from a PyPI-style JSON document.
 
         Uses the HTTPS-only opener, so a redirect can never downgrade the
         request to plain http.
@@ -267,7 +278,7 @@ class UpdateService:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
         with self._opener.open(request, timeout=_PYPI_SOCKET_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read())
-        return data["info"]["version"]
+        return latest_index_version(data, include_prereleases=self.follows_prereleases)
 
     def _check_frozen_update(self) -> Optional[str]:
         """Check the canonical signed release manifest for frozen distributions."""
@@ -480,7 +491,9 @@ class UpdateService:
         cannot run.
         """
         try:
-            return self._runtime.package_management.self_update_argv()
+            return self._runtime.package_management.self_update_argv(
+                include_prereleases=self.follows_prereleases
+            )
         except RuntimeCapabilityError:
             return None
 
@@ -623,16 +636,52 @@ class UpdateService:
 
     @staticmethod
     def _is_newer(latest: str, current: str) -> bool:
-        """Compare PEP 440 versions with a small dependency-free fallback."""
-        try:
-            from packaging.version import Version
+        """Compare PEP 440 versions; a version that cannot be ordered is never newer."""
+        latest_version = PackageVersion.parse(latest)
+        current_version = PackageVersion.parse(current)
+        if latest_version is None or current_version is None:
+            return False
+        return latest_version > current_version
 
-            return Version(latest) > Version(current)
-        except ImportError:
-            def parse(value: str) -> tuple[int, ...]:
-                return tuple(int(part) for part in value.split(".") if part.isdigit())
 
-            return parse(latest) > parse(current)
+def latest_index_version(
+    document: Mapping[str, object], *, include_prereleases: bool
+) -> Optional[str]:
+    """The newest installable version in a PyPI JSON project document.
+
+    ``info.version`` is the index's latest non-yanked stable release, but it
+    can name a pre-release when no stable release is available, and a mirror
+    may fill it differently. The ``releases`` table, when present, decides
+    instead: yanked versions and versions without files are never offered,
+    and pre-releases only when ``include_prereleases`` is set. Documents
+    without that table (some mirrors) fall back to ``info.version`` under the
+    same pre-release rule.
+
+    Raises:
+        KeyError, TypeError: If the document has no ``info.version``.
+    """
+    reported = document["info"]["version"]  # type: ignore[index]
+    installable: dict[str, bool] = {}
+    releases = document.get("releases")
+    if isinstance(releases, Mapping):
+        for version, files in releases.items():
+            installable[version] = (
+                isinstance(files, list)
+                and bool(files)
+                and not all(
+                    isinstance(entry, Mapping) and entry.get("yanked") is True
+                    for entry in files
+                )
+            )
+    versions = [version for version, ok in installable.items() if ok]
+    if installable.get(reported, True):
+        versions.append(reported)
+    offered = [
+        parsed
+        for parsed in map(PackageVersion.parse, versions)
+        if parsed is not None and (include_prereleases or not parsed.is_prerelease)
+    ]
+    return max(offered).text if offered else None
 
 
 def _read_limited(
