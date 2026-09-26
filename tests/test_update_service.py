@@ -31,7 +31,7 @@ def _svc(current="2.16.3", latest="2.17.0", kind=DistributionKind.PIP):
         pipx_contains_servonaut=kind is DistributionKind.PIPX,
         marker=(
             {"schema_version": 1, "distribution": kind.value, "product_version": current,
-             "console_helper": "servonaut-cli"}
+             "channel": "stable", "packaging_revision": 1, "console_helper": "servonaut-cli"}
             if kind is DistributionKind.PACKAGED_DESKTOP else None
         ),
     ))

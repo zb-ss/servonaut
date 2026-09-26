@@ -26,6 +26,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from servonaut.distribution.artifact_marker import (
+    ArtifactMarkerError,
+    identity_mismatches,
+    read_artifact_marker,
+)
 from servonaut.distribution.manifest import (
     SUPPORTED_ARCHITECTURES,
     SUPPORTED_PLATFORMS,
@@ -294,10 +299,16 @@ def plan_candidate(
     *,
     tag: str,
     source_commit: str,
+    artifact_files: Mapping[str, Path],
     requires_signing: bool = True,
     channel: Optional[ReleaseChannel] = None,
 ) -> ReleaseCandidate:
-    """Create a candidate from a validated manifest, failing closed on mismatches."""
+    """Create a candidate from a validated manifest, failing closed on mismatches.
+
+    Every artifact file must match the manifest, and the runtime marker inside
+    it must name the tag's release channel and the manifest's packaging
+    revision, so an update check orders the released build correctly.
+    """
     tag_channel = channel_for_tag(tag)
     if channel is not None and channel is not tag_channel:
         raise CandidatePolicyError(
@@ -323,6 +334,8 @@ def plan_candidate(
         raise CandidatePolicyError(
             "no-artifacts", "A candidate must declare at least one artifact."
         )
+    verify_artifact_files(artifacts, artifact_files)
+    _require_marker_identity(manifest, tag_channel, artifact_files)
     return ReleaseCandidate(
         tag=tag,
         channel=tag_channel,
@@ -332,6 +345,52 @@ def plan_candidate(
         artifacts=artifacts,
         requires_signing=bool(requires_signing),
     )
+
+
+def _require_marker_identity(
+    manifest: ReleaseManifest,
+    channel: ReleaseChannel,
+    artifact_files: Mapping[str, Path],
+) -> None:
+    """Require each artifact's runtime marker to match the tag and the manifest."""
+    revision = manifest.packaging_revision
+    if revision is None:
+        raise CandidatePolicyError(
+            "revision-missing",
+            "The manifest must state the packaging revision its artifacts carry.",
+        )
+    for artifact in manifest.artifacts:
+        try:
+            marker = read_artifact_marker(
+                artifact, Path(artifact_files[artifact.artifact_id])
+            )
+        except ArtifactMarkerError as error:
+            raise CandidatePolicyError(
+                "marker-unreadable",
+                "A candidate artifact's runtime marker could not be verified.",
+            ) from error
+        mismatches = identity_mismatches(
+            marker,
+            artifact=artifact,
+            product_version=manifest.product_version,
+            channel=channel.value,
+            packaging_revision=revision,
+        )
+        if "channel" in mismatches:
+            raise CandidatePolicyError(
+                "marker-channel-mismatch",
+                "A candidate artifact was built for a different release channel.",
+            )
+        if "packaging_revision" in mismatches:
+            raise CandidatePolicyError(
+                "marker-revision-mismatch",
+                "A candidate artifact carries a different packaging revision.",
+            )
+        if mismatches:
+            raise CandidatePolicyError(
+                "marker-mismatch",
+                "A candidate artifact's runtime marker does not match the release.",
+            )
 
 
 def _artifact_path(directory: Path, filename: str) -> Path:
@@ -693,6 +752,9 @@ def _run_plan(args: argparse.Namespace) -> None:
         manifest,
         tag=args.tag,
         source_commit=args.commit,
+        artifact_files=artifact_files_in(
+            args.artifacts_dir, _candidate_artifacts(manifest)
+        ),
         requires_signing=args.require_signing == "true",
         channel=requested,
     )
@@ -702,9 +764,6 @@ def _run_plan(args: argparse.Namespace) -> None:
             "version-mismatch",
             "The candidate product version does not match the checked-out package.",
         )
-    verify_artifact_files(
-        candidate.artifacts, artifact_files_in(args.artifacts_dir, candidate.artifacts)
-    )
     if args.evidence_out is not None:
         args.evidence_out.write_bytes(canonicalize_json(candidate.to_evidence()) + b"\n")
     print(f"tag={candidate.tag}")
