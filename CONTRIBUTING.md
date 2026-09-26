@@ -224,6 +224,10 @@ When you add a journey:
   by the desktop host in-process or by the real desktop child process). A
   journey using `sshd` must be marked `needs_sshd`. Journeys using `desktop`
   are also marked `needs_browser`; CI runs them in a job of their own.
+- For AI journeys (`e2e/journeys/ai/`), `fake_ai` stands in for OpenAI,
+  Anthropic and Ollama through the provider base-URL setting, and
+  `fake_cloud.ai.script(...)` scripts the hosted chat, replaying the recorded
+  streams in `tests/fixtures/sse`.
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - Mark it `e2e_pr` to run it on every pull request. A journey that turns out
