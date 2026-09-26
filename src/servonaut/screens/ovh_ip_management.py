@@ -192,10 +192,15 @@ class OVHIPManagementScreen(Screen):
             self._ips = await svc.list_ips()
         except Exception as exc:
             logger.error("Error loading OVH IPs: %s", exc)
-            self.notify(f"Failed to load IPs: {exc}", severity="error")
+            self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
             return
 
         self._populate_table()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched IP blocks for the new demo-mode state."""
+        if self._ips:
+            self._populate_table()
 
     def _populate_table(self) -> None:
         table = self.query_one("#ip_table", DataTable)
@@ -296,7 +301,7 @@ class OVHIPManagementScreen(Screen):
             await self._load_ips()
         except Exception as exc:
             logger.error("Error moving IP %s: %s", ip, exc)
-            self.notify(f"Move failed: {exc}", severity="error")
+            self.notify(f"Move failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Reverse DNS
@@ -355,7 +360,7 @@ class OVHIPManagementScreen(Screen):
             await self._load_ips()
         except Exception as exc:
             logger.error("Error setting reverse DNS for %s: %s", ip, exc)
-            self.notify(f"Set reverse DNS failed: {exc}", severity="error")
+            self.notify(f"Set reverse DNS failed: {exc}", severity="error", markup=False)
 
     async def _on_delete_rdns(self) -> None:
         """Delete reverse DNS for the selected IP after confirmation."""
@@ -410,4 +415,4 @@ class OVHIPManagementScreen(Screen):
             await self._load_ips()
         except Exception as exc:
             logger.error("Error deleting reverse DNS for %s: %s", ip, exc)
-            self.notify(f"Delete reverse DNS failed: {exc}", severity="error")
+            self.notify(f"Delete reverse DNS failed: {exc}", severity="error", markup=False)

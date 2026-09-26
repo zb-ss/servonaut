@@ -159,6 +159,9 @@ class UpdateService:
     ) -> None:
         self._runtime = runtime or detect_runtime()
         self._current = self._runtime.product_version
+        # Same-version builds are ordered only by the integer packaging revision
+        # the build wrote into its marker. The free-form build_revision label
+        # (for example a CI run identifier) is never parsed for ordering.
         self._current_revision = self._runtime.packaging_revision
         self._manifest_url = (
             manifest_url

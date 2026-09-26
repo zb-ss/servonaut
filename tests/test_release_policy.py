@@ -864,6 +864,9 @@ def test_release_candidate_template_step_writes_a_loadable_record(
     tmp_path: Path,
 ) -> None:
     # Imported here so the release-policy tests keep a light module import.
+    import io
+    import tarfile
+
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from scripts.distribution.qualification import load_matrix, load_record
@@ -877,10 +880,28 @@ def test_release_candidate_template_step_writes_a_loadable_record(
     from servonaut.runtime import DistributionKind
 
     release_file = tmp_path / "servonaut.tar.gz"
-    release_file.write_bytes(b"PAYLOAD")
+    marker = {
+        "schema_version": 1,
+        "distribution": "frozen-cli",
+        "product_version": "1.2.3",
+        "build_revision": "ci-r1",
+        "channel": "stable",
+        "packaging_revision": 1,
+        "console_helper": "servonaut",
+        "desktop_child": None,
+    }
+    with tarfile.open(release_file, "w:gz") as archive:
+        for name, data in (
+            ("servonaut", b"PAYLOAD"),
+            ("servonaut-runtime.json", json.dumps(marker).encode("utf-8")),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
     builder = ManifestBuilder(
         product_version="1.2.3",
         channel=ReleaseChannel.STABLE,
+        packaging_revision=1,
         expires_at="2099-01-01T00:00:00Z",
     )
     artifact = builder.add_artifact_file(
@@ -892,7 +913,12 @@ def test_release_candidate_template_step_writes_a_loadable_record(
         download_url="https://example.com/servonaut.tar.gz",
     )
     builder.sign_artifact(artifact.artifact_id, Ed25519PrivateKey.generate())
-    candidate = plan_candidate(builder.build(), tag="v1.2.3", source_commit="c" * 40)
+    candidate = plan_candidate(
+        builder.build(),
+        tag="v1.2.3",
+        source_commit="c" * 40,
+        artifact_files={artifact.artifact_id: release_file},
+    )
     (tmp_path / "candidate-evidence.json").write_bytes(
         canonicalize_json(candidate.to_evidence()) + b"\n"
     )

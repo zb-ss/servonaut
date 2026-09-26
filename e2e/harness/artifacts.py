@@ -65,6 +65,15 @@ _MIXED_CASE_TOKEN = re.compile(
 _HEX_TOKEN = re.compile(r"(?i)(?<![0-9a-z])[0-9a-f]{40,}(?![0-9a-z])")
 
 
+def journey_failed(node: object) -> bool:
+    """True when the test's setup or call failed (reports are kept on the item)."""
+    for when in ("setup", "call"):
+        report = getattr(node, f"rep_{when}", None)
+        if report is not None and report.failed:
+            return True
+    return False
+
+
 # Exact values to redact from this journey's artifacts (see register_secret).
 _REGISTERED: set[str] = set()
 

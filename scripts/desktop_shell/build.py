@@ -57,6 +57,13 @@ from scripts.standalone_cli.model import (
     TargetSpec,
     load_target_spec,
 )
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentity,
+    ReleaseIdentityError,
+    add_release_identity_arguments,
+    identity_for_release_tag,
+    resolve_release_identity,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGING_DIR = _REPO_ROOT / "packaging" / "desktop_shell"
@@ -82,6 +89,10 @@ _MACHINE_ARCHITECTURES = {
 # Inherited interpreter, installer and spec settings must not steer the
 # isolated build interpreter.
 _REMOVED_ENVIRONMENT_PREFIXES = ("python", "pip_", "servonaut_desktop_")
+# The GUI entry dispatches --_artifact-selftest itself, so PyInstaller always
+# bundles the self-test. The spec, profile and provenance record that fact; it
+# is not a build option.
+_ARTIFACT_SELFTEST_EMBEDDED = True
 
 _DirectoryIdentity = tuple[int, int]
 
@@ -119,7 +130,6 @@ class _SpecInputs:
     metadata_dir: Path
     frontend_dir: Path
     notices: _StagedNotices
-    require_artifact_selftest: bool
 
     def spec_environment(
         self, base: dict[str, str], dist_dir: Path
@@ -141,7 +151,7 @@ class _SpecInputs:
                 self.notices.embedded.staging_root
             ),
             "SERVONAUT_DESKTOP_REQUIRE_ARTIFACT_SELFTEST": (
-                "1" if self.require_artifact_selftest else "0"
+                "1" if _ARTIFACT_SELFTEST_EMBEDDED else "0"
             ),
         }
 
@@ -244,7 +254,6 @@ def _prepare_spec_inputs(
         metadata_dir=metadata_dir,
         frontend_dir=frontend_dir,
         notices=notices,
-        require_artifact_selftest=request.require_artifact_selftest,
     )
 
 
@@ -465,7 +474,7 @@ def _write_profile(staging_root: Path, request: DesktopBuildRequest) -> Path:
         "product_version": request.product_version,
         "excluded_modules": list(target.forbidden_modules),
         "hook_directory": str(_HOOKS_DIR.resolve()),
-        "require_artifact_selftest": request.require_artifact_selftest,
+        "require_artifact_selftest": _ARTIFACT_SELFTEST_EMBEDDED,
     }
     profile_path.write_text(json.dumps(profile_data, indent=2) + "\n", encoding="utf-8")
     return profile_path
@@ -600,6 +609,7 @@ def _write_runtime_marker(payload_root: Path, request: DesktopBuildRequest) -> P
         "distribution": "packaged-desktop",
         "product_version": request.product_version,
         "build_revision": request.build_revision,
+        **request.release_identity.marker_fields(),
         "console_helper": console_name,
         "desktop_child": child_name,
     }
@@ -662,7 +672,7 @@ def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) ->
         "architecture": target.architecture,
         "python_version": target.python_version,
         "wheel": request.wheel.name,
-        "require_artifact_selftest": request.require_artifact_selftest,
+        "require_artifact_selftest": _ARTIFACT_SELFTEST_EMBEDDED,
         "voice_runtime": {
             "python_version": voice_policy.python_version,
             "uv_version": voice_policy.uv_version,
@@ -790,6 +800,20 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _release_identity(args: argparse.Namespace, product_version: str) -> ReleaseIdentity:
+    """A release build takes its channel from its tag; others default to development."""
+    if args.release_tag is None:
+        return resolve_release_identity(
+            args.channel, args.packaging_revision, required=False
+        )
+    return identity_for_release_tag(
+        args.release_tag,
+        product_version=product_version,
+        channel=args.channel,
+        packaging_revision=args.packaging_revision,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the desktop builder."""
     parser = argparse.ArgumentParser(
@@ -799,18 +823,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
     parser.add_argument("--product-version", default=None)
-    parser.add_argument("--release-tag")
+    parser.add_argument(
+        "--release-tag",
+        help=(
+            "Release tag vX.Y.Z or vX.Y.Z-preview.N for the product version; "
+            "marks a release build and decides its channel."
+        ),
+    )
     parser.add_argument("--revision", default=None)
     parser.add_argument("--commit", default=None)
     parser.add_argument(
         "--output", "--output-dir", dest="output", type=Path, required=True
     )
-    parser.add_argument(
-        "--require-artifact-selftest",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Embed the authenticated artifact self-test in the GUI executable.",
-    )
+    add_release_identity_arguments(parser, required=False)
 
     args = parser.parse_args(argv)
     commit = args.commit or os.environ.get("GITHUB_SHA", "HEAD")
@@ -818,8 +843,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         product_version = args.product_version or _wheel_product_version(args.wheel)
-        if args.release_tag is not None and args.release_tag != f"v{product_version}":
-            parser.error("--release-tag must equal v<product-version>")
         target_spec = load_desktop_target_spec(args.policy, args.target)
         request = DesktopBuildRequest(
             wheel=args.wheel,
@@ -828,10 +851,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_revision=revision,
             source_commit=commit,
             output_dir=args.output,
-            require_artifact_selftest=args.require_artifact_selftest,
+            release_identity=_release_identity(args, product_version),
         )
         build_desktop(request)
-    except (DesktopPolicyValidationError, TypeError) as err:
+    except (DesktopPolicyValidationError, ReleaseIdentityError, TypeError) as err:
         parser.error(str(err))
 
     return 0

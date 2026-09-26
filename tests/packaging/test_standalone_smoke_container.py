@@ -60,6 +60,8 @@ def _request(tmp_path: Path) -> ContainerSmokeRequest:
                 "distribution": "frozen-cli",
                 "product_version": "9.8.7",
                 "build_revision": "test-revision",
+                "channel": "stable",
+                "packaging_revision": 1,
                 "console_helper": "servonaut",
                 "desktop_child": None,
             }
