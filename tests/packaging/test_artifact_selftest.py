@@ -263,6 +263,7 @@ def test_fixture_cache_uses_the_real_cache_service_format(
     monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
     cache = CacheService(ttl_seconds=3600)
     assert cache.get_age() is not None
+    assert cache.is_fresh() is True
     assert cache.load_any() == [selftest._FIXTURE_INSTANCE]
     assert selftest._verify_fixtures(config_path, cache_path, expected) == {
         "config": True,

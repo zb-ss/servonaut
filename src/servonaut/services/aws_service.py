@@ -66,6 +66,20 @@ class AWSService(InstanceServiceInterface):
         self.last_fetch_error: Optional[str] = None
         self._failed_regions: List[str] = []
 
+    def get_cached_instances(self) -> List[dict]:
+        """Return the cached AWS instances synchronously, regardless of TTL.
+
+        Mirrors ``OVHService`` / ``HetznerService.get_cached_instances`` so
+        headless surfaces (CLI) read every provider's cache the same way.
+        ``CacheService.load_any`` already absorbs a missing or corrupt cache
+        file, so callers need no exception handling of their own.
+
+        Returns:
+            Cached instance list, or an empty list if no cache exists.
+        """
+        cached = self.cache_service.load_any()
+        return cached if cached is not None else []
+
     async def fetch_instances(self) -> List[dict]:
         """Fetch instances from AWS across all regions.
 

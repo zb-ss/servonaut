@@ -187,3 +187,32 @@ class TestDangerousFloorEscalationIntegration:
         )
         result = run(bridge.handle_tool_call(call_))
         assert result.status == "denied"
+
+    def test_floor_row_records_server_tier_as_sent(self):
+        """``server_tier`` is the service's label, not the client-escalated one.
+
+        ``aws_terminate_instance`` has no client mirror entry (floor
+        "standard"), so a "readonly" label is first raised to "standard"
+        by the client floor, then to "dangerous" by the pattern floor.
+        The floor row must still say the service sent "readonly".
+        """
+        bridge, audit = _make_bridge()
+        call_ = ToolCall(
+            tool_call_id="tc-floor-sent",
+            tool="aws_terminate_instance",
+            args={},
+            guard_level="readonly",
+            conversation_id="conv-floor",
+        )
+        run(bridge.handle_tool_call(call_))
+
+        floor_rows = [
+            c for c in audit.log.call_args_list
+            if c.args[4] == "dangerous_floor_escalation"
+        ]
+        assert len(floor_rows) == 1
+        kwargs = floor_rows[0].kwargs
+        assert kwargs["server_tier"] == "readonly"
+        assert kwargs["effective_tier"] == "dangerous"
+        assert kwargs["conversation_id"] == "conv-floor"
+        assert kwargs["tool_call_id"] == "tc-floor-sent"

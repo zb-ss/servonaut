@@ -329,6 +329,19 @@ class ConnectionServiceInterface(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_target_port(self, instance: dict) -> Optional[int]:
+        """Get the SSH port for the target host.
+
+        Args:
+            instance: Instance dictionary.
+
+        Returns:
+            The instance's own SSH port (custom servers), or None for the
+            SSH default.
+        """
+        pass
+
 
 class ScanServiceInterface(ABC):
     """Interface for server scanning (keyword search in files)."""
@@ -349,6 +362,10 @@ class ScanServiceInterface(ABC):
 
         Returns:
             List of match dictionaries with keys: file, line_number, line_text, keyword.
+
+        Raises:
+            An implementation-specific error when the server cannot be
+            reached, so callers can report it instead of showing "no matches".
         """
         pass
 

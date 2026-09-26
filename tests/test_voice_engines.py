@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from servonaut.config.schema import VoiceConfig
+from servonaut.services import voice_engines
 from servonaut.services.voice_engines import (
     DEFAULT_ENGINE,
     ENGINES,
@@ -54,6 +55,61 @@ class TestSileroVadRegistry:
 
     def test_size_constant_is_plausible(self):
         assert 0 < SILERO_VAD_BYTES < 10_000_000  # a small VAD, not an LLM
+
+
+class TestModelsRoot:
+    """Every path helper resolves against one models root."""
+
+    def test_env_override_sets_the_default_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(voice_engines.VOICE_MODELS_DIR_ENV, str(tmp_path))
+        assert voice_engines.default_voice_models_root() == tmp_path
+
+    def test_default_root_is_under_the_data_root(self, monkeypatch):
+        monkeypatch.delenv(voice_engines.VOICE_MODELS_DIR_ENV, raising=False)
+        root = voice_engines.default_voice_models_root()
+        assert root == Path("~/.servonaut/voice_models").expanduser()
+
+    def test_explicit_root_is_honoured_by_every_helper(self, tmp_path):
+        assert silero_vad_model_dir(tmp_path) == tmp_path / SILERO_VAD_MODEL_ID
+        assert voice_engines.kokoro_model_dir(tmp_path).parent == tmp_path
+        assert nemotron_model_dir(160, tmp_path) == tmp_path / "nemotron-3.5-160ms-int8"
+
+    def test_setting_the_root_moves_every_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(voice_engines, "VOICE_MODEL_ROOT", voice_engines.VOICE_MODEL_ROOT)
+        voice_engines.set_voice_models_root(tmp_path)
+        assert voice_engines.voice_models_root() == tmp_path
+        assert silero_vad_model_dir().parent == tmp_path
+        assert voice_engines.kokoro_model_dir().parent == tmp_path
+        assert nemotron_model_dir(320).parent == tmp_path
+
+    def test_streaming_model_presence_needs_every_file(self, tmp_path):
+        model_dir = nemotron_model_dir(80, tmp_path)
+        model_dir.mkdir(parents=True)
+        names = list(voice_engines.NEMOTRON_FILES.values())
+        for name in names[:-1]:
+            (model_dir / name).write_bytes(b"x")
+        assert not voice_engines.is_nemotron_model_present(80, tmp_path)
+        (model_dir / names[-1]).write_bytes(b"x")
+        assert voice_engines.is_nemotron_model_present(80, tmp_path)
+        assert not voice_engines.is_nemotron_model_present(320, tmp_path)
+
+
+class TestWhisperCache:
+    """Batch weights live in the Hugging Face hub cache, not the models root."""
+
+    def test_cached_only_when_the_weights_file_exists(self, tmp_path):
+        snapshot = tmp_path / "models--Systran--faster-whisper-small" / "snapshots" / "abc"
+        snapshot.mkdir(parents=True)
+        assert not voice_engines.is_whisper_model_cached("small", tmp_path)
+        (snapshot / "model.bin").write_bytes(b"weights")
+        assert voice_engines.is_whisper_model_cached("small", tmp_path)
+        assert not voice_engines.is_whisper_model_cached("medium", tmp_path)
+
+    def test_hub_cache_honours_hf_home(self, tmp_path, monkeypatch):
+        for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HF_HOME", str(tmp_path))
+        assert voice_engines.huggingface_hub_cache_root() == tmp_path / "hub"
 
 
 class TestEngineRegistry:

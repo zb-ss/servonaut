@@ -286,6 +286,8 @@ Configure AI log analysis under the `ai_provider` key. Each provider has its own
 | `base_url` | string | `""` | Custom API base URL — set to `https://ollama.com` to point Ollama at the cloud instead of `http://localhost:11434` |
 | `max_tokens` | int | `2000` | Maximum response tokens |
 | `temperature` | float | `0.3` | Sampling temperature |
+| `stream_silence_timeout_seconds` | float | `35.0` | Servonaut AI only: how long a streamed reply may go without any data (the service sends a keep-alive about every 15 s) before the connection counts as lost. Accepted range 20–600; values outside it are clamped. Time spent answering a tool prompt or running a tool does not count |
+| `tool_confirm_timeout_seconds` | float | `50.0` | Servonaut AI only: how long a tool confirmation prompt stays open. When it passes, the prompt closes and the tool is not run. The service waits about 60 s for a tool result by default, so keep this below that |
 
 Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-sonnet-4-20250514`, Gemini → `gemini-2.0-flash`, Ollama → `llama3`. When using Ollama Cloud, model names take **no `-cloud` suffix** (e.g. `gpt-oss:120b`); the suffix is only used by local Ollama proxying to a cloud model.
 
@@ -383,6 +385,13 @@ If you pointed either variable at a development or staging server over plain `ht
 
 The hosted MCP server tells the CLI where to send tool calls. That address is used only when it has the same scheme, host and port as `SERVONAUT_MCP_URL`; otherwise the CLI ignores it and uses `/mcp/message` on that base, so the login token never goes to another host.
 
+The relay listener's local timeouts can be lengthened on slow or heavily loaded machines. Values are in seconds; a missing, non-numeric, zero, negative or infinite value falls back to the default, so a typo can never make shutdown unbounded.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERVONAUT_RELAY_CONTROL_TIMEOUT_SECONDS` | `2` | Bound on each local control request, such as the TUI asking a background listener to hand over |
+| `SERVONAUT_RELAY_CLEANUP_TIMEOUT_SECONDS` | `10` | Deadline for the listener's shutdown cleanup; never shorter than the control timeout |
+
 These can be set inline, exported, or added to `~/.secrets/servonaut.env`:
 
 ```
@@ -402,6 +411,7 @@ TUI's in-process listener:
     "base_url": "https://api.servonaut.dev",
     "mercure_url": "https://servonaut.dev/.well-known/mercure",
     "heartbeat_interval": 30,
+    "heartbeat_rejection_alert_after": 3,
     "ai_tool_auto_approve": "standard"
   }
 }
@@ -412,6 +422,7 @@ TUI's in-process listener:
 | `base_url` | _(derived from API base)_ | REST API for heartbeats, Mercure JWTs, and results |
 | `mercure_url` | _(derived from API base)_ | The Mercure hub URL |
 | `heartbeat_interval` | `30` | Seconds between heartbeats |
+| `heartbeat_rejection_alert_after` | `3` | Rejected heartbeats (while your session is still valid) before the listener reports that commands are not being delivered: one `heartbeat_rejected` line in `~/.servonaut/logs/relay.log` and the TUI indicator changes from "connected" to "connecting…". The listener keeps retrying and returns to "connected" once a heartbeat is accepted; until then it renews the session on every Nth rejected heartbeat only. Minimum `1`; lower or non-numeric values are treated as `1` and the default respectively. |
 | `ai_tool_auto_approve` | `"standard"` | Max guard tier a headless listener auto-approves for AI chat tool calls: `"readonly"`, `"standard"`, or `"dangerous"`. `"dangerous"` additionally requires the dangerous-AI-tools entitlement. Tools above the tier are denied with an explanatory message. |
 
 `base_url` receives your login token and `mercure_url` the relay subscription token, so both follow the same rule as the endpoint variables above: `https://`, or `http://` only for `127.0.0.1`, `::1` and `localhost`, with no embedded credentials, query, fragment, spaces or backslashes. With any other value `servonaut connect` (and `connect --bg`, before it starts anything) exits with an error naming the key (for example `Error: relay.base_url must be an https:// URL ...`), the TUI reports that the relay failed to start and shows the reason on the relay status screen, and Settings refuses to save it. Previously the TUI listener accepted any URL, and `servonaut connect` refused `http://` even for a loopback test server. If you saved an `http://` address on your network here, change it to `https://`, or clear both fields to use the defaults derived from the API base.

@@ -67,6 +67,43 @@ def build_default_probers(
     return probers
 
 
+def default_module_names() -> List[str]:
+    """Return the module name of every default prober, in probing order.
+
+    Read from the prober classes (no instantiation), so the list includes
+    ``logs`` even though :func:`build_default_probers` omits that prober
+    when its services are not wired. Surfaces that offer a module choice
+    (e.g. team sharing) use this instead of hand-maintained name lists.
+    """
+    from .os import OSProber
+    from .runtimes import RuntimesProber
+    from .services import ServicesProber
+    from .web_stack import WebStackProber
+    from .logs import LogsProber
+    from .databases import DatabasesProber
+    from .containers import ContainersProber
+    from .network import NetworkProber
+    from .git import GitProber
+    from .disk import DiskProber
+
+    return [
+        cls.name
+        for cls in (
+            OSProber,
+            RuntimesProber,
+            ServicesProber,
+            WebStackProber,
+            DatabasesProber,
+            ContainersProber,
+            NetworkProber,
+            GitProber,
+            DiskProber,
+            LogsProber,
+        )
+    ]
+
+
 __all__ = [
     "build_default_probers",
+    "default_module_names",
 ]

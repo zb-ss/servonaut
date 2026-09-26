@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-import hashlib
-import http.client
 import json
 import os
 import re
 import stat
-import tarfile
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
-import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Literal
+from typing import Literal
 
 from scripts.standalone_cli.artifact_types import ArtifactEvidenceError
 from scripts.standalone_cli.bounded_command import run_bounded_command
 from scripts.standalone_cli.model import TargetSpec
+from scripts.standalone_cli.pinned_asset import (
+    AssetRules,
+    check_download_url,
+    download_pinned_asset,
+    extract_pinned_member,
+)
 
 _POLICY_FIELDS = frozenset({"schema_version", "tool"})
 _TOOL_FIELDS = frozenset(
@@ -98,26 +97,14 @@ class SyftPolicy:
     targets: Mapping[str, SyftTarget]
 
 
-class _RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Allow GitHub release redirects only to the reviewed asset hosts."""
+def _asset_rules(redirect_hosts: frozenset[str] = frozenset()) -> AssetRules:
+    """Syft assets start at the release origin and redirect only to reviewed hosts."""
 
-    def __init__(self, allowed_hosts: frozenset[str]) -> None:
-        super().__init__()
-        self._allowed_hosts = allowed_hosts
+    def validate(url: str, is_redirect: bool) -> None:
+        hosts = redirect_hosts if is_redirect else frozenset({_ORIGIN_HOST})
+        _validate_download_url(url, hosts, is_redirect=is_redirect)
 
-    def redirect_request(
-        self,
-        request: urllib.request.Request,
-        file_pointer: BinaryIO,
-        code: int,
-        message: str,
-        headers: Mapping[str, str],
-        new_url: str,
-    ) -> urllib.request.Request | None:
-        _validate_download_url(new_url, self._allowed_hosts, is_redirect=True)
-        return super().redirect_request(
-            request, file_pointer, code, message, headers, new_url
-        )
+    return AssetRules("Syft", ArtifactEvidenceError, validate)
 
 
 def load_syft_policy(policy_path: Path) -> SyftPolicy:
@@ -356,21 +343,7 @@ def _policy_url(
 def _validate_download_url(
     value: str, allowed_hosts: frozenset[str], *, is_redirect: bool
 ) -> None:
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError as error:
-        raise ArtifactEvidenceError("Syft download URL is invalid") from error
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname not in allowed_hosts
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in {None, 443}
-        or parsed.fragment
-        or (not is_redirect and parsed.query)
-    ):
-        raise ArtifactEvidenceError("Syft download URL is invalid")
+    check_download_url(_asset_rules(), value, allowed_hosts, is_redirect=is_redirect)
 
 
 def _download(
@@ -381,66 +354,15 @@ def _download(
 ) -> None:
     """Fetch one pinned asset within the policy size and time limits."""
     _validate_download_url(url, frozenset({_ORIGIN_HOST}), is_redirect=False)
-    request = urllib.request.Request(
-        url, headers={"Accept": "application/octet-stream"}
+    download_pinned_asset(
+        _asset_rules(policy.redirect_hosts),
+        url,
+        destination,
+        expected_sha256,
+        max_bytes=policy.max_download_bytes,
+        deadline_seconds=policy.download_timeout_seconds,
+        socket_timeout_seconds=policy.version_timeout_seconds,
     )
-    opener = urllib.request.build_opener(
-        _RestrictedRedirectHandler(policy.redirect_hosts)
-    )
-    deadline = time.monotonic() + policy.download_timeout_seconds
-    digest = hashlib.sha256()
-    total = 0
-    created = False
-    try:
-        with opener.open(request, timeout=policy.version_timeout_seconds) as response:
-            _validate_download_url(
-                response.geturl(), policy.redirect_hosts, is_redirect=True
-            )
-            _require_declared_length(response, policy.max_download_bytes)
-            with destination.open("xb") as handle:
-                created = True
-                while chunk := response.read1(1024 * 1024):
-                    if time.monotonic() > deadline:
-                        raise ArtifactEvidenceError("Syft download timed out")
-                    total += len(chunk)
-                    if total > policy.max_download_bytes:
-                        raise ArtifactEvidenceError(
-                            "Syft download exceeds its size limit"
-                        )
-                    digest.update(chunk)
-                    handle.write(chunk)
-    except ArtifactEvidenceError:
-        _discard_download(destination, created)
-        raise
-    except (
-        OSError,
-        TimeoutError,
-        urllib.error.URLError,
-        http.client.HTTPException,
-    ) as error:
-        _discard_download(destination, created)
-        raise ArtifactEvidenceError("Syft download failed") from error
-    if digest.hexdigest() != expected_sha256:
-        _discard_download(destination, created)
-        raise ArtifactEvidenceError("Syft download checksum does not match policy")
-
-
-def _require_declared_length(response: http.client.HTTPResponse, maximum: int) -> None:
-    content_length = response.headers.get("Content-Length")
-    if content_length is None:
-        return
-    try:
-        declared_length = int(content_length)
-    except ValueError as error:
-        raise ArtifactEvidenceError("Syft download length is invalid") from error
-    if declared_length < 0 or declared_length > maximum:
-        raise ArtifactEvidenceError("Syft download exceeds its size limit")
-
-
-def _discard_download(destination: Path, created: bool) -> None:
-    """Remove only a partial file this download created itself."""
-    if created:
-        destination.unlink(missing_ok=True)
 
 
 def _parse_manifest(path: Path, max_bytes: int) -> dict[str, str]:
@@ -482,85 +404,17 @@ def _extract_verified_executable(
 def _extract_zip_member(
     archive_path: Path, member_name: str, destination: Path, max_bytes: int
 ) -> None:
-    try:
-        with zipfile.ZipFile(archive_path) as archive:
-            members: dict[str, zipfile.ZipInfo] = {}
-            total = 0
-            for info in archive.infolist():
-                name = _normalise_archive_member(info.filename)
-                if name in members:
-                    raise ArtifactEvidenceError("Syft archive has duplicate members")
-                mode = (info.external_attr >> 16) & 0xFFFF
-                if info.is_dir():
-                    pass
-                elif (mode and not stat.S_ISREG(mode)) or info.flag_bits & 0x1:
-                    raise ArtifactEvidenceError(
-                        "Syft archive contains an unsafe member"
-                    )
-                total += info.file_size
-                if info.file_size < 0 or total > max_bytes:
-                    raise ArtifactEvidenceError("Syft archive exceeds its size limit")
-                members[name] = info
-            selected = members.get(member_name)
-            if selected is None or selected.is_dir():
-                raise ArtifactEvidenceError("Syft executable member is missing")
-            with archive.open(selected) as source, destination.open("xb") as output:
-                _copy_bounded(source, output, max_bytes)
-    except ArtifactEvidenceError:
-        destination.unlink(missing_ok=True)
-        raise
-    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
-        destination.unlink(missing_ok=True)
-        raise ArtifactEvidenceError("Syft archive is invalid") from error
+    extract_pinned_member(
+        _asset_rules(), archive_path, "zip", member_name, destination, max_bytes
+    )
 
 
 def _extract_tar_member(
     archive_path: Path, member_name: str, destination: Path, max_bytes: int
 ) -> None:
-    try:
-        with tarfile.open(archive_path, mode="r:gz") as archive:
-            members: dict[str, tarfile.TarInfo] = {}
-            total = 0
-            for info in archive.getmembers():
-                name = _normalise_archive_member(info.name)
-                if name in members:
-                    raise ArtifactEvidenceError("Syft archive has duplicate members")
-                if not (info.isfile() or info.isdir()):
-                    raise ArtifactEvidenceError(
-                        "Syft archive contains an unsafe member"
-                    )
-                total += info.size
-                if info.size < 0 or total > max_bytes:
-                    raise ArtifactEvidenceError("Syft archive exceeds its size limit")
-                members[name] = info
-            selected = members.get(member_name)
-            if selected is None or not selected.isfile():
-                raise ArtifactEvidenceError("Syft executable member is missing")
-            source = archive.extractfile(selected)
-            if source is None:
-                raise ArtifactEvidenceError("Syft executable member is missing")
-            with source, destination.open("xb") as output:
-                _copy_bounded(source, output, max_bytes)
-    except ArtifactEvidenceError:
-        destination.unlink(missing_ok=True)
-        raise
-    except (OSError, tarfile.TarError) as error:
-        destination.unlink(missing_ok=True)
-        raise ArtifactEvidenceError("Syft archive is invalid") from error
-
-
-def _normalise_archive_member(value: str) -> str:
-    if not value or "\x00" in value or "\\" in value:
-        raise ArtifactEvidenceError("Syft archive member is invalid")
-    stripped = value.removesuffix("/")
-    path = PurePosixPath(stripped)
-    if (
-        not stripped
-        or path.is_absolute()
-        or any(part in {"", ".", ".."} for part in stripped.split("/"))
-    ):
-        raise ArtifactEvidenceError("Syft archive member is invalid")
-    return path.as_posix()
+    extract_pinned_member(
+        _asset_rules(), archive_path, "tar.gz", member_name, destination, max_bytes
+    )
 
 
 def _verify_syft_version(
@@ -741,15 +595,6 @@ def _read_bounded(path: Path, label: str, max_bytes: int) -> bytes:
     if len(data) > max_bytes:
         raise ArtifactEvidenceError(f"{label} exceeds its size limit")
     return data
-
-
-def _copy_bounded(source: BinaryIO, destination: BinaryIO, max_bytes: int) -> None:
-    total = 0
-    while chunk := source.read(1024 * 1024):
-        total += len(chunk)
-        if total > max_bytes:
-            raise ArtifactEvidenceError("Syft executable exceeds its size limit")
-        destination.write(chunk)
 
 
 def _bounded_int(value: object, label: str, minimum: int, maximum: int) -> int:

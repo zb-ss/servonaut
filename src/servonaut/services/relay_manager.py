@@ -22,7 +22,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from servonaut.services.relay_control import _complete_owned_cleanup
+from servonaut.services.relay_control import (
+    DEFAULT_CONTROL_TIMEOUT_SECONDS,
+    _complete_owned_cleanup,
+    cleanup_deadline_seconds,
+    configured_control_timeout_seconds,
+)
 from servonaut.services.relay_lock import (
     DEFAULT_LOCK_PATH,
     LockOwner,
@@ -94,6 +99,20 @@ class StartResult:
 StateCallback = Callable[[RelayState], None]
 
 
+@dataclass
+class _StopScope:
+    """The lifecycle objects one ``stop()`` call owns, captured when it starts.
+
+    Settling compares identities against this scope, so a stop that finishes
+    late can never release a newer lock or clear a newer listener task.
+    """
+
+    lock: RelayLock | None
+    task: asyncio.Task | None
+    listener: Any
+    settled: bool = False
+
+
 class RelayManager:
     """Owns the lifecycle of the in-process relay listener."""
 
@@ -108,6 +127,7 @@ class RelayManager:
         control_server_factory=None,
         control_record_path=None,
         control_timeout_seconds=None,
+        cleanup_timeout_seconds=None,
         app: Any = None,
     ) -> None:
         self._config_manager = config_manager
@@ -122,6 +142,8 @@ class RelayManager:
         self._control_server_factory = control_server_factory
         self._control_record_path = control_record_path
         self._control_timeout_seconds = control_timeout_seconds
+        # ``None`` defers to the environment-configured cleanup deadline.
+        self._cleanup_timeout_seconds = cleanup_timeout_seconds
         self._lock: RelayLock | None = None
         self._listener = None
         self._task: asyncio.Task | None = None
@@ -307,24 +329,14 @@ class RelayManager:
             self._control_server = control_server
             await control_server.start(self._release_for_handover)
         except asyncio.CancelledError:
-            await _complete_owned_cleanup(
-                self._rollback_control_startup(
-                    control_server,
-                    startup_listener,
-                    startup_lock,
-                    RelayState.STOPPED,
-                )
+            await self._settle_failed_startup(
+                control_server, startup_listener, startup_lock, RelayState.STOPPED
             )
             raise
         except Exception:
             logger.exception("Could not start local relay control server")
-            await _complete_owned_cleanup(
-                self._rollback_control_startup(
-                    control_server,
-                    startup_listener,
-                    startup_lock,
-                    RelayState.ERROR,
-                )
+            await self._settle_failed_startup(
+                control_server, startup_listener, startup_lock, RelayState.ERROR
             )
             return StartResult(RelayState.ERROR, "Could not start local relay control.")
 
@@ -332,7 +344,7 @@ class RelayManager:
         # clears this reference before awaiting its close, so never schedule a
         # listener after shutdown has already won the lifecycle race.
         if self._control_server is not control_server or self._lock is None:
-            await control_server.close()
+            await self._close_control_server(control_server)
             self._set_state(RelayState.STOPPED)
             return StartResult(RelayState.STOPPED, "Relay startup was stopped.")
 
@@ -352,48 +364,102 @@ class RelayManager:
 
         Textual may cancel shutdown workers. Owned state is still torn down
         deterministically, then that cancellation is propagated to the caller.
+
+        The asynchronous part is bounded: it gets ``grace_seconds`` plus the
+        cleanup deadline, and if cut short the same again to unwind, so the
+        worst case is 2 x (grace + cleanup deadline). Whatever happens there,
+        the lock, task and listener captured when this call started are
+        settled synchronously before it returns. A lifecycle started in the
+        meantime is never touched.
         """
         control_server = self._control_server if close_control else None
         if close_control:
             self._control_server = None
-        await _complete_owned_cleanup(
-            self._stop_owned_resources(
-                grace_seconds=grace_seconds,
-                control_server=control_server,
+        scope = _StopScope(lock=self._lock, task=self._task, listener=self._listener)
+        try:
+            await _complete_owned_cleanup(
+                self._stop_owned_resources(
+                    scope,
+                    grace_seconds=grace_seconds,
+                    control_server=control_server,
+                ),
+                timeout_seconds=grace_seconds + self._cleanup_deadline_seconds(),
             )
-        )
+        except asyncio.TimeoutError:
+            pass  # Already logged; the ``finally`` below settles this stop.
+        finally:
+            self._settle_stopped(scope)
 
     async def _stop_owned_resources(
         self,
+        scope: _StopScope,
         *,
         grace_seconds: float,
         control_server,
     ) -> None:
-        """Perform idempotent shutdown work, allowing cancellation to escape."""
-        if control_server is not None:
-            try:
-                await control_server.close()
-            except Exception:
-                logger.exception("Could not close local relay control server")
-        task = self._task
-        listener = self._listener
-        if listener is not None:
-            try:
-                listener.stop()
-            except Exception:
-                logger.exception("Could not stop relay listener")
+        """Perform idempotent shutdown work, allowing cancellation to escape.
+
+        The synchronous part sits in ``finally`` so that a cleanup deadline
+        cancelling this coroutine still releases the lock and settles the
+        state.
+        """
+        try:
+            if control_server is not None:
+                await self._close_control_server(control_server)
+            await self._stop_listener_task(scope, grace_seconds)
+        finally:
+            self._settle_stopped(scope)
+
+    async def _stop_listener_task(self, scope: _StopScope, grace_seconds: float) -> None:
+        """Signal the listener, cancel its task and wait out the grace period.
+
+        ``asyncio.wait`` neither re-cancels the task on timeout nor waits for
+        it when this coroutine is itself cancelled, so a listener that
+        ignores cancellation can delay the stop by ``grace_seconds`` at most.
+        """
+        task = scope.task
+        self._signal_listener_stop(scope.listener)
+        if task is None or task.done():
+            return
+        task.cancel()
+        done, _ = await asyncio.wait((task,), timeout=grace_seconds)
+        if not done:
+            logger.warning("Relay listener did not stop within its grace period")
+        elif not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "Relay listener failed while stopping", exc_info=task.exception()
+            )
+
+    def _signal_listener_stop(self, listener) -> None:
+        if listener is None:
+            return
+        try:
+            listener.stop()
+        except Exception:
+            logger.exception("Could not stop relay listener")
+
+    def _settle_stopped(self, scope: _StopScope) -> None:
+        """Synchronously finish one stop; only the first call for a scope acts.
+
+        Only objects captured in ``scope`` are released or cleared, so a stop
+        that settles late cannot touch a lifecycle started after it.
+        """
+        if scope.settled:
+            return
+        scope.settled = True
+        task = scope.task
         if task is not None and not task.done():
+            # The bounded stop was cut short or the listener ignores cancellation.
+            self._signal_listener_stop(scope.listener)
             task.cancel()
-            try:
-                await asyncio.wait_for(task, timeout=grace_seconds)
-            except asyncio.TimeoutError:
-                logger.warning("Relay listener did not stop within its grace period")
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("Relay listener failed while stopping")
+        superseded = (self._lock is not None and self._lock is not scope.lock) or (
+            self._task is not None and self._task is not task
+        )
+        if superseded:
+            return
         self._task = None
-        self._listener = None
+        if self._listener is scope.listener:
+            self._listener = None
         self._release_lock()
         self._set_state(RelayState.STOPPED)
         log_relay_event("stopped", mode="tui", reason="explicit")
@@ -421,11 +487,18 @@ class RelayManager:
             control_server = self._control_server
             self._control_server = None
             if control_server is not None:
-                await control_server.close()
+                await self._close_control_server(control_server)
 
     async def _release_for_handover(self) -> None:
-        """Release the live TUI listener before the control success response."""
+        """Release the live TUI listener before the control success response.
+
+        Raises when the lock is still held afterwards, so the requester is
+        told the release failed instead of being acknowledged.
+        """
+        lock = self._lock
         await self.stop(close_control=False)
+        if self._lock is not None or (lock is not None and lock.is_held):
+            raise RuntimeError("The relay lock is still held")
 
     async def _rollback_control_startup(
         self,
@@ -457,6 +530,47 @@ class RelayManager:
             if owns_control or owns_listener or owns_lock:
                 self._set_state(terminal_state)
 
+    async def _settle_failed_startup(
+        self,
+        control_server,
+        startup_listener,
+        startup_lock,
+        terminal_state: RelayState,
+    ) -> None:
+        """Roll back a failed start within the cleanup deadline.
+
+        A deadline overrun is logged by the cleanup helper and must not
+        replace the start outcome (its error result or its cancellation);
+        the rollback settles the manager state in its own ``finally``.
+        """
+        try:
+            await _complete_owned_cleanup(
+                self._rollback_control_startup(
+                    control_server,
+                    startup_listener,
+                    startup_lock,
+                    terminal_state,
+                ),
+                timeout_seconds=self._cleanup_deadline_seconds(),
+            )
+        except asyncio.TimeoutError:
+            pass
+
+    async def _close_control_server(self, control_server) -> None:
+        """Close the control server, logging instead of raising on failure."""
+        try:
+            await control_server.close()
+        except Exception:
+            logger.exception("Could not close local relay control server")
+
+    def _cleanup_deadline_seconds(self) -> float:
+        """The cleanup deadline, never shorter than this manager's control timeout."""
+        if self._control_timeout_seconds is None:
+            control_timeout = DEFAULT_CONTROL_TIMEOUT_SECONDS
+        else:
+            control_timeout = configured_control_timeout_seconds(self._control_timeout_seconds)
+        return cleanup_deadline_seconds(self._cleanup_timeout_seconds, control_timeout)
+
     def _build_control_server(self):
         """Construct the local authenticated control server for this lifecycle."""
         kwargs = {}
@@ -464,6 +578,8 @@ class RelayManager:
             kwargs["record_path"] = self._control_record_path
         if self._control_timeout_seconds is not None:
             kwargs["timeout_seconds"] = self._control_timeout_seconds
+        if self._cleanup_timeout_seconds is not None:
+            kwargs["cleanup_timeout_seconds"] = self._cleanup_timeout_seconds
         if self._control_server_factory is not None:
             return self._control_server_factory(**kwargs)
         from servonaut.services.relay_control import LocalControlServer
@@ -481,6 +597,19 @@ class RelayManager:
         """Listener teardown notice — log only; task-level handler sets the final state."""
         log_relay_event("disconnected", mode="tui")
 
+    async def _handle_degraded(self) -> None:
+        """Heartbeats keep being rejected although the session is valid.
+
+        The listener keeps retrying, but the server is not delivering
+        commands, so the indicator must stop claiming "connected". The
+        status model has no separate degraded state; CONNECTING ("not yet
+        accepted by the server") is the accurate one. The listener has
+        already written the relay.log event, and its next accepted
+        heartbeat fires ``on_connected``, which restores CONNECTED.
+        """
+        if self._state is RelayState.CONNECTED:
+            self._set_state(RelayState.CONNECTING)
+
     async def notify_session_expired(self) -> None:
         """Public hook for any caller that sees a 401 from an API call.
 
@@ -488,7 +617,16 @@ class RelayManager:
         indicator flips immediately instead of waiting for the next
         heartbeat tick (~30s). Idempotent — once SESSION_EXPIRED is
         the current state subsequent calls no-op.
+
+        A 401/403 alone does not prove the session is gone: a refresh
+        that failed transiently (network error, 429, 5xx) or a 403 from
+        something in front of the API leaves the session authenticated,
+        and then this is a no-op.
         """
+        auth = self._auth_service
+        if auth is not None and auth.is_authenticated:
+            logger.info("API call rejected but the session is still valid; relay kept")
+            return
         await self._handle_session_expired()
 
     async def _handle_session_expired(self) -> None:
@@ -578,12 +716,19 @@ class RelayManager:
             on_connected=on_connected,
             on_disconnected=on_disconnected,
             on_session_expired=on_session_expired,
+            # Wired here rather than through the listener-factory hooks, so
+            # a custom factory keeps the three-hook signature.
+            on_degraded=self._handle_degraded,
+            heartbeat_rejection_alert_after=cfg.heartbeat_rejection_alert_after,
             # The listener owns its own httpx.AsyncClient (needs to —
             # the SSE subscription holds it open). Hand it the refresh
             # path so a locally-stale access_token on heartbeat doesn't
             # surface as a phantom "session expired" before refresh has
             # had a chance to rotate the bearer.
             refresh_callback=auth.refresh_token,
+            # Only a session that is really gone expires the relay; a
+            # transient refresh failure leaves it authenticated.
+            session_alive=lambda: auth.is_authenticated,
             providers_configured=providers,
             probe_bridge=probe_bridge,
         )

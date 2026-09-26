@@ -373,7 +373,7 @@ Every file is written atomically (sibling `.tmp` + `os.replace`) with mode `0o60
 Memory integrates with Servonaut Cloud (sign in via TUI → Account → Login) for operators who want cross-device and team sharing. The following hosted operations are plan-gated on the backend:
 
 - **Cross-machine sync** — push encrypted memory to servonaut.dev and pull it on another machine.
-- **Team-shared memories** — list memories your teammates have shared within a team.
+- **Team-shared memories** — list memories your teammates have shared within a team, and share your own. When you share a server, pick the modules to include: teammates receive decryption keys for those modules only. By default only `os`, `runtimes`, `services`, `git` and `logs` are ticked; `web_stack`, `databases`, `containers`, `network`, `disk`, annotations and findings are listed but must be ticked to be shared. A share's module list cannot be narrowed in place; revoke the share, purge its keys, then share again.
 - **Hosted summaries** — dispatch a consent-scoped summary job, then retrieve and decrypt its encrypted result in the TUI.
 
 The deterministic local summary remains available on every plan. **Enhance with AI** can also use a separately configured OpenAI, Anthropic, Gemini, or Ollama provider; that path is governed by the selected provider's own credentials and only runs after explicit consent.

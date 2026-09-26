@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servonaut.dev/schemas/desktop-voice-runtime-policy-v1.json",
+  "title": "Servonaut desktop managed voice runtime policy",
+  "description": "Pinned uv release per desktop target, the exact Python patch release the managed voice runtime installs, and the time and size bounds for building and provisioning it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$comment",
+    "schema_version",
+    "minimum_release_age_days",
+    "python_version",
+    "uv",
+    "uv_command_timeout_seconds",
+    "stall_timeout_seconds",
+    "provision_timeout_seconds",
+    "build_download"
+  ],
+  "properties": {
+    "$comment": {
+      "description": "The pinning rule, kept next to the pins it governs.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "minimum_release_age_days": {
+      "description": "Supply-chain cooldown: every pinned release must be at least this many days old when it is chosen.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 90
+    },
+    "python_version": {
+      "description": "Exact CPython 3.12 patch release that uv installs for the voice runtime.",
+      "type": "string",
+      "pattern": "^3\\.12\\.(?:0|[1-9][0-9]?)$"
+    },
+    "uv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "origin_host",
+        "redirect_hosts",
+        "targets"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"
+        },
+        "origin_host": {
+          "description": "Host every pinned archive URL must use.",
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+        },
+        "redirect_hosts": {
+          "description": "Hosts a download may be redirected to.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+          }
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "windows-x64",
+            "macos-x64",
+            "macos-arm64",
+            "linux-x64-ubuntu-22.04"
+          ],
+          "properties": {
+            "windows-x64": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/uv_archive"
+                },
+                {
+                  "properties": {
+                    "url": {
+                      "pattern": "\\.zip$"
+                    },
+                    "member": {
+                      "pattern": "(?:^|/)uv\\.exe$"
+                    }
+                  }
+                }
+              ]
+            },
+            "macos-x64": {
+              "$ref": "#/$defs/posix_uv_archive"
+            },
+            "macos-arm64": {
+              "$ref": "#/$defs/posix_uv_archive"
+            },
+            "linux-x64-ubuntu-22.04": {
+              "$ref": "#/$defs/posix_uv_archive"
+            }
+          }
+        }
+      }
+    },
+    "uv_command_timeout_seconds": {
+      "description": "Upper bound for one uv command while provisioning.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 7200
+    },
+    "stall_timeout_seconds": {
+      "description": "A uv command that makes no progress for this long is stopped.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "provision_timeout_seconds": {
+      "description": "Upper bound for one complete install or repair.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 14400
+    },
+    "build_download": {
+      "description": "Bounds for fetching the pinned uv archive while building the desktop payload.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timeout_seconds",
+        "socket_timeout_seconds",
+        "max_archive_bytes",
+        "max_member_bytes"
+      ],
+      "properties": {
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "socket_timeout_seconds": {
+          "description": "Upper bound for one blocked network read.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600
+        },
+        "max_archive_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 536870912
+        },
+        "max_member_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 536870912
+        }
+      }
+    }
+  },
+  "$defs": {
+    "uv_archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "sha256",
+        "member"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://[^\\s]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "member": {
+          "type": "string",
+          "pattern": "^(?!.*(?:^|/)\\.\\.?(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+        }
+      }
+    },
+    "posix_uv_archive": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/uv_archive"
+        },
+        {
+          "properties": {
+            "url": {
+              "pattern": "\\.tar\\.gz$"
+            },
+            "member": {
+              "pattern": "(?:^|/)uv$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -206,6 +206,24 @@ class TestGetTargetHost(TestConnectionService):
         assert service.get_target_host(instance) == ''
 
 
+class TestGetTargetPort(TestConnectionService):
+
+    def test_custom_server_returns_its_port(self, service):
+        instance = {'id': 'custom-web-1', 'is_custom': True, 'port': 2222}
+        assert service.get_target_port(instance) == 2222
+
+    def test_custom_server_without_port_is_default(self, service):
+        assert service.get_target_port({'id': 'custom-web-1', 'is_custom': True}) is None
+
+    def test_aws_instance_is_default(self, service):
+        assert service.get_target_port({'id': 'i-0abc', 'public_ip': '9.9.9.9'}) is None
+
+    def test_port_ignored_without_custom_flag(self, service):
+        # Only custom servers define a target port; other providers' dicts
+        # never did, so a stray key must not start emitting -p.
+        assert service.get_target_port({'id': 'i-0abc', 'port': 2222}) is None
+
+
 @pytest.mark.parametrize("instance_key,ovh_key,global_key,fallback_key,expected", [
     ("/keys/instance", "/keys/ovh", "/keys/global", "/keys/discovered", "/keys/instance"),
     ("", "/keys/ovh", "/keys/global", "/keys/discovered", "/keys/ovh"),
