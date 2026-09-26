@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from importlib.metadata import version as pkg_version
 from typing import Any, AsyncIterator, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
+
+from servonaut.utils.endpoints import (
+    API_URL_ENV,
+    EndpointOverrideError,
+    endpoint_or_default,
+)
 
 from .interfaces import APIClientInterface
 
@@ -35,11 +40,6 @@ EXPORT_TIMEOUT_SECONDS = 300
 # happens at the call site with a clear message instead of as a
 # silent 404 against an unrelated endpoint.
 _TEAM_SLUG_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-
-
-def _api_base() -> str:
-    """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
 
 
 class APIError(Exception):
@@ -161,6 +161,37 @@ class ForbiddenError(APIError):
     so error-screen copy can be precise: "you don't have access to this
     team" vs "upgrade to use this feature".
     """
+
+
+class EndpointConfigError(APIError, EndpointOverrideError):
+    """``SERVONAUT_API_URL`` holds a URL the client refuses to use.
+
+    Both an :class:`APIError`, so every caller that already reports API
+    failures shows its message (which names the variable, never the URL), and
+    an :class:`EndpointOverrideError`, for callers that single out
+    configuration problems. It is raised before a request is built, so no
+    token is sent and production is never used in its place.
+    """
+
+    CODE = "invalid_endpoint"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(code=self.CODE, message=message, status=0)
+
+
+def _api_base() -> str:
+    """Return the API base URL, honouring a valid ``SERVONAUT_API_URL``.
+
+    Read at call time so secrets loaded after import are picked up.
+
+    Raises:
+        EndpointConfigError: The override is not https (or http to a
+            loopback host).
+    """
+    try:
+        return endpoint_or_default(API_URL_ENV, _DEFAULT_API_BASE)
+    except EndpointOverrideError as exc:
+        raise EndpointConfigError(str(exc)) from exc
 
 
 _CODE_TO_EXC: Dict[str, Type[APIError]] = {
@@ -371,11 +402,14 @@ class APIClient(APIClientInterface):
         timeout: float = LONG_TIMEOUT_SECONDS,
         method: str = "POST",
         params: Optional[Dict[str, Any]] = None,
+        silence_timeout: Optional[float] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream Server-Sent Events from ``path`` with ``body``.
 
         ``method``/``params`` allow GET streams (findings scan
         progress); the defaults keep the original POST behaviour.
+        ``silence_timeout`` overrides the heartbeat watchdog limit
+        (``None`` keeps the default).
 
         Thin wrapper that delegates to
         :func:`servonaut.services.ai_sse.stream_sse` so SSE concerns
@@ -403,6 +437,7 @@ class APIClient(APIClientInterface):
 
         async for event in _stream_sse(
             self, path, body, timeout=timeout, method=method, params=params,
+            silence_timeout=silence_timeout,
         ):
             yield event
 

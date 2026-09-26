@@ -258,6 +258,10 @@ class BwVaultManagerScreen(Screen):
     # Rendering
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the vault items and the servers using them."""
+        self._render_table()
+
     def _render_table(self) -> None:
         try:
             table = self.query_one("#bw_vault_mgr_table", DataTable)

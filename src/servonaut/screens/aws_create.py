@@ -37,6 +37,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import replace_instances
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.sidebar import Sidebar
 
@@ -752,15 +753,8 @@ class AWSCreateScreen(Screen):
         if svc is None:
             return
         new_aws = await svc.fetch_instances_cached(force_refresh=True)
-        existing = list(getattr(self.app, "instances", []) or [])
-        # AWS instance dicts have no "provider" key, so .get() returns None —
-        # keeping them in the exclusion set.  Custom servers always carry
-        # is_custom=True and are kept regardless of the provider value.
-        non_aws = [
-            i for i in existing
-            if i.get("provider") not in ("aws", None) or i.get("is_custom")
-        ]
-        self.app.instances = non_aws + list(new_aws)
+        # Keeps the real rows aside and lists them redacted in demo mode.
+        replace_instances(self.app, "aws", new_aws)
 
     # ------------------------------------------------------------------
     # Helpers

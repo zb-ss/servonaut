@@ -513,6 +513,40 @@ class TestVerifySshFlowWithRef:
         bw.report_personal_instance_verify.assert_not_awaited()
 
 
+class TestRunSshProbePort:
+    """The verify probe must reach a custom server on its own SSH port."""
+
+    def _probe_argv(self, instance: dict) -> list:
+        from servonaut.services.connection_service import ConnectionService
+
+        fake_app = _FakeApp()
+        fake_app.connection_service = ConnectionService(fake_app.config_manager)
+        screen = _make_screen(instance=instance, app=fake_app)
+        proc = MagicMock(returncode=0)
+        with patch("servonaut.screens.server_actions.subprocess.run",
+                   return_value=proc) as run:
+            status = _run(screen._run_ssh_probe(None, "10.0.0.5"))
+        assert status == "verified"
+        return run.call_args.args[0]
+
+    def test_custom_server_port_is_passed(self):
+        inst = {
+            "id": "custom-web-1", "name": "web-1", "public_ip": "10.0.0.5",
+            "is_custom": True, "port": 2222, "username": "deploy",
+        }
+        argv = self._probe_argv(inst)
+        assert argv[argv.index("-p") + 1] == "2222"
+        assert argv[-2:] == ["deploy@10.0.0.5", "true"]
+
+    def test_default_port_adds_no_flag(self):
+        custom_22 = {
+            "id": "custom-web-2", "public_ip": "10.0.0.6",
+            "is_custom": True, "port": 22,
+        }
+        assert "-p" not in self._probe_argv(custom_22)
+        assert "-p" not in self._probe_argv(_make_instance())
+
+
 # ---------------------------------------------------------------------------
 # Helpers for SshRefResolver chain tests
 # ---------------------------------------------------------------------------

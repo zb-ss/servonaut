@@ -40,16 +40,20 @@ from servonaut.runtime import (
     RuntimeLayout,
     detect_runtime,
 )
+from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 
 log = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/servonaut/json"
+# Replaces PYPI_URL (the whole JSON document URL) for a mirror or a local fake.
+PYPI_URL_ENV: Final = "SERVONAUT_PYPI_URL"
 
 # A release manifest lists a handful of artifacts, so anything larger is not a
 # manifest. This is a protocol bound, not deployment configuration.
 _MAX_MANIFEST_BYTES: Final = 1024 * 1024
 _TRANSFER_CHUNK_BYTES: Final = 64 * 1024
 _MANIFEST_SOCKET_TIMEOUT_SECONDS: Final = 5
+_PYPI_SOCKET_TIMEOUT_SECONDS: Final = 5
 _DOWNLOAD_SOCKET_TIMEOUT_SECONDS: Final = 30
 DEFAULT_MANIFEST_DEADLINE_SECONDS: Final = 30.0
 DEFAULT_DOWNLOAD_DEADLINE_SECONDS: Final = 30 * 60.0
@@ -155,6 +159,9 @@ class UpdateService:
     ) -> None:
         self._runtime = runtime or detect_runtime()
         self._current = self._runtime.product_version
+        # Same-version builds are ordered only by the integer packaging revision
+        # the build wrote into its marker. The free-form build_revision label
+        # (for example a CI run identifier) is never parsed for ordering.
         self._current_revision = self._runtime.packaging_revision
         self._manifest_url = (
             manifest_url
@@ -225,22 +232,42 @@ class UpdateService:
             return self._check_frozen_update()
 
         try:
-            request = urllib.request.Request(
-                PYPI_URL, headers={"Accept": "application/json"}
-            )
-            with urllib.request.urlopen(request, timeout=5) as response:
-                data = json.loads(response.read())
-            self._latest = data["info"]["version"]
-        except (urllib.error.URLError, json.JSONDecodeError, KeyError, OSError) as exc:
-            log.debug("Version check failed: %s", exc)
+            override = endpoint_override(PYPI_URL_ENV)
+        except EndpointOverrideError as exc:
+            log.warning("Version check skipped: %s", exc)
             self._last_result = UpdateCheckResult.OFFLINE
+            self._update_status = f"Could not check for updates: {exc}"
             return None
+        try:
+            latest = self._fetch_pypi_version(override or PYPI_URL)
+        except (*_TRANSFER_ERRORS, KeyError, TypeError) as exc:
+            if override:
+                # The exception text can quote the URL; name the variable only.
+                log.warning(
+                    "Version check via %s failed (%s).", PYPI_URL_ENV, type(exc).__name__
+                )
+            else:
+                log.debug("Version check failed: %s", exc)
+            return self._record(UpdateCheckResult.OFFLINE)
 
+        self._latest = latest
+        self._update_status = None
         if self._is_newer(self._latest, self._current):
             self._last_result = UpdateCheckResult.UPDATE_AVAILABLE
             return self._latest
         self._last_result = UpdateCheckResult.UP_TO_DATE
         return None
+
+    def _fetch_pypi_version(self, url: str) -> str:
+        """Read ``info.version`` from a PyPI-style JSON document.
+
+        Uses the HTTPS-only opener, so a redirect can never downgrade the
+        request to plain http.
+        """
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with self._opener.open(request, timeout=_PYPI_SOCKET_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read())
+        return data["info"]["version"]
 
     def _check_frozen_update(self) -> Optional[str]:
         """Check the canonical signed release manifest for frozen distributions."""

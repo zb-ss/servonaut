@@ -34,6 +34,8 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.widgets.sidebar import Sidebar
 
 if TYPE_CHECKING:
@@ -53,8 +55,29 @@ _SUPPORTS_REBOOT = {"vps", "cloud", "dedicated"}
 _SUPPORTS_DELETE = {"cloud"}
 _SUPPORTS_CREATE_HERE = "cloud"
 
+_PRODUCT_LABELS = {
+    "vps": "OVHcloud VPS",
+    "cloud": "OVHcloud Public Cloud",
+    "dedicated": "OVHcloud dedicated server",
+}
 
-class OVHManagerScreen(Screen):
+# Power actions that interrupt a running server ask first (yes/no); starting
+# a stopped one does not. Values: (verb shown to the user, consequence).
+_CONFIRM_POWER = {
+    "stop_instance": (
+        "Stop",
+        "The server shuts down and its services stay unavailable until it "
+        "is started again.",
+    ),
+    "reboot_instance": (
+        "Reboot",
+        "The server restarts and its services are unavailable until it is "
+        "back up.",
+    ),
+}
+
+
+class OVHManagerScreen(DemoRowsMixin, Screen):
     """OVHcloud instance manager — list + lifecycle toolbar."""
 
     BINDINGS = [
@@ -76,7 +99,9 @@ class OVHManagerScreen(Screen):
 
     def __init__(self) -> None:
         super().__init__()
+        self._raw_instances: List[dict] = []
         self._instances: List[dict] = []
+        self._api_ids: dict = {}
         self._loading: bool = False
 
     # ------------------------------------------------------------------
@@ -166,20 +191,10 @@ class OVHManagerScreen(Screen):
         svc = self.app.ovh_service
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
-            self._instances = list(instances)
-            # Redact the fresh list in-place; OVH names are often FQDNs
-            # (ns1.bigcorp.com) which are especially identifying.
-            # Mirrors the app-startup redact_instances pattern.
-            self._api_ids = {}
-            if self.app.demo_mode and self.app.redaction_service:
-                # Rows carry demo-mode fakes; API calls need the real ids,
-                # so remember the mapping before redacting in place.
-                raw_ids = [str(i.get("id") or "") for i in self._instances]
-                self.app.redaction_service.redact_instances(self._instances)
-                self._api_ids = {
-                    str(i.get("id") or ""): raw
-                    for i, raw in zip(self._instances, raw_ids)
-                }
+            # Keep the fetched rows untouched; what the table draws is
+            # derived from them (demo-mode fakes when demo mode is on).
+            self._raw_instances = list(instances)
+            self._apply_display_rows()
             self._render_table()
             n = len(instances)
             if n == 0:
@@ -259,6 +274,15 @@ class OVHManagerScreen(Screen):
         """Real provider id for an API call; the row may carry a demo-mode fake."""
         shown = str(inst.get("id") or "")
         return getattr(self, "_api_ids", {}).get(shown, shown)
+
+    @staticmethod
+    def _row_label(inst: dict) -> str:
+        """What to call a row's server: its name, else the id the table shows.
+
+        The fallback is the row's id, never the API id: in demo mode the row
+        carries a placeholder and the real id stays off the screen.
+        """
+        return str(inst.get("name") or inst.get("id") or "")
 
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state per row's provider_type + state.
@@ -386,11 +410,21 @@ class OVHManagerScreen(Screen):
             )
             return
 
-        self._set_status(
-            f"[dim]{in_progress_verb} {inst.get('name', identifier)}…[/dim]"
-        )
         self.run_worker(
-            self._do_lifecycle(method, identifier, ptype, done_verb),
+            confirm_and_run_power_action(
+                self.app,
+                prompt=_CONFIRM_POWER.get(method),
+                server_name=self._row_label(inst),
+                provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
+                in_progress_verb=in_progress_verb,
+                set_status=self._set_status,
+                run=lambda: self._do_lifecycle(method, identifier, ptype, done_verb),
+                # Declined stops and reboots are recorded like declined
+                # deletes, so the audit log shows every answered question.
+                on_declined=lambda: self._audit_action(
+                    method, identifier, ptype, success=False, confirmed=False,
+                ),
+            ),
             exclusive=False,
             name=f"ovh_mgr_{method}",
         )
@@ -430,6 +464,7 @@ class OVHManagerScreen(Screen):
         # OVHCloudService call which takes them separately.
         project_id, _, inst_id = composite_id.partition("/")
         project_label = "Hidden" if self.app.demo_mode else project_id
+        label = self._row_label(inst)
         if not project_id or not inst_id:
             self.notify(
                 f"Cannot parse OVH cloud id {self._display_id(composite_id)!r}.",
@@ -442,9 +477,9 @@ class OVHManagerScreen(Screen):
             ConfirmActionScreen(
                 title="Delete OVH Cloud Instance",
                 description=(
-                    f"Delete [bold]{inst.get('name', inst_id)}[/bold] "
-                    f"([bold]{inst.get('type', '')}[/bold]) in project "
-                    f"[bold]{project_label}[/bold]?"
+                    f"Delete [bold]{escape(label)}[/bold] "
+                    f"([bold]{escape(str(inst.get('type', '')))}[/bold]) in project "
+                    f"[bold]{escape(project_label)}[/bold]?"
                 ),
                 consequences=[
                     "All data on the instance will be permanently destroyed",
@@ -462,9 +497,7 @@ class OVHManagerScreen(Screen):
         if not confirmed:
             return
 
-        self._set_status(
-            f"[dim]Deleting {inst.get('name', inst_id)}…[/dim]"
-        )
+        self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
         cloud_svc = getattr(self.app, "ovh_cloud_service", None)
         if cloud_svc is None:
             self.notify(
@@ -552,6 +585,8 @@ class OVHManagerScreen(Screen):
         return self._short_err(error)
 
     def _set_status(self, text: str) -> None:
+        # Provider errors quote real ids and names: demo mode shows stand-ins.
+        text = display_text(self.app, text)
         try:
             self.query_one("#ovh_mgr_status", Static).update(text)
         except Exception:  # pragma: no cover - defensive

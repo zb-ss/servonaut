@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -364,3 +365,89 @@ def test_unenforced_policy_files_are_not_shipped() -> None:
     # PyInstaller selects hooks by import name; pywebview imports as ``webview``.
     assert not (_POLICY_ROOT / "hooks" / "hook-pywebview.py").exists()
     assert not (_POLICY_ROOT / "warnings-allowlist.json").exists()
+
+
+_VOICE_BUNDLE_FILES = (
+    "servonaut-2.27.0-py3-none-any.whl",
+    "voice-requirements.txt",
+    "voice-runtime.json",
+)
+
+
+@pytest.mark.parametrize("target_name", sorted(_TARGETS))
+def test_voice_bundle_files_are_exempt_only_where_the_payload_keeps_them(
+    target_name: str,
+) -> None:
+    target = load_desktop_target_policy(_POLICY_PATH).targets[target_name]
+    uv = "uv.exe" if target.platform == "win32" else "uv"
+    for name in (uv, *_VOICE_BUNDLE_FILES):
+        path = PurePosixPath("_internal/voice") / name
+        # Still inside the forbidden voice tree, so only the exemption admits it.
+        assert matches_forbidden_path(path, target.forbidden_path_patterns)
+        assert matches_forbidden_path(path, target.voice_bundle_paths), name
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "_internal/voice/models/silero_vad.onnx",
+        "_internal/voice/models/whisper/model.bin",
+        "_internal/voice/sherpa_onnx/lib/libonnxruntime.so",
+        "_internal/voice/faster_whisper/__init__.py",
+        "_internal/voice/uv/uv",
+        "_internal/voice/extra.txt",
+        "_internal/voice/numpy-2.5.3-cp312-cp312-win_amd64.whl",
+        "voice/uv",
+        "_internal/servonaut/voice/voice-runtime.json",
+    ],
+)
+def test_voice_engines_and_models_stay_forbidden(relative: str) -> None:
+    for target in load_desktop_target_policy(_POLICY_PATH).targets.values():
+        path = PurePosixPath(relative)
+        assert matches_forbidden_path(path, target.forbidden_path_patterns), relative
+        assert not matches_forbidden_path(path, target.voice_bundle_paths), relative
+
+
+@pytest.mark.parametrize(
+    "voice_bundle_paths",
+    [
+        [],
+        ["_internal/voice/**"],
+        [
+            "_internal/voice/uv",
+            "_internal/voice/servonaut-*-py3-none-any.whl",
+            "_internal/voice/voice-requirements.txt",
+            "_internal/voice/voice-runtime.json",
+            "_internal/voice/models/**",
+        ],
+        [
+            "_internal/voice/uv.exe",
+            "_internal/voice/servonaut-*-py3-none-any.whl",
+            "_internal/voice/voice-requirements.txt",
+            "_internal/voice/voice-runtime.json",
+        ],
+        [
+            "_internal/voice/uv",
+            "_internal/voice/uv",
+            "_internal/voice/servonaut-*-py3-none-any.whl",
+            "_internal/voice/voice-requirements.txt",
+            "_internal/voice/voice-runtime.json",
+        ],
+        [{"path": "_internal/voice/uv"}],
+        "_internal/voice/**",
+    ],
+)
+def test_desktop_policy_rejects_wider_voice_bundle_exemptions(
+    tmp_path: Path, voice_bundle_paths: object
+) -> None:
+    raw = json.loads(_POLICY_PATH.read_text(encoding="utf-8"))
+    raw["targets"]["linux-x64-ubuntu-22.04"]["voice_bundle_paths"] = voice_bundle_paths
+    policy = tmp_path / "target-policy.json"
+    policy.write_text(json.dumps(raw), encoding="utf-8")
+    # Policy paths must stay inside the policy directory, so copy what it names.
+    for directory in ("requirements", "frontend"):
+        shutil.copytree(_POLICY_ROOT / directory, tmp_path / directory)
+    shutil.copyfile(_POLICY_ROOT / "size-baselines.json", tmp_path / "size-baselines.json")
+
+    with pytest.raises(DesktopPolicyValidationError, match="voice_bundle_paths"):
+        load_desktop_target_policy(policy)

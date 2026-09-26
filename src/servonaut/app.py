@@ -133,19 +133,23 @@ class ServonautApp(App):
     memory_crypto = None
     _memory_key_material = None
 
-    # Shared state
-    instances: List[dict] = []  # all fetched instances
+    # Shared state. The mutable containers are created per app in __init__:
+    # a class-level default would be one list/set shared by every instance.
+    instances: List[dict]  # all fetched instances
     demo_mode: bool = False
     _instances_pristine: Optional[List[dict]] = None  # deepcopy before redaction
+    # Bumped whenever the fleet is replaced; keys the demo-mode toast replacer.
+    _fleet_generation: int = 0
+    _demo_known_cache: Optional[tuple] = None
 
     # T11: instance IDs that have already triggered the first-connect memory
     # prompt in this session.  Reset every time the app restarts.
-    memory_first_connect_seen: set = set()
+    memory_first_connect_seen: set
 
     # Instance IDs for which an annotation pull has already been kicked off
     # this session.  Kept separate from memory_first_connect_seen so that
     # banner-dismissal gating is untouched.
-    memory_annotations_pulled_seen: set = set()
+    memory_annotations_pulled_seen: set
 
     # Latest version found by the background update check (None = not checked yet)
     _latest_version: Optional[str] = None
@@ -189,6 +193,9 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        self.instances = []
+        self.memory_first_connect_seen = set()
+        self.memory_annotations_pulled_seen = set()
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
@@ -212,15 +219,51 @@ class ServonautApp(App):
         scrubbed before being passed to the Textual App.notify() base method.
         """
         if self.demo_mode and self.redaction_service is not None:
-            message = self.redaction_service.scrub_stream(message)
+            message = self.redact_display_text(message)
             if title:
-                title = self.redaction_service.scrub_stream(title)
+                title = self.redact_display_text(title)
         # Textual's App.notify signature uses Optional[float] for timeout;
         # pass only when non-None to avoid overriding the default.
         if timeout is not None:
             super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
         else:
             super().notify(message, title=title, severity=severity, markup=markup)
+
+    def redact_display_text(self, text: str) -> str:
+        """*text* as demo mode may show it; unchanged outside demo mode.
+
+        Every known real name, host and id of the fleet becomes its stand-in,
+        then the stream rules run (addresses, URLs, accounts, secrets). Used
+        for notifications and status lines, which often quote provider errors.
+        """
+        if not text or not self.demo_mode or self.redaction_service is None:
+            return text
+        known = self._demo_known_identifiers()
+        return self.redaction_service.scrub_stream(known.replace_known(text))
+
+    def _demo_known_identifiers(self):
+        """Replacer for the fleet's real names, hosts and ids (demo mode).
+
+        Provider errors quote what was sent — the real service name, host or
+        id — and a bare host name has no shape rule in ``scrub_stream``, so
+        every known real identifier is swapped for its stand-in first.
+        Rebuilt only when the fleet changes (``replace_instances`` bumps
+        ``_fleet_generation``) or a new id gets a stand-in.
+        """
+        from servonaut.services.report_scrubber import InventoryScrubber
+
+        redaction = self.redaction_service
+        key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
+        cached = self._demo_known_cache
+        if cached is None or cached[0] != key:
+            known = InventoryScrubber.for_fleet(
+                redaction, self._instances_pristine or [], redaction.real_ids_seen()
+            )
+            # Building may hand out stand-ins itself; key on the count after.
+            key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
+            cached = (key, known)
+            self._demo_known_cache = cached
+        return cached[1]
 
     def pop_screen(self):
         """Pop screen, but navigate to instances if at the root."""
@@ -236,6 +279,14 @@ class ServonautApp(App):
         from servonaut.screens.instance_list import InstanceListScreen
 
         self._init_services()
+        # Background ssh runs in its own session, so closing the terminal no
+        # longer hangs it up; end it (a log tail, say) before the app goes.
+        try:
+            from servonaut.utils.ssh_utils import install_hangup_cleanup
+            install_hangup_cleanup()
+        except (ValueError, OSError) as e:  # not the main thread / unsupported
+            logger.debug("Hangup cleanup not installed: %s", e)
+        self._warn_refused_endpoint_overrides()
         # Startup sweep for crash-left decrypted Bitwarden key files under
         # ~/.servonaut/tmp/ (>24 h old). Normal exits are covered by the
         # atexit sweeper / per-call cleanup; a crash or SIGKILL skips both,
@@ -246,29 +297,21 @@ class ServonautApp(App):
         except Exception as e:  # noqa: BLE001 — sweep must never break startup
             logger.warning("Stale BW key sweep failed: %s", e)
         # Eagerly load cached instances so all screens have data
-        cached = self.cache_service.load_any()
-        if cached:
-            self.instances = cached
+        fleet = list(self.cache_service.load_any() or [])
         # Merge custom servers into instance list
-        self.instances.extend(self.custom_server_service.list_as_instances())
+        fleet.extend(self.custom_server_service.list_as_instances())
         # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
         if self.ovh_service is not None:
-            self.instances.extend(self.ovh_service.get_cached_instances())
+            fleet.extend(self.ovh_service.get_cached_instances())
         # Merge Hetzner Cloud cached instances (same stale-while-revalidate
         # contract as OVH — provider-agnostic instant render at startup).
         if self.hetzner_service is not None:
-            self.instances.extend(self.hetzner_service.get_cached_instances())
-        # Snapshot pristine instance list BEFORE any redaction — always, so
-        # the toggle path can restore real data even when --demo was set at
-        # launch.  deepcopy prevents in-place mutations from affecting the
-        # snapshot later.
-        import copy
-        self._instances_pristine = copy.deepcopy(self.instances)
-        # Apply demo-mode redaction
+            fleet.extend(self.hetzner_service.get_cached_instances())
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
-            self.redaction_service.redact_instances(self.instances)
+        # Keeps the real records aside and redacts what is listed in demo mode.
+        self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
         # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
         if self._initial_screen is not None:
@@ -326,6 +369,25 @@ class ServonautApp(App):
         # Start background fleet auto-scan loop (sleeps first, so safe to
         # call here even before the instance list is fully populated).
         self._start_fleet_auto_scan_loop()
+
+    def _warn_refused_endpoint_overrides(self) -> None:
+        """Show an error for each refused ``SERVONAUT_API_URL`` / ``SERVONAUT_MCP_URL``.
+
+        Runs after the config manager has loaded the secrets env file. Every
+        request that needs a refused variable fails before anything is sent,
+        so this notice gives the one reason up front rather than leaving each
+        account feature to fail on its own. It names the variable, never the
+        URL.
+        """
+        from servonaut.utils.endpoints import ACCOUNT_ENDPOINT_ENVS, endpoint_override_errors
+
+        for message in endpoint_override_errors(ACCOUNT_ENDPOINT_ENVS):
+            self.notify(
+                f"{message} Requests that need it are refused until it is fixed.",
+                severity="error",
+                timeout=20,
+                markup=False,
+            )
 
     def _init_services(self) -> None:
         """Create all service instances."""
@@ -547,9 +609,11 @@ class ServonautApp(App):
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
         )
-        tool_executor = ChatToolExecutor(
-            tools=self.servonaut_tools,
-            guard_level=config.chat_tool_guard_level,
+        # Follows chat_tool_guard_level live: bring-your-own providers run
+        # tools without per-call prompts, so a lowered level must apply to
+        # the next call, not after a restart.
+        tool_executor = ChatToolExecutor.from_config(
+            self.servonaut_tools, self.config_manager,
         )
         self.chat_service = ChatService(
             self.config_manager, self.ai_analysis_service, tool_executor,
@@ -782,6 +846,7 @@ class ServonautApp(App):
             self.notify(
                 f"MCP relay: using external listener (PID {result.external_owner.pid}).",
                 severity="information", timeout=4,
+                markup=False,
             )
         elif result.state is RelayState.NO_ENTITLEMENT:
             self.notify(
@@ -795,9 +860,11 @@ class ServonautApp(App):
                 severity="warning", timeout=6,
             )
         elif result.state is RelayState.ERROR:
+            # Long enough to read a refused-URL reason; also kept on the
+            # relay status screen. The message is plain text, not markup.
             self.notify(
                 f"MCP relay failed to start: {result.message}",
-                severity="error", timeout=6,
+                severity="error", timeout=20, markup=False,
             )
 
     def on_user_logout(self) -> None:
@@ -990,11 +1057,7 @@ class ServonautApp(App):
                     logger.debug("Servonaut AI provider registration skipped: %s", e)
             # Expose the ServonautProvider directly for chat-panel streaming.
             try:
-                from servonaut.services.ai_providers import ServonautProvider
-                self.servonaut_provider = ServonautProvider(
-                    api_client=self.api_client,
-                    auth_service=self.auth_service,
-                )
+                self.servonaut_provider = self._build_servonaut_provider()
             except Exception as e:  # pragma: no cover
                 logger.debug("ServonautProvider direct init skipped: %s", e)
                 self.servonaut_provider = None
@@ -1028,6 +1091,9 @@ class ServonautApp(App):
                 from servonaut.services.relay_executors import RelayExecutors
                 from servonaut.mcp.audit import AuditTrail
                 from servonaut.services.ai_tool_bridge import AIToolBridge
+                from servonaut.screens.tool_confirm_modal import (
+                    build_modal_confirm,
+                )
                 relay = RelayExecutors(
                     self.config_manager,
                     self.aws_service,
@@ -1040,28 +1106,11 @@ class ServonautApp(App):
                 cfg = self.config_manager.get()
                 ai_audit = AuditTrail(cfg.mcp.audit_path)
 
-                async def _ai_confirm_callback(call) -> bool:
-                    """Push the right confirm modal for *call* and await the user's choice."""
-                    from servonaut.screens.tool_confirm_modal import (
-                        DangerousToolConfirmModal,
-                        ToolConfirmModal,
-                    )
-                    if call.guard_level == "dangerous":
-                        modal = DangerousToolConfirmModal(call.tool, dict(call.args))
-                    else:
-                        modal = ToolConfirmModal(call.tool, dict(call.args))
-                    try:
-                        result = await self.push_screen_wait(modal)
-                    except Exception:  # pragma: no cover — defensive
-                        logger.exception("push_screen_wait failed for tool confirm")
-                        return False
-                    return bool(result)
-
                 self.ai_tool_bridge = AIToolBridge(
                     api_client=self.api_client,
                     relay_executors=relay,
                     mcp_audit=ai_audit,
-                    confirm_callback=_ai_confirm_callback,
+                    confirm_callback=build_modal_confirm(self),
                     auth_service=self.auth_service,
                     # Inject the same ServonautTools the MCP server uses
                     # so AI-driven readonly tools (list_instances,
@@ -1069,6 +1118,12 @@ class ServonautApp(App):
                     # surface instead of the SSH/Mercure relay.
                     servonaut_tools=getattr(self, "servonaut_tools", None),
                     ip_ban_service=getattr(self, "ip_ban_service", None),
+                    # Read per call: an unanswered prompt is closed and
+                    # the tool refused once this many seconds pass.
+                    confirm_timeout=lambda: (
+                        self.config_manager.get()
+                        .ai_provider.tool_confirm_timeout_seconds
+                    ),
                 )
                 # Demo mode: the model reasons over redacted rows and asks for
                 # tools by fake id; the relay needs the real one.
@@ -1082,6 +1137,19 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Paid-tier services init failed: %s", e)
         self._init_memory_cloud_services()
+
+    def _build_servonaut_provider(self):
+        """Hosted-AI provider for chat-panel streaming.
+
+        ``config_manager`` lets the provider send ``chat_max_tool_rounds``
+        on each chat request.
+        """
+        from servonaut.services.ai_providers import ServonautProvider
+        return ServonautProvider(
+            api_client=self.api_client,
+            auth_service=self.auth_service,
+            config_manager=self.config_manager,
+        )
 
     def _init_memory_cloud_services(self) -> None:
         """Wire memory cloud-sync services (Stream 2 + 3).
@@ -2073,60 +2141,114 @@ class ServonautApp(App):
     def action_toggle_demo(self) -> None:
         """Toggle demo mode at runtime (ctrl+shift+d).
 
-        ON  → instantiate RedactionService, redact instances in place, refresh
-              status bar + active screen, notify (information).
-        OFF → restore self.instances from self._instances_pristine (deepcopy),
-              clear redaction_service so guards short-circuit, refresh, notify
+        ON  → instantiate RedactionService, redact instances in place,
+              re-render every mounted screen, notify (information).
+        OFF → put the real records back into the same dicts, clear
+              redaction_service so guards short-circuit, re-render, notify
               (warning — "real data restored").
+
+        Both directions work in place, so a screen holding an instance dict
+        (server actions, log viewer, SCP …) sees the change without being
+        rebuilt. Every screen on the stack then re-renders through its
+        ``refresh_after_demo_toggle()`` hook; screens that show redactable
+        data implement it (enforced by tests/test_demo_mode_lint.py).
 
         Race-safety: snapshot captured once at on_mount + re-captured on
         instance-list refresh; never mutated otherwise. Mid-stream renders
         may land mid-burst — next flush tick re-syncs. Documented.
         """
-        import copy
         from servonaut.services.redaction_service import RedactionService
 
         if self.demo_mode:
-            if self._instances_pristine is not None:
-                self.instances = copy.deepcopy(self._instances_pristine)
+            self._restore_instances_in_place()
             self.demo_mode = False
             self.redaction_service = None
             self.notify("Demo mode OFF — real data restored.", severity="warning", timeout=4)
         else:
+            import copy
+
             if self.redaction_service is None:
                 self.redaction_service = RedactionService()
+            # The list is real while demo mode is off: it is the copy to map
+            # stand-ins back to, whatever changed it since the last snapshot.
+            self._instances_pristine = copy.deepcopy(self.instances)
+            self._fleet_generation += 1
+            self.redaction_service.register_real_ids(
+                row.get("id") for row in self.instances
+            )
             self.redaction_service.redact_instances(self.instances)
             self.demo_mode = True
-            self.notify("Demo mode ON — all surfaces redacted.", severity="information", timeout=4)
+            self.notify(
+                "Demo mode ON — open screens redrawn; reopen any dialog or "
+                "form that was already open.",
+                severity="information",
+                timeout=6,
+            )
 
-        # Re-render active screen + StatusBar.
-        try:
-            self.screen.refresh(recompose=False)
-        except Exception:
-            pass
+        self._refresh_screens_after_demo_toggle()
 
-        from servonaut.screens.instance_list import InstanceListScreen
-        from servonaut.screens.fleet_memory import FleetMemoryScreen
-        from servonaut.screens.log_viewer import LogViewerScreen
-        from servonaut.screens.ovh_billing import OVHBillingScreen
-        if isinstance(self.screen, InstanceListScreen):
-            self.screen._instances = list(self.instances)
-            self.screen._update_table()
-        elif isinstance(self.screen, FleetMemoryScreen):
-            self.screen._launch_populate()
-        elif isinstance(self.screen, LogViewerScreen):
-            # Pre-toggle scrollback + copy/AI buffer hold raw lines; the
-            # screen re-scrubs and repaints them (and its header) itself.
-            self.screen.refresh_after_demo_toggle()
-        elif isinstance(self.screen, OVHBillingScreen):
-            self.screen.refresh_after_demo_toggle()
+    def replace_instances(self, source: Optional[str], rows) -> List[dict]:
+        """Make fetched *rows* the fleet's *source* slice (``None``: all of it).
 
-        try:
-            from servonaut.widgets.status_bar import StatusBar
-            for sb in self.query(StatusBar):
-                sb._update_display()
-        except Exception:
-            pass
+        The one entry point every fetch, create and setup path uses, in or
+        out of demo mode: it keeps the real records aside for
+        ``connection_instance`` and lists them redacted when demo mode is on.
+        """
+        from servonaut.screens._demo_resolve import replace_instances
+
+        return replace_instances(self, source, rows)
+
+    def _restore_instances_in_place(self) -> None:
+        """Refill the dicts demo mode redacted from the pre-redaction snapshot.
+
+        ``redact_instances`` rewrites the shared dicts, so every screen that
+        holds one shows fakes. Rebuilding the list would leave those screens
+        on the stale fake dicts; refilling the same dicts restores every
+        holder. A row with no real record is kept as it is rather than
+        dropped. Must run while ``redaction_service`` still maps fake ids back.
+        """
+        import copy
+
+        redaction = self.redaction_service
+        pristine_by_id = {
+            str(row.get("id") or ""): row for row in self._instances_pristine or []
+        }
+        for row in self.instances:
+            shown = str(row.get("id") or "")
+            real_id = redaction.real_instance_id(shown) if redaction else shown
+            original = pristine_by_id.get(real_id)
+            if original is None:
+                logger.warning("Demo mode off: no real record for a listed row")
+                continue
+            row.clear()
+            row.update(copy.deepcopy(original))
+
+    def _refresh_screens_after_demo_toggle(self) -> None:
+        """Re-render every screen on the stack, and its status bars.
+
+        ``App.query`` never reaches the widgets of the screens on the stack,
+        so each screen is visited explicitly, bottom to top: a suspended
+        screen must be right when the user returns to it, not only the one
+        on top. One failing hook must not leave the others showing stale data.
+        """
+        from servonaut.widgets.status_bar import StatusBar
+
+        for screen in list(self.screen_stack):
+            hook = getattr(screen, "refresh_after_demo_toggle", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Demo toggle refresh failed on %s: %s",
+                        type(screen).__name__, exc,
+                    )
+            try:
+                for status_bar in screen.query(StatusBar):
+                    status_bar._update_display()
+                screen.refresh()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Demo toggle repaint skipped: %s", exc)
 
     def resolve_instance(self, id_or_name: str) -> Optional[dict]:
         """Case-insensitive instance lookup across all providers.
@@ -2204,6 +2326,15 @@ class ServonautApp(App):
             return instance_id
         return self.redaction_service.real_instance_id(instance_id)
 
+    def has_real_record(self, instance: dict) -> bool:
+        """False only in demo mode, for a row whose real server is unknown."""
+        if not instance or not self.demo_mode or self.redaction_service is None:
+            return True
+        real_id = self.redaction_service.real_instance_id(str(instance.get("id") or ""))
+        return any(
+            str(row.get("id") or "") == real_id for row in self._instances_pristine or []
+        )
+
     def connection_instance(self, instance: dict) -> dict:
         """The pristine record behind a (possibly demo-redacted) instance row.
 
@@ -2222,7 +2353,31 @@ class ServonautApp(App):
         for pristine in self._instances_pristine or []:
             if str(pristine.get("id") or "") == real_id:
                 return copy.deepcopy(pristine)
+        logger.warning("Demo mode: no real record behind a listed row")
         return instance
+
+    def open_settings_screen(self, panel_id: Optional[str] = None) -> None:
+        """Show Settings, opened on *panel_id* (e.g. ``"ai_provider"``) if given.
+
+        Replaces the current view, as the sidebar's Settings entry does. When a
+        Settings screen is already open, even under other screens (Help, a
+        management screen), those are closed and that Settings screen switches
+        category in place, so its unsaved edits and their prompt are kept.
+        """
+        from servonaut.screens.settings import SettingsScreen
+
+        stack = self.screen_stack
+        existing = next(
+            (screen for screen in reversed(stack) if isinstance(screen, SettingsScreen)),
+            None,
+        )
+        if existing is None:
+            self.switch_screen(SettingsScreen(initial_panel=panel_id))
+            return
+        for _ in range(len(stack) - 1 - stack.index(existing)):
+            self.pop_screen()
+        if panel_id:
+            existing.show_panel(panel_id)
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
@@ -2382,38 +2537,60 @@ class ServonautApp(App):
             self.exit()
 
     def _run_global_scan(self) -> None:
-        """Run keyword scan across all running instances."""
-        self.notify("Starting scan of all running servers...", severity="information")
+        """Run keyword scan across every server not known to be stopped."""
+        self.notify("Starting scan of all servers...", severity="information")
         self.run_worker(self._do_global_scan(), name="global_scan", exclusive=True)
 
     async def _do_global_scan(self) -> None:
-        """Worker: scan all running instances for keywords."""
+        """Worker: scan every server not known to be stopped for keywords.
+
+        Custom servers have no power state, so they are always attempted; one
+        that cannot be reached is named in the summary instead of silently
+        counting as "nothing found".
+        """
+        from servonaut.services.scan_service import ScanConnectionError, is_scannable
+
         instances = self.instances
         if not instances:
             self.notify("No instances loaded. Load instances first.", severity="warning")
             return
 
-        running = [i for i in instances if i.get('state') == 'running']
-        if not running:
-            self.notify("No running instances to scan.", severity="warning")
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
+            self.notify("No running servers to scan.", severity="warning")
             return
 
-        total = len(running)
+        total = len(targets)
         scanned = 0
-        for idx, instance in enumerate(running, 1):
+        unreachable: List[str] = []
+        for idx, instance in enumerate(targets, 1):
             name = instance.get('name') or instance.get('id', 'unknown')
-            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information")
+            self.notify(f"Scanning {idx}/{total}: {name}...", severity="information", markup=False)
             try:
+                # Demo mode redacts the row; connect to and key by the real one.
                 results = await self.scan_service.scan_server(
-                    instance, self.ssh_service, self.connection_service
+                    self.connection_instance(instance),
+                    self.ssh_service, self.connection_service,
                 )
-                if results:
-                    self.keyword_store.save_results(instance['id'], results)
-                    scanned += 1
+            except ScanConnectionError as e:
+                unreachable.append(name)
+                # ssh's own message names the real host and user; demo mode
+                # shows only the reason category.
+                reason = e.describe(redact=bool(self.demo_mode))
+                self.notify(f"Could not connect to {name}: {reason}", severity="warning", markup=False)
+                continue
             except Exception as e:
-                self.notify(f"Scan failed for {name}: {e}", severity="error")
+                # markup=False: a host-key message carries "[host]:port".
+                self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
+                continue
+            if results:
+                self.keyword_store.save_results(self.real_instance_id(instance['id']), results)
+                scanned += 1
 
-        self.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+        summary = f"Scan complete. {scanned}/{total} servers scanned."
+        if unreachable:
+            summary += f" Could not connect to: {', '.join(unreachable)}."
+        self.notify(summary, severity="warning" if unreachable else "information", markup=False)
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

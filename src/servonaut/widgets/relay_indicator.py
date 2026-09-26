@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
@@ -203,6 +204,11 @@ class RelayStatusScreen(Screen):
         owner = read_owner(self.app.relay_lock_path)
         if owner.pid is not None:
             text += f" — lock owner: {owner.mode} (PID {owner.pid})"
+        manager = getattr(self.app, "relay_manager", None)
+        reason = getattr(manager, "last_error", None)
+        if isinstance(reason, str) and reason:
+            # Why it failed (for example a refused relay URL), not just "error".
+            text += f"\n[red]{escape(reason)}[/red]"
         self.query_one("#local_status", Static).update(text)
 
     async def _refresh_backend(self) -> None:

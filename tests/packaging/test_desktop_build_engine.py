@@ -20,7 +20,10 @@ from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_build_policy,
     load_desktop_target_spec,
+    load_voice_runtime_policy,
 )
+from scripts.desktop_shell.voice_bundle import VoiceBundleError
+from scripts.standalone_cli.release_identity import DEVELOPMENT_IDENTITY, ReleaseIdentity
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
@@ -77,7 +80,29 @@ def _stage_outputs(staging_root: Path) -> tuple[Path, Path]:
     return payload, metadata
 
 
-def test_main_accepts_disabling_the_artifact_selftest(
+def test_the_artifact_selftest_is_not_a_build_option(
+    wheel: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The GUI entry always bundles the self-test, so a build cannot claim otherwise."""
+    monkeypatch.setattr(desktop_build, "build_desktop", lambda _request: None)
+    base = [
+        "--wheel",
+        str(wheel),
+        "--target",
+        "linux-x64-ubuntu-22.04",
+        "--output-dir",
+        str(tmp_path / "out"),
+    ]
+
+    for option in ("--require-artifact-selftest", "--no-require-artifact-selftest"):
+        with pytest.raises(SystemExit) as error:
+            desktop_build.main([*base, option])
+        assert error.value.code == 2
+    assert "servonaut_desktop.py" in str(desktop_build._GUI_ENTRY)
+    assert "--_artifact-selftest" in desktop_build._GUI_ENTRY.read_text(encoding="utf-8")
+
+
+def test_main_stamps_the_development_identity_unless_told_otherwise(
     wheel: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     requests: list[DesktopBuildRequest] = []
@@ -92,9 +117,102 @@ def test_main_accepts_disabling_the_artifact_selftest(
     ]
 
     assert desktop_build.main(base) == 0
-    assert desktop_build.main([*base, "--no-require-artifact-selftest"]) == 0
+    assert (
+        desktop_build.main([*base, "--channel", "preview", "--packaging-revision", "3"])
+        == 0
+    )
 
-    assert [request.require_artifact_selftest for request in requests] == [True, False]
+    assert [request.release_identity for request in requests] == [
+        DEVELOPMENT_IDENTITY,
+        ReleaseIdentity("preview", 3),
+    ]
+
+
+def _release_argv(wheel: Path, tmp_path: Path, tag: str, *identity: str) -> list[str]:
+    return [
+        "--wheel",
+        str(wheel),
+        "--target",
+        "linux-x64-ubuntu-22.04",
+        "--output-dir",
+        str(tmp_path / "out"),
+        "--release-tag",
+        tag,
+        *identity,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tag", "identity_args", "reason"),
+    [
+        (f"v{_VERSION}", [], "require an explicit --packaging-revision"),
+        (f"v{_VERSION}", ["--channel", "stable"], "require an explicit --packaging-revision"),
+        (
+            f"v{_VERSION}",
+            ["--channel", "preview", "--packaging-revision", "2"],
+            "contradicts the stable release tag",
+        ),
+        (
+            f"v{_VERSION}-preview.1",
+            ["--channel", "stable", "--packaging-revision", "2"],
+            "contradicts the preview release tag",
+        ),
+        ("v9.9.9", ["--packaging-revision", "2"], "does not match the product version"),
+        (f"v{_VERSION}-rc.1", ["--packaging-revision", "2"], "must be a stable"),
+        (f"v{_VERSION}", ["--packaging-revision", "0"], "integer from 1 to 65535"),
+    ],
+)
+def test_release_builds_refuse_an_identity_their_tag_contradicts(
+    wheel: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tag: str,
+    identity_args: list[str],
+    reason: str,
+) -> None:
+    monkeypatch.setattr(
+        desktop_build,
+        "build_desktop",
+        lambda _request: pytest.fail("an inconsistent release build must not start"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        desktop_build.main(_release_argv(wheel, tmp_path, tag, *identity_args))
+
+    assert error.value.code == 2
+    assert reason in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("tag", "identity_args", "expected"),
+    [
+        (f"v{_VERSION}", ["--packaging-revision", "2"], ReleaseIdentity("stable", 2)),
+        (
+            f"v{_VERSION}-preview.3",
+            ["--packaging-revision", "1"],
+            ReleaseIdentity("preview", 1),
+        ),
+        (
+            f"v{_VERSION}-preview.3",
+            ["--channel", "preview", "--packaging-revision", "4"],
+            ReleaseIdentity("preview", 4),
+        ),
+    ],
+)
+def test_release_build_takes_its_channel_from_the_tag(
+    wheel: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+    identity_args: list[str],
+    expected: ReleaseIdentity,
+) -> None:
+    requests: list[DesktopBuildRequest] = []
+    monkeypatch.setattr(desktop_build, "build_desktop", requests.append)
+
+    assert desktop_build.main(_release_argv(wheel, tmp_path, tag, *identity_args)) == 0
+    assert requests[0].release_identity == expected
 
 
 def _pin_host_python(
@@ -252,6 +370,13 @@ def test_capture_build_metadata_persists_warnings_and_every_toc(
         assert (tocs / "PYZ-00.toc").read_text() == f"[('PYZ{index}',)]"
     provenance = json.loads((metadata / "dependency-provenance.json").read_text())
     assert provenance["require_artifact_selftest"] is True
+    voice_policy = load_voice_runtime_policy()
+    assert provenance["voice_runtime"] == {
+        "python_version": voice_policy.python_version,
+        "uv_version": voice_policy.uv_version,
+        "uv_archive_url": voice_policy.uv_archives[target.name].url,
+        "uv_archive_sha256": voice_policy.uv_archives[target.name].sha256,
+    }
 
 
 def test_capture_build_metadata_requires_every_toc(
@@ -402,3 +527,102 @@ def test_build_policy_rejects_out_of_bounds_timeouts(tmp_path: Path) -> None:
         load_desktop_build_policy(policy_path)
 
     assert isinstance(load_desktop_build_policy(), DesktopBuildPolicy)
+
+
+def _voice_bundle(root: Path) -> Path:
+    voice = root / "voice"
+    voice.mkdir(parents=True)
+    (voice / "uv").write_bytes(b"\x7fELF uv")
+    (voice / "uv").chmod(0o755)
+    for name in ("servonaut-2.26.3-py3-none-any.whl", "voice-requirements.txt"):
+        (voice / name).write_bytes(name.encode())
+    (voice / "voice-runtime.json").write_text("{}")
+    return voice
+
+
+def test_voice_bundle_is_copied_into_the_payload_unchanged(tmp_path: Path) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    payload = tmp_path / "servonaut-desktop"
+    (payload / "_internal").mkdir(parents=True)
+
+    desktop_build._install_voice_bundle(payload, voice)
+
+    installed = payload / "_internal" / "voice"
+    assert sorted(path.name for path in installed.iterdir()) == sorted(
+        path.name for path in voice.iterdir()
+    )
+    for source in voice.iterdir():
+        assert (installed / source.name).read_bytes() == source.read_bytes()
+    assert (installed / "uv").stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize("existing", ["voice", "voice-link"])
+def test_voice_bundle_never_merges_into_pyinstaller_output(
+    tmp_path: Path, existing: str
+) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    internal = tmp_path / "servonaut-desktop" / "_internal"
+    internal.mkdir(parents=True)
+    if existing == "voice":
+        (internal / "voice").mkdir()
+    else:
+        (internal / "voice").symlink_to(voice, target_is_directory=True)
+
+    with pytest.raises(DesktopPolicyValidationError, match="already contains a voice"):
+        desktop_build._install_voice_bundle(tmp_path / "servonaut-desktop", voice)
+
+
+def test_voice_bundle_requires_the_pyinstaller_contents_directory(tmp_path: Path) -> None:
+    voice = _voice_bundle(tmp_path / "staging")
+    (tmp_path / "servonaut-desktop").mkdir()
+
+    with pytest.raises(DesktopPolicyValidationError, match="contents directory"):
+        desktop_build._install_voice_bundle(tmp_path / "servonaut-desktop", voice)
+
+
+def test_voice_bundle_is_staged_before_dependencies_and_pyinstaller(
+    wheel: Path,
+    target: DesktopTargetSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        desktop_build, "_bootstrap_build_venv", lambda root, policy: _context(root)
+    )
+
+    def refuse_download(staging_root: Path, spec: DesktopTargetSpec, *args: object) -> Path:
+        staged.append((staging_root, spec.name))
+        raise VoiceBundleError("the uv archive does not match its pinned SHA-256")
+
+    def unexpected(*args: object) -> None:
+        raise AssertionError("the long build steps must not start")
+
+    monkeypatch.setattr(desktop_build, "stage_voice_bundle", refuse_download)
+    monkeypatch.setattr(desktop_build, "_prepare_spec_inputs", unexpected)
+    monkeypatch.setattr(desktop_build, "_run_pyinstaller", unexpected)
+
+    with pytest.raises(DesktopPolicyValidationError, match="pinned SHA-256"):
+        desktop_build._build_staged_payload(
+            _request(wheel, target, tmp_path), tmp_path, load_desktop_build_policy()
+        )
+
+    assert staged == [(tmp_path, target.name)]
+
+
+def test_malformed_voice_lock_is_refused_before_output_is_created(
+    wheel: Path,
+    target: DesktopTargetSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(desktop_build, "_validate_host_target", lambda target: None)
+    lock = tmp_path / "voice-lock.txt"
+    lock.write_text("numpy>=1.24\n", encoding="ascii")
+    monkeypatch.setattr(desktop_build, "voice_lock_path", lambda name: lock)
+    output_dir = tmp_path / "out"
+
+    with pytest.raises(DesktopPolicyValidationError, match="only name==version pins"):
+        desktop_build.build_desktop(_request(wheel, target, output_dir))
+
+    assert not output_dir.exists()

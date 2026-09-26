@@ -11,7 +11,11 @@ from enum import Enum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Optional, Sequence
 
-from servonaut.runtime import DistributionKind
+from servonaut.runtime import (
+    MAX_PACKAGING_REVISION,
+    MIN_PACKAGING_REVISION,
+    DistributionKind,
+)
 
 _NUMERIC_IDENTIFIER = r"0|[1-9][0-9]*"
 _PRERELEASE_IDENTIFIER = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -30,8 +34,8 @@ _HEX_SIGNATURE_REGEX = re.compile(r"[0-9a-fA-F]{128}")
 _OS_VERSION_REGEX = re.compile(r"[0-9]+(?:\.[0-9]+){0,3}")
 _VERSIONED_OS_PLATFORMS = frozenset({"darwin", "windows"})
 _SUPPORTED_SCHEMA_VERSIONS = {1}
-_SUPPORTED_PLATFORMS = {"linux", "darwin", "windows"}
-_SUPPORTED_ARCHITECTURES = {"x86_64", "arm64"}
+SUPPORTED_PLATFORMS = frozenset({"linux", "darwin", "windows"})
+SUPPORTED_ARCHITECTURES = frozenset({"x86_64", "arm64"})
 
 # Manifest content is untrusted until verified, so values echoed into error
 # messages are escaped and truncated rather than interpolated verbatim.
@@ -98,6 +102,20 @@ class SemVer:
             for part in self.prerelease
         )
         return (self.major, self.minor, self.patch, (0, identifiers))
+
+
+def validate_packaging_revision(value: object) -> int:
+    """Require a packaging revision every package format and the runtime accept."""
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not MIN_PACKAGING_REVISION <= value <= MAX_PACKAGING_REVISION
+    ):
+        raise ManifestSchemaError(
+            "packaging_revision must be a positive integer from "
+            f"{MIN_PACKAGING_REVISION} to {MAX_PACKAGING_REVISION}."
+        )
+    return value
 
 
 def parse_semver(version: object) -> SemVer:
@@ -178,8 +196,8 @@ class ReleaseArtifact:
             raise ManifestSchemaError(
                 f"Invalid distribution kind: {bounded_repr(self.distribution)}"
             )
-        _require_member(self.platform, _SUPPORTED_PLATFORMS, "Platform")
-        _require_member(self.arch, _SUPPORTED_ARCHITECTURES, "Architecture")
+        _require_member(self.platform, SUPPORTED_PLATFORMS, "Platform")
+        _require_member(self.arch, SUPPORTED_ARCHITECTURES, "Architecture")
         _require_bare_filename(self.filename)
         if not isinstance(self.download_url, str) or not self.download_url:
             raise ManifestSchemaError("Download URL must be a non-empty string.")
@@ -377,12 +395,7 @@ class ReleaseManifest:
         if not self.published_at or not isinstance(self.published_at, str):
             raise ManifestSchemaError("published_at must be a non-empty ISO 8601 string.")
         if self.packaging_revision is not None:
-            if (
-                not isinstance(self.packaging_revision, int)
-                or isinstance(self.packaging_revision, bool)
-                or self.packaging_revision < 1
-            ):
-                raise ManifestSchemaError("packaging_revision must be a positive integer (>= 1).")
+            validate_packaging_revision(self.packaging_revision)
         if self.expires_at is not None and (not isinstance(self.expires_at, str) or not self.expires_at):
             raise ManifestSchemaError("expires_at must be a non-empty string when provided.")
         if not isinstance(self.artifacts, tuple) or not self.artifacts:

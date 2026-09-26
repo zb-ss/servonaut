@@ -28,7 +28,11 @@ if find_upstream_static_dir() is None:
 from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_target_spec,
+    load_voice_runtime_policy,
+    uv_executable_name,
+    voice_lock_path,
 )
+from scripts.desktop_shell.voice_bundle import BundledFile, VoiceBundleManifest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
@@ -125,6 +129,8 @@ def _create_mock_payload(
         "distribution": "packaged-desktop",
         "product_version": version,
         "build_revision": "rev1",
+        "channel": "stable",
+        "packaging_revision": 1,
         "console_helper": f"servonaut{ext}",
         "desktop_child": f"servonaut-desktop-child{ext}",
     }
@@ -138,7 +144,41 @@ def _create_mock_payload(
     (notices / "CPython-LICENSE.txt").write_text("Python license\n")
     for distribution in _NOTICE_DISTRIBUTIONS:
         (notices / f"{distribution}-LICENSE.txt").write_bytes(_notice_text(distribution))
+    _create_voice_bundle(root, target, version)
     return root
+
+
+def _bundled(path: Path) -> BundledFile:
+    return BundledFile(path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def _write_voice_manifest(voice: Path, target: DesktopTargetSpec, version: str) -> None:
+    policy = load_voice_runtime_policy()
+    manifest = VoiceBundleManifest(
+        target=target.name,
+        python_version=policy.python_version,
+        uv=_bundled(voice / uv_executable_name(target.platform)),
+        wheel=_bundled(voice / f"servonaut-{version}-py3-none-any.whl"),
+        requirements=_bundled(voice / "voice-requirements.txt"),
+        uv_command_seconds=policy.uv_command_timeout_seconds,
+        stall_seconds=policy.stall_timeout_seconds,
+        provision_seconds=policy.provision_timeout_seconds,
+    )
+    (voice / "voice-runtime.json").write_text(json.dumps(manifest.to_json()))
+
+
+def _create_voice_bundle(
+    root: Path, target: DesktopTargetSpec, version: str, uv: bytes | None = None
+) -> Path:
+    voice = root / "_internal" / "voice"
+    voice.mkdir(parents=True)
+    uv_path = voice / uv_executable_name(target.platform)
+    uv_path.write_bytes((_native_executable(target) if uv is None else uv) + b"uv")
+    uv_path.chmod(0o755)
+    (voice / f"servonaut-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    shutil.copyfile(voice_lock_path(target.name), voice / "voice-requirements.txt")
+    _write_voice_manifest(voice, target, version)
+    return voice
 
 
 def _create_build_metadata(
@@ -186,6 +226,7 @@ def test_inspect_desktop_payload_success(
     assert report.marker_valid is True
     assert report.assets_verified_count > 0
     assert report.notices_verified_count == 6
+    assert report.voice_files_verified_count == 4
     assert report.regular_file_count > 0
     assert report.binary_formats == {"gui": "elf", "child": "elf", "console": "elf"}
 
@@ -508,3 +549,200 @@ def test_inspect_main_cli(
     data = json.loads(output_json.read_text(encoding="utf-8"))
     assert data["target"] == "linux-x64-ubuntu-22.04"
     assert data["marker_valid"] is True
+
+
+def _voice_dir(payload: Path) -> Path:
+    return payload / "_internal" / "voice"
+
+
+@pytest.mark.parametrize("target_name", _TARGETS)
+def test_inspect_accepts_the_voice_bundle_for_every_target(
+    tmp_path: Path, target_name: str
+) -> None:
+    target = load_desktop_target_spec(_POLICY_PATH, target_name)
+    payload = _create_mock_payload(tmp_path / "payload", target)
+    metadata = _create_build_metadata(tmp_path / "metadata", target)
+
+    assert _inspect((payload, metadata), target).voice_files_verified_count == 4
+    assert {path.name for path in _voice_dir(payload).iterdir()} == {
+        uv_executable_name(target.platform),
+        "servonaut-2.26.3-py3-none-any.whl",
+        "voice-requirements.txt",
+        "voice-runtime.json",
+    }
+
+
+@pytest.mark.parametrize(
+    ("relative", "message"),
+    [
+        ("_internal/voice/extra.txt", "unexpected \\['extra.txt'\\]"),
+        ("_internal/voice/model.onnx", "unexpected \\['model.onnx'\\]"),
+        ("_internal/voice/servonaut-9.9.9-py3-none-any.whl", "unexpected"),
+        ("_internal/voice/models/silero_vad.bin", "unexpected \\['models'\\]"),
+        ("_internal/voice/sherpa_onnx/__init__.py", "unexpected \\['sherpa_onnx'\\]"),
+    ],
+)
+def test_inspect_rejects_anything_else_in_the_voice_bundle(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, relative: str, message: str
+) -> None:
+    path = build[0] / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a voice runtime input")
+
+    with pytest.raises(DesktopInspectionError, match=message):
+        _inspect(build, target_spec)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "_internal/voice/models/silero_vad.bin",
+        "_internal/voice/sherpa_onnx/lib/libonnxruntime.so",
+        "_internal/voice/extra.txt",
+        "_internal/voice/uv/nested",
+        "_internal/other/voice/uv",
+        "voice/voice-runtime.json",
+    ],
+)
+def test_forbidden_path_policy_still_covers_voice_engines_and_models(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, relative: str
+) -> None:
+    """Only the four bundle files are exempt; the path gate rejects everything else."""
+    payload, metadata = build
+    path = payload / relative
+    if path.parent.is_file():
+        path.parent.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"voice engine or model")
+    snapshot = desktop_inspect._without_voice_bundle(
+        desktop_inspect._payload_snapshot(payload, payload / "servonaut", {}, {}),
+        target_spec,
+    )
+    executables = {
+        role: payload / name
+        for role, name in (
+            ("gui", "servonaut-desktop"),
+            ("child", "servonaut-desktop-child"),
+            ("console", "servonaut"),
+        )
+    }
+
+    with pytest.raises(DesktopInspectionError, match="forbidden relative path"):
+        desktop_inspect._verify_toc_policy(
+            snapshot, target_spec, executables, metadata, 1024 * 1024
+        )
+
+
+def test_forbidden_path_policy_exempts_exactly_the_bundle_files(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec
+) -> None:
+    payload, metadata = build
+    snapshot = desktop_inspect._payload_snapshot(payload, payload / "servonaut", {}, {})
+    exempt = desktop_inspect._without_voice_bundle(snapshot, target_spec)
+
+    removed = {entry.relative_path.as_posix() for entry in snapshot.entries} - {
+        entry.relative_path.as_posix() for entry in exempt.entries
+    }
+    assert removed == {
+        "_internal/voice/uv",
+        "_internal/voice/servonaut-2.26.3-py3-none-any.whl",
+        "_internal/voice/voice-requirements.txt",
+        "_internal/voice/voice-runtime.json",
+    }
+
+
+def test_inspect_requires_the_voice_bundle(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec
+) -> None:
+    shutil.rmtree(_voice_dir(build[0]))
+
+    with pytest.raises(DesktopInspectionError, match="Voice runtime uv does not exist"):
+        _inspect(build, target_spec)
+
+
+def test_inspect_rejects_a_voice_uv_for_another_architecture(tmp_path: Path) -> None:
+    target = load_desktop_target_spec(_POLICY_PATH, "macos-arm64")
+    payload = _create_mock_payload(tmp_path / "payload", target)
+    shutil.rmtree(_voice_dir(payload))
+    _create_voice_bundle(payload, target, "2.26.3", uv=_macho("x86_64"))
+    metadata = _create_build_metadata(tmp_path / "metadata", target)
+
+    with pytest.raises(DesktopInspectionError, match="Voice runtime uv architecture"):
+        _inspect((payload, metadata), target)
+
+
+def test_inspect_rejects_a_non_executable_voice_uv(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec
+) -> None:
+    (_voice_dir(build[0]) / "uv").chmod(0o644)
+
+    with pytest.raises(DesktopInspectionError, match="Voice runtime uv is not executable"):
+        _inspect(build, target_spec)
+
+
+@pytest.mark.parametrize(
+    "name", ["uv", "servonaut-2.26.3-py3-none-any.whl", "voice-requirements.txt"]
+)
+def test_inspect_rejects_voice_files_that_differ_from_the_manifest(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, name: str
+) -> None:
+    with (_voice_dir(build[0]) / name).open("ab") as handle:
+        handle.write(b"\n# altered\n")
+
+    with pytest.raises(DesktopInspectionError, match="manifest does not match"):
+        _inspect(build, target_spec)
+
+
+def test_inspect_rejects_voice_requirements_other_than_the_target_lock(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec
+) -> None:
+    voice = _voice_dir(build[0])
+    other = voice_lock_path("windows-x64").read_bytes()
+    (voice / "voice-requirements.txt").write_bytes(other)
+    _write_voice_manifest(voice, target_spec, "2.26.3")
+
+    with pytest.raises(
+        DesktopInspectionError, match="differ from the reviewed target lock"
+    ):
+        _inspect(build, target_spec)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda raw: raw.update(extra=1), "unsupported or missing fields"),
+        (lambda raw: raw.update(schema_version=True), "schema_version"),
+        (lambda raw: raw.update(python_version="3.12.0"), "manifest does not match"),
+        (lambda raw: raw.update(target="windows-x64"), "manifest does not match"),
+        (
+            lambda raw: raw["timeouts"].update(stall_seconds=1),
+            "manifest does not match",
+        ),
+    ],
+)
+def test_inspect_rejects_a_voice_manifest_outside_policy(
+    build: tuple[Path, Path],
+    target_spec: DesktopTargetSpec,
+    change: object,
+    message: str,
+) -> None:
+    manifest_path = _voice_dir(build[0]) / "voice-runtime.json"
+    raw = json.loads(manifest_path.read_text())
+    change(raw)
+    manifest_path.write_text(json.dumps(raw))
+
+    with pytest.raises(DesktopInspectionError, match=message):
+        _inspect(build, target_spec)
+
+
+def test_inspect_rejects_a_symlinked_voice_file(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, tmp_path: Path
+) -> None:
+    requirements = _voice_dir(build[0]) / "voice-requirements.txt"
+    outside = tmp_path / "requirements.txt"
+    outside.write_bytes(requirements.read_bytes())
+    requirements.unlink()
+    requirements.symlink_to(outside)
+
+    with pytest.raises(DesktopInspectionError, match="regular file"):
+        _inspect(build, target_spec)

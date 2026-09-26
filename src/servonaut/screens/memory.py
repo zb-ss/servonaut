@@ -6,8 +6,10 @@ keyboard actions to refresh, pin, clear, annotate, and export memory.
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import hashlib
+import inspect
 import logging
 import os
 import shlex
@@ -15,17 +17,20 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
 
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
+from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -121,7 +126,7 @@ def _memory_scan_status_label(instance: Dict[str, Any], memory_service: Any) -> 
         return label
 
     instance_id = instance.get("id") or instance.get("name", "")
-    provider = instance.get("provider", "custom")
+    provider = instance_provider(instance)
     try:
         modules = memory_service.get_all_modules(instance_id, provider)
     except Exception as exc:  # noqa: BLE001
@@ -360,8 +365,19 @@ class MemoryScreen(Screen):
             instance: Instance dict (same format as ``app.instances``).
         """
         super().__init__()
+        # The row as displayed: demo-mode stand-ins when demo mode is on.
+        # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
         self._has_local_memory = False
+
+    @property
+    def _target(self) -> dict:
+        """The real record behind the displayed row (itself outside demo mode)."""
+        try:
+            app = self.app
+        except RuntimeError:  # no running app: nothing was redacted either
+            return self._instance
+        return connection_instance(app, self._instance)
 
     # ------------------------------------------------------------------
     # Compose
@@ -477,6 +493,25 @@ class MemoryScreen(Screen):
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the title and the observed/declared values for the new mode.
+
+        The displayed row is redacted or restored in place by the app, so
+        the title only needs redrawing.
+        """
+        self._render_title()
+        self._render_table()
+
+    def _render_title(self) -> None:
+        from rich.markup import escape
+
+        name = (
+            self._instance.get("name") or self._instance.get("id") or "unknown"
+        )
+        self.query_one("#memory-title", Static).update(
+            f"[bold cyan]Server Memory: {escape(str(name))}[/bold cyan]"
+        )
+
     # ------------------------------------------------------------------
     # Table rendering
     # ------------------------------------------------------------------
@@ -492,8 +527,8 @@ class MemoryScreen(Screen):
         table = self.query_one("#memory-table", DataTable)
         banner = self.query_one("#memory-opt-out-banner", Static)
 
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
+        instance_id = self._target.get("id") or self._target.get("name", "")
+        provider = instance_provider(self._target)
 
         # Opt-out check
         memory_service = getattr(self.app, "memory_service", None)
@@ -672,7 +707,7 @@ class MemoryScreen(Screen):
             True when the global enabled flag is False or when this
             specific instance has been opted out via per_server_overrides.
         """
-        instance_name = self._instance.get("name", "")
+        instance_name = self._target.get("name", "")
         try:
             return memory_service.is_memory_disabled(instance_id, instance_name)
         except Exception as exc:  # noqa: BLE001
@@ -734,7 +769,7 @@ class MemoryScreen(Screen):
 
     def action_refresh_all(self) -> None:
         """Refresh all memory modules for this instance."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -756,16 +791,45 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            await memory_service.refresh(self._instance)
+            host_key_message = await self._refresh_memory(memory_service)
             self._render_table()
-            self.app.notify("Memory refreshed.")
+            if host_key_message:
+                self._notify_host_key_refusal(host_key_message)
+            else:
+                self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
+
+    async def _refresh_memory(
+        self, memory_service: Any, modules: Optional[list] = None,
+    ) -> Optional[str]:
+        """Re-probe, returning the message when ssh refused the host key.
+
+        Uses the reporting API when the service provides it; services that
+        expose only the dict-returning ``refresh`` report nothing.
+        """
+        refresh_report = getattr(memory_service, "refresh_report", None)
+        # Probe the real server: in demo mode the row shows stand-ins.
+        target = self._target
+        if not inspect.iscoroutinefunction(refresh_report):
+            if modules is None:
+                await memory_service.refresh(target)
+            else:
+                await memory_service.refresh(target, modules=modules)
+            return None
+        report = await refresh_report(target, modules)
+        if report.overall_reason == HOST_KEY_BUILD_REASON and report.failures:
+            return report.failures[0].message
+        return None
+
+    def _notify_host_key_refusal(self, message: str) -> None:
+        """Show a refused host key; the message carries "[host]:port"."""
+        self.app.notify(message, severity="error", markup=False, timeout=20)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -789,18 +853,23 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        self.app.notify(f"Probing {module_name}…")
+        self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            await memory_service.refresh(self._instance, modules=[module_name])
+            host_key_message = await self._refresh_memory(
+                memory_service, modules=[module_name],
+            )
             self._render_table()
-            self.app.notify(f"Module '{module_name}' refreshed.")
+            if host_key_message:
+                self._notify_host_key_refusal(host_key_message)
+            else:
+                self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
             logger.error("Module refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
     def action_pin_key(self) -> None:
         """Push PinKeyModal to pin a declared value for the cursor key."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -814,7 +883,7 @@ class MemoryScreen(Screen):
             return
 
         # Look up the current observed value for the placeholder text
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._target)
         try:
             data = memory_service.get(instance_id, module_name, provider)
             current_value = str(data.get("observed", {}).get(key, "")) if data else ""
@@ -847,7 +916,7 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._target)
         try:
             await memory_service.pin(
                 instance_id,
@@ -858,14 +927,14 @@ class MemoryScreen(Screen):
                 provider=provider,
             )
             self._render_table()
-            self.app.notify(f"Pinned {module_name}.{key} = {value!r}")
+            self.app.notify(f"Pinned {module_name}.{key} = {value!r}", markup=False)
         except Exception as exc:
             logger.error("Pin failed: %s", exc, exc_info=True)
-            self.app.notify(f"Pin failed: {exc}", severity="error")
+            self.app.notify(f"Pin failed: {exc}", severity="error", markup=False)
 
     def action_clear_module(self) -> None:
         """Clear the module at the cursor row after confirmation."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -885,16 +954,16 @@ class MemoryScreen(Screen):
             if self._is_opted_out(instance_id, memory_service):
                 self.app.notify("Memory disabled for this server.", severity="warning")
                 return
-            provider = self._instance.get("provider", "custom")
+            provider = instance_provider(self._target)
             try:
                 memory_service.clear(
                     instance_id, modules=[module_name], provider=provider
                 )
                 self._render_table()
-                self.app.notify(f"Module '{module_name}' cleared.")
+                self.app.notify(f"Module '{module_name}' cleared.", markup=False)
             except Exception as exc:
                 logger.error("Clear failed: %s", exc, exc_info=True)
-                self.app.notify(f"Clear failed: {exc}", severity="error")
+                self.app.notify(f"Clear failed: {exc}", severity="error", markup=False)
 
         self.app.push_screen(
             SimpleConfirmModal(f"Clear module [bold]{module_name}[/bold]?"),
@@ -909,8 +978,8 @@ class MemoryScreen(Screen):
         free-form notes file.  Seeding a short template makes that
         distinction obvious without fighting the data-table surface.
         """
-        name = self._instance.get("name") or instance_id
-        provider = self._instance.get("provider", "custom")
+        name = self._target.get("name") or instance_id
+        provider = instance_provider(self._target)
         return (
             f"# Notes — {name} ({instance_id}) @ {provider}\n"
             "\n"
@@ -943,12 +1012,14 @@ class MemoryScreen(Screen):
         )
 
     def action_annotate(self) -> None:
-        """Open the annotations file in the user's ``$EDITOR``.
+        """Edit this server's free-form notes (``annotations.md``).
 
-        Drops out of the TUI via ``self.app.suspend()``, opens the editor,
-        then re-renders the table on return.
+        Opens ``$VISUAL`` / ``$EDITOR`` in the terminal via
+        ``self.app.suspend()``. Where the app cannot suspend (the headless
+        driver, web drivers) it falls back to an in-app editor, so annotating
+        works everywhere. The table re-renders after either.
         """
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -957,14 +1028,53 @@ class MemoryScreen(Screen):
             self.app.notify("Memory disabled for this server.", severity="warning")
             return
 
-        provider = self._instance.get("provider", "custom")
+        provider = instance_provider(self._target)
+        path = self._prepare_annotations_file(instance_id, provider, memory_service)
+        if path is None:
+            return
+
+        argv = self._editor_argv(path)
+        logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
+        try:
+            proc = self._run_external_editor(argv)
+        except SuspendNotSupported:
+            logger.info("Terminal cannot be suspended; using the in-app editor")
+            self._open_in_app_annotation_editor(instance_id, provider, memory_service)
+            return
+        except FileNotFoundError:
+            self.app.notify(
+                f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
+                "installed command (e.g. 'vi', 'nano').",
+                severity="error",
+            )
+            return
+        except OSError as exc:
+            self.app.notify(f"Could not launch editor: {exc}", severity="error", markup=False)
+            return
+
+        self._report_editor_problems(argv, proc)
+        self.run_worker(
+            self._finish_external_edit(instance_id, provider, memory_service),
+            exclusive=False,
+            group="memory_mutation",
+            name="memory_annotations_record",
+        )
+
+    def _prepare_annotations_file(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[Path]:
+        """Resolve ``annotations.md``, seeding the template on first open.
+
+        Returns ``None`` (after notifying) when the file cannot be prepared.
+        """
         try:
             path = memory_service.get_annotations_path(instance_id, provider)
         except Exception as exc:
             self.app.notify(
-                f"Could not resolve annotations path: {exc}", severity="error"
+                f"Could not resolve annotations path: {exc}", severity="error",
+                markup=False,
             )
-            return
+            return None
 
         # Seed a short template on first open so operators understand what
         # goes here (free-form notes) vs. what is machine-probed (the table
@@ -985,10 +1095,15 @@ class MemoryScreen(Screen):
                 )
             except OSError as exc:
                 self.app.notify(
-                    f"Could not create annotations file: {exc}", severity="error"
+                    f"Could not create annotations file: {exc}", severity="error",
+                    markup=False,
                 )
-                return
+                return None
+        return path
 
+    @staticmethod
+    def _editor_argv(path: Path) -> List[str]:
+        """Build the editor argv from ``$VISUAL`` / ``$EDITOR`` (default ``vi``)."""
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         # $EDITOR / $VISUAL may include flags (e.g. "emacsclient -c -a emacs")
         # so split with shlex rather than passing the raw string as argv[0];
@@ -1001,41 +1116,40 @@ class MemoryScreen(Screen):
         if not argv:
             argv = ["vi"]
         argv.append(str(path))
+        return argv
 
-        logger.info("Opening annotations editor: argv=%r path=%s", argv, path)
+    def _run_external_editor(self, argv: List[str]) -> Optional[subprocess.CompletedProcess]:
+        """Run the editor in the real terminal while the app is suspended.
 
+        Raises:
+            SuspendNotSupported: the driver cannot hand the terminal over.
+                Raised on entering ``suspend()``, before anything is launched.
+        """
+        with self.app.suspend():
+            # Only stderr is captured, so a non-zero exit (e.g. emacsclient
+            # can't reach a daemon) can be surfaced. stdout must stay the
+            # terminal: a terminal editor draws its screen there, and
+            # capturing it leaves the user typing into an invisible editor.
+            return subprocess.run(  # noqa: S603
+                argv,
+                check=False,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
+
+    def _report_editor_problems(
+        self, argv: List[str], proc: Optional[subprocess.CompletedProcess]
+    ) -> None:
+        """Explain common editor misconfigurations and non-zero exits."""
         # Heuristic: catch the common "$EDITOR=emacs -c -a emacs" typo.  Those
         # flags are emacsclient-specific; plain emacs treats them as filenames
         # and opens buffers named -c / -a / emacs alongside the real file,
         # which users perceive as "emacs opened but not my file".
         editor_binary = os.path.basename(argv[0])
-        looks_like_bad_emacs_config = editor_binary == "emacs" and any(
+        if editor_binary == "emacs" and any(
             flag in argv[1:-1] for flag in ("-c", "-a", "--alternate-editor")
-        )
-        try:
-            with self.app.suspend():
-                # capture_output so a non-zero exit (e.g. emacsclient can't
-                # reach a daemon and fallback emacs fails) can be surfaced
-                # instead of dropping the user back into the TUI with no
-                # clue why nothing happened.
-                proc = subprocess.run(  # noqa: S603
-                    argv,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-        except FileNotFoundError:
-            self.app.notify(
-                f"Editor not found: {argv[0]}. Set $EDITOR or $VISUAL to an "
-                "installed command (e.g. 'vi', 'nano').",
-                severity="error",
-            )
-            return
-        except OSError as exc:
-            self.app.notify(f"Could not launch editor: {exc}", severity="error")
-            return
-
-        if looks_like_bad_emacs_config:
+        ):
             self.app.notify(
                 "Your $EDITOR is 'emacs' but uses emacsclient flags (-c / -a). "
                 "Plain emacs treats those as filenames, so the wrong buffer "
@@ -1045,57 +1159,173 @@ class MemoryScreen(Screen):
                 timeout=10,
             )
 
-        if proc is not None and proc.returncode != 0:
-            stderr_snippet = (proc.stderr or "").strip().splitlines()
-            last_err = stderr_snippet[-1] if stderr_snippet else ""
-            logger.warning(
-                "Editor exited non-zero: argv=%r rc=%d stderr=%r",
-                argv,
-                proc.returncode,
-                proc.stderr,
+        if proc is None or proc.returncode == 0:
+            return
+        stderr_snippet = (proc.stderr or "").strip().splitlines()
+        last_err = stderr_snippet[-1] if stderr_snippet else ""
+        logger.warning(
+            "Editor exited non-zero: argv=%r rc=%d stderr=%r",
+            argv,
+            proc.returncode,
+            proc.stderr,
+        )
+        # emacsclient is a common trip-wire: it only opens a frame when
+        # an emacs daemon is running, and "emacsclient -c -a emacs"
+        # falls back to GUI emacs which needs DISPLAY.  Hint at the fix
+        # rather than just showing a bare exit code.
+        hint = ""
+        if "emacsclient" in argv[0]:
+            hint = (
+                " — try 'emacsclient -t' (terminal frame) or start an "
+                "emacs daemon with 'emacs --daemon'."
             )
-            # emacsclient is a common trip-wire: it only opens a frame when
-            # an emacs daemon is running, and "emacsclient -c -a emacs"
-            # falls back to GUI emacs which needs DISPLAY.  Hint at the fix
-            # rather than just showing a bare exit code.
-            hint = ""
-            if "emacsclient" in argv[0]:
-                hint = (
-                    " — try 'emacsclient -t' (terminal frame) or start an "
-                    "emacs daemon with 'emacs --daemon'."
-                )
-            msg = (
-                f"Editor exited with code {proc.returncode}"
-                f"{': ' + last_err if last_err else ''}{hint}"
-            )
-            self.app.notify(msg, severity="warning")
+        msg = (
+            f"Editor exited with code {proc.returncode}"
+            f"{': ' + last_err if last_err else ''}{hint}"
+        )
+        self.app.notify(msg, severity="warning", markup=False)
 
-        # After the editor closes, compute a content hash and enqueue the
-        # updated annotations for sync if the content has changed.
+    def _open_in_app_annotation_editor(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> None:
+        """Edit the annotations in a modal TextArea; save them in a worker."""
+        from servonaut.screens.text_editor_modal import TextEditorModal
+
         try:
             content = memory_service.read_annotations(instance_id, provider)
-            new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            prior_hash = memory_service.get_annotations_meta(instance_id).get(
-                "annotations_hash", ""
+        except Exception as exc:
+            self.app.notify(f"Could not read annotations: {exc}", severity="error", markup=False)
+            return
+
+        def _on_close(result: Optional[str]) -> None:
+            if result is None or result == content:
+                return
+            self.run_worker(
+                self._save_annotations(instance_id, provider, memory_service, result),
+                exclusive=False,
+                group="memory_mutation",
+                name="memory_annotations_save",
             )
-            if new_hash != prior_hash:
-                now_iso = datetime.now(timezone.utc).isoformat()
-                memory_service.set_annotations_meta(
-                    instance_id,
-                    annotations_hash=new_hash,
-                    annotations_modified_at=now_iso,
-                )
+
+        name = self._instance.get("name") or instance_id
+        self.app.push_screen(
+            TextEditorModal(
+                content,
+                title=f"Notes — {name}",
+                hint="Free-form notes for this server (Markdown)",
+                check=self._secret_warning,
+            ),
+            _on_close,
+        )
+
+    async def _save_annotations(
+        self, instance_id: str, provider: str, memory_service: Any, text: str
+    ) -> None:
+        """Worker: write the notes off the UI thread, then record the change."""
+        try:
+            await asyncio.to_thread(
+                memory_service.write_annotations, instance_id, text, provider
+            )
+        except Exception as exc:
+            self.app.notify(
+                f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        self.app.notify("Annotations saved.", severity="information")
+        await self._record_annotations_edit(instance_id, provider, memory_service)
+
+    async def _finish_external_edit(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> None:
+        """Worker: record what ``$EDITOR`` saved; warn if it looks like a secret."""
+        content = await self._record_annotations_edit(
+            instance_id, provider, memory_service
+        )
+        warning = self._secret_warning(content) if content is not None else None
+        if warning:
+            self.app.notify(
+                f"{warning} They were saved as written; remove them if that "
+                "was not intended.",
+                severity="warning",
+                timeout=10,
+                markup=False,
+            )
+
+    async def _record_annotations_edit(
+        self, instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[str]:
+        """Store a changed annotations hash, queue the notes for sync, re-render.
+
+        The file read and metadata write run off the UI thread. The sync
+        enqueue stays on the event loop, which is where the sync queue is
+        drained, so the two never touch the queue at the same time.
+
+        Returns:
+            The new content when it changed, else ``None``.
+        """
+        content: Optional[str] = None
+        try:
+            changed = await asyncio.to_thread(
+                self._store_annotations_hash, instance_id, provider, memory_service
+            )
+            if changed is not None:
+                content, modified_at = changed
                 sync = getattr(self.app, "memory_sync_service", None)
                 if sync is not None:
-                    sync.enqueue_annotations(self._instance, content, probed_at=now_iso)
+                    sync.enqueue_annotations(
+                        self._target, content, probed_at=modified_at
+                    )
         except Exception as exc:
             logger.warning("Could not enqueue annotations after edit: %s", exc)
 
         self._render_table()
+        return content
+
+    @staticmethod
+    def _store_annotations_hash(
+        instance_id: str, provider: str, memory_service: Any
+    ) -> Optional[Tuple[str, str]]:
+        """Blocking: when the notes changed, store their new hash.
+
+        Returns:
+            ``(content, modified_at)`` when they changed, else ``None``.
+        """
+        content = memory_service.read_annotations(instance_id, provider)
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        prior_hash = memory_service.get_annotations_meta(instance_id).get(
+            "annotations_hash", ""
+        )
+        if new_hash == prior_hash:
+            return None
+        now_iso = datetime.now(timezone.utc).isoformat()
+        memory_service.set_annotations_meta(
+            instance_id,
+            annotations_hash=new_hash,
+            annotations_modified_at=now_iso,
+        )
+        return content, now_iso
+
+    @staticmethod
+    def _secret_warning(content: str) -> Optional[str]:
+        """A warning when the notes look like they hold a secret, else ``None``.
+
+        Notes are never blocked or scrubbed: the user may have pasted a
+        placeholder on purpose.
+        """
+        from servonaut.services.memory.redaction import scan_for_secrets
+
+        categories = scan_for_secrets(content)
+        if not categories:
+            return None
+        return (
+            "These notes appear to contain secrets ("
+            + ", ".join(dict.fromkeys(categories))
+            + ")."
+        )
 
     def action_view_summary(self) -> None:
         """Render the deterministic local summary without an entitlement gate."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -1122,7 +1352,7 @@ class MemoryScreen(Screen):
         if memory_service is None:
             return
         try:
-            summary = await memory_service.get_summary(self._instance)
+            summary = await memory_service.get_summary(self._target)
             summary = self._scrub_summary_for_demo(summary)
             from servonaut.screens.memory_summary import MemorySummaryScreen
 
@@ -1205,7 +1435,7 @@ class MemoryScreen(Screen):
             )
             return
         try:
-            local_summary = await memory_service.get_summary(self._instance)
+            local_summary = await memory_service.get_summary(self._target)
             prompt = config_manager.get().memory.ai_enhancement_prompt
             from servonaut.screens.memory_summary import (
                 MemorySummaryScreen,
@@ -1246,7 +1476,7 @@ class MemoryScreen(Screen):
 
     def action_export(self) -> None:
         """Export memory summary to a Markdown file."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -1267,11 +1497,11 @@ class MemoryScreen(Screen):
         if memory_service is None:
             return
         try:
-            path = await memory_service.write_summary(self._instance)
-            self.app.notify(f"Exported to {path}")
+            path = await memory_service.write_summary(self._target)
+            self.app.notify(f"Exported to {path}", markup=False)
         except Exception as exc:
             logger.error("Export failed: %s", exc, exc_info=True)
-            self.app.notify(f"Export failed: {exc}", severity="error")
+            self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Cloud sync actions (S binding)
@@ -1286,7 +1516,7 @@ class MemoryScreen(Screen):
     def _refresh_local_memory_status(self) -> None:
         """Update the local scan label from the latest stored modules."""
         memory_service = getattr(self.app, "memory_service", None)
-        label = _memory_scan_status_label(self._instance, memory_service)
+        label = _memory_scan_status_label(self._target, memory_service)
         try:
             self.query_one("#memory-local-status", Static).update(label)
         except Exception:  # noqa: BLE001
@@ -1434,10 +1664,12 @@ class MemoryScreen(Screen):
     _MAX_MANUAL_SYNC_BATCHES = 200
 
     async def _do_sync_now(self, sync_service: Any) -> None:
-        iid = self._instance.get("id") or self._instance.get("name", "")
-        name = self._instance.get("name", "")
-        provider = self._instance.get("provider", "custom")
-        display_name = name or iid or "this server"
+        target = self._target
+        iid = target.get("id") or target.get("name", "")
+        name = target.get("name", "")
+        shown = self._instance
+        provider = instance_provider(target)
+        display_name = shown.get("name") or shown.get("id") or "this server"
         try:
             queued = sync_service.backfill_from_local_store(instance_id=iid)
             pending_before = self._pending_for_instance(sync_service, iid)
@@ -1591,7 +1823,7 @@ class MemoryScreen(Screen):
                 self.app.push_screen(UpsellModal("memory_ai_summary"))
                 return
 
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         await self._do_ai_summary_flow(instance_id)
 
     async def _do_ai_summary_flow(self, instance_id: str) -> None:
@@ -1754,7 +1986,7 @@ class MemoryScreen(Screen):
             raise RuntimeError(
                 "Memory retrieval is unavailable; unlock Memory Sync and retry"
             )
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         decrypted = await retrieval_service.decrypt_envelope(
             envelope,
             expected_instance_id=instance_id,

@@ -146,8 +146,80 @@ def test_inspect_and_smoke_receive_build_metadata(workflow_content: str):
         assert '--build-metadata "${METADATA_DIR}"' in step
 
 
-def test_selftest_skip_is_documented(workflow_content: str):
+def _step(qualify: str, module: str) -> str:
+    return qualify.split(module, 1)[1].split("\n      - ", 1)[0]
+
+
+def test_every_target_embeds_and_runs_the_gui_selftest(workflow_content: str):
+    """The matrix runs one qualify job per target, each with the self-test."""
     qualify = _job_block(workflow_content, "qualify")
-    smoke = qualify.split("- name: Run policy-bound smoke checks", 1)
-    assert "# --skip-selftest:" in smoke[0].rsplit("\n      - ", 1)[-1]
-    assert "--skip-selftest" in smoke[1]
+
+    # The build always embeds the self-test; it is not a build option.
+    assert "artifact-selftest" not in _step(qualify, "scripts.desktop_shell.build")
+    smoke = _step(qualify, "scripts.desktop_shell.smoke_artifact")
+    assert "--selftest" in smoke.split()
+    assert "--no-selftest" not in workflow_content
+    assert "--skip-selftest" not in workflow_content
+    # Opening the native window needs a display the runners do not have.
+    assert "--selftest-window" not in smoke
+
+
+def test_matrix_values_reach_run_steps_only_through_env(workflow_content: str):
+    qualify = _job_block(workflow_content, "qualify")
+    run_blocks = re.findall(r"\n        run: \|\n(.*?)(?=\n      - |\Z)", qualify, re.S)
+
+    assert run_blocks
+    for block in run_blocks:
+        assert "${{" not in block
+
+
+_DRIFT_WORKFLOW_PATH = _WORKFLOW_PATH.with_name("voice-runtime-drift.yml")
+
+
+def test_voice_runtime_drift_check_is_scheduled_and_read_only() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"\n  schedule:\n    - cron: '[0-9 *]+'\n", content)
+    assert "\npermissions:\n  contents: read\n" in content
+    assert "persist-credentials: false" in content
+    assert "secrets." not in content
+    assert re.search(r"\n    timeout-minutes: \d+\n", content)
+    assert "python -m scripts.desktop_shell.voice_drift" in content
+    uses = re.findall(r"uses:\s*(\S+)(.*)", content)
+    assert uses
+    for reference, comment in uses:
+        assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", reference), reference
+        assert re.fullmatch(r"\s*# v\d+\.\d+\.\d+", comment), reference
+
+
+def test_voice_runtime_drift_check_uses_the_same_action_pins(workflow_content: str) -> None:
+    drift = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    pinned = set(re.findall(r"uses:\s*(\S+)", workflow_content))
+
+    assert set(re.findall(r"uses:\s*(\S+)", drift)) <= pinned
+
+
+def test_voice_runtime_drift_check_runs_when_its_inputs_change() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+    paths = content.split("  pull_request:\n", 1)[1].split("\n  workflow_dispatch", 1)[0]
+
+    for path in (
+        "packaging/desktop_shell/voice-runtime.json",
+        "packaging/desktop_shell/target-policy.json",
+        "packaging/desktop_shell/requirements/voice*",
+        "scripts/desktop_shell/voice_*.py",
+        "scripts/desktop_shell/model.py",
+        "scripts/desktop_shell/native_headers.py",
+        "scripts/standalone_cli/pinned_asset.py",
+    ):
+        assert f"- '{path}'" in paths, path
+
+
+def test_voice_runtime_drift_check_uses_a_hash_locked_pip_and_a_read_only_token() -> None:
+    content = _DRIFT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "--require-hashes" in content
+    assert "-r packaging/desktop_shell/requirements/voice-drift-tools.txt" in content
+    assert "GITHUB_TOKEN: ${{ github.token }}" in content
+    assert re.search(r"permissions:\n  contents: read\n", content)
+    assert "write" not in content.split("\njobs:", 1)[1]

@@ -22,6 +22,7 @@ from scripts.desktop_shell.model import (
     EMBEDDED_NOTICE_POLICY_PATH,
     EXECUTABLE_ROLES,
     PYINSTALLER_WARNING_NAME,
+    VOICE_PAYLOAD_DIRECTORY,
     DesktopBuildPolicy,
     DesktopBuildRequest,
     DesktopBuildResult,
@@ -31,8 +32,11 @@ from scripts.desktop_shell.model import (
     executable_toc_directory,
     load_desktop_build_policy,
     load_desktop_target_spec,
+    load_voice_runtime_policy,
     validate_desktop_build_request,
+    voice_lock_path,
 )
+from scripts.desktop_shell.voice_bundle import load_voice_lock, stage_voice_bundle
 
 # The desktop payload embeds the same CPython and third-party notices as the
 # standalone payload, staged and verified by the same code.
@@ -52,6 +56,13 @@ from scripts.standalone_cli.model import (
     BuildValidationError,
     TargetSpec,
     load_target_spec,
+)
+from scripts.standalone_cli.release_identity import (
+    ReleaseIdentity,
+    ReleaseIdentityError,
+    add_release_identity_arguments,
+    identity_for_release_tag,
+    resolve_release_identity,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,6 +89,10 @@ _MACHINE_ARCHITECTURES = {
 # Inherited interpreter, installer and spec settings must not steer the
 # isolated build interpreter.
 _REMOVED_ENVIRONMENT_PREFIXES = ("python", "pip_", "servonaut_desktop_")
+# The GUI entry dispatches --_artifact-selftest itself, so PyInstaller always
+# bundles the self-test. The spec, profile and provenance record that fact; it
+# is not a build option.
+_ARTIFACT_SELFTEST_EMBEDDED = True
 
 _DirectoryIdentity = tuple[int, int]
 
@@ -115,7 +130,6 @@ class _SpecInputs:
     metadata_dir: Path
     frontend_dir: Path
     notices: _StagedNotices
-    require_artifact_selftest: bool
 
     def spec_environment(
         self, base: dict[str, str], dist_dir: Path
@@ -137,7 +151,7 @@ class _SpecInputs:
                 self.notices.embedded.staging_root
             ),
             "SERVONAUT_DESKTOP_REQUIRE_ARTIFACT_SELFTEST": (
-                "1" if self.require_artifact_selftest else "0"
+                "1" if _ARTIFACT_SELFTEST_EMBEDDED else "0"
             ),
         }
 
@@ -151,6 +165,7 @@ def build_desktop(request: DesktopBuildRequest) -> DesktopBuildResult:
     validate_desktop_build_request(request)
     _validate_host_target(request.target)
     _require_builder_inputs()
+    _require_voice_inputs(request.target)
     policy = load_desktop_build_policy()
     output = _prepare_output_directory(request.output_dir)
     staging: _OwnedDirectory | None = None
@@ -179,6 +194,15 @@ def _build_staged_payload(
     request: DesktopBuildRequest, staging_root: Path, policy: DesktopBuildPolicy
 ) -> tuple[Path, Path]:
     context = _bootstrap_build_venv(staging_root, policy)
+    # The pinned uv archive is fetched before the long dependency and
+    # PyInstaller steps, so a missing or altered download fails fast.
+    voice_bundle = stage_voice_bundle(
+        staging_root,
+        request.target,
+        request.wheel,
+        request.product_version,
+        load_voice_runtime_policy(),
+    )
     inputs = _prepare_spec_inputs(context, request, staging_root)
     dist_dir = staging_root / "dist"
     work_dir = staging_root / "build"
@@ -187,6 +211,7 @@ def _build_staged_payload(
 
     payload = dist_dir / _PAYLOAD_NAME
     _verify_staged_executables(payload, request.target)
+    _install_voice_bundle(payload, voice_bundle)
     _validate_payload_notices(payload, inputs.notices, policy.max_metadata_file_bytes)
     _expose_frontend(payload, inputs.frontend_dir)
     _write_runtime_marker(payload, request)
@@ -229,7 +254,6 @@ def _prepare_spec_inputs(
         metadata_dir=metadata_dir,
         frontend_dir=frontend_dir,
         notices=notices,
-        require_artifact_selftest=request.require_artifact_selftest,
     )
 
 
@@ -269,6 +293,12 @@ def _require_builder_inputs() -> None:
             )
     if not _HOOKS_DIR.is_dir():
         raise DesktopPolicyValidationError("PyInstaller hook directory is missing")
+
+
+def _require_voice_inputs(target: DesktopTargetSpec) -> None:
+    """Validate the voice runtime policy and target lock before any build work."""
+    load_voice_runtime_policy()
+    load_voice_lock(voice_lock_path(target.name))
 
 
 def _sanitized_environment() -> dict[str, str]:
@@ -444,7 +474,7 @@ def _write_profile(staging_root: Path, request: DesktopBuildRequest) -> Path:
         "product_version": request.product_version,
         "excluded_modules": list(target.forbidden_modules),
         "hook_directory": str(_HOOKS_DIR.resolve()),
-        "require_artifact_selftest": request.require_artifact_selftest,
+        "require_artifact_selftest": _ARTIFACT_SELFTEST_EMBEDDED,
     }
     profile_path.write_text(json.dumps(profile_data, indent=2) + "\n", encoding="utf-8")
     return profile_path
@@ -545,6 +575,23 @@ def _verify_staged_executables(payload: Path, target: DesktopTargetSpec) -> None
         )
 
 
+def _install_voice_bundle(payload: Path, voice_bundle: Path) -> None:
+    """Copy the staged voice runtime inputs into the payload unchanged.
+
+    They bypass PyInstaller on purpose: its binary processing would reclassify
+    the uv executable as a binary and, on macOS, rewrite and re-sign it, so the
+    payload would no longer match the digests in the packaged manifest.
+    """
+    destination = payload.joinpath(*VOICE_PAYLOAD_DIRECTORY.parts)
+    if not destination.parent.is_dir() or destination.parent.is_symlink():
+        raise DesktopPolicyValidationError("payload has no PyInstaller contents directory")
+    if destination.exists() or destination.is_symlink():
+        raise DesktopPolicyValidationError(
+            "PyInstaller output already contains a voice directory"
+        )
+    shutil.copytree(voice_bundle, destination)
+
+
 def _expose_frontend(payload: Path, frontend_staging: Path) -> None:
     payload_frontend = payload / "frontend"
     if payload_frontend.is_dir():
@@ -562,6 +609,7 @@ def _write_runtime_marker(payload_root: Path, request: DesktopBuildRequest) -> P
         "distribution": "packaged-desktop",
         "product_version": request.product_version,
         "build_revision": request.build_revision,
+        **request.release_identity.marker_fields(),
         "console_helper": console_name,
         "desktop_child": child_name,
     }
@@ -612,6 +660,8 @@ def _copy_build_record(source: Path, destination: Path) -> None:
 def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) -> None:
     """Write dependency provenance, environment, and build facts."""
     target = request.target
+    voice_policy = load_voice_runtime_policy()
+    uv_archive = voice_policy.uv_archives[target.name]
     provenance = {
         "schema_version": 1,
         "product_version": request.product_version,
@@ -622,7 +672,13 @@ def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) ->
         "architecture": target.architecture,
         "python_version": target.python_version,
         "wheel": request.wheel.name,
-        "require_artifact_selftest": request.require_artifact_selftest,
+        "require_artifact_selftest": _ARTIFACT_SELFTEST_EMBEDDED,
+        "voice_runtime": {
+            "python_version": voice_policy.python_version,
+            "uv_version": voice_policy.uv_version,
+            "uv_archive_url": uv_archive.url,
+            "uv_archive_sha256": uv_archive.sha256,
+        },
     }
     (metadata_dir / "dependency-provenance.json").write_text(
         json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -744,6 +800,20 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _release_identity(args: argparse.Namespace, product_version: str) -> ReleaseIdentity:
+    """A release build takes its channel from its tag; others default to development."""
+    if args.release_tag is None:
+        return resolve_release_identity(
+            args.channel, args.packaging_revision, required=False
+        )
+    return identity_for_release_tag(
+        args.release_tag,
+        product_version=product_version,
+        channel=args.channel,
+        packaging_revision=args.packaging_revision,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the desktop builder."""
     parser = argparse.ArgumentParser(
@@ -753,18 +823,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--policy", type=Path, default=_POLICY_PATH)
     parser.add_argument("--product-version", default=None)
-    parser.add_argument("--release-tag")
+    parser.add_argument(
+        "--release-tag",
+        help=(
+            "Release tag vX.Y.Z or vX.Y.Z-preview.N for the product version; "
+            "marks a release build and decides its channel."
+        ),
+    )
     parser.add_argument("--revision", default=None)
     parser.add_argument("--commit", default=None)
     parser.add_argument(
         "--output", "--output-dir", dest="output", type=Path, required=True
     )
-    parser.add_argument(
-        "--require-artifact-selftest",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Embed the authenticated artifact self-test in the GUI executable.",
-    )
+    add_release_identity_arguments(parser, required=False)
 
     args = parser.parse_args(argv)
     commit = args.commit or os.environ.get("GITHUB_SHA", "HEAD")
@@ -772,8 +843,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         product_version = args.product_version or _wheel_product_version(args.wheel)
-        if args.release_tag is not None and args.release_tag != f"v{product_version}":
-            parser.error("--release-tag must equal v<product-version>")
         target_spec = load_desktop_target_spec(args.policy, args.target)
         request = DesktopBuildRequest(
             wheel=args.wheel,
@@ -782,10 +851,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_revision=revision,
             source_commit=commit,
             output_dir=args.output,
-            require_artifact_selftest=args.require_artifact_selftest,
+            release_identity=_release_identity(args, product_version),
         )
         build_desktop(request)
-    except (DesktopPolicyValidationError, TypeError) as err:
+    except (DesktopPolicyValidationError, ReleaseIdentityError, TypeError) as err:
         parser.error(str(err))
 
     return 0

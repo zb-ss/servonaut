@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import AsyncIterator, Callable, Dict, List, Optional, Set
+
+from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_or_default
 
 from .interfaces import AuthServiceInterface
+from .relay_lock import try_lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +32,37 @@ CLIENT_ID = "servonaut-cli"
 
 
 def _api_base() -> str:
-    """Read API base URL at call time so secrets loaded after import are picked up."""
-    return os.environ.get("SERVONAUT_API_URL") or _DEFAULT_API_BASE
+    """Return the API base URL, honouring a valid ``SERVONAUT_API_URL``.
+
+    Read at call time so secrets loaded after import are picked up.
+
+    Raises:
+        EndpointOverrideError: ``SERVONAUT_API_URL`` is set to a URL that is
+            not https (or http to a loopback host). Every request URL is built
+            from this value first, so the refusal happens before a token or
+            credential is sent, and never falls back to production.
+    """
+    return endpoint_or_default(API_URL_ENV, _DEFAULT_API_BASE)
+
+
+# Seconds allowed for one whole ``/api/oauth/refresh`` round-trip (enforced
+# with ``asyncio.wait_for``; httpx's own timeout applies per phase).
+_REFRESH_HTTP_TIMEOUT_SECONDS = 30
+# How long a refresh waits for another process to finish its own. Longer
+# than one round-trip, so a live holder that is mid-request completes first.
+# On expiry the refresh re-reads auth.json and gives up for now (transient)
+# rather than present a refresh token the holder may be rotating.
+_REFRESH_LOCK_WAIT_SECONDS = _REFRESH_HTTP_TIMEOUT_SECONDS + 5
+_REFRESH_LOCK_POLL_SECONDS = 0.05
+# Statuses on which the refresh endpoint can carry the API's own OAuth
+# error. The API answers a revoked, expired or unknown refresh token with
+# ``400 {"error": "invalid_grant", ...}`` (RFC 6749 section 5.2).
+_OAUTH_ERROR_STATUSES = frozenset({400, 401, 403})
+_REVOKED_GRANT_CODE = "invalid_grant"
+# The fields that make up the token pair. A cache save never writes them
+# over a pair another process stored (see AuthService._save_token).
+_CREDENTIAL_FIELDS = ("access_token", "refresh_token", "expires_at")
+
 ENTITLEMENT_TTL = 3600  # 1 hour cache
 # Stale-while-revalidate window for the per-team
 # ``GET /api/v1/teams/{slug}/secrets-config`` response. Deliberately
@@ -54,8 +88,8 @@ SECRETS_PAYLOAD_MAX_BYTES = 16 * 1024
 # It is acceptable that newly-accepted team invites take up to an hour to
 # appear in ``active_team_slug()`` bootstrap, since the alternative
 # (no cache, list_teams per CLI invocation) is wasteful and a user
-# in that exact race can run ``servonaut auth refresh`` to skip the
-# wait.
+# in that exact race can sign in again with ``servonaut login`` (a new
+# session starts with an empty team cache) to skip the wait.
 TEAMS_CACHE_TTL = 3600
 
 
@@ -128,6 +162,100 @@ class AuthToken:
         return bool(self.access_token) and bool(self.refresh_token)
 
 
+def _oauth_error_code(response: "httpx.Response") -> str:
+    """Return the OAuth ``error`` code of a JSON error body, or ``""``.
+
+    Accepts the RFC 6749 string form (``{"error": "invalid_grant"}``) and
+    the API's nested form (``{"error": {"code": "invalid_grant"}}``). An
+    HTML page, a non-JSON body or any other shape yields ``""``.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    error = body.get("error")
+    if isinstance(error, dict):
+        error = error.get("code")
+    return error if isinstance(error, str) else ""
+
+
+def _is_revoked_grant(response: "httpx.Response") -> bool:
+    """Whether a failed refresh is the API saying the refresh token is dead.
+
+    Only the API's own ``invalid_grant`` error counts. A 401 or 403 from
+    something in front of the API (a WAF or CDN blocking the client IP
+    answers with an HTML page) says nothing about the session, so it is
+    transient like a 429 or a 5xx.
+    """
+    return (
+        response.status_code in _OAUTH_ERROR_STATUSES
+        and _oauth_error_code(response) == _REVOKED_GRANT_CODE
+    )
+
+
+def _refresh_lock_path() -> Path:
+    """The OS lock file beside ``auth.json`` that serialises refreshes."""
+    return AUTH_FILE.with_name(AUTH_FILE.name + ".lock")
+
+
+def _open_refresh_lock() -> Optional[int]:
+    """Open (creating, mode 0600) the refresh lock file, or None if impossible."""
+    path = _refresh_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        logger.warning(
+            "Refresh lock %s is unavailable (%s); continuing without it",
+            path, e,
+        )
+        return None
+
+
+async def _wait_for_refresh_lock(fd: int) -> bool:
+    """Poll for the refresh lock without blocking the event loop."""
+    deadline = time.monotonic() + _REFRESH_LOCK_WAIT_SECONDS
+    while not try_lock_exclusive(fd):
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "Another process held the token refresh lock for over %ss",
+                _REFRESH_LOCK_WAIT_SECONDS,
+            )
+            return False
+        await asyncio.sleep(_REFRESH_LOCK_POLL_SECONDS)
+    return True
+
+
+@contextlib.asynccontextmanager
+async def _cross_process_refresh_lock() -> AsyncIterator[bool]:
+    """Hold the OS lock beside ``auth.json`` while the token pair changes.
+
+    The TUI and a background relay listener share ``auth.json`` and its
+    single-use refresh token. Unserialised, both can present the same
+    token at once, and the loser's ``invalid_grant`` looks like a revoked
+    session. The OS drops the lock if its holder dies, and on cancellation
+    it is released here.
+
+    Yields True when the wait timed out because another holder kept the
+    lock: the caller must then not change the pair. When the lock file
+    cannot be opened at all, it yields False and the caller proceeds
+    unserialised; the re-reads of ``auth.json`` remain as guards.
+    """
+    fd = _open_refresh_lock()
+    held = False
+    try:
+        if fd is not None:
+            held = await _wait_for_refresh_lock(fd)
+        yield fd is not None and not held
+    finally:
+        if fd is not None:
+            if held:
+                unlock(fd)
+            os.close(fd)
+
+
 class AuthService(AuthServiceInterface):
     """Manages OAuth2 device flow and token lifecycle."""
 
@@ -136,12 +264,16 @@ class AuthService(AuthServiceInterface):
         # asyncio.Lock can only be created inside an event loop; lazy-init
         # in _get_refresh_lock so __init__ stays sync-safe.
         self._refresh_lock: Optional[asyncio.Lock] = None
-        # Sticky flag set when the server tells us the refresh_token is
-        # revoked/expired (HTTP 400 invalid_grant or 401 on /oauth/refresh).
+        # Sticky flag set when the API tells us the refresh_token is
+        # revoked/expired (its ``invalid_grant`` error on /oauth/refresh).
         # Cleared on a successful login or refresh. Transient failures
-        # (429/5xx) MUST NOT set this — they'd nuke the session over a
-        # passing blip. See _classify_refresh_failure.
+        # (429/5xx, a WAF's HTML 403) MUST NOT set this — they'd nuke the
+        # session over a passing blip. See _is_revoked_grant.
         self._refresh_grant_revoked: bool = False
+        # The refresh_token this process last read from or wrote to
+        # auth.json. A cache save compares it with the stored one to tell
+        # whether another process changed the pair meanwhile.
+        self._persisted_refresh_token: Optional[str] = None
         self._load_token()
 
     def _get_refresh_lock(self) -> asyncio.Lock:
@@ -342,9 +474,9 @@ class AuthService(AuthServiceInterface):
         skip the network round-trip.
 
         Args:
-            force_refresh: Bypass the cache and re-fetch. Used by
-                an explicit ``servonaut auth refresh`` command (and
-                by the post-team-invite UX nudge, when wired).
+            force_refresh: Bypass the cache and re-fetch. Callers that
+                know the team list just changed (for example after
+                accepting an invite) pass it; no CLI command exposes it.
 
         Cache invalidation:
             - Explicit ``force_refresh=True``.
@@ -629,7 +761,7 @@ class AuthService(AuthServiceInterface):
                         # Clear the sticky revoked flag — this is a brand new
                         # token pair from a successful device-flow grant.
                         self._refresh_grant_revoked = False
-                        self._save_token()
+                        self._save_token(new_pair=True)
                         # Fetch entitlements immediately after login
                         await self.fetch_entitlements()
                         logger.info("Authentication successful, plan: %s", self._token.plan)
@@ -673,15 +805,27 @@ class AuthService(AuthServiceInterface):
         serialisation, two concurrent 401-retries would both present the
         same ``R_0``: the first succeeds, the second hits a revoked
         token and gets ``400 invalid_grant`` → session killed mid-flight.
+        The same race runs between processes: the TUI and a background
+        relay listener share ``auth.json``.
 
-        Two guards protect against that:
+        Three guards protect against that:
 
         1. A per-process :class:`asyncio.Lock` serialises in-flight
-           refresh attempts.
-        2. Inside the lock we re-read ``auth.json`` and, if its
-           refresh_token differs from the one we entered with, adopt
-           the on-disk pair without a network round-trip — somebody
-           else already rotated for us.
+           refresh attempts, and an OS file lock beside ``auth.json``
+           serialises them across processes. If another process keeps
+           that lock past the wait, this refresh gives up (transient)
+           instead of presenting a token that process may be rotating.
+        2. Inside the locks we re-read ``auth.json`` and, if it holds a
+           newer pair of the same account, adopt it without a network
+           round-trip — somebody else already rotated for us.
+        3. On ``invalid_grant`` we re-read ``auth.json`` once more before
+           declaring the session revoked: if another process rotated past
+           the token we presented (possible when the lock file could not
+           be opened), we adopt its pair and report success, so the caller
+           retries its request once with that pair.
+
+        An older stored pair (a stale cache write) is never adopted, see
+        :meth:`_adopt_rotated_disk_token`.
 
         Returns ``True`` on success (in-memory + on-disk token are
         now the freshly issued pair). Returns ``False`` on any kind
@@ -695,115 +839,165 @@ class AuthService(AuthServiceInterface):
 
         attempted_with = self._token.refresh_token
         async with self._get_refresh_lock():
-            # Concurrent-rotation dedup: another task may have completed a
-            # refresh between this caller's 401 and our acquiring the lock.
-            # Detect that by re-reading auth.json; if its refresh_token has
-            # already moved on, adopt that pair instead of presenting the
-            # stale (now-revoked) one. Re-read is silent (does NOT mutate
-            # self._token on parse failures — we'd rather keep the in-memory
-            # copy than wipe the user's session over a transient FS hiccup).
-            disk_token = self._load_token_from_disk_silent()
-            if (
-                disk_token is not None
-                and disk_token.refresh_token
-                and disk_token.refresh_token != attempted_with
-            ):
-                self._token = disk_token
-                self._refresh_grant_revoked = False
-                logger.info(
-                    "refresh_token: adopted newer token from disk (another "
-                    "task rotated while we waited for the lock)"
-                )
-                return True
-
-            try:
-                async with httpx.AsyncClient(timeout=30) as client:
-                    response = await client.post(
-                        f"{_api_base()}/api/oauth/refresh",
-                        json={
-                            "client_id": CLIENT_ID,
-                            "refresh_token": self._token.refresh_token,
-                            "grant_type": "refresh_token",
-                        },
+            async with _cross_process_refresh_lock() as lock_timed_out:
+                # Concurrent-rotation dedup: another task or process may
+                # have completed a refresh between this caller's 401 and
+                # our acquiring the locks. Re-read is silent (does NOT
+                # mutate self._token on parse failures — we'd rather keep
+                # the in-memory copy than wipe the user's session over a
+                # transient FS hiccup).
+                if self._adopt_rotated_disk_token(attempted_with):
+                    logger.info(
+                        "refresh_token: adopted newer token from disk "
+                        "(another task or process rotated while we waited "
+                        "for the lock)"
                     )
-            except Exception as e:
-                # Network-layer failure: connection refused, timeout, etc.
-                # Treat as transient — session credentials are still good,
-                # the user just can't reach the server right now.
-                logger.warning("Token refresh network error: %s", e)
-                return False
+                    return True
+                if lock_timed_out:
+                    logger.warning(
+                        "Token refresh skipped: another process is still "
+                        "refreshing; will retry on next 401"
+                    )
+                    return False
+                return await self._exchange_refresh_token()
 
-            if response.status_code == 200:
-                data = response.json()
-                self._token.access_token = data["access_token"]
-                self._token.refresh_token = data.get(
-                    "refresh_token", self._token.refresh_token
-                )
-                self._token.expires_at = time.time() + data.get("expires_in", 3600)
-                if data.get("email"):
-                    self._token.email = data["email"]
-                self._refresh_grant_revoked = False
-                self._save_token()
-                logger.info("Token refreshed successfully")
-                return True
-
-            self._classify_refresh_failure(response)
+    async def _exchange_refresh_token(self) -> bool:
+        """POST the held refresh token and act on the verdict (locks held)."""
+        presented = self._token.refresh_token
+        try:
+            refresh_url = f"{_api_base()}/api/oauth/refresh"
+        except EndpointOverrideError as exc:
+            # A configuration error, not a network blip and not a revoked
+            # session: keep the credentials and say why nothing was sent.
+            logger.warning("Token refresh skipped: %s", exc)
+            return False
+        try:
+            response = await asyncio.wait_for(
+                self._post_refresh(refresh_url, presented),
+                timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            # Network-layer failure: connection refused, timeout, etc.
+            # Treat as transient — session credentials are still good,
+            # the user just can't reach the server right now.
+            logger.warning(
+                "Token refresh network error: %s: %s", type(e).__name__, e,
+            )
             return False
 
-    def _classify_refresh_failure(self, response: "httpx.Response") -> None:
-        """Decide whether a non-200 refresh response means the session is dead.
+        if response.status_code == 200:
+            return self._apply_refreshed_pair(response)
 
-        Backend (OAuthController) maps a revoked/expired/unknown refresh
-        token to ``400`` with ``error.code == "invalid_grant"``. Anything
-        else — ``429`` from the per-IP rate limiter, ``5xx`` from a
-        Symfony fault, even a 400 with a different error code — is
-        transient and MUST NOT kill the session. Without this
-        distinction, a brief blip would log every CLI user out.
-        """
-        status = response.status_code
-        if status in (401, 403):
-            # Server explicitly rejected our credentials.
-            self._refresh_grant_revoked = True
+        if not _is_revoked_grant(response):
+            # 429, 5xx, a WAF/CDN block page, any other 4xx — transient.
             logger.warning(
-                "Token refresh rejected (%s) — session is no longer valid",
-                status,
+                "Token refresh transient failure (%s) — keeping current "
+                "credentials, will retry on next 401",
+                response.status_code,
             )
-            return
-        if status == 400:
-            code = ""
-            try:
-                err = response.json().get("error", "")
-                if isinstance(err, dict):
-                    code = err.get("code", "") or ""
-                elif isinstance(err, str):
-                    code = err
-            except Exception:
-                code = ""
-            if code == "invalid_grant":
-                self._refresh_grant_revoked = True
-                logger.warning(
-                    "Refresh token revoked or expired (invalid_grant) — "
-                    "user must re-authenticate"
-                )
-                return
-            logger.warning(
-                "Token refresh returned 400 with code=%r — treating as "
-                "transient (not clearing session)",
-                code,
+            return False
+
+        if self._adopt_rotated_disk_token(presented):
+            logger.info(
+                "refresh_token: the presented refresh token was already "
+                "rotated by another process; adopted the stored pair"
             )
-            return
-        # 429 / 5xx / anything else — transient.
+            return True
+
+        self._refresh_grant_revoked = True
         logger.warning(
-            "Token refresh transient failure (%s) — keeping current "
-            "credentials, will retry on next 401",
-            status,
+            "Refresh token revoked or expired (invalid_grant) — "
+            "user must re-authenticate"
         )
+        return False
+
+    @staticmethod
+    async def _post_refresh(refresh_url: str, refresh_token: str) -> "httpx.Response":
+        async with httpx.AsyncClient(
+            timeout=_REFRESH_HTTP_TIMEOUT_SECONDS,
+        ) as client:
+            return await client.post(
+                refresh_url,
+                json={
+                    "client_id": CLIENT_ID,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+
+    def _adopt_rotated_disk_token(self, stale_refresh_token: str) -> bool:
+        """Adopt the pair in ``auth.json`` if another holder rotated past ours.
+
+        Returns True when the stored refresh_token differs from
+        ``stale_refresh_token`` and the stored pair is a newer one of the
+        same account (:meth:`_is_newer_pair_of_our_account`). An older
+        stored pair is a stale write, not a rotation: adopting it would
+        swap our live pair for a revoked one and end the session.
+        """
+        disk_token = self._load_token_from_disk_silent()
+        if (
+            disk_token is None
+            or not disk_token.refresh_token
+            or disk_token.refresh_token == stale_refresh_token
+        ):
+            return False
+        if not self._is_newer_pair_of_our_account(disk_token):
+            logger.warning(
+                "auth.json holds an older token pair or another account's; "
+                "not adopting it"
+            )
+            return False
+        self._token = disk_token
+        self._persisted_refresh_token = disk_token.refresh_token
+        self._refresh_grant_revoked = False
+        return True
+
+    def _is_newer_pair_of_our_account(self, stored: AuthToken) -> bool:
+        """Whether ``stored`` may replace our in-memory pair.
+
+        Its access token must expire no earlier than ours (a pair issued
+        later expires later) and its user_id must match ours when both are
+        known.
+        """
+        if stored.expires_at < self._token.expires_at:
+            return False
+        ours, theirs = self._token.user_id, stored.user_id
+        return ours is None or theirs is None or ours == theirs
+
+    def _apply_refreshed_pair(self, response: "httpx.Response") -> bool:
+        """Store the pair from a 200 refresh response; False if it has none.
+
+        A 200 without a usable JSON token body (a proxy's interstitial page,
+        say) most likely never reached the API, so it is transient and the
+        session is kept as it is.
+        """
+        try:
+            data = response.json()
+            access_token = data["access_token"]
+        except Exception:
+            logger.warning(
+                "Token refresh returned 200 without a token pair — treating "
+                "as transient (not clearing session)"
+            )
+            return False
+        self._token.access_token = access_token
+        self._token.refresh_token = data.get(
+            "refresh_token", self._token.refresh_token
+        )
+        self._token.expires_at = time.time() + data.get("expires_in", 3600)
+        if data.get("email"):
+            self._token.email = data["email"]
+        self._refresh_grant_revoked = False
+        # The refresh lock is held, so the new pair is written whole.
+        self._save_token(new_pair=True)
+        logger.info("Token refreshed successfully")
+        return True
 
     def _load_token_from_disk_silent(self) -> Optional[AuthToken]:
         """Read ``auth.json`` without mutating in-memory state.
 
         Used by :meth:`refresh_token` to detect concurrent rotation by
-        another task in the same process. Returns ``None`` if the file
+        another task in this process or by another process. Returns ``None`` if the file
         is missing, unreadable, or the payload doesn't satisfy
         :class:`AuthToken`'s field set (after the forward-compat
         unknown-key filter applied in :meth:`_load_token`).
@@ -849,12 +1043,9 @@ class AuthService(AuthServiceInterface):
 
         if self._refresh_grant_revoked:
             logger.info("Token validation failed (revoked), clearing local auth")
+            presented = self._token.refresh_token
             self._token = None
-            if AUTH_FILE.exists():
-                try:
-                    AUTH_FILE.unlink()
-                except OSError as e:
-                    logger.warning("Could not delete %s: %s", AUTH_FILE, e)
+            await self._delete_auth_file_holding(presented)
             return False
         # Transient failure — keep credentials, just report not-validated.
         logger.warning(
@@ -862,13 +1053,45 @@ class AuthService(AuthServiceInterface):
         )
         return False
 
+    async def _delete_auth_file_holding(self, refresh_token: str) -> None:
+        """Delete ``auth.json`` only while it still holds ``refresh_token``.
+
+        Runs under the refresh lock: another process may have rotated or
+        signed in again since this one's refresh failed, and its pair must
+        survive.
+        """
+        async with _cross_process_refresh_lock() as lock_timed_out:
+            stored = self._load_token_from_disk_silent()
+            if lock_timed_out or (
+                stored is not None and stored.refresh_token != refresh_token
+            ):
+                logger.info(
+                    "auth.json now holds another session; leaving it in place"
+                )
+                return
+            self._persisted_refresh_token = None
+            if AUTH_FILE.exists():
+                try:
+                    AUTH_FILE.unlink()
+                except OSError as e:
+                    logger.warning("Could not delete %s: %s", AUTH_FILE, e)
+
     async def logout(self) -> None:
-        """Revoke tokens and clear local auth."""
+        """Revoke tokens and clear local auth.
+
+        Raises:
+            EndpointOverrideError: ``SERVONAUT_API_URL`` is refused. Nothing
+                is cleared, so the session can still be revoked once the
+                variable is fixed instead of being dropped unrevoked.
+        """
         if self._token and HAS_HTTPX:
+            # Outside the best-effort try: a refused override is a
+            # configuration error to report, not a network blip to skip.
+            revoke_url = f"{_api_base()}/api/oauth/revoke"
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
-                        f"{_api_base()}/api/oauth/revoke",
+                        revoke_url,
                         json={
                             "client_id": CLIENT_ID,
                             "token": self._token.access_token,
@@ -877,16 +1100,32 @@ class AuthService(AuthServiceInterface):
             except Exception as e:
                 logger.warning("Token revocation failed (continuing logout): %s", e)
 
+        self._forget_session()
+        logger.info("Logged out")
+
+    def sign_out_locally(self) -> None:
+        """Forget the session on this device without contacting the server.
+
+        For when :meth:`logout` cannot reach the API, for example while
+        ``SERVONAUT_API_URL`` is refused. Pointing the variable elsewhere to
+        get a revoke through would send the token to a server that did not
+        issue it, so nothing is sent at all. The tokens stay valid on the
+        server until they expire.
+        """
+        self._forget_session()
+        logger.info("Signed out on this device only; the session was not revoked")
+
+    def _forget_session(self) -> None:
+        """Drop the in-memory token and delete ``auth.json``.
+
+        ``auth.json`` also holds the cached entitlements, team list and
+        secrets config, so they go with it; a later login starts with the
+        dataclass defaults (cold caches).
+        """
         self._token = None
         self._refresh_grant_revoked = False
-        if AUTH_FILE.exists():
-            AUTH_FILE.unlink()
-        # Secrets cache lives inside the deleted token file, so dropping
-        # ``_token`` already clears it from memory. Nothing extra to do
-        # — but if ``auth.json`` is recreated by a subsequent login, the
-        # new ``AuthToken`` starts with the default empty cache thanks
-        # to the dataclass defaults (cold cache after re-login).
-        logger.info("Logged out")
+        self._persisted_refresh_token = None
+        AUTH_FILE.unlink(missing_ok=True)
 
     async def fetch_entitlements(self) -> Optional[dict]:
         """Fetch entitlements from API and cache them.
@@ -901,6 +1140,12 @@ class AuthService(AuthServiceInterface):
           consumers (T4.5 first-run modal / lapse-toast resolver) can detect
           the False→True or True→False transition reliably (Risk §5).
         """
+        return await self._fetch_entitlements(retry_after_refresh=True)
+
+    async def _fetch_entitlements(
+        self, *, retry_after_refresh: bool,
+    ) -> Optional[dict]:
+        """Fetch entitlements; on a 401, refresh and retry at most once."""
         if not self.is_authenticated or not HAS_HTTPX:
             return None
         try:
@@ -915,9 +1160,10 @@ class AuthService(AuthServiceInterface):
                     self._save_token()
                     return ents
                 elif response.status_code == 401:
-                    # Try refresh
-                    if await self.refresh_token():
-                        return await self.fetch_entitlements()
+                    if retry_after_refresh and await self.refresh_token():
+                        return await self._fetch_entitlements(
+                            retry_after_refresh=False,
+                        )
                     return None
                 else:
                     logger.warning("Entitlements fetch failed: %s", response.status_code)
@@ -1311,9 +1557,9 @@ class AuthService(AuthServiceInterface):
         """Drop the cached secrets config.
 
         Called on logout (alongside :pyattr:`_refresh_grant_revoked`)
-        and from an explicit ``servonaut secrets refresh --clear``
-        path so users can recover from a poisoned cache without
-        editing JSON by hand.
+        and from the TUI Secrets screen's clear-cache action (``c``) so
+        users can recover from a poisoned cache without editing JSON by
+        hand.
         """
         if not self._token:
             return
@@ -1429,6 +1675,7 @@ class AuthService(AuthServiceInterface):
             logger.warning("Failed to load auth token: %s", e)
             self._token = None
             return
+        self._persisted_refresh_token = self._token.refresh_token
         self._ensure_secure_mode()
 
     @staticmethod
@@ -1452,33 +1699,110 @@ class AuthService(AuthServiceInterface):
             except OSError as e:
                 logger.warning("Could not chmod %s: %s", AUTH_FILE, e)
 
-    def _save_token(self) -> None:
-        """Persist token to ~/.servonaut/auth.json via atomic 0600 write."""
+    def _save_token(self, *, new_pair: bool = False) -> None:
+        """Persist the token to ``auth.json``.
+
+        ``new_pair=True`` is for a pair this process just obtained from the
+        server (a login, or a refresh made under the refresh lock): it is
+        written whole.
+
+        Any other save only updates caches (entitlements, user id, teams,
+        secrets config). Other processes share the file and may have
+        rotated the pair since this one last read it, so the save is a
+        compare-and-swap under the refresh lock: when the stored refresh
+        token is no longer the one this process persisted, the stored
+        credentials win and only the cache fields are written on top of
+        them. Without that, a cache save that finishes after another
+        process's rotation would put a revoked pair back on disk and end
+        the session for every process. When the lock is busy (a refresh is
+        in flight) the cache stays in memory and a later save persists it.
+        """
         if not self._token:
             return
+        if new_pair:
+            self._write_token_file()
+            return
+        fd = _open_refresh_lock()
+        if fd is None:
+            if self._reconcile_with_stored_pair():
+                self._write_token_file()
+            return
+        try:
+            if not try_lock_exclusive(fd):
+                logger.debug(
+                    "auth.json is being refreshed elsewhere; keeping the "
+                    "cache update in memory"
+                )
+                return
+            try:
+                if self._reconcile_with_stored_pair():
+                    self._write_token_file()
+            finally:
+                unlock(fd)
+        finally:
+            os.close(fd)
+
+    def _reconcile_with_stored_pair(self) -> bool:
+        """Prepare a cache save; return whether it may write ``auth.json``.
+
+        Adopts the stored credentials when another process rotated the pair
+        (or signed in again) for the same account, so the write that follows
+        keeps them. Refuses the write when the file was removed (a sign-out
+        elsewhere), holds another account's session, or holds an older pair
+        than ours: a cache save never writes this process's pair over a
+        pair it did not persist.
+        """
+        stored = self._load_token_from_disk_silent()
+        if stored is None:
+            # Missing, or unreadable (then our write repairs it). Recreating
+            # a file that another process removed would undo its sign-out.
+            return not (
+                self._persisted_refresh_token is not None
+                and not AUTH_FILE.exists()
+            )
+        if stored.refresh_token == self._persisted_refresh_token:
+            return True
+        if not self._is_newer_pair_of_our_account(stored):
+            logger.warning(
+                "auth.json changed elsewhere to an older token pair or another "
+                "account; not overwriting it"
+            )
+            return False
+        for name in _CREDENTIAL_FIELDS:
+            setattr(self._token, name, getattr(stored, name))
+        self._persisted_refresh_token = stored.refresh_token
+        self._refresh_grant_revoked = False
+        return True
+
+    def _write_token_file(self) -> None:
+        """Atomically replace ``auth.json`` with the token, mode 0600.
+
+        The temporary file gets a unique name in the same directory, so
+        processes saving at once never share it, and ``os.replace`` swaps
+        it in whole.
+        """
+        tmp_path: Optional[Path] = None
         try:
             AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = AUTH_FILE.with_suffix(AUTH_FILE.suffix + ".tmp")
-            # Open with O_CREAT|O_TRUNC|O_WRONLY + explicit 0600 so we never
-            # materialise a world-readable copy between open() and chmod().
-            fd = os.open(
-                tmp_path,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
+            # mkstemp creates the file with mode 0600, so no world-readable
+            # copy ever exists.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{AUTH_FILE.name}.", suffix=".tmp",
+                dir=AUTH_FILE.parent,
             )
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(asdict(self._token), f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-            except Exception:
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
-                raise
-            # Belt-and-suspenders in case umask masked bits off the open() mode.
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w") as f:
+                json.dump(asdict(self._token), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            # Belt-and-suspenders on platforms where mkstemp's mode differs.
             os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, AUTH_FILE)
+            tmp_path = None
+            self._persisted_refresh_token = self._token.refresh_token
         except Exception as e:
             logger.error("Failed to save auth token: %s", e)
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink()

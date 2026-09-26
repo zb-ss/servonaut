@@ -108,6 +108,8 @@ else:
         "distribution": "frozen-cli",
         "product_version": version,
         "build_revision": "test-revision",
+        "channel": "stable",
+        "packaging_revision": 1,
         "console_helper": "servonaut",
         "desktop_child": None,
     }

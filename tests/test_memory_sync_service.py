@@ -919,6 +919,21 @@ class TestBatchSplitting:
         assert len(svc._pending) == 4
         assert result.accepted == []
 
+    def test_poison_envelope_is_parked_beside_the_queue(self, tmp_path):
+        """A refused single envelope lands next to this service's queue file."""
+        svc = _make_service(tmp_path=tmp_path)
+        envelope = SyncEnvelope(
+            "inst-0", "os", "", 86400, False, False, False, False, None, {}
+        )
+
+        svc._handle_poison_envelope(envelope)
+
+        poison = tmp_path / "memory" / "sync_poison.jsonl"
+        assert svc._poison_path == poison
+        lines = poison.read_text().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["instance_id"] == "inst-0"
+
 
 # ---------------------------------------------------------------------------
 # Quota persistence

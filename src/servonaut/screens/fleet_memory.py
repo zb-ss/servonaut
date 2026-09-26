@@ -33,6 +33,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.services.memory.provider import instance_provider
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -353,6 +354,10 @@ class FleetMemoryScreen(Screen):
     # Data / populate
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-populate the fleet rows so names and ids follow the demo toggle."""
+        self._launch_populate()
+
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
         fleet_service = getattr(self.app, "fleet_service", None)
@@ -508,7 +513,7 @@ class FleetMemoryScreen(Screen):
         for inst in instances:
             iid = inst.get("id") or inst.get("name", "")
             iname = inst.get("name", iid)
-            provider = inst.get("provider", "custom") or "custom"
+            provider = instance_provider(inst)
             status = compute_memory_status(inst, memory_service)
 
             modules_count = 0
@@ -739,7 +744,7 @@ class FleetMemoryScreen(Screen):
                 if stale_only
                 else "No instances available to scan."
             )
-            self.app.notify(msg)
+            self.app.notify(msg, markup=False)
             return
 
         self._set_progress(
@@ -944,7 +949,8 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         self.app.notify(
             f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed."
+            f"{len(result.failed)} failed.",
+            markup=False,
         )
         if result.failed:
             self.app.push_screen(

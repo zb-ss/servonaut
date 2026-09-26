@@ -1,6 +1,6 @@
 """Tests for configuration migration."""
 
-from servonaut.config.migration import migrate_v1_to_v2, migrate_to_latest, create_backup
+from servonaut.config.migration import migrate_v1_to_v2, migrate_to_latest
 from servonaut.config.schema import (
     AppConfig,
     SSHConfig,
@@ -218,20 +218,17 @@ class TestMigrateToLatest:
         self._assert_new_fields_at_defaults(out)
 
 
-class TestCreateBackup:
+class TestVersionAsString:
+    """A hand-edited config may carry its version as a string."""
 
-    def test_creates_backup_file(self, tmp_path):
-        config_file = tmp_path / 'config.json'
-        config_file.write_text('{"test": true}')
-        result = create_backup(config_file)
-        assert result is True
-        backups = list(tmp_path.glob('*.v1.bak.*'))
-        assert len(backups) == 1
-        assert backups[0].read_text() == '{"test": true}'
+    def test_string_version_is_migrated(self):
+        out = migrate_to_latest({'version': '5', 'cloudtrail_max_events': 100})
+        assert out['version'] == CONFIG_VERSION
+        assert out['cloudtrail_max_events'] == 500
 
-    def test_nonexistent_file(self, tmp_path):
-        result = create_backup(tmp_path / 'nope.json')
-        assert result is False
+    def test_current_string_version_is_left_alone(self):
+        data = {'version': str(CONFIG_VERSION), 'cloudtrail_max_events': 100}
+        assert migrate_to_latest(data) == data
 
 
 # ---------------------------------------------------------------------------

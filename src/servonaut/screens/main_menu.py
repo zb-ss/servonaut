@@ -12,7 +12,12 @@ from textual.widgets import Static, Button, Header, Footer
 
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._demo_resolve import (
+    connection_instance,
+    real_instance_id,
+    replace_instances,
+)
+from servonaut.services.scan_service import ScanConnectionError, is_scannable
 
 
 class MainMenuScreen(Screen):
@@ -50,8 +55,7 @@ class MainMenuScreen(Screen):
         if not instances and self.app.cache_service:
             cached = self.app.cache_service.load_any()
             if cached:
-                instances = cached
-                self.app.instances = cached
+                instances = replace_instances(self.app, None, cached)
                 
         total = len(instances)
         running = sum(1 for i in instances if i.get("state") == "running")
@@ -179,21 +183,23 @@ class MainMenuScreen(Screen):
         instances = self.app.instances
         if not instances:
             progress.start("Loading instances from AWS...")
-            instances = await self.app.aws_service.fetch_instances_cached()
-            self.app.instances = instances
+            instances = replace_instances(
+                self.app, None, await self.app.aws_service.fetch_instances_cached()
+            )
 
-        running = [i for i in instances if i.get('state') == 'running']
-        if not running:
+        targets = [i for i in instances if is_scannable(i)]
+        if not targets:
             progress.stop()
             for btn in self.query("Button"):
                 if "scan" in str(btn.id):
                     btn.disabled = False
-            self.app.notify("No running instances to scan", severity="warning")
+            self.app.notify("No running servers to scan", severity="warning")
             return
 
-        total = len(running)
+        total = len(targets)
         scanned = 0
-        for idx, instance in enumerate(running, 1):
+        unreachable = []
+        for idx, instance in enumerate(targets, 1):
             name = instance.get('name') or instance.get('id', 'unknown')
             progress.start(f"Scanning {idx}/{total}: {name}...")
             try:
@@ -206,14 +212,26 @@ class MainMenuScreen(Screen):
                         real_instance_id(self.app, instance['id']), results
                     )
                     scanned += 1
+            except ScanConnectionError as e:
+                unreachable.append(name)
+                reason = e.describe(redact=bool(getattr(self.app, "demo_mode", False)))
+                self.app.notify(
+                    f"Could not connect to {name}: {reason}", severity="warning", markup=False
+                )
             except Exception as e:
-                self.app.notify(f"Scan failed for {name}: {e}", severity="error")
+                # markup=False: a host-key message carries "[host]:port".
+                self.app.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
 
         progress.stop()
         for btn in self.query("Button"):
             if "scan" in str(btn.id):
                 btn.disabled = False
-        self.app.notify(f"Scan complete. {scanned}/{total} servers scanned.")
+        summary = f"Scan complete. {scanned}/{total} servers scanned."
+        if unreachable:
+            summary += f" Could not connect to: {', '.join(unreachable)}."
+        self.app.notify(
+            summary, severity="warning" if unreachable else "information", markup=False
+        )
 
     def action_option_4(self) -> None:
         from servonaut.screens.settings import SettingsScreen
@@ -251,7 +269,7 @@ class MainMenuScreen(Screen):
         progress.stop()
         self.query_one("#nav_update", Button).disabled = False
         severity = "information" if success else "error"
-        self.app.notify(message, severity=severity, timeout=10)
+        self.app.notify(message, severity=severity, timeout=10, markup=False)
 
     def action_quit(self) -> None:
         self.app.exit()

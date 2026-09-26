@@ -289,6 +289,16 @@ def test_ci_runs_the_desktop_suite_with_its_dependencies_required() -> None:
     assert "pytest --tb=short -q tests/desktop" in job
 
 
+def test_ci_runs_the_browser_journeys_in_their_own_job() -> None:
+    jobs = _jobs((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))
+    # Together the two end-to-end jobs run every pull-request journey once.
+    assert '-m "e2e_pr and not e2e_quarantine and not needs_browser"' in jobs["e2e"]
+    desktop = jobs["e2e-desktop"]
+    assert "playwright install --with-deps --only-shell chromium" in desktop
+    assert '-m "needs_browser and e2e_pr and not e2e_quarantine"' in desktop
+    assert "e2e-artifacts/" in desktop
+
+
 def test_desktop_test_extra_matches_the_desktop_shell_pins() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     extra = re.search(r"^desktop-test = \[(.*)\]$", pyproject, re.MULTILINE)

@@ -97,6 +97,18 @@ class ChatService:
         )
         self._chat_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def tool_guard_level(self) -> Optional[str]:
+        """Guard level chat tools run at, or ``None`` when tools are off.
+
+        Mirrors the condition :meth:`send_message` uses to enter the
+        agentic (tool-running) loop.
+        """
+        if not (self._ai_service and self._tool_executor):
+            return None
+        level = getattr(self._tool_executor, "guard_level", None)
+        return level if isinstance(level, str) and level else None
+
     def create_session(self) -> ChatSession:
         """Create a new chat session and persist it."""
         session = ChatSession()

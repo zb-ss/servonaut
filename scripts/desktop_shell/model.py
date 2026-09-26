@@ -6,10 +6,17 @@ import json
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit
+
+from scripts.standalone_cli.release_identity import (
+    DEVELOPMENT_IDENTITY,
+    ReleaseIdentity,
+)
 
 _SCHEMA_VERSION = 1
 _PACKAGING_ROOT = Path(__file__).resolve().parents[2] / "packaging"
@@ -35,6 +42,56 @@ _BUILD_POLICY_BOUNDS = {
 _SIZE_BASELINE_FIELDS = frozenset(
     {"target", "max_expanded_bytes", "max_regular_file_count", "rationale"}
 )
+_VOICE_RUNTIME_POLICY_PATH = _PACKAGING_ROOT / "desktop_shell" / "voice-runtime.json"
+_VOICE_REQUIREMENTS_DIR = _PACKAGING_ROOT / "desktop_shell" / "requirements"
+# The unlocked voice runtime requirements every target lock is generated from.
+VOICE_REQUIREMENTS_INPUT = _VOICE_REQUIREMENTS_DIR / "voice.in"
+# Where the payload keeps the managed voice runtime inputs; the frozen app reads
+# them from its resource root (``_internal``) under ``voice/``.
+VOICE_PAYLOAD_DIRECTORY = PurePosixPath("_internal/voice")
+VOICE_REQUIREMENTS_NAME = "voice-requirements.txt"
+VOICE_MANIFEST_NAME = "voice-runtime.json"
+VOICE_WHEEL_PATTERN = "servonaut-*-py3-none-any.whl"
+_VOICE_RUNTIME_FIELDS = frozenset(
+    {
+        "$comment",
+        "schema_version",
+        "minimum_release_age_days",
+        "python_version",
+        "uv",
+        "uv_command_timeout_seconds",
+        "stall_timeout_seconds",
+        "provision_timeout_seconds",
+        "build_download",
+    }
+)
+_VOICE_POLICY_BOUNDS = {
+    "minimum_release_age_days": (1, 90),
+    "uv_command_timeout_seconds": (1, 7200),
+    "stall_timeout_seconds": (1, 3600),
+    "provision_timeout_seconds": (1, 14400),
+}
+_VOICE_DOWNLOAD_BOUNDS = {
+    "timeout_seconds": (1, 3600),
+    "socket_timeout_seconds": (1, 600),
+    "max_archive_bytes": (1024, 512 * 1024 * 1024),
+    "max_member_bytes": (1024, 512 * 1024 * 1024),
+}
+_UV_FIELDS = frozenset({"version", "origin_host", "redirect_hosts", "targets"})
+_HOSTNAME_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOSTNAME_RE = re.compile(rf"^{_HOSTNAME_LABEL}(?:\.{_HOSTNAME_LABEL})+$")
+_UV_ARCHIVE_FIELDS = frozenset({"url", "sha256", "member"})
+_UV_EXECUTABLES = {
+    "win32": ("uv.exe", "zip"),
+    "darwin": ("uv", "tar.gz"),
+    "linux": ("uv", "tar.gz"),
+}
+_EXACT_PYTHON_RE = re.compile(r"^3\.12\.(?:0|[1-9][0-9]?)$")
+_UV_VERSION_RE = re.compile(r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
+_ARCHIVE_MEMBER_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+# Ubuntu 22.04, the oldest supported Linux desktop, ships glibc 2.35; 2.17 is
+# the manylinux2014 floor.
+_LINUX_GLIBC_MINORS = range(35, 16, -1)
 _TARGET_IDENTITIES = {
     "windows-x64": ("win32", "x86_64", "zip", "requirements/windows-x64.txt", None),
     "macos-x64": ("darwin", "x86_64", "tar.gz", "requirements/macos-x64.txt", "13.0"),
@@ -62,6 +119,7 @@ _TARGET_FIELDS = frozenset(
         "archive",
         "forbidden_modules",
         "forbidden_path_patterns",
+        "voice_bundle_paths",
         "frontend_assets_lock",
         "frontend_licenses",
         "size_baselines",
@@ -150,6 +208,9 @@ class DesktopTargetSpec:
     artifact_name_template: str
     forbidden_modules: tuple[str, ...]
     forbidden_path_patterns: tuple[str, ...]
+    # The managed voice runtime inputs: exempt from forbidden_path_patterns
+    # because inspection verifies them file by file against their manifest.
+    voice_bundle_paths: tuple[str, ...]
     frontend_assets_lock: Path
     frontend_licenses: Path
     size_baselines: Path
@@ -175,6 +236,39 @@ class DesktopBuildPolicy:
     pyinstaller_timeout_seconds: int
     failure_output_tail_chars: int
     max_metadata_file_bytes: int
+
+
+@dataclass(frozen=True)
+class UvArchiveSpec:
+    """One pinned upstream uv release archive and the executable inside it."""
+
+    url: str
+    sha256: str
+    member: PurePosixPath
+    archive_format: Literal["zip", "tar.gz"]
+    executable_name: str
+
+
+@dataclass(frozen=True)
+class VoiceRuntimePolicy:
+    """Pinned inputs and bounds for the managed desktop voice runtime."""
+
+    policy_path: Path
+    # Supply-chain cooldown for choosing uv, Python and voice lock pins.
+    minimum_release_age_days: int
+    python_version: str
+    uv_version: str
+    # Every pinned archive URL is on this host; redirects may reach only these.
+    uv_origin_host: str
+    uv_redirect_hosts: frozenset[str]
+    uv_archives: dict[str, UvArchiveSpec]
+    uv_command_timeout_seconds: int
+    stall_timeout_seconds: int
+    provision_timeout_seconds: int
+    download_timeout_seconds: int
+    socket_timeout_seconds: int
+    max_archive_bytes: int
+    max_member_bytes: int
 
 
 @dataclass(frozen=True)
@@ -348,6 +442,17 @@ def load_desktop_target_policy(path: Path | None = None) -> DesktopTargetPolicy:
                 f"Target {name!r} forbidden_path_patterns must be a list of glob strings"
             )
 
+        voice_bundle_paths = target_data.get("voice_bundle_paths")
+        if (
+            not isinstance(voice_bundle_paths, list)
+            or not all(isinstance(path, str) for path in voice_bundle_paths)
+            or sorted(voice_bundle_paths) != sorted(_voice_bundle_paths(expected_plat))
+        ):
+            raise DesktopPolicyValidationError(
+                f"Target {name!r} voice_bundle_paths must list exactly the "
+                "managed voice runtime inputs"
+            )
+
         assets_lock_raw = target_data.get("frontend_assets_lock")
         if not isinstance(assets_lock_raw, str):
             raise DesktopPolicyValidationError(
@@ -426,6 +531,7 @@ def load_desktop_target_policy(path: Path | None = None) -> DesktopTargetPolicy:
             artifact_name_template=template,
             forbidden_modules=tuple(forbidden_modules),
             forbidden_path_patterns=tuple(forbidden_patterns),
+            voice_bundle_paths=tuple(voice_bundle_paths),
             frontend_assets_lock=assets_lock_path,
             frontend_licenses=licenses_path,
             size_baselines=size_baselines_path,
@@ -505,6 +611,228 @@ def load_desktop_build_policy(path: Path | None = None) -> DesktopBuildPolicy:
         if type(value) is not int or not minimum <= value <= maximum:
             raise DesktopPolicyValidationError(f"build policy {field} is out of bounds")
     return DesktopBuildPolicy(**{field: raw[field] for field in _BUILD_POLICY_BOUNDS})
+
+
+def uv_executable_name(platform: str) -> str:
+    """Return the file name of the uv executable on a desktop platform."""
+    return _UV_EXECUTABLES[platform][0]
+
+
+def _voice_bundle_paths(platform: str) -> tuple[str, ...]:
+    return tuple(
+        f"{VOICE_PAYLOAD_DIRECTORY}/{name}"
+        for name in (
+            uv_executable_name(platform),
+            VOICE_WHEEL_PATTERN,
+            VOICE_REQUIREMENTS_NAME,
+            VOICE_MANIFEST_NAME,
+        )
+    )
+
+
+def voice_wheel_platforms(target: DesktopTargetSpec) -> tuple[str, ...]:
+    """Return the pip ``--platform`` tags a target's voice runtime accepts."""
+    if target.platform == "win32":
+        return ("win_amd64",)
+    if target.platform == "darwin":
+        if target.macos_minimum_version is None:
+            raise DesktopPolicyValidationError("macOS target has no minimum version")
+        floor = target.macos_minimum_version.replace(".", "_")
+        # pip expands a macOS tag to every older compatible release.
+        return (f"macosx_{floor}_{target.architecture}",)
+    return (
+        *(f"manylinux_2_{minor}_x86_64" for minor in _LINUX_GLIBC_MINORS),
+        "manylinux2014_x86_64",
+    )
+
+
+def voice_release_cutoff(minimum_age_days: int, now: datetime | None = None) -> str:
+    """Return the newest upload time a pin may have under the cooldown.
+
+    That is the start (UTC) of the day ``minimum_age_days`` before ``now``.
+    """
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    day = (moment - timedelta(days=minimum_age_days)).date()
+    return f"{day.isoformat()}T00:00:00Z"
+
+
+def voice_lock_path(target_name: str) -> Path:
+    """Return the hash-locked voice runtime requirements for a desktop target."""
+    if target_name not in _TARGET_IDENTITIES:
+        raise DesktopPolicyValidationError(f"Unknown target name: {target_name!r}")
+    return _VOICE_REQUIREMENTS_DIR / f"voice-{target_name}.txt"
+
+
+def load_voice_runtime_policy(path: Path | None = None) -> VoiceRuntimePolicy:
+    """Load the pinned uv, Python and bounds of the managed voice runtime."""
+    policy_path = path or _VOICE_RUNTIME_POLICY_PATH
+    raw = _load_json_object(policy_path, "voice runtime policy")
+    if raw.get("schema_version") != _SCHEMA_VERSION or set(raw) != _VOICE_RUNTIME_FIELDS:
+        raise DesktopPolicyValidationError(
+            "voice runtime policy has unsupported or missing fields"
+        )
+    if not isinstance(raw["$comment"], str) or not raw["$comment"].strip():
+        raise DesktopPolicyValidationError(
+            "voice runtime policy must state its pinning rule in $comment"
+        )
+    python_version = raw["python_version"]
+    if not isinstance(python_version, str) or not _EXACT_PYTHON_RE.fullmatch(
+        python_version
+    ):
+        raise DesktopPolicyValidationError(
+            "voice runtime python_version must be an exact 3.12 patch release"
+        )
+    bounded = _bounded_integers(raw, _VOICE_POLICY_BOUNDS, "voice runtime")
+    if not (
+        bounded["stall_timeout_seconds"]
+        <= bounded["uv_command_timeout_seconds"]
+        <= bounded["provision_timeout_seconds"]
+    ):
+        raise DesktopPolicyValidationError(
+            "voice runtime timeouts must satisfy stall <= uv command <= provision"
+        )
+    download_raw = raw["build_download"]
+    if not isinstance(download_raw, dict) or set(download_raw) != set(
+        _VOICE_DOWNLOAD_BOUNDS
+    ):
+        raise DesktopPolicyValidationError(
+            "voice runtime build_download has unsupported or missing fields"
+        )
+    download = _bounded_integers(download_raw, _VOICE_DOWNLOAD_BOUNDS, "build_download")
+    if download["socket_timeout_seconds"] > download["timeout_seconds"]:
+        raise DesktopPolicyValidationError(
+            "build_download socket_timeout_seconds must not exceed timeout_seconds"
+        )
+    uv = _load_uv(raw["uv"])
+    return VoiceRuntimePolicy(
+        policy_path=policy_path,
+        minimum_release_age_days=bounded["minimum_release_age_days"],
+        python_version=python_version,
+        uv_version=uv.version,
+        uv_origin_host=uv.origin_host,
+        uv_redirect_hosts=uv.redirect_hosts,
+        uv_archives=uv.archives,
+        uv_command_timeout_seconds=bounded["uv_command_timeout_seconds"],
+        stall_timeout_seconds=bounded["stall_timeout_seconds"],
+        provision_timeout_seconds=bounded["provision_timeout_seconds"],
+        download_timeout_seconds=download["timeout_seconds"],
+        socket_timeout_seconds=download["socket_timeout_seconds"],
+        max_archive_bytes=download["max_archive_bytes"],
+        max_member_bytes=download["max_member_bytes"],
+    )
+
+
+def _bounded_integers(
+    raw: dict[str, object], bounds: dict[str, tuple[int, int]], label: str
+) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for field, (minimum, maximum) in bounds.items():
+        value = raw[field]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise DesktopPolicyValidationError(f"{label} {field} is out of bounds")
+        values[field] = value
+    return values
+
+
+@dataclass(frozen=True)
+class _UvPins:
+    version: str
+    origin_host: str
+    redirect_hosts: frozenset[str]
+    archives: dict[str, UvArchiveSpec]
+
+
+def _load_uv(raw: object) -> _UvPins:
+    if not isinstance(raw, dict) or set(raw) != _UV_FIELDS:
+        raise DesktopPolicyValidationError(
+            "voice runtime uv must define version, hosts and targets"
+        )
+    version = raw["version"]
+    if not isinstance(version, str) or not _UV_VERSION_RE.fullmatch(version):
+        raise DesktopPolicyValidationError("voice runtime uv version must be exact")
+    origin, redirects = raw["origin_host"], raw["redirect_hosts"]
+    if (
+        not isinstance(origin, str)
+        or not _HOSTNAME_RE.fullmatch(origin)
+        or not isinstance(redirects, list)
+        or not 1 <= len(redirects) <= 8
+        or len(set(redirects)) != len(redirects)
+        or any(
+            not isinstance(host, str) or not _HOSTNAME_RE.fullmatch(host)
+            for host in redirects
+        )
+    ):
+        raise DesktopPolicyValidationError("voice runtime uv download hosts are invalid")
+    targets = raw["targets"]
+    if not isinstance(targets, dict) or set(targets) != DESKTOP_TARGET_NAMES:
+        raise DesktopPolicyValidationError(
+            "voice runtime uv must pin exactly one archive per desktop target"
+        )
+    archives = {
+        name: _load_uv_archive(name, entry, version, origin)
+        for name, entry in targets.items()
+    }
+    return _UvPins(version, origin, frozenset(redirects), archives)
+
+
+def _load_uv_archive(
+    target_name: str, raw: object, version: str, origin_host: str
+) -> UvArchiveSpec:
+    if not isinstance(raw, dict) or set(raw) != _UV_ARCHIVE_FIELDS:
+        raise DesktopPolicyValidationError(
+            f"uv archive for {target_name!r} must define url, sha256 and member"
+        )
+    platform = _TARGET_IDENTITIES[target_name][0]
+    executable, archive_format = _UV_EXECUTABLES[platform]
+    url, sha256, member = raw["url"], raw["sha256"], raw["member"]
+    # The URL must name the pinned release on the pinned origin, so neither the
+    # version nor the host can drift from the archive.
+    if not _is_release_url(url, origin_host, version, archive_format):
+        raise DesktopPolicyValidationError(
+            f"uv archive URL for {target_name!r} must be an https {archive_format} "
+            f"of release {version} on {origin_host}"
+        )
+    if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+        raise DesktopPolicyValidationError(
+            f"uv archive sha256 for {target_name!r} is invalid"
+        )
+    if (
+        not isinstance(member, str)
+        or not _ARCHIVE_MEMBER_RE.fullmatch(member)
+        or any(part in {".", ".."} for part in member.split("/"))
+        or PurePosixPath(member).name != executable
+    ):
+        raise DesktopPolicyValidationError(
+            f"uv archive member for {target_name!r} must be a relative path to {executable}"
+        )
+    return UvArchiveSpec(
+        url=url,
+        sha256=sha256,
+        member=PurePosixPath(member),
+        archive_format=archive_format,
+        executable_name=executable,
+    )
+
+
+def _is_release_url(url: object, host: str, version: str, archive_format: str) -> bool:
+    if not isinstance(url, str) or any(character.isspace() for character in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "https"
+        and parts.hostname == host
+        and parts.username is None
+        and parts.password is None
+        and port is None
+        and not parts.query
+        and not parts.fragment
+        and f"/{version}/" in parts.path
+        and parts.path.endswith(f".{archive_format}")
+    )
 
 
 def executable_toc_directory(build_metadata_dir: Path, role: str) -> Path:
@@ -724,7 +1052,9 @@ class DesktopBuildRequest:
     build_revision: str
     source_commit: str
     output_dir: Path
-    require_artifact_selftest: bool = True
+    # Written into the runtime marker for the update check. Builds cut without
+    # release inputs are development builds with the development identity.
+    release_identity: ReleaseIdentity = DEVELOPMENT_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -825,5 +1155,5 @@ def validate_desktop_build_request(request: DesktopBuildRequest) -> None:
         raise TypeError("output_dir must be a Path")
     if not request.output_dir.is_absolute():
         raise DesktopPolicyValidationError("output_dir must be an absolute path")
-    if not isinstance(request.require_artifact_selftest, bool):
-        raise DesktopPolicyValidationError("require_artifact_selftest must be a boolean")
+    if not isinstance(request.release_identity, ReleaseIdentity):
+        raise TypeError("release_identity must be a ReleaseIdentity")

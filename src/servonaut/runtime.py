@@ -44,9 +44,16 @@ _MARKER_FIELDS: Final = frozenset(
     }
 )
 # Release channels a packaged build can follow. They mirror the stable and
-# preview release-manifest channels; a marker without a channel is stable.
+# preview release-manifest channels. Every packaged marker names its channel;
+# only unmarked layouts (source, pip, pipx) fall back to stable.
 _MARKER_CHANNELS: Final = frozenset({"stable", "preview"})
 _DEFAULT_MARKER_CHANNEL: Final = "stable"
+# Packaging revisions order builds of one product version. The upper bound is
+# the 16-bit revision field of a Windows Installer version, so every package
+# format can carry the same revision; the builders, the runtime marker and the
+# release manifest all accept exactly 1..MAX_PACKAGING_REVISION.
+MIN_PACKAGING_REVISION: Final = 1
+MAX_PACKAGING_REVISION: Final = 65535
 
 
 class DistributionKind(Enum):
@@ -177,6 +184,7 @@ class RuntimeLayout:
     package_management: PackageManagementCapability
     is_frozen: bool
     release_channel: str = _DEFAULT_MARKER_CHANNEL
+    # Always set from a packaged build marker; None only for unmarked layouts.
     packaging_revision: int | None = None
 
     def current_app_argv(self, *args: str) -> list[str]:
@@ -252,6 +260,15 @@ def resolve_runtime(evidence: RuntimeEvidence) -> RuntimeLayout:
 def detect_runtime() -> RuntimeLayout:
     """Collect process facts and resolve the current runtime layout."""
     return resolve_runtime(collect_runtime_evidence())
+
+
+def data_root_for_home(home: Path) -> Path:
+    """Return the per-user data root every distribution kind uses under *home*.
+
+    Callers that only need a path under the data root use this instead of
+    ``detect_runtime()``, which inspects the installation (and may run pipx).
+    """
+    return home / ".servonaut"
 
 
 def collect_runtime_evidence() -> RuntimeEvidence:
@@ -545,7 +562,7 @@ def _managed_layout(evidence: RuntimeEvidence, kind: DistributionKind) -> Runtim
         build_revision=None,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=evidence.executable,
         path_console=evidence.path_console,
@@ -563,7 +580,7 @@ def _frozen_cli_layout(evidence: RuntimeEvidence) -> RuntimeLayout:
         build_revision=None,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=None,
         path_console=evidence.path_console,
@@ -593,7 +610,7 @@ def _layout_from_marker(
         build_revision=marker.build_revision,
         resource_root=evidence.resource_root,
         executable_root=evidence.executable_root,
-        data_root=evidence.home / ".servonaut",
+        data_root=data_root_for_home(evidence.home),
         executable=evidence.executable,
         python_executable=None,
         path_console=evidence.path_console,
@@ -647,7 +664,7 @@ class _ValidatedMarker:
     kind: DistributionKind
     product_version: str
     build_revision: str | None
-    packaging_revision: int | None
+    packaging_revision: int
     channel: str
     console_helper: Path | None
     desktop_child: Path | None
@@ -690,23 +707,28 @@ def _validate_marker(
     )
 
 
-def _marker_packaging_revision(marker: Mapping[str, object]) -> int | None:
-    """Return the integer packaging revision used to order same-version builds."""
+def _marker_packaging_revision(marker: Mapping[str, object]) -> int:
+    """Return the integer packaging revision used to order same-version builds.
+
+    Both packaged builders always write it. It is required rather than
+    defaulted: a missing revision would order the build before every packaged
+    release of its own version and offer that release as an update forever.
+    """
     value = marker.get("packaging_revision")
-    if value is None:
-        return None
-    if type(value) is not int or value < 1:
+    if (
+        type(value) is not int
+        or not MIN_PACKAGING_REVISION <= value <= MAX_PACKAGING_REVISION
+    ):
         raise RuntimeMarkerError(
-            "Build marker field packaging_revision must be a positive integer."
+            "Build marker field packaging_revision must be an integer from "
+            f"{MIN_PACKAGING_REVISION} to {MAX_PACKAGING_REVISION}."
         )
     return value
 
 
 def _marker_channel(marker: Mapping[str, object]) -> str:
-    """Return the release channel the build follows; absent means stable."""
+    """Return the release channel the build follows, which the build must name."""
     value = marker.get("channel")
-    if value is None:
-        return _DEFAULT_MARKER_CHANNEL
     if not isinstance(value, str) or value not in _MARKER_CHANNELS:
         raise RuntimeMarkerError("Build marker has an unsupported channel.")
     return value

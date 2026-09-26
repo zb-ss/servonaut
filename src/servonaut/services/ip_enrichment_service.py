@@ -24,19 +24,45 @@ import asyncio
 import json
 import logging
 import os
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from servonaut.utils.endpoints import endpoint_override
+
 logger = logging.getLogger(__name__)
 
-_IP_API_BATCH_URL = "http://ip-api.com/batch"
+# Base URLs; the lookups append ``/batch`` / ``/json/<ip>`` and ``/check``.
+# ip-api.com serves its free tier over plain HTTP only (HTTPS needs a paid key).
+_IP_API_DEFAULT_BASE = "http://ip-api.com"
+_ABUSEIPDB_DEFAULT_BASE = "https://api.abuseipdb.com/api/v2"
+# Override the base URLs for a proxy or a local fake.
+IP_API_URL_ENV = "SERVONAUT_IP_API_URL"
+ABUSEIPDB_URL_ENV = "SERVONAUT_ABUSEIPDB_URL"
 # query is appended as a query-string field list; ``reverse`` triggers rDNS.
 _IP_API_FIELDS = "status,message,query,country,countryCode,isp,org,as,reverse,proxy,hosting"
-_ABUSEIPDB_URL = "https://api.abuseipdb.com/api/v2/check"
 
 # Defensive caps so a runaway agent can't issue thousands of lookups.
 _MAX_IPS = 100
 _HTTP_TIMEOUT = 10
+
+
+def ip_api_base_url() -> str:
+    """ip-api.com base URL, or the validated ``SERVONAUT_IP_API_URL`` override.
+
+    Raises:
+        EndpointOverrideError: The override is not an acceptable URL.
+    """
+    return (endpoint_override(IP_API_URL_ENV) or _IP_API_DEFAULT_BASE).rstrip("/")
+
+
+def abuseipdb_base_url() -> str:
+    """AbuseIPDB API base URL, or the validated ``SERVONAUT_ABUSEIPDB_URL`` override.
+
+    Raises:
+        EndpointOverrideError: The override is not an acceptable URL.
+    """
+    return (endpoint_override(ABUSEIPDB_URL_ENV) or _ABUSEIPDB_DEFAULT_BASE).rstrip("/")
 
 
 def _resolve_key(raw: str) -> str:
@@ -45,6 +71,13 @@ def _resolve_key(raw: str) -> str:
     if raw.startswith("$"):
         return os.environ.get(raw[1:], "")
     return raw
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Turn every redirect into an HTTP error instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
 
 
 class IPEnrichmentService:
@@ -115,7 +148,7 @@ class IPEnrichmentService:
     async def _fetch_geo_batch(self, ips: List[str]) -> Dict[str, Dict[str, Any]]:
         payload = [{"query": ip, "fields": _IP_API_FIELDS} for ip in ips]
         try:
-            data = await self._post_json(_IP_API_BATCH_URL, payload)
+            data = await self._post_json(f"{ip_api_base_url()}/batch", payload)
         except Exception as exc:  # noqa: BLE001 — network best-effort
             logger.warning("ip-api batch lookup failed: %s", exc)
             return {ip: {"_error": f"geo lookup failed: {exc}"} for ip in ips}
@@ -135,7 +168,7 @@ class IPEnrichmentService:
     async def _fetch_abuse(self, ip: str, key: str) -> Optional[Dict[str, Any]]:
         try:
             data = await self._get_json(
-                _ABUSEIPDB_URL,
+                f"{abuseipdb_base_url()}/check",
                 params={"ipAddress": ip, "maxAgeInDays": "90"},
                 headers={"Key": key, "Accept": "application/json"},
             )
@@ -168,9 +201,8 @@ class IPEnrichmentService:
         try:
             import httpx
         except ImportError:
-            query = "&".join(f"{k}={v}" for k, v in params.items())
             return await self._urllib_request(
-                f"{url}?{query}", method="GET", headers=headers,
+                f"{url}?{urllib.parse.urlencode(params)}", method="GET", headers=headers,
             )
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url, params=params, headers=headers)
@@ -180,7 +212,12 @@ class IPEnrichmentService:
         self, url: str, method: str,
         json_body: Any = None, headers: Optional[Dict[str, str]] = None,
     ) -> Any:
-        """Blocking urllib request executed in a thread pool."""
+        """Blocking urllib request executed in a thread pool.
+
+        Redirects are refused, as httpx does by default: following one would
+        forward the AbuseIPDB ``Key`` header to whatever host the response
+        names, possibly over plain http.
+        """
         def _do() -> Any:
             data = None
             if json_body is not None:
@@ -188,7 +225,8 @@ class IPEnrichmentService:
             req = urllib.request.Request(
                 url, data=data, method=method, headers=headers or {},
             )
-            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            opener = urllib.request.build_opener(_RefuseRedirects)
+            with opener.open(req, timeout=_HTTP_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
         loop = asyncio.get_event_loop()

@@ -15,6 +15,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,12 @@ class CloudWatchBrowserScreen(Screen):
             prev_btn.disabled = self._current_page == 0
             next_btn.disabled = self._current_page >= total - 1
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the fetched events and their top IPs for the new mode."""
+        self._populate_events_table()
+        if self._events:
+            self._refresh_ips_table()
+
     def _populate_events_table(self) -> None:
         """Fill the events table with the current page."""
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
@@ -283,7 +290,7 @@ class CloudWatchBrowserScreen(Screen):
                 prefix=prefix, region=region
             )
         except Exception as exc:
-            self.app.notify(f"Failed to load log groups: {exc}", severity="error")
+            self.app.notify(f"Failed to load log groups: {exc}", severity="error", markup=False)
             self.query_one("#cw_select_log_group", Select).prompt = "Error loading"
             return
 
@@ -334,7 +341,11 @@ class CloudWatchBrowserScreen(Screen):
 
         time_select = self.query_one("#cw_select_time_range", Select)
         minutes = int(time_select.value) if time_select.value is not Select.NULL else 60
-        filter_pattern = self.query_one("#cw_input_filter_pattern", Input).value.strip()
+        # A bare term such as an address or path only matches when quoted;
+        # apply the same rule the MCP tool uses.
+        filter_pattern = self.app.cloudwatch_service.normalize_filter_pattern(
+            self.query_one("#cw_input_filter_pattern", Input).value.strip()
+        )
 
         self.query_one("#cw_btn_fetch", Button).disabled = True
         self.query_one("#cloudwatch_detail_text", Static).update("Loading...")
@@ -369,7 +380,7 @@ class CloudWatchBrowserScreen(Screen):
                 max_events=0,  # Fetch all
             )
         except Exception as exc:
-            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error")
+            self.app.notify(f"CloudWatch fetch failed: {exc}", severity="error", markup=False)
             self.query_one("#cw_btn_fetch", Button).disabled = False
             return
 
@@ -387,7 +398,13 @@ class CloudWatchBrowserScreen(Screen):
         count = len(events)
         if count == 0:
             self.query_one("#cloudwatch_detail_text", Static).update("No events found.")
-            self.app.notify("No events found for the given filters.", severity="warning")
+            # Say whether the filter or the window came up empty.
+            reason = (
+                f"No events matched filter {filter_pattern} ({minutes}min window)."
+                if filter_pattern
+                else f"No events in this log group ({minutes}min window)."
+            )
+            self.app.notify(reason, severity="warning", markup=False)
         else:
             self.query_one("#cloudwatch_detail_text", Static).update(
                 "Select a log event to view the full message."
@@ -533,10 +550,10 @@ class CloudWatchBrowserScreen(Screen):
     def _copy_text(self, text: str, message: str) -> None:
         from servonaut.utils.platform_utils import copy_to_clipboard
         if copy_to_clipboard(text):
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
         else:
             self.app.copy_to_clipboard(text)
-            self.app.notify(message)
+            self.app.notify(message, markup=False)
 
     def action_ban_ip(self) -> None:
         ip = self._get_selected_ip()
@@ -546,7 +563,11 @@ class CloudWatchBrowserScreen(Screen):
             )
             return
         from servonaut.screens.ip_ban import IPBanScreen
-        self.app.push_screen(IPBanScreen(prefill_ip=ip))
+        # Pre-fill what the table shows; a ban of it targets the real address.
+        shown = ip
+        if self.app.demo_mode and self.app.redaction_service:
+            shown = self.app.redaction_service.redact_ip(ip)
+        self.app.push_screen(IPBanScreen(prefill_ip=shown, prefill_real_ip=ip))
 
     def action_ip_info(self) -> None:
         """Look up geolocation and abuse info for the selected IP."""
@@ -655,7 +676,7 @@ class CloudWatchBrowserScreen(Screen):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"http://ip-api.com/json/{ip}",
+                    f"{ip_api_base_url()}/json/{ip}",
                     params={"fields": "status,country,countryCode,regionName,city,isp,org,as,proxy,hosting"},
                 )
                 data = resp.json()
@@ -688,7 +709,7 @@ class CloudWatchBrowserScreen(Screen):
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://api.abuseipdb.com/api/v2/check",
+                    f"{abuseipdb_base_url()}/check",
                     params={"ipAddress": ip, "maxAgeInDays": "90"},
                     headers={"Key": api_key, "Accept": "application/json"},
                 )

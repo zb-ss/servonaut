@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("aiohttp")
 pytest.importorskip("playwright.async_api")
-from playwright.async_api import async_playwright
+from playwright.async_api import Error as PlaywrightError, async_playwright
 
 from servonaut.app import ServonautApp
 from servonaut.desktop.driver import (
@@ -29,6 +29,17 @@ from servonaut.desktop.model import SecretToken
 from servonaut.runtime import detect_runtime
 
 BROWSERS = ["chromium", "webkit"]
+
+
+async def _launch(browser_launcher, browser_type: str):
+    """Launch *browser_type*, skipping when Playwright's browser is not installed."""
+    try:
+        return await browser_launcher.launch()
+    except PlaywrightError as error:
+        # The Python package can be installed without its browsers.
+        if "Executable doesn't exist" in str(error):
+            pytest.skip(f"{browser_type} is not installed for Playwright")
+        raise
 
 
 @pytest.fixture
@@ -76,7 +87,7 @@ async def test_browser_desktop_boot_and_navigation(
 
     async with async_playwright() as playwright:
         browser_launcher = getattr(playwright, browser_type)
-        browser = await browser_launcher.launch()
+        browser = await _launch(browser_launcher, browser_type)
         page = await browser.new_page()
 
         page.on(
@@ -150,7 +161,7 @@ async def test_browser_settings_and_modal_flow(
 
     async with async_playwright() as playwright:
         browser_launcher = getattr(playwright, browser_type)
-        browser = await browser_launcher.launch()
+        browser = await _launch(browser_launcher, browser_type)
         page = await browser.new_page()
 
         await page.goto(origin)
@@ -202,7 +213,7 @@ async def test_browser_invalid_token_fails_authentication(
 
     async with async_playwright() as playwright:
         browser_launcher = getattr(playwright, browser_type)
-        browser = await browser_launcher.launch()
+        browser = await _launch(browser_launcher, browser_type)
         page = await browser.new_page()
 
         await page.goto(origin)

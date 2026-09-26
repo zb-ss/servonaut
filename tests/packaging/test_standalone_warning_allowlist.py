@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -22,15 +24,18 @@ _NEW_FACTS = {"target": _TARGET, "lock_sha256": "1" * 64, "toolchain_sha256": "3
 _CLIENT = {"module": "client", "qualifiers": ["optional"]}
 _WORKER = {"module": "desktop_worker", "qualifiers": ["optional"]}
 _GUARDED = {"module": "guarded_client", "qualifiers": ["conditional"]}
+_HELPER = {"module": "helper", "qualifiers": ["optional"]}
 
 
 def _warning(
     module: str,
     facts: dict[str, str],
     importers: list[dict[str, object]] | None = None,
+    *,
+    code: str = "missing-module",
 ) -> dict[str, object]:
     record: dict[str, object] = {
-        "code": "missing-module",
+        "code": code,
         "module": module,
         "importers": importers or [_CLIENT],
         "target_facts": facts,
@@ -296,26 +301,125 @@ def test_prune_stale_refuses_a_warning_that_is_not_a_pure_narrowing(
 
 @pytest.mark.parametrize(
     "report_change",
-    ("other-run", "edited-approval", "invalid-report"),
+    (
+        "other-run",
+        "edited-approval",
+        "invalid-report",
+        "counts-mismatch",
+        "record-count-mismatch",
+        "older-run",
+        "current-listed-stale",
+    ),
 )
 def test_prune_stale_refuses_a_report_that_does_not_match_the_inputs(
     tmp_path: Path, report_change: str
 ) -> None:
-    reviewed = _approval("gone")
-    allowlist = _write_allowlist(tmp_path, [_approval("kept"), reviewed])
-    original = allowlist.read_bytes()
+    """Each report differs from one its own run could write in one way only."""
+    kept, gone = _approval("kept"), _approval("gone")
+    entries = [kept, gone]
     unknown: list[dict[str, object]] = []
-    stale = [reviewed]
+    stale = [gone]
     if report_change == "other-run":
         unknown = [_warning("elsewhere", _OLD_FACTS)]
     elif report_change == "edited-approval":
-        stale = [{**reviewed, "reason": "Different review."}]
-    report = _write_report(tmp_path, approved=[], unknown=unknown, stale=stale)
+        stale = [{**gone, "reason": "Different review."}]
+    elif report_change == "older-run":
+        entries = [kept, gone, _approval("added_after_the_run")]
+    elif report_change == "current-listed-stale":
+        stale = [kept, gone]
+    allowlist = _write_allowlist(tmp_path, entries)
+    original = allowlist.read_bytes()
+    report = _write_report(
+        tmp_path, approved=[_warning("kept", _OLD_FACTS)], unknown=unknown, stale=stale
+    )
+    document = json.loads(report.read_text(encoding="utf-8"))
     if report_change == "invalid-report":
-        report.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+        document = {"schema_version": 1}
+    elif report_change == "counts-mismatch":
+        document["counts"]["stale"] = 0
+    elif report_change == "record-count-mismatch":
+        document["collection_facts"]["record_count"] += 1
+    report.write_text(json.dumps(document), encoding="utf-8")
 
     assert _prune(allowlist, _write_candidates(tmp_path, []), report) == 1
     assert allowlist.read_bytes() == original
+
+
+@pytest.mark.parametrize("pruning", (False, True), ids=("refresh", "prune-stale"))
+@pytest.mark.parametrize("tampering", ("copied-fingerprint", "foreign-fingerprint"))
+def test_refresh_rejects_fingerprints_that_do_not_identify_their_rows(
+    tmp_path: Path, tampering: str, pruning: bool
+) -> None:
+    gone = _approval("gone")
+    forged = "9" * 64 if tampering == "foreign-fingerprint" else gone["fingerprint"]
+    kept = {**_approval("kept"), "fingerprint": forged}
+    allowlist = _write_allowlist(tmp_path, [kept, gone])
+    original = allowlist.read_bytes()
+    candidates = _write_candidates(tmp_path, [])
+    if pruning:
+        observed = {field: kept[field] for field in _warning("kept", _OLD_FACTS)}
+        report = _write_report(tmp_path, approved=[observed], unknown=[], stale=[gone])
+        result = _prune(allowlist, candidates, report)
+    else:
+        result = _refresh(allowlist, candidates)
+
+    assert result == 1
+    assert allowlist.read_bytes() == original
+
+
+@pytest.mark.parametrize("case", ("different-code", "two-narrowings"))
+def test_prune_stale_refuses_a_narrowing_that_is_not_one_to_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], case: str
+) -> None:
+    reviewed = _approval("audio", [_CLIENT, _WORKER, _HELPER])
+    allowlist = _write_allowlist(tmp_path, [reviewed])
+    original = allowlist.read_bytes()
+    if case == "different-code":
+        observed = [_warning("audio", _OLD_FACTS, [_CLIENT], code="excluded-module")]
+    else:
+        observed = [
+            _warning("audio", _OLD_FACTS, [_CLIENT]),
+            _warning("audio", _OLD_FACTS, [_CLIENT, _HELPER]),
+        ]
+    report = _write_report(tmp_path, approved=[], unknown=observed, stale=[reviewed])
+
+    assert _prune(allowlist, _write_candidates(tmp_path, observed), report) == 1
+
+    assert "1 warning candidates have no reviewed approval" in capsys.readouterr().err
+    assert allowlist.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_refresh_keeps_the_allowlist_file_mode(tmp_path: Path) -> None:
+    allowlist = _write_allowlist(tmp_path, [_approval("kept")])
+    allowlist.chmod(0o640)
+
+    assert _refresh(allowlist, _write_candidates(tmp_path, [])) == 0
+
+    assert stat.S_IMODE(allowlist.stat().st_mode) == 0o640
+    assert list(tmp_path.glob(".warnings-allowlist-*")) == []
+
+
+def test_refresh_syncs_the_new_allowlist_before_replacing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowlist = _write_allowlist(tmp_path, [_approval("kept")])
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def recording_fsync(descriptor: int) -> None:
+        events.append("fsync")
+        real_fsync(descriptor)
+
+    def recording_replace(source: str, destination: Path) -> None:
+        events.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
+
+    assert _refresh(allowlist, _write_candidates(tmp_path, [])) == 0
+    assert events == ["fsync", "replace"]
 
 
 @pytest.mark.parametrize(

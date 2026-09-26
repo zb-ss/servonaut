@@ -85,7 +85,7 @@ servonaut hetzner create NAME               [--type cx23]
                                             [--image ubuntu-22.04]
                                             [--location fsn1]
                                             [--ssh-key NAME|ID] (repeatable)
-                                            [--no-wait] [--json]
+                                            [--no-wait] [--yes] [--json]
 servonaut hetzner destroy NAME_OR_ID        [--yes] [--json]
 servonaut hetzner ssh-keys list             [--json]
 servonaut hetzner ssh-keys add NAME --public-key-file PATH [--json]
@@ -97,8 +97,14 @@ servonaut hetzner test-connection           [--json]
 
 ```bash
 # Spin up a single Ubuntu 22.04 box in Falkenstein with the SSH key
-# named "laptop" (already registered with Hetzner) injected.
+# named "laptop" (already registered with Hetzner) injected. It shows
+# the type, image, location and keys it resolved, then asks y/N.
 servonaut hetzner create my-demo --ssh-key laptop
+
+# Create without the question (CI / scripts). Without --yes, create
+# only runs in a terminal: with piped or redirected input it asks
+# nothing and exits with code 3. Ctrl-C at the question cancels.
+servonaut hetzner create my-demo --ssh-key laptop --yes
 
 # List, filtering on state
 servonaut hetzner list --state running
@@ -120,7 +126,7 @@ servonaut hetzner server-types
 | 0    | success                                                           |
 | 1    | generic error (API failure, network)                              |
 | 2    | not configured (no token resolvable)                              |
-| 3    | typed-confirmation declined for `destroy`                         |
+| 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` without `--yes` when input is not a terminal |
 | 4    | input validation error                                            |
 
 ## TUI integration
@@ -134,6 +140,11 @@ default — Hetzner's stock images don't ship a non-root user).
 
 A background refresh worker keeps the list up to date; press `R` to
 force a refresh.
+
+In the Hetzner Manager, **Shutdown**, **Power off** and **Reboot** ask
+yes/no before they run ("No" is selected, so Enter cancels); **Start**
+runs straight away. **Delete** asks you to type `delete`. The AWS and
+OVH managers ask the same way before Stop and Reboot.
 
 ## MCP-tool catalogue
 
@@ -202,12 +213,18 @@ Place the token at one of:
 - `$HCLOUD_TOKEN`
 - `~/.config/hcloud/token`
 
-### SSH host-key prompt on first connect
+### SSH host key on first connect
 
 Hetzner does not return the new server's host fingerprint in the
-create response. Servonaut's SSH wrapper uses
-`StrictHostKeyChecking=accept-new`, so the first connect adds the host
-to your `known_hosts` automatically. No special Hetzner handling.
+create response. With the default `ssh.host_key_checking` of
+`accept-new`, the first connection records the server's key in
+`~/.servonaut/known_hosts` without a prompt, under the server's own name
+(`hetzner:<location>:<server-id>`) rather than its IP, and later
+connections are refused if that key changes. A new server that reuses a
+released IP is a different server and gets its own entry. When you rebuild
+a server in place, its key changes: Servonaut reports it and gives the
+`ssh-keygen -R` command that removes the old entry. See
+[SSH host-key verification](configuration.md#ssh-host-key-verification).
 
 ### `shutdown` sent but the server stays running
 

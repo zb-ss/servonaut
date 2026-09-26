@@ -11,6 +11,7 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
+from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class OVHResizeScreen(Screen):
 
     async def _load_models(self) -> None:
         """Fetch available upgrade models and populate the DataTable."""
-        vps_name = self._instance.get('id', '')
+        vps_name = real_instance_id(self.app, self._instance.get('id', ''))
         if not vps_name:
             self.notify("No VPS ID found in instance data.", severity="error")
             return
@@ -91,7 +92,7 @@ class OVHResizeScreen(Screen):
             self._models = await ovh_vps_service.list_upgrade_models(vps_name)
         except Exception as e:
             logger.error("Error loading VPS upgrade models: %s", e)
-            self.notify(f"Failed to load upgrade models: {e}", severity="error")
+            self.notify(f"Failed to load upgrade models: {e}", severity="error", markup=False)
             return
 
         table = self.query_one("#models_table", DataTable)
@@ -136,8 +137,10 @@ class OVHResizeScreen(Screen):
 
         model = self._models[row_key]
         model_name = model.get('name', 'Unknown')
-        vps_name = self._instance.get('id', '')
-        instance_name = self._instance.get('name') or vps_name
+        shown_id = self._instance.get('id', '')
+        # The row may carry demo-mode fakes: show them, act on the real VPS.
+        vps_name = real_instance_id(self.app, shown_id)
+        instance_name = self._instance.get('name') or shown_id
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -182,10 +185,11 @@ class OVHResizeScreen(Screen):
             self.notify(
                 f"Upgrade of {instance_name} to {model_name} has been queued.",
                 severity="information",
+                markup=False,
             )
         except Exception as e:
             logger.error("VPS upgrade failed: %s", e)
-            self.notify(f"Upgrade failed: {e}", severity="error")
+            self.notify(f"Upgrade failed: {e}", severity="error", markup=False)
 
     def action_back(self) -> None:
         """Navigate back."""

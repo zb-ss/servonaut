@@ -2704,6 +2704,8 @@ def _fixture(
                 "distribution": "frozen-cli",
                 "product_version": "1.2.3",
                 "build_revision": "build-1",
+                "channel": "stable",
+                "packaging_revision": 1,
                 "console_helper": "servonaut",
                 "desktop_child": None,
             }

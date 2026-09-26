@@ -16,8 +16,10 @@ metacharacters and we don't want a malformed brace to corrupt the row.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from rich.markup import escape
 from textual.app import ComposeResult
@@ -25,6 +27,8 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Static
+
+logger = logging.getLogger(__name__)
 
 
 # Maximum displayed length per arg value before we truncate. Models
@@ -322,7 +326,49 @@ class DangerousToolConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+def build_modal_confirm(app: Any) -> Callable[[Any], Awaitable[bool]]:
+    """Confirm callback that pushes the right modal and awaits the answer.
+
+    Must be awaited from a worker (``push_screen_wait``). When the awaiting
+    task is cancelled — the tool bridge's confirmation deadline passed, or
+    the chat turn was cancelled — the prompt is closed so an answer given
+    afterwards cannot look like it did anything.
+    """
+
+    async def _confirm(call: Any) -> bool:
+        if call.guard_level == "dangerous":
+            modal: ModalScreen[bool] = DangerousToolConfirmModal(call.tool, dict(call.args))
+        else:
+            modal = ToolConfirmModal(call.tool, dict(call.args))
+        try:
+            result = await app.push_screen_wait(modal)
+        except asyncio.CancelledError:
+            _close_if_top(app, modal)
+            raise
+        except Exception:  # pragma: no cover — defensive
+            logger.exception("push_screen_wait failed for tool confirm")
+            return False
+        return bool(result)
+
+    return _confirm
+
+
+def _close_if_top(app: Any, modal: ModalScreen) -> None:
+    """Close *modal* if it is still the active screen; never raises.
+
+    A prompt that is no longer on top is left alone: dismissing pops the
+    top screen, which would close whatever the user opened over it. Its
+    answer goes nowhere either way, because nothing awaits it any more.
+    """
+    try:
+        if app.screen is modal:
+            modal.dismiss(False)
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        logger.debug("Could not close an expired tool prompt", exc_info=True)
+
+
 __all__ = [
     "ToolConfirmModal",
     "DangerousToolConfirmModal",
+    "build_modal_confirm",
 ]
