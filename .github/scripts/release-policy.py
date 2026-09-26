@@ -338,8 +338,9 @@ def refuse_unreleased_final_tags(baseline: str) -> None:
     tags = unreleased_final_tags(baseline)
     if tags:
         raise ReleasePolicyError(
-            f"Tagged without a published release: {', '.join(tags)}. Publish the "
-            "draft release, or run the final stage to create the release, first."
+            f"Tagged without a published release: {', '.join(tags)}. Publish its "
+            "draft release or run the final stage to create the release; if its "
+            "candidate was withdrawn, delete the never-released tag by hand instead."
         )
 
 

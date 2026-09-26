@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / ".github/scripts/release-policy.py"
 PUSH = ROOT / ".github/scripts/release-push.sh"
+PYPI_CHECK = ROOT / ".github/scripts/candidate-on-pypi.sh"
 WORKFLOWS = ROOT / ".github/workflows"
 
 
@@ -1273,6 +1274,16 @@ def test_unreleased_final_tag_blocks_a_new_cycle(repo: Path, command: str) -> No
     result = candidate_plan(repo, command=command)
     assert result.returncode != 0
     assert "Tagged without a published release: v1.2.4, v1.2.5" in result.stderr
+    assert "delete the never-released tag by hand" in result.stderr
+
+
+def test_deleting_a_never_released_tag_starts_a_new_candidate(repo: Path) -> None:
+    # The promoted candidate was withdrawn before its release was created.
+    promoted_without_release(repo)
+    git(repo, "tag", "-d", "v1.2.4")
+    releases = [release(), candidate_release("v1.2.4rc1")]
+    planned = outputs(candidate_plan(repo, releases))
+    assert (planned["action"], planned["tag"]) == ("new", "v1.2.4rc2")
 
 
 def test_other_branch_names_are_not_release_branches(repo: Path) -> None:
@@ -1534,16 +1545,28 @@ def test_final_waits_for_approval_before_anything_is_written() -> None:
     assert "    needs: [plan, approval]\n" in promote
     assert "needs.approval.result == 'success'" in promote
     for name in ("plan", "approval"):
-        assert "git push" not in jobs[name]
+        assert "git push" not in jobs[name] and "release-push.sh" not in jobs[name]
         assert "gh release create" not in jobs[name]
-        assert "secrets.RELEASE_TOKEN }}" not in jobs[name].replace(
-            "secrets.RELEASE_TOKEN != ''", ""
-        )
-    # Writes are serialised, but approval never holds the lock while it waits.
+    assert "secrets." not in approval
+    # Each stage's writes queue behind that stage only, so a queued candidate
+    # run can never cancel an approved promotion; approval holds no lock.
+    groups = {}
     for name in ("candidate", "promote"):
-        assert "    concurrency:\n      group: release\n      cancel-in-progress: false\n" in jobs[name]
-    assert "concurrency" not in jobs["approval"]
+        match = re.search(
+            r"^    concurrency:\n      group: (\S+)\n      cancel-in-progress: false\n",
+            jobs[name],
+            re.MULTILINE,
+        )
+        assert match, name
+        groups[name] = match.group(1)
+    assert groups == {"candidate": "release-stage-candidate", "promote": "release-stage-final"}
+    assert "concurrency" not in jobs["approval"] and "concurrency" not in jobs["plan"]
     assert "\nconcurrency:" not in (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    # No other workflow shares a group name with these jobs.
+    for path in WORKFLOWS.glob("*.yml"):
+        if path.name != "release.yml":
+            text = path.read_text(encoding="utf-8")
+            assert not any(f"group: {group}\n" in text for group in groups.values()), path.name
 
 
 def test_candidate_job_runs_only_for_a_planned_candidate() -> None:
@@ -2070,6 +2093,15 @@ def test_release_push_passes_the_token_only_through_the_environment(tmp_path: Pa
 
 def test_release_token_is_only_in_the_steps_that_write() -> None:
     jobs = release_jobs()
+    plan_steps = re.split(r"^      - ", jobs["plan"], flags=re.MULTILINE)[1:]
+    reading = [
+        step.splitlines()[0]
+        for step in plan_steps
+        if "secrets.RELEASE_TOKEN }}" in step
+    ]
+    # The plan only reads with it, to see draft releases.
+    assert reading == ["name: Look for a draft release"]
+    assert "gh release" not in jobs["plan"] and "release-push.sh" not in jobs["plan"]
     for name, writer in (("candidate", "Cut the candidate"), ("promote", "Promote the candidate")):
         steps = re.split(r"^      - ", jobs[name], flags=re.MULTILINE)[1:]
         holding = [step.splitlines()[0] for step in steps if "secrets.RELEASE_TOKEN" in step]
@@ -2084,28 +2116,86 @@ def test_release_token_is_only_in_the_steps_that_write() -> None:
 # PyPI checks before asking for approval --------------------------------------
 
 
+def run_pypi_check(
+    tmp_path: Path, *args: str, served: bool = True, yanked: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Run the PyPI check with a curl stand-in on PATH."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    document = json.dumps({"info": {"version": "1.2.4rc1", "yanked": yanked}})
+    body = f"printf '%s' '{document}'" if served else "exit 22"
+    (bin_dir / "curl").write_text(
+        f'#!/bin/sh\necho "$*" >> "{tmp_path / "curl.log"}"\n{body}\n', encoding="utf-8"
+    )
+    (bin_dir / "curl").chmod(0o755)
+    return subprocess.run(
+        ["bash", str(PYPI_CHECK), *args],
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        text=True, capture_output=True, check=False,
+    )
+
+
+@needs_jq
 @pytest.mark.parametrize(
-    "served,yanked,code,message",
+    "served,yanked,args,code,message",
     [
-        (True, False, 0, "PyPI serves v1.2.4rc1, and it is not yanked."),
-        (True, True, 1, "v1.2.4rc1 is yanked on PyPI"),
-        (False, False, 1, "v1.2.4rc1 is not on PyPI"),
+        (True, False, ("v1.2.4rc1",), 0, "PyPI serves v1.2.4rc1, and it is not yanked."),
+        (True, True, ("v1.2.4rc1",), 1, "v1.2.4rc1 is yanked on PyPI, so it will not be promoted"),
+        (
+            True, True, ("v1.2.4rc1", "v1.2.4"), 1,
+            "delete the never-released tag by hand (git push origin :refs/tags/v1.2.4)",
+        ),
+        (False, False, ("v1.2.4rc1",), 1, "v1.2.4rc1 is not on PyPI, or PyPI could not be read"),
     ],
 )
 def test_promotion_needs_the_candidate_on_pypi_and_not_yanked(
-    tmp_path: Path, served: bool, yanked: bool, code: int, message: str
+    tmp_path: Path, served: bool, yanked: bool, args: tuple[str, ...], code: int, message: str
 ) -> None:
-    document = json.dumps({"info": {"version": "1.2.4rc1", "yanked": yanked}})
-    stub = (
-        f"curl() {{ echo \"$*\" >> '{tmp_path / 'curl.log'}'; "
-        + (f"printf '%s' '{document}'; }}\n" if served else "return 22; }\n")
-    )
-    result = run_step(
-        "release.yml", "Require the candidate on PyPI", prelude=stub, CANDIDATE="v1.2.4rc1"
-    )
+    result = run_pypi_check(tmp_path, *args, served=served, yanked=yanked)
     assert result.returncode == code, result.stdout + result.stderr
     assert message in result.stdout
     assert "https://pypi.org/pypi/servonaut/1.2.4rc1/json" in (tmp_path / "curl.log").read_text()
+
+
+def test_pypi_is_checked_before_approval_and_again_before_pushing() -> None:
+    plan = step_script("release.yml", "Require the candidate on PyPI")
+    assert 'bash .github/scripts/candidate-on-pypi.sh "${args[@]}"' in plan
+    promote = release_jobs()["promote"]
+    names = re.findall(r"^      - name: (.+)$", promote, re.MULTILINE)
+    assert names[-3:] == [
+        "Refuse if a release already went out today",
+        "Require the candidate on PyPI, still",
+        "Promote the candidate",
+    ]
+    again = workflow_step("release.yml", "Require the candidate on PyPI, still")
+    assert "if: steps.cadence.outputs.allowed == 'true'" in again
+    assert 'bash "$RUNNER_TEMP/candidate-on-pypi.sh" "${args[@]}"' in again
+    assert '.github/scripts/candidate-on-pypi.sh "$RUNNER_TEMP/"' in promote
+
+
+@pytest.mark.parametrize(
+    "token,existing,waiting",
+    [("test-token", "123", "true"), ("test-token", "", "false"), ("", "123", "false")],
+)
+def test_a_draft_stable_release_is_not_sent_for_approval(
+    tmp_path: Path, token: str, existing: str, waiting: str
+) -> None:
+    output = tmp_path / "output"
+    result = run_step(
+        "release.yml", "Look for a draft release",
+        prelude=fake_gh(tmp_path, existing),
+        GH_TOKEN=token, REPO="example/project", TAG="v1.2.4",
+        GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(tmp_path / "summary"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8").splitlines()[-1] == f"waiting={waiting}"
+    if waiting == "true":
+        assert "v1.2.4 already has a release waiting as a draft" in result.stdout
+    plan = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert (
+        "action: ${{ steps.draft.outputs.waiting == 'true' && 'none' "
+        "|| steps.plan.outputs.action }}"
+    ) in plan
 
 
 def test_candidate_plan_reads_the_index_versions(repo: Path, tmp_path: Path) -> None:
@@ -2169,3 +2259,40 @@ def test_python_release_candidates_pass_the_binary_candidate_gate(tmp_path: Path
     assert "if: env.REQUIRE_CANDIDATE == 'true' && env.PRERELEASE != 'true'" in job
     # Skipping the job itself would skip the tests and the upload after it.
     assert "if: needs.eligibility.outputs.publish == 'true'\n" in job
+
+
+@needs_jq
+@pytest.mark.parametrize("action,names_tag", [("promote", False), ("release", True)])
+def test_pypi_step_names_the_pushed_tag_only_when_it_exists(
+    tmp_path: Path, action: str, names_tag: bool
+) -> None:
+    run_pypi_check(tmp_path, "v1.2.4rc1")  # creates the curl stand-in
+    result = subprocess.run(
+        ["bash", "-c", step_script("release.yml", "Require the candidate on PyPI")],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "ACTION": action,
+            "CANDIDATE": "v1.2.4rc1",
+            "TAG": "v1.2.4",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    (tmp_path / "bin" / "curl").write_text(
+        "#!/bin/sh\nprintf '%s' '{\"info\": {\"yanked\": true}}'\n", encoding="utf-8"
+    )
+    yanked = subprocess.run(
+        ["bash", "-c", step_script("release.yml", "Require the candidate on PyPI")],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "ACTION": action, "CANDIDATE": "v1.2.4rc1", "TAG": "v1.2.4",
+        },
+    )
+    assert yanked.returncode == 1
+    assert ("refs/tags/v1.2.4" in yanked.stdout) is names_tag

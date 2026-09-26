@@ -74,7 +74,8 @@ jobs:
     outputs:
       stage: ${{ steps.stage.outputs.stage }}
       dry_run: ${{ steps.stage.outputs.dry_run }}
-      action: ${{ steps.plan.outputs.action }}
+      # A stable release already waiting as a draft needs publishing, not approval.
+      action: ${{ steps.draft.outputs.waiting == 'true' && 'none' || steps.plan.outputs.action }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
       candidate: ${{ steps.plan.outputs.candidate }}
@@ -185,18 +186,40 @@ jobs:
           steps.stage.outputs.stage == 'final'
           && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
         env:
+          ACTION: ${{ steps.plan.outputs.action }}
           CANDIDATE: ${{ steps.plan.outputs.candidate }}
+          TAG: ${{ steps.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! meta="$(curl -sf --retry 3 "https://pypi.org/pypi/servonaut/${CANDIDATE#v}/json")"; then
-            echo "::error::$CANDIDATE is not on PyPI, so it cannot have been installed and tested. Check its publish run."
-            exit 1
+          args=("$CANDIDATE")
+          # The tag is already pushed when only its release is missing.
+          [ "$ACTION" = "release" ] && args+=("$TAG")
+          bash .github/scripts/candidate-on-pypi.sh "${args[@]}"
+
+      # The plan reads releases with the built-in token, which cannot see
+      # drafts. A tag whose release is a draft has nothing left to approve.
+      - name: Look for a draft release
+        id: draft
+        if: steps.stage.outputs.stage == 'final' && steps.plan.outputs.action == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "waiting=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::Without RELEASE_TOKEN, draft releases cannot be seen."
+            exit 0
           fi
-          if [ "$(jq -r '.info.yanked' <<< "$meta")" != "false" ]; then
-            echo "::error::$CANDIDATE is yanked on PyPI. Cut and test a new candidate before promoting."
-            exit 1
+          existing="$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -n "$existing" ]; then
+            echo "waiting=true" >> "$GITHUB_OUTPUT"
+            msg="$TAG already has a release waiting as a draft. Publish it to ship; nothing needs approval."
+            echo "::notice::$msg"
+            echo "$msg" >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "PyPI serves $CANDIDATE, and it is not yanked."
 
   candidate:
     needs: plan
@@ -206,8 +229,11 @@ jobs:
           || needs.plan.outputs.action == 'release')
       && needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
+    # Each stage queues only behind itself, so a queued candidate run can
+    # never cancel an approved promotion that waits for its turn. The
+    # force-with-lease pushes keep the two stages from overwriting each other.
     concurrency:
-      group: release
+      group: release-stage-candidate
       cancel-in-progress: false
     env:
       DRAFT: ${{ inputs.draft == true }}
@@ -300,7 +326,7 @@ jobs:
     if: needs.approval.result == 'success' && needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     concurrency:
-      group: release
+      group: release-stage-final
       cancel-in-progress: false
     env:
       DRAFT: ${{ inputs.draft == true }}
@@ -324,7 +350,9 @@ jobs:
           python-version: "3.12"
 
       - name: Keep this run's release tooling
-        run: cp .github/scripts/release-policy.py .github/scripts/release-push.sh "$RUNNER_TEMP/"
+        run: |
+          cp .github/scripts/release-policy.py .github/scripts/release-push.sh \
+            .github/scripts/candidate-on-pypi.sh "$RUNNER_TEMP/"
 
       # Approval can take days. Go ahead only with what was approved, and
       # only while it is still what the release branch and tags say.
@@ -373,6 +401,16 @@ jobs:
           fi
           echo "Nothing shipped today — clear to release."
           echo "allowed=true" >> "$GITHUB_OUTPUT"
+
+      # A candidate can be yanked while the approval waits.
+      - name: Require the candidate on PyPI, still
+        if: steps.cadence.outputs.allowed == 'true'
+        run: |
+          set -euo pipefail
+          args=("$CANDIDATE")
+          # The tag is already pushed when only its release is missing.
+          [ "$ACTION" = "release" ] && args+=("$TAG")
+          bash "$RUNNER_TEMP/candidate-on-pypi.sh" "${args[@]}"
 
       - name: Promote the candidate
         if: steps.cadence.outputs.allowed == 'true'
