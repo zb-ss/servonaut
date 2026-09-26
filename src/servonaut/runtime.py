@@ -11,7 +11,6 @@ import importlib.metadata
 import json
 import math
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -30,11 +29,6 @@ _MARKER_SCHEMA_VERSION: Final = 1
 # This protocol bound prevents an untrusted sibling file from consuming
 # unbounded startup memory; it is deliberately not deployment configuration.
 _MAX_MARKER_BYTES: Final = 256 * 1024
-# A self-update pins only a plain public version, so the requirement it builds
-# can never carry other requirement syntax.
-_PINNED_VERSION: Final = re.compile(
-    r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?"
-)
 _PIPX_INSPECTION_TIMEOUT_ENV: Final = "SERVONAUT_PIPX_INSPECTION_TIMEOUT_SECONDS"
 _DEFAULT_PIPX_INSPECTION_TIMEOUT_SECONDS: Final = 5.0
 _MARKER_FIELDS: Final = frozenset(
@@ -151,35 +145,24 @@ class PackageManagementCapability:
             "This Servonaut distribution cannot install Python dependencies."
         )
 
-    def self_update_argv(
-        self, package: str = "servonaut", *, version: str | None = None
-    ) -> list[str]:
+    def self_update_argv(self, package: str = "servonaut") -> list[str]:
         """Build a self-update argv when this distribution permits one.
 
-        Without ``version`` the argv upgrades to the newest stable release: pip
-        and pipx never pick a pre-release unless asked, and this never asks.
-        With ``version`` it installs exactly that release, which is how a
-        running pre-release moves to a newer one. Pinning, rather than pip's
-        ``--pre``, keeps dependencies on stable releases and leaves nothing
-        behind in pipx's metadata that would pull pre-releases into later
-        upgrades.
+        The argv never asks for pre-releases, so pip and pipx install only
+        stable releases with it. A running pre-release that should move to a
+        newer one passes a constraint to the same command instead (see
+        ``UpdateService``), which leaves pipx's stored install spec alone.
         """
         if not isinstance(package, str) or not package:
             raise ValueError("package must be a non-empty string")
-        if version is not None and _PINNED_VERSION.fullmatch(version) is None:
-            raise ValueError("version must be a plain release version")
-        requirement = package if version is None else f"{package}=={version}"
         if self.kind is PackageManagementKind.PIP:
             if not self.allows_automatic_mutation:
                 raise RuntimeCapabilityError(
                     "Source installations cannot self-update; update from the source checkout."
                 )
-            return [*self.argv_prefix, "install", "--upgrade", requirement]
+            return [*self.argv_prefix, "install", "--upgrade", package]
         if self.kind is PackageManagementKind.PIPX:
-            if version is None:
-                return [*self.argv_prefix, "upgrade", package]
-            # Reinstalls into the existing environment, keeping injected packages.
-            return [*self.argv_prefix, "install", "--force", requirement]
+            return [*self.argv_prefix, "upgrade", package]
         if self.kind is PackageManagementKind.UNSUPPORTED:
             raise RuntimeCapabilityError(
                 "Frozen Servonaut distributions cannot update themselves with pip."

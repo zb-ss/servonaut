@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import importlib.metadata
@@ -487,22 +488,30 @@ class UpdateService:
     def get_upgrade_command(self) -> list[str] | None:
         """Return a self-update argv, or None when the runtime cannot self-update.
 
-        A stable installation always gets the plain upgrade, which never
-        installs a pre-release. A running pre-release installs exactly the
-        version the last check found, which may be a newer pre-release.
+        The argv is the plain upgrade for every installation and never asks
+        for pre-releases. A running pre-release that moves to a newer one runs
+        the same argv with :meth:`prerelease_target` as a pip constraint.
 
         This has no side effects; :meth:`run_upgrade` reports why an update
         cannot run.
         """
         try:
-            return self._upgrade_argv()
+            return self._runtime.package_management.self_update_argv()
         except RuntimeCapabilityError:
             return None
 
-    def _upgrade_argv(self) -> list[str]:
+    def prerelease_target(self) -> Optional[str]:
+        """The version a running pre-release upgrades to, or None.
+
+        Only for an installation that follows pre-releases, and only when the
+        last check found a version newer than the running one: an upgrade
+        never reinstalls the same version or moves back to an older one, even
+        if a later check lowered the version on offer.
+        """
         latest = PackageVersion.parse(self._latest)
-        pinned = latest.text if latest is not None and self.follows_prereleases else None
-        return self._runtime.package_management.self_update_argv(version=pinned)
+        if latest is None or not self.follows_prereleases:
+            return None
+        return latest.text if self._is_newer(latest.text, self._current) else None
 
     def installed_version_external(self) -> Optional[str]:
         """Query the target mutable environment after an upgrade."""
@@ -548,21 +557,22 @@ class UpdateService:
         if self._runtime.is_frozen:
             return await self._run_frozen_upgrade()
 
-        if self.get_upgrade_command() is None:
+        command = self.get_upgrade_command()
+        if command is None:
             self._update_status = _SOURCE_UPDATE_GUIDANCE
             return False, self._update_status
 
         before = self.installed_version_external() or self._current
         target = self._latest or self.check_for_update()
-        # Built after the check, since a running pre-release pins the version found.
-        command = self._upgrade_argv()
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
+            with _upgrade_environment(self.prerelease_target()) as environment:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=environment,
+                )
+                stdout, stderr = await process.communicate()
             output = (
                 stdout.decode(errors="replace") + stderr.decode(errors="replace")
             ).strip()
@@ -650,6 +660,27 @@ class UpdateService:
         if latest_version is None or current_version is None:
             return False
         return latest_version > current_version
+
+
+@contextlib.contextmanager
+def _upgrade_environment(pinned: Optional[str]) -> Iterator[Optional[dict[str, str]]]:
+    """The upgrade's environment: inherited, or with a constraint pinning Servonaut.
+
+    pip, and pipx through it, read ``PIP_CONSTRAINT`` from the environment,
+    so the pin applies to this run only. Unlike ``--pre`` or a pinned
+    requirement it is not stored in pipx's metadata, keeps the extras the
+    installation was made with, and lets no dependency become a pre-release.
+    The constraint file is named by a ``file:`` URL, which has no spaces for
+    pip to split the variable on.
+    """
+    if pinned is None:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="servonaut-upgrade-") as directory:
+        constraint = Path(directory) / "constraints.txt"
+        constraint.write_text(f"servonaut=={pinned}\n", encoding="utf-8")
+        existing = os.environ.get("PIP_CONSTRAINT", "").strip()
+        yield {**os.environ, "PIP_CONSTRAINT": f"{existing} {constraint.as_uri()}".strip()}
 
 
 def latest_index_version(

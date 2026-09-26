@@ -26,7 +26,6 @@ _PUBLIC_VERSION: Final = re.compile(
     r"(?:\.post(?P<post>[0-9]+))?"
     r"(?:\.dev(?P<dev>[0-9]+))?"
 )
-_LEADING_RELEASE: Final = re.compile(r"v?([0-9]+(?:\.[0-9]+)*)")
 _PRE_RELEASE_ORDER: Final = {"a": 0, "b": 1, "rc": 2}
 # Sort positions outside every real pre-release: a development release of a
 # final version comes before its alphas, and a final version after its
@@ -71,18 +70,20 @@ class PackageVersion:
     def parse_installed(cls, text: object) -> Optional["PackageVersion"]:
         """Parse an installed version, tolerating local and repackaged forms.
 
-        A local version (``2.27.0+deb1``) is read as its public part, and any
-        other form by its leading release number (``2.27.0-1ubuntu1`` reads as
-        the final release ``2.27.0``), so such an installation is still offered
-        newer releases. Returns None only when no release number can be found.
+        A leading ``v`` is ignored, a local version (``2.27.0+deb1``) is read
+        as its public part, and any other form by the longest public version
+        it starts with: ``2.28.0rc1-1`` reads as ``2.28.0rc1`` and
+        ``2.27.0-1ubuntu1`` as ``2.27.0``. Such an installation is still
+        offered newer releases. Returns None when it starts with no version.
         """
         if not isinstance(text, str):
             return None
-        parsed = cls.parse(text) or cls.parse(text.split("+", 1)[0])
+        public = text[1:] if text[:1] in ("v", "V") else text
+        parsed = cls.parse(public) or cls.parse(public.split("+", 1)[0])
         if parsed is not None:
             return parsed
-        match = _LEADING_RELEASE.match(text)
-        return cls.parse(match.group(1)) if match else None
+        match = _PUBLIC_VERSION.match(public)
+        return cls.parse(match.group(0)) if match else None
 
     @property
     def is_prerelease(self) -> bool:

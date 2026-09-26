@@ -77,6 +77,9 @@ def test_equal_versions_hash_alike() -> None:
         ("2.28.0rc1+local.2", "2.28.0rc1", True),
         ("2.27.0-1ubuntu1", "2.27.0", False),
         ("v2.27.0", "2.27.0", False),
+        ("v2.28.0rc1", "2.28.0rc1", True),
+        ("2.28.0rc1-1", "2.28.0rc1", True),
+        ("2.27.0.post1-2", "2.27.0.post1", False),
         ("2.28.0-rc1", "2.28.0", False),
     ],
 )

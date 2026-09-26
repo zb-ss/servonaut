@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -362,36 +364,83 @@ def test_stable_upgrade_commands_never_request_prereleases(kind, latest):
     assert not any(argument.startswith("--pip-args") for argument in command)
 
 
-def test_prerelease_upgrade_pins_the_version_found():
-    # Pinning keeps dependencies on stable releases, and unlike pipx's
-    # --pip-args=--pre it is not stored for later `pipx upgrade` runs.
-    pip = _svc(current="2.28.0rc1", latest="2.28.0rc2").get_upgrade_command()
-    pipx = _svc(
-        current="2.28.0rc1", latest="2.28.0rc2", kind=DistributionKind.PIPX
-    ).get_upgrade_command()
-    assert pip == [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut==2.28.0rc2"]
-    assert pipx == [str(Path("/usr/bin/pipx")), "install", "--force", "servonaut==2.28.0rc2"]
+def test_prerelease_upgrade_keeps_the_plain_command():
+    # pipx stores --pip-args=--pre, a pinned requirement or --force for later
+    # runs; the plain command, limited by a constraint, stores none of them.
+    for kind, expected in (
+        (DistributionKind.PIP, [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut"]),
+        (DistributionKind.PIPX, [str(Path("/usr/bin/pipx")), "upgrade", "servonaut"]),
+    ):
+        service = _svc(current="2.28.0rc1", latest="2.28.0rc2", kind=kind)
+        assert service.get_upgrade_command() == expected
+        assert service.prerelease_target() == "2.28.0rc2"
 
 
-def test_prerelease_upgrade_without_a_known_version_is_the_plain_upgrade():
-    for latest in (None, "not a version"):
-        command = _svc(current="2.28.0rc1", latest=latest).get_upgrade_command()
-        assert command == [sys.executable, "-m", "pip", "install", "--upgrade", "servonaut"]
+@pytest.mark.parametrize(
+    "current,latest",
+    [
+        ("2.27.0", "2.28.0rc2"),  # stable installations are never limited
+        ("2.28.0rc2", "2.28.0rc2"),  # never reinstall the same version
+        ("2.28.0rc2", "2.28.0rc1"),  # never move back, e.g. after a yank
+        ("2.28.0rc1", None),
+        ("2.28.0rc1", "not a version"),
+    ],
+)
+def test_prerelease_target_is_only_ever_a_newer_version(current, latest):
+    assert _svc(current=current, latest=latest).prerelease_target() is None
 
 
-def test_run_upgrade_pins_the_prerelease_it_just_found(monkeypatch):
+def _spawn_recording_constraint(record):
+    async def spawn(*argv, stdout=None, stderr=None, env=None):
+        record["argv"] = argv
+        record["env"] = env
+        if env is not None:
+            urls = env["PIP_CONSTRAINT"].split()
+            record["urls"] = urls
+            path = Path(urllib.request.url2pathname(urllib.parse.urlsplit(urls[-1]).path))
+            record["path"] = path
+            record["constraint"] = path.read_text(encoding="utf-8")
+        return _fake_proc()
+
+    return spawn
+
+
+def test_run_upgrade_limits_a_prerelease_with_a_constraint(monkeypatch):
     service = _svc(current="2.28.0rc1", latest=None, kind=DistributionKind.PIPX)
     service._opener = _Opener(_PRERELEASE_PUBLISHED)
     monkeypatch.setattr(
         service, "installed_version_external", MagicMock(side_effect=["2.28.0rc1", "2.28.0rc2"])
     )
-    spawn = AsyncMock(return_value=_fake_proc())
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setenv("PIP_CONSTRAINT", "/etc/pip/site-constraints.txt")
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+
     ok, message = asyncio.run(service.run_upgrade())
+
     assert ok is True, message
-    assert spawn.call_args.args == (
-        str(Path("/usr/bin/pipx")), "install", "--force", "servonaut==2.28.0rc2"
+    assert record["argv"] == (str(Path("/usr/bin/pipx")), "upgrade", "servonaut")
+    assert record["constraint"] == "servonaut==2.28.0rc2\n"
+    # An existing constraint still applies; ours is a file: URL, with no
+    # spaces for pip to split the variable on.
+    assert record["urls"][0] == "/etc/pip/site-constraints.txt"
+    assert record["urls"][1].startswith("file:")
+    assert not record["path"].exists()
+
+
+def test_run_upgrade_of_a_stable_installation_inherits_the_environment(monkeypatch):
+    service = _svc(current="2.26.0", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(
+        service, "installed_version_external", MagicMock(side_effect=["2.26.0", "2.27.0"])
     )
+    record = {}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn_recording_constraint(record))
+
+    ok, message = asyncio.run(service.run_upgrade())
+
+    assert ok is True, message
+    assert record["env"] is None
+    assert record["argv"] == (sys.executable, "-m", "pip", "install", "--upgrade", "servonaut")
 
 
 # --- repackaged installations still see updates -----------------------------
@@ -418,3 +467,22 @@ def test_a_local_prerelease_still_follows_prereleases():
     service._opener = _Opener(_PRERELEASE_PUBLISHED)
     assert service.follows_prereleases is True
     assert service.check_for_update() == "2.28.0rc2"
+
+
+def test_update_command_line_names_the_prerelease_limit(monkeypatch, capsys):
+    from servonaut import main as main_module
+    from servonaut.services import update_service
+
+    service = _svc(current="2.28.0rc1", latest=None)
+    service._opener = _Opener(_PRERELEASE_PUBLISHED)
+    monkeypatch.setattr(update_service, "UpdateService", lambda runtime: service)
+    monkeypatch.setattr("servonaut.runtime.detect_runtime", lambda: service.runtime)
+    monkeypatch.setattr(
+        service, "run_upgrade", AsyncMock(return_value=(True, "Updated."))
+    )
+    main_module._run_update()
+    printed = capsys.readouterr().out
+    assert (
+        f"Running: {sys.executable} -m pip install --upgrade servonaut"
+        " (limited to servonaut==2.28.0rc2)"
+    ) in printed
