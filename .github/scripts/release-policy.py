@@ -286,6 +286,63 @@ def candidate_tags(version: str) -> list[tuple[int, str]]:
     return sorted(found)
 
 
+def next_candidate_number(
+    version: str, releases: list[dict[str, Any]], index_versions: list[str]
+) -> int:
+    """One above every candidate number of *version* already used anywhere.
+
+    A number counts once it has a tag, a GitHub release or a package on the
+    index: the index never accepts the same version twice, even after a tag
+    or release is deleted.
+    """
+    used = [number for number, _ in candidate_tags(version)]
+    names = [f"v{name}" for name in index_versions]
+    names += [str(release.get("tag_name")) for release in releases]
+    for name in names:
+        match = CANDIDATE_TAG.fullmatch(name)
+        if match and ".".join(match.groups()[:3]) == version:
+            used.append(int(match.group(4)))
+    return max(used, default=0) + 1
+
+
+def read_index_versions(path: Path | None) -> list[str]:
+    """The ``versions`` list of a PEP 691 JSON simple-index project page."""
+    if path is None:
+        return []
+    page = json.loads(path.read_text(encoding="utf-8"))
+    versions = page.get("versions") if isinstance(page, dict) else None
+    if not isinstance(versions, list) or any(not isinstance(v, str) for v in versions):
+        raise ReleasePolicyError("Expected the package index's list of versions.")
+    return versions
+
+
+def has_release(releases: list[dict[str, Any]], tag: str) -> bool:
+    return any(release.get("tag_name") == tag for release in releases)
+
+
+def unreleased_final_tags(baseline: str) -> list[str]:
+    """vX.Y.Z tags above the latest published stable release, in order.
+
+    One exists when a promotion pushed its tag but its release was never
+    created or is still a draft.
+    """
+    tags = [
+        tag
+        for tag in git("tag", "--list", "v*").splitlines()
+        if STABLE_TAG.fullmatch(tag) and version_key(tag[1:]) > version_key(baseline[1:])
+    ]
+    return sorted(tags, key=lambda tag: version_key(tag[1:]))
+
+
+def refuse_unreleased_final_tags(baseline: str) -> None:
+    tags = unreleased_final_tags(baseline)
+    if tags:
+        raise ReleasePolicyError(
+            f"Tagged without a published release: {', '.join(tags)}. Publish the "
+            "draft release, or run the final stage to create the release, first."
+        )
+
+
 def require_unreleased(version: str, baseline: str) -> None:
     if ref_exists(f"refs/tags/v{version}"):
         raise ReleasePolicyError(
@@ -299,12 +356,16 @@ def require_unreleased(version: str, baseline: str) -> None:
         )
 
 
-def plan_candidate(payload: str, requested: str, remote: str) -> dict[str, str]:
+def plan_candidate(
+    payload: str, requested: str, remote: str, index_versions: list[str]
+) -> dict[str, str]:
     """Plan the next vX.Y.ZrcN: a new release branch, or the next candidate on it."""
-    baseline = stable_baseline(read_releases(payload))
+    releases = read_releases(payload)
+    baseline = stable_baseline(releases)
+    refuse_unreleased_final_tags(baseline)
     branch = single_release_branch(remote)
     if branch is None:
-        return plan_first_candidate(baseline, requested)
+        return plan_first_candidate(baseline, requested, releases, index_versions)
     version, head = branch
     if requested != "auto":
         raise ReleasePolicyError(
@@ -320,20 +381,25 @@ def plan_candidate(payload: str, requested: str, remote: str) -> dict[str, str]:
         "base": head,
     }
     if tags and commit_of(f"refs/tags/{tags[-1][1]}") == head:
-        return {"action": "none", **plan, "tag": tags[-1][1]}
-    number = tags[-1][0] + 1 if tags else 1
+        latest = tags[-1][1]
+        # The tag was pushed but its release was never created: create only that.
+        action = "none" if has_release(releases, latest) else "release"
+        return {"action": action, **plan, "tag": latest}
+    number = next_candidate_number(version, releases, index_versions)
     return {"action": "next", **plan, "tag": f"v{version}rc{number}"}
 
 
-def plan_first_candidate(baseline: str, requested: str) -> dict[str, str]:
+def plan_first_candidate(
+    baseline: str,
+    requested: str,
+    releases: list[dict[str, Any]],
+    index_versions: list[str],
+) -> dict[str, str]:
     planned = plan_next_version(baseline, requested)
     if planned["release"] == "false":
         return {"action": "none", "last_tag": baseline}
     version = planned["next"][1:]
-    tags = candidate_tags(version)
-    # Candidate numbers are never reused: an abandoned candidate's version
-    # stays taken on the package index.
-    number = tags[-1][0] + 1 if tags else 1
+    number = next_candidate_number(version, releases, index_versions)
     return {
         "action": "new",
         "last_tag": baseline,
@@ -346,6 +412,30 @@ def plan_first_candidate(baseline: str, requested: str) -> dict[str, str]:
     }
 
 
+def promoted_from(tag: str) -> str:
+    """The candidate a vX.Y.Z tag was promoted from, verified, or an error.
+
+    A promotion tags the candidate's commit plus a single change of the two
+    version declarations.
+    """
+    version = tag[1:]
+    tags = candidate_tags(version)
+    parent = git("rev-parse", "--verify", f"{tag}^{{commit}}^")
+    candidate = tags[-1][1] if tags else None
+    changed = git("diff", "--name-only", candidate or parent, tag).splitlines()
+    if (
+        candidate is None
+        or commit_of(f"refs/tags/{candidate}") != parent
+        or changed != [path.as_posix() for path, _, _ in VERSION_FILES]
+        or package_versions(tag) != (version,) * len(VERSION_FILES)
+    ):
+        raise ReleasePolicyError(
+            f"{tag} is tagged without a release, but was not promoted from a "
+            "candidate. Create or delete its release by hand."
+        )
+    return candidate
+
+
 def plan_final(payload: str, requested: str, remote: str) -> dict[str, str]:
     """Plan promoting the open release branch's latest candidate to vX.Y.Z."""
     if requested != "auto":
@@ -356,6 +446,20 @@ def plan_final(payload: str, requested: str, remote: str) -> dict[str, str]:
     releases = read_releases(payload)
     baseline = stable_baseline(releases)
     branch = single_release_branch(remote)
+    pending = unreleased_final_tags(baseline)
+    if pending and (branch is not None or len(pending) > 1):
+        refuse_unreleased_final_tags(baseline)
+    if pending:
+        # A promotion pushed its tag but the release was not created.
+        tag = pending[0]
+        return {
+            "action": "release",
+            "last_tag": baseline,
+            "version": tag[1:],
+            "base": commit_of(f"refs/tags/{tag}"),
+            "candidate": promoted_from(tag),
+            "tag": tag,
+        }
     if branch is None:
         return {"action": "none", "last_tag": baseline}
     version, head = branch
@@ -429,6 +533,19 @@ def summary_text(command: str, output: dict[str, str]) -> str:
         )
     if action == "next":
         return f"## Candidate {output['tag']}\n\nCut from the head of `{output['branch']}`.\n"
+    if action == "release" and command == "candidate":
+        return (
+            f"## Candidate {output['tag']}\n\n"
+            "The tag was pushed but has no release yet: only the pre-release "
+            "is created.\n"
+        )
+    if action == "release":
+        return (
+            f"## Release {output['tag']}\n\n"
+            f"{output['tag']} was promoted from {output['candidate']} but has no "
+            "release yet: only the release is created, after approval in the "
+            "`release-approval` environment.\n"
+        )
     if action == "promote":
         return (
             f"## Promote {output['candidate']} → {output['tag']}\n\n"
@@ -461,6 +578,13 @@ def main() -> int:
         command.add_argument("--summary", type=Path)
         if name != "plan":
             command.add_argument("--remote", default="origin")
+        if name == "candidate":
+            command.add_argument(
+                "--index-versions",
+                type=Path,
+                help="PEP 691 JSON simple-index page, to skip candidate numbers "
+                "already on the package index",
+            )
     edit = commands.add_parser("set-version", help="Set both package versions")
     edit.add_argument("version")
     edit.add_argument(
@@ -479,7 +603,9 @@ def main() -> int:
             if args.command == "plan":
                 output = plan_release(payload, args.bump)
             elif args.command == "candidate":
-                output = plan_candidate(payload, args.bump, args.remote)
+                output = plan_candidate(
+                    payload, args.bump, args.remote, read_index_versions(args.index_versions)
+                )
             else:
                 output = plan_final(payload, args.bump, args.remote)
             if args.summary:

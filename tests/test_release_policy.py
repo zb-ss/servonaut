@@ -1,5 +1,6 @@
 """Exercise release decisions with real, disposable Git histories."""
 
+import base64
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / ".github/scripts/release-policy.py"
+PUSH = ROOT / ".github/scripts/release-push.sh"
 WORKFLOWS = ROOT / ".github/workflows"
 
 
@@ -1209,11 +1211,68 @@ def test_unchanged_open_branch_cuts_nothing(repo: Path, tmp_path: Path) -> None:
     git(repo, "tag", "v1.2.4rc1")
     open_branch(repo, "1.2.4")
     summary = tmp_path / "summary.md"
-    payload = json.dumps([release()])
+    payload = json.dumps([release(), candidate_release("v1.2.4rc1")])
     result = run_policy(repo, "candidate", "--summary", str(summary), payload=payload)
     assert outputs(result)["action"] == "none"
     assert outputs(result)["tag"] == "v1.2.4rc1"
     assert "has not changed since v1.2.4rc1" in summary.read_text(encoding="utf-8")
+
+
+def test_candidate_tag_without_a_release_gets_only_its_release(repo: Path) -> None:
+    # An earlier run pushed the branch and tag, then failed to create the release.
+    head = set_versions(repo, "1.2.4rc1")
+    git(repo, "tag", "v1.2.4rc1")
+    open_branch(repo, "1.2.4")
+    assert outputs(candidate_plan(repo)) == {
+        "action": "release",
+        "last_tag": "v1.2.3",
+        "version": "1.2.4",
+        "branch": "release/1.2.4",
+        "base": head,
+        "tag": "v1.2.4rc1",
+    }
+
+
+def index_page(tmp_path: Path, versions: list[str]) -> Path:
+    page = tmp_path / "simple.json"
+    page.write_text(json.dumps({"meta": {"api-version": "1.4"}, "versions": versions}))
+    return page
+
+
+@pytest.mark.parametrize("branch_open", [False, True])
+def test_candidate_numbers_already_on_the_index_are_skipped(
+    repo: Path, tmp_path: Path, branch_open: bool
+) -> None:
+    # rc1 and rc2 are on the index though their tags and releases were deleted.
+    commit(repo, "src/servonaut/example.py", "fix: correct output")
+    if branch_open:
+        open_branch(repo, "1.2.4")
+    page = index_page(tmp_path, ["1.2.3", "1.2.4rc1", "1.2.4rc2", "1.2.40rc9"])
+    payload = json.dumps([release(), candidate_release("v1.2.4rc3", draft=True)])
+    result = run_policy(repo, "candidate", "--index-versions", str(page), payload=payload)
+    assert outputs(result)["tag"] == "v1.2.4rc4"
+
+
+@pytest.mark.parametrize("page", ['{"versions": "1.2.4rc1"}', "[]", '{"meta": {}}', "{"])
+def test_unreadable_index_versions_fail_closed(repo: Path, tmp_path: Path, page: str) -> None:
+    commit(repo, "src/servonaut/example.py", "fix: correct output")
+    path = tmp_path / "simple.json"
+    path.write_text(page)
+    result = run_policy(
+        repo, "candidate", "--index-versions", str(path), payload=json.dumps([release()])
+    )
+    assert result.returncode != 0
+    assert not result.stdout
+
+
+@pytest.mark.parametrize("command", ["candidate", "final"])
+def test_unreleased_final_tag_blocks_a_new_cycle(repo: Path, command: str) -> None:
+    commit(repo, "src/servonaut/example.py", "fix: correct output")
+    git(repo, "tag", "v1.2.4")
+    git(repo, "tag", "v1.2.5")
+    result = candidate_plan(repo, command=command)
+    assert result.returncode != 0
+    assert "Tagged without a published release: v1.2.4, v1.2.5" in result.stderr
 
 
 def test_other_branch_names_are_not_release_branches(repo: Path) -> None:
@@ -1237,7 +1296,7 @@ def test_two_open_release_branches_are_refused(repo: Path, command: str) -> None
 def test_branch_of_a_released_version_is_refused(repo: Path, command: str) -> None:
     git(repo, "tag", "v1.2.4")
     open_branch(repo, "1.2.4")
-    result = candidate_plan(repo, command=command)
+    result = candidate_plan(repo, [release(), release("v1.2.4")], command=command)
     assert result.returncode != 0
     assert "v1.2.4 is already tagged" in result.stderr
 
@@ -1349,6 +1408,52 @@ def test_final_refuses_a_candidate_with_other_package_versions(repo: Path) -> No
     assert "do not match v1.2.4rc1" in result.stderr
 
 
+def promoted_without_release(repo: Path, *, extra_change: bool = False) -> str:
+    """A promotion whose tag landed but whose release was never created."""
+    head = branch_with_candidates(repo, 1)
+    git(repo, "update-ref", "-d", "refs/remotes/origin/release/1.2.4")
+    git(repo, "switch", "--detach", head)
+    if extra_change:
+        commit(repo, "src/servonaut/untested.py", "fix: untested")
+    promoted = set_versions(repo, "1.2.4")
+    git(repo, "tag", "v1.2.4")
+    git(repo, "switch", "master")
+    return promoted
+
+
+def test_final_creates_only_the_missing_release_of_a_promotion(
+    repo: Path, tmp_path: Path
+) -> None:
+    promoted = promoted_without_release(repo)
+    summary = tmp_path / "summary.md"
+    payload = json.dumps([release(), candidate_release("v1.2.4rc1")])
+    result = run_policy(repo, "final", "--summary", str(summary), payload=payload)
+    assert outputs(result) == {
+        "action": "release",
+        "last_tag": "v1.2.3",
+        "version": "1.2.4",
+        "base": promoted,
+        "candidate": "v1.2.4rc1",
+        "tag": "v1.2.4",
+    }
+    assert "only the release is created" in summary.read_text(encoding="utf-8")
+
+
+def test_final_refuses_a_stray_tag_that_was_not_promoted(repo: Path) -> None:
+    promoted_without_release(repo, extra_change=True)
+    result = candidate_plan(repo, [release(), candidate_release("v1.2.4rc1")], command="final")
+    assert result.returncode != 0
+    assert "was not promoted from a candidate" in result.stderr
+
+
+def test_final_refuses_a_missing_release_while_a_branch_is_open(repo: Path) -> None:
+    promoted_without_release(repo)
+    open_branch(repo, "1.2.5")
+    result = candidate_plan(repo, [release(), candidate_release("v1.2.4rc1")], command="final")
+    assert result.returncode != 0
+    assert "Tagged without a published release: v1.2.4" in result.stderr
+
+
 def test_final_refuses_a_bump(repo: Path) -> None:
     result = candidate_plan(repo, bump="patch", command="final")
     assert result.returncode != 0
@@ -1454,7 +1559,8 @@ def test_releases_are_created_with_generated_notes_and_right_channel() -> None:
     for script in (cut, promote):
         assert '--generate-notes --notes-start-tag "$LAST"' in script
         assert "--verify-tag" in script
-        assert "git push --atomic --force-with-lease=" in script
+        assert 'bash "$RUNNER_TEMP/release-push.sh" --atomic' in script
+        assert "--force-with-lease=" in script
     assert "--prerelease" in cut
     assert "--prerelease" not in promote
 
@@ -1611,7 +1717,19 @@ def runner_temp(tmp_path: Path) -> Path:
     directory = tmp_path / "runner-temp"
     directory.mkdir(exist_ok=True)
     shutil.copy(POLICY, directory / "release-policy.py")
+    shutil.copy(PUSH, directory / "release-push.sh")
     return directory
+
+
+def gh_calls(tmp_path: Path) -> list[str]:
+    log = tmp_path / "gh.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+RELEASE_LOOKUP = (
+    "api --paginate repos/example/project/releases"
+    ' --jq .[] | select(.tag_name == "{tag}") | .id'
+)
 
 
 def python_shim() -> str:
@@ -1619,15 +1737,17 @@ def python_shim() -> str:
 
 
 def run_mutation(
-    tmp_path: Path, clone: Path, name: str, **env: str
+    tmp_path: Path, clone: Path, name: str, gh_output: str = "", **env: str
 ) -> subprocess.CompletedProcess[str]:
     return run_step(
         "release.yml",
         name,
-        prelude=fake_gh(tmp_path) + python_shim(),
+        prelude=fake_gh(tmp_path, gh_output) + python_shim(),
         cwd=clone,
         RUNNER_TEMP=str(runner_temp(tmp_path)),
         GITHUB_STEP_SUMMARY=str(tmp_path / "summary"),
+        GH_TOKEN="test-token",
+        REPO="example/project",
         DRAFT="false",
         **env,
     )
@@ -1662,10 +1782,11 @@ def test_cut_opens_the_branch_and_tags_the_first_candidate(
     assert git(origin, "log", "-1", "--format=%s%n%an", head) == (
         "chore: bump version to 1.2.4rc1\ngithub-actions[bot]"
     )
-    assert (tmp_path / "gh.log").read_text(encoding="utf-8") == (
+    assert gh_calls(tmp_path) == [
+        RELEASE_LOOKUP.format(tag="v1.2.4rc1"),
         "release create v1.2.4rc1 --title v1.2.4rc1 --prerelease --verify-tag"
-        " --generate-notes --notes-start-tag v1.2.3\n"
-    )
+        " --generate-notes --notes-start-tag v1.2.3",
+    ]
 
 
 def test_cut_adds_the_next_candidate_to_the_open_branch(
@@ -1705,7 +1826,7 @@ def test_cut_pushes_nothing_when_the_branch_moved(
     )
     assert result.returncode != 0
     assert remote_refs(origin) == before
-    assert not (tmp_path / "gh.log").exists()
+    assert gh_calls(tmp_path) == []
 
 
 def prepare_promotion(repo: Path, origin: Path, *, master_version: str | None = None) -> str:
@@ -1721,12 +1842,14 @@ def prepare_promotion(repo: Path, origin: Path, *, master_version: str | None = 
     return candidate
 
 
-def promote(tmp_path: Path, origin: Path, base: str) -> subprocess.CompletedProcess[str]:
-    clone = checkout(origin, tmp_path, "runner")
+def promote(
+    tmp_path: Path, origin: Path, base: str, action: str = "promote", gh_output: str = ""
+) -> subprocess.CompletedProcess[str]:
+    clone = checkout(origin, tmp_path, f"runner-{action}")
     return run_mutation(
-        tmp_path, clone, "Promote the candidate",
-        VERSION="1.2.4", TAG="v1.2.4", CANDIDATE="v1.2.4rc1",
-        BRANCH="release/1.2.4", BASE=base, LAST="v1.2.3",
+        tmp_path, clone, "Promote the candidate", gh_output,
+        ACTION=action, VERSION="1.2.4", TAG="v1.2.4", CANDIDATE="v1.2.4rc1",
+        BRANCH="release/1.2.4" if action == "promote" else "", BASE=base, LAST="v1.2.3",
     )
 
 
@@ -1749,10 +1872,11 @@ def test_promotion_changes_only_the_version(
     assert git(origin, "rev-parse", "master^") == master
     assert versions(origin, "master") == ("1.2.4", "1.2.4")
     assert git(origin, "log", "-1", "--format=%s", "master") == "chore: bump version to 1.2.4"
-    assert (tmp_path / "gh.log").read_text(encoding="utf-8") == (
+    assert gh_calls(tmp_path) == [
+        RELEASE_LOOKUP.format(tag="v1.2.4"),
         "release create v1.2.4 --title v1.2.4 --verify-tag"
-        " --generate-notes --notes-start-tag v1.2.3\n"
-    )
+        " --generate-notes --notes-start-tag v1.2.3",
+    ]
 
 
 def test_promotion_leaves_a_higher_master_version_alone(
@@ -1777,7 +1901,7 @@ def test_promotion_pushes_nothing_when_the_branch_moved(
     result = promote(tmp_path, origin, candidate)
     assert result.returncode != 0
     assert remote_refs(origin) == before
-    assert not (tmp_path / "gh.log").exists()
+    assert gh_calls(tmp_path) == []
 
 
 def test_promotion_refuses_more_than_a_version_change(
@@ -1823,6 +1947,7 @@ def test_promotion_rechecks_the_candidate_after_approval(
         cwd=clone,
         RUNNER_TEMP=str(runner_temp(tmp_path)),
         REPO="example/project",
+        ACTION="promote",
         CANDIDATE="v1.2.4rc1",
         TAG="v1.2.4",
         BASE=candidate,
@@ -1833,3 +1958,214 @@ def test_promotion_rechecks_the_candidate_after_approval(
     assert result.returncode == 1
     assert "::error::" in result.stdout + result.stderr
     assert message in result.stdout + result.stderr
+
+
+def test_cut_creates_only_the_missing_prerelease(
+    repo: Path, origin: Path, tmp_path: Path
+) -> None:
+    git(repo, "switch", "-c", "release/1.2.4")
+    head = set_versions(repo, "1.2.4rc1")
+    git(repo, "tag", "v1.2.4rc1")
+    git(repo, "push", "origin", "release/1.2.4", "v1.2.4rc1")
+    before = remote_refs(origin)
+    clone = checkout(origin, tmp_path, "runner")
+    result = run_mutation(
+        tmp_path, clone, "Cut the candidate",
+        ACTION="release", TAG="v1.2.4rc1", BRANCH="release/1.2.4", BASE=head, LAST="v1.2.3",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert remote_refs(origin) == before
+    assert gh_calls(tmp_path)[-1].startswith("release create v1.2.4rc1 --title v1.2.4rc1 --prerelease")
+
+
+@pytest.mark.parametrize("step", ["Cut the candidate", "Promote the candidate"])
+def test_an_existing_draft_release_is_never_duplicated(
+    repo: Path, origin: Path, tmp_path: Path, step: str
+) -> None:
+    git(repo, "tag", "v1.2.4rc1")
+    git(repo, "tag", "v1.2.4")
+    git(repo, "push", "origin", "v1.2.4rc1", "v1.2.4")
+    clone = checkout(origin, tmp_path, "runner")
+    tag = "v1.2.4rc1" if step == "Cut the candidate" else "v1.2.4"
+    result = run_mutation(
+        tmp_path, clone, step, "123",
+        ACTION="release", TAG=tag, VERSION="1.2.4", CANDIDATE="v1.2.4rc1",
+        BRANCH="", BASE=git(repo, "rev-parse", "HEAD"), LAST="v1.2.3",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"::notice::{tag} already has a release" in result.stdout
+    assert not any(call.startswith("release create") for call in gh_calls(tmp_path))
+
+
+def test_promotion_rerun_creates_only_the_missing_release(
+    repo: Path, origin: Path, tmp_path: Path
+) -> None:
+    candidate = prepare_promotion(repo, origin)
+    assert promote(tmp_path, origin, candidate).returncode == 0
+    promoted = remote_refs(origin)
+    (tmp_path / "gh.log").unlink()
+    result = promote(tmp_path, origin, promoted["refs/tags/v1.2.4"], action="release")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert remote_refs(origin) == promoted
+    assert gh_calls(tmp_path)[-1].startswith("release create v1.2.4 --title v1.2.4 --verify-tag")
+
+
+def test_release_failure_says_how_to_recover(repo: Path, origin: Path, tmp_path: Path) -> None:
+    candidate = prepare_promotion(repo, origin)
+    clone = checkout(origin, tmp_path, "runner")
+    prelude = (
+        'gh() { [ "$1" = "api" ] && return 0; echo "gh: HTTP 502"; return 1; }\n'
+        + python_shim()
+    )
+    result = run_step(
+        "release.yml", "Promote the candidate", prelude=prelude, cwd=clone,
+        RUNNER_TEMP=str(runner_temp(tmp_path)), GITHUB_STEP_SUMMARY=str(tmp_path / "summary"),
+        GH_TOKEN="test-token", REPO="example/project", DRAFT="false", ACTION="promote",
+        VERSION="1.2.4", TAG="v1.2.4", CANDIDATE="v1.2.4rc1", BRANCH="release/1.2.4",
+        BASE=candidate, LAST="v1.2.3",
+    )
+    assert result.returncode == 1
+    assert "Run the final stage again: after approval it creates only the release" in result.stdout
+    # The push had landed, so the next plan offers exactly that.
+    assert "refs/tags/v1.2.4" in remote_refs(origin)
+
+
+# The release token never reaches disk or argv -------------------------------
+
+
+def test_release_push_passes_the_token_only_through_the_environment(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "git.record"
+    (bin_dir / "git").write_text(
+        "#!/bin/sh\n"
+        f'{{ echo "argv=$*"; env | grep "^GIT_CONFIG_" | sort; }} > "{record}"\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(
+        ["bash", str(PUSH), "--atomic", "origin", "HEAD:refs/heads/x"],
+        env={**env, "GH_TOKEN": "s3cret-token"},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = record.read_text(encoding="utf-8").splitlines()
+    assert recorded[0] == "argv=push --atomic origin HEAD:refs/heads/x"
+    expected = "AUTHORIZATION: basic " + base64.b64encode(b"x-access-token:s3cret-token").decode()
+    assert recorded[1:] == [
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
+        f"GIT_CONFIG_VALUE_0={expected}",
+    ]
+    assert "s3cret-token" not in result.stdout + result.stderr
+    missing = subprocess.run(
+        ["bash", str(PUSH), "origin"],
+        env={key: value for key, value in env.items() if key != "GH_TOKEN"},
+        text=True, capture_output=True, check=False,
+    )
+    assert missing.returncode != 0
+    assert not record.exists() or record.read_text(encoding="utf-8").startswith("argv=push --atomic")
+
+
+def test_release_token_is_only_in_the_steps_that_write() -> None:
+    jobs = release_jobs()
+    for name, writer in (("candidate", "Cut the candidate"), ("promote", "Promote the candidate")):
+        steps = re.split(r"^      - ", jobs[name], flags=re.MULTILINE)[1:]
+        holding = [step.splitlines()[0] for step in steps if "secrets.RELEASE_TOKEN" in step]
+        assert holding == [f"name: {writer}"], name
+        checkout = next(step for step in steps if "actions/checkout@" in step)
+        assert "persist-credentials: false" in checkout
+        assert "token:" not in checkout
+        assert 'bash "$RUNNER_TEMP/release-push.sh" --atomic' in jobs[name]
+        assert "git push" not in jobs[name].replace("release-push.sh", "")
+
+
+# PyPI checks before asking for approval --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "served,yanked,code,message",
+    [
+        (True, False, 0, "PyPI serves v1.2.4rc1, and it is not yanked."),
+        (True, True, 1, "v1.2.4rc1 is yanked on PyPI"),
+        (False, False, 1, "v1.2.4rc1 is not on PyPI"),
+    ],
+)
+def test_promotion_needs_the_candidate_on_pypi_and_not_yanked(
+    tmp_path: Path, served: bool, yanked: bool, code: int, message: str
+) -> None:
+    document = json.dumps({"info": {"version": "1.2.4rc1", "yanked": yanked}})
+    stub = (
+        f"curl() {{ echo \"$*\" >> '{tmp_path / 'curl.log'}'; "
+        + (f"printf '%s' '{document}'; }}\n" if served else "return 22; }\n")
+    )
+    result = run_step(
+        "release.yml", "Require the candidate on PyPI", prelude=stub, CANDIDATE="v1.2.4rc1"
+    )
+    assert result.returncode == code, result.stdout + result.stderr
+    assert message in result.stdout
+    assert "https://pypi.org/pypi/servonaut/1.2.4rc1/json" in (tmp_path / "curl.log").read_text()
+
+
+def test_candidate_plan_reads_the_index_versions(repo: Path, tmp_path: Path) -> None:
+    commit(repo, "src/servonaut/example.py", "fix: correct output")
+    index = json.dumps({"meta": {"api-version": "1.4"}, "versions": ["1.2.3", "1.2.4rc1"]})
+    curl = (
+        "curl() {\n"
+        '  while [ "$#" -gt 0 ]; do\n'
+        f'    [ "$1" = "-o" ] && printf \'%s\' \'{index}\' > "$2"\n'
+        "    shift\n"
+        "  done\n"
+        "}\n"
+    )
+    releases = json.dumps([release()])
+    output = tmp_path / "output"
+    (repo / ".github/scripts").mkdir(parents=True)
+    shutil.copy(POLICY, repo / ".github/scripts/release-policy.py")
+    result = run_step(
+        "release.yml", "Plan the release",
+        prelude=curl + fake_gh(tmp_path, releases) + python_shim(), cwd=repo,
+        STAGE="candidate", BUMP="auto", REPO="example/project",
+        RUNNER_TEMP=str(runner_temp(tmp_path)), GITHUB_OUTPUT=str(output),
+        GITHUB_STEP_SUMMARY=str(tmp_path / "summary"),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "tag=v1.2.4rc2" in output.read_text(encoding="utf-8").splitlines()
+
+
+def test_candidate_plan_refuses_without_the_index(repo: Path, tmp_path: Path) -> None:
+    result = run_step(
+        "release.yml", "Plan the release",
+        prelude="curl() { return 22; }\n" + fake_gh(tmp_path) + python_shim(), cwd=repo,
+        STAGE="candidate", BUMP="auto", REPO="example/project",
+        RUNNER_TEMP=str(runner_temp(tmp_path)), GITHUB_OUTPUT=str(tmp_path / "output"),
+        GITHUB_STEP_SUMMARY=str(tmp_path / "summary"),
+    )
+    assert result.returncode == 1
+    assert "::error::Could not read the published versions from PyPI." in result.stdout
+    assert gh_calls(tmp_path) == []
+
+
+# The binary candidate gate applies to stable releases only -------------------
+
+
+def test_python_release_candidates_pass_the_binary_candidate_gate(tmp_path: Path) -> None:
+    log = tmp_path / "calls.log"
+    result = subprocess.run(
+        ["bash", "-c", _GATE_STUBS + step_script("publish.yml", "Require candidate verification when enabled")],
+        text=True, capture_output=True, check=False,
+        env={
+            **os.environ, "REQUIRE_CANDIDATE": "true", "PRERELEASE": "true",
+            "REPO": "example/project", "THIS_TAG": "v1.2.4rc1", "REVISION": "c" * 40,
+            "TEST_LOG": str(log),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "v1.2.4rc1 is a Python release candidate" in result.stdout
+    assert not log.exists()
+    job = _job((WORKFLOWS / "publish.yml").read_text(encoding="utf-8"), "candidate")
+    assert "PRERELEASE: ${{ needs.eligibility.outputs.prerelease }}" in job
+    assert "if: env.REQUIRE_CANDIDATE == 'true' && env.PRERELEASE != 'true'" in job
+    # Skipping the job itself would skip the tests and the upload after it.
+    assert "if: needs.eligibility.outputs.publish == 'true'\n" in job

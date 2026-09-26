@@ -102,27 +102,26 @@ def test_every_workflow_declares_read_only_top_level_permissions(path: Path) -> 
 
 
 @pytest.mark.parametrize("workflow,job_name,job", JOBS, ids=JOB_IDS)
-def test_checkouts_that_never_push_drop_their_credentials(
+def test_every_checkout_drops_its_credentials(
     workflow: str, job_name: str, job: str
 ) -> None:
-    if "git push" in job:
-        return
+    """No token is left in .git/config for later steps or actions to read."""
     for step in _steps(job):
         if "actions/checkout@" in step:
             assert "persist-credentials: false" in step, (workflow, job_name)
 
 
-def test_only_the_release_jobs_may_keep_checkout_credentials() -> None:
-    pushing = [(workflow, name) for workflow, name, job in JOBS if "git push" in job]
+def test_only_the_release_jobs_push_with_a_per_command_token() -> None:
+    pushing = [
+        (workflow, name)
+        for workflow, name, job in JOBS
+        if "git push" in job or "release-push.sh" in job
+    ]
     assert pushing == [("release.yml", "candidate"), ("release.yml", "promote")]
-
-
-def test_release_jobs_that_push_use_the_release_token() -> None:
-    jobs = _jobs((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))
-    for name in ("candidate", "promote"):
-        checkout = next(step for step in _steps(jobs[name]) if "actions/checkout@" in step)
-        assert "token: ${{ secrets.RELEASE_TOKEN }}" in checkout
-        assert "persist-credentials: false" not in checkout
+    for _, name in pushing:
+        job = _jobs((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))[name]
+        assert "git push" not in job
+        assert 'bash "$RUNNER_TEMP/release-push.sh"' in job
 
 
 @pytest.mark.parametrize("workflow", SHA_PINNED_WORKFLOWS)

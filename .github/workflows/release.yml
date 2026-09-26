@@ -20,6 +20,10 @@ name: Release
 #   deleted. Without an open candidate there is nothing to promote and no
 #   release that week. A rejected or expired approval publishes nothing.
 #
+# If a run pushed its tag but failed to create the GitHub release, running
+# the same stage again creates only the missing release (after approval, for
+# the final stage).
+#
 # `dry_run` reports what either stage would do without touching anything,
 # and works without the token below.
 #
@@ -140,15 +144,26 @@ jobs:
           STAGE: ${{ steps.stage.outputs.stage }}
         run: |
           set -euo pipefail
+          index=()
+          if [ "$STAGE" = "candidate" ]; then
+            # A candidate number already on PyPI is never reused, even when
+            # its tag and release were deleted: PyPI refuses the same version twice.
+            curl -sf --retry 3 -H "Accept: application/vnd.pypi.simple.v1+json" \
+              -o "$RUNNER_TEMP/index.json" "https://pypi.org/simple/servonaut/" \
+              || { echo "::error::Could not read the published versions from PyPI."; exit 1; }
+            index=(--index-versions "$RUNNER_TEMP/index.json")
+          fi
           gh api --paginate "repos/$REPO/releases" \
-            | python3 .github/scripts/release-policy.py "$STAGE" --bump "$BUMP" \
+            | python3 .github/scripts/release-policy.py "$STAGE" --bump "$BUMP" "${index[@]}" \
                 --summary "$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
 
       # A job that names an environment nobody configured creates it without
       # protection rules, and would run without waiting for anyone. Refuse to
       # ask for approval unless a reviewer is actually required.
       - name: Require a reviewer for the promotion
-        if: steps.plan.outputs.action == 'promote'
+        if: >-
+          steps.stage.outputs.stage == 'final'
+          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -166,22 +181,29 @@ jobs:
           echo "The release-approval environment requires a reviewer."
 
       - name: Require the candidate on PyPI
-        if: steps.plan.outputs.action == 'promote'
+        if: >-
+          steps.stage.outputs.stage == 'final'
+          && (steps.plan.outputs.action == 'promote' || steps.plan.outputs.action == 'release')
         env:
           CANDIDATE: ${{ steps.plan.outputs.candidate }}
         run: |
           set -euo pipefail
-          if ! curl -sf --retry 3 "https://pypi.org/pypi/servonaut/${CANDIDATE#v}/json" > /dev/null; then
+          if ! meta="$(curl -sf --retry 3 "https://pypi.org/pypi/servonaut/${CANDIDATE#v}/json")"; then
             echo "::error::$CANDIDATE is not on PyPI, so it cannot have been installed and tested. Check its publish run."
             exit 1
           fi
-          echo "PyPI serves $CANDIDATE."
+          if [ "$(jq -r '.info.yanked' <<< "$meta")" != "false" ]; then
+            echo "::error::$CANDIDATE is yanked on PyPI. Cut and test a new candidate before promoting."
+            exit 1
+          fi
+          echo "PyPI serves $CANDIDATE, and it is not yanked."
 
   candidate:
     needs: plan
     if: >-
       needs.plan.outputs.stage == 'candidate'
-      && (needs.plan.outputs.action == 'new' || needs.plan.outputs.action == 'next')
+      && (needs.plan.outputs.action == 'new' || needs.plan.outputs.action == 'next'
+          || needs.plan.outputs.action == 'release')
       && needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     concurrency:
@@ -195,10 +217,12 @@ jobs:
       BASE: ${{ needs.plan.outputs.base }}
       LAST: ${{ needs.plan.outputs.last_tag }}
     steps:
+      # No credentials are kept on disk: the release token reaches only the
+      # step that pushes and creates the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -206,33 +230,46 @@ jobs:
 
       # The release branch may carry older tooling; always use this run's.
       - name: Keep this run's release tooling
-        run: cp .github/scripts/release-policy.py "$RUNNER_TEMP/release-policy.py"
+        run: cp .github/scripts/release-policy.py .github/scripts/release-push.sh "$RUNNER_TEMP/"
 
       - name: Cut the candidate
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          policy="$RUNNER_TEMP/release-policy.py"
           v="${TAG#v}"
-          git switch --detach "$BASE"
-          python3 "$policy" set-version "$v" > /dev/null
+          # "release": an earlier run pushed the tag but did not create its release.
+          if [ "$ACTION" != "release" ]; then
+            git switch --detach "$BASE"
+            python3 "$RUNNER_TEMP/release-policy.py" set-version "$v" > /dev/null
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore: bump version to $v"
-          git tag "$TAG"
-          # A new branch must not exist yet; an open one must still be where
-          # it was planned. Branch and tag land together or not at all.
-          expected=""
-          [ "$ACTION" = "next" ] && expected="$BASE"
-          git push --atomic --force-with-lease="refs/heads/$BRANCH:$expected" \
-            origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "chore: bump version to $v"
+            git tag "$TAG"
+            # A new branch must not exist yet; an open one must still be where
+            # it was planned. Branch and tag land together or not at all.
+            expected=""
+            [ "$ACTION" = "next" ] && expected="$BASE"
+            bash "$RUNNER_TEMP/release-push.sh" --atomic \
+              --force-with-lease="refs/heads/$BRANCH:$expected" \
+              origin "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG" \
+              || { echo "::error::The push was refused, so nothing changed. If an earlier attempt already pushed $TAG, re-run all jobs so the workflow plans again."; exit 1; }
+          fi
 
+          # The plan cannot see draft releases; this token can.
+          existing="$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -n "$existing" ]; then
+            echo "::notice::$TAG already has a release. If it is a draft, publish it to upload the candidate to PyPI."
+            exit 0
+          fi
           draft_flag=""
           [ "$DRAFT" = "true" ] && draft_flag="--draft"
           gh release create "$TAG" --title "$TAG" --prerelease --verify-tag \
-            --generate-notes --notes-start-tag "$LAST" $draft_flag
+            --generate-notes --notes-start-tag "$LAST" $draft_flag \
+            || { echo "::error::$TAG is pushed but its pre-release could not be created. Run the candidate stage again to create only the pre-release."; exit 1; }
           if [ -n "$draft_flag" ]; then
             echo "Draft pre-release $TAG created on $BRANCH — publish it to upload it to PyPI." >> "$GITHUB_STEP_SUMMARY"
           else
@@ -246,7 +283,7 @@ jobs:
     needs: plan
     if: >-
       needs.plan.outputs.stage == 'final'
-      && needs.plan.outputs.action == 'promote'
+      && (needs.plan.outputs.action == 'promote' || needs.plan.outputs.action == 'release')
       && needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     environment: release-approval
@@ -256,7 +293,7 @@ jobs:
         env:
           CANDIDATE: ${{ needs.plan.outputs.candidate }}
           TAG: ${{ needs.plan.outputs.tag }}
-        run: echo "Approved promoting $CANDIDATE to $TAG." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Approved releasing $TAG from $CANDIDATE." >> "$GITHUB_STEP_SUMMARY"
 
   promote:
     needs: [plan, approval]
@@ -267,6 +304,7 @@ jobs:
       cancel-in-progress: false
     env:
       DRAFT: ${{ inputs.draft == true }}
+      ACTION: ${{ needs.plan.outputs.action }}
       VERSION: ${{ needs.plan.outputs.version }}
       TAG: ${{ needs.plan.outputs.tag }}
       CANDIDATE: ${{ needs.plan.outputs.candidate }}
@@ -274,20 +312,22 @@ jobs:
       BASE: ${{ needs.plan.outputs.base }}
       LAST: ${{ needs.plan.outputs.last_tag }}
     steps:
+      # No credentials are kept on disk: the release token reaches only the
+      # step that pushes and creates the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Keep this run's release tooling
-        run: cp .github/scripts/release-policy.py "$RUNNER_TEMP/release-policy.py"
+        run: cp .github/scripts/release-policy.py .github/scripts/release-push.sh "$RUNNER_TEMP/"
 
-      # Approval can take days. Promote only the candidate that was approved,
-      # and only while it is still the latest one on the release branch.
+      # Approval can take days. Go ahead only with what was approved, and
+      # only while it is still what the release branch and tags say.
       - name: Confirm the approved candidate is unchanged
         env:
           GH_TOKEN: ${{ github.token }}
@@ -296,13 +336,13 @@ jobs:
           set -euo pipefail
           now="$(gh api --paginate "repos/$REPO/releases" \
             | python3 "$RUNNER_TEMP/release-policy.py" final)"
-          for expected in "action=promote" "candidate=$CANDIDATE" "tag=$TAG" "base=$BASE"; do
+          for expected in "action=$ACTION" "candidate=$CANDIDATE" "tag=$TAG" "base=$BASE"; do
             if ! grep -qxF "$expected" <<< "$now"; then
               echo "::error::The release branch changed while $CANDIDATE waited for approval. Nothing was promoted; test the latest candidate and run the final stage again."
               exit 1
             fi
           done
-          echo "Promoting $CANDIDATE, unchanged since it was approved."
+          echo "Releasing $TAG from $CANDIDATE, unchanged since it was approved."
 
       - name: Refuse if a release already went out today
         id: cadence
@@ -338,39 +378,53 @@ jobs:
         if: steps.cadence.outputs.allowed == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           policy="$RUNNER_TEMP/release-policy.py"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # "release": an earlier run pushed the tag but did not create its release.
+          if [ "$ACTION" = "promote" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git switch --detach "$BASE"
-          python3 "$policy" set-version "$VERSION" > /dev/null
-          git commit -am "chore: bump version to $VERSION"
-          git tag "$TAG"
-          # The stable release is the tested candidate with only its version changed.
-          changed="$(git diff --name-only "$CANDIDATE" "$TAG" | tr '\n' ' ')"
-          if [ "$changed" != "pyproject.toml src/servonaut/__init__.py " ]; then
-            echo "::error::$TAG would differ from $CANDIDATE in more than its version."
-            exit 1
-          fi
-
-          # Between releases, master carries the latest release's version.
-          refs=("refs/tags/$TAG" ":refs/heads/$BRANCH")
-          git switch --detach origin/master
-          raised="$(python3 "$policy" set-version "$VERSION" --only-if-newer)"
-          if grep -qx "changed=true" <<< "$raised"; then
+            git switch --detach "$BASE"
+            python3 "$policy" set-version "$VERSION" > /dev/null
             git commit -am "chore: bump version to $VERSION"
-            refs+=("HEAD:refs/heads/master")
-          fi
-          # Tag, master and the branch deletion land together or not at all,
-          # and the branch goes only while it still holds the approved candidate.
-          git push --atomic --force-with-lease="refs/heads/$BRANCH:$BASE" origin "${refs[@]}"
+            git tag "$TAG"
+            # The stable release is the tested candidate with only its version changed.
+            changed="$(git diff --name-only "$CANDIDATE" "$TAG" | tr '\n' ' ')"
+            if [ "$changed" != "pyproject.toml src/servonaut/__init__.py " ]; then
+              echo "::error::$TAG would differ from $CANDIDATE in more than its version."
+              exit 1
+            fi
 
+            # Between releases, master carries the latest release's version.
+            refs=("refs/tags/$TAG" ":refs/heads/$BRANCH")
+            git switch --detach origin/master
+            raised="$(python3 "$policy" set-version "$VERSION" --only-if-newer)"
+            if grep -qx "changed=true" <<< "$raised"; then
+              git commit -am "chore: bump version to $VERSION"
+              refs+=("HEAD:refs/heads/master")
+            fi
+            # Tag, master and the branch deletion land together or not at all,
+            # and the branch goes only while it still holds the approved candidate.
+            bash "$RUNNER_TEMP/release-push.sh" --atomic \
+              --force-with-lease="refs/heads/$BRANCH:$BASE" origin "${refs[@]}" \
+              || { echo "::error::The push was refused, so nothing changed. Run the final stage again."; exit 1; }
+          fi
+
+          # The plan cannot see draft releases; this token can.
+          existing="$(gh api --paginate "repos/$REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -n "$existing" ]; then
+            echo "::notice::$TAG already has a release. If it is a draft, publish it to ship."
+            exit 0
+          fi
           draft_flag=""
           [ "$DRAFT" = "true" ] && draft_flag="--draft"
           gh release create "$TAG" --title "$TAG" --verify-tag \
-            --generate-notes --notes-start-tag "$LAST" $draft_flag
+            --generate-notes --notes-start-tag "$LAST" $draft_flag \
+            || { echo "::error::$TAG is tagged but its release could not be created. Run the final stage again: after approval it creates only the release."; exit 1; }
           if [ -n "$draft_flag" ]; then
             echo "Draft release $TAG created — publish it to ship." >> "$GITHUB_STEP_SUMMARY"
           else
