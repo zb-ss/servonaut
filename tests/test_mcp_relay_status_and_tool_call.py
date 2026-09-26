@@ -24,8 +24,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _make_tools(auth_service):
-    config = AppConfig(mcp=MCPConfig(guard_level=GuardLevel.STANDARD))
+def _make_tools(auth_service, guard_level=GuardLevel.STANDARD):
+    config = AppConfig(mcp=MCPConfig(guard_level=guard_level))
     cm = MagicMock()
     cm.get.return_value = config
     audit = MagicMock()
@@ -91,6 +91,24 @@ class TestRelayStatus:
 
         result = json.loads(_run(tools.relay_status()))
         assert result == {"connected": True, "client_ids": ["host-ab"]}
+
+    def test_available_at_the_readonly_tier(self, monkeypatch):
+        # A read of the relay's status must not need the api_request tier.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, headers={"Content-Type": "application/json"},
+                json={"connected": False},
+            )
+        _install_transport(monkeypatch, handler)
+        tools, audit = _make_tools(
+            auth_service=_authed_stub(), guard_level=GuardLevel.READONLY,
+        )
+
+        result = json.loads(_run(tools.relay_status()))
+
+        assert result == {"connected": False}
+        assert audit.log.call_args.args[0] == "relay_status"
+        assert audit.log.call_args.args[3] is True
 
     def test_backend_error_propagates_envelope(self, monkeypatch):
         def handler(request: httpx.Request) -> httpx.Response:
