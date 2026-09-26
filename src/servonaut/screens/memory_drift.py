@@ -259,7 +259,7 @@ class MemoryDriftScreen(Screen):
             events = await drift_service.list_drift()
         except Exception as exc:
             logger.error("Failed to load drift events: %s", exc)
-            self.app.notify(f"Drift load failed: {exc}", severity="error")
+            self.app.notify(f"Drift load failed: {exc}", severity="error", markup=False)
             return
         self._events = events
         self._render_table()
@@ -356,7 +356,7 @@ class MemoryDriftScreen(Screen):
             await self._do_load()
         except Exception as exc:
             logger.error("Acknowledge failed: %s", exc)
-            self.app.notify(f"Acknowledge failed: {exc}", severity="error")
+            self.app.notify(f"Acknowledge failed: {exc}", severity="error", markup=False)
 
     def action_toggle_unack(self) -> None:
         self._show_unack_only = not self._show_unack_only

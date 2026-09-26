@@ -354,6 +354,10 @@ class FleetMemoryScreen(Screen):
     # Data / populate
     # ------------------------------------------------------------------
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-populate the fleet rows so names and ids follow the demo toggle."""
+        self._launch_populate()
+
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
         fleet_service = getattr(self.app, "fleet_service", None)
@@ -740,7 +744,7 @@ class FleetMemoryScreen(Screen):
                 if stale_only
                 else "No instances available to scan."
             )
-            self.app.notify(msg)
+            self.app.notify(msg, markup=False)
             return
 
         self._set_progress(
@@ -945,7 +949,8 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         self.app.notify(
             f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed."
+            f"{len(result.failed)} failed.",
+            markup=False,
         )
         if result.failed:
             self.app.push_screen(

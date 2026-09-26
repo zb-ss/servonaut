@@ -54,6 +54,12 @@ class RelayPanel(SettingsPanel):
     PANEL_ID = "relay"
     TITLE = "Relay"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "relay_base_url": "redact_url",
+        "relay_mercure_url": "redact_url",
+    }
+
     DEFAULT_CSS = """
     RelayPanel .relay-warn {
         color: $warning;
@@ -137,8 +143,8 @@ class RelayPanel(SettingsPanel):
         config = self.app.config_manager.get()
         relay = config.relay
 
-        self.query_one("#relay_base_url", Input).value = relay.base_url
-        self.query_one("#relay_mercure_url", Input).value = relay.mercure_url
+        self._show_field("relay_base_url", relay.base_url)
+        self._show_field("relay_mercure_url", relay.mercure_url)
         self.query_one("#relay_heartbeat_interval", Input).value = str(relay.heartbeat_interval)
 
         tier = (
@@ -154,8 +160,8 @@ class RelayPanel(SettingsPanel):
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
         return {
-            "base_url": self.query_one("#relay_base_url", Input).value.strip(),
-            "mercure_url": self.query_one("#relay_mercure_url", Input).value.strip(),
+            "base_url": self._field_value("relay_base_url").strip(),
+            "mercure_url": self._field_value("relay_mercure_url").strip(),
             "heartbeat_interval": self.query_one("#relay_heartbeat_interval", Input).value.strip(),
             "ai_tool_auto_approve": str(
                 self.query_one("#relay_ai_tool_auto_approve", Select).value
@@ -168,8 +174,8 @@ class RelayPanel(SettingsPanel):
         Raises:
             ValidationError: When heartbeat_interval is not a positive integer.
         """
-        base_url = self.query_one("#relay_base_url", Input).value.strip()
-        mercure_url = self.query_one("#relay_mercure_url", Input).value.strip()
+        base_url = self._field_value("relay_base_url").strip()
+        mercure_url = self._field_value("relay_mercure_url").strip()
 
         heartbeat_raw = self.query_one("#relay_heartbeat_interval", Input).value.strip()
         try:

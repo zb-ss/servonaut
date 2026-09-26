@@ -148,7 +148,7 @@ class MemoryExportScreen(Screen):
             logger.error("Export failed: %s", exc)
             from rich.markup import escape as _esc
             status.update(f"[red]Export failed: {_esc(str(exc))}[/red]")
-            self.app.notify(f"Export failed: {exc}", severity="error")
+            self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Button handler

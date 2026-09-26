@@ -37,6 +37,16 @@ class HetznerPanel(SettingsPanel):
     PANEL_ID = "hetzner"
     TITLE = "Hetzner Cloud"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "hetzner_cache_path": "redact_path",
+        "hetzner_audit_path": "redact_path",
+        "hetzner_s3_endpoint_url": "redact_url",
+        "hetzner_default_hetzner_ssh_key": "redact_key_name",
+        "hetzner_default_local_ssh_key": "redact_key_name",
+        "hetzner_default_username": "redact_username",
+    }
+
     DEFAULT_CSS = """
     HetznerPanel .hetzner-status {
         height: auto;
@@ -212,13 +222,9 @@ class HetznerPanel(SettingsPanel):
         self._update_status_label(h)
 
         self.query_one("#hetzner_enabled", Switch).value = h.enabled
-        self.query_one("#hetzner_default_hetzner_ssh_key", Input).value = (
-            h.default_hetzner_ssh_key
-        )
-        self.query_one("#hetzner_default_local_ssh_key", Input).value = (
-            h.default_local_ssh_key
-        )
-        self.query_one("#hetzner_default_username", Input).value = h.default_username
+        self._show_field("hetzner_default_hetzner_ssh_key", h.default_hetzner_ssh_key)
+        self._show_field("hetzner_default_local_ssh_key", h.default_local_ssh_key)
+        self._show_field("hetzner_default_username", h.default_username)
         self.query_one("#hetzner_default_image", Input).value = h.default_image
         self.query_one("#hetzner_default_server_type", Input).value = (
             h.default_server_type
@@ -228,8 +234,8 @@ class HetznerPanel(SettingsPanel):
             h.require_ssh_keys_on_create
         )
         self.query_one("#hetzner_cache_ttl", Input).value = str(h.cache_ttl_seconds)
-        self.query_one("#hetzner_cache_path", Input).value = h.cache_path
-        self.query_one("#hetzner_audit_path", Input).value = h.audit_path
+        self._show_field("hetzner_cache_path", h.cache_path)
+        self._show_field("hetzner_audit_path", h.audit_path)
         self.query_one("#hetzner_cost_alert_threshold", Input).value = str(
             h.cost_alert_threshold
         )
@@ -238,7 +244,7 @@ class HetznerPanel(SettingsPanel):
         self.query_one("#hetzner_s3_access_key", EnvVarInput).value = s3.access_key
         self.query_one("#hetzner_s3_secret_key", EnvVarInput).value = s3.secret_key
         self.query_one("#hetzner_s3_region", Input).value = s3.region
-        self.query_one("#hetzner_s3_endpoint_url", Input).value = s3.endpoint_url
+        self._show_field("hetzner_s3_endpoint_url", s3.endpoint_url)
 
         self._snapshot_now()
 
@@ -246,15 +252,13 @@ class HetznerPanel(SettingsPanel):
         """Return current widget values for dirty comparison."""
         return {
             "enabled": self.query_one("#hetzner_enabled", Switch).value,
-            "default_hetzner_ssh_key": self.query_one(
-                "#hetzner_default_hetzner_ssh_key", Input
-            ).value.strip(),
-            "default_local_ssh_key": self.query_one(
-                "#hetzner_default_local_ssh_key", Input
-            ).value.strip(),
-            "default_username": self.query_one(
-                "#hetzner_default_username", Input
-            ).value.strip(),
+            "default_hetzner_ssh_key": self._field_value(
+                "hetzner_default_hetzner_ssh_key"
+            ).strip(),
+            "default_local_ssh_key": self._field_value(
+                "hetzner_default_local_ssh_key"
+            ).strip(),
+            "default_username": self._field_value("hetzner_default_username").strip(),
             "default_image": self.query_one(
                 "#hetzner_default_image", Input
             ).value.strip(),
@@ -268,12 +272,8 @@ class HetznerPanel(SettingsPanel):
                 "#hetzner_require_ssh_keys", Switch
             ).value,
             "cache_ttl": self.query_one("#hetzner_cache_ttl", Input).value.strip(),
-            "cache_path": self.query_one(
-                "#hetzner_cache_path", Input
-            ).value.strip(),
-            "audit_path": self.query_one(
-                "#hetzner_audit_path", Input
-            ).value.strip(),
+            "cache_path": self._field_value("hetzner_cache_path").strip(),
+            "audit_path": self._field_value("hetzner_audit_path").strip(),
             "cost_alert_threshold": self.query_one(
                 "#hetzner_cost_alert_threshold", Input
             ).value.strip(),
@@ -286,9 +286,7 @@ class HetznerPanel(SettingsPanel):
             "s3_region": self.query_one(
                 "#hetzner_s3_region", Input
             ).value.strip(),
-            "s3_endpoint_url": self.query_one(
-                "#hetzner_s3_endpoint_url", Input
-            ).value.strip(),
+            "s3_endpoint_url": self._field_value("hetzner_s3_endpoint_url").strip(),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -327,15 +325,15 @@ class HetznerPanel(SettingsPanel):
 
         return {
             "enabled": self.query_one("#hetzner_enabled", Switch).value,
-            "default_hetzner_ssh_key": self.query_one(
-                "#hetzner_default_hetzner_ssh_key", Input
-            ).value.strip(),
-            "default_local_ssh_key": self.query_one(
-                "#hetzner_default_local_ssh_key", Input
-            ).value.strip(),
-            "default_username": self.query_one(
-                "#hetzner_default_username", Input
-            ).value.strip() or "root",
+            "default_hetzner_ssh_key": self._field_value(
+                "hetzner_default_hetzner_ssh_key"
+            ).strip(),
+            "default_local_ssh_key": self._field_value(
+                "hetzner_default_local_ssh_key"
+            ).strip(),
+            "default_username": self._field_value(
+                "hetzner_default_username"
+            ).strip() or "root",
             "default_image": self.query_one(
                 "#hetzner_default_image", Input
             ).value.strip(),
@@ -349,12 +347,8 @@ class HetznerPanel(SettingsPanel):
                 "#hetzner_require_ssh_keys", Switch
             ).value,
             "cache_ttl_seconds": cache_ttl,
-            "cache_path": self.query_one(
-                "#hetzner_cache_path", Input
-            ).value.strip(),
-            "audit_path": self.query_one(
-                "#hetzner_audit_path", Input
-            ).value.strip(),
+            "cache_path": self._field_value("hetzner_cache_path").strip(),
+            "audit_path": self._field_value("hetzner_audit_path").strip(),
             "cost_alert_threshold": cost_threshold,
             "s3_access_key": self.query_one(
                 "#hetzner_s3_access_key", EnvVarInput
@@ -365,9 +359,7 @@ class HetznerPanel(SettingsPanel):
             "s3_region": self.query_one(
                 "#hetzner_s3_region", Input
             ).value.strip(),
-            "s3_endpoint_url": self.query_one(
-                "#hetzner_s3_endpoint_url", Input
-            ).value.strip(),
+            "s3_endpoint_url": self._field_value("hetzner_s3_endpoint_url").strip(),
         }
 
     def persist(self) -> None:

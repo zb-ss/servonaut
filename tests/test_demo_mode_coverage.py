@@ -607,12 +607,22 @@ class TestRuntimeToggleDemoMode:
         pristine: List[dict],
     ):
         """Create a minimal ServonautApp-like mock for toggle tests."""
+        from servonaut.app import ServonautApp
+
         app = MagicMock()
         app.demo_mode = demo
         app.redaction_service = RedactionService() if demo else None
         app.instances = instances
         app._instances_pristine = copy.deepcopy(pristine)
         app.query.return_value = []
+        app.screen_stack = []
+        # The toggle's own helpers run for real against the mock.
+        app._restore_instances_in_place = (
+            lambda: ServonautApp._restore_instances_in_place(app)
+        )
+        app._refresh_screens_after_demo_toggle = (
+            lambda: ServonautApp._refresh_screens_after_demo_toggle(app)
+        )
         return app
 
     def test_toggle_on_sets_demo_mode(self) -> None:
@@ -2351,93 +2361,69 @@ class TestKeyManagementDemoMode:
 
 
 class TestServerActionsRdnsDemoMode:
-    """_fetch_rdns must scrub the rDNS hostname via redact_hostname in demo mode.
+    """_fetch_rdns asks OVH about the real VPS and shows a redacted answer.
 
     rDNS commonly resolves to a customer's company domain
     (vps-acme-corp.ovh.net, mail.bigcorp.com) — must not appear in recording.
+    The lookup itself must name the real VPS and address: OVH does not know
+    the demo-mode stand-ins.
     """
 
-    def test_rdns_hostname_scrubbed_in_demo_mode(self) -> None:
-        """The reverse-DNS hostname must not appear raw in the info_widget."""
+    REAL = {
+        "id": "vps-acme01.vps.ovh.net",
+        "name": "acme-mail",
+        "public_ip": "9.9.9.9",
+        "is_ovh": True,
+        "provider_type": "vps",
+    }
+    RDNS = "mail.acme-corp.example"
+
+    def _run(self, demo: bool):
         from servonaut.screens.server_actions import ServerActionsScreen
 
-        screen = object.__new__(ServerActionsScreen)
-        mock_app = _make_mock_app(demo=True)
-
-        # A realistic rDNS hostname that would identify a company
-        rdns_hostname = "vps-acme-corp.ovh.net"
-        public_ip = "192.0.2.10"  # doc-range, already-redacted representation
-
-        mock_vps_service = MagicMock()
-        mock_vps_service.get_reverse_dns = MagicMock(
-            return_value=asyncio.coroutine(lambda *a: rdns_hostname)()
-            if False
-            else None  # replaced below with async mock
+        mock_app = _make_mock_app(demo=demo)
+        shown = copy.deepcopy(self.REAL)
+        if demo:
+            mock_app.redaction_service.redact_instance(shown)
+        mock_app.connection_instance = lambda row: (
+            copy.deepcopy(self.REAL) if demo else row
         )
-
-        mock_info_widget = MagicMock()
-        # The screen keeps the markup it wrote to the info widget.
-        screen._server_info_text = f"[dim]Public IP:[/dim] {public_ip}"
-
-        updated_texts: list = []
-        mock_info_widget.update.side_effect = lambda t: updated_texts.append(t)
+        asked: list = []
 
         async def _fake_get_rdns(vps_name, ip):
-            return rdns_hostname
+            asked.append((vps_name, ip))
+            return self.RDNS
 
-        mock_vps_service.get_reverse_dns = _fake_get_rdns
-        mock_app.ovh_vps_service = mock_vps_service
-
-        screen._instance = {"id": "vps-123"}
+        mock_app.ovh_vps_service.get_reverse_dns = _fake_get_rdns
+        screen = object.__new__(ServerActionsScreen)
+        screen._instance = shown
+        info_widget = MagicMock()
+        rendered: list = []
+        info_widget.update.side_effect = rendered.append
 
         with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
-            with patch.object(screen, "query_one", return_value=mock_info_widget):
-                asyncio.run(screen._fetch_rdns(public_ip))
+            with patch.object(screen, "query_one", return_value=info_widget):
+                asyncio.run(screen._fetch_rdns())
+        assert rendered, "server info was never redrawn"
+        return asked, rendered[-1], shown
 
-        assert updated_texts, "info_widget.update was never called"
-        rendered = updated_texts[0]
-        assert rdns_hostname not in rendered, (
-            f"rDNS hostname leaked into info_widget: {rendered!r}"
-        )
-        # The replacement must still contain the Reverse DNS label
-        assert "Reverse DNS" in rendered, (
-            "Reverse DNS label missing from info_widget after redaction"
-        )
+    def test_lookup_names_the_real_vps_in_demo_mode(self) -> None:
+        asked, _, shown = self._run(demo=True)
+        assert shown["id"] != self.REAL["id"], "fixture must hold stand-ins"
+        assert asked == [(self.REAL["id"], self.REAL["public_ip"])]
+
+    def test_rdns_hostname_scrubbed_in_demo_mode(self) -> None:
+        _, rendered, shown = self._run(demo=True)
+        assert self.RDNS not in rendered
+        assert "Reverse DNS" in rendered
+        for real in (self.REAL["id"], self.REAL["public_ip"], self.REAL["name"]):
+            assert real not in rendered
+        assert shown["public_ip"] in rendered
 
     def test_rdns_hostname_not_scrubbed_without_demo(self) -> None:
-        """Without demo mode, the raw rDNS hostname passes through."""
-        from servonaut.screens.server_actions import ServerActionsScreen
-
-        screen = object.__new__(ServerActionsScreen)
-        mock_app = _make_mock_app(demo=False)
-
-        rdns_hostname = "vps-acme-corp.ovh.net"
-        public_ip = "192.0.2.10"
-
-        async def _fake_get_rdns(vps_name, ip):
-            return rdns_hostname
-
-        mock_vps_service = MagicMock()
-        mock_vps_service.get_reverse_dns = _fake_get_rdns
-        mock_app.ovh_vps_service = mock_vps_service
-
-        screen._instance = {"id": "vps-123"}
-
-        mock_info_widget = MagicMock()
-        screen._server_info_text = f"[dim]Public IP:[/dim] {public_ip}"
-
-        updated_texts: list = []
-        mock_info_widget.update.side_effect = lambda t: updated_texts.append(t)
-
-        with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
-            with patch.object(screen, "query_one", return_value=mock_info_widget):
-                asyncio.run(screen._fetch_rdns(public_ip))
-
-        assert updated_texts, "info_widget.update was never called"
-        rendered = updated_texts[0]
-        assert rdns_hostname in rendered, (
-            "rDNS hostname should be present when demo mode is off"
-        )
+        asked, rendered, _ = self._run(demo=False)
+        assert asked == [(self.REAL["id"], self.REAL["public_ip"])]
+        assert f"Reverse DNS:[/dim] {self.RDNS}" in rendered
 
 
 # ---------------------------------------------------------------------------

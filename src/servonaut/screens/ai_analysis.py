@@ -343,7 +343,7 @@ class AIAnalysisScreen(Screen):
             try:
                 compiled = re.compile(regex_match.group(1), re.IGNORECASE)
             except re.error as e:
-                self.app.notify(f"Invalid regex: {e}", severity="error")
+                self.app.notify(f"Invalid regex: {e}", severity="error", markup=False)
                 return
             filtered = [
                 line for line in self._raw_text.splitlines()

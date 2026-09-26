@@ -62,6 +62,11 @@ class AiProviderPanel(SettingsPanel):
     PANEL_ID = "ai_provider"
     TITLE = "AI Provider"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "ai_provider_base_url": "redact_url",
+    }
+
     DEFAULT_CSS = """
     AiProviderPanel .ai-status-row {
         height: auto;
@@ -240,7 +245,7 @@ class AiProviderPanel(SettingsPanel):
         self.query_one("#ai_provider_gemini_key", EnvVarInput).value = ai.gemini_api_key
         self.query_one("#ai_provider_ollama_key", EnvVarInput).value = ai.ollama_api_key
         self.query_one("#ai_provider_model", Input).value = ai.model
-        self.query_one("#ai_provider_base_url", Input).value = ai.base_url
+        self._show_field("ai_provider_base_url", ai.base_url)
         self.query_one("#ai_provider_max_tokens", Input).value = str(ai.max_tokens)
         self.query_one("#ai_provider_temperature", Input).value = str(ai.temperature)
 
@@ -263,7 +268,7 @@ class AiProviderPanel(SettingsPanel):
             "gemini_api_key": self.query_one("#ai_provider_gemini_key", EnvVarInput).value.strip(),
             "ollama_api_key": self.query_one("#ai_provider_ollama_key", EnvVarInput).value.strip(),
             "model": self.query_one("#ai_provider_model", Input).value.strip(),
-            "base_url": self.query_one("#ai_provider_base_url", Input).value.strip(),
+            "base_url": self._field_value("ai_provider_base_url").strip(),
             "max_tokens": self.query_one("#ai_provider_max_tokens", Input).value.strip(),
             "temperature": self.query_one("#ai_provider_temperature", Input).value.strip(),
             "provider_preference": str(self.query_one("#ai_provider_pref_select", Select).value),
@@ -286,7 +291,7 @@ class AiProviderPanel(SettingsPanel):
         gemini_key = self.query_one("#ai_provider_gemini_key", EnvVarInput).value.strip()
         ollama_key = self.query_one("#ai_provider_ollama_key", EnvVarInput).value.strip()
         model = self.query_one("#ai_provider_model", Input).value.strip()
-        base_url = self.query_one("#ai_provider_base_url", Input).value.strip()
+        base_url = self._field_value("ai_provider_base_url").strip()
 
         max_tokens_raw = self.query_one("#ai_provider_max_tokens", Input).value.strip() or "4096"
         try:

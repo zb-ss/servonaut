@@ -28,6 +28,13 @@ class HistoryPathsPanel(SettingsPanel):
     PANEL_ID = "history_paths"
     TITLE = "History & Paths"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "hp_keyword_store_path": "redact_path",
+        "hp_command_history_path": "redact_path",
+        "hp_chat_history_path": "redact_path",
+    }
+
     def form_rows(self) -> ComposeResult:
         """Yield the form rows for history and path settings."""
         yield Horizontal(
@@ -70,33 +77,23 @@ class HistoryPathsPanel(SettingsPanel):
     def load(self) -> None:
         """Populate widgets from config and snapshot for dirty tracking."""
         config = self.app.config_manager.get()
-        self.query_one("#hp_keyword_store_path", Input).value = (
-            config.keyword_store_path
-        )
-        self.query_one("#hp_command_history_path", Input).value = (
-            config.command_history_path
-        )
+        self._show_field("hp_keyword_store_path", config.keyword_store_path)
+        self._show_field("hp_command_history_path", config.command_history_path)
         self.query_one("#hp_max_command_history", Input).value = str(
             config.max_command_history
         )
-        self.query_one("#hp_chat_history_path", Input).value = config.chat_history_path
+        self._show_field("hp_chat_history_path", config.chat_history_path)
         self._snapshot_now()
 
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
         return {
-            "keyword_store_path": self.query_one(
-                "#hp_keyword_store_path", Input
-            ).value.strip(),
-            "command_history_path": self.query_one(
-                "#hp_command_history_path", Input
-            ).value.strip(),
+            "keyword_store_path": self._field_value("hp_keyword_store_path").strip(),
+            "command_history_path": self._field_value("hp_command_history_path").strip(),
             "max_command_history": self.query_one(
                 "#hp_max_command_history", Input
             ).value.strip(),
-            "chat_history_path": self.query_one(
-                "#hp_chat_history_path", Input
-            ).value.strip(),
+            "chat_history_path": self._field_value("hp_chat_history_path").strip(),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -107,17 +104,13 @@ class HistoryPathsPanel(SettingsPanel):
                 or ``chat_history_path`` is empty, or ``max_command_history`` is
                 not a positive integer.
         """
-        keyword_store_path = self.query_one(
-            "#hp_keyword_store_path", Input
-        ).value.strip()
+        keyword_store_path = self._field_value("hp_keyword_store_path").strip()
         if not keyword_store_path:
             raise ValidationError(
                 "hp_keyword_store_path", "Keyword store path cannot be empty"
             )
 
-        command_history_path = self.query_one(
-            "#hp_command_history_path", Input
-        ).value.strip()
+        command_history_path = self._field_value("hp_command_history_path").strip()
         if not command_history_path:
             raise ValidationError(
                 "hp_command_history_path", "Command history path cannot be empty"
@@ -139,9 +132,7 @@ class HistoryPathsPanel(SettingsPanel):
                 "Max command history must be at least 1",
             )
 
-        chat_history_path = self.query_one(
-            "#hp_chat_history_path", Input
-        ).value.strip()
+        chat_history_path = self._field_value("hp_chat_history_path").strip()
         if not chat_history_path:
             raise ValidationError(
                 "hp_chat_history_path", "Chat history path cannot be empty"

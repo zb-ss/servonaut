@@ -27,6 +27,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -362,8 +363,19 @@ class MemoryScreen(Screen):
             instance: Instance dict (same format as ``app.instances``).
         """
         super().__init__()
+        # The row as displayed: demo-mode stand-ins when demo mode is on.
+        # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
         self._has_local_memory = False
+
+    @property
+    def _target(self) -> dict:
+        """The real record behind the displayed row (itself outside demo mode)."""
+        try:
+            app = self.app
+        except RuntimeError:  # no running app: nothing was redacted either
+            return self._instance
+        return connection_instance(app, self._instance)
 
     # ------------------------------------------------------------------
     # Compose
@@ -479,6 +491,25 @@ class MemoryScreen(Screen):
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
 
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the title and the observed/declared values for the new mode.
+
+        The displayed row is redacted or restored in place by the app, so
+        the title only needs redrawing.
+        """
+        self._render_title()
+        self._render_table()
+
+    def _render_title(self) -> None:
+        from rich.markup import escape
+
+        name = (
+            self._instance.get("name") or self._instance.get("id") or "unknown"
+        )
+        self.query_one("#memory-title", Static).update(
+            f"[bold cyan]Server Memory: {escape(str(name))}[/bold cyan]"
+        )
+
     # ------------------------------------------------------------------
     # Table rendering
     # ------------------------------------------------------------------
@@ -494,8 +525,8 @@ class MemoryScreen(Screen):
         table = self.query_one("#memory-table", DataTable)
         banner = self.query_one("#memory-opt-out-banner", Static)
 
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
-        provider = instance_provider(self._instance)
+        instance_id = self._target.get("id") or self._target.get("name", "")
+        provider = instance_provider(self._target)
 
         # Opt-out check
         memory_service = getattr(self.app, "memory_service", None)
@@ -674,7 +705,7 @@ class MemoryScreen(Screen):
             True when the global enabled flag is False or when this
             specific instance has been opted out via per_server_overrides.
         """
-        instance_name = self._instance.get("name", "")
+        instance_name = self._target.get("name", "")
         try:
             return memory_service.is_memory_disabled(instance_id, instance_name)
         except Exception as exc:  # noqa: BLE001
@@ -736,7 +767,7 @@ class MemoryScreen(Screen):
 
     def action_refresh_all(self) -> None:
         """Refresh all memory modules for this instance."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -758,16 +789,16 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            await memory_service.refresh(self._instance)
+            await memory_service.refresh(self._target)
             self._render_table()
             self.app.notify("Memory refreshed.")
         except Exception as exc:
             logger.error("Memory refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
     def action_refresh_module(self) -> None:
         """Refresh the module at the cursor row."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -791,18 +822,18 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        self.app.notify(f"Probing {module_name}…")
+        self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            await memory_service.refresh(self._instance, modules=[module_name])
+            await memory_service.refresh(self._target, modules=[module_name])
             self._render_table()
-            self.app.notify(f"Module '{module_name}' refreshed.")
+            self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:
             logger.error("Module refresh failed: %s", exc, exc_info=True)
-            self.app.notify(f"Refresh failed: {exc}", severity="error")
+            self.app.notify(f"Refresh failed: {exc}", severity="error", markup=False)
 
     def action_pin_key(self) -> None:
         """Push PinKeyModal to pin a declared value for the cursor key."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -816,7 +847,7 @@ class MemoryScreen(Screen):
             return
 
         # Look up the current observed value for the placeholder text
-        provider = instance_provider(self._instance)
+        provider = instance_provider(self._target)
         try:
             data = memory_service.get(instance_id, module_name, provider)
             current_value = str(data.get("observed", {}).get(key, "")) if data else ""
@@ -849,7 +880,7 @@ class MemoryScreen(Screen):
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             return
-        provider = instance_provider(self._instance)
+        provider = instance_provider(self._target)
         try:
             await memory_service.pin(
                 instance_id,
@@ -860,14 +891,14 @@ class MemoryScreen(Screen):
                 provider=provider,
             )
             self._render_table()
-            self.app.notify(f"Pinned {module_name}.{key} = {value!r}")
+            self.app.notify(f"Pinned {module_name}.{key} = {value!r}", markup=False)
         except Exception as exc:
             logger.error("Pin failed: %s", exc, exc_info=True)
-            self.app.notify(f"Pin failed: {exc}", severity="error")
+            self.app.notify(f"Pin failed: {exc}", severity="error", markup=False)
 
     def action_clear_module(self) -> None:
         """Clear the module at the cursor row after confirmation."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -887,16 +918,16 @@ class MemoryScreen(Screen):
             if self._is_opted_out(instance_id, memory_service):
                 self.app.notify("Memory disabled for this server.", severity="warning")
                 return
-            provider = instance_provider(self._instance)
+            provider = instance_provider(self._target)
             try:
                 memory_service.clear(
                     instance_id, modules=[module_name], provider=provider
                 )
                 self._render_table()
-                self.app.notify(f"Module '{module_name}' cleared.")
+                self.app.notify(f"Module '{module_name}' cleared.", markup=False)
             except Exception as exc:
                 logger.error("Clear failed: %s", exc, exc_info=True)
-                self.app.notify(f"Clear failed: {exc}", severity="error")
+                self.app.notify(f"Clear failed: {exc}", severity="error", markup=False)
 
         self.app.push_screen(
             SimpleConfirmModal(f"Clear module [bold]{module_name}[/bold]?"),
@@ -911,8 +942,8 @@ class MemoryScreen(Screen):
         free-form notes file.  Seeding a short template makes that
         distinction obvious without fighting the data-table surface.
         """
-        name = self._instance.get("name") or instance_id
-        provider = instance_provider(self._instance)
+        name = self._target.get("name") or instance_id
+        provider = instance_provider(self._target)
         return (
             f"# Notes — {name} ({instance_id}) @ {provider}\n"
             "\n"
@@ -952,7 +983,7 @@ class MemoryScreen(Screen):
         driver, web drivers) it falls back to an in-app editor, so annotating
         works everywhere. The table re-renders after either.
         """
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -961,7 +992,7 @@ class MemoryScreen(Screen):
             self.app.notify("Memory disabled for this server.", severity="warning")
             return
 
-        provider = instance_provider(self._instance)
+        provider = instance_provider(self._target)
         path = self._prepare_annotations_file(instance_id, provider, memory_service)
         if path is None:
             return
@@ -982,7 +1013,7 @@ class MemoryScreen(Screen):
             )
             return
         except OSError as exc:
-            self.app.notify(f"Could not launch editor: {exc}", severity="error")
+            self.app.notify(f"Could not launch editor: {exc}", severity="error", markup=False)
             return
 
         self._report_editor_problems(argv, proc)
@@ -1004,7 +1035,8 @@ class MemoryScreen(Screen):
             path = memory_service.get_annotations_path(instance_id, provider)
         except Exception as exc:
             self.app.notify(
-                f"Could not resolve annotations path: {exc}", severity="error"
+                f"Could not resolve annotations path: {exc}", severity="error",
+                markup=False,
             )
             return None
 
@@ -1027,7 +1059,8 @@ class MemoryScreen(Screen):
                 )
             except OSError as exc:
                 self.app.notify(
-                    f"Could not create annotations file: {exc}", severity="error"
+                    f"Could not create annotations file: {exc}", severity="error",
+                    markup=False,
                 )
                 return None
         return path
@@ -1125,7 +1158,7 @@ class MemoryScreen(Screen):
         try:
             content = memory_service.read_annotations(instance_id, provider)
         except Exception as exc:
-            self.app.notify(f"Could not read annotations: {exc}", severity="error")
+            self.app.notify(f"Could not read annotations: {exc}", severity="error", markup=False)
             return
 
         def _on_close(result: Optional[str]) -> None:
@@ -1204,7 +1237,7 @@ class MemoryScreen(Screen):
                 sync = getattr(self.app, "memory_sync_service", None)
                 if sync is not None:
                     sync.enqueue_annotations(
-                        self._instance, content, probed_at=modified_at
+                        self._target, content, probed_at=modified_at
                     )
         except Exception as exc:
             logger.warning("Could not enqueue annotations after edit: %s", exc)
@@ -1256,7 +1289,7 @@ class MemoryScreen(Screen):
 
     def action_view_summary(self) -> None:
         """Render the deterministic local summary without an entitlement gate."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -1283,7 +1316,7 @@ class MemoryScreen(Screen):
         if memory_service is None:
             return
         try:
-            summary = await memory_service.get_summary(self._instance)
+            summary = await memory_service.get_summary(self._target)
             summary = self._scrub_summary_for_demo(summary)
             from servonaut.screens.memory_summary import MemorySummaryScreen
 
@@ -1366,7 +1399,7 @@ class MemoryScreen(Screen):
             )
             return
         try:
-            local_summary = await memory_service.get_summary(self._instance)
+            local_summary = await memory_service.get_summary(self._target)
             prompt = config_manager.get().memory.ai_enhancement_prompt
             from servonaut.screens.memory_summary import (
                 MemorySummaryScreen,
@@ -1407,7 +1440,7 @@ class MemoryScreen(Screen):
 
     def action_export(self) -> None:
         """Export memory summary to a Markdown file."""
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
             self.app.notify("Memory service not available.", severity="error")
@@ -1428,11 +1461,11 @@ class MemoryScreen(Screen):
         if memory_service is None:
             return
         try:
-            path = await memory_service.write_summary(self._instance)
-            self.app.notify(f"Exported to {path}")
+            path = await memory_service.write_summary(self._target)
+            self.app.notify(f"Exported to {path}", markup=False)
         except Exception as exc:
             logger.error("Export failed: %s", exc, exc_info=True)
-            self.app.notify(f"Export failed: {exc}", severity="error")
+            self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------
     # Cloud sync actions (S binding)
@@ -1447,7 +1480,7 @@ class MemoryScreen(Screen):
     def _refresh_local_memory_status(self) -> None:
         """Update the local scan label from the latest stored modules."""
         memory_service = getattr(self.app, "memory_service", None)
-        label = _memory_scan_status_label(self._instance, memory_service)
+        label = _memory_scan_status_label(self._target, memory_service)
         try:
             self.query_one("#memory-local-status", Static).update(label)
         except Exception:  # noqa: BLE001
@@ -1595,10 +1628,12 @@ class MemoryScreen(Screen):
     _MAX_MANUAL_SYNC_BATCHES = 200
 
     async def _do_sync_now(self, sync_service: Any) -> None:
-        iid = self._instance.get("id") or self._instance.get("name", "")
-        name = self._instance.get("name", "")
-        provider = instance_provider(self._instance)
-        display_name = name or iid or "this server"
+        target = self._target
+        iid = target.get("id") or target.get("name", "")
+        name = target.get("name", "")
+        shown = self._instance
+        provider = instance_provider(target)
+        display_name = shown.get("name") or shown.get("id") or "this server"
         try:
             queued = sync_service.backfill_from_local_store(instance_id=iid)
             pending_before = self._pending_for_instance(sync_service, iid)
@@ -1752,7 +1787,7 @@ class MemoryScreen(Screen):
                 self.app.push_screen(UpsellModal("memory_ai_summary"))
                 return
 
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         await self._do_ai_summary_flow(instance_id)
 
     async def _do_ai_summary_flow(self, instance_id: str) -> None:
@@ -1915,7 +1950,7 @@ class MemoryScreen(Screen):
             raise RuntimeError(
                 "Memory retrieval is unavailable; unlock Memory Sync and retry"
             )
-        instance_id = self._instance.get("id") or self._instance.get("name", "")
+        instance_id = self._target.get("id") or self._target.get("name", "")
         decrypted = await retrieval_service.decrypt_envelope(
             envelope,
             expected_instance_id=instance_id,

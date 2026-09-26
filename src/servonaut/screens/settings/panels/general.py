@@ -27,6 +27,12 @@ class GeneralPanel(SettingsPanel):
     PANEL_ID = "general"
     TITLE = "General"
 
+    # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
+    DEMO_REDACTED_FIELDS = {
+        "general_username": "redact_username",
+        "general_default_key": "redact_key_name",
+    }
+
     def form_rows(self) -> ComposeResult:
         """Yield the General form rows."""
         yield Horizontal(
@@ -67,8 +73,8 @@ class GeneralPanel(SettingsPanel):
     def load(self) -> None:
         """Populate widgets from config and snapshot for dirty tracking."""
         config = self.app.config_manager.get()
-        self.query_one("#general_username", Input).value = config.default_username
-        self.query_one("#general_default_key", Input).value = config.default_key
+        self._show_field("general_username", config.default_username)
+        self._show_field("general_default_key", config.default_key)
         self.query_one("#general_cache_ttl", Input).value = str(config.cache_ttl_seconds)
         self.query_one("#general_terminal", Input).value = config.terminal_emulator
         theme = config.theme if config.theme in ("dark", "light") else "dark"
@@ -78,8 +84,8 @@ class GeneralPanel(SettingsPanel):
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
         return {
-            "default_username": self.query_one("#general_username", Input).value.strip(),
-            "default_key": self.query_one("#general_default_key", Input).value.strip(),
+            "default_username": self._field_value("general_username").strip(),
+            "default_key": self._field_value("general_default_key").strip(),
             "cache_ttl_seconds": self.query_one("#general_cache_ttl", Input).value.strip(),
             "terminal_emulator": self.query_one("#general_terminal", Input).value.strip(),
             "theme": str(self.query_one("#general_theme", Select).value),
@@ -91,7 +97,7 @@ class GeneralPanel(SettingsPanel):
         Raises:
             ValidationError: On empty username or invalid cache TTL.
         """
-        username = self.query_one("#general_username", Input).value.strip()
+        username = self._field_value("general_username").strip()
         if not username:
             raise ValidationError("general_username", "Username cannot be empty")
 
@@ -110,7 +116,7 @@ class GeneralPanel(SettingsPanel):
         theme = str(self.query_one("#general_theme", Select).value)
         return {
             "default_username": username,
-            "default_key": self.query_one("#general_default_key", Input).value.strip(),
+            "default_key": self._field_value("general_default_key").strip(),
             "cache_ttl_seconds": cache_ttl,
             "terminal_emulator": (
                 self.query_one("#general_terminal", Input).value.strip() or "auto"
