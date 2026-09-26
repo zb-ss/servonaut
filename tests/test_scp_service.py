@@ -20,7 +20,7 @@ class TestBuildUploadCommand(TestSCPService):
             username='ec2-user',
         )
         assert cmd[0] == 'scp'
-        assert 'StrictHostKeyChecking=no' in cmd
+        assert 'StrictHostKeyChecking=accept-new' in cmd
         assert '/tmp/file.txt' in cmd
         assert 'ec2-user@9.9.9.9:/home/ec2-user/' in cmd  # leak-guard:allow (AWS default account, not a personal path)
 

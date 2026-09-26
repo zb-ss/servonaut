@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import List, Optional
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -14,7 +15,17 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.ssh_host_keys import (
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+)
 
+from servonaut.utils.ssh_utils import (
+    SshLog,
+    background_process_kwargs,
+    track_background_process,
+)
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance
 
@@ -54,6 +65,7 @@ class CommandOverlay(ModalScreen):
         self._output_lines: List[str] = []
 
         # Resolve connection details
+        self._connection: Optional[dict] = None
         self._profile = None
         self._host = None
         self._proxy_args: List[str] = []
@@ -91,6 +103,7 @@ class CommandOverlay(ModalScreen):
         # Resolve connection details — check for missing profiles
         # Demo mode redacts the row we display; connect to the real record.
         conn = connection_instance(self.app, self._instance)
+        self._connection = conn
         self._profile = self.app.connection_service.resolve_profile(conn)
         self._host = self.app.connection_service.get_target_host(
             conn,
@@ -300,16 +313,23 @@ class CommandOverlay(ModalScreen):
             ssh_cmd: SSH command list from build_ssh_command.
             output_widget: CommandOutput widget to write results to.
         """
+        # ssh writes its own messages to this private log (a remote command
+        # cannot), and they are shown once the command ends.
+        ssh_log = SshLog()
         try:
             self.app.call_from_thread(
                 output_widget.append_output, "[dim]Connecting...[/dim]"
             )
             process = subprocess.Popen(
-                ssh_cmd,
+                ssh_log.command(ssh_cmd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                env=ssh_log.environment(),
+                # No terminal: ssh cannot prompt over the TUI.
+                **background_process_kwargs(),
             )
+            track_background_process(process)
             self._running_process = process
 
             # Demo-mode helper: scrub lines BEFORE appending to _output_lines
@@ -329,19 +349,31 @@ class CommandOverlay(ModalScreen):
                     if "no job control" in line or "terminal process group" in line:
                         continue
                     self._output_lines.append(_scrub(line))
-                    self.app.call_from_thread(output_widget.append_error, line)
+                    # Escaped: OpenSSH's own hints contain "[host]:port",
+                    # which Rich markup would otherwise swallow.
+                    self.app.call_from_thread(output_widget.append_error, escape(line))
 
             stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
             stderr_thread.start()
 
             # Read stdout line-by-line in this thread
+            saw_stdout = False
             for raw_line in iter(process.stdout.readline, b''):
+                saw_stdout = True
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
                 self._output_lines.append(_scrub(line))
                 self.app.call_from_thread(output_widget.append_output, line)
 
             stderr_thread.join(timeout=5)
             return_code = process.wait()
+
+            diagnostics = ssh_log.read()
+            for line in diagnostics.splitlines():
+                if line.strip():
+                    self._output_lines.append(_scrub(line))
+                    # Escaped: OpenSSH's own hints contain "[host]:port",
+                    # which Rich markup would otherwise swallow.
+                    self.app.call_from_thread(output_widget.append_error, escape(line))
 
             if return_code != 0 and return_code not in (-15, -9):
                 exit_msg = f"Command exited with code {return_code}"
@@ -350,6 +382,9 @@ class CommandOverlay(ModalScreen):
                     output_widget.append_error,
                     f"[dim]{exit_msg}[/dim]",
                 )
+            self._report_host_key_problem(
+                diagnostics, return_code, saw_stdout, output_widget, _scrub,
+            )
 
         except Exception as e:
             error_str = str(e)
@@ -371,10 +406,41 @@ class CommandOverlay(ModalScreen):
 
         finally:
             self._running_process = None
+            ssh_log.close()
             try:
                 self.app.call_from_thread(output_widget.append_output, "")
             except Exception:
                 logger.warning("Could not write final separator (overlay may be closed)")
+
+    def _report_host_key_problem(
+        self,
+        stderr: str,
+        returncode: Optional[int],
+        saw_stdout: bool,
+        output_widget: CommandOutput,
+        scrub,
+    ) -> None:
+        """Explain a refused host key, with the command that clears a stale one.
+
+        Called from the worker thread once ssh has exited, with ssh's own
+        messages from its private log; OpenSSH's banner is already on
+        screen, this adds the one-line summary and next step.
+        """
+        problem = detect_host_key_problem(
+            stderr, returncode,
+            HostKeyTarget.for_connection(
+                self._host or "", self._port,
+                instance=self._connection, profile=self._profile,
+            ),
+            HostKeyPolicy.from_ssh_config(self.app.config_manager.get().ssh),
+            stdout=saw_stdout,
+        )
+        if problem is None:
+            return
+        self._output_lines.append(scrub(problem.message))
+        # append_error embeds the text in Rich markup; "[host]:port" and
+        # paths must render literally.
+        self.app.call_from_thread(output_widget.append_error, escape(problem.message))
 
     def _stop_running_process(self) -> None:
         """Terminate the currently running subprocess, if any."""

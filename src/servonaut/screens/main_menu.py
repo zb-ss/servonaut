@@ -219,6 +219,7 @@ class MainMenuScreen(Screen):
                     f"Could not connect to {name}: {reason}", severity="warning", markup=False
                 )
             except Exception as e:
+                # markup=False: a host-key message carries "[host]:port".
                 self.app.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
 
         progress.stop()

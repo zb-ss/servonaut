@@ -279,6 +279,13 @@ class ServonautApp(App):
         from servonaut.screens.instance_list import InstanceListScreen
 
         self._init_services()
+        # Background ssh runs in its own session, so closing the terminal no
+        # longer hangs it up; end it (a log tail, say) before the app goes.
+        try:
+            from servonaut.utils.ssh_utils import install_hangup_cleanup
+            install_hangup_cleanup()
+        except (ValueError, OSError) as e:  # not the main thread / unsupported
+            logger.debug("Hangup cleanup not installed: %s", e)
         # Startup sweep for crash-left decrypted Bitwarden key files under
         # ~/.servonaut/tmp/ (>24 h old). Normal exits are covered by the
         # atexit sweeper / per-call cleanup; a crash or SIGKILL skips both,
@@ -2554,6 +2561,7 @@ class ServonautApp(App):
                 self.notify(f"Could not connect to {name}: {reason}", severity="warning", markup=False)
                 continue
             except Exception as e:
+                # markup=False: a host-key message carries "[host]:port".
                 self.notify(f"Scan failed for {name}: {e}", severity="error", markup=False)
                 continue
             if results:

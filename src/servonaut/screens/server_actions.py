@@ -14,6 +14,15 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Header, Footer
 
+from servonaut.services.ssh_host_keys import (
+    OFF_OPTIONS_KEEP_KNOWN_HOSTS,
+    HostKeyPolicy,
+    HostKeyTarget,
+    detect_host_key_problem,
+    host_key_alias_options,
+    identity_file_args,
+)
+from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
@@ -919,6 +928,10 @@ class ServerActionsScreen(Screen):
                 username=username,
                 key_path=key_path,
                 port=port,
+                # Pin a cloud instance by its alias, as every other path does.
+                extra_options=host_key_alias_options(
+                    instance, self.app.connection_service.host_key_policy(),
+                ),
             )
 
             tier_label = "personal" if source == "personal" else "team"
@@ -1320,8 +1333,15 @@ class ServerActionsScreen(Screen):
             "not_found": "SSH probe: host not found or unreachable.",
             "auth_failed": "SSH probe: authentication failed.",
         }
-        label = _status_labels.get(status, f"SSH probe status: {status}")
-        self.app.notify(label, markup=False)
+        host_key_message = getattr(self, "_ssh_probe_host_key_message", None)
+        if host_key_message:
+            # A refused host key is reported as such, not as "unreachable".
+            self.app.notify(
+                host_key_message, severity="error", markup=False, timeout=20,
+            )
+        else:
+            label = _status_labels.get(status, f"SSH probe status: {status}")
+            self.app.notify(label, markup=False)
 
         # Refresh the instance list table if it's behind this screen.
         try:
@@ -1376,18 +1396,24 @@ class ServerActionsScreen(Screen):
         else:
             tmp_key_path = None
 
+        self._ssh_probe_host_key_message = None
         try:
+            conn = connection_instance(self.app, self._instance)
+            host_key_policy = HostKeyPolicy.from_ssh_config(
+                self.app.config_manager.get().ssh
+            )
             cmd = [
                 "ssh",
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=5",
-                "-o", "StrictHostKeyChecking=no",
+                # ``off`` keeps this probe's previous argv (no /dev/null).
+                *host_key_policy.ssh_options(off_options=OFF_OPTIONS_KEEP_KNOWN_HOSTS),
             ]
+            for option in host_key_alias_options(conn, host_key_policy):
+                cmd += ["-o", option]
             if tmp_key_path:
-                cmd += ["-i", tmp_key_path, "-o", "IdentitiesOnly=yes"]
-            port = self.app.connection_service.get_target_port(
-                connection_instance(self.app, self._instance)
-            )
+                cmd += [*identity_file_args(tmp_key_path), "-o", "IdentitiesOnly=yes"]
+            port = self.app.connection_service.get_target_port(conn)
             if port is not None and port != 22:
                 cmd += ["-p", str(port)]
             # Use the configured username or default.
@@ -1396,10 +1422,12 @@ class ServerActionsScreen(Screen):
                 or self.app.config_manager.get().default_username
                 or "root"
             )
-            cmd += [f"{username}@{host}", "true"]
+            # "--" ends option parsing before the destination.
+            cmd += ["--", f"{username}@{host}", "true"]
 
+            # No terminal to prompt on; ssh's messages go to a private log.
             proc = await asyncio.to_thread(
-                subprocess.run,
+                run_ssh,
                 cmd,
                 capture_output=True,
                 timeout=15,
@@ -1407,6 +1435,13 @@ class ServerActionsScreen(Screen):
             rc = proc.returncode
             if rc == 0:
                 return "verified"
+            problem = detect_host_key_problem(
+                getattr(proc, "diagnostics", "") or "", rc,
+                HostKeyTarget.for_connection(host, port, instance=conn),
+                host_key_policy, stdout=proc.stdout,
+            )
+            if problem is not None:
+                self._ssh_probe_host_key_message = problem.message
             # Exit code 255: SSH layer failure (host unreachable, key mismatch)
             # Exit code 1–254: auth issues or remote command failure
             return "auth_failed" if rc != 255 else "not_found"
