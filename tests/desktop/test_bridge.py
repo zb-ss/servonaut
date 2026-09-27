@@ -120,8 +120,8 @@ def test_validate_navigation_url() -> None:
     assert not validate_navigation_url("invalid", origin)
 
 
-def test_bridge_exposes_only_claim_session_to_the_page() -> None:
-    """pywebview hands every public method to the page's JavaScript."""
+def test_bridge_public_surface_is_only_claim_session() -> None:
+    """The bridge guards the session secret, so it offers nothing else."""
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:8080",
         token=SecretToken.generate(),

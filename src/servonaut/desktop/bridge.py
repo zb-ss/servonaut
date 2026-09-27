@@ -1,8 +1,10 @@
-"""One-shot native JS bridge delivering secret token to pywebview bootstrap.
+"""One-shot hand-over of the desktop session token to the page's bootstrap.
 
-The bridge is exposed to the browser engine via pywebview's native JS bridge.
-It enforces strict origin matching, one-shot retrieval, and immediate reference
-dropping so the secret token cannot be retrieved more than once or intercepted.
+The launcher claims the token here, in Python, once the window reports the
+root document as loaded, and passes it to the page's bootstrap function. The
+bridge is not exposed to page JavaScript. It enforces strict origin matching,
+one-shot retrieval, and immediate reference dropping so the secret token
+cannot be retrieved more than once or intercepted.
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ from servonaut.desktop.model import SecretToken, _validate_origin
 logger = logging.getLogger(__name__)
 
 _ALLOWED_PATHS: Final[frozenset[str]] = frozenset({"", "/", "/index.html", "/ws"})
+
+# Error code for a second claim, e.g. when the page reloads.
+SESSION_ALREADY_CLAIMED: Final = "desktop-session-already-claimed"
 
 
 class DesktopBridgeError(RuntimeError):
@@ -66,10 +71,10 @@ def validate_navigation_url(url: str, expected_origin: str) -> bool:
 
 
 class DesktopBootstrapBridge:
-    """Exposed to pywebview JavaScript as ``window.pywebview.api``.
+    """Holds the session token until the launcher claims it for the page.
 
-    Provides a state-locked, one-shot ``claim_session()`` method. pywebview
-    hands every public method to the page, so that is the only one.
+    Provides a state-locked, one-shot ``claim_session()`` method, its only
+    public method, since it guards the session secret.
     """
 
     def __init__(
@@ -108,7 +113,7 @@ class DesktopBootstrapBridge:
         """
         with self._lock:
             if self._claimed or self._token is None:
-                raise DesktopBridgeError("desktop-session-already-claimed")
+                raise DesktopBridgeError(SESSION_ALREADY_CLAIMED)
 
             # A location that cannot be read is refused like a foreign one.
             current_url = self._get_current_url()
