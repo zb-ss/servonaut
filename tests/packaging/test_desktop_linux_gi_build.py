@@ -441,7 +441,9 @@ def test_the_probe_imports_nothing_from_this_repository() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom)
     }
-    assert imported <= {"__future__", "json", "sys", "pathlib", "PyInstaller", "gi", "cairo"}
+    assert imported <= {
+        "__future__", "ctypes", "json", "sys", "pathlib", "PyInstaller", "gi", "cairo"
+    }
 
 
 # --- typelib hooks -----------------------------------------------------------
