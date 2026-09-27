@@ -37,15 +37,18 @@ def check_action_passthrough(screen, action: str) -> bool | None:
                   greyed-out so the user can still discover it.
     - ``False`` → binding hidden entirely; gone from the footer too.
 
-    We return ``None`` (not ``False``) so the footer keeps advertising
-    every shortcut even while the user is typing in a search box. Two UX
-    journeys preserved:
+    We return ``None`` (not ``False``) so the footer can keep advertising
+    every shortcut even while the user is typing in a search box. Textual
+    itself leaves printable-key bindings out of the footer while an Input
+    has focus, so an Input that should keep them listed also has to report
+    that it does not consume those keys (see ``FleetSearchInput`` on the
+    fleet screen). Two UX journeys preserved:
 
-    1. **Find-a-server-fast**: search Input is focused on mount; typing
-       letters filters the table; footer shows greyed shortcuts as a hint
-       of "what you can do after you Tab into a result".
-    2. **Act-on-a-row**: Tab/↓/Escape moves focus to the table; the same
-       bindings light up bright and fire normally.
+    1. **Act-on-a-row**: the fleet table has focus when the screen opens;
+       the shortcuts are bright and fire normally.
+    2. **Find-a-server-fast**: ``/`` focuses the search box; typing
+       letters filters the table while the footer shows the shortcuts
+       greyed out, as a hint of what works once focus is back on a row.
 
     Non-printable keys (escape, f5, enter, ctrl+*, arrows) are always
     allowed regardless of focus.

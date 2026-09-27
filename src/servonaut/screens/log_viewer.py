@@ -80,14 +80,22 @@ class LogViewerScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("escape", "back", "Back", show=True),
-        Binding("p", "toggle_pause", "Pause/Resume", show=True),
-        Binding("c", "clear_output", "Clear", show=True),
-        Binding("m", "manage_paths", "Manage Paths", show=True),
-        Binding("l", "pick_log", "Pick Log", show=True),
-        Binding("a", "send_to_ai", "Send to AI", show=True),
-        Binding("y", "copy_output", "Copy All", show=True),
-        Binding("v", "copy_mode", "Select", show=True),
+        # Tooltips double as the key descriptions on the help screen.
+        Binding("escape", "back", "Back", show=True,
+                tooltip="Stop streaming and go back"),
+        Binding("p", "toggle_pause", "Pause/Resume", show=True,
+                tooltip="Pause or resume streaming"),
+        Binding("c", "clear_output", "Clear", show=True, tooltip="Clear the output"),
+        Binding("m", "manage_paths", "Manage Paths", show=True,
+                tooltip="Manage custom log paths"),
+        Binding("l", "pick_log", "Pick Log", show=True,
+                tooltip="Switch to a different log file"),
+        Binding("a", "send_to_ai", "Send to AI", show=True,
+                tooltip="Send the log buffer to AI analysis"),
+        Binding("y", "copy_output", "Copy All", show=True,
+                tooltip="Copy the whole log buffer to the clipboard"),
+        Binding("v", "copy_mode", "Select", show=True,
+                tooltip="Copy Mode: the log in a text area you can select from"),
     ]
 
     # How often the main-thread timer drains the line queue (seconds).
