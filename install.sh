@@ -1,10 +1,10 @@
 #!/bin/sh
 # Servonaut Installer
-# Usage: curl -sSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash
+# Usage: curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash
 # Or: ./install.sh
 #
 # Release candidate instead of the stable release:
-#   curl -sSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
+#   curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
 # Or: SERVONAUT_PRE=1 ./install.sh
 #
 # Servonaut is installed from PyPI with pipx. When run from a clone of the

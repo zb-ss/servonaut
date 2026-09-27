@@ -46,26 +46,28 @@ an existing installation keeps your configuration and data in
 
 ### With the install script
 
-The install scripts install the newest candidate when asked, or the stable
-release when that is newer than every candidate. They replace an existing
-pipx installation.
+The install scripts of the latest stable release install the newest
+candidate when asked, or the stable release when that is newer than every
+candidate. They replace an existing pipx installation.
 
 **Linux / macOS:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:SERVONAUT_PRE = "1"; irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+$env:SERVONAUT_PRE = "1"; irm https://github.com/zb-ss/servonaut/releases/latest/download/install.ps1 | iex
 ```
 
 `SERVONAUT_PRE` stays set in that PowerShell window, so running the installer
 there again installs a candidate again. Clear it with
 `Remove-Item Env:SERVONAUT_PRE`, or open a new window. From a downloaded copy
-of the scripts, run `./install.sh --pre` or `.\install.ps1 -Pre`.
+of the scripts, run `./install.sh --pre` or `.\install.ps1 -Pre`. Each
+candidate's release page also carries its own copy of the scripts, with
+`install-scripts_SHA256SUMS`.
 
 ### With pipx
 
