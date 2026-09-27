@@ -6,7 +6,6 @@ import hashlib
 import io
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tarfile
@@ -15,7 +14,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from scripts.distribution.package_deb import (
-    APPARMOR_PROFILE_PATH,
     DEFAULT_DEPENDENCIES,
     REQUIRED_PAYLOAD_FILES,
     DebPackagingError,
@@ -380,14 +378,11 @@ class TestUserDataPreservation:
         (servonaut_dir / "tokens.json").write_text('{"token": "secret"}', encoding="utf-8")
         (servonaut_dir / "servers.json").write_text('[{"name": "srv1"}]', encoding="utf-8")
 
-        # Execute postrm with remove and purge arguments, against a scratch
-        # root so its purge never reaches this machine's /etc
-        root = tmp_path / "root"
-        root.mkdir()
+        # Execute postrm with remove and purge arguments
         for action in ("remove", "purge"):
             res = subprocess.run(
                 ["/bin/sh", str(postrm_file), action],
-                env={"HOME": str(fake_home), "PATH": "/usr/bin:/bin", "DPKG_ROOT": str(root)},
+                env={"HOME": str(fake_home), "PATH": "/usr/bin:/bin"},
                 capture_output=True,
                 text=True,
             )
@@ -827,261 +822,3 @@ class TestDebArchiveFormat:
         internal = root / "opt" / "servonaut" / "_internal"
         assert (internal / "long-link").readlink() == Path(_LONG_LINK_TARGET)
         assert (internal / _NON_ASCII_NAME).read_bytes() == b"notice\n"
-
-
-_PROFILE = APPARMOR_PROFILE_PATH.lstrip("/")
-_DISABLE_LINK = "etc/apparmor.d/disable/servonaut-desktop"
-_DISABLED_BY_PACKAGE = "var/lib/servonaut/apparmor-profile-disabled"
-
-
-def _control_text(deb_path: Path, name: str) -> str:
-    control_tar_data = _parse_ar_archive(deb_path)[1][5]
-    with tarfile.open(fileobj=io.BytesIO(control_tar_data), mode="r:gz") as tar:
-        member = tar.extractfile(f"./{name}")
-        assert member is not None
-        return member.read().decode("utf-8")
-
-
-def _data_text(deb_path: Path, name: str) -> str:
-    data_tar_data = _parse_ar_archive(deb_path)[2][5]
-    with tarfile.open(fileobj=io.BytesIO(data_tar_data), mode="r:gz") as tar:
-        member = tar.extractfile(f"./{name}")
-        assert member is not None
-        return member.read().decode("utf-8")
-
-
-def _apparmor_deb(payload: Path, tmp_path: Path, **kwargs: object) -> Path:
-    deb_path, _, _ = package_deb(
-        payload_dir=payload,
-        maintainer=_MAINTAINER,
-        output_dir=tmp_path / "out",
-        product_version="2.26.3",
-        **kwargs,
-    )
-    return deb_path
-
-
-class TestDebAppArmorProfile:
-    """The launcher's AppArmor profile, which lets WebKit's sandbox start where
-    Ubuntu restricts unprivileged user namespaces."""
-
-    def test_the_profile_grants_the_installed_launcher_user_namespaces(
-        self, mock_payload: Path, tmp_path: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path)
-        members = _data_members(deb_path)
-        profile = _data_text(deb_path, _PROFILE)
-
-        info = members[f"./{_PROFILE}"]
-        assert info.isfile() and info.mode == 0o644 and (info.uid, info.gid) == (0, 0)
-        assert re.search(r"^abi <abi/4\.0>,$", profile, re.MULTILINE)
-        assert re.search(
-            r"^profile servonaut-desktop /opt/servonaut/servonaut-desktop flags=\(unconfined\) \{$",
-            profile,
-            re.MULTILINE,
-        )
-        assert re.search(r"^  userns,$", profile, re.MULTILINE)
-        assert "  include if exists <local/servonaut-desktop>\n" in profile
-        assert "@INSTALL_ROOT@" not in profile
-        # It names the launcher the package installs: WebKit's UI runs there
-        # and starts bubblewrap, which inherits the profile.
-        assert members["./opt/servonaut/servonaut-desktop"].mode == 0o755
-
-    def test_the_profile_follows_the_install_root(
-        self, mock_payload: Path, tmp_path: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path, package_name="servonaut-next")
-
-        profile = _data_text(deb_path, _PROFILE)
-        assert " /opt/servonaut-next/servonaut-desktop flags=(unconfined) {" in profile
-        assert "./opt/servonaut-next/servonaut-desktop" in _data_members(deb_path)
-
-    def test_the_profile_is_a_conffile_that_md5sums_leaves_to_dpkg(
-        self, mock_payload: Path, tmp_path: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path)
-
-        assert _control_text(deb_path, "conffiles") == f"{APPARMOR_PROFILE_PATH}\n"
-        assert _PROFILE not in _md5sums_paths(deb_path)
-
-    def test_apparmor_installs_and_upgrades_run_the_postinst_again(
-        self, mock_payload: Path, tmp_path: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path)
-
-        assert _control_text(deb_path, "triggers") == "interest-noawait /etc/apparmor.d/abi\n"
-        postinst = _control_text(deb_path, "postinst")
-        assert re.search(r"^    triggered\)\n        setup_apparmor_profile\n", postinst, re.MULTILINE)
-
-    def test_a_template_that_does_not_name_the_launcher_is_rejected(
-        self, mock_payload: Path, tmp_path: Path
-    ) -> None:
-        template = tmp_path / "profile"
-        template.write_text("profile servonaut-desktop /opt/servonaut/servonaut-desktop {}\n")
-
-        with pytest.raises(DebPackagingError, match="@INSTALL_ROOT@"):
-            _apparmor_deb(mock_payload, tmp_path, apparmor_profile_file=template)
-
-    @pytest.mark.skipif(
-        shutil.which("apparmor_parser") is None
-        or not Path("/etc/apparmor.d/abi/4.0").is_file(),
-        reason="needs AppArmor 4's parser",
-    )
-    def test_apparmor_4_compiles_the_profile(self, mock_payload: Path, tmp_path: Path) -> None:
-        profile = tmp_path / "servonaut-desktop"
-        profile.write_text(_data_text(_apparmor_deb(mock_payload, tmp_path), _PROFILE))
-
-        result = subprocess.run(
-            ["apparmor_parser", "--skip-kernel-load", "--skip-cache", "--quiet", str(profile)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        assert result.returncode == 0, result.stderr
-
-    def test_the_maintainer_scripts_are_posix_shell(self) -> None:
-        for name in ("postinst", "postrm"):
-            script = Path(__file__).resolve().parents[2] / "packaging" / "deb" / name
-            subprocess.run(["sh", "-n", str(script)], check=True)
-            if shutil.which("shellcheck"):
-                subprocess.run(["shellcheck", "--shell=sh", str(script)], check=True)
-
-
-@pytest.fixture
-def dpkg_root(tmp_path: Path) -> Path:
-    """An empty dpkg database for chrootless installs by an unprivileged user."""
-    root = tmp_path / "root"
-    admin = root / "var" / "lib" / "dpkg"
-    for directory in ("updates", "info", "triggers"):
-        (admin / directory).mkdir(parents=True)
-    (admin / "status").touch()
-    (admin / "available").touch()
-    return root
-
-
-@pytest.fixture
-def kernel_policy_calls(tmp_path: Path) -> Path:
-    """Stand-ins for the AppArmor tools that log each call instead of loading policy."""
-    tools = tmp_path / "apparmor-tools"
-    tools.mkdir()
-    calls = tmp_path / "apparmor-calls.log"
-    for name in ("apparmor_parser", "aa-enabled"):
-        tool = tools / name
-        tool.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\n')
-        tool.chmod(0o755)
-    calls.touch()
-    return calls
-
-
-def _dpkg(root: Path, calls: Path, *args: str) -> str:
-    """Run dpkg against *root*; its maintainer scripts get DPKG_ROOT set to it."""
-    result = subprocess.run(
-        [
-            "dpkg",
-            "--force-not-root",
-            "--force-script-chrootless",
-            f"--root={root}",
-            f"--admindir={root / 'var' / 'lib' / 'dpkg'}",
-            "--log=/dev/null",
-            *args,
-        ],
-        env={**os.environ, "PATH": f"{calls.parent / 'apparmor-tools'}:{os.environ['PATH']}"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    return result.stdout
-
-
-def _apparmor_4_deb(tmp_path: Path) -> Path:
-    """A package that ships AppArmor 4's abi file, as the apparmor package does."""
-    tree = tmp_path / "apparmor-4"
-    (tree / "DEBIAN").mkdir(parents=True)
-    (tree / "DEBIAN" / "control").write_text(
-        "Package: apparmor-abi-4\nVersion: 4.0\nArchitecture: all\n"
-        f"Maintainer: {_MAINTAINER}\nDescription: AppArmor 4 abi stand-in\n"
-    )
-    abi = tree / "etc" / "apparmor.d" / "abi" / "4.0"
-    abi.parent.mkdir(parents=True)
-    abi.write_text("# AppArmor 4 abi\n")
-    deb_path = tmp_path / "apparmor-abi-4.deb"
-    subprocess.run(
-        ["dpkg-deb", "--root-owner-group", "--build", str(tree), str(deb_path)],
-        capture_output=True,
-        check=True,
-    )
-    return deb_path
-
-
-@pytest.mark.skipif(
-    shutil.which("dpkg") is None or shutil.which("dpkg-deb") is None, reason="dpkg not installed"
-)
-class TestDebAppArmorMaintainerScripts:
-    """dpkg itself installs, triggers, removes and purges the package in a scratch root.
-
-    Loading into the kernel is left to the running system's AppArmor, so none
-    of this may reach it.
-    """
-
-    def test_the_profile_stays_disabled_until_apparmor_4_arrives(
-        self, mock_payload: Path, tmp_path: Path, dpkg_root: Path, kernel_policy_calls: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path, dependencies=())
-
-        _dpkg(dpkg_root, kernel_policy_calls, "--install", str(deb_path))
-        link = dpkg_root / _DISABLE_LINK
-        assert (dpkg_root / _PROFILE).is_file()
-        assert link.is_symlink() and link.readlink() == Path(APPARMOR_PROFILE_PATH)
-        assert (dpkg_root / _DISABLED_BY_PACKAGE).is_file()
-
-        output = _dpkg(dpkg_root, kernel_policy_calls, "--install", str(_apparmor_4_deb(tmp_path)))
-        assert "Processing triggers for servonaut" in output
-        assert not link.is_symlink()
-        assert not (dpkg_root / _DISABLED_BY_PACKAGE).parent.exists()
-        assert kernel_policy_calls.read_text() == ""
-
-    def test_an_administrators_disable_link_is_kept(
-        self, mock_payload: Path, tmp_path: Path, dpkg_root: Path, kernel_policy_calls: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path, dependencies=())
-        _dpkg(dpkg_root, kernel_policy_calls, "--install", str(_apparmor_4_deb(tmp_path)))
-        _dpkg(dpkg_root, kernel_policy_calls, "--install", str(deb_path))
-        link = dpkg_root / _DISABLE_LINK
-        assert not link.is_symlink()
-
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(APPARMOR_PROFILE_PATH)
-        _dpkg(dpkg_root, kernel_policy_calls, "--install", str(deb_path))
-
-        assert link.is_symlink()
-        assert not (dpkg_root / _DISABLED_BY_PACKAGE).exists()
-
-    def test_remove_keeps_the_conffile_and_purge_clears_everything_about_it(
-        self, mock_payload: Path, tmp_path: Path, dpkg_root: Path, kernel_policy_calls: Path
-    ) -> None:
-        deb_path = _apparmor_deb(mock_payload, tmp_path, dependencies=())
-        _dpkg(dpkg_root, kernel_policy_calls, "--install", str(deb_path))
-        local = dpkg_root / "etc" / "apparmor.d" / "local" / "servonaut-desktop"
-        local.parent.mkdir(parents=True)
-        local.write_text("# site-specific additions\n")
-        cached = dpkg_root / "var" / "cache" / "apparmor" / "0123abcd.0" / "servonaut-desktop"
-        cached.parent.mkdir(parents=True)
-        cached.write_bytes(b"compiled")
-
-        _dpkg(dpkg_root, kernel_policy_calls, "--remove", "servonaut")
-        assert (dpkg_root / _PROFILE).is_file()
-        assert not (dpkg_root / "opt" / "servonaut" / "servonaut-desktop").exists()
-
-        _dpkg(dpkg_root, kernel_policy_calls, "--purge", "servonaut")
-        for leftover in (
-            dpkg_root / _PROFILE,
-            dpkg_root / _DISABLE_LINK,
-            dpkg_root / _DISABLED_BY_PACKAGE,
-            local,
-            cached,
-        ):
-            assert not leftover.exists() and not leftover.is_symlink(), leftover
-        assert not (dpkg_root / "var" / "lib" / "servonaut").exists()
-        assert kernel_policy_calls.read_text() == ""

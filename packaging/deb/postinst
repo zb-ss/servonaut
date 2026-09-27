@@ -1,70 +1,14 @@
 #!/bin/sh
 set -e
 
-# The launcher's AppArmor profile lets WebKit's bubblewrap sandbox create its
-# user namespace where Ubuntu restricts them. It is written for AppArmor 4;
-# older AppArmor cannot parse it and would fail every policy load that meets
-# it, so there it is disabled with the standard disable/ link. A dpkg trigger
-# on /etc/apparmor.d/abi runs this script again whenever AppArmor is installed
-# or upgraded, which enables the profile once AppArmor 4 arrives.
-PROFILE_NAME=servonaut-desktop
-APPARMOR_DIR="${DPKG_ROOT:-}/etc/apparmor.d"
-PROFILE="$APPARMOR_DIR/$PROFILE_NAME"
-DISABLE_LINK="$APPARMOR_DIR/disable/$PROFILE_NAME"
-# Present while the disable/ link is this package's rather than an
-# administrator's aa-disable, which must stay in force.
-DISABLED_BY_PACKAGE="${DPKG_ROOT:-}/var/lib/servonaut/apparmor-profile-disabled"
-
-apparmor_can_load() {
-    # Policy for another root must never reach the running kernel.
-    [ -z "${DPKG_ROOT:-}" ] || return 1
-    command -v apparmor_parser >/dev/null 2>&1 || return 1
-    aa-enabled --quiet 2>/dev/null
-}
-
-disable_apparmor_profile() {
-    if [ -e "$DISABLE_LINK" ] || [ -L "$DISABLE_LINK" ]; then
-        return 0
-    fi
-    mkdir -p "$APPARMOR_DIR/disable" "${DISABLED_BY_PACKAGE%/*}"
-    ln -s "/etc/apparmor.d/$PROFILE_NAME" "$DISABLE_LINK"
-    : > "$DISABLED_BY_PACKAGE"
-}
-
-setup_apparmor_profile() {
-    # An administrator may delete a conffile; dpkg then keeps it deleted.
-    [ -f "$PROFILE" ] || return 0
-    if [ ! -e "$APPARMOR_DIR/abi/4.0" ]; then
-        disable_apparmor_profile
-        return 0
-    fi
-    if [ -e "$DISABLED_BY_PACKAGE" ]; then
-        rm -f "$DISABLE_LINK" "$DISABLED_BY_PACKAGE"
-        rmdir "${DISABLED_BY_PACKAGE%/*}" 2>/dev/null || true
-    fi
-    if [ -e "$DISABLE_LINK" ] || [ -L "$DISABLE_LINK" ]; then
-        return 0
-    fi
-    if apparmor_can_load; then
-        # The window still opens where user namespaces are not restricted,
-        # so a profile that does not load warns instead of failing the install.
-        apparmor_parser --replace --write-cache --skip-read-cache "$PROFILE" \
-            || echo "servonaut: could not load the AppArmor profile $PROFILE" >&2
-    fi
-}
-
 case "$1" in
     configure)
         if command -v update-desktop-database >/dev/null 2>&1; then
-            update-desktop-database -q "${DPKG_ROOT:-}/usr/share/applications" || true
+            update-desktop-database -q /usr/share/applications || true
         fi
         if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-            gtk-update-icon-cache -q -t -f "${DPKG_ROOT:-}/usr/share/icons/hicolor" || true
+            gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
         fi
-        setup_apparmor_profile
-        ;;
-    triggered)
-        setup_apparmor_profile
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)
         ;;

@@ -1,19 +1,13 @@
 #!/bin/sh
 set -e
 
-# The launcher's AppArmor profile; see postinst.
-PROFILE_NAME=servonaut-desktop
-APPARMOR_DIR="${DPKG_ROOT:-}/etc/apparmor.d"
-PROFILE="$APPARMOR_DIR/$PROFILE_NAME"
-DISABLED_BY_PACKAGE="${DPKG_ROOT:-}/var/lib/servonaut/apparmor-profile-disabled"
-
 case "$1" in
     remove|purge)
         if command -v update-desktop-database >/dev/null 2>&1; then
-            update-desktop-database -q "${DPKG_ROOT:-}/usr/share/applications" || true
+            update-desktop-database -q /usr/share/applications || true
         fi
         if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-            gtk-update-icon-cache -q -t -f "${DPKG_ROOT:-}/usr/share/icons/hicolor" || true
+            gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
         fi
         # NOTE: User configuration, cached servers, logs, and credentials
         # stored under ~/.servonaut are intentionally preserved across package
@@ -22,31 +16,6 @@ case "$1" in
     upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         ;;
     *)
-        ;;
-esac
-
-case "$1" in
-    remove)
-        # The launcher is gone, so its profile leaves the kernel. The profile
-        # file is a conffile and stays until purge, like every conffile.
-        if [ -z "${DPKG_ROOT:-}" ] && [ -f "$PROFILE" ] \
-            && [ -e "$APPARMOR_DIR/abi/4.0" ] \
-            && command -v apparmor_parser >/dev/null 2>&1 \
-            && aa-enabled --quiet 2>/dev/null; then
-            apparmor_parser --remove "$PROFILE" >/dev/null 2>&1 || true
-        fi
-        ;;
-    purge)
-        # dpkg has deleted the profile; drop everything that refers to it.
-        rm -f "$APPARMOR_DIR/disable/$PROFILE_NAME" \
-            "$APPARMOR_DIR/force-complain/$PROFILE_NAME" \
-            "$APPARMOR_DIR/local/$PROFILE_NAME" \
-            "$DISABLED_BY_PACKAGE" \
-            "${DPKG_ROOT:-}"/var/cache/apparmor/*/"$PROFILE_NAME"
-        rmdir "${DISABLED_BY_PACKAGE%/*}" 2>/dev/null || true
-        rmdir "$APPARMOR_DIR/disable" 2>/dev/null || true
-        rmdir "$APPARMOR_DIR/local" 2>/dev/null || true
-        rmdir "$APPARMOR_DIR" 2>/dev/null || true
         ;;
 esac
 
