@@ -176,7 +176,11 @@ Values you type while demo mode is on (a server added on the Custom Servers
 screen) render exactly as typed — the redactor remembers them for the
 session, so a recording can add a server without the table re-labelling it.
 Provider labels that are public taxonomy (`AWS`, `OVH`, `Hetzner`, …) pass
-through too, so the provider column stays true. Ids are always hashed.
+through too, in any letter case, so the provider column stays true. Any other
+provider label (a custom server's own, which may name a company) is shown as
+`custom`, and so is a custom server's region, which repeats that label: the
+stand-in hides the name without turning the server into another kind. Ids
+are always hashed.
 
 ## Known limitations
 
