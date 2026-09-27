@@ -285,6 +285,8 @@ def test_only_the_package_leaves_the_job_briefly(workflow: str) -> None:
     assert "path: ${{ steps.package.outputs.deb-path }}\n" in handoff
     assert "retention-days: 1\n" in handoff
     assert "if-no-files-found: error\n" in handoff
+    # Re-running every job of a run uploads the same names again.
+    assert "overwrite: true\n" in handoff and "overwrite: true\n" in evidence
     assert "*.json" in evidence and "*.png" in evidence
     assert ".deb" not in evidence
     assert "name: desktop-preview-deb\n" in _step(

@@ -448,6 +448,8 @@ jobs:
           path: ${{ steps.package.outputs.deb-path }}
           retention-days: 1
           if-no-files-found: error
+          # A re-run of this run replaces the package an earlier attempt handed over.
+          overwrite: true
           compression-level: 0
           include-hidden-files: false
 
@@ -474,6 +476,7 @@ jobs:
             ${{ steps.paths.outputs.upload-dir }}/*.png
           retention-days: 7
           if-no-files-found: warn
+          overwrite: true
           include-hidden-files: false
 
       - name: Remove build material
