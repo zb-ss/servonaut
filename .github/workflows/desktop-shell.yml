@@ -281,7 +281,10 @@ jobs:
           set -euo pipefail
           mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
           trap 'cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
-          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+          # The distribution tooling imports the product's release-identity
+          # code, so the packager runs with the checkout's sources.
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
             "${QUALIFIED_PYTHON}" -m scripts.distribution.package_deb \
             --payload-dir "${PAYLOAD_DIR}" \
             --output-dir "${FORWARD_DIR}/deb" \

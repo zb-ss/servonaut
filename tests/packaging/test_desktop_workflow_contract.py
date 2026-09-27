@@ -325,6 +325,8 @@ def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: s
     assert "id: window-smoke-forward" in step
     assert "if: runner.os == 'Linux'" in step
     assert "-m scripts.distribution.package_deb" in step
+    # scripts.distribution imports the product's release-identity code.
+    assert 'PYTHONPATH="${GITHUB_WORKSPACE}/src"' in step
     assert "docker run --rm" in step
     assert '--volume "${GITHUB_WORKSPACE}:/src:ro"' in step
     assert "bash scripts/desktop_shell/forward_window_smoke.sh" in step
