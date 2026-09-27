@@ -59,6 +59,23 @@ check_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Ask a yes/no question; succeeds when the answer is y or Y.
+# Under `curl ... | bash` standard input is the script itself, so the answer
+# is read from the terminal. Without a terminal the answer is no.
+ask_yes_no() {
+    echo "$1 (y/n)"
+    printf "> "
+    response=""
+    if [ -t 0 ]; then
+        read -r response || response=""
+    elif (: < /dev/tty) 2>/dev/null; then
+        read -r response < /dev/tty || response=""
+    else
+        echo "n (no terminal)"
+    fi
+    [ "$response" = "y" ] || [ "$response" = "Y" ]
+}
+
 # Check Python version
 check_python_version() {
     print_info "Checking Python installation..."
@@ -101,7 +118,6 @@ check_python_version() {
     fi
 
     print_success "Python $PYTHON_VERSION found at $(command -v "$PYTHON_CMD")"
-    echo "$PYTHON_CMD"
 }
 
 # Install pipx
@@ -254,10 +270,7 @@ setup_wizard() {
         else
             print_warning "AWS CLI not configured"
             echo ""
-            echo "Would you like to configure AWS now? (y/n)"
-            printf "> "
-            read -r response
-            if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+            if ask_yes_no "Would you like to configure AWS now?"; then
                 print_info "Running 'aws configure'..."
                 aws configure
             else
@@ -294,10 +307,7 @@ setup_wizard() {
 
     # Create starter config
     echo ""
-    echo "Would you like to create a starter configuration file? (y/n)"
-    printf "> "
-    read -r response
-    if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+    if ask_yes_no "Would you like to create a starter configuration file?"; then
         create_starter_config
     else
         print_info "Skipping configuration file creation"
@@ -313,10 +323,7 @@ create_starter_config() {
     if [ -f "$CONFIG_FILE" ]; then
         print_warning "Configuration file already exists at: $CONFIG_FILE"
         echo ""
-        echo "Would you like to overwrite it? (y/n)"
-        printf "> "
-        read -r response
-        if [ "$response" != "y" ] && [ "$response" != "Y" ]; then
+        if ! ask_yes_no "Would you like to overwrite it?"; then
             print_info "Keeping existing configuration"
             return 0
         fi
@@ -387,8 +394,8 @@ print_final_message() {
 main() {
     print_header
 
-    # Check Python
-    PYTHON_CMD=$(check_python_version)
+    # Check Python (sets PYTHON_CMD)
+    check_python_version
     echo ""
 
     # Install pipx
@@ -400,11 +407,8 @@ main() {
     echo ""
 
     # Ask about setup wizard
-    echo "Would you like to run the setup wizard? (y/n)"
-    echo "(This will check AWS CLI installation and configuration)"
-    printf "> "
-    read -r response
-    if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+    echo "(The setup wizard checks the AWS CLI installation and configuration)"
+    if ask_yes_no "Would you like to run the setup wizard?"; then
         echo ""
         setup_wizard
     else
