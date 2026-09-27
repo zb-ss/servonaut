@@ -471,17 +471,21 @@ Once connected, the exit code is the remote command's (or the session's);
 | `servonaut` | Launch the TUI |
 | `servonaut --debug` | Launch the TUI with verbose logging |
 | `servonaut --update` | Check for and apply updates from PyPI |
+| `servonaut --list-backups` | List local configuration backups, newest first |
+| `servonaut --restore-backup [N]` | Restore configuration backup `N` from `--list-backups` (1 = newest); without `N`, choose from a list |
 | `servonaut --install-desktop` | Create a desktop shortcut (Linux/macOS) |
 | `servonaut --setup-ovh` | Guided OVHcloud credential setup |
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
 | `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |
 
-`servonaut --update` and the in-app update check offer stable releases only.
-New versions are published as release candidates (for example `2.28.0rc1`)
-a few days before the stable release; pip and pipx install them only when asked
-for pre-releases. To try one without touching your installation, run
-`pipx run --spec 'servonaut==2.28.0rc1' servonaut`. An installation that is
-itself a release candidate is offered newer candidates and the stable release
-that follows them.
+On a stable release, `servonaut --update` and the in-app update check offer
+stable releases only. New versions are published as release candidates (for
+example `2.28.0rc1`) a few days before the stable release; pip and pipx
+install them only when you ask for one. To try one without touching your
+installation, run `pipx run --spec 'servonaut==2.28.0rc1' servonaut`. An
+installation that is itself a release candidate is offered newer candidates
+and the stable release that follows them. See
+[Release candidates](release-candidates.md) for installing one, how updates
+behave, and going back to the stable release.
 
 See [MCP Tools reference](mcp-tools.md) for the full list of MCP tools.
