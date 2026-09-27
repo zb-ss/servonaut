@@ -25,6 +25,9 @@ REQUIRED_SYSTEM_DEPS = (
     "gir1.2-webkit2-4.1",
 )
 
+# The prohibited lists below are the source of truth; the linux_abi block of
+# packaging/desktop_shell/target-policy.json mirrors them for reviewers, and a
+# contract test fails when the two drift apart.
 PROHIBITED_COPIED_DISTRO_MODULES = (
     "gi",
     "_gi",

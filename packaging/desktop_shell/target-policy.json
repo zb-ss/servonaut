@@ -199,12 +199,15 @@
         "prohibited_copied_distro_modules": [
           "gi",
           "_gi",
-          "cairo"
+          "cairo",
+          "_gi_cairo"
         ],
         "prohibited_bundled_closures": [
           "libgtk-3",
           "libglib-2.0",
-          "libwebkit2gtk-4.1"
+          "libgobject-2.0",
+          "libwebkit2gtk-4.1",
+          "libjavascriptcoregtk-4.1"
         ]
       }
     }

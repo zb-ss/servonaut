@@ -14,6 +14,8 @@ from scripts.desktop_shell.linux_abi import (
     REQUIRED_WEBKIT_API,
     UBUNTU_2204_BASELINE,
     UBUNTU_2404_FORWARD,
+    PROHIBITED_BUNDLED_CLOSURES,
+    PROHIBITED_COPIED_DISTRO_MODULES,
     LinuxAbiError,
     audit_linux_onedir_payload,
     get_split_runtime_fallback_spec,
@@ -35,12 +37,15 @@ def test_linux_target_policy_declares_exact_abi_spec() -> None:
     assert abi.webkit_api == REQUIRED_WEBKIT_API
     assert abi.build_platform == UBUNTU_2204_BASELINE
     assert abi.qualification_platforms == (UBUNTU_2204_BASELINE, UBUNTU_2404_FORWARD)
-    assert set(abi.prohibited_copied_distro_modules) >= {"gi", "_gi", "cairo"}
-    assert set(abi.prohibited_bundled_closures) >= {
-        "libgtk-3",
-        "libglib-2.0",
-        "libwebkit2gtk-4.1",
-    }
+
+
+def test_target_policy_mirrors_the_prohibited_lists_exactly() -> None:
+    """linux_abi's constants are the source of truth the payload audit enforces."""
+    abi = load_desktop_target_policy().targets["linux-x64-ubuntu-22.04"].linux_abi
+
+    assert abi is not None
+    assert abi.prohibited_bundled_closures == PROHIBITED_BUNDLED_CLOSURES
+    assert abi.prohibited_copied_distro_modules == PROHIBITED_COPIED_DISTRO_MODULES
 
 
 def test_validate_pygobject_abi_contract() -> None:
