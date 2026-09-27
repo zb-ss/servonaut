@@ -1,0 +1,609 @@
+name: Desktop preview .deb
+
+# Attaches a preview .deb of the Linux desktop app to every published GitHub
+# release and pre-release (vX.Y.Z and vX.Y.ZrcN):
+#
+#   resolve  decides what to build, from the release event or the inputs;
+#   qualify  builds the desktop payload from the release's tag commit, runs
+#            the desktop qualification's inspection, packaged self-test and
+#            window smoke on it, then packages that payload and installs the
+#            package; it never holds a write token;
+#   publish  checks the package it was handed, attests its build provenance
+#            and uploads it with its SHA256SUMS, replacing only those two
+#            assets of the release.
+#
+# Nothing is uploaded unless every qualification step passed. The PyPI
+# publish is a separate workflow with no dependency on this one, so a failed
+# or slow desktop build never holds back the Python package.
+#
+# Re-run a release on the tag itself, so the provenance names the commit
+# that was built:
+#   gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z
+# dry_run does everything except the attestation and the upload. A dry run
+# may start from a branch; without a tag it rehearses that branch's commit as
+# if it were tagged rehearsal_version.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag vX.Y.Z or vX.Y.ZrcN (to publish, run the workflow on that tag)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Build and qualify, but attest and upload nothing"
+        type: boolean
+        default: false
+      rehearsal_version:
+        description: "Dry run without a tag only: rehearse this commit as version X.Y.Z or X.Y.ZrcN"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-preview-deb-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Never for forks; pull requests do not trigger this workflow at all.
+    if: github.repository == 'zb-ss/servonaut'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      build: ${{ steps.resolve.outputs.build }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+      rehearsal-version: ${{ steps.resolve.outputs.rehearsal-version }}
+      checkout-ref: ${{ steps.resolve.outputs.checkout-ref }}
+      expected-commit: ${{ steps.resolve.outputs.expected-commit }}
+    steps:
+      - name: Decide what to build
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_REHEARSAL_VERSION: ${{ inputs.rehearsal_version }}
+        run: |
+          set -euo pipefail
+          version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
+          dry_run=false
+          rehearsal=""
+          case "${GITHUB_EVENT_NAME}" in
+            release)
+              tag="${RELEASE_TAG}"
+              if [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::notice::Only releases vX.Y.Z and release candidates vX.Y.ZrcN carry a desktop preview."
+                echo "build=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              if [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+                echo "::error::The release event does not name its own tag."
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              tag="${INPUT_TAG}"
+              rehearsal="${INPUT_REHEARSAL_VERSION}"
+              if [ "${INPUT_DRY_RUN}" = "true" ]; then dry_run=true; fi
+              if [ -n "${rehearsal}" ]; then
+                if [ "${dry_run}" != "true" ] || [ -n "${tag}" ]; then
+                  echo "::error::rehearsal_version is for a dry run without a tag only."
+                  exit 1
+                fi
+                if [[ ! "${rehearsal}" =~ ^${version}$ ]]; then
+                  echo "::error::rehearsal_version must be X.Y.Z or X.Y.ZrcN."
+                  exit 1
+                fi
+                tag="v${rehearsal}"
+              elif [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::error::tag must be a release vX.Y.Z or a release candidate vX.Y.ZrcN."
+                exit 1
+              elif [ "${dry_run}" != "true" ] && [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+                echo "::error::To publish, run this workflow on the tag: gh workflow run desktop-preview-deb.yml --ref ${tag} -f tag=${tag}"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::This workflow runs for published releases and on request only."
+              exit 1
+              ;;
+          esac
+
+          # The commit to build: the tag's, unless a dry run rehearses its own.
+          if [ -n "${rehearsal}" ]; then
+            checkout_ref="${GITHUB_SHA}"
+            expected="${GITHUB_SHA}"
+          elif [ "${GITHUB_REF}" = "refs/tags/${tag}" ]; then
+            checkout_ref="refs/tags/${tag}"
+            expected="${GITHUB_SHA}"
+          else
+            checkout_ref="refs/tags/${tag}"
+            expected=""
+          fi
+          {
+            echo "build=true"
+            echo "tag=${tag}"
+            echo "dry-run=${dry_run}"
+            echo "rehearsal-version=${rehearsal}"
+            echo "checkout-ref=${checkout_ref}"
+            echo "expected-commit=${expected}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ -n "${rehearsal}" ]; then
+            echo "Rehearsal of this commit as ${tag}: nothing is attested or uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          elif [ "${dry_run}" = "true" ]; then
+            echo "Dry run for ${tag}: nothing is attested or uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Desktop preview for ${tag}." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  qualify:
+    name: qualify (linux-x64-ubuntu-22.04)
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      debian-version: ${{ steps.plan.outputs.debian-version }}
+      package-name: ${{ steps.plan.outputs.package-name }}
+      architecture: ${{ steps.plan.outputs.architecture }}
+      deb-asset: ${{ steps.plan.outputs.deb-asset }}
+      sums-asset: ${{ steps.plan.outputs.sums-asset }}
+      deb-sha256: ${{ steps.package.outputs.deb-sha256 }}
+    env:
+      TARGET: linux-x64-ubuntu-22.04
+      TAG: ${{ needs.resolve.outputs.tag }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Confirm the commit to build
+        id: source
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          if [ -n "${EXPECTED_COMMIT}" ] && [ "${commit}" != "${EXPECTED_COMMIT}" ]; then
+            echo "::error::${TAG} no longer points at the commit this run was started for."
+            exit 1
+          fi
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+          # Package timestamps follow the commit, so a rebuild is comparable.
+          echo "epoch=$(git log -1 --format=%ct)" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      # A rehearsal sets the version exactly as the Release workflow does when
+      # it cuts a candidate, so everything below sees a release commit.
+      - name: Rehearse as a release commit
+        if: needs.resolve.outputs.rehearsal-version != ''
+        env:
+          REHEARSAL_VERSION: ${{ needs.resolve.outputs.rehearsal-version }}
+        run: python .github/scripts/release-policy.py set-version "${REHEARSAL_VERSION}"
+
+      - name: Prepare qualification paths
+        id: paths
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          BASE_TEMP="${RUNNER_TEMP}/servonaut-desktop-preview-${GITHUB_RUN_ID}"
+          export BASE_TEMP
+          "${PYTHON_PATH}" -I -c '
+          import os
+          from pathlib import Path
+
+          base = Path(os.environ["BASE_TEMP"])
+          try:
+              base.mkdir(mode=0o700, parents=False, exist_ok=False)
+              for name in ("wheel-tools", "qualification", "evidence", "upload", "screenshots", "deb"):
+                  (base / name).mkdir(mode=0o700)
+          except OSError:
+              raise SystemExit("qualification directories could not be created")
+          '
+          {
+            echo "python-path=${PYTHON_PATH}"
+            echo "base-temp=${BASE_TEMP}"
+            echo "wheel-tools-dir=${BASE_TEMP}/wheel-tools"
+            echo "qualification-dir=${BASE_TEMP}/qualification"
+            echo "build-dir=${BASE_TEMP}/build"
+            echo "evidence-dir=${BASE_TEMP}/evidence"
+            echo "upload-dir=${BASE_TEMP}/upload"
+            echo "screenshot-dir=${BASE_TEMP}/screenshots"
+            echo "deb-dir=${BASE_TEMP}/deb"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare hash-locked qualification environment
+        id: qualification-env
+        env:
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          ROOT: ${{ steps.paths.outputs.qualification-dir }}
+        run: |
+          set -euo pipefail
+          VENV="${ROOT}/venv"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -m venv "${VENV}"
+          QUALIFIED_PYTHON="${VENV}/bin/python"
+          if ! "${QUALIFIED_PYTHON}" -m pip --isolated install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/qualification-tools-${TARGET}.txt" \
+            >"${ROOT}/qualification-install.log" 2>&1; then
+            tail -n 40 "${ROOT}/qualification-install.log" >&2
+            exit 1
+          fi
+          "${QUALIFIED_PYTHON}" -m pip check
+          echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
+
+      # The tag decides the versions and asset names, and a checkout whose
+      # package versions disagree with the tag stops here, before any build.
+      - name: Plan the preview from the release tag
+        id: plan
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/distribution/desktop_preview.py ]; then
+            echo "::error::${TAG} predates the desktop preview packaging, so it cannot carry a preview."
+            exit 1
+          fi
+          # The distribution tooling imports the product's release-identity code.
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview plan \
+            --tag "${TAG}" --checkout "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/preview-plan"
+          cat "${RUNNER_TEMP}/preview-plan" >> "${GITHUB_OUTPUT}"
+          sed 's/^/    /' "${RUNNER_TEMP}/preview-plan"
+
+      # The same packages as the desktop qualification: they mirror
+      # scripts/desktop_shell/linux_abi.py.
+      - name: Install Linux GTK build and window packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgirepository1.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1 \
+            pkg-config libcairo2-dev libffi-dev gir1.2-girepository-2.0 gir1.2-gtk-3.0 \
+            xvfb xauth imagemagick
+
+      - name: Build verified wheel with locked tools
+        id: wheel
+        uses: ./.github/actions/setup-standalone-cli
+        with:
+          python-path: ${{ steps.paths.outputs.python-path }}
+          checkout-path: ${{ github.workspace }}
+          temporary-directory: ${{ steps.paths.outputs.wheel-tools-dir }}
+
+      - name: Build internal desktop onedir payload
+        id: build
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          WHEEL_PATH: ${{ steps.wheel.outputs.wheel-path }}
+          BUILD_DIR: ${{ steps.paths.outputs.build-dir }}
+          COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
+            --wheel "${WHEEL_PATH}" \
+            --target "${TARGET}" \
+            --commit "${COMMIT}" \
+            --output-dir "${BUILD_DIR}"
+          echo "payload-dir=${BUILD_DIR}/servonaut-desktop" >> "${GITHUB_OUTPUT}"
+          echo "metadata-dir=${BUILD_DIR}/build-metadata" >> "${GITHUB_OUTPUT}"
+
+      - name: Inspect desktop onedir payload
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.inspect \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --output "${EVIDENCE_DIR}/inspection-report-${TARGET}.json"
+
+      - name: Run policy-bound smoke checks
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --selftest
+
+      - name: Run packaged window smoke
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.window_smoke \
+            --payload-root "${PAYLOAD_DIR}" \
+            --target "${TARGET}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
+
+      # The payload qualified above, packaged as the release asset. The
+      # package's own fields must repeat what the tag says.
+      - name: Package the qualified payload
+        id: package
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          DEB_DIR: ${{ steps.paths.outputs.deb-dir }}
+          SOURCE_EPOCH: ${{ steps.source.outputs.epoch }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          DEBIAN_VERSION: ${{ steps.plan.outputs.debian-version }}
+          PACKAGE_NAME: ${{ steps.plan.outputs.package-name }}
+          ARCHITECTURE: ${{ steps.plan.outputs.architecture }}
+          DEB_ASSET: ${{ steps.plan.outputs.deb-asset }}
+          # The Debian Maintainer field; the repository variable overrides it.
+          DEB_MAINTAINER: ${{ vars.DESKTOP_DEB_MAINTAINER || 'Servonaut <41898282+github-actions[bot]@users.noreply.github.com>' }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.package_deb \
+            --payload-dir "${PAYLOAD_DIR}" \
+            --output-dir "${DEB_DIR}" \
+            --version "${PRODUCT_VERSION}" \
+            --arch "${ARCHITECTURE}" \
+            --package-name "${PACKAGE_NAME}" \
+            --maintainer "${DEB_MAINTAINER}" \
+            --epoch "${SOURCE_EPOCH}" \
+            --filename "${DEB_ASSET}"
+          deb="${DEB_DIR}/${DEB_ASSET}"
+          for pair in "Package=${PACKAGE_NAME}" "Version=${DEBIAN_VERSION}" "Architecture=${ARCHITECTURE}"; do
+            field="${pair%%=*}"
+            expected="${pair#*=}"
+            actual="$(dpkg-deb --field "${deb}" "${field}")"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::The package's ${field} is ${actual}, but ${TAG} needs ${expected}."
+              exit 1
+            fi
+          done
+          echo "deb-path=${deb}" >> "${GITHUB_OUTPUT}"
+          echo "deb-sha256=$(sha256sum "${deb}" | cut -d ' ' -f 1)" >> "${GITHUB_OUTPUT}"
+
+      # What a user does with the release asset: install it with apt, which
+      # also installs its declared dependencies, run it, and purge it again.
+      - name: Install, run and remove the package
+        env:
+          DEB_PATH: ${{ steps.package.outputs.deb-path }}
+          PACKAGE_NAME: ${{ steps.plan.outputs.package-name }}
+          DEBIAN_VERSION: ${{ steps.plan.outputs.debian-version }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes --no-install-recommends "${DEB_PATH}"
+          installed="$(dpkg-query --show --showformat='${Version}' "${PACKAGE_NAME}")"
+          if [ "${installed}" != "${DEBIAN_VERSION}" ]; then
+            echo "::error::apt installed version ${installed}, not ${DEBIAN_VERSION}."
+            exit 1
+          fi
+          test -x /usr/bin/servonaut-desktop
+          version_text="$(env -u PYTHONPATH -u PYTHONHOME HOME="$(mktemp -d)" /usr/bin/servonaut --version)"
+          echo "${version_text}"
+          if [[ "${version_text}" != *"${PRODUCT_VERSION}"* ]]; then
+            echo "::error::The installed CLI does not report ${PRODUCT_VERSION}."
+            exit 1
+          fi
+          sudo apt-get purge --yes "${PACKAGE_NAME}"
+          status="$(dpkg-query --show --showformat='${db:Status-Status}' "${PACKAGE_NAME}" 2>/dev/null || true)"
+          if [ -n "${status}" ] && [ "${status}" != "not-installed" ]; then
+            echo "::error::${PACKAGE_NAME} is ${status} after it was purged."
+            exit 1
+          fi
+          if [ -e /opt/servonaut ] || [ -e /usr/bin/servonaut-desktop ]; then
+            echo "::error::Purging ${PACKAGE_NAME} left its files behind."
+            exit 1
+          fi
+
+      # Only the package leaves this job, for the publish job to check,
+      # attest and upload. Its digest travels separately, as a job output.
+      - name: Hand the qualified package to the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-preview-deb
+          path: ${{ steps.package.outputs.deb-path }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Collect qualification evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        env:
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+          UPLOAD_DIR: ${{ steps.paths.outputs.upload-dir }}
+        run: |
+          set -euo pipefail
+          find "${EVIDENCE_DIR}" -type f -name '*.json' -exec cp {} "${UPLOAD_DIR}/" \;
+          find "${SCREENSHOT_DIR}" -type f -name '*.png' -exec cp {} "${UPLOAD_DIR}/" \;
+
+      # Reports and the window screenshot, taken once the session opened or
+      # when it did not. No executable is kept.
+      - name: Upload qualification evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-preview-qualification
+          path: |
+            ${{ steps.paths.outputs.upload-dir }}/*.json
+            ${{ steps.paths.outputs.upload-dir }}/*.png
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: false
+
+      - name: Remove build material
+        if: always()
+        env:
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
+            chmod -R u+w "${BASE_TEMP}"
+            rm -r -- "${BASE_TEMP}"
+          fi
+
+  publish:
+    name: publish
+    needs: [resolve, qualify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The only job with write access, and it runs no code from the repository.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry-run }}
+      REHEARSAL_VERSION: ${{ needs.resolve.outputs.rehearsal-version }}
+      COMMIT: ${{ needs.qualify.outputs.commit }}
+      DEBIAN_VERSION: ${{ needs.qualify.outputs.debian-version }}
+      PACKAGE_NAME: ${{ needs.qualify.outputs.package-name }}
+      ARCHITECTURE: ${{ needs.qualify.outputs.architecture }}
+      DEB_ASSET: ${{ needs.qualify.outputs.deb-asset }}
+      SUMS_ASSET: ${{ needs.qualify.outputs.sums-asset }}
+      DEB_SHA256: ${{ needs.qualify.outputs.deb-sha256 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Receive the qualified package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-preview-deb
+          path: preview
+
+      - name: Verify the package and write its checksums
+        working-directory: preview
+        run: |
+          set -euo pipefail
+          if [ "$(ls -A)" != "${DEB_ASSET}" ]; then
+            echo "::error::Expected exactly ${DEB_ASSET} from the qualify job."
+            exit 1
+          fi
+          # The file the qualify job measured, byte for byte.
+          echo "${DEB_SHA256}  ${DEB_ASSET}" | sha256sum --check --strict -
+          for pair in "Package=${PACKAGE_NAME}" "Version=${DEBIAN_VERSION}" "Architecture=${ARCHITECTURE}"; do
+            field="${pair%%=*}"
+            expected="${pair#*=}"
+            actual="$(dpkg-deb --field "${DEB_ASSET}" "${field}")"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::The package's ${field} is ${actual}, but ${TAG} needs ${expected}."
+              exit 1
+            fi
+          done
+          sha256sum "${DEB_ASSET}" > "${SUMS_ASSET}"
+          sha256sum --check --strict "${SUMS_ASSET}"
+
+      # The release must exist and its tag must still name the commit that
+      # was built. A dry run with a tag reports; a rehearsal has no release.
+      - name: Confirm the release and its tag
+        if: env.REHEARSAL_VERSION == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-before"; then
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "::notice::${TAG} has no published release; a real run would stop here."
+              exit 0
+            fi
+            echo "::error::${TAG} has no published release to attach the preview to."
+            exit 1
+          fi
+          tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq '.sha')"
+          if [ "${tagged}" != "${COMMIT}" ]; then
+            echo "::error::${TAG} was moved after the preview was built from ${COMMIT}."
+            exit 1
+          fi
+          echo "Assets of ${TAG} now:"
+          sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
+
+      - name: Attest the package's build provenance
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: preview/${{ needs.qualify.outputs.deb-asset }}
+
+      # --clobber replaces this workflow's own two assets, so a re-run is
+      # idempotent; every other asset of the release is left alone.
+      - name: Upload the preview to the release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" "preview/${DEB_ASSET}" "preview/${SUMS_ASSET}" --clobber
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-after"
+          while IFS= read -r name; do
+            if ! grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-after"; then
+              echo "::error::The upload removed another asset of ${TAG}."
+              exit 1
+            fi
+          done < "${RUNNER_TEMP}/assets-before"
+          # What a user downloads must check out against the published sums.
+          mkdir "${RUNNER_TEMP}/published"
+          gh release download "${TAG}" --dir "${RUNNER_TEMP}/published" \
+            --pattern "${DEB_ASSET}" --pattern "${SUMS_ASSET}"
+          (cd "${RUNNER_TEMP}/published" && sha256sum --check --strict "${SUMS_ASSET}")
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          {
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "## Desktop preview for ${TAG} (dry run, not published)"
+            else
+              echo "## Desktop preview for ${TAG}"
+            fi
+            echo ""
+            echo "- Package: \`${PACKAGE_NAME}\` version \`${DEBIAN_VERSION}\` (${ARCHITECTURE}), built from \`${COMMIT}\`"
+            echo "- Assets: \`${DEB_ASSET}\`, \`${SUMS_ASSET}\`"
+            echo "- SHA-256: \`${DEB_SHA256}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
