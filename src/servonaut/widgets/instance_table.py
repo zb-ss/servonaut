@@ -1,9 +1,83 @@
 """Instance table widget for Servonaut v2.0."""
 
 from __future__ import annotations
-from typing import Any, List, Optional
 
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence
+
+from rich.text import Text
 from textual.widgets import DataTable
+
+# What an empty cell shows.
+_EMPTY = "-"
+
+
+@dataclass(frozen=True)
+class _Column:
+    """One fleet-table column.
+
+    Attributes:
+        key: Column key, also used by ``get_column_index``.
+        label: Header text.
+        max_width: Longest value shown in full; a longer one is cut short with
+            an ellipsis (the detail panel below the table shows it whole).
+            ``None`` for columns whose values are short by construction.
+        optional: Left out while no row has a value for it.
+    """
+
+    key: str
+    label: str
+    max_width: Optional[int] = None
+    optional: bool = False
+
+
+# Every column is as wide as its longest value, up to its maximum, so short
+# values leave room for the rest. Most important first: when the terminal is
+# too narrow, the table scrolls sideways and the last columns are the ones
+# out of view.
+COLUMNS: Sequence[_Column] = (
+    _Column("index", "#"),
+    _Column("name", "Name", max_width=32),
+    _Column("state", "State"),
+    _Column("provider", "Provider", max_width=14),
+    _Column("public_ip", "Public IP", max_width=24),
+    _Column("type", "Type", max_width=20),
+    _Column("region", "Region", max_width=16),
+    _Column("private_ip", "Private IP", max_width=24),
+    # 25 fits an OVH VPS service name; AWS ids are 19.
+    _Column("id", "ID", max_width=25),
+    _Column("key", "Key", max_width=20),
+    # SSH verify status — at-a-glance BW probe result badge. Shown once any
+    # server has a result, so a fleet that never verifies keeps the room.
+    _Column("ssh", "SSH", optional=True),
+    # Memory discoverability — at-a-glance status so users learn the
+    # feature exists without needing to drill into a server.
+    _Column("memory", "Mem"),
+)
+
+# Shown in the table's bottom border while some columns are out of view.
+SCROLL_HINT = "← → more columns"
+
+
+def _fit(value: str, max_width: Optional[int]) -> Text:
+    """*value* as plain text (never markup), cut to *max_width* with an ellipsis."""
+    text = Text(value, no_wrap=True, end="")
+    if max_width is not None and text.cell_len > max_width:
+        text.truncate(max_width, overflow="ellipsis")
+    return text
+
+
+def _key_label(key: str) -> str:
+    """A key as the table lists it: the file name of a key file path.
+
+    Custom servers name a key file (``~/.ssh/web1_ed25519``); cloud servers
+    name a key pair. The directory rarely tells servers apart, so the table
+    keeps to the file name and the detail panel shows the full path.
+    """
+    if "/" in key or "\\" in key:
+        name = key.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return name or key
+    return key
 
 
 class InstanceTable(DataTable):
@@ -16,25 +90,23 @@ class InstanceTable(DataTable):
         super().__init__(cursor_type="row")
         self._all_instances: List[dict] = []
         self._filtered_instances: List[dict] = []
-        self._setup_columns()
+        self._shown_columns: List[_Column] = []
+        self._setup_columns([column for column in COLUMNS if not column.optional])
 
-    def _setup_columns(self) -> None:
-        """Set up table columns with auto-sizing for available width."""
-        self.add_column("#", width=4, key="index")
-        self.add_column("Name", key="name")
-        self.add_column("ID", width=20, key="id")
-        self.add_column("Type", width=12, key="type")
-        self.add_column("State", width=10, key="state")
-        self.add_column("Public IP", width=16, key="public_ip")
-        self.add_column("Private IP", width=16, key="private_ip")
-        self.add_column("Region", width=14, key="region")
-        self.add_column("Provider", width=14, key="provider")
-        self.add_column("Key", key="key")
-        # SSH verify status — at-a-glance BW probe result badge.
-        self.add_column("SSH", width=14, key="ssh")
-        # Memory discoverability — at-a-glance status so users learn the
-        # feature exists without needing to drill into a server.
-        self.add_column("Mem", width=6, key="memory")
+    def _setup_columns(self, columns: Sequence[_Column]) -> None:
+        """Add *columns*, each sized to its content (see ``COLUMNS``)."""
+        for column in columns:
+            self.add_column(column.label, key=column.key)
+        self._shown_columns = list(columns)
+
+    def on_resize(self) -> None:
+        """Re-check the scroll hint: the view got wider or narrower."""
+        self._sync_scroll_hint()
+
+    def _sync_scroll_hint(self) -> None:
+        """Say so in the bottom border while columns are out of view."""
+        hidden = self.virtual_size.width > self.scrollable_content_region.width
+        self.border_subtitle = SCROLL_HINT if hidden else ""
 
     def _update_dimensions(self, *args: Any, **kwargs: Any) -> None:
         """Size the columns for new rows, then redraw rows drawn too early.
@@ -51,6 +123,7 @@ class InstanceTable(DataTable):
         """
         widths_before = self._render_widths()
         super()._update_dimensions(*args, **kwargs)
+        self._sync_scroll_hint()
         if self._render_widths() == widths_before:
             return
         clear_caches = getattr(self, "_clear_caches", None)
@@ -143,24 +216,57 @@ class InstanceTable(DataTable):
 
     def _refresh_table(self) -> None:
         """Refresh table display with current filtered instances."""
-        self.clear()
-
         memory_service = getattr(self.app, "memory_service", None)
+        # Judged on the whole fleet, not the filtered rows, so a search does
+        # not make an optional column come and go.
+        columns = [
+            column
+            for column in COLUMNS
+            if not column.optional
+            or any(self._optional_cell(column.key, i) for i in self._all_instances)
+        ]
+        if columns == self._shown_columns:
+            self.clear()
+        else:
+            self.clear(columns=True)
+            self._setup_columns(columns)
         for idx, instance in enumerate(self._filtered_instances):
-            self.add_row(
-                str(idx + 1),
-                instance.get('name', ''),
-                instance.get('id', ''),
-                instance.get('type', ''),
-                self._colorize_state(instance.get('state', '')),
-                instance.get('public_ip', '') or '-',
-                instance.get('private_ip', '') or '-',
-                instance.get('region', ''),
-                instance.get('provider', 'AWS'),
-                instance.get('key_name', '') or '-',
-                self._ssh_verify_cell(instance),
-                self._memory_icon(instance, memory_service),
-            )
+            cells = self._row_cells(idx, instance, memory_service)
+            self.add_row(*(cells[column.key] for column in columns))
+
+    def _row_cells(self, idx: int, instance: dict, memory_service: Any) -> Dict[str, Any]:
+        """Every column's cell for one server, by column key."""
+        limits = {column.key: column.max_width for column in COLUMNS}
+
+        def plain(key: str, value: Any) -> Text:
+            return _fit(str(value or "") or _EMPTY, limits[key])
+
+        state = instance.get("state", "") or ""
+        coloured = self._colorize_state(state)
+        return {
+            "index": str(idx + 1),
+            "name": plain("name", instance.get("name")),
+            # A state without a colour is provider text: never read as markup.
+            "state": coloured if coloured != state else plain("state", state),
+            "provider": plain("provider", instance.get("provider", "AWS")),
+            "public_ip": plain("public_ip", instance.get("public_ip")),
+            "type": plain("type", instance.get("type")),
+            "region": plain("region", instance.get("region")),
+            "private_ip": plain("private_ip", instance.get("private_ip")),
+            "id": plain("id", instance.get("id")),
+            "key": plain("key", _key_label(instance.get("key_name") or "")),
+            "ssh": self._ssh_verify_cell(instance),
+            "memory": self._memory_icon(instance, memory_service),
+        }
+
+    def _optional_cell(self, key: str, instance: dict) -> Optional[str]:
+        """The cell an optional column shows for *instance*, or None if nothing."""
+        if key == "ssh":
+            from servonaut.utils.formatting import format_ssh_verify_state
+
+            cell = self._ssh_verify_cell(instance)
+            return None if cell == format_ssh_verify_state(None, None) else cell
+        return None
 
     def _ssh_verify_cell(self, instance: dict) -> str:
         """Return Rich-markup badge for the SSH verify status column.

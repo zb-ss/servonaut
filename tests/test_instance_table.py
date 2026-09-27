@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from servonaut.widgets.instance_table import InstanceTable
+from servonaut.widgets.instance_table import COLUMNS, InstanceTable
 from servonaut.utils.formatting import format_ssh_verify_state
 
 
@@ -29,60 +29,16 @@ def _make_table() -> InstanceTable:
 # Column presence
 # ---------------------------------------------------------------------------
 
-class TestSetupColumns:
-    def test_ssh_column_added(self):
-        """_setup_columns must add a column with key='ssh'."""
-        calls = []
+class TestColumns:
+    def test_ssh_column_sits_between_key_and_mem(self):
+        """The SSH verify column is listed after Key and before Mem."""
+        keys = [column.key for column in COLUMNS]
+        assert keys.index("key") < keys.index("ssh") < keys.index("memory")
 
-        class FakeTable:
-            def add_column(self, label, **kwargs):
-                calls.append((label, kwargs))
-
-        ft = FakeTable()
-        # Borrow the method and bind it to the fake table.
-        InstanceTable._setup_columns(ft)
-
-        keys = [kw.get("key") for _, kw in calls]
-        assert "ssh" in keys, f"Expected 'ssh' key in columns; got {keys}"
-
-    def test_ssh_column_between_key_and_mem(self):
-        """'SSH' column must be inserted between 'Key' and 'Mem'."""
-        calls = []
-
-        class FakeTable:
-            def add_column(self, label, **kwargs):
-                calls.append((label, kwargs))
-
-        ft = FakeTable()
-        InstanceTable._setup_columns(ft)
-
-        labels = [label for label, _ in calls]
-        assert "Key" in labels and "SSH" in labels and "Mem" in labels
-        key_idx = labels.index("Key")
-        ssh_idx = labels.index("SSH")
-        mem_idx = labels.index("Mem")
-        assert key_idx < ssh_idx < mem_idx, (
-            f"Expected Key < SSH < Mem in column order; got indices "
-            f"Key={key_idx}, SSH={ssh_idx}, Mem={mem_idx}"
-        )
-
-    def test_ssh_column_width(self):
-        """SSH column should have width=14."""
-        calls = []
-
-        class FakeTable:
-            def add_column(self, label, **kwargs):
-                calls.append((label, kwargs))
-
-        ft = FakeTable()
-        InstanceTable._setup_columns(ft)
-
-        ssh_entry = next(
-            (kw for label, kw in calls if kw.get("key") == "ssh"),
-            None,
-        )
-        assert ssh_entry is not None, "SSH column not found"
-        assert ssh_entry.get("width") == 14
+    def test_ssh_column_is_optional(self):
+        """The SSH column is left out while no server has a verify result."""
+        ssh = next(column for column in COLUMNS if column.key == "ssh")
+        assert ssh.optional
 
 
 # ---------------------------------------------------------------------------

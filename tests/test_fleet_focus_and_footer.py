@@ -163,3 +163,73 @@ async def test_a_screen_never_opens_with_the_sidebar_focused() -> None:
         # how start-up timing orders the two differs between Python versions.
         assert sidebar.focusable_at_mount == []
         assert not [widget for widget in sidebar.query("*") if widget.can_focus]
+
+
+# ---------------------------------------------------------------------------
+# Footer width
+# ---------------------------------------------------------------------------
+
+
+def _footer_layout(screen: Screen) -> tuple:
+    """The footer's width, its drawn keys and where the palette key starts."""
+    from textual.widgets import Footer
+    from textual.widgets._footer import FooterKey
+
+    footer = screen.query_one(Footer)
+    keys = [key for key in footer.query(FooterKey) if "-command-palette" not in key.classes]
+    palette = [key for key in footer.query(FooterKey) if "-command-palette" in key.classes]
+    right_edge = palette[0].region.x if palette else footer.region.right
+    return footer, keys, right_edge
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [80, 100, 120, 160, 220])
+async def test_every_footer_label_is_drawn_whole(width: int) -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(width, 30)) as pilot:
+        screen = await _open_fleet(pilot)
+        await pilot.pause()
+        _, keys, right_edge = _footer_layout(screen)
+        assert keys, "the footer lists no shortcut"
+        cut = [
+            f"{key.key} {key.description}"
+            for key in keys
+            if key.region.right > right_edge or key.region.width < key.get_content_width(
+                key.size, key.size
+            )
+        ]
+        assert not cut, f"cut at {width} columns: {cut}"
+
+
+@pytest.mark.asyncio
+async def test_the_footer_refits_when_the_terminal_is_resized() -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(220, 30)) as pilot:
+        screen = await _open_fleet(pilot)
+        wide = {key.key for key in _footer_layout(screen)[1]}
+        await pilot.resize_terminal(100, 30)
+        for _ in range(5):
+            await pilot.pause()
+        narrow = {key.key for key in _footer_layout(screen)[1]}
+        assert narrow < wide
+        # The most useful shortcuts stay.
+        assert {"o", "slash", "s"} <= narrow
+
+
+@pytest.mark.asyncio
+async def test_shortcuts_left_out_of_the_footer_still_work() -> None:
+    app = _FleetHost()
+    async with app.run_test(size=(80, 30)) as pilot:
+        screen = await _open_fleet(pilot)
+        shown = {key.key for key in _footer_layout(screen)[1]}
+        assert "y" not in shown
+        ran = []
+        screen.action_copy_row = lambda: ran.append("copy")
+        await pilot.press("y")
+        assert ran == ["copy"]
+
+
+def test_every_fleet_shortcut_has_a_footer_rank() -> None:
+    actions = {binding.action for binding in InstanceListScreen.BINDINGS if binding.show}
+    # Enter is DataTable's own key on the fleet; "o" is its footer entry.
+    assert actions <= set(InstanceListScreen.FOOTER_PRIORITY)

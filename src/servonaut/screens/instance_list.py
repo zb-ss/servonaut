@@ -12,6 +12,7 @@ from textual.widgets import Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._footer_fit import fit_footer
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
@@ -92,11 +93,39 @@ class InstanceListScreen(Screen):
     # shortcut above work straight away; "/" moves to the search box.
     AUTO_FOCUS = "InstanceTable"
 
+    # The footer lists as many shortcuts as fit on one line, in this order
+    # of usefulness; the rest stay bound, and the help screen lists them all.
+    FOOTER_PRIORITY = (
+        "select_instance",
+        "focus_search",
+        "ssh_connect",
+        "run_command",
+        "browse_files",
+        "view_logs",
+        "open_memory",
+        "scp_transfer",
+        "refresh",
+        "ai_analysis",
+        "copy_row",
+        "verify_ssh",
+        "manage_ssh_ref",
+        "fleet_db_scan",
+    )
+
     # Debounce delay for search input (seconds)
     _SEARCH_DEBOUNCE = 0.15
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
+
+    @property
+    def active_bindings(self):
+        """Active bindings, with the footer kept to the shortcuts that fit."""
+        return fit_footer(super().active_bindings, self, self.FOOTER_PRIORITY)
+
+    def on_resize(self) -> None:
+        """Re-fit the footer to the new width."""
+        self.refresh_bindings()
 
     def __init__(self, initial_search: str = "") -> None:
         """Initialize instance list screen.
