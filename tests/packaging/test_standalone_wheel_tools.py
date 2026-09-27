@@ -234,6 +234,14 @@ def _write_project(path: Path, version: str) -> Path:
     return path
 
 
+# The wheel tools run on the locked build interpreter and read pyproject.toml
+# with the standard library's tomllib, which Python 3.10 does not have.
+requires_tomllib = pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="reading pyproject.toml needs tomllib (Python 3.11+)"
+)
+
+
+@requires_tomllib
 @pytest.mark.parametrize("version", ["2.28.0", "2.28.0rc1", "2.28.0rc12"])
 def test_project_version_may_be_a_release_or_a_release_candidate(
     tmp_path: Path, version: str
@@ -243,6 +251,7 @@ def test_project_version_may_be_a_release_or_a_release_candidate(
     assert _read_project_version(project, LIMITS.max_metadata_bytes) == version
 
 
+@requires_tomllib
 @pytest.mark.parametrize(
     "version", ["2.28", "2.28.0rc0", "2.28.0-rc1", "2.28.0.rc1", "2.28.0a1", "2.28.0.dev1"]
 )
