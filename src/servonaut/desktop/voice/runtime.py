@@ -124,6 +124,10 @@ _LAUNCHER_MODULE: Final = "servonaut.desktop.voice.release_lock"
 # Native stacks the voice worker imports. Importing sounddevice loads PortAudio,
 # so this also proves the native audio library is present.
 _ENGINE_MODULES: Final = ("numpy", "sounddevice", "faster_whisper", "sherpa_onnx")
+# What sounddevice raises when the PortAudio shared library is missing. On
+# Linux the library comes from the system; the desktop package depends on it.
+_PORTAUDIO_MISSING: Final = "PortAudio library not found"
+_PORTAUDIO_LINUX_PACKAGE: Final = "libportaudio2"
 
 # Process-control mechanics, not policy: how often a running step is checked,
 # how long a killed step may take to exit, how long an operation waits out a
@@ -1515,14 +1519,24 @@ def _smoke_test(
         runner.run(_SMOKE_STEP, [str(target.python), "-I", "-c", imports], env=env)
     except VoiceRuntimeCommandError as error:
         raise VoiceRuntimeSmokeError(
-            _SMOKE_STEP,
-            f"The voice engines could not be loaded{_last_line_suffix(error.output)}",
-            error.output,
+            _SMOKE_STEP, _engine_load_failure(error.output), error.output
         ) from error
     request = HandshakeRequest(id=secrets.token_hex(8), client_version=target.product_version)
     argv = _worker_argv(target.directory, models_root, target.runtime_id)
     response = runner.handshake(_SMOKE_STEP, argv, request, env=env)
     _check_handshake(response, target)
+
+
+def _engine_load_failure(output: str, platform_name: str = sys.platform) -> str:
+    """Explain an engine import failure, naming the package a Linux host lacks."""
+    message = f"The voice engines could not be loaded{_last_line_suffix(output)}"
+    if _PORTAUDIO_MISSING in output and platform_name.startswith("linux"):
+        message = (
+            f"{message.rstrip('.')}. Install the PortAudio system library: the "
+            f"{_PORTAUDIO_LINUX_PACKAGE} package on Debian and Ubuntu "
+            f"(sudo apt install {_PORTAUDIO_LINUX_PACKAGE})."
+        )
+    return message
 
 
 def _check_handshake(response: VoiceResponse, target: _SmokeTarget) -> None:

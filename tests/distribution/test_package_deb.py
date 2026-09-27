@@ -185,6 +185,10 @@ class TestDebControlMetadata:
             "gir1.2-webkit2-4.1",
         } <= declared
 
+    def test_dependencies_declare_portaudio_for_voice_input(self) -> None:
+        """Voice input imports sounddevice, which loads the system PortAudio."""
+        assert "libportaudio2" in DEFAULT_DEPENDENCIES
+
     def test_control_file_fields_and_dependencies(
         self, mock_payload: Path, tmp_path: Path
     ) -> None:
