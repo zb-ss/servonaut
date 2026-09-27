@@ -202,9 +202,9 @@ def test_the_window_needs_a_display(
 def test_the_window_smoke_covers_only_its_policy_targets(
     tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
 ) -> None:
-    with pytest.raises(window_smoke.WindowSmokeError, match="does not cover macos-arm64"):
+    with pytest.raises(window_smoke.WindowSmokeError, match="does not cover windows-x64"):
         window_smoke.run_window_smoke(
-            tmp_path, "macos-arm64", policy, screenshot=None, inherited=_DISPLAY
+            tmp_path, "windows-x64", policy, screenshot=None, inherited=_DISPLAY
         )
 
 

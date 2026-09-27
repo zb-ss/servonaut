@@ -1,13 +1,14 @@
 """Open the packaged desktop window and prove its page reaches the app.
 
-Starts the frozen ``servonaut-desktop`` launcher the way a user does, on the X
-display of the calling environment (``xvfb-run`` in CI) and with an isolated
-HOME. The check passes once the private child logs that the page opened the
-authenticated session WebSocket. Getting there needs the GTK binding, the
-native window, the page, the one-shot session hand-over and the host to work
-together, so a window that stays blank never passes. The window is then
-photographed and the launcher stopped; every process it started must exit
-with it.
+Starts the frozen ``servonaut-desktop`` launcher the way a user does, with an
+isolated HOME: on Linux on the X display of the calling environment
+(``xvfb-run`` in CI), on macOS in the calling user's login session, from the
+executable inside the app bundle. The check passes once the private child
+logs that the page opened the authenticated session WebSocket. Getting there
+needs the window toolkit binding, the native window, the page, the one-shot
+session hand-over and the host to work together, so a window that stays blank
+never passes. The window is then photographed and the launcher stopped; every
+process it started must exit with it.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -41,6 +43,15 @@ _LAUNCHER_LOG = Path(".servonaut") / "logs" / "desktop.log"
 # an empty one would hide tools the host's GTK stack may start.
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 _DISPLAY_VARIABLES = ("DISPLAY", "XAUTHORITY")
+# Linux lists processes in /proc; macOS has no /proc and asks ps.
+_PS = "/bin/ps"
+_PS_TIMEOUT_SECONDS = 10
+# Photographs of the whole screen: ImageMagick's import on an X display, the
+# system's screencapture (silent, -x) in a macOS session.
+_SCREENSHOT_COMMANDS = {
+    "linux": ("import", ("-window", "root")),
+    "darwin": ("screencapture", ("-x",)),
+}
 _POLL_SECONDS = 0.25
 _OS_RELEASE = Path("/etc/os-release")
 _DIAGNOSTIC_TAIL_BYTES = 4000
@@ -67,8 +78,11 @@ class WindowSmokeReport:
         return json.dumps(asdict(self), indent=2) + "\n"
 
 
-def host_platform(os_release: Path = _OS_RELEASE) -> str:
-    """The distribution the window ran on, such as ``ubuntu-24.04``."""
+def host_platform(os_release: Path = _OS_RELEASE, *, system: str = sys.platform) -> str:
+    """The system the window ran on, such as ``ubuntu-24.04`` or ``macos-15.6``."""
+    if system == "darwin":
+        version = platform.mac_ver()[0]
+        return f"macos-{version}" if version else "unknown"
     fields: dict[str, str] = {}
     try:
         lines = os_release.read_text(encoding="utf-8").splitlines()
@@ -89,8 +103,19 @@ def session_connected(log_text: str) -> bool:
     return any(line.endswith(SESSION_CONNECTED_LINE) for line in log_text.splitlines())
 
 
-def window_environment(home: Path, inherited: Mapping[str, str]) -> dict[str, str]:
-    """The isolated smoke environment, plus the display and a private runtime dir."""
+def window_environment(
+    home: Path, inherited: Mapping[str, str], *, system: str = sys.platform
+) -> dict[str, str]:
+    """The isolated smoke environment, plus what the window system needs.
+
+    On Linux that is the X display and a private runtime dir. A macOS app
+    reaches the window server through the login session it is started in, so
+    it needs no variable for it.
+    """
+    if system == "darwin":
+        environment = isolated_child_environment(home)
+        environment["PATH"] = _SYSTEM_PATH
+        return environment
     missing = [name for name in ("DISPLAY",) if not inherited.get(name)]
     if missing:
         raise WindowSmokeError("the window smoke needs an X display; run it under xvfb-run")
@@ -107,6 +132,8 @@ def window_environment(home: Path, inherited: Mapping[str, str]) -> dict[str, st
 
 def process_parents(proc_root: Path = Path("/proc")) -> dict[int, int]:
     """Map every live (non-zombie) process to its parent."""
+    if not proc_root.is_dir():
+        return parse_ps_parents(_ps_listing())
     parents: dict[int, int] = {}
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
@@ -121,6 +148,33 @@ def process_parents(proc_root: Path = Path("/proc")) -> dict[int, int]:
         if len(fields) >= 2 and fields[0] != "Z":
             parents[int(entry.name)] = int(fields[1])
     return parents
+
+
+def parse_ps_parents(listing: str) -> dict[int, int]:
+    """Map live processes to their parents from ``ps -o pid=,ppid=,stat=`` output."""
+    parents: dict[int, int] = {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if not fields[2].startswith("Z"):
+            parents[int(fields[0])] = int(fields[1])
+    return parents
+
+
+def _ps_listing() -> str:
+    try:
+        completed = subprocess.run(
+            [_PS, "-A", "-o", "pid=,ppid=,stat="],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_SECONDS,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise WindowSmokeError(f"the process list could not be read: {error}") from error
+    return completed.stdout
 
 
 def descendants(root: int, parents: Mapping[int, int]) -> set[int]:
@@ -162,8 +216,13 @@ def run_window_smoke(
     *,
     screenshot: Path | None,
     inherited: Mapping[str, str] = os.environ,
+    system: str = sys.platform,
 ) -> WindowSmokeReport:
-    """Launch the packaged window, wait for its session, photograph it, stop it."""
+    """Launch the packaged window, wait for its session, photograph it, stop it.
+
+    ``payload_root`` holds the launcher: the onedir payload, or the
+    ``Contents/MacOS`` directory of a macOS app bundle.
+    """
     if target_name not in policy.window_smoke_targets:
         raise WindowSmokeError(f"the window smoke does not cover {target_name}")
     launcher = payload_root.resolve(strict=True) / "servonaut-desktop"
@@ -173,7 +232,7 @@ def run_window_smoke(
     with tempfile.TemporaryDirectory(prefix="servonaut-desktop-window-") as scratch:
         home = Path(scratch) / "home"
         home.mkdir(mode=0o700)
-        environment = window_environment(home, inherited)
+        environment = window_environment(home, inherited, system=system)
         stderr_path = Path(scratch) / "launcher-stderr.txt"
         with stderr_path.open("wb") as stderr:
             process = subprocess.Popen(
@@ -194,13 +253,13 @@ def run_window_smoke(
             )
             connect_elapsed_ms = int((time.monotonic() - started) * 1000)
             if not reached or process.poll() is not None:
-                _capture_screenshot(screenshot, inherited, required=False)
+                _capture_screenshot(screenshot, inherited, required=False, system=system)
                 raise WindowSmokeError(
                     _startup_failure(process, policy, reached)
                     + _diagnostics(home, stderr_path)
                 )
             time.sleep(policy.window_render_settle_seconds)
-            captured = _capture_screenshot(screenshot, inherited, required=True)
+            captured = _capture_screenshot(screenshot, inherited, required=True, system=system)
             started_tree = descendants(process.pid, process_parents())
             exit_code = _stop_launcher(process, policy)
             tree_exited = wait_until(
@@ -217,7 +276,7 @@ def run_window_smoke(
 
     return WindowSmokeReport(
         target=target_name,
-        host_platform=host_platform(),
+        host_platform=host_platform(system=system),
         session_connected=True,
         connect_elapsed_ms=connect_elapsed_ms,
         screenshot_captured=captured,
@@ -265,22 +324,27 @@ def _kill_leftovers(process: subprocess.Popen[bytes], tree: set[int]) -> None:
 
 
 def _capture_screenshot(
-    destination: Path | None, inherited: Mapping[str, str], *, required: bool
+    destination: Path | None,
+    inherited: Mapping[str, str],
+    *,
+    required: bool,
+    system: str = sys.platform,
 ) -> bool:
-    """Photograph the whole display with ImageMagick's ``import``.
+    """Photograph the whole screen with the system's screenshot tool.
 
     A failed run is photographed on a best-effort basis; the photograph of a
     connected window is required.
     """
     if destination is None:
         return False
-    program = shutil.which("import", path=inherited.get("PATH"))
+    name, arguments = _SCREENSHOT_COMMANDS.get(system, _SCREENSHOT_COMMANDS["linux"])
+    program = shutil.which(name, path=inherited.get("PATH"))
     captured = False
     if program is not None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             completed = subprocess.run(
-                [program, "-window", "root", str(destination)],
+                [program, *arguments, str(destination)],
                 env=dict(inherited),
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -291,7 +355,7 @@ def _capture_screenshot(
         except (OSError, subprocess.TimeoutExpired):
             captured = False
     if required and not captured:
-        raise WindowSmokeError("the display could not be photographed with import")
+        raise WindowSmokeError(f"the display could not be photographed with {name}")
     return captured
 
 
@@ -317,8 +381,9 @@ def _read_text(path: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="window_smoke",
-        description="Open the packaged desktop window under an X display and "
-        "require its page to open the authenticated session.",
+        description="Open the packaged desktop window (under an X display on "
+        "Linux, in the login session on macOS) and require its page to open "
+        "the authenticated session.",
     )
     parser.add_argument("--payload-root", type=Path, required=True)
     parser.add_argument("--target", required=True)
