@@ -15,6 +15,8 @@ from typing import Any, Awaitable, Callable
 import pytest
 from textual.widgets import Button, DataTable
 
+from servonaut.screens.settings.registry import PANELS
+
 from . import _harness
 
 Scenario = Callable[[Any], Awaitable[None]]
@@ -83,7 +85,7 @@ def _settings(panel_id: str) -> Scenario:
         screen = await _harness.wait_for_screen(pilot, "SettingsScreen")
         await _harness.wait_until(
             pilot,
-            lambda: screen.query_one(f"#save_{panel_id}").display,
+            lambda: screen.query_one(f"#panel_{panel_id}").display,
             f"the {panel_id} settings panel",
         )
 
@@ -173,6 +175,23 @@ def test_settings_general(screen_snapshot, size: str) -> None:
 def test_settings_hetzner(screen_snapshot, size: str) -> None:
     """Settings, Hetzner Cloud panel."""
     _capture(screen_snapshot, size, _settings("hetzner"))
+
+
+# The other Settings panels, at the narrow size, where each label sits above
+# its field. Left out: panels whose content depends on the machine running
+# the tests (whether the Bitwarden CLI or the voice packages are installed).
+_MACHINE_DEPENDENT_PANELS = {"bw_ssh", "voice"}
+_NARROW_PANELS = [
+    spec.id
+    for spec in PANELS
+    if spec.id not in {"general", "hetzner"} | _MACHINE_DEPENDENT_PANELS
+]
+
+
+@pytest.mark.parametrize("panel_id", _NARROW_PANELS)
+def test_settings_panel_narrow(screen_snapshot, panel_id: str) -> None:
+    """A Settings panel on the narrow terminal."""
+    _capture(screen_snapshot, "100x30", _settings(panel_id))
 
 
 @sizes
