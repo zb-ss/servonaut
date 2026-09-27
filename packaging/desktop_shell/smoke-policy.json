@@ -11,10 +11,16 @@
   "mcp_request_timeout_seconds": 20,
   "mcp_shutdown_timeout_seconds": 10,
   "mcp_frame_max_bytes": 1048576,
+  "window_session_timeout_seconds": 120,
+  "window_render_settle_seconds": 3,
+  "window_shutdown_timeout_seconds": 20,
   "selftest_targets": [
     "linux-x64-ubuntu-22.04",
     "windows-x64",
     "macos-x64",
     "macos-arm64"
+  ],
+  "window_smoke_targets": [
+    "linux-x64-ubuntu-22.04"
   ]
 }

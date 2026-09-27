@@ -168,6 +168,27 @@ class TestDebPackageStructure:
 class TestDebControlMetadata:
     """Tests validating control.tar.gz metadata and dependencies."""
 
+    def test_dependencies_declare_the_libraries_the_gtk_binding_links(self) -> None:
+        """The payload never bundles them, so the package must pull them in."""
+        declared = {
+            alternative.split()[0]
+            for dependency in DEFAULT_DEPENDENCIES
+            for alternative in dependency.split("|")
+        }
+        assert {
+            "libgirepository-1.0-1",
+            "libglib2.0-0",
+            "libcairo2",
+            "libcairo-gobject2",
+            "libffi8",
+            "gir1.2-gtk-3.0",
+            "gir1.2-webkit2-4.1",
+        } <= declared
+
+    def test_dependencies_declare_portaudio_for_voice_input(self) -> None:
+        """Voice input imports sounddevice, which loads the system PortAudio."""
+        assert "libportaudio2" in DEFAULT_DEPENDENCIES
+
     def test_control_file_fields_and_dependencies(
         self, mock_payload: Path, tmp_path: Path
     ) -> None:
@@ -694,3 +715,110 @@ class TestDebPackagingAssets:
             if asset.suffix == ".svg":
                 continue
             assert "@example." not in asset.read_text(encoding="utf-8"), asset.name
+
+
+# Over 100 characters, so it does not fit a ustar link field.
+_LONG_LINK_TARGET = (
+    "a-directory-with-a-rather-long-name/"
+    "nested-directory-with-another-long-name/"
+    "the-file-the-link-points-at.txt"
+)
+_NON_ASCII_NAME = "café-notice.txt"
+
+
+@pytest.fixture
+def awkward_payload(mock_payload: Path) -> Path:
+    """A payload with the entries that make Python's default tar format write PAX headers."""
+    internal = mock_payload / "_internal"
+    target = internal / _LONG_LINK_TARGET
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"linked\n")
+    os.symlink(_LONG_LINK_TARGET, internal / "long-link")
+    (internal / _NON_ASCII_NAME).write_bytes(b"notice\n")
+    return mock_payload
+
+
+def _awkward_deb(payload: Path, tmp_path: Path) -> Path:
+    deb_path, _, _ = package_deb(
+        payload_dir=payload,
+        maintainer=_MAINTAINER,
+        output_dir=tmp_path / "out",
+        product_version="2.26.3",
+    )
+    return deb_path
+
+
+class TestDebArchiveFormat:
+    """dpkg's own unpacker rejects PAX extended headers, so neither archive may carry any."""
+
+    def test_archives_carry_no_pax_headers_and_round_trip(
+        self, awkward_payload: Path, tmp_path: Path
+    ) -> None:
+        assert len(_LONG_LINK_TARGET) > 100
+        deb_path = _awkward_deb(awkward_payload, tmp_path)
+
+        members = _parse_ar_archive(deb_path)
+        for name, data in ((members[1][0], members[1][5]), (members[2][0], members[2][5])):
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                assert tar.pax_headers == {}, name
+                assert all(member.pax_headers == {} for member in tar.getmembers()), name
+
+        data_members = _data_members(deb_path)
+        link = data_members["./opt/servonaut/_internal/long-link"]
+        assert link.issym() and link.linkname == _LONG_LINK_TARGET
+        assert data_members[f"./opt/servonaut/_internal/{_NON_ASCII_NAME}"].isfile()
+        assert f"opt/servonaut/_internal/{_NON_ASCII_NAME}" in _md5sums_paths(deb_path)
+
+    @pytest.mark.skipif(shutil.which("dpkg-deb") is None, reason="dpkg-deb tool not installed")
+    def test_dpkg_deb_lists_and_extracts_the_awkward_entries(
+        self, awkward_payload: Path, tmp_path: Path
+    ) -> None:
+        deb_path = _awkward_deb(awkward_payload, tmp_path)
+
+        contents = subprocess.run(
+            ["dpkg-deb", "--contents", str(deb_path)],
+            capture_output=True,
+            check=True,
+        ).stdout.decode("utf-8")
+        extract_dir = tmp_path / "extracted"
+        subprocess.run(["dpkg-deb", "-x", str(deb_path), str(extract_dir)], check=True)
+
+        assert f"./opt/servonaut/_internal/long-link -> {_LONG_LINK_TARGET}" in contents
+        internal = extract_dir / "opt" / "servonaut" / "_internal"
+        assert (internal / "long-link").read_bytes() == b"linked\n"
+        assert (internal / _NON_ASCII_NAME).read_bytes() == b"notice\n"
+
+    @pytest.mark.skipif(shutil.which("dpkg") is None, reason="dpkg not installed")
+    def test_dpkg_unpacks_the_package_itself(
+        self, awkward_payload: Path, tmp_path: Path
+    ) -> None:
+        """dpkg-deb extracts with an external tar; dpkg's own unpacker is the strict one."""
+        deb_path = _awkward_deb(awkward_payload, tmp_path)
+        root = tmp_path / "root"
+        admin = root / "var" / "lib" / "dpkg"
+        (admin / "updates").mkdir(parents=True)
+        (admin / "info").mkdir()
+        (admin / "status").touch()
+        (admin / "available").touch()
+
+        result = subprocess.run(
+            [
+                "dpkg",
+                "--force-not-root",
+                "--force-script-chrootless",
+                "--force-depends",
+                f"--root={root}",
+                f"--admindir={admin}",
+                "--log=/dev/null",
+                "--unpack",
+                str(deb_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        internal = root / "opt" / "servonaut" / "_internal"
+        assert (internal / "long-link").readlink() == Path(_LONG_LINK_TARGET)
+        assert (internal / _NON_ASCII_NAME).read_bytes() == b"notice\n"

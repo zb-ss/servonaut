@@ -21,6 +21,11 @@ textual-serve==1.1.3
 pywebview==6.2.1
 aiohttp==3.14.3
 aiohttp-jinja2>=1.6
+# pywebview's GTK binding on Linux, built from source against the host GLib.
+# pywebview's gtk extra would select PyGObject 3.50+, which needs GLib 2.80;
+# Ubuntu 22.04 ships 2.72.
+PyGObject==3.48.2 ; sys_platform == "linux"
+pycairo>=1.26.0 ; sys_platform == "linux"
 
 # Build and evidence tooling retained in the isolated build environment.
 pyinstaller==6.22.3

@@ -702,11 +702,39 @@ class TestFailureKeepsThePreviousRelease:
         )
         manager = bundle.manager()
 
-        with pytest.raises(VoiceRuntimeSmokeError, match="PortAudio library not found"):
+        with pytest.raises(VoiceRuntimeSmokeError, match="PortAudio library not found") as caught:
             manager.provision()
 
         assert manager.status().state is VoiceRuntimeState.NOT_INSTALLED
         assert _staging_entries(manager) == []
+        if sys.platform.startswith("linux"):
+            assert "libportaudio2" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("platform_name", "names_package"),
+        [("linux", True), ("darwin", False), ("win32", False)],
+    )
+    def test_a_missing_portaudio_names_the_linux_package(
+        self, platform_name: str, names_package: bool
+    ) -> None:
+        output = "Traceback (most recent call last):\nOSError: PortAudio library not found\n"
+
+        message = runtime_module._engine_load_failure(output, platform_name)
+
+        assert message.startswith(
+            "The voice engines could not be loaded: OSError: PortAudio library not found"
+        )
+        assert ("sudo apt install libportaudio2" in message) is names_package
+
+    def test_other_engine_failures_keep_their_last_line(self) -> None:
+        message = runtime_module._engine_load_failure(
+            "ModuleNotFoundError: No module named 'sherpa_onnx'\n", "linux"
+        )
+
+        assert message == (
+            "The voice engines could not be loaded: "
+            "ModuleNotFoundError: No module named 'sherpa_onnx'"
+        )
 
     def test_worker_that_cannot_start_fails_the_smoke_test(self, bundle: VoiceBundle) -> None:
         bundle.behave(**{"empty-wheel": True})

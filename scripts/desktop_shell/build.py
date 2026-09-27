@@ -18,6 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.desktop_shell.assets import stage_frontend_assets
+from scripts.desktop_shell.linux_abi import (
+    GI_ROOT_NAMESPACES,
+    LinuxAbiError,
+    LinuxGiBinding,
+    validate_gi_binding_probe,
+)
 from scripts.desktop_shell.model import (
     EMBEDDED_NOTICE_POLICY_PATH,
     EXECUTABLE_ROLES,
@@ -35,6 +41,15 @@ from scripts.desktop_shell.model import (
     load_voice_runtime_policy,
     validate_desktop_build_request,
     voice_lock_path,
+)
+from scripts.desktop_shell.source_notices import (
+    SOURCE_NOTICE_POLICY_PATH,
+    SourceNoticeError,
+    SourceNoticeRecord,
+    load_source_notice_policy,
+    stage_source_notices,
+    validate_payload_source_notices,
+    write_source_notice_metadata,
 )
 from scripts.desktop_shell.voice_bundle import load_voice_lock, stage_voice_bundle
 
@@ -74,6 +89,11 @@ _GUI_ENTRY = _ENTRIES_DIR / "servonaut_desktop.py"
 _CHILD_ENTRY = _ENTRIES_DIR / "servonaut_desktop_child.py"
 _HOOKS_DIR = _PACKAGING_DIR / "hooks"
 _SOURCE_BUILD_TOOLS_LOCK = _PACKAGING_DIR / "requirements" / "source-build-tools.txt"
+# Linux only: the meson toolchain that builds PyGObject and pycairo from source.
+_GI_BUILD_TOOLS_LOCK = _PACKAGING_DIR / "requirements" / "linux-gi-build-tools.txt"
+# PyGObject compiles against pycairo's headers, so pycairo is installed first.
+_GI_BUILD_PREREQUISITE = "pycairo"
+_GI_BINDING_PROBE = Path(__file__).resolve().with_name("linux_gi_probe.py")
 _STANDALONE_POLICY_PATH = (
     _REPO_ROOT / "packaging" / "standalone_cli" / "target-policy.json"
 )
@@ -118,6 +138,8 @@ class _BuildContext:
 class _StagedNotices:
     runtime: _RuntimeNoticeSource
     embedded: StagedEmbeddedNotices
+    # Linux: license texts from the source archives of the GTK binding.
+    source: tuple[SourceNoticeRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,6 +152,7 @@ class _SpecInputs:
     metadata_dir: Path
     frontend_dir: Path
     notices: _StagedNotices
+    gi_binding: LinuxGiBinding | None
 
     def spec_environment(
         self, base: dict[str, str], dist_dir: Path
@@ -215,7 +238,9 @@ def _build_staged_payload(
     _validate_payload_notices(payload, inputs.notices, policy.max_metadata_file_bytes)
     _expose_frontend(payload, inputs.frontend_dir)
     _write_runtime_marker(payload, request)
-    _capture_build_metadata(work_dir, inputs.metadata_dir, request, inputs.notices)
+    _capture_build_metadata(
+        work_dir, inputs.metadata_dir, request, inputs.notices, inputs.gi_binding
+    )
     return payload, inputs.metadata_dir
 
 
@@ -241,6 +266,11 @@ def _prepare_spec_inputs(
     pip_report = staging_root / "pip-report.json"
     _install_locked_environment(context, request, pip_report)
     site_packages = _site_packages(context)
+    gi_binding = (
+        _probe_gi_binding(context, site_packages)
+        if request.target.linux_abi is not None
+        else None
+    )
     frontend_dir = _stage_frontend(
         staging_root / "frontend", site_packages, request.target
     )
@@ -249,11 +279,12 @@ def _prepare_spec_inputs(
     )
     return _SpecInputs(
         cli_entry=_write_cli_entry(staging_root),
-        profile=_write_profile(staging_root, request),
+        profile=_write_profile(staging_root, request, gi_binding),
         site_packages=site_packages,
         metadata_dir=metadata_dir,
         frontend_dir=frontend_dir,
         notices=notices,
+        gi_binding=gi_binding,
     )
 
 
@@ -285,7 +316,10 @@ def _require_builder_inputs() -> None:
         _GUI_ENTRY,
         _CHILD_ENTRY,
         _SOURCE_BUILD_TOOLS_LOCK,
+        _GI_BUILD_TOOLS_LOCK,
+        _GI_BINDING_PROBE,
         EMBEDDED_NOTICE_POLICY_PATH,
+        SOURCE_NOTICE_POLICY_PATH,
     ):
         if not path.is_file():
             raise DesktopPolicyValidationError(
@@ -345,6 +379,10 @@ def _install_locked_environment(
         timeout_seconds=timeout,
         step="source build tool installation",
     )
+    environment = context.environment
+    if request.target.linux_abi is not None:
+        environment = {**environment, **_meson_environment(context.python)}
+        _install_gi_build_prerequisites(context, request.target, install, environment)
     wheel = request.wheel.resolve(strict=True)
     _run(
         context,
@@ -359,7 +397,92 @@ def _install_locked_environment(
         ],
         timeout_seconds=timeout,
         step="locked dependency installation",
+        environment=environment,
     )
+
+
+def _meson_environment(python: Path) -> dict[str, str]:
+    """Point meson-python at the hash-locked meson and ninja in the build venv."""
+    scripts = python.parent
+    return {"MESON": str(scripts / "meson"), "NINJA": str(scripts / "ninja")}
+
+
+def _install_gi_build_prerequisites(
+    context: _BuildContext,
+    target: DesktopTargetSpec,
+    install: list[str],
+    environment: dict[str, str],
+) -> None:
+    """Install what the PyGObject source build needs before the lock builds it.
+
+    Source builds run without build isolation, so the meson toolchain must be
+    installed first. pip builds every source distribution of one install
+    before it installs any, so pycairo, whose headers PyGObject compiles
+    against, goes in on its own, with the pin and hash of the target lock.
+    """
+    timeout = context.policy.dependency_install_timeout_seconds
+    _run(
+        context,
+        [*install, "-r", str(_GI_BUILD_TOOLS_LOCK)],
+        timeout_seconds=timeout,
+        step="GTK binding build tool installation",
+    )
+    prerequisite = context.working_directory / f"{_GI_BUILD_PREREQUISITE}-requirement.txt"
+    prerequisite.write_text(
+        _locked_requirement(
+            target.requirements_lock.read_text(encoding="utf-8"), _GI_BUILD_PREREQUISITE
+        ),
+        encoding="utf-8",
+    )
+    _run(
+        context,
+        [*install, "--no-build-isolation", "-r", str(prerequisite)],
+        timeout_seconds=timeout,
+        step=f"{_GI_BUILD_PREREQUISITE} source build",
+        environment=environment,
+    )
+
+
+def _locked_requirement(lock_text: str, name: str) -> str:
+    """Return one pinned, hashed requirement of a lock as a source-only requirements file."""
+    lines = iter(lock_text.splitlines())
+    for line in lines:
+        requirement, separator, _ = line.partition("==")
+        if not separator or requirement.strip().lower() != name:
+            continue
+        block = [line]
+        while block[-1].rstrip().endswith("\\"):
+            continuation = next(lines, "")
+            if not continuation.lstrip().startswith("--hash=sha256:"):
+                raise DesktopPolicyValidationError(f"lock entry for {name} is malformed")
+            block.append(continuation)
+        if len(block) < 2:
+            raise DesktopPolicyValidationError(f"lock entry for {name} has no hash")
+        return "\n".join([f"--no-binary {name}", *block]) + "\n"
+    raise DesktopPolicyValidationError(f"target lock does not pin {name}")
+
+
+def _probe_gi_binding(context: _BuildContext, site_packages: Path) -> LinuxGiBinding:
+    """Check the build venv's GTK binding before PyInstaller freezes it."""
+    output = _run(
+        context,
+        [
+            str(context.python),
+            "-I",
+            str(_GI_BINDING_PROBE),
+            json.dumps(dict(GI_ROOT_NAMESPACES)),
+        ],
+        timeout_seconds=context.policy.interpreter_probe_timeout_seconds,
+        step="GTK binding probe",
+    )
+    try:
+        return validate_gi_binding_probe(json.loads(output), site_packages)
+    except json.JSONDecodeError as error:
+        raise DesktopPolicyValidationError(
+            "GTK binding probe did not report JSON"
+        ) from error
+    except LinuxAbiError as error:
+        raise DesktopPolicyValidationError(f"GTK binding is invalid: {error}") from error
 
 
 def _site_packages(context: _BuildContext) -> Path:
@@ -398,10 +521,10 @@ def _stage_frontend(
 
 @contextmanager
 def _notice_errors() -> Iterator[None]:
-    """Report failures of the shared notice code as desktop build errors."""
+    """Report failures of the notice code as desktop build errors."""
     try:
         yield
-    except (BuildValidationError, subprocess.CalledProcessError) as error:
+    except (BuildValidationError, SourceNoticeError, subprocess.CalledProcessError) as error:
         raise DesktopPolicyValidationError(
             f"license notice staging failed: {error}"
         ) from error
@@ -444,7 +567,30 @@ def _stage_notices(
             metadata_dir,
             context.policy.max_metadata_file_bytes,
         )
-    return _StagedNotices(runtime, embedded)
+        source = _stage_source_notices(context, target, embedded.staging_root)
+    return _StagedNotices(runtime, embedded, source)
+
+
+def _stage_source_notices(
+    context: _BuildContext, target: DesktopTargetSpec, staging_root: Path
+) -> tuple[SourceNoticeRecord, ...]:
+    """Stage the license texts of the target's source-built packages as notices.
+
+    They land beside the other third-party notices, where the spec collects
+    every staged notice into the payload.
+    """
+    policy = load_source_notice_policy()
+    if not policy.for_target(target.name):
+        return ()
+    work_dir = context.working_directory / "source-archives"
+    work_dir.mkdir()
+    return stage_source_notices(
+        policy,
+        target.name,
+        target.requirements_lock.read_text(encoding="utf-8"),
+        staging_root,
+        work_dir,
+    )
 
 
 def _validate_payload_notices(
@@ -453,6 +599,7 @@ def _validate_payload_notices(
     with _notice_errors():
         _validate_payload_runtime_notice(payload_root, notices.runtime)
         validate_payload_embedded_notices(payload_root, notices.embedded, max_bytes)
+        validate_payload_source_notices(payload_root, notices.source, max_bytes)
 
 
 def _write_cli_entry(staging_root: Path) -> Path:
@@ -461,10 +608,14 @@ def _write_cli_entry(staging_root: Path) -> Path:
     return cli_entry
 
 
-def _write_profile(staging_root: Path, request: DesktopBuildRequest) -> Path:
+def _write_profile(
+    staging_root: Path,
+    request: DesktopBuildRequest,
+    gi_binding: LinuxGiBinding | None,
+) -> Path:
     target = request.target
     profile_path = staging_root / "desktop_profile.json"
-    profile_data = {
+    profile_data: dict[str, object] = {
         "schema_version": 1,
         "target_name": target.name,
         "target_platform": target.platform,
@@ -476,6 +627,9 @@ def _write_profile(staging_root: Path, request: DesktopBuildRequest) -> Path:
         "hook_directory": str(_HOOKS_DIR.resolve()),
         "require_artifact_selftest": _ARTIFACT_SELFTEST_EMBEDDED,
     }
+    if gi_binding is not None:
+        # The spec leaves these to the host; see linux_abi.REQUIRED_TYPELIBS.
+        profile_data["linux_gi"] = {"host_libraries": list(gi_binding.host_libraries)}
     profile_path.write_text(json.dumps(profile_data, indent=2) + "\n", encoding="utf-8")
     return profile_path
 
@@ -625,6 +779,7 @@ def _capture_build_metadata(
     metadata_dir: Path,
     request: DesktopBuildRequest,
     notices: _StagedNotices,
+    gi_binding: LinuxGiBinding | None = None,
 ) -> None:
     """Persist PyInstaller records before the staging work directory is removed."""
     spec_work_dir = work_dir / _SPEC_PATH.stem
@@ -648,7 +803,8 @@ def _capture_build_metadata(
         write_embedded_notice_metadata(
             metadata_dir / "third-party-notices.json", notices.embedded
         )
-    _write_build_provenance(metadata_dir, request)
+        write_source_notice_metadata(metadata_dir / "source-notices.json", notices.source)
+    _write_build_provenance(metadata_dir, request, gi_binding)
 
 
 def _copy_build_record(source: Path, destination: Path) -> None:
@@ -657,12 +813,16 @@ def _copy_build_record(source: Path, destination: Path) -> None:
     shutil.copy2(source, destination)
 
 
-def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) -> None:
+def _write_build_provenance(
+    metadata_dir: Path,
+    request: DesktopBuildRequest,
+    gi_binding: LinuxGiBinding | None = None,
+) -> None:
     """Write dependency provenance, environment, and build facts."""
     target = request.target
     voice_policy = load_voice_runtime_policy()
     uv_archive = voice_policy.uv_archives[target.name]
-    provenance = {
+    provenance: dict[str, object] = {
         "schema_version": 1,
         "product_version": request.product_version,
         "build_revision": request.build_revision,
@@ -680,6 +840,8 @@ def _write_build_provenance(metadata_dir: Path, request: DesktopBuildRequest) ->
             "uv_archive_sha256": uv_archive.sha256,
         },
     }
+    if gi_binding is not None:
+        provenance["linux_gi"] = gi_binding.to_json()
     (metadata_dir / "dependency-provenance.json").write_text(
         json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

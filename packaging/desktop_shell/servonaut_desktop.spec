@@ -105,6 +105,16 @@ _RUNTIME_METADATA_DISTRIBUTIONS = (
     "textual",
     "textual_serve",
 )
+# Linux: the frozen GTK binding's metadata carries its LGPL license texts.
+_GI_METADATA_DISTRIBUTIONS = ("PyGObject", "pycairo")
+# PyInstaller's GObject runtime hooks point GIO, GLib, GTK, Pango and
+# GdkPixbuf at data and plugins inside the payload. The payload leaves those
+# to the host, so of its GObject runtime hooks only pyi_rth_gi, which adds the
+# bundled typelibs to the search path, stays.
+_HOST_DATA_RUNTIME_HOOKS = frozenset(
+    {"pyi_rth_gio", "pyi_rth_glib", "pyi_rth_gtk", "pyi_rth_gdkpixbuf"}
+)
+_SONAME_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*\.so(?:\.[0-9]+)*$")
 _DIAGNOSTIC_EXIT_BASE = 64
 _DIAGNOSTIC_PHASE_NAMES = (
     "preflight",
@@ -458,9 +468,51 @@ def _validate_environment() -> tuple[
 ) = _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PREFLIGHT, _validate_environment)
 
 
+def _linux_host_libraries(profile: dict[str, object]) -> frozenset[str]:
+    """Return the shared libraries a Linux payload leaves to the host.
+
+    The builder resolved them from the build venv's GTK binding: everything
+    its extension modules and the libraries of its bundled typelibs link.
+    Other targets record none.
+    """
+    linux_gi = profile.get("linux_gi")
+    if linux_gi is None:
+        return frozenset()
+    if (
+        profile.get("target_platform") != "linux"
+        or not isinstance(linux_gi, dict)
+        or set(linux_gi) != {"host_libraries"}
+    ):
+        _fail("profile linux_gi must hold only a Linux target's host libraries")
+    names = linux_gi["host_libraries"]
+    if (
+        not isinstance(names, list)
+        or not names
+        or any(
+            not isinstance(name, str) or not _SONAME_PATTERN.fullmatch(name)
+            for name in names
+        )
+    ):
+        _fail("profile linux_gi host_libraries must list shared library names")
+    return frozenset(names)
+
+
+HOST_LIBRARIES = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_PREFLIGHT, lambda: _linux_host_libraries(PROFILE)
+)
+SITE_PACKAGES = _run_diagnostic_phase(
+    _DIAGNOSTIC_PHASE_PREFLIGHT,
+    lambda: _resolved_environment_path("SERVONAUT_DESKTOP_ISOLATED_SITE_PACKAGES"),
+)
+
+
 def _collect_runtime_metadata() -> list[object]:
     collected: list[object] = []
-    for dist_name in _RUNTIME_METADATA_DISTRIBUTIONS:
+    distributions = (
+        *_RUNTIME_METADATA_DISTRIBUTIONS,
+        *(_GI_METADATA_DISTRIBUTIONS if HOST_LIBRARIES else ()),
+    )
+    for dist_name in distributions:
         try:
             collected.extend(copy_metadata(dist_name))
         except importlib.metadata.PackageNotFoundError:
@@ -515,6 +567,37 @@ def _filter_collected_data(analysis: object) -> object:
     )
 
 
+def _without_host_stack(
+    analysis: object, host_libraries: frozenset[str], site_packages: Path
+) -> tuple[object, object]:
+    """Leave the host's GTK stack, and the data it reads, to the host.
+
+    PyInstaller collects the libraries the GTK binding links as ordinary
+    dependencies. The frozen launcher runs with its contents directory on the
+    library search path, and the WebKit processes it starts inherit that path,
+    so a bundled copy would replace the host's own for GTK and WebKit too. A
+    copy vendored inside a wheel has a name of its own and stays.
+    """
+    binaries = type(analysis.binaries)(
+        entry
+        for entry in analysis.binaries
+        if not _is_host_library(entry, host_libraries, site_packages)
+    )
+    scripts = type(analysis.scripts)(
+        entry for entry in analysis.scripts if entry[0] not in _HOST_DATA_RUNTIME_HOOKS
+    )
+    return binaries, scripts
+
+
+def _is_host_library(
+    entry: tuple[object, ...], host_libraries: frozenset[str], site_packages: Path
+) -> bool:
+    destination = str(entry[0]).replace("\\", "/").rsplit("/", 1)[-1]
+    if destination not in host_libraries:
+        return False
+    return not _is_within(Path(str(entry[1])).resolve(), site_packages)
+
+
 # 1. GUI executable analysis
 a_gui = _run_diagnostic_phase(
     _DIAGNOSTIC_PHASE_ANALYSIS,
@@ -544,6 +627,15 @@ a_cli.datas = _run_diagnostic_phase(
     _DIAGNOSTIC_PHASE_DATA_FILTERING,
     lambda: _filter_collected_data(a_cli),
 )
+
+# Linux: every executable analyses pywebview, so each one would collect the
+# host's GTK stack.
+if HOST_LIBRARIES:
+    for _analysis in (a_gui, a_child, a_cli):
+        _analysis.binaries, _analysis.scripts = _run_diagnostic_phase(
+            _DIAGNOSTIC_PHASE_DATA_FILTERING,
+            lambda: _without_host_stack(_analysis, HOST_LIBRARIES, SITE_PACKAGES),
+        )
 
 pyz_gui = _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PYZ, lambda: PYZ(a_gui.pure))
 pyz_child = _run_diagnostic_phase(_DIAGNOSTIC_PHASE_PYZ, lambda: PYZ(a_child.pure))

@@ -405,3 +405,149 @@ def test_desktop_spec_hidden_imports_name_existing_servonaut_modules() -> None:
             source_root / relative / "__init__.py"
         ).is_file(), module
     assert "servonaut.desktop.dialogs" not in _spec_hidden_imports()
+
+
+class _GiMockAnalysis(_MockAnalysis):
+    """An analysis of a Linux build venv, where pywebview pulls in the GTK binding."""
+
+    def __init__(self, scripts: list[str], **kwargs: object) -> None:
+        super().__init__(scripts, **kwargs)
+        self.scripts = [
+            ("pyiboot01_bootstrap", "/pyinstaller/bootstrap.py", "PYSOURCE"),
+            ("pyi_rth_gi", "/pyinstaller/pyi_rth_gi.py", "PYSOURCE"),
+            ("pyi_rth_gio", "/pyinstaller/pyi_rth_gio.py", "PYSOURCE"),
+            ("pyi_rth_glib", "/pyinstaller/pyi_rth_glib.py", "PYSOURCE"),
+            ("pyi_rth_gtk", "/pyinstaller/pyi_rth_gtk.py", "PYSOURCE"),
+            ("pyi_rth_gdkpixbuf", "/pyinstaller/pyi_rth_gdkpixbuf.py", "PYSOURCE"),
+            ("servonaut_desktop", scripts[0], "PYSOURCE"),
+        ]
+        self.binaries = [
+            ("gi/_gi.cpython-312-x86_64-linux-gnu.so", "/venv/gi/_gi.so", "EXTENSION"),
+            ("libglib-2.0.so.0", "/lib/x86_64-linux-gnu/libglib-2.0.so.0", "BINARY"),
+            ("libcairo.so.2", "/usr/lib/x86_64-linux-gnu/libcairo.so.2", "BINARY"),
+            ("libpython3.12.so.1.0", "/opt/python/lib/libpython3.12.so.1.0", "BINARY"),
+            ("libssl.so.3", "/lib/x86_64-linux-gnu/libssl.so.3", "BINARY"),
+        ]
+
+
+def _set_linux_gi(spec_environment: dict[str, Path], linux_gi: object) -> None:
+    profile_path = spec_environment["SERVONAUT_DESKTOP_PROFILE_PATH"]
+    profile = json.loads(profile_path.read_text())
+    profile["linux_gi"] = linux_gi
+    profile_path.write_text(json.dumps(profile))
+
+
+def _run_gi_spec() -> dict[str, object]:
+    return runpy.run_path(
+        str(_SPEC_PATH),
+        init_globals={
+            "Analysis": _GiMockAnalysis,
+            "PYZ": _MockPYZ,
+            "EXE": _MockEXE,
+            "COLLECT": _MockCOLLECT,
+            "SPECPATH": str(_SPEC_PATH.parent),
+        },
+    )
+
+
+def test_linux_spec_leaves_the_host_gtk_stack_to_the_host(
+    spec_environment: dict[str, Path],
+) -> None:
+    _set_linux_gi(
+        spec_environment, {"host_libraries": ["libglib-2.0.so.0", "libcairo.so.2"]}
+    )
+
+    _run_gi_spec()
+
+    for analysis in _MockAnalysis.instances:
+        assert [entry[0] for entry in analysis.binaries] == [
+            "gi/_gi.cpython-312-x86_64-linux-gnu.so",
+            "libpython3.12.so.1.0",
+            "libssl.so.3",
+        ]
+        assert [entry[0] for entry in analysis.scripts] == [
+            "pyiboot01_bootstrap",
+            "pyi_rth_gi",
+            "servonaut_desktop",
+        ]
+    gui = next(e for e in _MockEXE.instances if e.kwargs.get("name") == "servonaut-desktop")
+    assert [entry[0] for entry in gui.args[1]] == [
+        "pyiboot01_bootstrap",
+        "pyi_rth_gi",
+        "servonaut_desktop",
+    ]
+
+
+def test_linux_spec_keeps_a_copy_vendored_inside_a_wheel(
+    spec_environment: dict[str, Path],
+) -> None:
+    site_packages = spec_environment["SERVONAUT_DESKTOP_ISOLATED_SITE_PACKAGES"]
+    vendored = site_packages / "cairo.libs" / "libcairo.so.2"
+    _set_linux_gi(spec_environment, {"host_libraries": ["libcairo.so.2", "libgtk-3.so.0"]})
+
+    class _VendoredAnalysis(_GiMockAnalysis):
+        def __init__(self, scripts: list[str], **kwargs: object) -> None:
+            super().__init__(scripts, **kwargs)
+            self.binaries = [("cairo.libs/libcairo.so.2", str(vendored), "BINARY")]
+
+    runpy.run_path(
+        str(_SPEC_PATH),
+        init_globals={
+            "Analysis": _VendoredAnalysis,
+            "PYZ": _MockPYZ,
+            "EXE": _MockEXE,
+            "COLLECT": _MockCOLLECT,
+            "SPECPATH": str(_SPEC_PATH.parent),
+        },
+    )
+
+    assert _MockAnalysis.instances[0].binaries == [
+        ("cairo.libs/libcairo.so.2", str(vendored), "BINARY")
+    ]
+
+
+def test_linux_spec_copies_the_binding_metadata(
+    spec_environment: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import PyInstaller.utils.hooks as hooks
+
+    copied: list[str] = []
+    monkeypatch.setattr(hooks, "copy_metadata", lambda name: copied.append(name) or [])
+    _set_linux_gi(spec_environment, {"host_libraries": ["libglib-2.0.so.0"]})
+
+    _run_gi_spec()
+
+    assert {"PyGObject", "pycairo"} <= set(copied)
+
+
+def test_spec_without_a_linux_binding_keeps_every_collected_file(
+    spec_environment: dict[str, Path],
+) -> None:
+    _run_gi_spec()
+
+    analysis = _MockAnalysis.instances[0]
+    assert len(analysis.binaries) == 5
+    assert len(analysis.scripts) == 7
+
+
+@pytest.mark.parametrize(
+    "linux_gi",
+    [
+        {"host_libraries": []},
+        {"host_libraries": ["../libglib-2.0.so.0"]},
+        {"host_libraries": ["libglib-2.0.so.0"], "extra": True},
+        ["libglib-2.0.so.0"],
+    ],
+)
+def test_spec_rejects_a_malformed_linux_binding(
+    spec_environment: dict[str, Path],
+    capsys: pytest.CaptureFixture[str],
+    linux_gi: object,
+) -> None:
+    _set_linux_gi(spec_environment, linux_gi)
+
+    with pytest.raises(SystemExit) as raised:
+        _run_gi_spec()
+
+    assert raised.value.code == 64
+    assert "linux_gi" in capsys.readouterr().err

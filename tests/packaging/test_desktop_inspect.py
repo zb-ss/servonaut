@@ -7,6 +7,7 @@ import hashlib
 import json
 import shutil
 import struct
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ if find_upstream_static_dir() is None:
         "Requires upstream textual-serve static assets directory",
         allow_module_level=True,
     )
+from scripts.desktop_shell.linux_abi import REQUIRED_TYPELIBS
 from scripts.desktop_shell.model import (
     DesktopTargetSpec,
     load_desktop_target_spec,
@@ -38,8 +40,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
 _TARGETS = ("windows-x64", "macos-x64", "macos-arm64", "linux-x64-ubuntu-22.04")
 _NOTICE_DISTRIBUTIONS = ("aaa-one", "bbb-two", "ccc-three", "ddd-four", "eee-five")
+# Notices the Linux target takes from the source archives it builds.
+_SOURCE_NOTICES = ("fff-six-COPYING.txt", "fff-six-COPYING-LGPL.txt")
 _SAFE_TOC = [("servonaut", "/site/servonaut/__init__.py", "PYMODULE")]
 _CPU_TYPES = {"x86_64": 0x01000007, "arm64": 0x0100000C}
+_GI_EXTENSIONS = (
+    "gi/_gi.cpython-312-x86_64-linux-gnu.so",
+    "gi/_gi_cairo.cpython-312-x86_64-linux-gnu.so",
+    "cairo/_cairo.cpython-312-x86_64-linux-gnu.so",
+)
+_GI_BINDING = {
+    "pygobject_version": "3.48.2",
+    "pycairo_version": "1.29.1",
+    "glib_version": "2.72.4",
+    "typelibs": sorted(REQUIRED_TYPELIBS),
+    "host_libraries": [
+        "libcairo.so.2",
+        "libffi.so.8",
+        "libgirepository-1.0.so.1",
+        "libglib-2.0.so.0",
+        "libgobject-2.0.so.0",
+        "libgtk-3.so.0",
+        "libjavascriptcoregtk-4.1.so.0",
+        "libwebkit2gtk-4.1.so.0",
+    ],
+}
 
 
 def _elf(machine: int = 0x3E) -> bytes:
@@ -96,7 +121,40 @@ def notice_policy(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     policy = root / "embedded-notices.json"
     policy.write_text(json.dumps({"schema_version": 1, "notices": rows}))
     monkeypatch.setattr(desktop_inspect, "EMBEDDED_NOTICE_POLICY_PATH", policy)
+    source_policy = root / "source-notices.json"
+    source_policy.write_text(json.dumps(_source_notice_policy()))
+    monkeypatch.setattr(desktop_inspect, "SOURCE_NOTICE_POLICY_PATH", source_policy)
     return policy
+
+
+def _source_notice_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "download": {
+            "origin_host": "files.pythonhosted.org",
+            "max_archive_bytes": 1024,
+            "max_expanded_bytes": 1024,
+            "download_timeout_seconds": 1,
+            "socket_timeout_seconds": 1,
+        },
+        "archives": [
+            {
+                "distribution": "fff-six",
+                "version": "1.0.0",
+                "targets": ["linux-x64-ubuntu-22.04"],
+                "url": "https://files.pythonhosted.org/packages/ff/fff-six-1.0.0.tar.gz",
+                "sha256": "0" * 64,
+                "notices": [
+                    {
+                        "member": f"fff-six-1.0.0/{name.removeprefix('fff-six-')}",
+                        "payload_path": f"_internal/notices/{name}",
+                        "sha256": hashlib.sha256(_notice_text(name)).hexdigest(),
+                    }
+                    for name in _SOURCE_NOTICES
+                ],
+            }
+        ],
+    }
 
 
 def _notice_text(distribution: str) -> bytes:
@@ -144,8 +202,30 @@ def _create_mock_payload(
     (notices / "CPython-LICENSE.txt").write_text("Python license\n")
     for distribution in _NOTICE_DISTRIBUTIONS:
         (notices / f"{distribution}-LICENSE.txt").write_bytes(_notice_text(distribution))
+    if target.linux_abi is not None:
+        for name in _SOURCE_NOTICES:
+            (notices / name).write_bytes(_notice_text(name))
     _create_voice_bundle(root, target, version)
+    if target.linux_abi is not None:
+        _create_gi_binding(root)
     return root
+
+
+def _create_gi_binding(root: Path) -> None:
+    """The frozen GTK binding: extension modules, typelibs and its metadata."""
+    contents = root / "_internal"
+    for extension in _GI_EXTENSIONS:
+        (contents / extension).parent.mkdir(parents=True, exist_ok=True)
+        (contents / extension).write_bytes(_elf())
+    typelibs = contents / "gi_typelibs"
+    typelibs.mkdir()
+    for name in REQUIRED_TYPELIBS:
+        (typelibs / f"{name}.typelib").write_bytes(b"GOBJ\nMETADATA")
+    dist_info = contents / "pygobject-3.48.2.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: PyGObject\nVersion: 3.48.2\n"
+    )
 
 
 def _bundled(path: Path) -> BundledFile:
@@ -188,9 +268,10 @@ def _create_build_metadata(
     tocs: dict[str, list[tuple[str, str, str]]] | None = None,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "dependency-provenance.json").write_text(
-        json.dumps({"target": target.name, "product_version": version})
-    )
+    provenance: dict[str, object] = {"target": target.name, "product_version": version}
+    if target.linux_abi is not None:
+        provenance["linux_gi"] = _GI_BINDING
+    (root / "dependency-provenance.json").write_text(json.dumps(provenance))
     for role in ("gui", "child", "console"):
         toc_dir = root / "executables" / role / "pyinstaller"
         toc_dir.mkdir(parents=True)
@@ -225,10 +306,114 @@ def test_inspect_desktop_payload_success(
     assert report.product_version == "2.26.3"
     assert report.marker_valid is True
     assert report.assets_verified_count > 0
-    assert report.notices_verified_count == 6
+    # CPython, the five wheel notices and the Linux source-archive notices.
+    assert report.notices_verified_count == 1 + 5 + len(_SOURCE_NOTICES)
     assert report.voice_files_verified_count == 4
     assert report.regular_file_count > 0
     assert report.binary_formats == {"gui": "elf", "child": "elf", "console": "elf"}
+    assert report.gi_typelibs_verified_count == len(REQUIRED_TYPELIBS)
+
+
+def _rewrite_provenance(metadata: Path, **changes: object) -> None:
+    path = metadata / "dependency-provenance.json"
+    provenance = json.loads(path.read_text())
+    for key, value in changes.items():
+        if value is None:
+            provenance.pop(key, None)
+        else:
+            provenance[key] = value
+    path.write_text(json.dumps(provenance))
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        # Named by the contract itself.
+        "_internal/libglib-2.0.so.0",
+        # Named only by the closure the build resolved on its host.
+        "_internal/libcairo.so.2",
+        "_internal/libffi.so.8",
+    ],
+)
+def test_inspect_rejects_a_bundled_copy_of_a_host_library(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, relative: str
+) -> None:
+    payload, _metadata = build
+    (payload / relative).write_bytes(_elf())
+
+    with pytest.raises(DesktopInspectionError, match=relative.rsplit("/", 1)[-1]):
+        _inspect(build, target_spec)
+
+
+def _drop_typelib(contents: Path) -> None:
+    (contents / "gi_typelibs" / "WebKit2-4.1.typelib").unlink()
+
+
+def _add_typelib(contents: Path) -> None:
+    (contents / "gi_typelibs" / "Gtk-4.0.typelib").write_bytes(b"GOBJ")
+
+
+def _drop_extension(contents: Path) -> None:
+    (contents / _GI_EXTENSIONS[1]).unlink()
+
+
+def _drop_binding_metadata(contents: Path) -> None:
+    shutil.rmtree(contents / "pygobject-3.48.2.dist-info")
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (_drop_typelib, "missing gi_typelibs/WebKit2-4.1.typelib"),
+        (_add_typelib, "unexpected gi_typelibs/Gtk-4.0.typelib"),
+        (_drop_extension, r"missing gi/_gi_cairo\.cpython-312-\*\.so"),
+        (_drop_binding_metadata, "payload PyGObject metadata None"),
+    ],
+)
+def test_inspect_requires_exactly_the_frozen_gtk_binding(
+    build: tuple[Path, Path],
+    target_spec: DesktopTargetSpec,
+    change: Callable[[Path], None],
+    message: str,
+) -> None:
+    payload, _metadata = build
+    change(payload / "_internal")
+
+    with pytest.raises(DesktopInspectionError, match=message):
+        _inspect(build, target_spec)
+
+
+def test_inspect_rejects_a_distro_python_module_link(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec
+) -> None:
+    payload, _metadata = build
+    (payload / "_internal" / "_gi_cairo.so").symlink_to(
+        "/usr/lib/python3/dist-packages/gi/_gi_cairo.so"
+    )
+
+    with pytest.raises(DesktopInspectionError, match="host distro module"):
+        _inspect(build, target_spec)
+
+
+@pytest.mark.parametrize(
+    "linux_gi",
+    [
+        None,
+        {**_GI_BINDING, "pygobject_version": "3.50.0"},
+        {**_GI_BINDING, "glib_version": "2.70.0"},
+        {**_GI_BINDING, "typelibs": ["Gtk-3.0"]},
+        {**_GI_BINDING, "host_libraries": ["libgtk-3.so.0"]},
+        {**_GI_BINDING, "extra": True},
+    ],
+)
+def test_inspect_requires_a_valid_recorded_gtk_binding(
+    build: tuple[Path, Path], target_spec: DesktopTargetSpec, linux_gi: object
+) -> None:
+    _payload, metadata = build
+    _rewrite_provenance(metadata, linux_gi=linux_gi)
+
+    with pytest.raises(DesktopInspectionError, match="Build provenance GTK binding"):
+        _inspect(build, target_spec)
 
 
 def test_inspect_rejects_missing_executable(

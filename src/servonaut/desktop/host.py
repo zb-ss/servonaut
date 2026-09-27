@@ -42,6 +42,10 @@ DEFAULT_ROWS: Final[int] = 24
 MAX_MESSAGE_BYTES: Final[int] = MAX_PACKET_BYTES
 SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 5.0
 PROTOCOL_SUBPROTOCOL: Final[str] = "servonaut.desktop.v1"
+# Logged once the page has opened the authenticated session. The packaged
+# window smoke waits for this line, so it names no secret and never changes
+# casually.
+SESSION_CONNECTED_MESSAGE: Final[str] = "Desktop session connected"
 
 
 class DesktopHostError(RuntimeError):
@@ -230,6 +234,7 @@ class DesktopHost:
         try:
             await ws.prepare(request)
             self._active_websocket = ws
+            logger.info(SESSION_CONNECTED_MESSAGE)
             await self._run_session(ws, width, height)
         finally:
             self.finished.set()

@@ -25,6 +25,12 @@ DEFAULT_DEPENDENCIES: tuple[str, ...] = (
     "libwebkit2gtk-4.1-0",
     "gir1.2-gtk-3.0",
     "gir1.2-webkit2-4.1",
+    # The bundled GTK binding links these; the payload never carries copies.
+    "libgirepository-1.0-1 (>= 1.72)",
+    "libglib2.0-0 (>= 2.72) | libglib2.0-0t64",
+    "libcairo2",
+    "libcairo-gobject2",
+    "libffi8",
     "libportaudio2",
     "openssh-client",
     "ca-certificates",
@@ -40,6 +46,11 @@ REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     *REQUIRED_PAYLOAD_BINARIES,
     "servonaut-runtime.json",
 )
+
+# dpkg's own unpacker rejects the PAX extended headers Python's default tar
+# format writes for a long symlink target or a non-ASCII name, so both
+# archives use the GNU format, as dpkg-deb itself does.
+_TAR_FORMAT = tarfile.GNU_FORMAT
 
 # Debian policy 5.6.2: "Full Name <email@address>" on a single line.
 _MAINTAINER_RE = re.compile(r"^[^<>\s][^<>\r\n]* <[^<>@\s]+@[^<>@\s]+>$")
@@ -139,7 +150,7 @@ def _build_control_tar(
 
     bio = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=bio, mtime=epoch) as gz:
-        with tarfile.open(mode="w", fileobj=gz) as tar:
+        with tarfile.open(mode="w", fileobj=gz, format=_TAR_FORMAT) as tar:
             # Add root directory entry
             root_info = tarfile.TarInfo(name="./")
             root_info.type = tarfile.DIRTYPE
@@ -276,7 +287,7 @@ def package_deb(
     sorted_dirs = sorted(dirs_to_add)
 
     with gzip.GzipFile(filename="", mode="wb", fileobj=data_bio, mtime=epoch) as gz:
-        with tarfile.open(mode="w", fileobj=gz) as tar:
+        with tarfile.open(mode="w", fileobj=gz, format=_TAR_FORMAT) as tar:
             # 1. Add directories
             for d in sorted_dirs:
                 ti = tarfile.TarInfo(name=d)
