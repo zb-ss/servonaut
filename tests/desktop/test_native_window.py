@@ -91,7 +91,9 @@ def test_native_window_configuration_contract() -> None:
         assert kwargs["url"] == "http://127.0.0.1:9999"
         assert kwargs["width"] == 1024
         assert kwargs["height"] == 768
-        assert kwargs["js_api"] is bridge
+        # The bridge stays in Python: pywebview's js_api cannot work under
+        # the page's Content-Security-Policy (no 'unsafe-eval').
+        assert "js_api" not in kwargs
 
         # Assert webview.start was called with required private isolation settings
         mock_start.assert_called_once_with(
@@ -103,7 +105,7 @@ def test_native_window_configuration_contract() -> None:
 
 
 def test_native_window_bridge_claim_contract() -> None:
-    """Verify that the JS bridge claim_session is only callable once by pywebview."""
+    """Verify that the bridge hands the session token out only once."""
     token = SecretToken.generate()
     bridge = DesktopBootstrapBridge(
         expected_origin="http://127.0.0.1:9999",

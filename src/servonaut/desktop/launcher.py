@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import logging
 import socket
 import subprocess
@@ -18,7 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from servonaut.desktop.bridge import DesktopBootstrapBridge
+from servonaut.desktop.bridge import (
+    SESSION_ALREADY_CLAIMED,
+    DesktopBootstrapBridge,
+    DesktopBridgeError,
+)
 from servonaut.desktop.model import ReadyResponse, SecretToken
 from servonaut.desktop.process_tree import (
     OwnedProcessTree,
@@ -252,6 +257,50 @@ class DesktopSessionOwner:
         self._origin = None
 
 
+def _session_start_script(token: str) -> str:
+    """Return the script that hands *token* to the page's bootstrap function.
+
+    The launcher runs it with ``window.run_js`` instead of exposing the bridge
+    as pywebview's ``js_api``: pywebview builds those page functions with
+    ``new Function``, which the page's Content-Security-Policy
+    (``script-src 'self'``, no ``'unsafe-eval'``) refuses, so the page would
+    never receive the token and would stay blank.
+    """
+    return (
+        "if (typeof window.startServonaut === 'function') { "
+        f"window.startServonaut({json.dumps(token)}); "
+        "}"
+    )
+
+
+def _hand_over_session(window: Any, bridge: DesktopBootstrapBridge | None) -> None:
+    """Claim the session token and pass it to the page loaded in *window*.
+
+    Runs once per session: a reload of the root document gets nothing. A
+    refused claim (the window no longer shows the root document) closes the
+    window, like any other navigation away from it.
+    """
+    if bridge is None or bridge.claimed:
+        return
+    try:
+        token = bridge.claim_session()
+    except DesktopBridgeError as exc:
+        if exc.code == SESSION_ALREADY_CLAIMED:
+            return
+        logger.error("Refusing to hand over the desktop session: %s", exc.code)
+        window.destroy()
+        return
+
+    try:
+        window.run_js(_session_start_script(token))
+    except Exception as exc:  # noqa: BLE001
+        # Only the type: a message could quote the script, token included.
+        logger.error(
+            "Could not hand the desktop session to the page: %s",
+            type(exc).__name__,
+        )
+
+
 def run_desktop(request: DesktopLaunchRequest) -> int:
     """Execute the full pywebview GUI on the main thread."""
     try:
@@ -288,21 +337,7 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
                 window.destroy()
             return
 
-        claim_script = (
-            "if (window.pywebview && window.pywebview.api) { "
-            "window.pywebview.api.claim_session().then(function(tok) { "
-            "if (tok && window.startServonaut) window.startServonaut(tok); "
-            "}); "
-            "} else { "
-            "window.addEventListener('pywebviewready', function() { "
-            "window.pywebview.api.claim_session().then(function(tok) { "
-            "if (tok && window.startServonaut) window.startServonaut(tok); "
-            "}); "
-            "}); "
-            "}"
-        )
-        with contextlib.suppress(Exception):
-            window.run_js(claim_script)
+        _hand_over_session(window, owner.bridge)
 
     def on_closed() -> None:
         stop_monitor.set()
@@ -331,7 +366,6 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
         url=ready.origin,
         width=request.width,
         height=request.height,
-        js_api=owner.bridge,
     )
     window.events.loaded += on_loaded
     window.events.closed += on_closed
