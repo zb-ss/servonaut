@@ -30,6 +30,7 @@ SHA_PINNED_WORKFLOWS = (
     "leak-guard.yml",
     "publish.yml",
     "release-candidate.yml",
+    "release-install-scripts.yml",
     "release.yml",
 )
 

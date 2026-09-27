@@ -1,0 +1,294 @@
+name: Release install scripts
+
+# Attaches the install scripts to every published GitHub release and
+# pre-release (vX.Y.Z and vX.Y.ZrcN), as the release's tag commit has them:
+#
+#   resolve  decides which commit's scripts to attach, from the release event
+#            or the inputs;
+#   prepare  checks out that commit and hands install.sh and install.ps1 to
+#            the upload job with their digests; it never holds a write token;
+#   upload   checks the scripts it was handed and that the tag still names
+#            their commit, then uploads them with install-scripts_SHA256SUMS,
+#            replacing only those three assets of the release. It runs no
+#            code from the repository.
+#
+# The README's install commands download these assets from the newest stable
+# release, so a change to the scripts reaches users with a release, never
+# straight from the default branch. The PyPI publish is a separate workflow
+# and does not wait for this one.
+#
+# Attach them to a release again; whichever branch runs the workflow, the
+# tag's own scripts are uploaded:
+#   gh workflow run release-install-scripts.yml -f tag=vX.Y.Z
+# dry_run does everything except the upload. A dry run without a tag checks
+# the scripts of the commit the workflow runs on.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag vX.Y.Z or vX.Y.ZrcN (a dry run may leave it empty)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Check everything, but upload nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-install-scripts-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Never for forks; pull requests do not trigger this workflow at all.
+    if: github.repository == 'zb-ss/servonaut'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      attach: ${{ steps.resolve.outputs.attach }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+      checkout-ref: ${{ steps.resolve.outputs.checkout-ref }}
+      expected-commit: ${{ steps.resolve.outputs.expected-commit }}
+    steps:
+      - name: Decide what to attach
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
+          dry_run=false
+          case "${GITHUB_EVENT_NAME}" in
+            release)
+              tag="${RELEASE_TAG}"
+              if [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::notice::Only releases vX.Y.Z and release candidates vX.Y.ZrcN carry the install scripts."
+                echo "attach=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              if [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+                echo "::error::The release event does not name its own tag."
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              tag="${INPUT_TAG}"
+              if [ "${INPUT_DRY_RUN}" = "true" ]; then dry_run=true; fi
+              if [ -z "${tag}" ]; then
+                if [ "${dry_run}" != "true" ]; then
+                  echo "::error::Name the release to attach the scripts to: -f tag=vX.Y.Z. Only a dry run may leave it out."
+                  exit 1
+                fi
+              elif [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::error::tag must be a release vX.Y.Z or a release candidate vX.Y.ZrcN."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::This workflow runs for published releases and on request only."
+              exit 1
+              ;;
+          esac
+
+          # The commit whose scripts are attached: the tag's, or for a dry run
+          # without a tag, the commit this run started from.
+          if [ -z "${tag}" ]; then
+            checkout_ref="${GITHUB_SHA}"
+            expected="${GITHUB_SHA}"
+          elif [ "${GITHUB_REF}" = "refs/tags/${tag}" ]; then
+            checkout_ref="refs/tags/${tag}"
+            expected="${GITHUB_SHA}"
+          else
+            checkout_ref="refs/tags/${tag}"
+            expected=""
+          fi
+          {
+            echo "attach=true"
+            echo "tag=${tag}"
+            echo "dry-run=${dry_run}"
+            echo "checkout-ref=${checkout_ref}"
+            echo "expected-commit=${expected}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ -z "${tag}" ]; then
+            echo "Dry run of this commit's install scripts: nothing is uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          elif [ "${dry_run}" = "true" ]; then
+            echo "Dry run for ${tag}: nothing is uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Install scripts for ${tag}." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  prepare:
+    name: prepare
+    needs: resolve
+    if: needs.resolve.outputs.attach == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.scripts.outputs.commit }}
+      sh-sha256: ${{ steps.scripts.outputs.sh-sha256 }}
+      ps1-sha256: ${{ steps.scripts.outputs.ps1-sha256 }}
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Take the scripts from the commit
+        id: scripts
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          if [ -n "${EXPECTED_COMMIT}" ] && [ "${commit}" != "${EXPECTED_COMMIT}" ]; then
+            echo "::error::${TAG} no longer points at the commit this run was started for."
+            exit 1
+          fi
+          # Earlier scripts fall back to installing the default branch when
+          # PyPI fails, so they must never become a release's download.
+          if [ ! -f .github/workflows/release-install-scripts.yml ]; then
+            echo "::error::${TAG:-This commit} predates the release install scripts, so it cannot carry them."
+            exit 1
+          fi
+          {
+            echo "commit=${commit}"
+            echo "sh-sha256=$(sha256sum install.sh | cut -d ' ' -f 1)"
+            echo "ps1-sha256=$(sha256sum install.ps1 | cut -d ' ' -f 1)"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Only the two scripts leave this job. Their digests travel separately,
+      # as job outputs.
+      - name: Hand the scripts to the upload job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-scripts
+          path: |
+            install.sh
+            install.ps1
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of this run replaces the scripts an earlier attempt handed over.
+          overwrite: true
+          include-hidden-files: false
+
+  upload:
+    name: upload
+    needs: [resolve, prepare]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job with write access, and it runs no code from the repository.
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry-run }}
+      COMMIT: ${{ needs.prepare.outputs.commit }}
+      SH_SHA256: ${{ needs.prepare.outputs.sh-sha256 }}
+      PS1_SHA256: ${{ needs.prepare.outputs.ps1-sha256 }}
+      SUMS_ASSET: install-scripts_SHA256SUMS
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Receive the scripts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: install-scripts
+          path: scripts
+
+      - name: Verify the scripts and write their checksums
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          received="$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')"
+          if [ "${received}" != "install.ps1 install.sh " ]; then
+            echo "::error::Expected exactly install.sh and install.ps1 from the prepare job."
+            exit 1
+          fi
+          # The files the prepare job measured, byte for byte.
+          printf '%s  %s\n' "${SH_SHA256}" install.sh "${PS1_SHA256}" install.ps1 \
+            | sha256sum --check --strict -
+          sha256sum install.sh install.ps1 > "${SUMS_ASSET}"
+          sha256sum --check --strict "${SUMS_ASSET}"
+
+      # The release must exist and its tag must still name the commit the
+      # scripts came from. A dry run reports; one without a tag has no release.
+      - name: Confirm the release and its tag
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-before"; then
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "::notice::${TAG} has no published release; a real run would stop here."
+              exit 0
+            fi
+            echo "::error::${TAG} has no published release to attach the install scripts to."
+            exit 1
+          fi
+          tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq '.sha')"
+          if [ "${tagged}" != "${COMMIT}" ]; then
+            echo "::error::${TAG} was moved after its install scripts were taken from ${COMMIT}."
+            exit 1
+          fi
+          echo "Assets of ${TAG} now:"
+          sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
+
+      # --clobber replaces this workflow's own three assets, so a re-run is
+      # idempotent; every other asset of the release is left alone.
+      - name: Upload the scripts to the release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" scripts/install.sh scripts/install.ps1 "scripts/${SUMS_ASSET}" --clobber
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-after"
+          while IFS= read -r name; do
+            if ! grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-after"; then
+              echo "::error::The upload removed another asset of ${TAG}."
+              exit 1
+            fi
+          done < "${RUNNER_TEMP}/assets-before"
+          # What users download must check out against the published sums.
+          mkdir "${RUNNER_TEMP}/published"
+          gh release download "${TAG}" --dir "${RUNNER_TEMP}/published" \
+            --pattern install.sh --pattern install.ps1 --pattern "${SUMS_ASSET}"
+          (cd "${RUNNER_TEMP}/published" && sha256sum --check --strict "${SUMS_ASSET}")
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          {
+            if [ -z "${TAG}" ]; then
+              echo "## Install scripts of ${COMMIT} (dry run, not published)"
+            elif [ "${DRY_RUN}" = "true" ]; then
+              echo "## Install scripts for ${TAG} (dry run, not published)"
+            else
+              echo "## Install scripts for ${TAG}"
+            fi
+            echo ""
+            echo "- Taken from \`${COMMIT}\`"
+            echo "- Assets: \`install.sh\`, \`install.ps1\`, \`${SUMS_ASSET}\`"
+            echo ""
+            echo '```'
+            cat "scripts/${SUMS_ASSET}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
