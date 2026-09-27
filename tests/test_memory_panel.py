@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from servonaut.utils.memory_panel import human_age, render_memory_panel
+import pytest
+
+from servonaut.utils.memory_panel import format_runtime, human_age, render_memory_panel
 
 
 def _iso_ago(**kwargs) -> str:
@@ -29,6 +31,55 @@ class TestHumanAge:
 
     def test_garbage_returns_question(self):
         assert human_age("not-a-date") == "?"
+
+
+class TestFormatRuntime:
+    """Each runtime reads "<name> <version>", its name shown once."""
+
+    @pytest.mark.parametrize(
+        ("runtime", "stored", "shown"),
+        [
+            # What the runtimes probe stores: each command's own output.
+            ("python", "Python 3.11.2", "Python 3.11.2"),
+            ("node", "v20.11.1", "Node 20.11.1"),
+            ("php", "PHP 8.2.7", "PHP 8.2.7"),
+            ("go", "go1.22.1", "Go 1.22.1"),
+            ("ruby", "ruby 3.2.2", "Ruby 3.2.2"),
+            # A bare version (older snapshots, other writers) gets the name too.
+            ("python", "3.12.3", "Python 3.12.3"),
+            ("node", "20.11", "Node 20.11"),
+        ],
+    )
+    def test_name_then_version(self, runtime, stored, shown):
+        assert format_runtime(runtime, stored) == shown
+
+    def test_panel_line_names_each_runtime_once(self):
+        modules = {
+            "runtimes": {
+                "observed": {
+                    "python": "Python 3.11.2",
+                    "node": "v20.11.1",
+                    "php": "PHP 8.2.7",
+                    "go": "go1.22.1",
+                    "ruby": "ruby 3.2.2",
+                },
+                "probed_at": _iso_ago(minutes=10),
+            },
+        }
+        out = render_memory_panel(modules)
+        runtime_line = next(line for line in out.splitlines() if "Runtime" in line)
+        assert runtime_line.endswith(
+            "Python 3.11.2 · Node 20.11.1 · PHP 8.2.7 · Go 1.22.1 · Ruby 3.2.2"
+        )
+
+    def test_markup_in_a_version_is_escaped(self):
+        modules = {
+            "runtimes": {
+                "observed": {"python": "Python [bold]3[/bold]"},
+                "probed_at": _iso_ago(minutes=1),
+            },
+        }
+        assert "Python \\[bold]3\\[/bold]" in render_memory_panel(modules)
 
 
 class TestRenderMemoryPanel:
@@ -71,8 +122,8 @@ class TestRenderMemoryPanel:
         out = render_memory_panel(modules)
         assert "nginx 1.24.0" in out
         assert "postgres 16.2" in out
-        assert "python 3.12.3" in out
-        assert "node 20.11" in out
+        assert "Python 3.12.3" in out
+        assert "Node 20.11" in out
         assert "26.0.0" in out
         assert "6 running" in out
 
