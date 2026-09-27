@@ -1,8 +1,14 @@
 # Servonaut Installer for Windows
-# Usage: irm https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
 # Or: .\install.ps1
 
 $ErrorActionPreference = "Stop"
+
+# Oldest Python that Servonaut supports (requires-python in pyproject.toml)
+$MinPythonMajor = 3
+$MinPythonMinor = 10
+
+$RepoUrl = "https://github.com/zb-ss/servonaut"
 
 function Write-Header {
     Write-Host ""
@@ -33,7 +39,7 @@ function Test-PythonVersion {
     if (-not $pythonCmd) {
         Write-Err "Python not found!"
         Write-Host ""
-        Write-Host "Install Python 3.8+ from: https://www.python.org/downloads/"
+        Write-Host "Install Python $MinPythonMajor.$MinPythonMinor+ from: https://www.python.org/downloads/"
         Write-Host "  - Check 'Add Python to PATH' during installation"
         Write-Host ""
         Write-Host "Or via winget:"
@@ -51,8 +57,8 @@ function Test-PythonVersion {
     $major = [int]$parts[0]
     $minor = [int]$parts[1]
 
-    if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 8)) {
-        Write-Err "Python $version found, but Python 3.8+ is required!"
+    if ($major -lt $MinPythonMajor -or ($major -eq $MinPythonMajor -and $minor -lt $MinPythonMinor)) {
+        Write-Err "Python $version found, but Python $MinPythonMajor.$MinPythonMinor+ is required!"
         Write-Host "Download from: https://www.python.org/downloads/"
         exit 1
     }
@@ -142,7 +148,7 @@ function Install-Servonaut {
     Write-Info "Cloning to: $cloneDir"
 
     try {
-        & git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$cloneDir\servonaut" 2>$null
+        & git clone --depth 1 "$RepoUrl.git" "$cloneDir\servonaut" 2>$null
         if ($LASTEXITCODE -eq 0) {
             & pipx install "$cloneDir\servonaut" --force 2>$null
             if ($LASTEXITCODE -eq 0) {
@@ -158,8 +164,8 @@ function Install-Servonaut {
     Write-Err "All installation methods failed"
     Write-Host ""
     Write-Host "Try manually:" -ForegroundColor White
-    Write-Host "  git clone https://github.com/zb-ss/ec2-ssh.git"
-    Write-Host "  cd ec2-ssh"
+    Write-Host "  git clone $RepoUrl.git"
+    Write-Host "  cd servonaut"
     Write-Host "  pipx install ."
     exit 1
 }
@@ -234,7 +240,7 @@ function Write-FinalMessage {
     Write-Host "  3. Use the menu to manage SSH keys and connect to instances"
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor White
-    Write-Host "  https://github.com/zb-ss/ec2-ssh"
+    Write-Host "  $RepoUrl"
     Write-Host ""
     Write-Host "Configuration:" -ForegroundColor White
     Write-Host "  Config: $env:USERPROFILE\.servonaut\config.json"

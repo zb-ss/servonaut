@@ -1,9 +1,15 @@
 #!/bin/sh
 # Servonaut Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
 # Or: ./install.sh
 
 set -e
+
+# Oldest Python that Servonaut supports (requires-python in pyproject.toml)
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=10
+
+REPO_URL="https://github.com/zb-ss/servonaut"
 
 # Color codes for terminal output
 # Use tput if available, otherwise fallback to ANSI codes
@@ -69,7 +75,7 @@ check_python_version() {
     if [ -z "$PYTHON_CMD" ]; then
         print_error "Python not found!"
         echo ""
-        echo "Please install Python 3.8 or higher:"
+        echo "Please install Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR or higher:"
         echo ""
         echo "  Ubuntu/Debian:  ${BOLD}sudo apt update && sudo apt install python3 python3-pip${RESET}"
         echo "  RHEL/CentOS:    ${BOLD}sudo yum install python3 python3-pip${RESET}"
@@ -85,11 +91,11 @@ check_python_version() {
     PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
     PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
-    # Check if version is >= 3.8
-    if [ "$PYTHON_MAJOR" -lt 3 ] || [ "$PYTHON_MAJOR" -eq 3 -a "$PYTHON_MINOR" -lt 8 ]; then
-        print_error "Python $PYTHON_VERSION found, but Python 3.8+ is required!"
+    # Check if version is >= MIN_PYTHON_MAJOR.MIN_PYTHON_MINOR
+    if [ "$PYTHON_MAJOR" -lt "$MIN_PYTHON_MAJOR" ] || { [ "$PYTHON_MAJOR" -eq "$MIN_PYTHON_MAJOR" ] && [ "$PYTHON_MINOR" -lt "$MIN_PYTHON_MINOR" ]; }; then
+        print_error "Python $PYTHON_VERSION found, but Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR+ is required!"
         echo ""
-        echo "Please upgrade Python to version 3.8 or higher."
+        echo "Please upgrade Python to version $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR or higher."
         echo "Visit: https://www.python.org/downloads/"
         exit 1
     fi
@@ -208,7 +214,7 @@ install_servonaut() {
     CLONE_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'servonaut')
     print_info "Cloning to temporary directory: $CLONE_DIR"
 
-    if git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$CLONE_DIR/servonaut" 2>/dev/null; then
+    if git clone --depth 1 "$REPO_URL.git" "$CLONE_DIR/servonaut" 2>/dev/null; then
         if pipx install "$CLONE_DIR/servonaut" --force; then
             print_success "Servonaut installed successfully from repository"
             rm -rf "$CLONE_DIR"
@@ -220,8 +226,8 @@ install_servonaut() {
     print_error "All installation methods failed"
     echo ""
     echo "Please try manually:"
-    echo "  ${BOLD}git clone https://github.com/zb-ss/ec2-ssh.git${RESET}"
-    echo "  ${BOLD}cd ec2-ssh${RESET}"
+    echo "  ${BOLD}git clone $REPO_URL.git${RESET}"
+    echo "  ${BOLD}cd servonaut${RESET}"
     echo "  ${BOLD}pipx install .${RESET}"
     exit 1
 }
@@ -369,7 +375,7 @@ print_final_message() {
     echo "  3. Use the menu to manage SSH keys and connect to instances"
     echo ""
     echo "${BOLD}Documentation:${RESET}"
-    echo "  https://github.com/zb-ss/ec2-ssh"
+    echo "  $REPO_URL"
     echo ""
     echo "${BOLD}Configuration:${RESET}"
     echo "  Config dir:  ~/.servonaut/"
