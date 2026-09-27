@@ -1,18 +1,28 @@
 """The packaged-window smoke, driven by stand-in launchers instead of a GTK build.
 
 A stand-in launcher behaves like the frozen one where the smoke can tell: it
-writes the child's log under its HOME and starts a child that exits once its
-parent is gone, like the real child's parent-death watchdog.
+connects to the display server its environment names, writes the child's log
+under its HOME and starts a child that exits once its parent is gone, like the
+real child's parent-death watchdog. Stand-in display servers are real Unix
+sockets where libxcb and libwayland look for them, so the smoke's proof of
+which one the window used reads the kernel's real socket table.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import dataclasses
 import json
 import os
+import socket
 import stat
+import struct
+import subprocess
 import sys
+import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -26,15 +36,31 @@ pytestmark = pytest.mark.skipif(
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TARGET = "linux-x64-ubuntu-22.04"
-_DISPLAY = {"DISPLAY": ":99", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+_PATH = os.environ.get("PATH", "/usr/bin:/bin")
+# A display number no real X server of the test host uses.
+_X_DISPLAY_NUMBER = 900000 + os.getpid() % 90000
+_X_SOCKET = f"\0/tmp/.X11-unix/X{_X_DISPLAY_NUMBER}"
 
 # The child reads the pipe its parent holds, so it sees EOF when the parent dies.
 _CHILD = "import sys; sys.stdin.read()"
+# Like GTK, the stand-in connects to the compositor of WAYLAND_DISPLAY, or to
+# the X server of DISPLAY in the abstract namespace, where libxcb looks first,
+# and waits for the server's greeting.
+_CONNECTS_TO_ITS_DISPLAY = """\
+display = socket.socket(socket.AF_UNIX)
+if os.environ.get("WAYLAND_DISPLAY"):
+    display.connect(os.environ["WAYLAND_DISPLAY"])
+    display.recv(1)
+elif os.environ.get("DISPLAY"):
+    display.connect("\\0/tmp/.X11-unix/X" + os.environ["DISPLAY"].lstrip(":"))
+    display.recv(1)
+"""
 _LAUNCHER = """\
 #!{python}
-import os, subprocess, sys, time
+import os, socket, subprocess, sys, time
 from pathlib import Path
 
+{display_connection}
 child = subprocess.Popen(
     [sys.executable, "-c", {child!r}], stdin=subprocess.PIPE, start_new_session=True
 )
@@ -68,6 +94,53 @@ def _host_session_message() -> str:
 SESSION_CONNECTED_MESSAGE = _host_session_message()
 
 
+@contextlib.contextmanager
+def _display_server(address: str) -> Iterator[None]:
+    """Accept and greet connections on *address* until the test ends."""
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(address)
+    server.listen()
+    server.settimeout(0.1)
+    stop = threading.Event()
+    accepted: list[socket.socket] = []
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                connection = server.accept()[0]
+            except TimeoutError:
+                continue
+            accepted.append(connection)
+            connection.sendall(b"\0")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+        server.close()
+        for connection in accepted:
+            connection.close()
+
+
+@pytest.fixture
+def x_display() -> Iterator[dict[str, str]]:
+    """The environment of an X session with a stand-in X server."""
+    with _display_server(_X_SOCKET):
+        yield {"DISPLAY": f":{_X_DISPLAY_NUMBER}", "PATH": _PATH}
+
+
+@pytest.fixture
+def wayland_display() -> Iterator[dict[str, str]]:
+    """The environment of a Wayland session with a stand-in compositor."""
+    # A Unix socket path must fit in 108 bytes; pytest's tmp_path may not.
+    with tempfile.TemporaryDirectory(prefix="wl-", dir="/tmp") as runtime_dir:
+        with _display_server(str(Path(runtime_dir) / "wayland-test")):
+            yield {"WAYLAND_DISPLAY": "wayland-test", "XDG_RUNTIME_DIR": runtime_dir, "PATH": _PATH}
+
+
 @pytest.fixture
 def policy() -> window_smoke.DesktopSmokePolicy:
     return dataclasses.replace(
@@ -78,31 +151,56 @@ def policy() -> window_smoke.DesktopSmokePolicy:
     )
 
 
-def _payload(tmp_path: Path, behaviour: str, child: str = _CHILD) -> Path:
+def _payload(
+    tmp_path: Path,
+    behaviour: str,
+    child: str = _CHILD,
+    display_connection: str = _CONNECTS_TO_ITS_DISPLAY,
+) -> Path:
     payload = tmp_path / "payload"
     payload.mkdir()
     launcher = payload / "servonaut-desktop"
     launcher.write_text(
-        _LAUNCHER.format(python=sys.executable, child=child, behaviour=behaviour)
+        _LAUNCHER.format(
+            python=sys.executable,
+            child=child,
+            behaviour=behaviour,
+            display_connection=display_connection,
+        )
     )
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
     return payload
 
 
-def _fake_import(tmp_path: Path) -> dict[str, str]:
-    """An ImageMagick ``import`` stand-in that writes the file it is given."""
+def _tool(tmp_path: Path, name: str, source: str) -> Path:
     tools = tmp_path / "tools"
-    tools.mkdir()
-    program = tools / "import"
-    program.write_text(
-        f"#!{sys.executable}\n"
-        "import sys\n"
-        "from pathlib import Path\n"
-        "assert sys.argv[1:3] == ['-window', 'root']\n"
-        "Path(sys.argv[3]).write_bytes(b'\\x89PNG')\n"
-    )
+    tools.mkdir(exist_ok=True)
+    program = tools / name
+    program.write_text(f"#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n{source}")
     program.chmod(0o755)
-    return {**_DISPLAY, "PATH": f"{tools}:{_DISPLAY['PATH']}"}
+    return tools
+
+
+def _fake_import(tmp_path: Path, session: dict[str, str]) -> dict[str, str]:
+    """An ImageMagick ``import`` stand-in that writes the file it is given."""
+    tools = _tool(
+        tmp_path,
+        "import",
+        "assert sys.argv[1:3] == ['-window', 'root']\n"
+        "Path(sys.argv[3]).write_bytes(b'\\x89PNG')\n",
+    )
+    return {**session, "PATH": f"{tools}:{session['PATH']}"}
+
+
+def _fake_weston_screenshooter(tmp_path: Path, session: dict[str, str]) -> dict[str, str]:
+    """A ``weston-screenshooter`` stand-in: it names its file, in its working directory."""
+    tools = _tool(
+        tmp_path,
+        "weston-screenshooter",
+        "assert sys.argv[1:] == [] and os.environ['WAYLAND_DISPLAY']\n"
+        "Path('wayland-screenshot-2026-09-27_10-00-00.png').write_bytes(b'\\x89PNG wayland')\n",
+    )
+    return {**session, "PATH": f"{tools}:{session['PATH']}"}
 
 
 def test_the_marker_is_the_hosts_session_message() -> None:
@@ -115,13 +213,13 @@ def test_the_marker_is_the_hosts_session_message() -> None:
 
 
 def test_a_connected_window_is_photographed_and_stopped_with_its_children(
-    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
 ) -> None:
     payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
     screenshot = tmp_path / "shots" / "window.png"
 
     report = window_smoke.run_window_smoke(
-        payload, _TARGET, policy, screenshot=screenshot, inherited=_fake_import(tmp_path)
+        payload, _TARGET, policy, screenshot=screenshot, inherited=_fake_import(tmp_path, x_display)
     )
 
     assert report.session_connected is True
@@ -131,6 +229,7 @@ def test_a_connected_window_is_photographed_and_stopped_with_its_children(
     assert report.process_tree_exited is True
     written = json.loads(report.to_json())
     assert written["target"] == _TARGET
+    assert written["display_protocols"] == ["x11"]
     # Whatever the host's security module says, the report carries it.
     assert all(
         labels and labels == sorted(labels)
@@ -139,7 +238,7 @@ def test_a_connected_window_is_photographed_and_stopped_with_its_children(
 
 
 def test_a_blank_window_fails_after_the_bound_with_its_logs(
-    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
 ) -> None:
     payload = _payload(tmp_path, "")
     policy = dataclasses.replace(policy, window_session_timeout_seconds=1)
@@ -147,7 +246,11 @@ def test_a_blank_window_fails_after_the_bound_with_its_logs(
 
     with pytest.raises(window_smoke.WindowSmokeError) as raised:
         window_smoke.run_window_smoke(
-            payload, _TARGET, policy, screenshot=screenshot, inherited=_fake_import(tmp_path)
+            payload,
+            _TARGET,
+            policy,
+            screenshot=screenshot,
+            inherited=_fake_import(tmp_path, x_display),
         )
 
     message = str(raised.value)
@@ -159,16 +262,18 @@ def test_a_blank_window_fails_after_the_bound_with_its_logs(
 
 
 def test_a_launcher_that_dies_early_fails_with_its_exit_code(
-    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
 ) -> None:
     payload = _payload(tmp_path, "sys.exit(3)")
 
     with pytest.raises(window_smoke.WindowSmokeError, match="exited with code 3"):
-        window_smoke.run_window_smoke(payload, _TARGET, policy, screenshot=None, inherited=_DISPLAY)
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x_display
+        )
 
 
 def test_a_child_that_outlives_the_launcher_fails_and_is_killed(
-    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
 ) -> None:
     payload = _payload(
         tmp_path,
@@ -179,7 +284,9 @@ def test_a_child_that_outlives_the_launcher_fails_and_is_killed(
     before = window_smoke.process_parents()
 
     with pytest.raises(window_smoke.WindowSmokeError, match="outlived it"):
-        window_smoke.run_window_smoke(payload, _TARGET, policy, screenshot=None, inherited=_DISPLAY)
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x_display
+        )
 
     leftovers = {
         pid
@@ -210,15 +317,15 @@ def test_the_window_smoke_covers_only_its_policy_targets(
 ) -> None:
     with pytest.raises(window_smoke.WindowSmokeError, match="does not cover windows-x64"):
         window_smoke.run_window_smoke(
-            tmp_path, "windows-x64", policy, screenshot=None, inherited=_DISPLAY
+            tmp_path, "windows-x64", policy, screenshot=None, inherited={"DISPLAY": ":99"}
         )
 
 
 def test_a_connected_window_needs_its_photograph(
-    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
 ) -> None:
     payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
-    no_tools = {**_DISPLAY, "PATH": str(tmp_path / "empty")}
+    no_tools = {**x_display, "PATH": str(tmp_path / "empty")}
 
     with pytest.raises(window_smoke.WindowSmokeError, match="could not be photographed"):
         window_smoke.run_window_smoke(
@@ -242,6 +349,203 @@ def test_the_environment_is_isolated_but_keeps_the_display(tmp_path: Path) -> No
     runtime = Path(environment["XDG_RUNTIME_DIR"])
     assert runtime.is_relative_to(home)
     assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+
+
+# Wayland: the same smoke on a compositor, held there by GDK_BACKEND and by
+# having no X display, and proven there by the window's socket connections.
+
+
+def test_a_wayland_window_is_proven_connected_to_the_compositor_and_photographed(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, wayland_display: dict[str, str]
+) -> None:
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+    screenshot = tmp_path / "shots" / "window.png"
+
+    report = window_smoke.run_window_smoke(
+        payload,
+        _TARGET,
+        policy,
+        screenshot=screenshot,
+        inherited=_fake_weston_screenshooter(tmp_path, wayland_display),
+        display="wayland",
+    )
+
+    assert report.display_protocols == ["wayland"]
+    assert report.screenshot_captured is True
+    assert screenshot.read_bytes() == b"\x89PNG wayland"
+    assert report.process_tree_exited is True
+
+
+def test_a_wayland_window_that_falls_back_to_x11_fails(
+    tmp_path: Path,
+    policy: window_smoke.DesktopSmokePolicy,
+    wayland_display: dict[str, str],
+    x_display: dict[str, str],
+) -> None:
+    falls_back = (
+        "display = socket.socket(socket.AF_UNIX)\n"
+        f"display.connect({_X_SOCKET!r})\n"
+        "display.recv(1)\n"
+    )
+    payload = _payload(
+        tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE), display_connection=falls_back
+    )
+
+    with pytest.raises(window_smoke.WindowSmokeError) as raised:
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=wayland_display, display="wayland"
+        )
+
+    assert "opened on wayland, but its processes were connected to x11" in str(raised.value)
+
+
+def test_a_window_connected_to_no_display_server_fails(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
+) -> None:
+    payload = _payload(
+        tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE), display_connection=""
+    )
+
+    with pytest.raises(window_smoke.WindowSmokeError, match="connected to no display server"):
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x_display
+        )
+
+
+def test_a_wayland_window_needs_a_compositor(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+) -> None:
+    payload = _payload(tmp_path, "")
+
+    x11_only = {"DISPLAY": ":99"}
+
+    with pytest.raises(window_smoke.WindowSmokeError, match="needs a Wayland compositor"):
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x11_only, display="wayland"
+        )
+    with pytest.raises(window_smoke.WindowSmokeError, match="unknown display server 'mir'"):
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x11_only, display="mir"
+        )
+
+
+def test_the_wayland_environment_has_no_way_back_to_x11(
+    tmp_path: Path, wayland_display: dict[str, str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    inherited = {**wayland_display, "DISPLAY": ":99", "XAUTHORITY": "/tmp/xauth"}
+
+    environment = window_smoke.window_environment(home, inherited, display="wayland")
+
+    socket_path = Path(wayland_display["XDG_RUNTIME_DIR"]) / "wayland-test"
+    assert environment["WAYLAND_DISPLAY"] == str(socket_path)
+    assert environment["GDK_BACKEND"] == "wayland"
+    assert "DISPLAY" not in environment
+    assert "XAUTHORITY" not in environment
+    # The window keeps its own private runtime dir.
+    assert Path(environment["XDG_RUNTIME_DIR"]).is_relative_to(home)
+
+
+def test_the_compositor_socket_is_found_as_libwayland_finds_it(
+    wayland_display: dict[str, str], tmp_path: Path
+) -> None:
+    runtime_dir = wayland_display["XDG_RUNTIME_DIR"]
+    expected = Path(runtime_dir) / "wayland-test"
+
+    assert window_smoke.wayland_socket(wayland_display) == expected
+    assert window_smoke.wayland_socket({"WAYLAND_DISPLAY": str(expected)}) == expected
+    with pytest.raises(window_smoke.WindowSmokeError, match="XDG_RUNTIME_DIR is unset"):
+        window_smoke.wayland_socket({"WAYLAND_DISPLAY": "wayland-test"})
+    (tmp_path / "wayland-0").write_text("")
+    with pytest.raises(window_smoke.WindowSmokeError, match="no Wayland compositor listens"):
+        window_smoke.wayland_socket({"WAYLAND_DISPLAY": str(tmp_path / "wayland-0")})
+
+
+def test_a_wayland_photograph_is_the_one_file_the_screenshooter_names(
+    tmp_path: Path, wayland_display: dict[str, str]
+) -> None:
+    session = _fake_weston_screenshooter(tmp_path, wayland_display)
+    destination = tmp_path / "shots" / "wayland.png"
+
+    assert window_smoke._capture_screenshot(
+        destination, session, required=True, system="linux", display="wayland"
+    )
+    assert destination.read_bytes() == b"\x89PNG wayland"
+    with pytest.raises(window_smoke.WindowSmokeError, match="with weston-screenshooter"):
+        window_smoke._capture_screenshot(
+            tmp_path / "none.png",
+            {**wayland_display, "PATH": str(tmp_path / "empty")},
+            required=True,
+            system="linux",
+            display="wayland",
+        )
+
+
+def _diagnostic(inode: int, *attributes: tuple[int, bytes]) -> bytes:
+    """A ``unix_diag_msg`` with netlink attributes, as the kernel sends it."""
+    message = struct.pack("=BBBBIII", socket.AF_UNIX, socket.SOCK_STREAM, 1, 0, inode, 0, 0)
+    for kind, value in attributes:
+        attribute = struct.pack("=HH", 4 + len(value), kind) + value
+        message += attribute + b"\0" * (-len(attribute) % 4)
+    return message
+
+
+def test_unix_diagnostics_give_each_socket_its_name_and_peer() -> None:
+    peer = struct.pack("=I", 41)
+
+    assert window_smoke.parse_unix_diagnostic(
+        _diagnostic(40, (0, b"/run/user/1000/wayland-0\0"), (2, peer))
+    ) == (40, window_smoke.UnixSocket("/run/user/1000/wayland-0", 41))
+    assert window_smoke.parse_unix_diagnostic(
+        _diagnostic(42, (0, b"\0/tmp/.X11-unix/X99"))
+    ) == (42, window_smoke.UnixSocket("@/tmp/.X11-unix/X99", None))
+    assert window_smoke.parse_unix_diagnostic(_diagnostic(43, (2, peer))) == (
+        43,
+        window_smoke.UnixSocket(None, 41),
+    )
+
+
+def test_netlink_messages_are_split_on_their_aligned_lengths() -> None:
+    first = struct.pack("=IHHII", 16 + 3, 20, 2, 1, 0) + b"abc" + b"\0"
+    done = struct.pack("=IHHII", 16 + 4, 3, 2, 1, 0) + b"\0" * 4
+
+    assert list(window_smoke.netlink_messages(first + done)) == [(20, b"abc"), (3, b"\0" * 4)]
+    with pytest.raises(OSError, match="malformed"):
+        list(window_smoke.netlink_messages(struct.pack("=IHHII", 64, 20, 2, 1, 0)))
+
+
+def test_display_protocols_follow_each_socket_to_the_server_it_reached(tmp_path: Path) -> None:
+    (tmp_path / "10" / "fd").mkdir(parents=True)
+    (tmp_path / "11" / "fd").mkdir(parents=True)
+    for pid, descriptor, target in (
+        (10, 3, "socket:[100]"),
+        (10, 4, "pipe:[7]"),
+        (10, 5, "/dev/null"),
+        (11, 3, "socket:[102]"),
+        (11, 4, "socket:[104]"),
+    ):
+        (tmp_path / str(pid) / "fd" / str(descriptor)).symlink_to(target)
+    sockets = {
+        100: window_smoke.UnixSocket(None, 101),
+        101: window_smoke.UnixSocket("/tmp/wl.abc/wayland-smoke", 100),
+        102: window_smoke.UnixSocket(None, 103),
+        103: window_smoke.UnixSocket("@/tmp/.X11-unix/X99", 102),
+        # A connection to something else, such as a session bus.
+        104: window_smoke.UnixSocket(None, 105),
+        105: window_smoke.UnixSocket("/run/user/1000/bus", 104),
+    }
+    wayland = Path("/tmp/wl.abc//wayland-smoke")
+
+    assert window_smoke.display_protocols(
+        [10, 11, 12], wayland=wayland, sockets=sockets, proc_root=tmp_path
+    ) == ["wayland", "x11"]
+    assert window_smoke.display_protocols(
+        [10], wayland=None, sockets=sockets, proc_root=tmp_path
+    ) == []
+    assert window_smoke.display_protocols(
+        [11], wayland=None, sockets=sockets, proc_root=tmp_path
+    ) == ["x11"]
 
 
 def test_process_parents_reads_proc_and_skips_zombies(tmp_path: Path) -> None:
@@ -324,9 +628,11 @@ def test_main_writes_the_report_and_fails_cleanly(
 
     assert window_smoke.main(argv) == 0
     written = json.loads(
-        (evidence / f"window-smoke-report-{_TARGET}-on-ubuntu-24.04.json").read_text()
+        (evidence / f"window-smoke-report-{_TARGET}-on-ubuntu-24.04-x11.json").read_text()
     )
     assert written["connect_elapsed_ms"] == 1200
+    assert window_smoke.main([*argv, "--display", "wayland"]) == 0
+    assert (evidence / f"window-smoke-report-{_TARGET}-on-ubuntu-24.04-wayland.json").is_file()
 
     def fail(*args: object, **kwargs: object) -> None:
         raise window_smoke.WindowSmokeError("blank")
@@ -486,3 +792,116 @@ def test_the_report_names_the_macos_release(
 
 def test_the_policy_covers_the_macos_app_targets() -> None:
     assert {"macos-x64", "macos-arm64"} <= load_desktop_smoke_policy().window_smoke_targets
+
+
+def test_glib_problems_are_counted_without_their_messages() -> None:
+    log = "\n".join(
+        [
+            "(servonaut-desktop:41): Gdk-CRITICAL **: 10:00:00.000: gdk_seat_get_keyboard: failed",
+            "(servonaut-desktop:41): Gdk-CRITICAL **: 10:00:00.001: gdk_seat_get_keyboard: failed",
+            "(WebKitWebProcess:42): GLib-GObject-WARNING **: 10:00:00.002: invalid cast",
+            "** (servonaut-desktop:41): WARNING **: 10:00:00.003: no domain",
+            "Gtk-Message: 10:00:00.004: Failed to load module",
+            "Gtk-WARNING: stand-in launcher",
+            "a message quoting (x:1): Gtk-CRITICAL **: later on the line",
+        ]
+    )
+
+    assert window_smoke.glib_problems(log) == {
+        "GLib-GObject-WARNING": 1,
+        "Gdk-CRITICAL": 2,
+        "default-WARNING": 1,
+    }
+    assert window_smoke.glib_problems("") == {}
+
+
+def test_a_connected_window_reports_its_launchers_glib_problems(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
+) -> None:
+    complains = (
+        "sys.stderr.write('(servonaut-desktop:7): Gtk-CRITICAL **: 10:00:00.000: x\\n')\n"
+        "sys.stderr.flush()\n"
+    )
+    payload = _payload(
+        tmp_path, complains + _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE)
+    )
+
+    report = window_smoke.run_window_smoke(
+        payload, _TARGET, policy, screenshot=None, inherited=x_display
+    )
+
+    assert report.launcher_glib_problems == {"Gtk-CRITICAL": 1}
+
+
+def test_reports_are_named_after_the_session_the_window_ran_in() -> None:
+    assert window_smoke.session_name("ubuntu-26.04", "wayland", system="linux") == (
+        "ubuntu-26.04-wayland"
+    )
+    # A macOS login session has one window server; its reports keep their names.
+    assert window_smoke.session_name("macos-15.6", "x11", system="darwin") == "macos-15.6"
+
+
+# weston_run.sh: the Wayland session the forward qualification opens the window
+# in, run here against a stand-in compositor that listens where weston would.
+
+_WESTON_RUN = _REPO_ROOT / "scripts" / "desktop_shell" / "weston_run.sh"
+_FAKE_WESTON = """\
+import socket, time
+
+options = dict(argument.split("=", 1) for argument in sys.argv[1:] if "=" in argument)
+Path(options["--log"]).write_text("stand-in weston: " + " ".join(sys.argv[1:]) + "\\n")
+{behaviour}
+listener = socket.socket(socket.AF_UNIX)
+listener.bind(os.path.join(os.environ["XDG_RUNTIME_DIR"], options["--socket"]))
+listener.listen()
+time.sleep(300)
+"""
+_PRINTS_ITS_SESSION = (
+    "import os, sys; from pathlib import Path; "
+    "runtime = os.environ['XDG_RUNTIME_DIR']; "
+    "print(os.environ.get('DISPLAY'), os.environ['WAYLAND_DISPLAY'], runtime, "
+    "Path(runtime, os.environ['WAYLAND_DISPLAY']).is_socket()); "
+    "sys.exit(int(sys.argv[1]))"
+)
+
+
+def _weston_run(
+    tmp_path: Path, behaviour: str, status: int = 0
+) -> subprocess.CompletedProcess[str]:
+    tools = _tool(tmp_path, "weston", _FAKE_WESTON.format(behaviour=behaviour))
+    return subprocess.run(
+        ["bash", str(_WESTON_RUN), sys.executable, "-c", _PRINTS_ITS_SESSION, str(status)],
+        env={"PATH": f"{tools}:{_PATH}", "DISPLAY": ":99", "XAUTHORITY": "/tmp/xauth"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_weston_run_gives_the_command_a_wayland_session_without_x11(tmp_path: Path) -> None:
+    completed = _weston_run(tmp_path, "")
+
+    assert completed.returncode == 0, completed.stderr
+    display, wayland, runtime, listening = completed.stdout.split()
+    assert (display, wayland, listening) == ("None", "wayland-smoke", "True")
+    # Short enough for a socket path, and gone with the compositor.
+    assert runtime.startswith("/tmp/weston.")
+    assert not Path(runtime).exists()
+
+
+def test_weston_run_returns_the_commands_status_with_the_compositor_log(tmp_path: Path) -> None:
+    completed = _weston_run(tmp_path, "", status=7)
+
+    assert completed.returncode == 7
+    assert "--- weston log (tail) ---" in completed.stderr
+    assert "stand-in weston: --backend=headless --renderer=pixman" in completed.stderr
+
+
+def test_weston_run_fails_when_the_compositor_does_not_start(tmp_path: Path) -> None:
+    completed = _weston_run(tmp_path, "sys.exit('no headless backend')")
+
+    assert completed.returncode == 1
+    assert "weston did not start its headless compositor" in completed.stderr
+    assert "stand-in weston:" in completed.stderr
+    assert completed.stdout == ""

@@ -194,7 +194,8 @@
         "build_platform": "ubuntu-22.04",
         "qualification_platforms": [
           "ubuntu-22.04",
-          "ubuntu-24.04"
+          "ubuntu-24.04",
+          "ubuntu-26.04"
         ],
         "prohibited_copied_distro_modules": [
           "gi",
