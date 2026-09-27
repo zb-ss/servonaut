@@ -47,6 +47,11 @@ REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     "servonaut-runtime.json",
 )
 
+# dpkg's own unpacker rejects the PAX extended headers Python's default tar
+# format writes for a long symlink target or a non-ASCII name, so both
+# archives use the GNU format, as dpkg-deb itself does.
+_TAR_FORMAT = tarfile.GNU_FORMAT
+
 # Debian policy 5.6.2: "Full Name <email@address>" on a single line.
 _MAINTAINER_RE = re.compile(r"^[^<>\s][^<>\r\n]* <[^<>@\s]+@[^<>@\s]+>$")
 
@@ -145,7 +150,7 @@ def _build_control_tar(
 
     bio = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=bio, mtime=epoch) as gz:
-        with tarfile.open(mode="w", fileobj=gz) as tar:
+        with tarfile.open(mode="w", fileobj=gz, format=_TAR_FORMAT) as tar:
             # Add root directory entry
             root_info = tarfile.TarInfo(name="./")
             root_info.type = tarfile.DIRTYPE
@@ -282,7 +287,7 @@ def package_deb(
     sorted_dirs = sorted(dirs_to_add)
 
     with gzip.GzipFile(filename="", mode="wb", fileobj=data_bio, mtime=epoch) as gz:
-        with tarfile.open(mode="w", fileobj=gz) as tar:
+        with tarfile.open(mode="w", fileobj=gz, format=_TAR_FORMAT) as tar:
             # 1. Add directories
             for d in sorted_dirs:
                 ti = tarfile.TarInfo(name=d)
