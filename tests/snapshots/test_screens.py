@@ -103,6 +103,22 @@ async def _power_prompt(pilot: Any) -> None:
     await _harness.wait_for_screen(pilot, "PowerActionConfirmModal")
 
 
+async def _dialog_over_fleet(pilot: Any) -> None:
+    from servonaut.screens.confirm_action import ConfirmActionScreen
+
+    await _harness.select_fleet_row(pilot, "web-1")
+    pilot.app.push_screen(
+        ConfirmActionScreen(
+            title="Reinstall server",
+            description="Reinstall [bold]web-1[/bold] from its base image?",
+            consequences=["Every file on the server is erased"],
+            confirm_text="web-1",
+            action_label="Reinstall",
+        )
+    )
+    await _harness.wait_for_screen(pilot, "ConfirmActionScreen")
+
+
 async def _help(pilot: Any) -> None:
     # From the fleet table: in the search box, "?" is typed as text.
     await _harness.select_fleet_row(pilot, _harness.FOCUS_SERVER["name"])
@@ -185,6 +201,12 @@ def test_server_memory(screen_snapshot, size: str) -> None:
 def test_power_action_prompt(screen_snapshot, size: str) -> None:
     """The yes/no question before stopping an EC2 instance."""
     _capture(screen_snapshot, size, _power_prompt)
+
+
+@sizes
+def test_dialog_over_fleet(screen_snapshot, size: str) -> None:
+    """A confirmation dialog dims the fleet table behind it instead of hiding it."""
+    _capture(screen_snapshot, size, _dialog_over_fleet)
 
 
 @sizes
