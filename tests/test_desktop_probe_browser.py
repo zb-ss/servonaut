@@ -81,6 +81,7 @@ async def test_browser_rendering_interactions_and_rejection(
     rendered = asyncio.Event()
     help_rendered = asyncio.Event()
     modal_rendered = asyncio.Event()
+    fleet_footer_rendered = asyncio.Event()
     stream_rendered = asyncio.Event()
     stream_complete = asyncio.Event()
     input_sent = asyncio.Event()
@@ -102,6 +103,11 @@ async def test_browser_rendering_interactions_and_rejection(
                 help_rendered.set()
             if b"Renderer interaction confirmation" in frames:
                 modal_rendered.set()
+            # The fleet's own footer ("Actions" is its first entry). A dialog
+            # dims the fleet but covers this footer with its own, so it is
+            # drawn only while the fleet is the top screen.
+            if b"Actions" in frames:
+                fleet_footer_rendered.set()
             if b"Renderer interaction exercise" in frames:
                 stream_rendered.set()
             if b"Synthetic stream complete." in frames:
@@ -216,25 +222,33 @@ async def test_browser_rendering_interactions_and_rejection(
                 # the exact phrase arrives, so a wrong phrase leaves it in
                 # place. Every key below stays inside the modal; a stray one
                 # would land on the fleet screen, where single letters and
-                # Enter are shortcuts. Enter is only pressed on a button:
-                # WebKit on Windows drops the keys typed right after an Enter
-                # in the terminal's input.
-                await page.keyboard.type("CONFIRX")
+                # Enter are shortcuts.
+                #
+                # The phrase is never corrected with an editing key. Textual
+                # applies a key it handles through a binding (Backspace,
+                # Ctrl+U, the arrows) only after the keys that reach the app
+                # in the same batch, so a letter typed right behind it lands
+                # first. Keys often arrive batched (they did on Windows), so
+                # the wrong phrase is the unfinished one and one more letter
+                # makes it exact.
+                await page.keyboard.type("CONFIR")
                 await asyncio.sleep(host.config.probe_poll_seconds * 2)
                 assert b"Renderer interaction confirmation" in frames
-                # Correct the phrase with plain keys: modifier chords do not
-                # reach the terminal the same way in every engine.
-                await page.keyboard.press("Backspace")
                 await page.keyboard.type("M")
                 # Let the input's change enable Continue before Tab looks
                 # for it; a disabled button is skipped.
                 await asyncio.sleep(host.config.probe_poll_seconds * 2)
-                rendered.clear()
+                # The dimmed fleet shows through the dialog, so its rows prove
+                # nothing here; its footer returns only once the dialog closes.
+                frames.clear()
+                fleet_footer_rendered.clear()
                 # Focus order: input, Cancel, then Continue once enabled.
                 await page.keyboard.press("Tab")
                 await page.keyboard.press("Tab")
                 await page.keyboard.press("Enter")
-                await asyncio.wait_for(rendered.wait(), host.config.startup_seconds)
+                await asyncio.wait_for(
+                    fleet_footer_rendered.wait(), host.config.startup_seconds
+                )
                 await capture_changed_screen(
                     page, host, modal, output / f"{prefix}modal-dismissed.png"
                 )
