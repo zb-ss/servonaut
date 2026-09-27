@@ -15,10 +15,8 @@ back on the event loop that awaited the operation.
 from __future__ import annotations
 
 import asyncio
-import http.client
 import logging
 import shutil
-import tarfile
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -30,12 +28,12 @@ from servonaut.desktop.voice.connection import (
 )
 from servonaut.desktop.voice.models import (
     KOKORO_TTS_SPEC,
+    MODEL_DOWNLOAD_ERRORS,
     MODEL_REGISTRY,
     SILERO_VAD_SPEC,
     VoiceModelCache,
     VoiceModelCacheState,
     VoiceModelCancelledError,
-    VoiceModelError,
     VoiceModelSpec,
     nemotron_spec,
 )
@@ -60,7 +58,9 @@ from servonaut.services.voice_setup_service import (
     MODEL_DOWNLOAD_SIZES,
     InstalledModel,
     VoiceReadiness,
+    byte_progress,
     portaudio_install_command,
+    progress_on_loop,
 )
 from servonaut.utils.credential_scrub import scrub_credentials
 
@@ -73,25 +73,13 @@ logger = logging.getLogger(__name__)
 # the model registry's engine kinds.
 _PANEL_ENGINE: Dict[str, str] = {"stt": "nemotron", "tts": "kokoro", "vad": "silero-vad"}
 
-# Download progress is forwarded at most every this many bytes. The model
-# cache reports every mebibyte; repainting the bar that often is wasted work.
-_PROGRESS_STEP_BYTES = 4 << 20
-
 # The runtime's size depends on the platform's wheels and is pinned nowhere,
 # so this stays an approximation.
 _RUNTIME_SIZE_HINT = "~200 MB"
 
-_ModelProgress = Callable[[float, int, int], None]
-
 # What a model download can raise once the cache has retried what it could:
 # network, disk, protocol, archive and lock failures.
-_DOWNLOAD_ERRORS = (
-    OSError,
-    VoiceModelError,
-    VoiceRuntimeError,
-    tarfile.TarError,
-    http.client.HTTPException,
-)
+_DOWNLOAD_ERRORS = (*MODEL_DOWNLOAD_ERRORS, VoiceRuntimeError)
 
 
 class DesktopVoiceSetupService(VoiceSetupServiceInterface):
@@ -499,7 +487,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         cancels the provisioning too, so no installer child outlives it.
         """
         cancel = threading.Event()
-        report = _step_progress(_on_loop(progress)) if progress is not None else None
+        report = _step_progress(progress_on_loop(progress)) if progress is not None else None
         try:
             return await asyncio.to_thread(self._transact, operation, report, cancel), ""
         except asyncio.CancelledError:
@@ -585,7 +573,7 @@ class DesktopVoiceSetupService(VoiceSetupServiceInterface):
         """Download and verify *spec* on a thread."""
         report = None
         if progress is not None:
-            report = _byte_progress(_on_loop(progress), spec.display_name)
+            report = byte_progress(progress_on_loop(progress), spec.display_name)
         cancel = threading.Event()
         try:
             status = await asyncio.to_thread(
@@ -664,25 +652,6 @@ def _runtime_readiness(status: VoiceRuntimeStatus) -> Tuple[bool, str]:
     return False, scrub_credentials(status.message)
 
 
-def _on_loop(callback: VoiceSetupProgress) -> VoiceSetupProgress:
-    """Wrap *callback* so a worker thread's calls run on the current event loop.
-
-    The setup panel's progress callbacks repaint widgets, which is only
-    safe from the event loop.
-    """
-    loop = asyncio.get_running_loop()
-
-    def deliver(label: str, done: int, total: int) -> None:
-        try:
-            loop.call_soon_threadsafe(callback, label, done, total)
-        except RuntimeError:
-            # The loop closed under a still-running operation: nobody is
-            # left to show progress to.
-            logger.debug("Dropped voice setup progress; the event loop is closed")
-
-    return deliver
-
-
 def _step_progress(callback: VoiceSetupProgress) -> VoiceSetupProgress:
     """Adapt the runtime's ``(label, done_steps, total_steps)`` reports.
 
@@ -694,23 +663,5 @@ def _step_progress(callback: VoiceSetupProgress) -> VoiceSetupProgress:
             callback(label, 0, 0)
             return
         callback(label, min(max(done, 0), total), total)
-
-    return report
-
-
-def _byte_progress(callback: VoiceSetupProgress, label: str) -> _ModelProgress:
-    """Adapt the cache's ``(fraction, done_bytes, total_bytes)`` reports.
-
-    Forwarded every few megabytes and on completion, labelled with the
-    model being fetched.
-    """
-    last_sent = [0]
-
-    def report(fraction: float, done: int, total: int) -> None:
-        finished = 0 < total <= done
-        if not finished and done - last_sent[0] < _PROGRESS_STEP_BYTES:
-            return
-        last_sent[0] = done
-        callback(label, done, max(total, 0))
 
     return report
