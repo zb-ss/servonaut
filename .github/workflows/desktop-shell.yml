@@ -263,8 +263,16 @@ jobs:
       # packaged as the .deb and installed in a clean Ubuntu 24.04 container
       # with nothing but its declared Depends, must open its window the same
       # way. The container keeps the payload inside this job. WebKit sandboxes
-      # its web processes with bubblewrap, which needs the user namespaces
-      # Docker's default seccomp and AppArmor profiles deny.
+      # its web processes with bubblewrap, which needs a user namespace:
+      # Docker's default seccomp filter denies one outright, so the container
+      # runs without it, and its processes are left unconfined, as in a
+      # desktop session. The kernel then restricts them the way 24.04 does
+      # (kernel.apparmor_restrict_unprivileged_userns=1), so the window needs
+      # the package's AppArmor profile, and the script shows it failing
+      # without the profile and opening with it. For that the container may
+      # load AppArmor policy into this runner's kernel (MAC_ADMIN and the
+      # host's securityfs), as installing 24.04's AppArmor and the package
+      # does; that policy stays loaded until the runner is discarded.
       - name: Run packaged window smoke on Ubuntu 24.04
         id: window-smoke-forward
         if: runner.os == 'Linux'
@@ -280,7 +288,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
-          trap 'cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
+          restriction=kernel.apparmor_restrict_unprivileged_userns
+          if ! host_restriction="$(sysctl -n "${restriction}" 2>/dev/null)"; then
+            echo "This runner's kernel has no ${restriction}, so it cannot qualify the restriction." >&2
+            exit 1
+          fi
+          trap 'sudo sysctl -qw "${restriction}=${host_restriction}"; cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
           # The distribution tooling imports the product's release-identity
           # code, so the packager runs with the checkout's sources.
           env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
@@ -291,9 +304,13 @@ jobs:
             --version "${PRODUCT_VERSION}" \
             --maintainer "Servonaut qualification <qualification@example.com>" \
             --filename servonaut.deb
+          echo "Runner kernel $(uname -r): ${restriction} was ${host_restriction}, now 1"
+          sudo sysctl -qw "${restriction}=1"
           docker run --rm \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
+            --cap-add MAC_ADMIN \
+            --volume /sys/kernel/security:/sys/kernel/security \
             --shm-size=1g \
             --volume "${GITHUB_WORKSPACE}:/src:ro" \
             --volume "${FORWARD_DIR}/deb:/deb:ro" \

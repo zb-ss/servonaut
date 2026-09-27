@@ -6,8 +6,8 @@ HOME. The check passes once the private child logs that the page opened the
 authenticated session WebSocket. Getting there needs the GTK binding, the
 native window, the page, the one-shot session hand-over and the host to work
 together, so a window that stays blank never passes. The window is then
-photographed and the launcher stopped; every process it started must exit
-with it.
+photographed, the security labels its processes run under are recorded, and
+the launcher stopped; every process it started must exit with it.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from scripts.desktop_shell.model import load_desktop_target_spec
@@ -45,6 +45,9 @@ _POLL_SECONDS = 0.25
 _OS_RELEASE = Path("/etc/os-release")
 _DIAGNOSTIC_TAIL_BYTES = 4000
 _SCREENSHOT_TIMEOUT_SECONDS = 30
+# Where Linux shows a process's security label: AppArmor's own file first,
+# then the one every security module shares.
+_SECURITY_LABEL_FILES = (Path("attr") / "apparmor" / "current", Path("attr") / "current")
 
 
 class WindowSmokeError(DesktopSmokeError):
@@ -62,6 +65,9 @@ class WindowSmokeReport:
     screenshot_captured: bool
     launcher_exit_code: int
     process_tree_exited: bool
+    # Command name -> the labels processes of that name ran under, such as
+    # WebKit's bubblewrap under the launcher's AppArmor profile.
+    process_security_labels: dict[str, list[str]] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2) + "\n"
@@ -138,6 +144,38 @@ def descendants(root: int, parents: Mapping[int, int]) -> set[int]:
     return found
 
 
+def security_labels(
+    pids: Iterable[int], proc_root: Path = Path("/proc")
+) -> dict[str, list[str]]:
+    """The security labels of *pids*, grouped by command name.
+
+    Processes that exited, and hosts without a security module, add nothing.
+    """
+    found: dict[str, set[str]] = {}
+    for pid in pids:
+        entry = proc_root / str(pid)
+        try:
+            name = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        label = _security_label(entry)
+        if label is not None:
+            found.setdefault(name, set()).add(label)
+    return {name: sorted(labels) for name, labels in sorted(found.items())}
+
+
+def _security_label(entry: Path) -> str | None:
+    for relative in _SECURITY_LABEL_FILES:
+        try:
+            text = (entry / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        label = text.strip("\x00\n ")
+        if label:
+            return label
+    return None
+
+
 def wait_until(
     condition: Callable[[], bool],
     timeout_seconds: float,
@@ -202,6 +240,7 @@ def run_window_smoke(
             time.sleep(policy.window_render_settle_seconds)
             captured = _capture_screenshot(screenshot, inherited, required=True)
             started_tree = descendants(process.pid, process_parents())
+            labels = security_labels({process.pid, *started_tree})
             exit_code = _stop_launcher(process, policy)
             tree_exited = wait_until(
                 lambda: not started_tree & process_parents().keys(),
@@ -223,6 +262,7 @@ def run_window_smoke(
         screenshot_captured=captured,
         launcher_exit_code=exit_code,
         process_tree_exited=tree_exited,
+        process_security_labels=labels,
     )
 
 
