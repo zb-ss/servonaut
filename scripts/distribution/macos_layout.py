@@ -104,13 +104,18 @@ def plan_app_layout(
         MacosLayoutError: For an unexpected top-level entry, an executable that
             is not Mach-O code or a missing contents directory.
     """
-    top_level = {entry.relative_path.name: entry for entry in entries if len(entry.relative_path.parts) == 1}
+    top_level = {
+        entry.relative_path.name: entry
+        for entry in entries
+        if len(entry.relative_path.parts) == 1
+    }
     planned = [*_top_level_entries(top_level, code)]
     internal_root = PurePosixPath(CONTENTS_DIRECTORY)
     internal = [
         _relative_to(entry, internal_root)
         for entry in entries
-        if entry.relative_path.parts[0] == CONTENTS_DIRECTORY and entry.relative_path != internal_root
+        if entry.relative_path.parts[0] == CONTENTS_DIRECTORY
+        and entry.relative_path != internal_root
     ]
     internal_code = frozenset(
         path.relative_to(internal_root) for path in code if path.parts[0] == CONTENTS_DIRECTORY
@@ -137,7 +142,8 @@ def verify_app_layout(app_path: Path) -> None:
         in_code_location = _is_below(here, _CODE_LOCATIONS)
         for name in subdirectories:
             path = Path(directory) / name
-            if in_code_location and "." in name and not path.is_symlink() and not name.endswith(".framework"):
+            dotted = "." in name and not name.endswith(".framework")
+            if in_code_location and dotted and not path.is_symlink():
                 raise MacosLayoutError(f"code directory name contains a dot: {here / name}")
         for name in files:
             path = Path(directory) / name
@@ -147,7 +153,9 @@ def verify_app_layout(app_path: Path) -> None:
             if in_code_location and not is_code:
                 raise MacosLayoutError(f"data file in a code location: {here / name}")
             if not in_code_location and is_code:
-                raise MacosLayoutError(f"code outside Contents/MacOS or Contents/Frameworks: {here / name}")
+                raise MacosLayoutError(
+                    f"code outside Contents/MacOS or Contents/Frameworks: {here / name}"
+                )
 
 
 def require_frontend_copy_matches(payload_root: Path, entries: Sequence[PayloadEntry]) -> None:
@@ -174,7 +182,9 @@ def require_frontend_copy_matches(payload_root: Path, entries: Sequence[PayloadE
             raise MacosLayoutError(f"the top-level frontend copy of {path} differs")
 
 
-def _subtree(entries: Sequence[PayloadEntry], root: PurePosixPath) -> dict[PurePosixPath, PayloadEntry]:
+def _subtree(
+    entries: Sequence[PayloadEntry], root: PurePosixPath
+) -> dict[PurePosixPath, PayloadEntry]:
     return {
         entry.relative_path.relative_to(root): entry
         for entry in entries

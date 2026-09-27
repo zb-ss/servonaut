@@ -199,7 +199,8 @@ def sign_app_bundle(
 
     if not (app_path / MACOS_DIR / MAIN_EXECUTABLE).is_file():
         raise MacosSigningError(f"Main executable missing: {MAIN_EXECUTABLE}")
-    _sign([*base_args, "--entitlements", str(entitlements)], app_path, "app bundle", dry_run=dry_run)
+    app_args = [*base_args, "--entitlements", str(entitlements)]
+    _sign(app_args, app_path, "app bundle", dry_run=dry_run)
     signed_items.append(app_path)
 
     for path, digest in preserved.items():

@@ -112,18 +112,15 @@ def window_environment(
     reaches the window server through the login session it is started in, so
     it needs no variable for it.
     """
-    if system == "darwin":
-        environment = isolated_child_environment(home)
-        environment["PATH"] = _SYSTEM_PATH
-        return environment
-    missing = [name for name in ("DISPLAY",) if not inherited.get(name)]
-    if missing:
+    if system != "darwin" and not inherited.get("DISPLAY"):
         raise WindowSmokeError("the window smoke needs an X display; run it under xvfb-run")
     environment = isolated_child_environment(home)
+    environment["PATH"] = _SYSTEM_PATH
+    if system == "darwin":
+        return environment
     runtime_dir = home / "runtime"
     runtime_dir.mkdir(mode=0o700, exist_ok=True)
     environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
-    environment["PATH"] = _SYSTEM_PATH
     for name in _DISPLAY_VARIABLES:
         if inherited.get(name):
             environment[name] = inherited[name]

@@ -179,7 +179,9 @@ class TestPlacement:
         assert _is_link_to(frameworks / "vendor.libs", "vendor__dot__libs")
         assert (frameworks / "vendor.libs" / "libx.dylib").is_file()
         # A data directory lives in Resources and keeps its name everywhere.
-        assert _is_link_to(frameworks / "example-1.0.dist-info", "../Resources/example-1.0.dist-info")
+        assert _is_link_to(
+            frameworks / "example-1.0.dist-info", "../Resources/example-1.0.dist-info"
+        )
 
     def test_framework_bundles_stay_whole_in_contents_frameworks(
         self, payload: _Payload, tmp_path: Path
@@ -294,7 +296,8 @@ class TestPayloadRules:
         app = _assemble(payload, tmp_path)
 
         assert not (app / "Contents" / "MacOS" / "frontend").exists()
-        assert (app / "Contents" / "Resources" / "frontend" / "index.html").read_bytes() == b"<html>"
+        index = app / "Contents" / "Resources" / "frontend" / "index.html"
+        assert index.read_bytes() == b"<html>"
         assert _is_link_to(app / "Contents" / "Frameworks" / "frontend", "../Resources/frontend")
 
     @pytest.mark.parametrize("change", ["content", "extra-file"])
@@ -326,7 +329,7 @@ class TestVerifyAppLayout:
             ("Contents/Frameworks/stray.json", b"{}", "data file in a code location"),
             ("Contents/MacOS/notes.txt", b"notes", "data file in a code location"),
             ("Contents/Resources/libstray.dylib", _MACHO, "code outside"),
-            ("Contents/Frameworks/pkg.libs/libx.dylib", _MACHO, "code directory name contains a dot"),
+            ("Contents/Frameworks/pkg.libs/libx.dylib", _MACHO, "directory name contains a dot"),
         ],
     )
     def test_misplaced_content_is_refused(

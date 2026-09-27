@@ -99,7 +99,9 @@ def assemble_app_bundle(
         require_frontend_copy_matches(src_dir, payload_entries)
         layout = plan_app_layout(payload_entries, code_files(src_dir, payload_entries))
     except MacosLayoutError as error:
-        raise MacosPackagingError(f"Payload cannot be laid out as an app bundle: {error}") from error
+        raise MacosPackagingError(
+            f"Payload cannot be laid out as an app bundle: {error}"
+        ) from error
 
     app_path = out_dir / bundle_name
     if app_path.is_symlink() or app_path.is_file():
@@ -117,7 +119,9 @@ def assemble_app_bundle(
         if packaging_revision is not None
         else product_version
     )
-    _write_info_plist(contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version)
+    _write_info_plist(
+        contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version
+    )
     for metadata in ("PkgInfo", "Info.plist"):
         (contents_dir / metadata).chmod(0o644)
 
