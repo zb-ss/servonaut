@@ -90,7 +90,6 @@ REQUIRED_TYPELIBS = frozenset(
         "Soup-3.0",
         "WebKit2-4.1",
         "cairo-1.0",
-        "freetype2-2.0",
         "xlib-2.0",
     }
 )
