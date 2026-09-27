@@ -64,5 +64,8 @@
 
 #ipban_discover_hint {
     margin-left: 1;
+    /* No bottom padding (a .note default): the hint centres on the
+       Discover button beside it. */
+    padding: 0 1;
     content-align: left middle;
 }

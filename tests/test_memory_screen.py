@@ -535,7 +535,11 @@ async def test_on_button_pressed_refresh_all(tmp_path: Path) -> None:
     app = TestApp()
     async with app.run_test(headless=True) as pilot:
         await pilot.pause(0.1)
-        # Click the refresh all button
+        # The page scrolls on a terminal this small; bring the button into
+        # view first, as a user would, then click it.
+        button = app.screen.query_one("#btn_refresh_all", Button)
+        button.scroll_visible(animate=False, immediate=True)
+        await pilot.pause()
         await pilot.click("#btn_refresh_all")
         try:
             await asyncio.wait_for(refresh_event.wait(), timeout=2.0)
@@ -2200,3 +2204,62 @@ class TestComputeMemoryStatus:
         svc = _make_memory_service(tmp_path, memory_disabled_for="i-abc123")
         _seed_module(svc._store, "i-abc123", "custom", "os")
         assert compute_memory_status(_make_instance(), svc) == STATUS_OPT_OUT
+
+
+# ---------------------------------------------------------------------------
+# Initial focus
+# ---------------------------------------------------------------------------
+
+
+def _focus_test_app(svc: Any, instance: Dict[str, Any]) -> Any:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Footer
+    from servonaut.widgets.safe_header import SafeHeader
+    from servonaut.screens.memory import MemoryScreen
+
+    class TestApp(App):
+        CSS = ""
+
+        def compose(self) -> ComposeResult:
+            yield SafeHeader()
+            yield Footer()
+
+        def on_mount(self) -> None:
+            self.memory_service = svc
+            self.push_screen(MemoryScreen(instance))
+
+    return TestApp()
+
+
+@pytest.mark.asyncio
+async def test_memory_screen_opens_on_the_table_not_the_setup_banner(tmp_path: Path) -> None:
+    """With memory to show, focus starts on the table, never on the upsell."""
+    instance = _make_instance()
+    svc = _make_memory_service(tmp_path)
+    _seed_module(svc._store, instance["id"], instance["provider"], "os")
+
+    app = _focus_test_app(svc, instance)
+    async with app.run_test(headless=True, size=(100, 30)) as pilot:
+        await pilot.pause(0.2)
+        banner = app.screen.query_one("#memory-cloud-banner")
+        assert not banner.has_class("hidden"), "the setup banner is on screen"
+        assert app.focused is not None
+        assert app.focused.id == "memory-table"
+        # Opening does not scroll the page away from its title.
+        assert app.screen.query_one("#memory-container").scroll_y == 0
+
+
+@pytest.mark.asyncio
+async def test_memory_screen_opens_on_the_probe_button_when_empty(tmp_path: Path) -> None:
+    """With nothing captured yet, focus starts on the probe button."""
+    instance = _make_instance()
+    svc = MagicMock()
+    svc.is_memory_disabled.return_value = False
+    svc.get_all_modules.return_value = {}
+    svc.stale_modules.return_value = []
+
+    app = _focus_test_app(svc, instance)
+    async with app.run_test(headless=True, size=(100, 30)) as pilot:
+        await pilot.pause(0.2)
+        assert app.focused is not None
+        assert app.focused.id == "btn_empty_probe"

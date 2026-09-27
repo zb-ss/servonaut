@@ -15,6 +15,8 @@ from typing import Any, Awaitable, Callable
 import pytest
 from textual.widgets import Button, DataTable, Select
 
+from servonaut.screens.settings.registry import PANELS
+
 from . import _harness
 
 Scenario = Callable[[Any], Awaitable[None]]
@@ -94,7 +96,7 @@ def _settings(panel_id: str) -> Scenario:
         screen = await _harness.wait_for_screen(pilot, "SettingsScreen")
         await _harness.wait_until(
             pilot,
-            lambda: screen.query_one(f"#save_{panel_id}").display,
+            lambda: screen.query_one(f"#panel_{panel_id}").display,
             f"the {panel_id} settings panel",
         )
 
@@ -144,6 +146,15 @@ async def _custom_servers(pilot: Any) -> None:
 
 
 async def _ip_ban(pilot: Any) -> None:
+    await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
+
+
+async def _ip_ban_configured(pilot: Any) -> None:
+    from servonaut.config.schema import IPBanConfig
+
+    pilot.app.config_manager.get().ip_ban_configs.append(
+        IPBanConfig(name="edge-waf", method="waf", region="us-east-1")
+    )
     await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
 
 
@@ -225,6 +236,23 @@ def test_settings_hetzner(screen_snapshot, size: str) -> None:
     _capture(screen_snapshot, size, _settings("hetzner"))
 
 
+# The other Settings panels, at the narrow size, where each label sits above
+# its field. Left out: panels whose content depends on the machine running
+# the tests (whether the Bitwarden CLI or the voice packages are installed).
+_MACHINE_DEPENDENT_PANELS = {"bw_ssh", "voice"}
+_NARROW_PANELS = [
+    spec.id
+    for spec in PANELS
+    if spec.id not in {"general", "hetzner"} | _MACHINE_DEPENDENT_PANELS
+]
+
+
+@pytest.mark.parametrize("panel_id", _NARROW_PANELS)
+def test_settings_panel_narrow(screen_snapshot, panel_id: str) -> None:
+    """A Settings panel on the narrow terminal."""
+    _capture(screen_snapshot, "100x30", _settings(panel_id))
+
+
 @sizes
 def test_server_memory(screen_snapshot, size: str) -> None:
     """The memory screen of a server with four cached modules."""
@@ -257,8 +285,13 @@ def test_custom_servers(screen_snapshot, size: str) -> None:
 
 @sizes
 def test_ip_ban(screen_snapshot, size: str) -> None:
-    """The IP ban manager with nothing configured."""
+    """The IP ban manager with nothing configured: a hint points to Settings."""
     _capture(screen_snapshot, size, _ip_ban)
+
+
+def test_ip_ban_configured(screen_snapshot) -> None:
+    """The IP ban manager once a ban method exists: no hint."""
+    _capture(screen_snapshot, "100x30", _ip_ban_configured)
 
 
 @sizes

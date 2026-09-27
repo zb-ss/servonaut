@@ -134,3 +134,107 @@
     border: round $error;
 }
 
+/* -------------------------------------------------------------------
+   Settings form rows
+   Wide terminals: a fixed label column, the field takes the rest of the
+   row. Inputs, selects and switches are all three rows tall, so labels
+   (and any value text sharing the row) are three rows tall too with the
+   text centred; otherwise a label sits on the field's top border row.
+   Every field keeps the same one-cell right margin so their right edges
+   line up.
+   ------------------------------------------------------------------- */
+
+.settings-panel .setting_row .label {
+    width: 28;
+}
+
+.settings-panel .setting_row > Static {
+    min-height: 3;
+    content-align-vertical: middle;
+}
+
+.settings-panel .setting_row Select,
+.settings-panel .setting_row EnvVarInput {
+    width: 1fr;
+    margin-right: 1;
+}
+
+/* EnvVarInput already carries the row margin; its inner Input must not add
+   a second one. */
+.settings-panel .setting_row EnvVarInput > Input {
+    margin-right: 0;
+}
+
+/* Start the selected value where an Input starts its text. */
+.settings-panel .setting_row SelectCurrent {
+    padding: 0 1;
+}
+
+/* The list editors size their small buttons in their own defaults, but the
+   stylesheet's global Button minimum (16 cells) outranks those, which
+   leaves the value input a sliver of the row on a narrow screen. */
+StringListEditor .list-remove,
+KeyValueEditor .kv-remove {
+    width: 5;
+    min-width: 5;
+}
+
+StringListEditor .list-add,
+KeyValueEditor .kv-add {
+    width: auto;
+    min-width: 9;
+}
+
+/* Narrow terminals (see SettingsScreen.HORIZONTAL_BREAKPOINTS): a label
+   column would leave no room for the field, so each label sits above its
+   field, and the pane and panel give up most of their side padding. */
+SettingsScreen.-narrow #settings-content {
+    padding: 0 1;
+}
+
+SettingsScreen.-narrow .settings-panel {
+    padding: 0 1;
+}
+
+SettingsScreen.-narrow .settings-panel .setting_row {
+    layout: vertical;
+    margin: 0 0 1 0;
+}
+
+SettingsScreen.-narrow .settings-panel .setting_row .label {
+    width: 100%;
+    padding: 0;
+    text-align: left;
+}
+
+SettingsScreen.-narrow .settings-panel .setting_row > Static {
+    min-height: 1;
+}
+
+/* A row of action buttons (Add / Edit / Remove …) overflows the pane at the
+   global 16-cell button minimum; sized to their labels they fit. The list
+   editors' add/remove buttons keep their own, smaller minimum. */
+SettingsScreen.-narrow .settings-panel .panel-body Horizontal > Button {
+    min-width: 8;
+}
+
+SettingsScreen.-narrow .settings-panel .panel-body StringListEditor Horizontal > Button,
+SettingsScreen.-narrow .settings-panel .panel-body KeyValueEditor Horizontal > Button {
+    min-width: 5;
+}
+
+/* Short terminals (see SettingsScreen.VERTICAL_BREAKPOINTS): drop the
+   vertical padding so the form body keeps most of the height. */
+SettingsScreen.-short #settings-content {
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+SettingsScreen.-short .settings-panel {
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+SettingsScreen.-short .panel-save-dock {
+    padding: 0;
+}
