@@ -26,7 +26,7 @@
     height: auto;
     border: round $primary;
     background: $primary 8%;
-    padding: 1;
+    padding: 0 1;
     margin-bottom: 1;
     align: left middle;
 }
@@ -34,6 +34,16 @@
 #memory-summary-status {
     width: 1fr;
     height: auto;
+}
+
+/* The status text beside each row's buttons is as tall as a button with
+   the text centred, so it reads on the same line as the button labels
+   rather than level with their top borders. */
+#memory-summary-status,
+#memory-sync-status,
+#memory-ai-status {
+    min-height: 3;
+    content-align-vertical: middle;
 }
 
 #memory-summary-row Button {
@@ -79,6 +89,32 @@
 #memory-sync-row Button,
 #memory-ai-row Button {
     min-width: 18;
+}
+
+.memory-row-buttons {
+    width: auto;
+    height: auto;
+}
+
+/* Narrow terminals (see MemoryScreen.HORIZONTAL_BREAKPOINTS): beside the
+   buttons the status text would be squeezed into a sliver, so it takes the
+   full width and the buttons sit together underneath it. */
+MemoryScreen.-narrow #memory-summary-row,
+MemoryScreen.-narrow #memory-sync-row,
+MemoryScreen.-narrow #memory-ai-row {
+    layout: vertical;
+}
+
+MemoryScreen.-narrow #memory-summary-status,
+MemoryScreen.-narrow #memory-sync-status,
+MemoryScreen.-narrow #memory-ai-status {
+    min-height: 1;
+}
+
+MemoryScreen.-narrow #memory-summary-row .memory-row-buttons Button:first-child,
+MemoryScreen.-narrow #memory-sync-row .memory-row-buttons Button:first-child,
+MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
+    margin-left: 0;
 }
 
 /* --- Drift screen --- */
