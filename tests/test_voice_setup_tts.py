@@ -1,9 +1,10 @@
 """Tests for the setup service's speech-model (TTS) surface.
 
-Network is mocked at the single-file download seam; extraction runs
-against real tar.bz2 archives built in the test, because the safety
-property under test — a hostile archive extracts to nothing — lives in
-the real tarfile machinery, not in a mock of it.
+Network is replaced by a fake URL opener serving archives built in the
+test, pinned to their own bytes; download, verification and extraction
+run for real, because the safety properties under test — a mismatched or
+hostile archive installs nothing — live in that machinery, not in a mock
+of it.
 """
 
 from __future__ import annotations
@@ -14,12 +15,14 @@ import shutil
 import sys
 import tarfile
 import types
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import servonaut.services.voice_engines as voice_engines
+import servonaut.services.voice_setup_service as voice_setup_service
 from servonaut.config.schema import VoiceConfig
 from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
 from servonaut.services.voice_engines import (
@@ -28,7 +31,17 @@ from servonaut.services.voice_engines import (
     TTS_PACKAGES,
     kokoro_model_dir,
 )
+from servonaut.services.voice_models import KOKORO_TTS_SPEC
 from servonaut.services.voice_setup_service import VoiceSetupService
+
+from .voice_download_fakes import (
+    FakeOpener,
+    downloader,
+    pinned_asset,
+    serving,
+    staging_leftovers,
+    with_assets,
+)
 
 
 def run_async(coro):
@@ -107,15 +120,23 @@ def _make_hostile_archive(path: Path, member_name: str, *, link: bool = False):
     return path
 
 
-def _patch_download_with(archive_builder):
-    """Patch the download seam to 'fetch' a locally built archive."""
-    async def _fake_download(self, client, url, destination, label, progress):
-        archive_builder(destination)
-        if progress is not None:
-            progress(label, destination.stat().st_size, destination.stat().st_size)
-        return True, ""
+ARCHIVE_NAME = f"{KOKORO_MODEL_ID}.tar.bz2"
 
-    return patch.object(VoiceSetupService, "_download_file", _fake_download)
+
+def _served_service(monkeypatch, tmp_path, archive_builder, *, opener=None, **pin_overrides):
+    """A service whose speech model is served, and pinned, as *archive_builder* writes it.
+
+    Args:
+        opener: Serves the requests instead of the built archive.
+
+    Returns:
+        (service, opener).
+    """
+    data = archive_builder(tmp_path / "served.tar.bz2").read_bytes()
+    asset = pinned_asset(ARCHIVE_NAME, data, is_archive=True, **pin_overrides)
+    monkeypatch.setattr(voice_setup_service, "KOKORO_TTS_SPEC", with_assets(KOKORO_TTS_SPEC, asset))
+    opener = opener or serving({ARCHIVE_NAME: data})
+    return VoiceSetupService(VoiceConfig(), _runtime(), downloader=downloader(opener)), opener
 
 
 # ---------------------------------------------------------------------------
@@ -241,72 +262,94 @@ class TestTTSInventory:
 
 class TestTTSDownload:
 
-    def test_successful_download_installs_the_model(self, model_root):
-        service = _service()
-        with _patch_download_with(lambda dest: _make_archive(dest, nested=True)):
-            success, message = run_async(service.download_tts_model())
-        assert success is True
+    def test_successful_download_installs_the_model(self, model_root, monkeypatch, tmp_path):
+        service, opener = _served_service(monkeypatch, tmp_path, lambda dest: _make_archive(dest, nested=True))
+        success, message = run_async(service.download_tts_model())
+        assert (success, message) == (True, "Downloaded the speech model.")
         assert service.is_tts_model_present() is True
-        # No staging leftovers.
+        assert opener.requested == [f"https://models.example/{ARCHIVE_NAME}"]
+        # No staging leftovers, and no archive left beside the model.
         assert [p for p in model_root.iterdir()] == [kokoro_model_dir()]
+        assert not (kokoro_model_dir() / ARCHIVE_NAME).exists()
 
-    def test_flat_archive_layout_is_tolerated(self, model_root):
-        service = _service()
-        with _patch_download_with(lambda dest: _make_archive(dest, nested=False)):
-            success, _ = run_async(service.download_tts_model())
+    def test_flat_archive_layout_is_tolerated(self, model_root, monkeypatch, tmp_path):
+        service, _ = _served_service(monkeypatch, tmp_path, lambda dest: _make_archive(dest, nested=False))
+        success, _ = run_async(service.download_tts_model())
         assert success is True
         assert service.is_tts_model_present() is True
 
-    def test_download_reports_progress(self, model_root):
-        service = _service()
+    def test_download_reports_progress_against_the_pinned_total(self, model_root, monkeypatch, tmp_path):
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive)
+        total = voice_setup_service.KOKORO_TTS_SPEC.total_download_bytes
         seen = []
-        with _patch_download_with(lambda dest: _make_archive(dest)):
-            run_async(service.download_tts_model(
-                progress=lambda label, done, total: seen.append((label, done, total))
-            ))
-        assert seen  # at least one report reached the callback
+        run_async(service.download_tts_model(
+            progress=lambda label, done, total: seen.append((label, done, total))
+        ))
+        assert seen
+        assert seen[-1] == ("speech model", total, total)
 
-    def test_failed_download_leaves_nothing_behind(self, model_root):
-        async def _failing_download(self, client, url, destination, label, progress):
-            return False, "Download failed for speech model: HTTP 503"
-
-        service = _service()
-        with patch.object(VoiceSetupService, "_download_file", _failing_download):
-            success, message = run_async(service.download_tts_model())
+    def test_failed_download_leaves_nothing_behind(self, model_root, monkeypatch, tmp_path):
+        unavailable = urllib.error.HTTPError(
+            "https://models.example", 503, "Service Unavailable", {}, None,
+        )
+        opener = FakeOpener({f"https://models.example/{ARCHIVE_NAME}": unavailable})
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive, opener=opener)
+        success, message = run_async(service.download_tts_model())
         assert success is False
         assert "503" in message
+        assert "speech model" in message
         assert list(model_root.iterdir()) == []
 
-    def test_incomplete_archive_is_rejected_after_extraction(self, model_root):
-        service = _service()
-        with _patch_download_with(lambda dest: _make_archive(dest, complete=False)):
-            success, message = run_async(service.download_tts_model())
+    def test_incomplete_archive_is_rejected_after_extraction(self, model_root, monkeypatch, tmp_path):
+        service, _ = _served_service(monkeypatch, tmp_path, lambda dest: _make_archive(dest, complete=False))
+        success, message = run_async(service.download_tts_model())
         assert success is False
-        assert "expected model files" in message
+        assert "speech model failed verification" in message
+        assert "voices.bin" in message
         assert service.is_tts_model_present() is False
+        assert list(model_root.iterdir()) == []
 
-    def test_download_replaces_an_existing_model(self, model_root):
+    def test_checksum_mismatch_installs_nothing(self, model_root, monkeypatch, tmp_path):
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive, expected_sha256="0" * 64)
+        success, message = run_async(service.download_tts_model())
+        assert success is False
+        assert "speech model failed verification" in message
+        assert "hash mismatch" in message
+        assert list(model_root.iterdir()) == []
+
+    def test_download_replaces_an_existing_model(self, model_root, monkeypatch, tmp_path):
         _write_kokoro_files(kokoro_model_dir())
         (kokoro_model_dir() / "stale-extra.bin").write_bytes(b"old")
-        service = _service()
-        with _patch_download_with(lambda dest: _make_archive(dest)):
-            success, _ = run_async(service.download_tts_model())
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive)
+        success, _ = run_async(service.download_tts_model())
         assert success is True
         assert not (kokoro_model_dir() / "stale-extra.bin").exists()
+        assert staging_leftovers(model_root) == []
 
-    def test_download_invalidates_cached_readiness(self, model_root):
-        service = _service()
+    def test_a_failed_redownload_keeps_the_existing_model(self, model_root, monkeypatch, tmp_path):
+        _write_kokoro_files(kokoro_model_dir())
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive, expected_sha256="0" * 64)
+        success, _ = run_async(service.download_tts_model())
+        assert success is False
+        assert (kokoro_model_dir() / "model.int8.onnx").read_bytes() == b"weights"
+
+    def test_download_invalidates_cached_readiness(self, model_root, monkeypatch, tmp_path):
+        service, _ = _served_service(monkeypatch, tmp_path, _make_archive)
         service.probe()
-        with _patch_download_with(lambda dest: _make_archive(dest)):
-            run_async(service.download_tts_model())
+        run_async(service.download_tts_model())
         assert service._cached is None
 
-    def test_corrupt_archive_is_an_error_not_a_crash(self, model_root):
-        service = _service()
-        with _patch_download_with(lambda dest: dest.write_bytes(b"not a tarball")):
-            success, message = run_async(service.download_tts_model())
+    def test_corrupt_archive_is_an_error_not_a_crash(self, model_root, monkeypatch, tmp_path):
+        def _not_a_tarball(dest):
+            dest.write_bytes(b"not a tarball")
+            return dest
+
+        service, _ = _served_service(monkeypatch, tmp_path, _not_a_tarball)
+        success, message = run_async(service.download_tts_model())
         assert success is False
+        assert "speech model" in message
         assert service.is_tts_model_present() is False
+        assert list(model_root.iterdir()) == []
 
 
 class TestTarSafety:
@@ -319,38 +362,20 @@ class TestTarSafety:
         ("innocent-link", True),
     ])
     def test_hostile_members_fail_the_whole_archive(
-        self, model_root, tmp_path, member, link
+        self, model_root, monkeypatch, tmp_path, member, link
     ):
-        archive = _make_hostile_archive(
-            tmp_path / "hostile.tar.bz2", member, link=link
+        """Even an archive that matches its pins installs nothing when unsafe."""
+        service, _ = _served_service(
+            monkeypatch, tmp_path, lambda dest: _make_hostile_archive(dest, member, link=link)
         )
-        service = _service()
-        destination = model_root / "staging"
-        error = service._extract_tts_archive(archive, destination)
-        assert error != ""
-        assert "unsafe" in error
-        # One bad member means NOTHING is extracted.
-        assert list(destination.iterdir()) == []
-        # And nothing escaped the destination either.
-        assert not (tmp_path / "outside.txt").exists()
-
-    def test_clean_archive_extracts_fully(self, model_root, tmp_path):
-        archive = _make_archive(tmp_path / "clean.tar.bz2", nested=True)
-        service = _service()
-        destination = model_root / "staging"
-        error = service._extract_tts_archive(archive, destination)
-        assert error == ""
-        assert (destination / KOKORO_MODEL_ID / "model.int8.onnx").is_file()
-
-    def test_hostile_download_never_installs(self, model_root):
-        service = _service()
-        with _patch_download_with(
-            lambda dest: _make_hostile_archive(dest, "../../escape.txt")
-        ):
-            success, message = run_async(service.download_tts_model())
+        success, message = run_async(service.download_tts_model())
         assert success is False
+        assert "unsafe" in message
         assert service.is_tts_model_present() is False
+        # One bad member means NOTHING is installed or left staged.
         assert list(model_root.iterdir()) == []
+        # And nothing escaped the models root either.
+        assert not (tmp_path / "outside.txt").exists()
 
 
 # ---------------------------------------------------------------------------

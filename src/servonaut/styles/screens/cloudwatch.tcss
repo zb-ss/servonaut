@@ -11,9 +11,16 @@
     margin: 0 1 0 1;
 }
 
+/* The filters sit on one grid row when the terminal is wide enough for
+   every placeholder to fit (the screen's -wide class) and wrap onto two
+   rows otherwise (-narrow, below). */
 #cloudwatch_filter_bar {
+    layout: grid;
+    grid-size: 6 1;
+    grid-columns: 3fr 3fr 22 2fr 10 10;
+    grid-rows: auto;
+    grid-gutter: 0 1;
     height: auto;
-    max-height: 7;
     padding: 0 1;
     background: $boost;
     border: round $primary;
@@ -21,25 +28,50 @@
 }
 
 #cloudwatch_filter_bar Vertical {
-    width: 1fr;
+    width: 100%;
     height: auto;
-    margin: 0 1;
 }
 
-#cw_filter_region {
-    width: 2fr;
+/* A label or a chosen value too long for its column ends in an ellipsis
+   instead of wrapping: a wrapped value pushes the control's bottom border
+   out of its row. */
+#cloudwatch_filter_bar Label {
+    width: 100%;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
-#cw_filter_log_group {
-    width: 3fr;
+#cloudwatch_filter_bar SelectCurrent {
+    padding: 0 1;
 }
 
-#cloudwatch_filter_bar Select {
-    height: 3;
+#cloudwatch_filter_bar SelectCurrent Static#label {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* An open list may be wider than its control, so a region or log group name
+   reads on one line even when the filters are squeezed. */
+#cloudwatch_filter_bar SelectOverlay {
+    width: auto;
+    min-width: 100%;
+    max-width: 64;
 }
 
 #cloudwatch_filter_bar Button {
-    margin: 1 0 0 1;
+    width: 100%;
+    min-width: 0;
+    margin: 1 0 0 0;
+}
+
+CloudWatchBrowserScreen.-narrow #cloudwatch_filter_bar {
+    grid-size: 4 2;
+    grid-columns: 6fr 8fr 9 9;
+}
+
+CloudWatchBrowserScreen.-narrow #cw_filter_time_range,
+CloudWatchBrowserScreen.-narrow #cw_filter_pattern {
+    column-span: 2;
 }
 
 #cloudwatch_main_content {
@@ -48,17 +80,19 @@
 }
 
 #cloudwatch_events_table {
-    width: 3fr;
+    width: 1fr;
     height: 100%;
     border: round $primary;
     margin: 0 1 0 0;
 }
 
+/* Wide enough for a full IPv4 address, a count and the WAF action, with
+   the table's border and scrollbar. */
 #cloudwatch_ips_panel {
-    width: 1fr;
+    width: 41;
     height: 100%;
     border: round $accent;
-    padding: 1;
+    padding: 0 1;
     background: $boost;
 }
 
@@ -86,7 +120,7 @@
 }
 
 #cloudwatch_ips_table {
-    height: 100%;
+    height: 1fr;
     border: round $primary;
 }
 
@@ -122,3 +156,20 @@
     overflow-y: auto;
 }
 
+/* A short terminal: single-row buttons and no padding around the event
+   detail, so the tables keep most of the height. */
+CloudWatchBrowserScreen.-short #cloudwatch_pager Button,
+CloudWatchBrowserScreen.-short #cloudwatch_ips_panel Button {
+    height: 1;
+    border: none;
+    margin: 0;
+}
+
+CloudWatchBrowserScreen.-short #cloudwatch_pager Button {
+    min-width: 10;
+}
+
+CloudWatchBrowserScreen.-short #cloudwatch_detail {
+    padding: 0 1;
+    margin: 0 1;
+}

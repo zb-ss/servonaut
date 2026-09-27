@@ -30,26 +30,19 @@ import glob
 import logging
 import os
 import shutil
-import tarfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
-from servonaut.utils.archive_safety import tar_member_rejection
+from servonaut.utils.credential_scrub import scrub_credentials
 from servonaut.utils.platform_utils import command_exists, get_os
 from servonaut.runtime import RuntimeCapabilityError, RuntimeLayout, detect_runtime
 from servonaut.services.interfaces import VoiceSetupProgress, VoiceSetupServiceInterface
 from servonaut.services.voice_engines import (
-    KOKORO_ARCHIVE_BYTES,
-    KOKORO_ARCHIVE_URL,
-    KOKORO_DISK_BYTES,
-    KOKORO_MODEL_FILE,
     KOKORO_MODEL_ID,
-    NEMOTRON_DOWNLOAD_BYTES,
     NEMOTRON_FILES,
-    SILERO_VAD_BYTES,
     SILERO_VAD_MODEL_ID,
-    SILERO_VAD_URL,
     TTS_PACKAGES,
     directory_bytes,
     engine_spec,
@@ -59,10 +52,20 @@ from servonaut.services.voice_engines import (
     kokoro_model_dir,
     model_label,
     nemotron_model_dir,
-    nemotron_repo,
+    normalise_nemotron_latency,
     silero_vad_model_dir,
-    silero_vad_model_path,
     voice_models_root,
+)
+from servonaut.services.voice_models import (
+    KOKORO_TTS_SPEC,
+    MODEL_DOWNLOAD_ERRORS,
+    SILERO_VAD_SPEC,
+    VoiceModelCancelledError,
+    VoiceModelDownloader,
+    VoiceModelExtractionError,
+    VoiceModelIntegrityError,
+    VoiceModelSpec,
+    nemotron_spec,
 )
 
 if TYPE_CHECKING:
@@ -130,13 +133,23 @@ def portaudio_install_command() -> str:
 # should never take a quarter of an hour.
 _INSTALL_TIMEOUT_SECONDS = 900
 
-# Ceiling for the model download. Generous because the larger models are
-# multi-gigabyte and the host throttles.
+# Ceiling for the Whisper download, which the transcription backend runs
+# itself and which therefore has no stall detection of ours. Generous
+# because the larger models are multi-gigabyte and the host throttles. The
+# pinned models have no total deadline: the downloader's policy bounds
+# silence instead (see VoiceModelDownloadPolicy).
 _DOWNLOAD_TIMEOUT_SECONDS = 1800
 
-# Streamed download chunk size. Large enough to keep syscall overhead off
-# the profile, small enough that progress updates feel live.
-_DOWNLOAD_CHUNK_BYTES = 1 << 20
+# Staging directories of the pinned downloads, inside the models root. Kept
+# distinct from the desktop model cache's own staging prefix, which that
+# cache sweeps under its lock: a terminal-app download in flight must never
+# look like the desktop's leftovers.
+_STAGING_PREFIX = ".partial."
+
+# Download progress is forwarded at most every this many bytes. The
+# downloader reports every mebibyte; repainting the bar that often is
+# wasted work.
+_PROGRESS_STEP_BYTES = 4 << 20
 
 
 @dataclass(frozen=True)
@@ -267,9 +280,12 @@ class VoiceSetupService(VoiceSetupServiceInterface):
         self,
         config: 'VoiceConfig',
         runtime: RuntimeLayout | None = None,
+        *,
+        downloader: Optional[VoiceModelDownloader] = None,
     ) -> None:
         self._config = config
         self._runtime = runtime or detect_runtime()
+        self._downloader = downloader or VoiceModelDownloader()
         self._cached: Optional[VoiceReadiness] = None
 
     # ------------------------------------------------------------------
@@ -477,8 +493,12 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     def download_size_hint_for(self, engine_id: str, *, model_size: str) -> str:
         """Approximate download size for an arbitrary engine/model choice."""
         if engine_spec(engine_id).streaming:
-            return f"~{human_bytes(NEMOTRON_DOWNLOAD_BYTES)}"
+            return self._streaming_size_hint()
         return MODEL_DOWNLOAD_SIZES.get(model_size, "size unknown")
+
+    def _streaming_size_hint(self) -> str:
+        """Pinned download size of the configured streaming variant."""
+        return f"~{human_bytes(nemotron_spec(self._latency_ms()).total_download_bytes)}"
 
     def can_download_model_for(self, engine_id: str) -> bool:
         """Always True: both engines' weights can be fetched from here."""
@@ -520,8 +540,8 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     def tts_download_size_hint(self) -> str:
         """Approximate footprint of the speech-model download."""
         return (
-            f"~{human_bytes(KOKORO_ARCHIVE_BYTES)} download "
-            f"(~{human_bytes(KOKORO_DISK_BYTES)} on disk)"
+            f"~{human_bytes(KOKORO_TTS_SPEC.total_download_bytes)} download "
+            f"(~{human_bytes(KOKORO_TTS_SPEC.total_disk_bytes)} on disk)"
         )
 
     def is_vad_model_present(self) -> bool:
@@ -539,7 +559,7 @@ class VoiceSetupService(VoiceSetupServiceInterface):
         uncompressed file, so the download and the on-disk size are the
         same number.
         """
-        return f"~{human_bytes(SILERO_VAD_BYTES)}"
+        return f"~{human_bytes(SILERO_VAD_SPEC.total_download_bytes)}"
 
     def _model_cache_root(self) -> Path:
         """Locate the Hugging Face hub cache the batch weights land in.
@@ -600,7 +620,7 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     def download_size_hint(self, model_size: Optional[str] = None) -> str:
         """Approximate download size for the configured model."""
         if self._engine().streaming:
-            return f"~{human_bytes(NEMOTRON_DOWNLOAD_BYTES)}"
+            return self._streaming_size_hint()
         size = model_size or self._config.model_size
         return MODEL_DOWNLOAD_SIZES.get(size, "size unknown")
 
@@ -987,12 +1007,12 @@ class VoiceSetupService(VoiceSetupServiceInterface):
         Args:
             model_size: Whisper size to fetch. Ignored by the streaming
                 engine, whose model is selected by latency instead.
-            progress: Optional callback invoked as
-                ``(label, downloaded_bytes, total_bytes)``. ``total_bytes``
-                is 0 when the server sends no length. Only the streaming
-                download reports progress — the batch engine's downloader
-                exposes no hook, so its caller should show an indeterminate
-                indicator instead of a percentage.
+            progress: Optional callback invoked on the event loop as
+                ``(label, downloaded_bytes, total_bytes)``, with the pinned
+                total. Only the streaming download reports progress — the
+                batch engine's downloader exposes no hook, so its caller
+                should show an indeterminate indicator instead of a
+                percentage.
 
         Returns:
             Tuple of (success, message).
@@ -1036,94 +1056,16 @@ class VoiceSetupService(VoiceSetupServiceInterface):
         return True, f"Downloaded the {model_size} model."
 
     async def _download_streaming_model(
-        self, progress: Optional[Callable[[str, int, int], None]]
+        self, progress: Optional[VoiceSetupProgress]
     ) -> Tuple[bool, str]:
-        """Fetch the four streaming model files.
-
-        Downloaded with the HTTP client already in Servonaut's core
-        dependencies rather than pulling in a hub library the streaming
-        engine does not otherwise need — and it gives us real progress,
-        which matters for a download this size.
-        """
-        latency = self._latency_ms()
-        model_dir = nemotron_model_dir(latency)
-        repo = nemotron_repo(latency)
-
-        try:
-            import httpx
-        except ImportError:  # pragma: no cover — httpx is a core dependency
-            return False, "The HTTP client is unavailable; cannot download the model."
-
-        # Staged in a sibling directory so an interrupted download can never
-        # be mistaken for a complete one by the presence check.
-        staging = model_dir.with_name(model_dir.name + ".partial")
-        try:
-            if staging.exists():
-                shutil.rmtree(staging)
-            staging.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            return False, f"Could not prepare the download directory: {e}"
-
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-                for index, (remote, local) in enumerate(NEMOTRON_FILES.items(), start=1):
-                    url = f"https://huggingface.co/{repo}/resolve/main/{remote}"
-                    if progress is not None:
-                        progress(f"{local} ({index}/{len(NEMOTRON_FILES)})", 0, 0)
-                    ok, error = await self._download_file(
-                        client, url, staging / local, local, progress
-                    )
-                    if not ok:
-                        shutil.rmtree(staging, ignore_errors=True)
-                        return False, error
-        except asyncio.TimeoutError:
-            shutil.rmtree(staging, ignore_errors=True)
-            return False, "The model download timed out."
-        except Exception as e:  # noqa: BLE001 — network failures vary widely
-            shutil.rmtree(staging, ignore_errors=True)
-            logger.error("Streaming model download failed: %s", e)
-            return False, f"Download failed: {e}"
-
-        try:
-            if model_dir.exists():
-                shutil.rmtree(model_dir)
-            staging.rename(model_dir)
-        except OSError as e:
-            shutil.rmtree(staging, ignore_errors=True)
-            return False, f"Could not finalise the download: {e}"
-
-        self._cached = None
+        """Fetch the pinned streaming model files for the configured latency."""
+        latency = normalise_nemotron_latency(self._latency_ms())
+        ok, error = await self._download_pinned(
+            nemotron_spec(latency), f"streaming model ({latency}ms)", progress
+        )
+        if not ok:
+            return False, error
         return True, f"Downloaded the streaming model ({latency}ms)."
-
-    async def _download_file(
-        self,
-        client,
-        url: str,
-        destination: Path,
-        label: str,
-        progress: Optional[Callable[[str, int, int], None]],
-    ) -> Tuple[bool, str]:
-        """Stream one file to disk, reporting progress as it goes."""
-        try:
-            async with client.stream("GET", url) as response:
-                if response.status_code != 200:
-                    return False, f"Download failed for {label}: HTTP {response.status_code}"
-                total = int(response.headers.get("content-length") or 0)
-                written = 0
-                last_reported = 0
-                with destination.open("wb") as handle:
-                    async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
-                        handle.write(chunk)
-                        written += len(chunk)
-                        # Throttled to every 4 MB: a 660 MB file would
-                        # otherwise repaint the bar hundreds of times a second.
-                        if progress is not None and written - last_reported >= 4 << 20:
-                            last_reported = written
-                            progress(label, written, total)
-        except Exception as e:  # noqa: BLE001 — network/disk failures vary
-            logger.error("Failed downloading %s: %s", url, e)
-            return False, f"Download failed for {label}: {e}"
-        return True, ""
 
     # ------------------------------------------------------------------
     # Speech-model (TTS) download
@@ -1132,124 +1074,29 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     async def download_tts_model(
         self,
         *,
-        progress: Optional[Callable[[str, int, int], None]] = None,
+        progress: Optional[VoiceSetupProgress] = None,
     ) -> Tuple[bool, str]:
         """Fetch and install the speech-synthesis model.
 
         Published as a single compressed archive — the model directory
         holds hundreds of small pronunciation-data files, and one streamed
-        download beats fetching them individually. The archive is staged
-        next to the final directory and only renamed into place once
-        extraction succeeded and every required file is present, so an
-        interrupted install can never read as a complete model.
+        download beats fetching them individually. The archive is verified
+        against its pins, extracted safely and checked for every required
+        file before the model directory is replaced, so an interrupted or
+        tampered install can never read as a complete model.
 
         Args:
-            progress: Optional callback invoked as
+            progress: Optional callback invoked on the event loop as
                 ``(label, downloaded_bytes, total_bytes)`` while the
-                archive downloads. Extraction reports no progress — it is
-                CPU-bound and brief next to the download.
+                archive downloads.
 
         Returns:
             Tuple of (success, message).
         """
-        try:
-            import httpx
-        except ImportError:  # pragma: no cover — httpx is a core dependency
-            return False, "The HTTP client is unavailable; cannot download the model."
-
-        model_dir = kokoro_model_dir()
-        archive_path = model_dir.with_name(model_dir.name + ".tar.bz2.partial")
-        staging = model_dir.with_name(model_dir.name + ".partial")
-
-        try:
-            voice_models_root().mkdir(parents=True, exist_ok=True)
-            if staging.exists():
-                shutil.rmtree(staging)
-            archive_path.unlink(missing_ok=True)
-        except OSError as e:
-            return False, f"Could not prepare the download directory: {e}"
-
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-                ok, error = await self._download_file(
-                    client, KOKORO_ARCHIVE_URL, archive_path,
-                    "speech model", progress,
-                )
-            if not ok:
-                archive_path.unlink(missing_ok=True)
-                return False, error
-        except Exception as e:  # noqa: BLE001 — network failures vary widely
-            archive_path.unlink(missing_ok=True)
-            logger.error("Speech model download failed: %s", e)
-            return False, f"Download failed: {e}"
-
-        # bz2 decompression is CPU-slow, so it runs off the event loop.
-        try:
-            error = await asyncio.to_thread(
-                self._extract_tts_archive, archive_path, staging
-            )
-        except Exception as e:  # noqa: BLE001 — a corrupt archive raises from tarfile/bz2
-            logger.error("Speech model extraction failed: %s", e)
-            error = f"Could not extract the speech model: {e}"
-        finally:
-            archive_path.unlink(missing_ok=True)
-        if error:
-            shutil.rmtree(staging, ignore_errors=True)
+        ok, error = await self._download_pinned(KOKORO_TTS_SPEC, "speech model", progress)
+        if not ok:
             return False, error
-
-        # The archive extracts to a directory named after the model; take
-        # that as the content root, tolerating a flat layout too.
-        content_root = staging
-        nested = staging / KOKORO_MODEL_ID
-        if not (content_root / KOKORO_MODEL_FILE).is_file() and nested.is_dir():
-            content_root = nested
-
-        try:
-            if model_dir.exists():
-                shutil.rmtree(model_dir)
-            content_root.rename(model_dir)
-        except OSError as e:
-            shutil.rmtree(staging, ignore_errors=True)
-            return False, f"Could not finalise the download: {e}"
-        shutil.rmtree(staging, ignore_errors=True)
-
-        if not is_kokoro_model_present():
-            # The rename succeeded but the archive did not hold what the
-            # engine needs — surface it now, not on the first spoken reply.
-            return False, "The downloaded archive did not contain the expected model files."
-
-        self._cached = None
         return True, "Downloaded the speech model."
-
-    def _extract_tts_archive(self, archive_path: Path, destination: Path) -> str:
-        """Extract the speech-model archive into *destination*, safely.
-
-        Every member is vetted BEFORE anything is extracted, and one bad
-        member fails the whole archive: a tampered archive should produce
-        nothing, not a partial tree. Runs on a worker thread — bz2
-        decompression blocks for seconds.
-
-        Returns:
-            An error message, or an empty string on success.
-        """
-        destination.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive_path, mode="r:bz2") as archive:
-            members = archive.getmembers()
-            for member in members:
-                reason = tar_member_rejection(member)
-                if reason:
-                    logger.error(
-                        "Rejected archive member %r: %s", member.name, reason
-                    )
-                    return f"The archive contains an unsafe entry ({reason})."
-            if hasattr(tarfile, "data_filter"):
-                # PEP 706 filter as a second layer where the runtime has it
-                # (3.10.12+); the manual vetting above is the layer this
-                # code guarantees on every supported interpreter.
-                archive.extractall(destination, members=members, filter="data")
-            else:  # pragma: no cover — depends on the patch level of 3.10/3.11
-                archive.extractall(destination, members=members)  # noqa: S202 — members vetted above
-        return ""
 
     # ------------------------------------------------------------------
     # Voice-activity model (conversation mode) download
@@ -1258,90 +1105,147 @@ class VoiceSetupService(VoiceSetupServiceInterface):
     async def download_vad_model(
         self,
         *,
-        progress: Optional[Callable[[str, int, int], None]] = None,
+        progress: Optional[VoiceSetupProgress] = None,
     ) -> Tuple[bool, str]:
         """Fetch the voice-activity model conversation mode needs.
 
-        A single small file, so unlike the speech model there is no
-        archive to extract — the download is staged under a ``.partial``
-        name and renamed into place only once complete, keeping the same
-        guarantee as every other model install: an interrupted download
-        can never read as an installed model.
-
         Args:
-            progress: Optional callback invoked as
+            progress: Optional callback invoked on the event loop as
                 ``(label, downloaded_bytes, total_bytes)`` while the file
-                downloads. ``total_bytes`` is 0 when the server sends no
-                length.
+                downloads.
 
         Returns:
             Tuple of (success, message).
         """
-        try:
-            import httpx
-        except ImportError:  # pragma: no cover — httpx is a core dependency
-            return False, "The HTTP client is unavailable; cannot download the model."
-
-        final_path = silero_vad_model_path()
-        partial = final_path.with_name(final_path.name + ".partial")
-        try:
-            silero_vad_model_dir().mkdir(parents=True, exist_ok=True)
-            partial.unlink(missing_ok=True)
-        except OSError as e:
-            return False, f"Could not prepare the download directory: {e}"
-
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-                ok, error = await self._download_file(
-                    client, SILERO_VAD_URL, partial,
-                    "voice-detection model", progress,
-                )
-            if not ok:
-                partial.unlink(missing_ok=True)
-                self._discard_empty_vad_dir()
-                return False, error
-        except Exception as e:  # noqa: BLE001 — network failures vary widely
-            partial.unlink(missing_ok=True)
-            self._discard_empty_vad_dir()
-            logger.error("Voice-activity model download failed: %s", e)
-            return False, f"Download failed: {e}"
-
-        try:
-            partial.replace(final_path)
-        except OSError as e:
-            partial.unlink(missing_ok=True)
-            self._discard_empty_vad_dir()
-            return False, f"Could not finalise the download: {e}"
-
-        if not is_silero_vad_model_present():
-            # The rename succeeded but the served file was empty — surface
-            # it now, not on the first conversation. The useless empty
-            # file is removed so the inventory does not list a 0 B
-            # "installed" model beside a readiness row saying otherwise.
-            try:
-                final_path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("could not remove the empty model file", exc_info=True)
-            self._discard_empty_vad_dir()
-            return False, "The downloaded file did not contain the expected model."
-
-        self._cached = None
+        ok, error = await self._download_pinned(
+            SILERO_VAD_SPEC, "voice-detection model", progress
+        )
+        if not ok:
+            return False, error
         return True, "Downloaded the voice-detection model."
 
-    @staticmethod
-    def _discard_empty_vad_dir() -> None:
-        """Remove the model directory a failed download left empty.
+    # ------------------------------------------------------------------
+    # Pinned download
+    # ------------------------------------------------------------------
 
-        The inventory lists the voice-activity model by directory
-        presence, so an empty leftover directory would read as an
-        installed model. ``Path.rmdir`` refuses to remove a non-empty
-        directory — exactly the guard needed when a real model (or a
-        concurrent download's staging file) is present.
+    async def _download_pinned(
+        self,
+        spec: VoiceModelSpec,
+        label: str,
+        progress: Optional[VoiceSetupProgress],
+    ) -> Tuple[bool, str]:
+        """Download *spec* from its pinned source on a worker thread.
+
+        The models root is resolved now, not at import, so a root set after
+        startup is the one written to. Every asset must match its pinned
+        size and SHA-256 before the model directory is touched; a mismatch
+        fails the download and installs nothing.
+
+        Returns:
+            ``(True, "")`` on success, else ``(False, message)`` naming the
+            model.
         """
+        root = voice_models_root()
+        report = None
+        if progress is not None:
+            report = byte_progress(progress_on_loop(progress), label)
+        cancel = threading.Event()
         try:
-            silero_vad_model_dir().rmdir()
-        except OSError:
-            pass
+            await asyncio.to_thread(self._install_pinned, spec, root, report, cancel)
+        except asyncio.CancelledError:
+            # Stops the transfer at its next chunk, so the thread does not
+            # outlive the settings panel or the app.
+            cancel.set()
+            raise
+        except MODEL_DOWNLOAD_ERRORS as error:
+            message = _download_failure_message(label, error)
+            logger.error("Voice model download failed for %s: %s", spec.model_id, message)
+            return False, message
+        finally:
+            self._cached = None
+        return True, ""
+
+    def _install_pinned(
+        self,
+        spec: VoiceModelSpec,
+        root: Path,
+        report: Optional[Callable[[float, int, int], None]],
+        cancel: threading.Event,
+    ) -> None:
+        """Blocking half of :meth:`_download_pinned`; runs on a worker thread."""
+        _remove_staging_leftovers(root, spec)
+        self._downloader.install(
+            spec,
+            root,
+            staging_prefix=_STAGING_PREFIX,
+            progress_callback=report,
+            cancel=cancel,
+        )
+
+
+def _remove_staging_leftovers(root: Path, spec: VoiceModelSpec) -> None:
+    """Delete what an earlier, killed download of *spec* left in *root*.
+
+    Only this model's own staging entries are touched, so a download of a
+    different model in progress elsewhere is left alone.
+    """
+    for entry in root.glob(f"{glob.escape(_STAGING_PREFIX + spec.model_id)}.*"):
+        logger.info("Removing stale model staging entry %s", entry.name)
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+
+
+def _download_failure_message(label: str, error: BaseException) -> str:
+    """One line for a failed pinned download, naming the model."""
+    reason = scrub_credentials(str(error))
+    if isinstance(error, VoiceModelCancelledError):
+        return "The download was cancelled."
+    if isinstance(error, VoiceModelIntegrityError):
+        return f"The {label} failed verification and was not installed: {reason}"
+    if isinstance(error, VoiceModelExtractionError):
+        return f"The {label} archive contains an unsafe entry and was not installed: {reason}"
+    return f"Download failed for the {label}: {reason}"
+
+
+def progress_on_loop(callback: VoiceSetupProgress) -> VoiceSetupProgress:
+    """Wrap *callback* so a worker thread's calls run on the current event loop.
+
+    The setup panel's progress callbacks repaint widgets, which is only
+    safe from the event loop.
+    """
+    loop = asyncio.get_running_loop()
+
+    def deliver(label: str, done: int, total: int) -> None:
+        try:
+            loop.call_soon_threadsafe(callback, label, done, total)
+        except RuntimeError:
+            # The loop closed under a still-running operation: nobody is
+            # left to show progress to.
+            logger.debug("Dropped voice setup progress; the event loop is closed")
+
+    return deliver
+
+
+def byte_progress(
+    callback: VoiceSetupProgress, label: str
+) -> Callable[[float, int, int], None]:
+    """Adapt the downloader's ``(fraction, done_bytes, total_bytes)`` reports.
+
+    Forwarded every few megabytes and on completion, labelled with the
+    model being fetched.
+    """
+    last_sent = [0]
+
+    def report(fraction: float, done: int, total: int) -> None:
+        finished = 0 < total <= done
+        if not finished and done - last_sent[0] < _PROGRESS_STEP_BYTES:
+            return
+        last_sent[0] = done
+        callback(label, done, max(total, 0))
+
+    return report
 
 
 def build_voice_setup_service(

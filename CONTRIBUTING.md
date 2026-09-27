@@ -133,7 +133,9 @@ over with the next candidate number.
 
 To try a candidate without touching an existing installation, run
 `pipx run --spec 'servonaut==X.Y.ZrcN' servonaut`, or install it in its own
-environment with `pip install --pre servonaut`.
+environment with `pip install 'servonaut==X.Y.ZrcN'`. Avoid `--pre`: it also
+accepts pre-release versions of the dependencies. See
+[docs/release-candidates.md](docs/release-candidates.md).
 
 Rehearse either stage without pushing, tagging or publishing anything:
 

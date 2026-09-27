@@ -157,6 +157,12 @@ class ServerActionsScreen(Screen):
         Binding("escape", "back", "Back", show=False),
     ]
 
+    # The screen gets -narrow / -wide and -short / -tall classes by terminal
+    # size; the stylesheet lays the action rail out two to a row only when
+    # there is room for it and the detail pane beside it.
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (130, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (44, "-tall")]
+
     def __init__(self, instance: dict) -> None:
         """Initialize server actions screen.
 
@@ -236,7 +242,7 @@ class ServerActionsScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Horizontal(id="sa-body"):
-                # --- Left: narrow, sectioned action rail ---
+                # --- Left: sectioned action rail ---
                 yield Vertical(
                     Static("CONNECT", classes="section_label"),
                     Button("1. Browse Files", id="btn_browse", variant="primary"),

@@ -164,6 +164,46 @@ _MEMORY_MODULES: Dict[str, Dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------
+# CloudWatch
+# ---------------------------------------------------------------------------
+
+CLOUDWATCH_REGION = "us-east-1"
+CLOUDWATCH_GROUP = "aws-waf-logs-web"
+
+# (client address, WAF action, request path, how many requests). The widest
+# IPv4 address a table can hold is included, so a snapshot shows whether the
+# Top IPs columns still fit.
+_WAF_REQUESTS = [
+    ("149.112.112.112", "BLOCK", "/wp-login.php", 4),
+    ("9.9.9.9", "ALLOW", "/", 3),
+    ("9.9.9.9", "BLOCK", "/xmlrpc.php", 1),
+    ("1.1.1.1", "BLOCK", "/.env", 2),
+    ("8.8.8.8", "ALLOW", "/health", 2),
+]
+
+
+def cloudwatch_events() -> List[dict]:
+    """WAF log events as ``CloudWatchService.get_log_events`` returns them."""
+    events: List[dict] = []
+    stamp = FROZEN_NOW.replace(tzinfo=None) - timedelta(minutes=30)
+    for address, action, path, count in _WAF_REQUESTS:
+        for _ in range(count):
+            record = {
+                "action": action,
+                "httpRequest": {"clientIp": address, "uri": path, "httpMethod": "GET"},
+            }
+            events.append(
+                {
+                    "timestamp": stamp,
+                    "log_stream": "waf-stream-1",
+                    "message": json.dumps(record),
+                }
+            )
+            stamp += timedelta(seconds=7)
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Seeding (writes through the application's own schema and stores)
 # ---------------------------------------------------------------------------
 

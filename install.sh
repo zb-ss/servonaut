@@ -1,9 +1,27 @@
 #!/bin/sh
 # Servonaut Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/ec2-ssh/master/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
 # Or: ./install.sh
+#
+# Release candidate instead of the stable release:
+#   curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+# Or: SERVONAUT_PRE=1 ./install.sh
 
 set -e
+
+# Oldest Python that Servonaut supports (requires-python in pyproject.toml)
+MIN_PYTHON_MAJOR=3
+MIN_PYTHON_MINOR=10
+
+REPO_URL="https://github.com/zb-ss/servonaut"
+
+# Naming a pre-release in the version specifier lets pip choose a release
+# candidate of Servonaut, or the stable release when that is newer. pip's
+# --pre flag would also allow pre-release versions of every dependency.
+PRE_RELEASE_SPEC="servonaut>=0rc0"
+
+# 1 when --pre or SERVONAUT_PRE asks for the newest release candidate
+INSTALL_PRE=0
 
 # Color codes for terminal output
 # Use tput if available, otherwise fallback to ANSI codes
@@ -48,9 +66,61 @@ print_info() {
     echo "${BLUE}→${RESET} $1"
 }
 
+print_usage() {
+    echo "Usage: install.sh [--pre]"
+    echo ""
+    echo "  --pre       Install the newest release candidate instead of the stable release."
+    echo "              SERVONAUT_PRE=1 in the environment does the same."
+    echo "  -h, --help  Show this help and exit."
+}
+
+# Read SERVONAUT_PRE, then the command-line options
+parse_options() {
+    case "$(printf '%s' "${SERVONAUT_PRE:-}" | tr '[:upper:]' '[:lower:]')" in
+        ""|0|false|no) ;;
+        1|true|yes) INSTALL_PRE=1 ;;
+        *)
+            print_error "SERVONAUT_PRE must be 1 or 0, not '$SERVONAUT_PRE'"
+            exit 2
+            ;;
+    esac
+
+    for arg in "$@"; do
+        case "$arg" in
+            --pre) INSTALL_PRE=1 ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                print_error "Unknown option: $arg"
+                print_usage >&2
+                exit 2
+                ;;
+        esac
+    done
+}
+
 # Check if a command exists
 check_command() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Ask a yes/no question; succeeds when the answer is y or Y.
+# Under `curl ... | bash` standard input is the script itself, so the answer
+# is read from the terminal. Without a terminal the answer is no.
+ask_yes_no() {
+    echo "$1 (y/n)"
+    printf "> "
+    response=""
+    if [ -t 0 ]; then
+        read -r response || response=""
+    elif (: < /dev/tty) 2>/dev/null; then
+        read -r response < /dev/tty || response=""
+    else
+        echo "n (no terminal)"
+    fi
+    [ "$response" = "y" ] || [ "$response" = "Y" ]
 }
 
 # Check Python version
@@ -69,7 +139,7 @@ check_python_version() {
     if [ -z "$PYTHON_CMD" ]; then
         print_error "Python not found!"
         echo ""
-        echo "Please install Python 3.8 or higher:"
+        echo "Please install Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR or higher:"
         echo ""
         echo "  Ubuntu/Debian:  ${BOLD}sudo apt update && sudo apt install python3 python3-pip${RESET}"
         echo "  RHEL/CentOS:    ${BOLD}sudo yum install python3 python3-pip${RESET}"
@@ -85,17 +155,16 @@ check_python_version() {
     PYTHON_MAJOR=$(echo "$PYTHON_VERSION" | cut -d. -f1)
     PYTHON_MINOR=$(echo "$PYTHON_VERSION" | cut -d. -f2)
 
-    # Check if version is >= 3.8
-    if [ "$PYTHON_MAJOR" -lt 3 ] || [ "$PYTHON_MAJOR" -eq 3 -a "$PYTHON_MINOR" -lt 8 ]; then
-        print_error "Python $PYTHON_VERSION found, but Python 3.8+ is required!"
+    # Check if version is >= MIN_PYTHON_MAJOR.MIN_PYTHON_MINOR
+    if [ "$PYTHON_MAJOR" -lt "$MIN_PYTHON_MAJOR" ] || { [ "$PYTHON_MAJOR" -eq "$MIN_PYTHON_MAJOR" ] && [ "$PYTHON_MINOR" -lt "$MIN_PYTHON_MINOR" ]; }; then
+        print_error "Python $PYTHON_VERSION found, but Python $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR+ is required!"
         echo ""
-        echo "Please upgrade Python to version 3.8 or higher."
+        echo "Please upgrade Python to version $MIN_PYTHON_MAJOR.$MIN_PYTHON_MINOR or higher."
         echo "Visit: https://www.python.org/downloads/"
         exit 1
     fi
 
     print_success "Python $PYTHON_VERSION found at $(command -v "$PYTHON_CMD")"
-    echo "$PYTHON_CMD"
 }
 
 # Install pipx
@@ -172,8 +241,36 @@ install_pipx() {
     fi
 }
 
+# Version of servonaut that pipx has installed, or "unknown"
+installed_servonaut_version() {
+    pipx list --short 2>/dev/null | awk '$1 == "servonaut" { print $2; found = 1 } END { if (!found) print "unknown" }'
+}
+
+# Install the newest release candidate from PyPI
+install_release_candidate() {
+    print_info "Installing the newest Servonaut release candidate from PyPI..."
+    print_info "When no candidate is newer than the stable release, the stable release is installed."
+
+    # --force also switches an existing installation over
+    if pipx install --force "$PRE_RELEASE_SPEC"; then
+        print_success "Servonaut $(installed_servonaut_version) installed from PyPI"
+        return 0
+    fi
+
+    print_error "Could not install a release candidate"
+    echo ""
+    echo "Please try manually:"
+    echo "  ${BOLD}pipx install --force '$PRE_RELEASE_SPEC'${RESET}"
+    exit 1
+}
+
 # Install servonaut
 install_servonaut() {
+    if [ "$INSTALL_PRE" -eq 1 ]; then
+        install_release_candidate
+        return 0
+    fi
+
     print_info "Installing Servonaut..."
 
     # Strategy 1: Local repository (if running ./install.sh from cloned repo)
@@ -208,7 +305,7 @@ install_servonaut() {
     CLONE_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'servonaut')
     print_info "Cloning to temporary directory: $CLONE_DIR"
 
-    if git clone --depth 1 https://github.com/zb-ss/ec2-ssh.git "$CLONE_DIR/servonaut" 2>/dev/null; then
+    if git clone --depth 1 "$REPO_URL.git" "$CLONE_DIR/servonaut" 2>/dev/null; then
         if pipx install "$CLONE_DIR/servonaut" --force; then
             print_success "Servonaut installed successfully from repository"
             rm -rf "$CLONE_DIR"
@@ -220,8 +317,8 @@ install_servonaut() {
     print_error "All installation methods failed"
     echo ""
     echo "Please try manually:"
-    echo "  ${BOLD}git clone https://github.com/zb-ss/ec2-ssh.git${RESET}"
-    echo "  ${BOLD}cd ec2-ssh${RESET}"
+    echo "  ${BOLD}git clone $REPO_URL.git${RESET}"
+    echo "  ${BOLD}cd servonaut${RESET}"
     echo "  ${BOLD}pipx install .${RESET}"
     exit 1
 }
@@ -248,12 +345,14 @@ setup_wizard() {
         else
             print_warning "AWS CLI not configured"
             echo ""
-            echo "Would you like to configure AWS now? (y/n)"
-            printf "> "
-            read -r response
-            if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+            if ask_yes_no "Would you like to configure AWS now?"; then
                 print_info "Running 'aws configure'..."
-                aws configure
+                if [ -t 0 ]; then
+                    aws configure
+                else
+                    # The answer came from the terminal, so aws can read it too
+                    aws configure < /dev/tty
+                fi
             else
                 print_info "Skipping AWS configuration"
                 echo ""
@@ -288,10 +387,7 @@ setup_wizard() {
 
     # Create starter config
     echo ""
-    echo "Would you like to create a starter configuration file? (y/n)"
-    printf "> "
-    read -r response
-    if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+    if ask_yes_no "Would you like to create a starter configuration file?"; then
         create_starter_config
     else
         print_info "Skipping configuration file creation"
@@ -307,10 +403,7 @@ create_starter_config() {
     if [ -f "$CONFIG_FILE" ]; then
         print_warning "Configuration file already exists at: $CONFIG_FILE"
         echo ""
-        echo "Would you like to overwrite it? (y/n)"
-        printf "> "
-        read -r response
-        if [ "$response" != "y" ] && [ "$response" != "Y" ]; then
+        if ! ask_yes_no "Would you like to overwrite it?"; then
             print_info "Keeping existing configuration"
             return 0
         fi
@@ -369,8 +462,14 @@ print_final_message() {
     echo "  3. Use the menu to manage SSH keys and connect to instances"
     echo ""
     echo "${BOLD}Documentation:${RESET}"
-    echo "  https://github.com/zb-ss/ec2-ssh"
+    echo "  $REPO_URL"
     echo ""
+    if [ "$INSTALL_PRE" -eq 1 ]; then
+        echo "${BOLD}Release candidate:${RESET}"
+        echo "  Report problems at: $REPO_URL/issues"
+        echo "  Return to the stable release with: ${BOLD}pipx install --force servonaut${RESET}"
+        echo ""
+    fi
     echo "${BOLD}Configuration:${RESET}"
     echo "  Config dir:  ~/.servonaut/"
     echo "  Config file: ~/.servonaut/config.json"
@@ -379,10 +478,11 @@ print_final_message() {
 
 # Main installation flow
 main() {
+    parse_options "$@"
     print_header
 
-    # Check Python
-    PYTHON_CMD=$(check_python_version)
+    # Check Python (sets PYTHON_CMD)
+    check_python_version
     echo ""
 
     # Install pipx
@@ -394,11 +494,8 @@ main() {
     echo ""
 
     # Ask about setup wizard
-    echo "Would you like to run the setup wizard? (y/n)"
-    echo "(This will check AWS CLI installation and configuration)"
-    printf "> "
-    read -r response
-    if [ "$response" = "y" ] || [ "$response" = "Y" ]; then
+    echo "(The setup wizard checks the AWS CLI installation and configuration)"
+    if ask_yes_no "Would you like to run the setup wizard?"; then
         echo ""
         setup_wizard
     else
@@ -410,4 +507,4 @@ main() {
 }
 
 # Run main function
-main
+main "$@"

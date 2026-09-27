@@ -11,10 +11,20 @@ Every observed value interpolated into markup is escaped via
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from rich.markup import escape
+
+# Runtimes the panel lists, in order, with the name it shows for each.
+_RUNTIME_NAMES = (
+    ("python", "Python"),
+    ("node", "Node"),
+    ("php", "PHP"),
+    ("go", "Go"),
+    ("ruby", "Ruby"),
+)
 
 
 def human_age(probed_at_str: str) -> str:
@@ -43,6 +53,28 @@ def _val(observed: Dict[str, Any], key: str) -> Optional[str]:
     if raw is None or raw == "" or raw == []:
         return None
     return str(raw)
+
+
+def format_runtime(runtime: str, version: str) -> str:
+    """Show a runtime as its name and version once: ``Python 3.11.2``.
+
+    The runtimes probe stores what each runtime's own version command
+    printed, and most of those already start with the runtime's name
+    (``Python 3.11.2``, ``PHP 8.2.7``, ``go1.22.1``, ``ruby 3.2.2``) or a
+    ``v`` (``v20.11.1``). Both are dropped before the display name is put
+    in front, so every runtime reads the same way.
+
+    Args:
+        runtime: The probe's key for the runtime (``python``, ``node``...).
+        version: The stored version string.
+
+    Returns:
+        Plain text (not markup-escaped).
+    """
+    names = dict(_RUNTIME_NAMES)
+    number = re.sub(rf"^\s*{re.escape(runtime)}\s*", "", version, flags=re.IGNORECASE)
+    number = re.sub(r"^v(?=\d)", "", number.strip())
+    return f"{names.get(runtime, runtime)} {number}".rstrip()
 
 
 def _newest_probed_at(modules: Dict[str, Dict[str, Any]]) -> str:
@@ -124,8 +156,8 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
     # Runtimes
     rt_o = obs("runtimes")
     rt_bits = [
-        f"{name} {escape(_val(rt_o, name))}"
-        for name in ("python", "node", "php", "go", "ruby")
+        escape(format_runtime(name, _val(rt_o, name)))
+        for name, _label in _RUNTIME_NAMES
         if _val(rt_o, name)
     ]
     if rt_bits:
