@@ -339,6 +339,56 @@ def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: s
     assert '"window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}"' in qualify
 
 
+def test_forward_smoke_runs_under_ubuntus_user_namespace_restriction(
+    workflow_content: str,
+) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Run packaged window smoke on Ubuntu 24.04")
+
+    assert "restriction=kernel.apparmor_restrict_unprivileged_userns" in step
+    # A runner without the restriction fails instead of passing vacuously.
+    missing = step.split('if ! host_restriction="$(sysctl -n "${restriction}"', 1)[1]
+    assert missing.split("fi\n", 1)[0].rstrip().endswith("exit 1")
+    enable = 'sudo sysctl -qw "${restriction}=1"'
+    restore = "trap 'sudo sysctl -qw \"${restriction}=${host_restriction}\";"
+    assert step.index(restore) < step.index(enable) < step.index("docker run --rm")
+    # Unconfined like a desktop session, so the restriction applies; seccomp
+    # off, or Docker's filter would refuse the namespace first; and allowed to
+    # load AppArmor policy, as installing AppArmor and the package does.
+    for option in (
+        "--security-opt seccomp=unconfined",
+        "--security-opt apparmor=unconfined",
+        "--cap-add MAC_ADMIN",
+        "--volume /sys/kernel/security:/sys/kernel/security",
+    ):
+        assert option in step
+    assert "--privileged" not in step
+
+
+def test_forward_script_opens_the_window_under_the_release_restriction() -> None:
+    """The tripwire for the day the window needs a user namespace."""
+    script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
+
+    assert "/proc/sys/kernel/apparmor_restrict_unprivileged_userns)\" != 1" in script
+    steps = [
+        'apt-get install --yes --no-install-recommends "${deb}"',
+        "--no-install-recommends python3 xvfb xauth imagemagick apparmor\n",
+        'runuser -u "${smoke_user}" -- unshare --user --map-root-user true',
+        '[[ "${refusal}" == *"/proc/self/uid_map"* ]]',
+        "-m scripts.desktop_shell.window_smoke",
+        "ship an AppArmor profile",
+        '"process_security_labels"',
+    ]
+    positions = [script.index(step) for step in steps]
+    assert positions == sorted(positions)
+    # The control must fail closed: a namespace that works means no restriction.
+    control = script.split("unshare --user --map-root-user true", 1)[1]
+    assert control.split("\nfi\n", 1)[0].strip().startswith("2>&1); then\n  fail ")
+    # No profile is shipped, and nothing switches the sandbox off to pass.
+    assert "apparmor_parser" not in script
+    assert "WEBKIT_DISABLE_SANDBOX" not in script
+
+
 def test_forward_script_installs_only_the_depends_before_its_own_tools() -> None:
     script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
     subprocess.run(["bash", "-n", str(_FORWARD_SCRIPT)], check=True)
