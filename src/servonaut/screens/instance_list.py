@@ -68,25 +68,42 @@ class InstanceListScreen(Screen):
         return super().app # type: ignore
 
     BINDINGS = [
-        Binding("r", "refresh", "Refresh", show=True),
-        Binding("/", "focus_search", "Search", show=True),
-        Binding("enter", "select_instance", "Actions", show=True),
+        # A tooltip shows on hovering the footer entry and is the key's
+        # description on the help screen.
+        Binding("r", "refresh", "Refresh", show=True,
+                tooltip="Fetch the fleet again from every provider"),
+        Binding("/", "focus_search", "Search", show=True,
+                tooltip="Search instances and keyword scan results"),
+        Binding("enter", "select_instance", "Actions", show=True,
+                tooltip="Open the selected server's actions"),
         # Explicit footer-visible alternative — DataTable consumes Enter for
         # row-selected, which hides the Enter binding from the footer. ``o``
         # (for "Open") shows up in the footer so users can discover the
         # actions menu without needing to guess that Enter works.
-        Binding("o", "select_instance", "Actions", show=True),
-        Binding("s", "ssh_connect", "SSH", show=True),
-        Binding("b", "browse_files", "Browse", show=True),
-        Binding("c", "run_command", "Command", show=True),
-        Binding("t", "scp_transfer", "Transfer", show=True),
-        Binding("l", "view_logs", "Logs", show=True),
-        Binding("a", "ai_analysis", "AI", show=True),
-        Binding("m", "open_memory", "Memory", show=True),
-        Binding("D", "fleet_db_scan", "DB Vault", show=True),
-        Binding("k", "manage_ssh_ref", "SSH Ref", show=True),
-        Binding("v", "verify_ssh", "Verify", show=True),
-        Binding("y", "copy_row", "Copy", show=True),
+        Binding("o", "select_instance", "Actions", show=True,
+                tooltip="Open the selected server's actions"),
+        Binding("s", "ssh_connect", "SSH", show=True,
+                tooltip="SSH into the selected server in a new terminal window"),
+        Binding("b", "browse_files", "Browse", show=True,
+                tooltip="Browse the selected server's files"),
+        Binding("c", "run_command", "Command", show=True,
+                tooltip="Run commands on the selected server"),
+        Binding("t", "scp_transfer", "Transfer", show=True,
+                tooltip="Copy files to or from the selected server"),
+        Binding("l", "view_logs", "Logs", show=True,
+                tooltip="Stream the selected server's logs"),
+        Binding("a", "ai_analysis", "AI", show=True,
+                tooltip="Analyse the selected server's logs with AI"),
+        Binding("m", "open_memory", "Memory", show=True,
+                tooltip="Open the selected server's memory (cached facts)"),
+        Binding("D", "fleet_db_scan", "DB Vault", show=True,
+                tooltip="Scan the fleet for database credentials"),
+        Binding("k", "manage_ssh_ref", "SSH Ref", show=True,
+                tooltip="Set the Bitwarden SSH key reference of the selected server"),
+        Binding("v", "verify_ssh", "Verify", show=True,
+                tooltip="Check that the selected server's SSH key works"),
+        Binding("y", "copy_row", "Copy", show=True,
+                tooltip="Copy the selected server's details"),
     ]
 
     # The screen opens on the fleet table, so the arrow keys and every

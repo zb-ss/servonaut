@@ -41,14 +41,22 @@ class CommandOverlay(ModalScreen):
     """
 
     BINDINGS = [
-        Binding("escape", "close_overlay", "Close", show=True),
-        Binding("ctrl+c", "stop_or_close", "Stop", show=False),
-        Binding("ctrl+r", "show_command_picker", "Picker", show=True),
-        Binding("ctrl+s", "save_command", "Save Cmd", show=True),
-        Binding("up", "history_prev", "Previous", show=False),
-        Binding("down", "history_next", "Next", show=False),
-        Binding("y", "copy_output", "Copy All", show=True),
-        Binding("v", "copy_mode", "Select", show=True),
+        # Tooltips double as the key descriptions on the help screen.
+        Binding("escape", "close_overlay", "Close", show=True, tooltip="Close the overlay"),
+        Binding("ctrl+c", "stop_or_close", "Stop", show=False,
+                tooltip="Stop the running command, or close the overlay"),
+        Binding("ctrl+r", "show_command_picker", "Picker", show=True,
+                tooltip="Pick a saved or recent command"),
+        Binding("ctrl+s", "save_command", "Save Cmd", show=True,
+                tooltip="Save the current command to favourites"),
+        Binding("up", "history_prev", "Previous", show=False,
+                tooltip="Previous command in the history"),
+        Binding("down", "history_next", "Next", show=False,
+                tooltip="Next command in the history"),
+        Binding("y", "copy_output", "Copy All", show=True,
+                tooltip="Copy all output to the clipboard"),
+        Binding("v", "copy_mode", "Select", show=True,
+                tooltip="Copy Mode: the output in a text area you can select from"),
     ]
 
     def __init__(self, instance: dict) -> None:

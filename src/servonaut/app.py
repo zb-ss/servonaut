@@ -51,12 +51,15 @@ class ServonautApp(App):
     CSS_PATH = CSS_FILES
     TITLE = "Servonaut"
     BINDINGS = [
-        Binding("q", "quit", "Quit", show=True),
-        Binding("question_mark", "show_help", "Help", show=True),
-        Binding("f2", "toggle_chat", "Chat", show=True),
+        # Tooltips double as the key descriptions on the help screen.
+        Binding("q", "quit", "Quit", show=True, tooltip="Quit Servonaut"),
+        Binding("question_mark", "show_help", "Help", show=True,
+                tooltip="This help screen"),
+        Binding("f2", "toggle_chat", "Chat", show=True, tooltip="Show or hide the chat panel"),
         # Fallback for terminals/multiplexers that swallow F-keys.
         Binding("ctrl+g", "toggle_chat", "Chat", show=False),
-        Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False),
+        Binding("ctrl+shift+d", "toggle_demo", "Demo mode", show=False,
+                tooltip="Demo mode: stand-ins for every identifier on screen"),
         # Fallback: many terminals (xterm.js/ttyd, some multiplexers) cannot
         # deliver ctrl+shift chords, and browsers reserve Ctrl+Shift+D.
         Binding("ctrl+e", "toggle_demo", "Demo mode", show=False),
