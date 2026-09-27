@@ -161,7 +161,8 @@ carries a preview of the Servonaut desktop app for Ubuntu on 64-bit x86
 The desktop app is a **preview**: it is not released yet, and each package is
 for trying the desktop app out and reporting problems. It is built on Ubuntu
 22.04 and must pass its self-test, open its window and install cleanly before
-it is attached.
+it is attached. A release can go out without a preview when the desktop app
+has a known problem at that version.
 
 Check the download before you install it. Both commands must succeed; the
 second needs the [GitHub CLI](https://cli.github.com/):
