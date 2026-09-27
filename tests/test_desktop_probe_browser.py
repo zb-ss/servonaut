@@ -213,12 +213,13 @@ async def test_browser_rendering_interactions_and_rejection(
                     page, host, instances, output / f"{prefix}modal.png"
                 )
                 # The real confirmation modal keeps its action disabled until
-                # the exact phrase arrives: Enter with a wrong phrase must
-                # leave the modal in place. Every key below stays inside the
-                # modal; a stray one would land on the fleet screen, where
-                # single letters and Enter are shortcuts.
+                # the exact phrase arrives, so a wrong phrase leaves it in
+                # place. Every key below stays inside the modal; a stray one
+                # would land on the fleet screen, where single letters and
+                # Enter are shortcuts. Enter is only pressed on a button:
+                # WebKit on Windows drops the keys typed right after an Enter
+                # in the terminal's input.
                 await page.keyboard.type("CONFIRX")
-                await page.keyboard.press("Enter")
                 await asyncio.sleep(host.config.probe_poll_seconds * 2)
                 assert b"Renderer interaction confirmation" in frames
                 # Correct the phrase with plain keys: modifier chords do not
