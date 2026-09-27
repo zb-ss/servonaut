@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'packaging/deb/**'
       - 'packaging/desktop_shell/**'
+      - 'packaging/macos/**'
       - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
       - 'scripts/distribution/**'
@@ -24,6 +25,7 @@ on:
       - 'src/**'
       - 'packaging/deb/**'
       - 'packaging/desktop_shell/**'
+      - 'packaging/macos/**'
       - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
       - 'scripts/distribution/**'
@@ -239,8 +241,8 @@ jobs:
 
       # Opens the packaged window the way a user starts it, on a virtual X
       # display with an isolated HOME. It passes once the page has opened the
-      # authenticated session, so a window that stays blank fails it. Linux
-      # only: the macOS runners give this job no display.
+      # authenticated session, so a window that stays blank fails it. macOS
+      # opens the window of the signed app bundle instead, further down.
       - name: Run packaged window smoke
         id: window-smoke
         if: runner.os == 'Linux'
@@ -263,9 +265,23 @@ jobs:
       # Forward qualification on the newer LTS: the payload built above,
       # packaged as the .deb and installed in a clean Ubuntu 24.04 container
       # with nothing but its declared Depends, must open its window the same
-      # way. The container keeps the payload inside this job. WebKit sandboxes
-      # its web processes with bubblewrap, which needs the user namespaces
-      # Docker's default seccomp and AppArmor profiles deny.
+      # way. The container keeps the payload inside this job.
+      #
+      # It runs under 24.04's restriction of unprivileged user namespaces:
+      # this runner's kernel enforces it for the step
+      # (kernel.apparmor_restrict_unprivileged_userns=1), and installing
+      # 24.04's AppArmor in the container loads 24.04's policy into it. The
+      # window needs no user namespace (WebKit's bubblewrap sandbox is off),
+      # so the package ships no AppArmor profile; should that change, the
+      # window stops opening here. The container options serve that check:
+      # - seccomp=unconfined, or Docker's filter would refuse the namespace
+      #   itself before the restriction is reached;
+      # - apparmor=unconfined, so the container's processes are unconfined,
+      #   as in a desktop session, which is what the restriction governs;
+      #   Docker's own profile would also block loading policy;
+      # - MAC_ADMIN and the host's securityfs, so installing AppArmor can
+      #   load 24.04's policy, which stays loaded until the runner is
+      #   discarded. The smoke runs as an unprivileged user without them.
       - name: Run packaged window smoke on Ubuntu 24.04
         id: window-smoke-forward
         if: runner.os == 'Linux'
@@ -281,7 +297,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
-          trap 'cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
+          restriction=kernel.apparmor_restrict_unprivileged_userns
+          if ! host_restriction="$(sysctl -n "${restriction}" 2>/dev/null)"; then
+            echo "This runner's kernel has no ${restriction}, so it cannot qualify the restriction." >&2
+            exit 1
+          fi
+          trap 'sudo sysctl -qw "${restriction}=${host_restriction}"; cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
           # The distribution tooling imports the product's release-identity
           # code, so the packager runs with the checkout's sources.
           env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
@@ -292,9 +313,13 @@ jobs:
             --version "${PRODUCT_VERSION}" \
             --maintainer "Servonaut qualification <qualification@example.com>" \
             --filename servonaut.deb
+          echo "Runner kernel $(uname -r): ${restriction} was ${host_restriction}, now 1"
+          sudo sysctl -qw "${restriction}=1"
           docker run --rm \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
+            --cap-add MAC_ADMIN \
+            --volume /sys/kernel/security:/sys/kernel/security \
             --shm-size=1g \
             --volume "${GITHUB_WORKSPACE}:/src:ro" \
             --volume "${FORWARD_DIR}/deb:/deb:ro" \
@@ -303,6 +328,110 @@ jobs:
             "${FORWARD_IMAGE}" \
             bash scripts/desktop_shell/forward_window_smoke.sh \
             /deb/servonaut.deb "${TARGET}" /out "$(id -u):$(id -g)"
+
+      # macOS: the qualified onedir becomes Servonaut.app in the layout the
+      # PyInstaller bootloader expects of an app bundle (code in
+      # Contents/MacOS and Contents/Frameworks, data in Contents/Resources),
+      # signed ad-hoc inside-out with the hardened runtime. The bundled uv
+      # keeps its publisher's signature. Gatekeeper (spctl) rejects every
+      # ad-hoc signed app by design, so it is not assessed here.
+      - name: Package and ad-hoc sign the macOS app
+        id: macos-app
+        if: runner.os == 'macOS'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          TARGET: ${{ matrix.target }}
+          PRODUCT_VERSION: ${{ steps.paths.outputs.product-version }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+        run: |
+          set -euo pipefail
+          MACOS_DIR="${BASE_TEMP}/macos"
+          mkdir -m 700 "${MACOS_DIR}"
+          APP="${MACOS_DIR}/Servonaut.app"
+          # The distribution tooling imports the product's release-identity code.
+          distribution() {
+            env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+              PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" -m "$@"
+          }
+          distribution scripts.distribution.package_macos --app-only \
+            --payload-dir "${PAYLOAD_DIR}" --output-dir "${MACOS_DIR}" \
+            --version "${PRODUCT_VERSION}" --arch "${TARGET}"
+          echo "Code in Contents/Frameworks: $(find "${APP}/Contents/Frameworks" -type f | wc -l) files;" \
+            "data in Contents/Resources: $(find "${APP}/Contents/Resources" -type f | wc -l) files;" \
+            "cross-links: $(find "${APP}/Contents" -type l | wc -l)"
+
+          distribution scripts.distribution.sign_macos --target "${APP}" --identity - --verify
+          codesign --verify --strict --deep --verbose=2 "${APP}"
+          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+            echo "Signature and entitlements of ${executable}:"
+            details="$(codesign -dv "${APP}/Contents/MacOS/${executable}" 2>&1)"
+            grep -E '^(Identifier|CodeDirectory|Signature)' <<< "${details}"
+            grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([a-z,-]*runtime' <<< "${details}"
+            codesign -d --entitlements - "${APP}/Contents/MacOS/${executable}"
+          done
+          # uv keeps its publisher's Developer ID signature, sealed into the bundle.
+          UV="${APP}/Contents/Frameworks/voice/uv"
+          codesign --verify --strict --verbose=2 "${UV}"
+          details="$(codesign -dv --verbose=2 "${UV}" 2>&1)"
+          grep -E '^(Authority|TeamIdentifier)=' <<< "${details}"
+          grep -q '^Authority=Developer ID Application' <<< "${details}"
+
+          # The app inside the disk image must keep a valid signature.
+          distribution scripts.distribution.package_macos --app-bundle "${APP}" \
+            --output-dir "${MACOS_DIR}" --version "${PRODUCT_VERSION}" --arch "${TARGET}" \
+            --verify-image
+          echo "app-dir=${APP}" >> "${GITHUB_OUTPUT}"
+
+      # The packaged self-test again, against the executables inside the
+      # signed bundle: the helpers run under the hardened runtime too.
+      - name: Run policy-bound smoke checks on the signed macOS app
+        id: macos-app-smoke
+        if: runner.os == 'macOS'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.macos-app.outputs.app-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          TARGET: ${{ matrix.target }}
+          PRODUCT_VERSION: ${{ steps.paths.outputs.product-version }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          APP_EVIDENCE="${BASE_TEMP}/macos/evidence"
+          mkdir -m 700 "${APP_EVIDENCE}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${APP_EVIDENCE}" \
+            --selftest
+          mv "${APP_EVIDENCE}/smoke-report-${TARGET}.json" \
+            "${EVIDENCE_DIR}/app-smoke-report-${TARGET}.json"
+
+      # Opens the signed app's window as a user would, in the runner's
+      # logged-in macOS session, from the executable inside the bundle. It
+      # proves the page reaches the app in WKWebView and that the hardened
+      # runtime's entitlements are enough.
+      - name: Run signed macOS app window smoke
+        id: macos-window-smoke
+        if: runner.os == 'macOS'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.macos-app.outputs.app-dir }}
+          TARGET: ${{ matrix.target }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.window_smoke \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --target "${TARGET}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
       - name: Prepare sanitized non-executable evidence
         id: sanitize
@@ -316,6 +445,9 @@ jobs:
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
           WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
           WINDOW_SMOKE_FORWARD_STATUS: ${{ steps.window-smoke-forward.outcome }}
+          MACOS_APP_STATUS: ${{ steps.macos-app.outcome }}
+          MACOS_APP_SMOKE_STATUS: ${{ steps.macos-app-smoke.outcome }}
+          MACOS_WINDOW_SMOKE_STATUS: ${{ steps.macos-window-smoke.outcome }}
         run: |
           set -euo pipefail
           if [ -d "${EVIDENCE_DIR}" ]; then
@@ -330,7 +462,10 @@ jobs:
             "inspect_status": "${INSPECT_STATUS}",
             "smoke_status": "${SMOKE_STATUS}",
             "window_smoke_status": "${WINDOW_SMOKE_STATUS}",
-            "window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}"
+            "window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}",
+            "macos_app_status": "${MACOS_APP_STATUS}",
+            "macos_app_smoke_status": "${MACOS_APP_SMOKE_STATUS}",
+            "macos_window_smoke_status": "${MACOS_WINDOW_SMOKE_STATUS}"
           }
           EOF
 
@@ -349,6 +484,16 @@ jobs:
       # opened, or when it did not.
       - name: Upload packaged window screenshot
         if: always() && runner.os == 'Linux' && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-window-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.screenshot-dir }}/*.png
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: false
+
+      - name: Upload signed macOS app window screenshot
+        if: always() && runner.os == 'macOS' && steps.paths.outputs.base-temp != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-window-${{ matrix.target }}
@@ -378,6 +523,9 @@ jobs:
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
           WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
           WINDOW_SMOKE_FORWARD_STATUS: ${{ steps.window-smoke-forward.outcome }}
+          MACOS_APP_STATUS: ${{ steps.macos-app.outcome }}
+          MACOS_APP_SMOKE_STATUS: ${{ steps.macos-app-smoke.outcome }}
+          MACOS_WINDOW_SMOKE_STATUS: ${{ steps.macos-window-smoke.outcome }}
           UPLOAD_STATUS: ${{ steps.upload.outcome }}
           CLEANUP_STATUS: ${{ steps.cleanup.outcome }}
         run: |
@@ -389,6 +537,11 @@ jobs:
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             test "${WINDOW_SMOKE_STATUS}" = "success"
             test "${WINDOW_SMOKE_FORWARD_STATUS}" = "success"
+          fi
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            test "${MACOS_APP_STATUS}" = "success"
+            test "${MACOS_APP_SMOKE_STATUS}" = "success"
+            test "${MACOS_WINDOW_SMOKE_STATUS}" = "success"
           fi
           test "${UPLOAD_STATUS}" = "success"
           test "${CLEANUP_STATUS}" = "success"

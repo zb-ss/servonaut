@@ -197,10 +197,12 @@ def _verify_voice_payload(runtime: RuntimeLayout) -> dict[str, object]:
     )
 
     directory = runtime.resource_root / PACKAGED_VOICE_DIRNAME
-    manifest_path = directory / PACKAGED_MANIFEST_FILENAME
-    if not _lstat_is(directory, stat.S_ISDIR) or not _lstat_is(
-        manifest_path, stat.S_ISREG
-    ):
+    try:
+        roots = _resource_directories(runtime.resource_root)
+    except (OSError, RuntimeError):
+        raise _SelftestFailure("voice-payload") from None
+    manifest_path = _packaged_file(directory / PACKAGED_MANIFEST_FILENAME, roots)
+    if not _lstat_is(directory, stat.S_ISDIR) or manifest_path is None:
         raise _SelftestFailure("voice-payload")
     try:
         manifest = load_packaged_manifest(manifest_path)
@@ -212,7 +214,7 @@ def _verify_voice_payload(runtime: RuntimeLayout) -> dict[str, object]:
         "requirements": manifest.requirements,
     }
     for role, bundled in pinned.items():
-        _verify_bundled_file(directory, role, bundled)
+        _verify_bundled_file(directory, roots, role, bundled)
     return {
         "directory": True,
         "manifest": True,
@@ -221,26 +223,45 @@ def _verify_voice_payload(runtime: RuntimeLayout) -> dict[str, object]:
     }
 
 
-def _verify_bundled_file(directory: Path, role: str, bundled: BundledFile) -> None:
-    """Require a pinned file to be a regular file in the voice directory, intact.
+def _verify_bundled_file(
+    directory: Path, roots: tuple[Path, ...], role: str, bundled: BundledFile
+) -> None:
+    """Require a pinned file in the voice directory to match its digest.
 
     The manifest's filename pattern admits no path separator and no leading
-    dot, so the file can only sit directly in the voice directory. A link is
-    refused even when its target matches: the build copies real files. Fails
-    with ``voice-<role>-file`` or ``voice-<role>-digest``.
+    dot, so the name can only sit directly in the voice directory. Fails with
+    ``voice-<role>-file`` or ``voice-<role>-digest``.
     """
     from servonaut.desktop.voice.runtime import (
         VoiceRuntimeIntegrityError,
         verify_sha256,
     )
 
-    path = directory / bundled.filename
-    if not _lstat_is(path, stat.S_ISREG):
+    path = _packaged_file(directory / bundled.filename, roots)
+    if path is None:
         raise _SelftestFailure(f"voice-{role}-file")
     try:
         verify_sha256(path, bundled.sha256)
     except VoiceRuntimeIntegrityError:
         raise _SelftestFailure(f"voice-{role}-digest") from None
+
+
+def _packaged_file(path: Path, roots: tuple[Path, ...]) -> Path | None:
+    """The regular file *path* names, resolved, if it stays within the resources.
+
+    A macOS app bundle links data files from ``Contents/Frameworks`` into
+    ``Contents/Resources``, so a link is followed, but only to a regular file
+    inside the resource directories. A link that escapes them or dangles
+    names nothing.
+    """
+    try:
+        resolved = path.resolve(strict=True)
+        is_regular = stat.S_ISREG(resolved.lstat().st_mode)
+    except (OSError, RuntimeError):
+        return None
+    if not is_regular or not any(resolved.is_relative_to(root) for root in roots):
+        return None
+    return resolved
 
 
 def _lstat_is(path: Path, is_kind: Callable[[int], bool]) -> bool:
@@ -249,6 +270,18 @@ def _lstat_is(path: Path, is_kind: Callable[[int], bool]) -> bool:
         return is_kind(path.lstat().st_mode)
     except OSError:
         return False
+
+
+def _resource_directories(resource_root: Path) -> tuple[Path, ...]:
+    """Where the packaged resources live, resolved.
+
+    A macOS app bundle keeps its code in ``Contents/Frameworks`` (the resource
+    root) and its data in ``Contents/Resources``, linked into the root.
+    """
+    roots = [resource_root]
+    if resource_root.name == "Frameworks" and resource_root.parent.name == "Contents":
+        roots.append(resource_root.parent / "Resources")
+    return tuple(root.resolve(strict=True) for root in roots)
 
 
 def _bootstrap_host(runtime: RuntimeLayout, *, open_window: bool) -> dict[str, bool]:

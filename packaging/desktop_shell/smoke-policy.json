@@ -21,6 +21,8 @@
     "macos-arm64"
   ],
   "window_smoke_targets": [
-    "linux-x64-ubuntu-22.04"
+    "linux-x64-ubuntu-22.04",
+    "macos-x64",
+    "macos-arm64"
   ]
 }

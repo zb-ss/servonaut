@@ -339,6 +339,56 @@ def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: s
     assert '"window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}"' in qualify
 
 
+def test_forward_smoke_runs_under_ubuntus_user_namespace_restriction(
+    workflow_content: str,
+) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Run packaged window smoke on Ubuntu 24.04")
+
+    assert "restriction=kernel.apparmor_restrict_unprivileged_userns" in step
+    # A runner without the restriction fails instead of passing vacuously.
+    missing = step.split('if ! host_restriction="$(sysctl -n "${restriction}"', 1)[1]
+    assert missing.split("fi\n", 1)[0].rstrip().endswith("exit 1")
+    enable = 'sudo sysctl -qw "${restriction}=1"'
+    restore = "trap 'sudo sysctl -qw \"${restriction}=${host_restriction}\";"
+    assert step.index(restore) < step.index(enable) < step.index("docker run --rm")
+    # Unconfined like a desktop session, so the restriction applies; seccomp
+    # off, or Docker's filter would refuse the namespace first; and allowed to
+    # load AppArmor policy, as installing AppArmor and the package does.
+    for option in (
+        "--security-opt seccomp=unconfined",
+        "--security-opt apparmor=unconfined",
+        "--cap-add MAC_ADMIN",
+        "--volume /sys/kernel/security:/sys/kernel/security",
+    ):
+        assert option in step
+    assert "--privileged" not in step
+
+
+def test_forward_script_opens_the_window_under_the_release_restriction() -> None:
+    """The tripwire for the day the window needs a user namespace."""
+    script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
+
+    assert "/proc/sys/kernel/apparmor_restrict_unprivileged_userns)\" != 1" in script
+    steps = [
+        'apt-get install --yes --no-install-recommends "${deb}"',
+        "--no-install-recommends python3 xvfb xauth imagemagick apparmor\n",
+        'runuser -u "${smoke_user}" -- unshare --user --map-root-user true',
+        '[[ "${refusal}" == *"/proc/self/uid_map"* ]]',
+        "-m scripts.desktop_shell.window_smoke",
+        "ship an AppArmor profile",
+        '"process_security_labels"',
+    ]
+    positions = [script.index(step) for step in steps]
+    assert positions == sorted(positions)
+    # The control must fail closed: a namespace that works means no restriction.
+    control = script.split("unshare --user --map-root-user true", 1)[1]
+    assert control.split("\nfi\n", 1)[0].strip().startswith("2>&1); then\n  fail ")
+    # No profile is shipped, and nothing switches the sandbox off to pass.
+    assert "apparmor_parser" not in script
+    assert "WEBKIT_DISABLE_SANDBOX" not in script
+
+
 def test_forward_script_installs_only_the_depends_before_its_own_tools() -> None:
     script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
     subprocess.run(["bash", "-n", str(_FORWARD_SCRIPT)], check=True)
@@ -358,3 +408,91 @@ def test_path_filters_cover_the_deb_packaging(workflow_content: str) -> None:
         paths = block.split("paths:\n", 1)[1].split("\n  pull_request:", 1)[0]
         assert "- 'scripts/distribution/**'" in paths
         assert "- 'packaging/deb/**'" in paths
+
+
+def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Package and ad-hoc sign the macOS app")
+
+    assert "id: macos-app" in step
+    assert "if: runner.os == 'macOS'" in step
+    assert 'PYTHONPATH="${GITHUB_WORKSPACE}/src"' in step
+    assert "scripts.distribution.package_macos --app-only" in step
+    assert '--payload-dir "${PAYLOAD_DIR}"' in step
+    assert 'scripts.distribution.sign_macos --target "${APP}" --identity - --verify' in step
+    # No signing identity or certificate reaches the job: ad-hoc only.
+    assert "secrets." not in step
+    assert "security import" not in step
+    # Verified as a whole and per executable; Gatekeeper rejects ad-hoc apps.
+    assert 'codesign --verify --strict --deep --verbose=2 "${APP}"' in step
+    assert "codesign -d --entitlements -" in step
+    assert "spctl" not in step
+    # uv keeps its publisher's signature.
+    assert "grep -q '^Authority=Developer ID Application'" in step
+    # The disk image is made from the signed app, which must still verify inside
+    # it; the packager mounts it, retrying hdiutil only while it is busy.
+    image = step.split('scripts.distribution.package_macos --app-bundle "${APP}"', 1)[1]
+    assert "--verify-image" in image.split("\n          echo", 1)[0]
+    assert "hdiutil" not in step
+    assert qualify.index("scripts.desktop_shell.smoke_artifact") < qualify.index(
+        "Package and ad-hoc sign the macOS app"
+    )
+
+
+def test_macos_self_tests_and_opens_the_signed_app(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    smoke = _named_step(qualify, "Run policy-bound smoke checks on the signed macOS app")
+    window = _named_step(qualify, "Run signed macOS app window smoke")
+
+    for step, step_id in ((smoke, "macos-app-smoke"), (window, "macos-window-smoke")):
+        assert f"id: {step_id}" in step
+        assert "if: runner.os == 'macOS'" in step
+        assert "APP_DIR: ${{ steps.macos-app.outputs.app-dir }}" in step
+        assert '--payload-root "${APP_DIR}/Contents/MacOS"' in step
+    assert "-m scripts.desktop_shell.smoke_artifact" in smoke
+    assert "--selftest" in smoke.split()
+    assert "--selftest-window" not in smoke
+    # Its report must not overwrite the payload's report of the same name.
+    assert '"${EVIDENCE_DIR}/app-smoke-report-${TARGET}.json"' in smoke
+    assert "-m scripts.desktop_shell.window_smoke" in window
+    assert "xvfb-run" not in window
+    assert '--screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"' in window
+    assert qualify.index("Package and ad-hoc sign the macOS app") < qualify.index(
+        "Run policy-bound smoke checks on the signed macOS app"
+    ) < qualify.index("Run signed macOS app window smoke") < qualify.index(
+        "Prepare sanitized non-executable evidence"
+    )
+
+
+def test_the_signed_app_gates_macos_qualification(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    gate = _named_step(qualify, "Require successful qualification")
+
+    for variable, step_id in (
+        ("MACOS_APP_STATUS", "macos-app"),
+        ("MACOS_APP_SMOKE_STATUS", "macos-app-smoke"),
+        ("MACOS_WINDOW_SMOKE_STATUS", "macos-window-smoke"),
+    ):
+        assert f"{variable}: ${{{{ steps.{step_id}.outcome }}}}" in gate
+        assert f'test "${{{variable}}}" = "success"' in gate
+    assert 'if [[ "${RUNNER_OS}" == "macOS" ]]; then' in gate
+    assert '"macos_window_smoke_status": "${MACOS_WINDOW_SMOKE_STATUS}"' in qualify
+
+
+def test_the_macos_window_screenshot_is_uploaded_before_cleanup(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    upload = _named_step(qualify, "Upload signed macOS app window screenshot")
+
+    assert "if: always() && runner.os == 'macOS'" in upload
+    assert "name: desktop-window-${{ matrix.target }}" in upload
+    assert "path: ${{ steps.paths.outputs.screenshot-dir }}/*.png" in upload
+    assert qualify.index("Upload signed macOS app window screenshot") < qualify.index(
+        "Cleanup build material and executables"
+    )
+
+
+def test_path_filters_cover_the_macos_packaging(workflow_content: str) -> None:
+    for trigger in ("push:", "pull_request:"):
+        block = workflow_content.split(f"  {trigger}\n", 1)[1].split("\n  workflow_dispatch", 1)[0]
+        paths = block.split("paths:\n", 1)[1].split("\n  pull_request:", 1)[0]
+        assert "- 'packaging/macos/**'" in paths

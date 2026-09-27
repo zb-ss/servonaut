@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 # Forward qualification of the packaged Linux desktop, run as root inside a
-# clean container of a newer Ubuntu release:
+# clean container of a newer Ubuntu release, with unprivileged user
+# namespaces restricted the way that release restricts them:
 #
 #   1. install the .deb built from the payload, with only its declared Depends;
 #   2. require every library the installed payload links to resolve;
 #   3. add the smoke's own tools (Python for the runner, a virtual display and
-#      a screenshot tool) and open the installed window, as an unprivileged
-#      user, with the same window smoke the build host runs.
+#      a screenshot tool) and the release's AppArmor, whose installation loads
+#      its policy into the host kernel, as booting that release does;
+#   4. require an unprivileged user to be refused a user namespace by that
+#      policy, so the restriction is really in force;
+#   5. open the installed window, as an unprivileged user, with the same
+#      window smoke the build host runs.
+#
+# The package ships no AppArmor profile, because nothing it starts needs a
+# user namespace: WebKit's bubblewrap sandbox is off. Step 5 fails the day
+# that changes.
 #
 # usage: forward_window_smoke.sh DEB TARGET OUTPUT_DIR OWNER_UID:GID
 # Run from the repository root; OUTPUT_DIR receives the report and screenshot
@@ -22,6 +31,15 @@ smoke_user=servonaut-smoke
 
 trap 'chown -R "${owner}" "${output}"' EXIT
 export DEBIAN_FRONTEND=noninteractive
+
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+
+if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" != 1 ]]; then
+  fail "The host kernel does not restrict unprivileged user namespaces."
+fi
 
 apt-get update -qq
 apt-get install --yes --no-install-recommends "${deb}"
@@ -39,15 +57,34 @@ if [[ -n "${unresolved}" ]]; then
   exit 1
 fi
 
-apt-get install --yes --no-install-recommends python3 xvfb xauth imagemagick
+apt-get install --yes --no-install-recommends python3 xvfb xauth imagemagick apparmor
 useradd --create-home "${smoke_user}"
 chmod 0777 "${output}"
 host=$(. /etc/os-release && echo "${ID}-${VERSION_ID}")
 
-runuser -u "${smoke_user}" -- env PYTHONDONTWRITEBYTECODE=1 \
+# The release's policy gives an unprivileged process its namespace without
+# capabilities, so setting up the uid map fails. Docker's seccomp filter or
+# the bare restriction would refuse the namespace itself instead.
+if refusal=$(runuser -u "${smoke_user}" -- unshare --user --map-root-user true 2>&1); then
+  fail "An unprivileged user was given a working user namespace, so the restriction is not in force."
+fi
+[[ "${refusal}" == *"/proc/self/uid_map"* ]] \
+  || fail "User namespaces were refused, but not by ${host}'s AppArmor policy: ${refusal}"
+echo "${host}'s AppArmor policy refuses unprivileged user namespaces: ${refusal}"
+
+if ! runuser -u "${smoke_user}" -- env PYTHONDONTWRITEBYTECODE=1 \
   xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" \
   python3 -m scripts.desktop_shell.window_smoke \
   --payload-root "${install_root}" \
   --target "${target}" \
   --evidence-dir "${output}" \
-  --screenshot "${output}/desktop-window-${target}-on-${host}.png"
+  --screenshot "${output}/desktop-window-${target}-on-${host}.png"; then
+  fail "The window did not open while ${host} restricts unprivileged user namespaces." \
+    "If WebKit now needs one (its bubblewrap sandbox), ship an AppArmor profile" \
+    "that grants the launcher userns."
+fi
+python3 -c '
+import json, sys
+labels = json.load(open(sys.argv[1]))["process_security_labels"]
+print("The window processes ran as:", json.dumps(labels, sort_keys=True))
+' "${output}/window-smoke-report-${target}-on-${host}.json"

@@ -129,7 +129,13 @@ def test_a_connected_window_is_photographed_and_stopped_with_its_children(
     assert screenshot.read_bytes() == b"\x89PNG"
     assert report.launcher_exit_code == -15
     assert report.process_tree_exited is True
-    assert json.loads(report.to_json())["target"] == _TARGET
+    written = json.loads(report.to_json())
+    assert written["target"] == _TARGET
+    # Whatever the host's security module says, the report carries it.
+    assert all(
+        labels and labels == sorted(labels)
+        for labels in written["process_security_labels"].values()
+    )
 
 
 def test_a_blank_window_fails_after_the_bound_with_its_logs(
@@ -202,9 +208,9 @@ def test_the_window_needs_a_display(
 def test_the_window_smoke_covers_only_its_policy_targets(
     tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
 ) -> None:
-    with pytest.raises(window_smoke.WindowSmokeError, match="does not cover macos-arm64"):
+    with pytest.raises(window_smoke.WindowSmokeError, match="does not cover windows-x64"):
         window_smoke.run_window_smoke(
-            tmp_path, "macos-arm64", policy, screenshot=None, inherited=_DISPLAY
+            tmp_path, "windows-x64", policy, screenshot=None, inherited=_DISPLAY
         )
 
 
@@ -250,6 +256,34 @@ def test_process_parents_reads_proc_and_skips_zombies(tmp_path: Path) -> None:
     (tmp_path / "13").mkdir()  # vanished before its stat was read
 
     assert window_smoke.process_parents(tmp_path) == {10: 1, 11: 10}
+
+
+def test_security_labels_group_the_tree_by_command_name(tmp_path: Path) -> None:
+    profile = "servonaut-desktop (unconfined)\n"
+    processes = {
+        # AppArmor's own attribute file, as on Ubuntu.
+        "10": ("servonaut-deskt", {"attr/apparmor/current": profile}),
+        # Only the shared attribute file, as on older kernels.
+        "11": ("bwrap", {"attr/current": profile}),
+        "12": ("bwrap", {"attr/apparmor/current": profile}),
+        "13": ("WebKitWebProces", {"attr/current": "unconfined\n"}),
+        # No security module: the attribute cannot be read.
+        "14": ("xdg-dbus-proxy", {}),
+    }
+    for pid, (name, attributes) in processes.items():
+        (tmp_path / pid).mkdir()
+        (tmp_path / pid / "comm").write_text(f"{name}\n")
+        for relative, text in attributes.items():
+            (tmp_path / pid / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / pid / relative).write_text(text)
+
+    labels = window_smoke.security_labels([10, 11, 12, 13, 14, 15], tmp_path)
+
+    assert labels == {
+        "WebKitWebProces": ["unconfined"],
+        "bwrap": ["servonaut-desktop (unconfined)"],
+        "servonaut-deskt": ["servonaut-desktop (unconfined)"],
+    }
 
 
 def test_descendants_walk_the_whole_tree() -> None:
@@ -319,3 +353,136 @@ def test_the_report_names_the_host_it_ran_on(
         os_release.write_text(content)
 
     assert window_smoke.host_platform(os_release) == expected
+
+
+# macOS: the same smoke, from the executable inside the app bundle, in the
+# login session. These run the macOS code paths against stand-ins on Linux.
+
+
+def _fake_screencapture(tmp_path: Path) -> dict[str, str]:
+    """A ``screencapture`` stand-in that writes the file it is given, silently."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    program = tools / "screencapture"
+    program.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "assert sys.argv[1:2] == ['-x']\n"
+        "Path(sys.argv[2]).write_bytes(b'\\x89PNG macOS')\n"
+    )
+    program.chmod(0o755)
+    return {"PATH": f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+
+def test_a_macos_window_needs_no_x_display_and_is_photographed_with_screencapture(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(window_smoke.platform, "mac_ver", lambda: ("15.6", ("", "", ""), "arm64"))
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+    screenshot = tmp_path / "shots" / "window.png"
+
+    report = window_smoke.run_window_smoke(
+        payload,
+        "macos-arm64",
+        policy,
+        screenshot=screenshot,
+        inherited=_fake_screencapture(tmp_path),
+        system="darwin",
+    )
+
+    assert report.session_connected is True
+    assert report.host_platform == "macos-15.6"
+    assert screenshot.read_bytes() == b"\x89PNG macOS"
+    assert report.process_tree_exited is True
+
+
+def test_a_macos_window_reports_no_security_labels(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security labels are Linux's (/proc/*/attr); macOS has none to read."""
+
+    def linux_only(*args: object, **kwargs: object) -> None:
+        raise AssertionError("macOS processes carry no Linux security label")
+
+    monkeypatch.setattr(window_smoke, "security_labels", linux_only)
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+
+    report = window_smoke.run_window_smoke(
+        payload,
+        "macos-x64",
+        policy,
+        screenshot=tmp_path / "window.png",
+        inherited=_fake_screencapture(tmp_path),
+        system="darwin",
+    )
+
+    assert report.process_security_labels == {}
+    assert json.loads(report.to_json())["process_security_labels"] == {}
+
+
+def test_a_macos_window_needs_its_photograph(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+) -> None:
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+
+    with pytest.raises(window_smoke.WindowSmokeError, match="photographed with screencapture"):
+        window_smoke.run_window_smoke(
+            payload,
+            "macos-x64",
+            policy,
+            screenshot=tmp_path / "w.png",
+            inherited={"PATH": str(tmp_path / "empty")},
+            system="darwin",
+        )
+
+
+def test_the_macos_environment_is_isolated_without_display_variables(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    environment = window_smoke.window_environment(
+        home, {"DISPLAY": ":99", "AWS_PROFILE": "prod"}, system="darwin"
+    )
+
+    assert environment["HOME"] == str(home)
+    assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert "DISPLAY" not in environment
+    assert "XDG_RUNTIME_DIR" not in environment
+    assert "AWS_PROFILE" not in environment
+
+
+def test_ps_output_maps_live_processes_to_their_parents() -> None:
+    listing = "\n".join(
+        [
+            "    1     0 Ss",
+            "  410     1 S",
+            "  411   410 R+",
+            "  412   410 Z",
+            "  bad line",
+            "",
+        ]
+    )
+
+    assert window_smoke.parse_ps_parents(listing) == {1: 0, 410: 1, 411: 410}
+
+
+def test_without_proc_the_process_list_comes_from_ps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(window_smoke, "_ps_listing", lambda: "  20     1 S\n  21    20 S\n")
+
+    assert window_smoke.process_parents(tmp_path / "no-proc") == {20: 1, 21: 20}
+
+
+@pytest.mark.parametrize(("version", "expected"), [("15.6.1", "macos-15.6.1"), ("", "unknown")])
+def test_the_report_names_the_macos_release(
+    monkeypatch: pytest.MonkeyPatch, version: str, expected: str
+) -> None:
+    monkeypatch.setattr(window_smoke.platform, "mac_ver", lambda: (version, ("", "", ""), ""))
+
+    assert window_smoke.host_platform(system="darwin") == expected
+
+
+def test_the_policy_covers_the_macos_app_targets() -> None:
+    assert {"macos-x64", "macos-arm64"} <= load_desktop_smoke_policy().window_smoke_targets
