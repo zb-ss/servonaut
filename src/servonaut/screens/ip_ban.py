@@ -72,12 +72,17 @@ class IPBanScreen(Screen):
             yield Container(
                 Static("[bold cyan]IP Ban Manager[/bold cyan]", id="ip_ban_title"),
             Static("[dim]Ban IP addresses via WAF, Security Groups, or NACLs[/dim]", id="ip_ban_subtitle"),
+            Static(
+                "No IP ban method is set up yet. Add a WAF IP set, security "
+                "group or network ACL in Settings → IP Ban, then choose it here.",
+                id="ip_ban_empty_hint",
+            ),
             Horizontal(
                 Vertical(
                     Static("Select Ban Configuration:", classes="field_label"),
                     Select(
                         options=self._get_config_options(),
-                        prompt="-- Select a ban configuration --",
+                        prompt="Select a ban configuration",
                         id="ban_config_selector",
                     ),
                     id="ip_ban_config_col",
@@ -120,6 +125,9 @@ class IPBanScreen(Screen):
     def on_mount(self) -> None:
         self._setup_table()
         self._load_audit_log()
+        self.query_one("#ip_ban_empty_hint", Static).display = not (
+            self.app.ip_ban_service.get_configs()
+        )
         if self._prefill_ip:
             self.query_one("#ip_input", Input).focus()
         else:
