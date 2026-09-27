@@ -40,6 +40,33 @@ Check the log for the exact SSH command:
 grep "SSH command" ~/.servonaut/logs/servonaut.log
 ```
 
+## SSH Host Key Has Changed
+
+Servonaut records each server's SSH host key the first time it connects
+(trust on first use) and refuses a later connection that presents a
+different key. The message names the host and the command that removes the
+old key, for example:
+
+```text
+SSH host key for web-1.example.com has changed, so the connection was refused.
+The server may have been rebuilt or re-keyed, or the connection may be
+intercepted. Once you have confirmed the new key is genuine, remove the old one
+and reconnect: ssh-keygen -R web-1.example.com -f ~/.servonaut/known_hosts
+```
+
+1. **Confirm the new key first** — compare the server's key fingerprint
+   with the one shown in your provider's console, or ask whoever rebuilt the
+   server. An unexpected change can mean the connection is being
+   intercepted.
+2. **Run the command from the message** — copy it exactly: cloud instances
+   are recorded under a name such as `aws:us-east-1:i-0abc…` rather than
+   their address, and the command names the right known_hosts file (yours or
+   Servonaut's).
+3. **Reconnect** — the new key is recorded on the next connection.
+
+See [SSH host-key verification](configuration.md#ssh-host-key-verification)
+for the `ssh.host_key_checking` setting and where keys are stored.
+
 ## Bastion Connection Hangs
 
 If the terminal opens but SSH hangs:
@@ -102,6 +129,29 @@ The file browser connects via SSH to list directory contents. If it fails:
 1. **Connection issues** — Same as SSH troubleshooting above
 2. **Permissions** — The SSH user must have read access to the directories
 3. **Key auto-discovery** — If no key is configured, the browser attempts auto-discovery from the instance's `key_name`
+
+## Installed a Release Candidate by Mistake
+
+A version such as `2.28.0rc1` is a release candidate, a preview of the next
+release. To go back to the newest stable release, keeping your
+configuration:
+
+```bash
+pipx install --force servonaut           # pipx, including the install scripts
+pip install --force-reinstall servonaut  # pip
+```
+
+If you installed with extras, name them again, for example
+`pipx install --force 'servonaut[all]'`.
+
+A candidate installed with `pipx install --pip-args=--pre` makes pipx
+remember `--pre`, so `pipx upgrade-all` and `pipx reinstall` keep choosing
+pre-releases; the `--force` install above clears that. On Windows, if the
+installer keeps installing candidates, `SERVONAUT_PRE` is still set in that
+PowerShell window: run `Remove-Item Env:SERVONAUT_PRE` or open a new window.
+
+See [Release candidates](release-candidates.md) for how candidates and their
+updates work.
 
 ## Logging
 

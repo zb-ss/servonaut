@@ -408,7 +408,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "cw_btn_fetch",
         "cw_btn_next",
         "cw_btn_prev",
+        "cw_filter_log_group",    # Reason: filter cell; styled via #cloudwatch_filter_bar Vertical
         "cw_filter_pattern",
+        "cw_filter_region",       # Reason: filter cell; styled via #cloudwatch_filter_bar Vertical
         "cw_filter_time_range",
         "cw_input_filter_pattern", # Reason: Input; inherits global Input styling
         "cw_select_log_group",

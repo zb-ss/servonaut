@@ -8,25 +8,59 @@
     background: $surface;
 }
 
-/* Left: narrow, sectioned action rail */
+/* Left: sectioned action rail. On a wide terminal the actions sit two to a
+   row (section labels, Browse and Back take a whole row), so every action
+   fits without scrolling. A narrow terminal gets one column of one-row
+   buttons, and a short one one-row buttons, so the rail still fits and the
+   detail pane keeps its width. */
 #action_buttons {
-    width: 36;
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-rows: auto;
+    grid-gutter: 0 1;
+    width: 46;
     height: 100%;
-    padding: 1 2;
+    padding: 0 1;
     overflow-y: auto;
     border-right: round $primary;
 }
 
 #action_buttons Button {
     width: 100%;
-    margin: 0 0 1 0;
+    min-width: 0;
+    margin: 0;
 }
 
 #action_buttons .section_label {
+    column-span: 2;
     color: $accent;
     text-style: bold;
     padding: 1 0 0 0;
     margin: 0;
+}
+
+#action_buttons #btn_browse,
+#action_buttons #btn_back {
+    column-span: 2;
+}
+
+ServerActionsScreen.-narrow #action_buttons {
+    layout: vertical;
+    width: 24;
+}
+
+ServerActionsScreen.-narrow #action_buttons Button,
+ServerActionsScreen.-short #action_buttons Button {
+    height: 1;
+    border: none;
+    content-align: left middle;
+    text-align: left;
+}
+
+ServerActionsScreen.-narrow #action_buttons .section_label:first-child,
+ServerActionsScreen.-short #action_buttons .section_label:first-child {
+    padding: 0;
 }
 
 /* Right: detail pane (identity + live + memory + focus help) */
@@ -97,3 +131,14 @@
     height: 1fr;
 }
 
+/* A short terminal: less padding around the detail panels, so the server
+   memory stays on screen under the server's details. */
+ServerActionsScreen.-short #sa-detail {
+    padding: 0 1;
+}
+
+ServerActionsScreen.-short #server_info,
+ServerActionsScreen.-short #live_stats,
+ServerActionsScreen.-short #memory_panel {
+    padding: 0 1;
+}

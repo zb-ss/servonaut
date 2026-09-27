@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from rich.cells import cell_len
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -59,6 +61,34 @@ _TIME_RANGE_OPTIONS = [
 
 _PAGE_SIZE = 100
 
+_EVENT_COLUMNS = ("Time", "Stream", "Message")
+
+# Widest a column of the events table grows; wider values end in an ellipsis
+# (the full event is shown below the table when a row is selected).
+_STREAM_COLUMN_MAX = 32
+
+# The Top IPs action column is as wide as its longest label.
+_IP_ACTION_WIDTH = len("BLOCKED")
+
+
+def _column_width(label: str, cells: Sequence[str], cap: Optional[int] = None) -> int:
+    """Cells needed to show *label* and every value in *cells*, at most *cap*."""
+    width = max([cell_len(label), *(cell_len(cell) for cell in cells)])
+    return min(width, cap) if cap else width
+
+
+def _reset_columns(table: DataTable, columns: Sequence[Tuple[str, int]]) -> None:
+    """Replace the columns of *table* (and its rows) with fixed-width ones.
+
+    The widths are worked out here from the rows about to be added, rather
+    than left to the table: it measures new rows a frame after they arrive,
+    and a frame drawn in between keeps the header-wide columns it was drawn
+    with, cutting every value short until something else redraws the table.
+    """
+    table.clear(columns=True)
+    for label, width in columns:
+        table.add_column(label, width=width)
+
 
 class CloudWatchBrowserScreen(Screen):
     """Screen for browsing AWS CloudWatch log groups and events."""
@@ -75,6 +105,12 @@ class CloudWatchBrowserScreen(Screen):
     ]
 
     _IP_FILTERS = ["All", "Allowed", "Blocked"]
+
+    # The screen gets -narrow / -wide and -short / -tall classes by terminal
+    # size; the stylesheet lays the filters out on one row only when they fit
+    # and trims vertical padding on a short terminal.
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
     def __init__(self) -> None:
         super().__init__()
@@ -108,11 +144,14 @@ class CloudWatchBrowserScreen(Screen):
                     "[bold]CloudWatch Logs Browser[/bold]",
                     id="cloudwatch_title",
                 ),
-            Horizontal(
+            # A grid, so a narrow terminal can wrap the filters onto two rows
+            # (see HORIZONTAL_BREAKPOINTS and the stylesheet).
+            Container(
                 Vertical(
                     Label("Region"),
                     Select(
-                        [(f"{label} ({value})", value) for label, value in _AWS_REGIONS],
+                        # The code first: a narrow control cuts the end off.
+                        [(f"{value} — {label}", value) for label, value in _AWS_REGIONS],
                         prompt="Select region",
                         id="cw_select_region",
                         allow_blank=True,
@@ -184,11 +223,11 @@ class CloudWatchBrowserScreen(Screen):
 
     def on_mount(self) -> None:
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
-        events_table.add_columns("Time", "Stream", "Message")
+        _reset_columns(events_table, [(label, len(label)) for label in _EVENT_COLUMNS])
         events_table.cursor_type = "row"
 
         ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
-        ips_table.add_columns("IP", "Count", "Action")
+        _reset_columns(ips_table, self._ip_columns([], []))
         ips_table.cursor_type = "row"
 
         self._update_pager()
@@ -229,7 +268,7 @@ class CloudWatchBrowserScreen(Screen):
     def _populate_events_table(self) -> None:
         """Fill the events table with the current page."""
         events_table = self.query_one("#cloudwatch_events_table", DataTable)
-        events_table.clear()
+        rows: List[Tuple[str, str, str]] = []
         for ev in self._page_events:
             ts = ev.get("timestamp", "")
             if hasattr(ts, "strftime"):
@@ -239,7 +278,23 @@ class CloudWatchBrowserScreen(Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 msg = self.app.redaction_service.scrub_stream(msg)
                 log_stream = self.app.redaction_service.scrub_stream(log_stream)
-            events_table.add_row(str(ts), log_stream, msg)
+            rows.append((str(ts), log_stream, msg))
+        caps = (None, _STREAM_COLUMN_MAX, None)
+        _reset_columns(
+            events_table,
+            [
+                (label, _column_width(label, [row[index] for row in rows], caps[index]))
+                for index, label in enumerate(_EVENT_COLUMNS)
+            ],
+        )
+        for ts, log_stream, msg in rows:
+            # Text, not str: a str cell is read as markup, and log lines are
+            # full of square brackets.
+            events_table.add_row(
+                Text(ts),
+                Text(log_stream, no_wrap=True, overflow="ellipsis"),
+                Text(msg, no_wrap=True),
+            )
 
     # ------------------------------------------------------------------
     # Pagination
@@ -454,23 +509,41 @@ class CloudWatchBrowserScreen(Screen):
         )
 
         ips_table = self.query_one("#cloudwatch_ips_table", DataTable)
-        ips_table.clear()
         self._selected_ip_row = None
+        rows: List[Tuple[str, str, Text]] = []
         for entry in self._top_ips:
-            allowed = entry.get("allowed", 0)
-            blocked = entry.get("blocked", 0)
-            if blocked > 0 and allowed == 0:
-                action_label = "[red]BLOCKED[/red]"
-            elif allowed > 0 and blocked == 0:
-                action_label = "[green]ALLOWED[/green]"
-            elif blocked > 0 and allowed > 0:
-                action_label = "[yellow]MIXED[/yellow]"
-            else:
-                action_label = "[dim]—[/dim]"
             display_ip = entry["ip"]
             if self.app.demo_mode and self.app.redaction_service:
                 display_ip = self.app.redaction_service.redact_ip(display_ip)
-            ips_table.add_row(display_ip, str(entry["count"]), action_label)
+            rows.append((display_ip, str(entry["count"]), self._ip_action_label(entry)))
+        _reset_columns(
+            ips_table,
+            self._ip_columns([row[0] for row in rows], [row[1] for row in rows]),
+        )
+        for display_ip, count, action_label in rows:
+            ips_table.add_row(Text(display_ip), Text(count), action_label)
+
+    @staticmethod
+    def _ip_columns(addresses: Sequence[str], counts: Sequence[str]) -> List[Tuple[str, int]]:
+        """Top IPs columns, each as wide as its longest value."""
+        return [
+            ("IP", _column_width("IP", addresses)),
+            ("Count", _column_width("Count", counts)),
+            ("Action", _IP_ACTION_WIDTH),
+        ]
+
+    @staticmethod
+    def _ip_action_label(entry: Dict[str, Any]) -> Text:
+        """What WAF did with an address's requests: all allowed, all blocked or both."""
+        allowed = entry.get("allowed", 0)
+        blocked = entry.get("blocked", 0)
+        if blocked > 0 and allowed == 0:
+            return Text("BLOCKED", style="red")
+        if allowed > 0 and blocked == 0:
+            return Text("ALLOWED", style="green")
+        if blocked > 0 and allowed > 0:
+            return Text("MIXED", style="yellow")
+        return Text("—", style="dim")
 
     # ------------------------------------------------------------------
     # Event detail / selection
