@@ -48,8 +48,20 @@ _NAME_SUFFIXES = [
     "shared", "dedicated", "cluster",
 ]
 
-# Fake provider/group names
-_PROVIDERS = ["AWS", "GCP", "Azure", "Hetzner", "OVH", "DigitalOcean"]
+# Provider labels that say what kind of server a row is, not whose it is:
+# demo mode shows them as they are, in any letter case. Includes the labels
+# the app itself sets (``custom`` for a custom server without one) and the
+# aliases the memory store files servers under.
+_PUBLIC_PROVIDERS = frozenset({
+    "aws", "ec2", "amazon", "gcp", "azure", "hetzner", "ovh", "ovhcloud",
+    "digitalocean", "custom",
+})
+# What any other provider label becomes. Only custom servers carry a label
+# of their own choosing, and it may name a company; they are custom servers
+# whatever the label says, so the stand-in keeps that category.
+_CUSTOM_PROVIDER = "custom"
+
+# Fake group names
 _GROUPS = [
     "production", "staging", "development", "monitoring",
     "web-servers", "api-servers", "databases", "workers",
@@ -528,16 +540,18 @@ class RedactionService:
         return fake
 
     def redact_provider(self, provider: str) -> str:
-        """Map a provider label to a pool one; pool labels pass through.
+        """A provider label as demo mode shows it.
 
-        The pool is public taxonomy (AWS, OVH, Hetzner …), so a real label
-        that is already in it stays put and the provider column stays true.
+        Public taxonomy (AWS, OVH, Hetzner …) passes through, so the
+        provider column stays true. Any other label, which only a custom
+        server can carry, becomes ``custom``: the stand-in hides the name
+        but never turns a custom server into another kind of server.
         """
         if not provider or provider == "-":
             return provider
-        if provider in _PROVIDERS:
+        if provider.strip().lower() in _PUBLIC_PROVIDERS:
             return provider
-        return _hash_pick(provider, _PROVIDERS)
+        return _CUSTOM_PROVIDER
 
     def redact_group(self, group: str) -> str:
         """Map a real group name to a fake one."""
@@ -582,7 +596,9 @@ class RedactionService:
             instance["tags"] = {
                 k: self.redact_name(v) for k, v in instance["tags"].items()
             }
-        # Custom servers use provider as region — redact if not a standard AWS region
+        # A custom server's region is its provider label (see
+        # CustomServerService.to_instance_dict), so it gets the same stand-in
+        # as the provider column; an AWS-style region is public and stays.
         if instance.get("is_custom") and instance.get("region"):
             region = instance["region"]
             if not region.startswith(("us-", "eu-", "ap-", "sa-", "ca-", "me-", "af-")):

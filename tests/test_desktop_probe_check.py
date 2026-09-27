@@ -19,6 +19,7 @@ from scripts.desktop_probe.diagnostics import PREFIX, exception_record, parse_re
 from scripts.desktop_probe.renderer import WEBGL_REGISTRATION, canvas_renderer
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.command_output import CommandOutput
+from tests._async_bounds import wait_until
 
 
 @pytest.mark.parametrize("outcome", ["failed", "skipped"])
@@ -175,8 +176,11 @@ async def test_probe_uses_the_real_confirmation_modal() -> None:
         confirm = app.screen.query_one("#btn_confirm", Button)
         assert confirm.disabled
         prompt.value = "CONFIRM"
-        await pilot.pause()
-        assert not confirm.disabled
+        # The input reports the change in a message that bubbles up to the
+        # dialog after this call returns. A single pause does not always
+        # outlast it: on Windows the clocks tick every 15.6 ms, and the
+        # pause's idle check can end before the dialog has handled it.
+        await wait_until(lambda: not confirm.disabled)
 
 
 @pytest.mark.asyncio
