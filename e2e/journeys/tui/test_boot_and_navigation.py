@@ -133,8 +133,8 @@ async def test_palette_reaches_screens_and_respects_sign_in_gates(tui, seed):
 async def test_help_back_to_root_and_quit(tui, seed):
     _seed_fleet(seed)
     async with tui() as t:
-        # The search box has focus at start-up, so move to the fleet first,
-        # as a user would, before using single-key shortcuts.
+        # Single-key shortcuts act on the fleet table, which has focus at
+        # start-up; make sure of it before using them.
         await t.focus_instance_table()
         await t.press("question_mark")
         await t.wait_for_screen("HelpScreen")

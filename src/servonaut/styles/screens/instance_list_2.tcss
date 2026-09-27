@@ -4,7 +4,8 @@
 #instance_list_container {
     width: 1fr;
     height: 100%;
-    padding: 1 2;
+    /* One column at each side, not two: the fleet table needs the width. */
+    padding: 1 1;
     background: $surface;
 }
 

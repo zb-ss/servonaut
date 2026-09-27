@@ -1,18 +1,118 @@
-"""Help screen for Servonaut v2.0."""
+"""Help screen for Servonaut v2.0.
+
+The key tables are built from the screens' own ``BINDINGS``, so the help
+always lists the keys that are really bound, in the case they are bound in.
+A binding's ``tooltip`` (also shown when hovering its footer entry) is its
+description here; without one, its footer label is.
+"""
 
 from __future__ import annotations
 
+from typing import Iterable, List, Sequence, Tuple
+
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, ScrollableContainer
+from textual.keys import format_key
 
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Footer, Static, Markdown
 
+# How the help writes named keys; any other key is shown as Textual shows it.
+_KEY_NAMES = {
+    "escape": "Esc",
+    "enter": "Enter",
+    "tab": "Tab",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "space": "Space",
+    "slash": "/",
+    "question_mark": "?",
+}
+_MODIFIER_NAMES = {"ctrl": "Ctrl", "shift": "Shift", "alt": "Alt", "meta": "Meta"}
 
-HELP_TEXT = """
+Row = Tuple[str, str]
+
+
+def key_label(key: str) -> str:
+    """One bound key as the help writes it, e.g. ``s``, ``D``, ``Ctrl+R``, ``F2``."""
+    *modifiers, base = key.split("+")
+    if len(base) == 1:
+        # Alone, a letter's case matters (``d`` and ``D`` are different
+        # keys); with Ctrl it does not, and a capital reads better.
+        name = base.upper() if modifiers else base
+    elif base in _KEY_NAMES:
+        name = _KEY_NAMES[base]
+    elif base[:1] == "f" and base[1:].isdigit():
+        name = base.upper()
+    else:
+        name = format_key(base)
+    return "+".join([*(_MODIFIER_NAMES.get(m, m.title()) for m in modifiers), name])
+
+
+def binding_rows(bindings: Iterable[BindingType]) -> List[Row]:
+    """(keys, description) rows for *bindings*, one per action, in binding order."""
+    rows: dict = {}
+    for binding in bindings:
+        if not isinstance(binding, Binding):
+            binding = Binding(*binding)
+        for key in binding.key.split(","):
+            label = f"`{key_label(key.strip())}`"
+            keys, text = rows.get(binding.action, ([], binding.tooltip or binding.description))
+            if label not in keys:
+                keys.append(label)
+            rows[binding.action] = (keys, text)
+    return [(" / ".join(keys), text) for keys, text in rows.values()]
+
+
+def _escape_cell(text: str) -> str:
+    return text.replace("|", r"\|")
+
+
+def key_table(rows: Sequence[Row], header: Row = ("Key", "Action")) -> str:
+    """A Markdown table of *rows*."""
+    lines = [f"| {header[0]} | {header[1]} |", "|-----|--------|"]
+    # A "|" in a description would end its cell.
+    lines += [f"| {keys} | {_escape_cell(text)} |" for keys, text in rows]
+    return "\n".join(lines)
+
+
+def build_help_text() -> str:
+    """The help, with each key table taken from the bindings it describes."""
+    from servonaut.app import ServonautApp
+    from servonaut.screens.command_overlay import CommandOverlay
+    from servonaut.screens.instance_list import InstanceListScreen
+    from servonaut.screens.log_viewer import LogViewerScreen
+    from servonaut.screens.server_actions import ServerActionsScreen
+
+    tables = {
+        "<<fleet-keys>>": key_table(
+            [("`Up` / `Down`", "Move between instances")]
+            + binding_rows(InstanceListScreen.BINDINGS)
+        ),
+        "<<server-action-keys>>": key_table(binding_rows(ServerActionsScreen.BINDINGS)),
+        "<<log-viewer-keys>>": key_table(binding_rows(LogViewerScreen.BINDINGS)),
+        "<<command-overlay-keys>>": key_table(binding_rows(CommandOverlay.BINDINGS)),
+        "<<global-keys>>": key_table(
+            binding_rows(ServonautApp.BINDINGS)
+            + [
+                ("`Ctrl+P`", "Command palette: every screen and command by name"),
+                ("`Esc`", "Go back / navigate to instances"),
+                ("`Tab` / `Shift+Tab`", "Next / previous widget"),
+            ]
+        ),
+    }
+    text = _HELP_TEMPLATE
+    for marker, table in tables.items():
+        text = text.replace(marker, table)
+    return text
+
+
+_HELP_TEMPLATE = """
 # Servonaut — Help
 
 ## Navigation
@@ -22,31 +122,26 @@ available on every screen. Hover over buttons for descriptions.
 
 ## Instance List
 
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` | Move between instances |
-| `Enter` | Open server actions |
-| `S` | Quick SSH to selected instance |
-| `B` | Open remote file browser |
-| `C` | Open command overlay |
-| `T` | Open file transfer |
-| `L` | View logs |
-| `A` | AI analysis |
-| `/` | Search instances and keyword scan results |
-| `R` | Force-refresh from AWS |
-| `Y` | Copy selected instance metadata |
+Keys are case-sensitive: `D` is Shift+d.
+
+<<fleet-keys>>
+
+The footer lists as many of these as fit the terminal's width. When the table
+is wider than the window, `Left` / `Right` scroll it sideways.
 
 The **detail panel** at the bottom shows the selected instance's metadata.
 You can highlight text in the detail panel with the mouse to copy it.
 
 ## Server Actions
 
+<<server-action-keys>>
+
 | Action | What it does |
 |--------|-------------|
 | **Browse Files** | Interactive remote filesystem tree via SSH |
 | **Run Command** | Execute commands on the server (overlay panel, `Up`/`Down` for history, `Ctrl+R` picker, `Ctrl+S` save) |
 | **SSH Connect** | Opens a **new terminal window** with SSH session |
-| **Memory (M)** | View / refresh / pin / annotate the server's fact cache (see below) |
+| **Memory** | View / refresh / pin / annotate the server's fact cache (see below) |
 | **SCP Transfer** | Upload/download files via SCP |
 | **View Scan Results** | Show keyword scan data for this server |
 | **View Logs** | Real-time log streaming via `tail -f` |
@@ -67,7 +162,7 @@ round-trip.
 | **Sidebar → Fleet Memory** | Fleet-wide status table. `s` scans every server, `f` refreshes stale modules, `enter` opens the per-server view. |
 | **Instance list → Mem column** | At-a-glance icon per row: `●` green fresh, `●` yellow stale, `○` not probed, `⛔` opted-out. |
 | **Instance list → `m`** | Opens the per-server Memory screen for the selected row. |
-| **Server Actions → `M`** | Same per-server view from the action stack. |
+| **Server Actions → `m`** | Same per-server view from the action stack. |
 | **MCP `get_server_memory`** | Agents call this first. If it returns `missing`, they should call `build_server_memory` to populate. |
 | **MCP `build_server_memory` / `refresh_server_memory`** | Trigger probing from an AI agent. Returns per-module successes + failures so the agent can explain what broke. |
 
@@ -87,16 +182,7 @@ Each custom server has: name, host, port, username, SSH key, provider label, gro
 
 Stream remote server logs in real-time via SSH.
 
-| Key | Action |
-|-----|--------|
-| `P` | Pause / resume streaming |
-| `C` | Clear output |
-| `L` | Switch to a different log file |
-| `M` | Manage custom log paths |
-| `V` | **Copy Mode** — opens content in a selectable text area |
-| `Y` | Copy entire log buffer to clipboard |
-| `A` | Send log buffer to AI analysis |
-| `Escape` | Stop streaming and go back |
+<<log-viewer-keys>>
 
 The viewer auto-detects readable log files on the server (syslog, auth.log,
 nginx, apache, mysql, postgresql). Configure custom paths per instance in settings.
@@ -185,7 +271,7 @@ Instances are cached to `~/.servonaut/cache.json` for fast startup.
 | First launch (no cache) | Fetches from AWS with progress bar |
 | Restart within TTL | **Instant load** from cache, no AWS call |
 | Restart after TTL | Shows stale data immediately, refreshes in background |
-| Press `R` | Force-refresh from AWS |
+| Press `r` | Refresh from every provider |
 
 Default TTL is **1 hour** (`cache_ttl_seconds: 3600` in config).
 
@@ -246,15 +332,7 @@ Config file: `~/.servonaut/config.json`
 
 ## Command Overlay Shortcuts
 
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` | Navigate command history |
-| `Ctrl+R` | Open command picker (saved + recent) |
-| `Ctrl+S` | Save current command to favorites |
-| `Ctrl+C` | Stop running command |
-| `V` | **Copy Mode** — opens output in a selectable text area |
-| `Y` | Copy all output to clipboard |
-| `Escape` | Close overlay |
+<<command-overlay-keys>>
 
 ## Logging & Debugging
 
@@ -269,21 +347,15 @@ SSH failures keep the terminal window **open** so you can read the error message
 | Method | Where it works |
 |--------|---------------|
 | **Mouse highlight** | Static text, detail panels, TextArea widgets |
-| **`Y` key** | Instance list (full row), log viewer (buffer), command output |
-| **`V` key (Copy Mode)** | Log viewer, command output — opens selectable TextArea |
+| **`y` key** | Instance list (full row), log viewer (buffer), command output |
+| **`v` key (Copy Mode)** | Log viewer, command output — opens selectable TextArea |
 
 Mouse text selection auto-copies to clipboard on Static widgets and TextArea fields.
-For scrollable views (log output, tables), use `V` to enter Copy Mode.
+For scrollable views (log output, tables), use `v` to enter Copy Mode.
 
 ## Global Shortcuts
 
-| Key | Action |
-|-----|--------|
-| `Q` | Quit |
-| `?` | This help screen |
-| `F2` | Toggle chat panel |
-| `Escape` | Go back / navigate to instances |
-| `Tab` / `Shift+Tab` | Next / previous widget |
+<<global-keys>>
 """
 
 
@@ -300,7 +372,7 @@ class HelpScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Markdown(HELP_TEXT, id="help_content"),
+                Markdown(build_help_text(), id="help_content"),
                 id="help_container"
             )
         yield Footer()
