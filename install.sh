@@ -1,11 +1,14 @@
 #!/bin/sh
 # Servonaut Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
+# Usage: curl -sSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash
 # Or: ./install.sh
 #
 # Release candidate instead of the stable release:
-#   curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+#   curl -sSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
 # Or: SERVONAUT_PRE=1 ./install.sh
+#
+# Servonaut is installed from PyPI with pipx. When run from a clone of the
+# repository, ./install.sh installs that checkout instead.
 
 set -e
 
@@ -14,6 +17,7 @@ MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=10
 
 REPO_URL="https://github.com/zb-ss/servonaut"
+TROUBLESHOOTING_URL="$REPO_URL/blob/master/docs/troubleshooting.md#the-install-script-stops"
 
 # Naming a pre-release in the version specifier lets pip choose a release
 # candidate of Servonaut, or the stable release when that is newer. pip's
@@ -286,40 +290,18 @@ install_servonaut() {
 
     # Strategy 2: Install from PyPI
     print_info "Installing from PyPI..."
-    if pipx install servonaut 2>/dev/null; then
+    if pipx install servonaut; then
         print_success "Servonaut installed successfully from PyPI"
         return 0
     fi
 
-    # Strategy 3: Clone repo and install from source
-    print_warning "PyPI install failed, cloning repository..."
-
-    if ! check_command git; then
-        print_error "git is required to clone the repository"
-        echo ""
-        echo "Install git and try again, or install manually:"
-        echo "  ${BOLD}pipx install servonaut${RESET}"
-        exit 1
-    fi
-
-    CLONE_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'servonaut')
-    print_info "Cloning to temporary directory: $CLONE_DIR"
-
-    if git clone --depth 1 "$REPO_URL.git" "$CLONE_DIR/servonaut" 2>/dev/null; then
-        if pipx install "$CLONE_DIR/servonaut" --force; then
-            print_success "Servonaut installed successfully from repository"
-            rm -rf "$CLONE_DIR"
-            return 0
-        fi
-    fi
-
-    rm -rf "$CLONE_DIR"
-    print_error "All installation methods failed"
+    # Never fall back to unreleased source: stop and say why
+    print_error "Could not install Servonaut from PyPI (pipx's error is shown above)"
     echo ""
-    echo "Please try manually:"
-    echo "  ${BOLD}git clone $REPO_URL.git${RESET}"
-    echo "  ${BOLD}cd servonaut${RESET}"
-    echo "  ${BOLD}pipx install .${RESET}"
+    echo "Fix the problem pipx reports and run the installer again, or install manually:"
+    echo "  ${BOLD}pipx install servonaut${RESET}"
+    echo ""
+    echo "Troubleshooting: $TROUBLESHOOTING_URL"
     exit 1
 }
 

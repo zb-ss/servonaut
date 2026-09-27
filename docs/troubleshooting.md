@@ -130,6 +130,29 @@ The file browser connects via SSH to list directory contents. If it fails:
 2. **Permissions** — The SSH user must have read access to the directories
 3. **Key auto-discovery** — If no key is configured, the browser attempts auto-discovery from the instance's `key_name`
 
+## The Install Script Stops
+
+The install scripts install Servonaut from PyPI with pipx. When that fails,
+they show pipx's error and stop without installing anything else: they never
+fall back to unreleased code. Common causes:
+
+1. **PyPI is unreachable** — pip needs `https://pypi.org` and
+   `https://files.pythonhosted.org`. Behind a proxy, set `HTTPS_PROXY` before
+   running the script. After a temporary network problem, run the script
+   again.
+2. **pipx uses a Python older than 3.10** — pip then finds no matching
+   version of Servonaut. Name a newer Python:
+   `pipx install --python python3.12 servonaut`.
+3. **pipx itself is broken** — for example after an operating system upgrade
+   removed the Python it was installed with. Reinstall pipx, then run
+   `pipx reinstall-all` to rebuild the applications it manages.
+
+Once the problem is fixed, run the script again, or install directly:
+
+```bash
+pipx install servonaut
+```
+
 ## Installed a Release Candidate by Mistake
 
 A version such as `2.28.0rc1` is a release candidate, a preview of the next
