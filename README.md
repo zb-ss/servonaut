@@ -28,6 +28,42 @@ irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
 pipx install servonaut
 ```
 
+### Try a release candidate
+
+Each release is published as a release candidate (for example `2.28.0rc1`)
+a few days before the stable release. Candidates are for people who want the
+next release early and will report what goes wrong. pip and pipx install one
+only when you ask for it.
+
+```bash
+# The newest candidate, with the install script
+curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+
+# With pipx: a specific candidate, or the newest one
+pipx install --force 'servonaut==2.28.0rc1'
+pipx install --force 'servonaut>=0rc0'
+
+# With pip
+pip install --upgrade 'servonaut>=0rc0'
+
+# Try one without changing your installation
+pipx run --spec 'servonaut==2.28.0rc1' servonaut
+
+# Go back to the newest stable release (your configuration is kept)
+pipx install --force servonaut
+```
+
+On Windows, run `$env:SERVONAUT_PRE = "1"` before the PowerShell installer.
+Avoid `pip install --pre` and `pipx install --pip-args=--pre`: they also
+install pre-release versions of Servonaut's dependencies, and some of those
+do not work with it.
+
+While you run a candidate, the update check offers newer candidates and then
+the stable release. A stable installation is only ever offered stable
+releases. Please report problems in
+[GitHub issues](https://github.com/zb-ss/servonaut/issues). Details:
+[Release candidates](docs/release-candidates.md).
+
 ## Standalone CLI preview
 
 Standalone console-only archives are being validated for Windows x64, macOS
@@ -114,6 +150,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 - **Remote file browser** — interactive file-tree navigation, inline in the dashboard or full-screen.
 - **Real-time log viewer** — stream logs via `tail -f` with pause, search, and log switching.
 - **Robust SSH** — bastion / jump-server (ProxyJump / ProxyCommand), keepalives on by default (tunable), per-host `extra_ssh_options` for legacy boxes, and key auto-discovery.
+- **SSH host-key checking** — trust on first use: the first connection records a server's host key, and a later connection presenting a different key is refused, with the exact command that removes the old key once you have confirmed the change. → [docs](docs/configuration.md#ssh-host-key-verification)
 
 ### Cloud provider management
 
@@ -152,7 +189,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 ### Convenience
 
 - **Instance caching** — stale-while-revalidate for fast startup.
-- **Auto-update** — startup check + one-click update (`servonaut --update`).
+- **Auto-update** — startup check + one-click update (`servonaut --update`). Stable installations are offered stable releases only; see [Release candidates](docs/release-candidates.md).
 - **Desktop shortcut** — `servonaut --install-desktop` (Linux/macOS).
 - **Fully configurable** — everything in `~/.servonaut/config.json`.
 
@@ -603,27 +640,46 @@ See [Architecture](docs/architecture.md) for codebase structure and design patte
 
 ## Troubleshooting
 
-See [Troubleshooting Guide](docs/troubleshooting.md) for help with SSH connections, bastion hosts, key management, and AWS credentials.
+See [Troubleshooting Guide](docs/troubleshooting.md) for help with SSH connections, changed host keys, bastion hosts, key management, AWS credentials, and going back from a release candidate.
 
 ## Runtime Files
 
 All runtime files are under `~/.servonaut/`:
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
 | `config.json` | Main configuration |
-| `cache.json` | Cached instance list (AWS + merged OVH) |
-| `auth.json` | OAuth tokens for servonaut.dev, mode `0600`, atomic writes |
+| `backups/` | Configuration backups: the last 5 saved versions, and the last 3 copies taken before an upgrade to a newer configuration format. List and restore them with `servonaut --list-backups` and `servonaut --restore-backup` |
+| `cache.json` | Cached AWS instance list |
+| `ovh_cache.json`, `hetzner_cache.json` | Cached OVHcloud and Hetzner Cloud server lists (when configured) |
 | `keywords.json` | Scan results store |
 | `command_history.json` | Saved commands and command history |
+| `chats/` | AI chat conversation history |
+| `known_hosts` | SSH host keys recorded on first connect (see [SSH host-key verification](docs/configuration.md#ssh-host-key-verification)) |
+| `keys/` | Private SSH keys fetched from your secrets backend (for example Bitwarden Secrets Manager) so SSH can use them, mode `0600` |
+| `tmp/` | Short-lived private key files for a single SSH connection (for example a key read from Bitwarden), removed after use |
+| `auth.json` | OAuth tokens for servonaut.dev, mode `0600`, atomic writes |
+| `secrets.json` | Local secret store, mode `0600` (the default secrets backend) |
+| `bw_ssh_refs.json` | Saved Bitwarden SSH key references: item IDs only, never key material |
+| `sync_key_probe.json` | Check value that confirms your config-sync passphrase; holds neither the passphrase nor the key |
 | `ip_ban_audit.json` | IP ban audit trail |
 | `mcp_audit.jsonl` | MCP server audit trail |
-| `relay.pid` | Background `servonaut connect --bg` PID (when running) |
-| `relay.lock` | Advisory flock shared between the TUI's in-process listener and `--bg`, carries `{pid, mode, acquired_at}` |
+| `aws_audit.jsonl`, `hetzner_audit.jsonl`, `ovh_audit.json` | Audit trails of server lifecycle actions (create, start, stop, delete, …) per provider |
+| `audit_queue.json` | Team audit events waiting to be sent to servonaut.dev |
 | `memory/` | Server-memory store: `<provider>/<instance_id>/<module>.json` per probed server, plus `index.json` |
 | `memory/sync_queue.jsonl` | Pre-encryption envelopes waiting to be pushed to servonaut.dev. Replayed on next bootstrap; deleted after a successful drain. Only present while Memory Sync has unsent work. |
-| `logs/servonaut.log` | Application log |
+| `memory/keys.json` | Memory Sync keypair; the private key is stored encrypted with your passphrase |
+| `memory_scan_state.json` | When the background fleet memory scan last ran |
+| `exports/` | Signed server-memory exports |
+| `transfers/` | Local side of relay file transfers: the relay reads and writes local files only here |
+| `voice_models/` | Downloaded voice models (the batch speech model uses the Hugging Face cache instead) |
+| `relay.pid` | Background `servonaut connect --bg` PID (when running) |
+| `relay.lock` | Advisory flock shared between the TUI's in-process listener and `--bg`, carries `{pid, mode, acquired_at}` |
+| `relay-control.json` | How to reach the TUI's relay listener, so `servonaut connect --force-bg` can take it over |
+| `logs/servonaut.log` | Application log, rotated at 2 MB with 5 older files kept |
 | `logs/relay.log` | Relay lifecycle events (one JSON line per event, secrets redacted) |
+| `logs/native_stderr.log` | Messages that native libraries (audio, speech) print directly, kept out of the TUI |
+| `logs/servonaut_*.sh` | Temporary wrapper scripts for SSH sessions opened in a new terminal window |
 
 ## Logging
 
