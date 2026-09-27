@@ -70,6 +70,12 @@ async def _fleet(pilot: Any) -> None:
     del pilot
 
 
+async def _fleet_search(pilot: Any) -> None:
+    await pilot.press("slash", *"web")
+    table = pilot.app.screen.query_one("InstanceTable")
+    await _harness.wait_until(pilot, lambda: table.row_count == 1, "the filtered fleet")
+
+
 def _server_actions_of(name: str) -> Scenario:
     async def scenario(pilot: Any) -> None:
         screen = await _open_server(pilot, name, "o", "ServerActionsScreen")
@@ -114,6 +120,22 @@ async def _power_prompt(pilot: Any) -> None:
     await pilot.pause()
     await pilot.press("t")
     await _harness.wait_for_screen(pilot, "PowerActionConfirmModal")
+
+
+async def _dialog_over_fleet(pilot: Any) -> None:
+    from servonaut.screens.confirm_action import ConfirmActionScreen
+
+    await _harness.select_fleet_row(pilot, "web-1")
+    pilot.app.push_screen(
+        ConfirmActionScreen(
+            title="Reinstall server",
+            description="Reinstall [bold]web-1[/bold] from its base image?",
+            consequences=["Every file on the server is erased"],
+            confirm_text="web-1",
+            action_label="Reinstall",
+        )
+    )
+    await _harness.wait_for_screen(pilot, "ConfirmActionScreen")
 
 
 async def _help(pilot: Any) -> None:
@@ -201,6 +223,12 @@ def test_fleet_table(screen_snapshot, size: str) -> None:
 
 
 @sizes
+def test_fleet_search(screen_snapshot, size: str) -> None:
+    """The fleet filtered from the search box; the footer keeps the shortcuts, greyed."""
+    _capture(screen_snapshot, size, _fleet_search)
+
+
+@sizes
 def test_fleet_table_demo_mode(screen_snapshot, size: str) -> None:
     """The same fleet with demo mode on: every identifier is a stand-in."""
     _capture(screen_snapshot, size, _fleet, demo=True)
@@ -263,6 +291,12 @@ def test_server_memory(screen_snapshot, size: str) -> None:
 def test_power_action_prompt(screen_snapshot, size: str) -> None:
     """The yes/no question before stopping an EC2 instance."""
     _capture(screen_snapshot, size, _power_prompt)
+
+
+@sizes
+def test_dialog_over_fleet(screen_snapshot, size: str) -> None:
+    """A confirmation dialog dims the fleet table behind it instead of hiding it."""
+    _capture(screen_snapshot, size, _dialog_over_fleet)
 
 
 @sizes

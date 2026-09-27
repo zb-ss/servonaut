@@ -12,6 +12,7 @@ from textual.widgets import Footer, Input, Label, Static, TextArea
 from textual.worker import Worker, WorkerState
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._footer_fit import fit_footer
 from servonaut.widgets.instance_table import InstanceTable
 from servonaut.widgets.status_bar import StatusBar
 from servonaut.widgets.progress_indicator import ProgressIndicator
@@ -38,6 +39,27 @@ def _is_aws_row(instance: dict) -> bool:
     return not any(instance.get(flag) for flag in _NON_AWS_FLAGS)
 
 
+class FleetSearchInput(Input):
+    """The fleet search box, which keeps the fleet shortcuts in the footer.
+
+    Textual drops every binding for a printable key from the footer while an
+    Input has focus, because the Input takes those keys as text. Here the
+    fleet shortcuts stay listed: the screen's ``check_action`` reports them
+    as disabled while the box has focus, so the footer shows them greyed
+    out. Typing is unaffected: the box still receives every printable key,
+    and a disabled action never runs.
+    """
+
+    def __init__(self, shortcut_characters: frozenset[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._shortcut_characters = shortcut_characters
+
+    def check_consume_key(self, key: str, character: str | None) -> bool:
+        if character is not None and character in self._shortcut_characters:
+            return False
+        return super().check_consume_key(key, character)
+
+
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
 
@@ -46,32 +68,81 @@ class InstanceListScreen(Screen):
         return super().app # type: ignore
 
     BINDINGS = [
-        Binding("r", "refresh", "Refresh", show=True),
-        Binding("/", "focus_search", "Search", show=True),
-        Binding("enter", "select_instance", "Actions", show=True),
+        # A tooltip shows on hovering the footer entry and is the key's
+        # description on the help screen.
+        Binding("r", "refresh", "Refresh", show=True,
+                tooltip="Fetch the fleet again from every provider"),
+        Binding("/", "focus_search", "Search", show=True,
+                tooltip="Search instances and keyword scan results"),
+        Binding("enter", "select_instance", "Actions", show=True,
+                tooltip="Open the selected server's actions"),
         # Explicit footer-visible alternative — DataTable consumes Enter for
         # row-selected, which hides the Enter binding from the footer. ``o``
         # (for "Open") shows up in the footer so users can discover the
         # actions menu without needing to guess that Enter works.
-        Binding("o", "select_instance", "Actions", show=True),
-        Binding("s", "ssh_connect", "SSH", show=True),
-        Binding("b", "browse_files", "Browse", show=True),
-        Binding("c", "run_command", "Command", show=True),
-        Binding("t", "scp_transfer", "Transfer", show=True),
-        Binding("l", "view_logs", "Logs", show=True),
-        Binding("a", "ai_analysis", "AI", show=True),
-        Binding("m", "open_memory", "Memory", show=True),
-        Binding("D", "fleet_db_scan", "DB Vault", show=True),
-        Binding("k", "manage_ssh_ref", "SSH Ref", show=True),
-        Binding("v", "verify_ssh", "Verify", show=True),
-        Binding("y", "copy_row", "Copy", show=True),
+        Binding("o", "select_instance", "Actions", show=True,
+                tooltip="Open the selected server's actions"),
+        Binding("s", "ssh_connect", "SSH", show=True,
+                tooltip="SSH into the selected server in a new terminal window"),
+        Binding("b", "browse_files", "Browse", show=True,
+                tooltip="Browse the selected server's files"),
+        Binding("c", "run_command", "Command", show=True,
+                tooltip="Run commands on the selected server"),
+        Binding("t", "scp_transfer", "Transfer", show=True,
+                tooltip="Copy files to or from the selected server"),
+        Binding("l", "view_logs", "Logs", show=True,
+                tooltip="Stream the selected server's logs"),
+        Binding("a", "ai_analysis", "AI", show=True,
+                tooltip="Analyse the selected server's logs with AI"),
+        Binding("m", "open_memory", "Memory", show=True,
+                tooltip="Open the selected server's memory (cached facts)"),
+        Binding("D", "fleet_db_scan", "DB Vault", show=True,
+                tooltip="Scan the fleet for database credentials"),
+        Binding("k", "manage_ssh_ref", "SSH Ref", show=True,
+                tooltip="Set the Bitwarden SSH key reference of the selected server"),
+        Binding("v", "verify_ssh", "Verify", show=True,
+                tooltip="Check that the selected server's SSH key works"),
+        Binding("y", "copy_row", "Copy", show=True,
+                tooltip="Copy the selected server's details"),
     ]
+
+    # The screen opens on the fleet table, so the arrow keys and every
+    # shortcut above work straight away; "/" moves to the search box.
+    AUTO_FOCUS = "InstanceTable"
+
+    # The footer lists as many shortcuts as fit on one line, in this order
+    # of usefulness; the rest stay bound, and the help screen lists them all.
+    FOOTER_PRIORITY = (
+        "select_instance",
+        "focus_search",
+        "ssh_connect",
+        "run_command",
+        "browse_files",
+        "view_logs",
+        "open_memory",
+        "scp_transfer",
+        "refresh",
+        "ai_analysis",
+        "copy_row",
+        "verify_ssh",
+        "manage_ssh_ref",
+        "fleet_db_scan",
+    )
 
     # Debounce delay for search input (seconds)
     _SEARCH_DEBOUNCE = 0.15
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
+
+    @property
+    def active_bindings(self):
+        """Active bindings, with the footer kept to the shortcuts that fit."""
+        return fit_footer(super().active_bindings, self, self.FOOTER_PRIORITY)
+
+    def on_resize(self) -> None:
+        """Re-fit the footer to the new width."""
+        self.refresh_bindings()
 
     def __init__(self, initial_search: str = "") -> None:
         """Initialize instance list screen.
@@ -93,7 +164,11 @@ class InstanceListScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Vertical(id="instance_list_container"):
-                yield Input(placeholder="Search instances and keywords...", id="search_input")
+                yield FleetSearchInput(
+                    self._shortcut_characters(),
+                    placeholder="Search instances and keywords...",
+                    id="search_input",
+                )
                 # Memory discoverability banner — only visible when no
                 # instance has memory yet, so it stops nagging once the user
                 # has engaged with the feature.
@@ -113,6 +188,15 @@ class InstanceListScreen(Screen):
                 yield VerticalScroll(id="keyword_matches_container")
             yield StatusBar()
         yield Footer()
+
+    @classmethod
+    def _shortcut_characters(cls) -> frozenset[str]:
+        """The single printable keys bound on this screen."""
+        return frozenset(
+            binding.key
+            for binding in cls.BINDINGS
+            if len(binding.key) == 1 and binding.key.isprintable()
+        )
 
     def on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
@@ -174,13 +258,6 @@ class InstanceListScreen(Screen):
             self._fetch_instances()
             self._fetch_ovh_instances()
             self._fetch_hetzner_instances()
-
-        # Default focus = search Input. The "find a server fast" journey
-        # is the primary entry point: type a name fragment, then Tab/↓
-        # into the filtered results and press a shortcut. The footer still
-        # advertises every binding (check_action_passthrough returns None,
-        # not False, when an Input is focused — bindings render greyed-out
-        # rather than disappearing) so discoverability stays intact.
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).

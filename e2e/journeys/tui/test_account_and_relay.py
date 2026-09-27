@@ -53,11 +53,19 @@ async def _relay_shows(t, label: str) -> None:
 
 
 def _fleet_column(t, key: str) -> dict[str, str]:
-    """One column of the fleet table, by instance name."""
+    """One column of the fleet table, by instance name; empty while not shown.
+
+    The SSH column appears once some server has a verify result.
+    """
+    from textual.widgets.data_table import ColumnDoesNotExist
+
     from servonaut.widgets.instance_table import InstanceTable
 
     table = t.on_screen(InstanceTable)
-    name_at, value_at = table.get_column_index("name"), table.get_column_index(key)
+    try:
+        name_at, value_at = table.get_column_index("name"), table.get_column_index(key)
+    except ColumnDoesNotExist:
+        return {}
     return {row[name_at]: row[value_at] for row in t.table_rows(InstanceTable)}
 
 
