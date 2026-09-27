@@ -110,7 +110,7 @@ jobs:
           base = Path(os.environ["BASE_TEMP"])
           try:
               base.mkdir(mode=0o700, parents=False, exist_ok=False)
-              for name in ("wheel-tools", "qualification", "evidence", "upload"):
+              for name in ("wheel-tools", "qualification", "evidence", "upload", "screenshots"):
                   (base / name).mkdir(mode=0o700)
           except OSError:
               raise SystemExit("qualification directories could not be created")
@@ -124,8 +124,22 @@ jobs:
             echo "build-dir=${BASE_TEMP}/build"
             echo "evidence-dir=${BASE_TEMP}/evidence"
             echo "upload-dir=${BASE_TEMP}/upload"
+            echo "screenshot-dir=${BASE_TEMP}/screenshots"
             echo "product-version=${VERSION}"
           } >> "${GITHUB_OUTPUT}"
+
+      # Linux builds PyGObject and pycairo from source against the host GLib,
+      # bundles only their typelibs, and runs the packaged window on a virtual
+      # display. The package list mirrors scripts/desktop_shell/linux_abi.py.
+      - name: Install Linux GTK build and window packages
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libgirepository1.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1 \
+            pkg-config libcairo2-dev libffi-dev gir1.2-girepository-2.0 gir1.2-gtk-3.0 \
+            xvfb xauth imagemagick
 
       - name: Build verified wheel with locked tools
         id: wheel
@@ -217,6 +231,29 @@ jobs:
             --evidence-dir "${EVIDENCE_DIR}" \
             --selftest
 
+      # Opens the packaged window the way a user starts it, on a virtual X
+      # display with an isolated HOME. It passes once the page has opened the
+      # authenticated session, so a window that stays blank fails it. Linux
+      # only: the macOS runners give this job no display.
+      - name: Run packaged window smoke
+        id: window-smoke
+        if: runner.os == 'Linux'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          TARGET: ${{ matrix.target }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.window_smoke \
+            --payload-root "${PAYLOAD_DIR}" \
+            --target "${TARGET}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
+
       - name: Prepare sanitized non-executable evidence
         id: sanitize
         if: always() && steps.paths.outputs.base-temp != ''
@@ -227,6 +264,7 @@ jobs:
           BUILD_STATUS: ${{ steps.build.outcome }}
           INSPECT_STATUS: ${{ steps.inspect.outcome }}
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
+          WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
         run: |
           set -euo pipefail
           if [ -d "${EVIDENCE_DIR}" ]; then
@@ -239,7 +277,8 @@ jobs:
             "target": "${TARGET}",
             "build_status": "${BUILD_STATUS}",
             "inspect_status": "${INSPECT_STATUS}",
-            "smoke_status": "${SMOKE_STATUS}"
+            "smoke_status": "${SMOKE_STATUS}",
+            "window_smoke_status": "${WINDOW_SMOKE_STATUS}"
           }
           EOF
 
@@ -252,6 +291,18 @@ jobs:
           path: ${{ steps.paths.outputs.upload-dir }}/*.json
           retention-days: 1
           if-no-files-found: error
+          include-hidden-files: false
+
+      # A photograph of the virtual display, taken once the window's session
+      # opened, or when it did not.
+      - name: Upload packaged window screenshot
+        if: always() && runner.os == 'Linux' && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-window-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.screenshot-dir }}/*.png
+          retention-days: 7
+          if-no-files-found: warn
           include-hidden-files: false
 
       - name: Cleanup build material and executables
@@ -273,6 +324,7 @@ jobs:
           BUILD_STATUS: ${{ steps.build.outcome }}
           INSPECT_STATUS: ${{ steps.inspect.outcome }}
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
+          WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
           UPLOAD_STATUS: ${{ steps.upload.outcome }}
           CLEANUP_STATUS: ${{ steps.cleanup.outcome }}
         run: |
@@ -281,5 +333,8 @@ jobs:
           test "${BUILD_STATUS}" = "success"
           test "${INSPECT_STATUS}" = "success"
           test "${SMOKE_STATUS}" = "success"
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            test "${WINDOW_SMOKE_STATUS}" = "success"
+          fi
           test "${UPLOAD_STATUS}" = "success"
           test "${CLEANUP_STATUS}" = "success"

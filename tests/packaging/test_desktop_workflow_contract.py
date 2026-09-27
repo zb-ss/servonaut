@@ -7,6 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from scripts.desktop_shell.linux_abi import (
+    GUI_SMOKE_SYSTEM_DEPS,
+    REQUIRED_SYSTEM_DEPS,
+    SOURCE_BUILD_SYSTEM_DEPS,
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW_PATH = _REPO_ROOT / ".github" / "workflows" / "desktop-shell.yml"
 
@@ -127,7 +133,12 @@ def test_qualification_toolchain_is_hash_locked(workflow_content: str):
     assert "--upgrade" not in workflow_content
     assert "python -m build" not in workflow_content
     assert "pip install pyinstaller" not in workflow_content
-    installs = [line for line in qualify.splitlines() if " install " in line]
+    # Python packages only; the Linux system packages come from the Ubuntu archive.
+    installs = [
+        line
+        for line in qualify.splitlines()
+        if " install " in line and "apt-get" not in line
+    ]
     assert installs
     assert all("--require-hashes" in line for line in installs)
     assert "qualification-tools-${TARGET}.txt" in qualify
@@ -223,3 +234,65 @@ def test_voice_runtime_drift_check_uses_a_hash_locked_pip_and_a_read_only_token(
     assert "GITHUB_TOKEN: ${{ github.token }}" in content
     assert re.search(r"permissions:\n  contents: read\n", content)
     assert "write" not in content.split("\njobs:", 1)[1]
+
+
+def _named_step(qualify: str, name: str) -> str:
+    return qualify.split(f"- name: {name}\n", 1)[1].split("\n      - ", 1)[0]
+
+
+def test_linux_system_packages_follow_the_abi_contract(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Install Linux GTK build and window packages")
+
+    assert "if: runner.os == 'Linux'" in step
+    installed = set(step.split("--no-install-recommends", 1)[1].replace("\\", " ").split())
+    assert installed == {
+        *REQUIRED_SYSTEM_DEPS,
+        *SOURCE_BUILD_SYSTEM_DEPS,
+        *GUI_SMOKE_SYSTEM_DEPS,
+    }
+    # Installed before the build compiles the GTK binding against them.
+    assert qualify.index("Install Linux GTK build and window packages") < qualify.index(
+        "scripts.desktop_shell.build"
+    )
+    assert workflow_content.count("apt-get install") == 1
+
+
+def test_linux_runs_the_packaged_window_under_a_virtual_display(
+    workflow_content: str,
+) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Run packaged window smoke")
+
+    assert "id: window-smoke" in step
+    assert "if: runner.os == 'Linux'" in step
+    assert "xvfb-run" in step
+    assert "-m scripts.desktop_shell.window_smoke" in step
+    assert '--evidence-dir "${EVIDENCE_DIR}"' in step
+    assert '--screenshot "${SCREENSHOT_DIR}/' in step
+    # After the headless smoke, against the same payload.
+    assert qualify.index("scripts.desktop_shell.smoke_artifact") < qualify.index(
+        "scripts.desktop_shell.window_smoke"
+    )
+
+
+def test_the_window_smoke_gates_linux_qualification(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    gate = _named_step(qualify, "Require successful qualification")
+
+    assert "WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}" in gate
+    assert 'if [[ "${RUNNER_OS}" == "Linux" ]]; then' in gate
+    assert 'test "${WINDOW_SMOKE_STATUS}" = "success"' in gate
+    assert '"window_smoke_status": "${WINDOW_SMOKE_STATUS}"' in qualify
+
+
+def test_the_window_screenshot_is_uploaded_before_cleanup(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    upload = _named_step(qualify, "Upload packaged window screenshot")
+
+    assert "if: always() && runner.os == 'Linux'" in upload
+    assert "path: ${{ steps.paths.outputs.screenshot-dir }}/*.png" in upload
+    assert "if-no-files-found: warn" in upload
+    assert qualify.index("Upload packaged window screenshot") < qualify.index(
+        "Cleanup build material and executables"
+    )

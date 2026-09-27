@@ -65,7 +65,11 @@ _POLICY_KEYS = frozenset(
         "mcp_request_timeout_seconds",
         "mcp_shutdown_timeout_seconds",
         "mcp_frame_max_bytes",
+        "window_session_timeout_seconds",
+        "window_render_settle_seconds",
+        "window_shutdown_timeout_seconds",
         "selftest_targets",
+        "window_smoke_targets",
     }
 )
 
@@ -90,7 +94,12 @@ class DesktopSmokePolicy:
     mcp_request_timeout_seconds: int
     mcp_shutdown_timeout_seconds: int
     mcp_frame_max_bytes: int
+    # The packaged-window smoke (window_smoke.py), where a display is available.
+    window_session_timeout_seconds: int
+    window_render_settle_seconds: int
+    window_shutdown_timeout_seconds: int
     selftest_targets: frozenset[str] = frozenset()
+    window_smoke_targets: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -166,13 +175,8 @@ def load_desktop_smoke_policy(path: Path | None = None) -> DesktopSmokePolicy:
             f"Unsupported smoke policy schema_version: {raw.get('schema_version')}"
         )
 
-    selftest_targets = raw["selftest_targets"]
-    if not isinstance(selftest_targets, list) or not all(
-        name in DESKTOP_TARGET_NAMES for name in selftest_targets
-    ):
-        raise DesktopSmokeError(
-            "Smoke policy selftest_targets must name desktop targets"
-        )
+    selftest_targets = _policy_targets(raw, "selftest_targets")
+    window_smoke_targets = _policy_targets(raw, "window_smoke_targets")
 
     return DesktopSmokePolicy(
         schema_version=raw["schema_version"],
@@ -187,8 +191,21 @@ def load_desktop_smoke_policy(path: Path | None = None) -> DesktopSmokePolicy:
         mcp_request_timeout_seconds=raw["mcp_request_timeout_seconds"],
         mcp_shutdown_timeout_seconds=raw["mcp_shutdown_timeout_seconds"],
         mcp_frame_max_bytes=raw["mcp_frame_max_bytes"],
-        selftest_targets=frozenset(selftest_targets),
+        window_session_timeout_seconds=raw["window_session_timeout_seconds"],
+        window_render_settle_seconds=raw["window_render_settle_seconds"],
+        window_shutdown_timeout_seconds=raw["window_shutdown_timeout_seconds"],
+        selftest_targets=selftest_targets,
+        window_smoke_targets=window_smoke_targets,
     )
+
+
+def _policy_targets(raw: dict[str, object], key: str) -> frozenset[str]:
+    targets = raw[key]
+    if not isinstance(targets, list) or not all(
+        name in DESKTOP_TARGET_NAMES for name in targets
+    ):
+        raise DesktopSmokeError(f"Smoke policy {key} must name desktop targets")
+    return frozenset(targets)
 
 
 def _require_selftest_skip_allowed(
