@@ -94,13 +94,15 @@ open_window() {
     --screenshot "${output}/desktop-window-${target}-on-${host}-${display}.png"
 }
 
-# describe DISPLAY_SERVER: what the window's processes ran as and reached.
+# describe DISPLAY_SERVER: what the window's processes ran as and reached,
+# and what their GTK stack complained about.
 describe() {
   python3 -c '
 import json, sys
 report = json.load(open(sys.argv[1]))
 print("The window processes ran as:", json.dumps(report["process_security_labels"], sort_keys=True))
 print("They were connected to:", ", ".join(report["display_protocols"]))
+print("GLib warnings and criticals of the launcher:", json.dumps(report["launcher_glib_problems"], sort_keys=True))
 ' "${output}/window-smoke-report-${target}-on-${host}-$1.json"
 }
 

@@ -58,6 +58,11 @@ _X11_VARIABLES = ("DISPLAY", "XAUTHORITY")
 # namespace ("@").
 _X11_SOCKET_RE = re.compile(r"@?/tmp/\.X11-unix/X\d+")
 _SOCKET_LINK_RE = re.compile(r"socket:\[(\d+)\]")
+# A GLib warning or critical, as "(program:pid): Gtk-CRITICAL **: ..." or, in
+# the default domain, "** (program:pid): WARNING **: ...".
+_GLIB_PROBLEM_RE = re.compile(
+    r"^(?:\*\* )?\([^()]*:\d+\): (?:(\S+)-)?(WARNING|CRITICAL|ERROR) \*\*", re.MULTILINE
+)
 # Linux lists processes in /proc; macOS has no /proc and asks ps.
 _PS = "/bin/ps"
 _PS_TIMEOUT_SECONDS = 10
@@ -136,6 +141,9 @@ class WindowSmokeReport:
     # The display servers the window's processes were connected to, ["x11"]
     # or ["wayland"]; macOS reports none.
     display_protocols: list[str] = field(default_factory=list)
+    # How often the launcher's GTK stack logged each kind of GLib warning or
+    # critical, such as {"Gtk-CRITICAL": 2}, without the messages.
+    launcher_glib_problems: dict[str, int] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2) + "\n"
@@ -225,7 +233,9 @@ def wayland_socket(inherited: Mapping[str, str]) -> Path:
     if not path.is_absolute():
         runtime_dir = inherited.get("XDG_RUNTIME_DIR")
         if not runtime_dir:
-            raise WindowSmokeError(f"WAYLAND_DISPLAY={name} is relative but XDG_RUNTIME_DIR is unset")
+            raise WindowSmokeError(
+                f"WAYLAND_DISPLAY={name} is relative but XDG_RUNTIME_DIR is unset"
+            )
         path = Path(runtime_dir) / name
     try:
         listening = stat.S_ISSOCK(path.stat().st_mode)
@@ -474,6 +484,15 @@ def _aligned(length: int) -> int:
     return (length + 3) & ~3
 
 
+def glib_problems(log_text: str) -> dict[str, int]:
+    """Count the GLib warnings and criticals in *log_text* by domain and level."""
+    counts: dict[str, int] = {}
+    for domain, level in _GLIB_PROBLEM_RE.findall(log_text):
+        kind = f"{domain or 'default'}-{level}"
+        counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def wait_until(
     condition: Callable[[], bool],
     timeout_seconds: float,
@@ -554,9 +573,12 @@ def run_window_smoke(
             window_processes = {process.pid, *started_tree}
             labels = {} if system == "darwin" else security_labels(window_processes)
             protocols = (
-                [] if system == "darwin" else _connected_display(window_processes, display, inherited)
+                []
+                if system == "darwin"
+                else _connected_display(window_processes, display, inherited)
             )
             exit_code = _stop_launcher(process, policy)
+            problems = glib_problems(_read_text(stderr_path))
             tree_exited = wait_until(
                 lambda: not started_tree & process_parents().keys(),
                 policy.window_shutdown_timeout_seconds,
@@ -579,6 +601,7 @@ def run_window_smoke(
         process_tree_exited=tree_exited,
         process_security_labels=labels,
         display_protocols=protocols,
+        launcher_glib_problems=problems,
     )
 
 

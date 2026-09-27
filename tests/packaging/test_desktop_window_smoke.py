@@ -382,7 +382,11 @@ def test_a_wayland_window_that_falls_back_to_x11_fails(
     wayland_display: dict[str, str],
     x_display: dict[str, str],
 ) -> None:
-    falls_back = f"display = socket.socket(socket.AF_UNIX)\ndisplay.connect({_X_SOCKET!r})\ndisplay.recv(1)\n"
+    falls_back = (
+        "display = socket.socket(socket.AF_UNIX)\n"
+        f"display.connect({_X_SOCKET!r})\n"
+        "display.recv(1)\n"
+    )
     payload = _payload(
         tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE), display_connection=falls_back
     )
@@ -403,7 +407,9 @@ def test_a_window_connected_to_no_display_server_fails(
     )
 
     with pytest.raises(window_smoke.WindowSmokeError, match="connected to no display server"):
-        window_smoke.run_window_smoke(payload, _TARGET, policy, screenshot=None, inherited=x_display)
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=x_display
+        )
 
 
 def test_a_wayland_window_needs_a_compositor(
@@ -411,13 +417,15 @@ def test_a_wayland_window_needs_a_compositor(
 ) -> None:
     payload = _payload(tmp_path, "")
 
+    x11_only = {"DISPLAY": ":99"}
+
     with pytest.raises(window_smoke.WindowSmokeError, match="needs a Wayland compositor"):
         window_smoke.run_window_smoke(
-            payload, _TARGET, policy, screenshot=None, inherited={"DISPLAY": ":99"}, display="wayland"
+            payload, _TARGET, policy, screenshot=None, inherited=x11_only, display="wayland"
         )
     with pytest.raises(window_smoke.WindowSmokeError, match="unknown display server 'mir'"):
         window_smoke.run_window_smoke(
-            payload, _TARGET, policy, screenshot=None, inherited={"DISPLAY": ":99"}, display="mir"
+            payload, _TARGET, policy, screenshot=None, inherited=x11_only, display="mir"
         )
 
 
@@ -784,6 +792,45 @@ def test_the_report_names_the_macos_release(
 
 def test_the_policy_covers_the_macos_app_targets() -> None:
     assert {"macos-x64", "macos-arm64"} <= load_desktop_smoke_policy().window_smoke_targets
+
+
+def test_glib_problems_are_counted_without_their_messages() -> None:
+    log = "\n".join(
+        [
+            "(servonaut-desktop:41): Gdk-CRITICAL **: 10:00:00.000: gdk_seat_get_keyboard: failed",
+            "(servonaut-desktop:41): Gdk-CRITICAL **: 10:00:00.001: gdk_seat_get_keyboard: failed",
+            "(WebKitWebProcess:42): GLib-GObject-WARNING **: 10:00:00.002: invalid cast",
+            "** (servonaut-desktop:41): WARNING **: 10:00:00.003: no domain",
+            "Gtk-Message: 10:00:00.004: Failed to load module",
+            "Gtk-WARNING: stand-in launcher",
+            "a message quoting (x:1): Gtk-CRITICAL **: later on the line",
+        ]
+    )
+
+    assert window_smoke.glib_problems(log) == {
+        "GLib-GObject-WARNING": 1,
+        "Gdk-CRITICAL": 2,
+        "default-WARNING": 1,
+    }
+    assert window_smoke.glib_problems("") == {}
+
+
+def test_a_connected_window_reports_its_launchers_glib_problems(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
+) -> None:
+    complains = (
+        "sys.stderr.write('(servonaut-desktop:7): Gtk-CRITICAL **: 10:00:00.000: x\\n')\n"
+        "sys.stderr.flush()\n"
+    )
+    payload = _payload(
+        tmp_path, complains + _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE)
+    )
+
+    report = window_smoke.run_window_smoke(
+        payload, _TARGET, policy, screenshot=None, inherited=x_display
+    )
+
+    assert report.launcher_glib_problems == {"Gtk-CRITICAL": 1}
 
 
 def test_reports_are_named_after_the_session_the_window_ran_in() -> None:
