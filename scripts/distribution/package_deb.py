@@ -25,6 +25,12 @@ DEFAULT_DEPENDENCIES: tuple[str, ...] = (
     "libwebkit2gtk-4.1-0",
     "gir1.2-gtk-3.0",
     "gir1.2-webkit2-4.1",
+    # The bundled GTK binding links these; the payload never carries copies.
+    "libgirepository-1.0-1 (>= 1.72)",
+    "libglib2.0-0 (>= 2.72) | libglib2.0-0t64",
+    "libcairo2",
+    "libcairo-gobject2",
+    "libffi8",
     "libportaudio2",
     "openssh-client",
     "ca-certificates",

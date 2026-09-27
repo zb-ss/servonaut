@@ -168,6 +168,23 @@ class TestDebPackageStructure:
 class TestDebControlMetadata:
     """Tests validating control.tar.gz metadata and dependencies."""
 
+    def test_dependencies_declare_the_libraries_the_gtk_binding_links(self) -> None:
+        """The payload never bundles them, so the package must pull them in."""
+        declared = {
+            alternative.split()[0]
+            for dependency in DEFAULT_DEPENDENCIES
+            for alternative in dependency.split("|")
+        }
+        assert {
+            "libgirepository-1.0-1",
+            "libglib2.0-0",
+            "libcairo2",
+            "libcairo-gobject2",
+            "libffi8",
+            "gir1.2-gtk-3.0",
+            "gir1.2-webkit2-4.1",
+        } <= declared
+
     def test_control_file_fields_and_dependencies(
         self, mock_payload: Path, tmp_path: Path
     ) -> None:

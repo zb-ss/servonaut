@@ -60,6 +60,8 @@ _DIRECT_REQUIREMENTS = {
     "pywebview==6.2.1",
     "aiohttp==3.14.3",
     "aiohttp-jinja2>=1.6",
+    'PyGObject==3.48.2 ; sys_platform == "linux"',
+    'pycairo>=1.26.0 ; sys_platform == "linux"',
     "pyinstaller==6.22.3",
     "pyinstaller-hooks-contrib==2026.7",
     "cyclonedx-bom==7.3.1",
@@ -309,6 +311,39 @@ def test_source_build_tools_match_every_target_lock() -> None:
         blocks = _locked_blocks(target.requirements_lock)
         assert "--no-binary proxy-tools" in lock_text
         assert blocks["setuptools"] == tools["setuptools"], target.name
+
+
+def test_linux_lock_builds_the_pinned_gtk_binding_from_source() -> None:
+    """PyGObject 3.50+ needs GLib 2.80; Ubuntu 22.04 has 2.72."""
+    policy = load_desktop_target_policy(_POLICY_PATH)
+    linux = policy.targets["linux-x64-ubuntu-22.04"]
+    lock_text = linux.requirements_lock.read_text(encoding="utf-8")
+    versions = _locked_versions(linux.requirements_lock)
+
+    assert linux.linux_abi is not None
+    assert versions["pygobject"] == linux.linux_abi.pygobject_version == "3.48.2"
+    pycairo = tuple(int(part) for part in versions["pycairo"].split("."))
+    assert pycairo >= (1, 26, 0)
+    for name in ("pygobject", "pycairo"):
+        assert f"--no-binary {name}" in lock_text.splitlines()
+    for name, target in policy.targets.items():
+        if name != "linux-x64-ubuntu-22.04":
+            assert not {"pygobject", "pycairo"} & _locked_versions(target.requirements_lock).keys()
+
+
+def test_gtk_binding_build_tools_are_wheel_only_and_agree_with_the_linux_lock() -> None:
+    tools_lock = _REQUIREMENTS_ROOT / "linux-gi-build-tools.txt"
+    tools = _locked_blocks(tools_lock)
+    linux = load_desktop_target_policy(_POLICY_PATH).targets["linux-x64-ubuntu-22.04"]
+
+    assert "--only-binary :all:" in tools_lock.read_text(encoding="utf-8").splitlines()
+    assert {"meson", "meson-python", "ninja", "packaging", "pyproject-metadata"} == set(tools)
+    _locked_versions(tools_lock)  # every tool is hash-pinned
+    # Installed before the lock, so a shared pin must be the same artifact.
+    shared = tools.keys() & _locked_blocks(linux.requirements_lock).keys()
+    assert shared == {"packaging"}
+    for name in shared:
+        assert tools[name] == _locked_blocks(linux.requirements_lock)[name]
 
 
 def test_intel_macos_lock_pins_cryptography_with_published_wheels() -> None:

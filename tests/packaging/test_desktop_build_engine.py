@@ -421,12 +421,14 @@ def test_pip_is_bootstrapped_from_the_bundled_wheel(
     assert commands == [["py", "-m", "ensurepip"]]
 
 
+@pytest.mark.parametrize("target_name", ["macos-x64", "linux-x64-ubuntu-22.04"])
 def test_dependencies_install_only_hash_verified_artifacts(
     wheel: Path,
-    target: DesktopTargetSpec,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    target_name: str,
 ) -> None:
+    target = load_desktop_target_spec(_POLICY_PATH, target_name)
     commands: list[list[str]] = []
     monkeypatch.setattr(
         desktop_build,
@@ -439,7 +441,9 @@ def test_dependencies_install_only_hash_verified_artifacts(
         _context(tmp_path), _request(wheel, target, tmp_path), report
     )
 
-    tools, locked = commands
+    # Linux also installs the GTK binding's build prerequisites in between.
+    tools, *_gi_prerequisites, locked = commands
+    assert len(commands) == (4 if target.linux_abi is not None else 2)
     for command in commands:
         assert command[1:4] == ["-m", "pip", "install"]
         for flag in (

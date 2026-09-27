@@ -15,6 +15,14 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from scripts.desktop_shell.assets import AssetPolicyError, verify_staged_assets
+from scripts.desktop_shell.linux_abi import (
+    LinuxAbiError,
+    LinuxGiBinding,
+    audit_linux_onedir_payload,
+    bundled_distribution_version,
+    find_bundled_host_libraries,
+    missing_gi_payload_components,
+)
 from scripts.desktop_shell.model import (
     EMBEDDED_NOTICE_POLICY_PATH,
     EXECUTABLE_ROLES,
@@ -83,6 +91,7 @@ class DesktopInspectionReport:
     expanded_bytes: int
     regular_file_count: int
     binary_formats: dict[str, str]
+    gi_typelibs_verified_count: int = 0
 
 
 def _verify_executable(
@@ -413,6 +422,35 @@ def _verify_macos_binaries(
             )
 
 
+def _verify_linux_gi_binding(
+    payload_root: Path, provenance: dict[str, object]
+) -> int:
+    """Require the frozen GTK binding and keep the host's GTK stack out of the payload."""
+    try:
+        binding = LinuxGiBinding.from_json(provenance.get("linux_gi"))
+    except LinuxAbiError as error:
+        raise DesktopInspectionError(f"Build provenance GTK binding: {error}") from error
+    problems = [
+        *audit_linux_onedir_payload(payload_root),
+        *missing_gi_payload_components(payload_root),
+        *(
+            f"bundled copy of a host library: {path}"
+            for path in find_bundled_host_libraries(payload_root, binding.host_libraries)
+        ),
+    ]
+    bundled = bundled_distribution_version(payload_root, "PyGObject")
+    if bundled != binding.pygobject_version:
+        problems.append(
+            f"payload PyGObject metadata {bundled!r} does not match the build's "
+            f"{binding.pygobject_version!r}"
+        )
+    if problems:
+        shown = "; ".join(problems[:20])
+        more = f" (and {len(problems) - 20} more)" if len(problems) > 20 else ""
+        raise DesktopInspectionError(f"Linux GTK binding is invalid: {shown}{more}")
+    return len(binding.typelibs)
+
+
 def inspect_desktop_payload(
     payload_root: Path,
     target: DesktopTargetSpec,
@@ -463,6 +501,11 @@ def inspect_desktop_payload(
     file_count = _verify_size_baseline(snapshot, target)
     if target.platform == "darwin":
         _verify_macos_binaries(snapshot, target, policy.max_metadata_file_bytes)
+    typelib_count = (
+        _verify_linux_gi_binding(payload_root, provenance)
+        if target.linux_abi is not None
+        else 0
+    )
 
     return DesktopInspectionReport(
         payload_root=str(payload_root),
@@ -479,6 +522,7 @@ def inspect_desktop_payload(
         expanded_bytes=snapshot.expanded_regular_bytes,
         regular_file_count=file_count,
         binary_formats=formats,
+        gi_typelibs_verified_count=typelib_count,
     )
 
 

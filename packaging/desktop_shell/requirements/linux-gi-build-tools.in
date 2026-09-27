@@ -1,0 +1,7 @@
+# Build backend for the PyGObject and pycairo source distributions of the
+# Linux desktop lock. The desktop builder installs this lock wheel-only before
+# those source builds, which run without build isolation.
+meson-python
+ninja
+# Keep identical to the packaging pin of the Linux desktop lock.
+packaging==26.3
