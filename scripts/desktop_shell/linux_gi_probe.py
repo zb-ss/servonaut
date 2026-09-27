@@ -66,19 +66,32 @@ def _host_libraries(
     return libraries
 
 
+def _glib_version() -> str:
+    """The version of the GLib library itself.
+
+    The GLib typelib's version constants describe the introspection data,
+    which gobject-introspection generates from its own GLib snapshot, so they
+    can lag the installed library.
+    """
+    import ctypes
+
+    glib = ctypes.CDLL("libglib-2.0.so.0")
+    return ".".join(
+        str(ctypes.c_uint.in_dll(glib, f"glib_{part}_version").value)
+        for part in ("major", "minor", "micro")
+    )
+
+
 def probe(roots: dict[str, str]) -> dict[str, object]:
     import cairo
     import gi
-
-    gi.require_version("GLib", "2.0")
-    from gi.repository import GLib
 
     typelibs = _typelib_closure(roots)
     extensions = _extension_modules(gi, cairo)
     return {
         "pygobject_version": gi.__version__,
         "pycairo_version": cairo.version,
-        "glib_version": f"{GLib.MAJOR_VERSION}.{GLib.MINOR_VERSION}.{GLib.MICRO_VERSION}",
+        "glib_version": _glib_version(),
         "modules": {"gi": gi.__file__, "cairo": cairo.__file__},
         "extension_modules": extensions,
         "typelibs": typelibs,
