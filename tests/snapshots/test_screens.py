@@ -63,6 +63,12 @@ async def _fleet(pilot: Any) -> None:
     del pilot
 
 
+async def _fleet_search(pilot: Any) -> None:
+    await pilot.press("slash", *"web")
+    table = pilot.app.screen.query_one("InstanceTable")
+    await _harness.wait_until(pilot, lambda: table.row_count == 1, "the filtered fleet")
+
+
 async def _server_actions(pilot: Any) -> None:
     screen = await _open_focus_server(pilot, "o", "ServerActionsScreen")
     # The screen focuses its first action as it opens, which may or may not
@@ -165,6 +171,12 @@ async def _cloudwatch(pilot: Any) -> None:
 def test_fleet_table(screen_snapshot, size: str) -> None:
     """The fleet table with AWS, custom, OVH and Hetzner servers."""
     _capture(screen_snapshot, size, _fleet)
+
+
+@sizes
+def test_fleet_search(screen_snapshot, size: str) -> None:
+    """The fleet filtered from the search box; the footer keeps the shortcuts, greyed."""
+    _capture(screen_snapshot, size, _fleet_search)
 
 
 @sizes

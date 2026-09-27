@@ -122,7 +122,10 @@ class Sidebar(Widget):
         yield RelayIndicator(id="relay_indicator")
 
         # ----- middle: scrollable sections -----
-        with VerticalScroll(id="sidebar-scroll"):
+        # Nothing in the sidebar takes keyboard focus: a screen opens with
+        # focus on its own content. Set at construction, not on mount, so
+        # a screen's first auto-focus pass can never land here.
+        with VerticalScroll(id="sidebar-scroll", can_focus=False):
             yield SidebarSection(
                 "Core",
                 self._nav("📋 Instances", "nav_list",
@@ -222,12 +225,16 @@ class Sidebar(Widget):
 
         # ----- bottom: docked, always visible -----
         with Vertical(id="sidebar-bottom"):
-            yield Button(
+            update = Button(
                 "📥  Update Available",
                 id="nav_update",
                 classes="nav-button hidden",
             )
-            yield Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
+            update.can_focus = False
+            yield update
+            quit_button = Button("👋 Quit", id="nav_quit", classes="nav-button error-button")
+            quit_button.can_focus = False
+            yield quit_button
 
     can_focus = False
 
@@ -235,21 +242,11 @@ class Sidebar(Widget):
         """Helper — build a nav button with the standard class + tooltip."""
         btn = Button(label, id=button_id, classes="nav-button")
         btn.tooltip = tooltip
+        btn.can_focus = False
         return btn
 
     def on_mount(self) -> None:
         """Apply gating, sync update + relay state, then expand the active section."""
-        # Buttons in nav-button class never steal focus.
-        for btn in self.query(".nav-button"):
-            btn.can_focus = False
-        # The wrapping VerticalScroll defaults to focusable — without
-        # this the sidebar would steal initial focus from the screen's
-        # search input on every mount (regression in the redesign).
-        try:
-            self.query_one("#sidebar-scroll").can_focus = False
-        except NoMatches:
-            pass
-
         # ----- Provider section gating -----
         # OVH and Hetzner sections have TWO independent auth surfaces:
         # compute (API token / app+consumer keys) and S3 object storage

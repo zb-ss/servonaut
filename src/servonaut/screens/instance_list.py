@@ -38,6 +38,27 @@ def _is_aws_row(instance: dict) -> bool:
     return not any(instance.get(flag) for flag in _NON_AWS_FLAGS)
 
 
+class FleetSearchInput(Input):
+    """The fleet search box, which keeps the fleet shortcuts in the footer.
+
+    Textual drops every binding for a printable key from the footer while an
+    Input has focus, because the Input takes those keys as text. Here the
+    fleet shortcuts stay listed: the screen's ``check_action`` reports them
+    as disabled while the box has focus, so the footer shows them greyed
+    out. Typing is unaffected: the box still receives every printable key,
+    and a disabled action never runs.
+    """
+
+    def __init__(self, shortcut_characters: frozenset[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._shortcut_characters = shortcut_characters
+
+    def check_consume_key(self, key: str, character: str | None) -> bool:
+        if character is not None and character in self._shortcut_characters:
+            return False
+        return super().check_consume_key(key, character)
+
+
 class InstanceListScreen(Screen):
     """Screen displaying list of EC2 instances with search/filter."""
 
@@ -67,6 +88,10 @@ class InstanceListScreen(Screen):
         Binding("y", "copy_row", "Copy", show=True),
     ]
 
+    # The screen opens on the fleet table, so the arrow keys and every
+    # shortcut above work straight away; "/" moves to the search box.
+    AUTO_FOCUS = "InstanceTable"
+
     # Debounce delay for search input (seconds)
     _SEARCH_DEBOUNCE = 0.15
 
@@ -93,7 +118,11 @@ class InstanceListScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Vertical(id="instance_list_container"):
-                yield Input(placeholder="Search instances and keywords...", id="search_input")
+                yield FleetSearchInput(
+                    self._shortcut_characters(),
+                    placeholder="Search instances and keywords...",
+                    id="search_input",
+                )
                 # Memory discoverability banner — only visible when no
                 # instance has memory yet, so it stops nagging once the user
                 # has engaged with the feature.
@@ -113,6 +142,15 @@ class InstanceListScreen(Screen):
                 yield VerticalScroll(id="keyword_matches_container")
             yield StatusBar()
         yield Footer()
+
+    @classmethod
+    def _shortcut_characters(cls) -> frozenset[str]:
+        """The single printable keys bound on this screen."""
+        return frozenset(
+            binding.key
+            for binding in cls.BINDINGS
+            if len(binding.key) == 1 and binding.key.isprintable()
+        )
 
     def on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
@@ -174,13 +212,6 @@ class InstanceListScreen(Screen):
             self._fetch_instances()
             self._fetch_ovh_instances()
             self._fetch_hetzner_instances()
-
-        # Default focus = search Input. The "find a server fast" journey
-        # is the primary entry point: type a name fragment, then Tab/↓
-        # into the filtered results and press a shortcut. The footer still
-        # advertises every binding (check_action_passthrough returns None,
-        # not False, when an Input is focused — bindings render greyed-out
-        # rather than disappearing) so discoverability stays intact.
 
     def _fetch_instances(self, force_refresh: bool = False) -> None:
         """Fetch instances from AWS via worker (blocking with progress indicator).
