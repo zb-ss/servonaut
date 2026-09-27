@@ -42,6 +42,7 @@ _LAUNCHER_LOG = Path(".servonaut") / "logs" / "desktop.log"
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 _DISPLAY_VARIABLES = ("DISPLAY", "XAUTHORITY")
 _POLL_SECONDS = 0.25
+_OS_RELEASE = Path("/etc/os-release")
 _DIAGNOSTIC_TAIL_BYTES = 4000
 _SCREENSHOT_TIMEOUT_SECONDS = 30
 
@@ -55,6 +56,7 @@ class WindowSmokeReport:
     """Public, content-free result of one packaged-window smoke run."""
 
     target: str
+    host_platform: str
     session_connected: bool
     connect_elapsed_ms: int
     screenshot_captured: bool
@@ -63,6 +65,23 @@ class WindowSmokeReport:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2) + "\n"
+
+
+def host_platform(os_release: Path = _OS_RELEASE) -> str:
+    """The distribution the window ran on, such as ``ubuntu-24.04``."""
+    fields: dict[str, str] = {}
+    try:
+        lines = os_release.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "unknown"
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key.strip()] = value.strip().strip('"')
+    distribution, version = fields.get("ID"), fields.get("VERSION_ID")
+    if not distribution or not version:
+        return "unknown"
+    return f"{distribution}-{version}"
 
 
 def session_connected(log_text: str) -> bool:
@@ -198,6 +217,7 @@ def run_window_smoke(
 
     return WindowSmokeReport(
         target=target_name,
+        host_platform=host_platform(),
         session_connected=True,
         connect_elapsed_ms=connect_elapsed_ms,
         screenshot_captured=captured,
@@ -325,12 +345,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.evidence_dir is not None:
         args.evidence_dir.mkdir(parents=True, exist_ok=True)
-        (args.evidence_dir / f"window-smoke-report-{target.name}.json").write_text(
-            report.to_json(), encoding="utf-8"
-        )
+        report_name = f"window-smoke-report-{target.name}-on-{report.host_platform}.json"
+        (args.evidence_dir / report_name).write_text(report.to_json(), encoding="utf-8")
     print(
-        f"Window smoke succeeded for {target.name}: session opened after "
-        f"{report.connect_elapsed_ms} ms"
+        f"Window smoke succeeded for {target.name} on {report.host_platform}: "
+        f"session opened after {report.connect_elapsed_ms} ms"
     )
     return 0
 

@@ -5,9 +5,11 @@ on:
     branches: [master, 'feature/desktop/**']
     paths:
       - 'src/**'
+      - 'packaging/deb/**'
       - 'packaging/desktop_shell/**'
       - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
+      - 'scripts/distribution/**'
       - 'scripts/standalone_cli/**'
       - '.github/actions/setup-standalone-cli/**'
       - 'tests/packaging/**'
@@ -20,9 +22,11 @@ on:
       - 'feature/desktop/**'
     paths:
       - 'src/**'
+      - 'packaging/deb/**'
       - 'packaging/desktop_shell/**'
       - 'packaging/standalone_cli/**'
       - 'scripts/desktop_shell/**'
+      - 'scripts/distribution/**'
       - 'scripts/standalone_cli/**'
       - '.github/actions/setup-standalone-cli/**'
       - 'tests/packaging/**'
@@ -110,7 +114,7 @@ jobs:
           base = Path(os.environ["BASE_TEMP"])
           try:
               base.mkdir(mode=0o700, parents=False, exist_ok=False)
-              for name in ("wheel-tools", "qualification", "evidence", "upload", "screenshots"):
+              for name in ("wheel-tools", "qualification", "evidence", "upload", "screenshots", "forward"):
                   (base / name).mkdir(mode=0o700)
           except OSError:
               raise SystemExit("qualification directories could not be created")
@@ -125,6 +129,7 @@ jobs:
             echo "evidence-dir=${BASE_TEMP}/evidence"
             echo "upload-dir=${BASE_TEMP}/upload"
             echo "screenshot-dir=${BASE_TEMP}/screenshots"
+            echo "forward-dir=${BASE_TEMP}/forward"
             echo "product-version=${VERSION}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -254,6 +259,47 @@ jobs:
             --evidence-dir "${EVIDENCE_DIR}" \
             --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
+      # Forward qualification on the newer LTS: the payload built above,
+      # packaged as the .deb and installed in a clean Ubuntu 24.04 container
+      # with nothing but its declared Depends, must open its window the same
+      # way. The container keeps the payload inside this job. WebKit sandboxes
+      # its web processes with bubblewrap, which needs the user namespaces
+      # Docker's default seccomp and AppArmor profiles deny.
+      - name: Run packaged window smoke on Ubuntu 24.04
+        id: window-smoke-forward
+        if: runner.os == 'Linux'
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          TARGET: ${{ matrix.target }}
+          PRODUCT_VERSION: ${{ steps.paths.outputs.product-version }}
+          FORWARD_DIR: ${{ steps.paths.outputs.forward-dir }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+          FORWARD_IMAGE: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+        run: |
+          set -euo pipefail
+          mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
+          trap 'cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.package_deb \
+            --payload-dir "${PAYLOAD_DIR}" \
+            --output-dir "${FORWARD_DIR}/deb" \
+            --version "${PRODUCT_VERSION}" \
+            --maintainer "Servonaut qualification <qualification@example.com>" \
+            --filename servonaut.deb
+          docker run --rm \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=1g \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --volume "${FORWARD_DIR}/deb:/deb:ro" \
+            --volume "${FORWARD_DIR}/out:/out" \
+            --workdir /src \
+            "${FORWARD_IMAGE}" \
+            bash scripts/desktop_shell/forward_window_smoke.sh \
+            /deb/servonaut.deb "${TARGET}" /out "$(id -u):$(id -g)"
+
       - name: Prepare sanitized non-executable evidence
         id: sanitize
         if: always() && steps.paths.outputs.base-temp != ''
@@ -265,6 +311,7 @@ jobs:
           INSPECT_STATUS: ${{ steps.inspect.outcome }}
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
           WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
+          WINDOW_SMOKE_FORWARD_STATUS: ${{ steps.window-smoke-forward.outcome }}
         run: |
           set -euo pipefail
           if [ -d "${EVIDENCE_DIR}" ]; then
@@ -278,7 +325,8 @@ jobs:
             "build_status": "${BUILD_STATUS}",
             "inspect_status": "${INSPECT_STATUS}",
             "smoke_status": "${SMOKE_STATUS}",
-            "window_smoke_status": "${WINDOW_SMOKE_STATUS}"
+            "window_smoke_status": "${WINDOW_SMOKE_STATUS}",
+            "window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}"
           }
           EOF
 
@@ -325,6 +373,7 @@ jobs:
           INSPECT_STATUS: ${{ steps.inspect.outcome }}
           SMOKE_STATUS: ${{ steps.smoke.outcome }}
           WINDOW_SMOKE_STATUS: ${{ steps.window-smoke.outcome }}
+          WINDOW_SMOKE_FORWARD_STATUS: ${{ steps.window-smoke-forward.outcome }}
           UPLOAD_STATUS: ${{ steps.upload.outcome }}
           CLEANUP_STATUS: ${{ steps.cleanup.outcome }}
         run: |
@@ -335,6 +384,7 @@ jobs:
           test "${SMOKE_STATUS}" = "success"
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             test "${WINDOW_SMOKE_STATUS}" = "success"
+            test "${WINDOW_SMOKE_FORWARD_STATUS}" = "success"
           fi
           test "${UPLOAD_STATUS}" = "success"
           test "${CLEANUP_STATUS}" = "success"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -296,3 +297,62 @@ def test_the_window_screenshot_is_uploaded_before_cleanup(workflow_content: str)
     assert qualify.index("Upload packaged window screenshot") < qualify.index(
         "Cleanup build material and executables"
     )
+
+
+_FORWARD_SCRIPT = _REPO_ROOT / "scripts" / "desktop_shell" / "forward_window_smoke.sh"
+
+
+def test_linux_payload_is_qualified_on_every_policy_platform(workflow_content: str) -> None:
+    """The 22.04 build runs on its runner; each newer release gets a pinned container."""
+    from scripts.desktop_shell.model import load_desktop_target_policy
+
+    linux = load_desktop_target_policy().targets["linux-x64-ubuntu-22.04"].linux_abi
+    assert linux is not None
+    qualify = _job_block(workflow_content, "qualify")
+    build_runner = f"runner: {linux.build_platform}"
+    assert f"target: linux-x64-ubuntu-22.04\n            {build_runner}" in qualify
+    for platform in linux.qualification_platforms:
+        if platform == linux.build_platform:
+            continue
+        name, version = platform.split("-")
+        assert re.search(rf"FORWARD_IMAGE: {name}:{version}@sha256:[0-9a-f]{{64}}\n", qualify)
+
+
+def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: str) -> None:
+    qualify = _job_block(workflow_content, "qualify")
+    step = _named_step(qualify, "Run packaged window smoke on Ubuntu 24.04")
+
+    assert "id: window-smoke-forward" in step
+    assert "if: runner.os == 'Linux'" in step
+    assert "-m scripts.distribution.package_deb" in step
+    assert "docker run --rm" in step
+    assert '--volume "${GITHUB_WORKSPACE}:/src:ro"' in step
+    assert "bash scripts/desktop_shell/forward_window_smoke.sh" in step
+    # The payload never leaves the job: no artifact carries it to another job.
+    assert qualify.index("Run packaged window smoke\n") < qualify.index(
+        "Run packaged window smoke on Ubuntu 24.04"
+    ) < qualify.index("Prepare sanitized non-executable evidence")
+    gate = _named_step(qualify, "Require successful qualification")
+    assert 'test "${WINDOW_SMOKE_FORWARD_STATUS}" = "success"' in gate
+    assert '"window_smoke_forward_status": "${WINDOW_SMOKE_FORWARD_STATUS}"' in qualify
+
+
+def test_forward_script_installs_only_the_depends_before_its_own_tools() -> None:
+    script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
+    subprocess.run(["bash", "-n", str(_FORWARD_SCRIPT)], check=True)
+
+    deb_install = script.index('apt-get install --yes --no-install-recommends "${deb}"')
+    library_check = script.index("xargs -0 ldd")
+    tools_install = script.index("apt-get install --yes --no-install-recommends python3")
+    assert deb_install < library_check < tools_install
+    assert 'runuser -u "${smoke_user}"' in script
+    assert "-m scripts.desktop_shell.window_smoke" in script
+    assert "WEBKIT_DISABLE_SANDBOX" not in script
+
+
+def test_path_filters_cover_the_deb_packaging(workflow_content: str) -> None:
+    for trigger in ("push:", "pull_request:"):
+        block = workflow_content.split(f"  {trigger}\n", 1)[1].split("\n  workflow_dispatch", 1)[0]
+        paths = block.split("paths:\n", 1)[1].split("\n  pull_request:", 1)[0]
+        assert "- 'scripts/distribution/**'" in paths
+        assert "- 'packaging/deb/**'" in paths

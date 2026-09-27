@@ -277,6 +277,7 @@ def test_main_writes_the_report_and_fails_cleanly(
 ) -> None:
     report = window_smoke.WindowSmokeReport(
         target=_TARGET,
+        host_platform="ubuntu-24.04",
         session_connected=True,
         connect_elapsed_ms=1200,
         screenshot_captured=True,
@@ -288,7 +289,9 @@ def test_main_writes_the_report_and_fails_cleanly(
     argv = ["--payload-root", str(tmp_path), "--target", _TARGET, "--evidence-dir", str(evidence)]
 
     assert window_smoke.main(argv) == 0
-    written = json.loads((evidence / f"window-smoke-report-{_TARGET}.json").read_text())
+    written = json.loads(
+        (evidence / f"window-smoke-report-{_TARGET}-on-ubuntu-24.04.json").read_text()
+    )
     assert written["connect_elapsed_ms"] == 1200
 
     def fail(*args: object, **kwargs: object) -> None:
@@ -297,3 +300,22 @@ def test_main_writes_the_report_and_fails_cleanly(
     monkeypatch.setattr(window_smoke, "run_window_smoke", fail)
     assert window_smoke.main(argv) == 1
     assert "Window smoke failed: blank" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ('NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="24.04"\n', "ubuntu-24.04"),
+        ("ID=debian\nVERSION_ID=12\n", "debian-12"),
+        ("NAME=Something\n", "unknown"),
+        (None, "unknown"),
+    ],
+)
+def test_the_report_names_the_host_it_ran_on(
+    tmp_path: Path, content: str | None, expected: str
+) -> None:
+    os_release = tmp_path / "os-release"
+    if content is not None:
+        os_release.write_text(content)
+
+    assert window_smoke.host_platform(os_release) == expected
