@@ -23,9 +23,7 @@ from servonaut.config.schema import VoiceConfig
 from servonaut.services.interfaces import VoiceOutputServiceInterface
 from servonaut.services.voice_engines import (
     DEFAULT_TTS_VOICE,
-    KOKORO_ARCHIVE_BYTES,
     KOKORO_ARCHIVE_URL,
-    KOKORO_DISK_BYTES,
     KOKORO_MODEL_ID,
     KOKORO_REQUIRED_FILES,
     KOKORO_VOICES,
@@ -34,6 +32,7 @@ from servonaut.services.voice_engines import (
     kokoro_model_dir,
     kokoro_voice_sid,
 )
+from servonaut.services.voice_models import KOKORO_TTS_SPEC
 from servonaut.services.voice_output_service import (
     VoiceOutputError,
     VoiceOutputService,
@@ -114,8 +113,8 @@ class TestKokoroRegistry:
         )
         assert KOKORO_MODEL_ID in KOKORO_ARCHIVE_URL
 
-    def test_size_constants_are_plausible(self):
-        assert 0 < KOKORO_ARCHIVE_BYTES < KOKORO_DISK_BYTES
+    def test_pinned_sizes_are_plausible(self):
+        assert 0 < KOKORO_TTS_SPEC.total_download_bytes < KOKORO_TTS_SPEC.total_disk_bytes
 
     def test_default_voice_is_in_the_roster(self):
         assert DEFAULT_TTS_VOICE in KOKORO_VOICES

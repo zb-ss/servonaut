@@ -989,7 +989,7 @@ class VoiceOutputService(VoiceOutputServiceInterface):
         """Load the synthesis engine, caching it on the instance.
 
         Deferred until the first utterance: constructing the engine reads
-        the full on-disk model (``KOKORO_DISK_BYTES``, ~181 MB of weights
+        the full on-disk model (``KOKORO_TTS_SPEC.total_disk_bytes``, ~181 MB of weights
         and voice data), and app startup must stay instant for users who
         never enable spoken replies.
 

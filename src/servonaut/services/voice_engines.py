@@ -102,9 +102,6 @@ NEMOTRON_FILES: Dict[str, str] = {
     "tokens.txt": "tokens.txt",
 }
 
-# Measured total of the int8 files, for the confirmation copy.
-NEMOTRON_DOWNLOAD_BYTES = 683 * 1024 * 1024
-
 # ---------------------------------------------------------------------------
 # Text-to-speech (spoken replies)
 # ---------------------------------------------------------------------------
@@ -125,16 +122,12 @@ KOKORO_MODEL_ID = "kokoro-int8-multi-lang-v1_0"
 # Single-tarball release asset. One streamed download beats fetching the
 # repository's files individually: the model directory holds hundreds of
 # small espeak data files, and bz2 compresses the int8 weights well enough
-# that the archive is smaller than the raw English-runtime subset.
+# that the archive is smaller than the raw English-runtime subset. Its size
+# and SHA-256 are pinned in :mod:`servonaut.services.voice_models`.
 KOKORO_ARCHIVE_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
     "kokoro-int8-multi-lang-v1_0.tar.bz2"
 )
-
-# Measured sizes for the confirmation copy: the archive as served, and the
-# extracted tree on disk.
-KOKORO_ARCHIVE_BYTES = 132_303_094
-KOKORO_DISK_BYTES = 189_455_587
 
 # Files the synthesiser is pointed at (relative to the model directory).
 KOKORO_MODEL_FILE = "model.int8.onnx"
@@ -198,14 +191,12 @@ DEFAULT_TTS_VOICE = "af_heart"
 
 SILERO_VAD_MODEL_ID = "silero-vad-v4-16k"
 
-# Single-file release asset — no archive, no extraction step.
+# Single-file release asset — no archive, no extraction step. Its size and
+# SHA-256 are pinned in :mod:`servonaut.services.voice_models`.
 SILERO_VAD_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     "silero_vad.onnx"
 )
-
-# Measured size of the asset as served, for the confirmation copy.
-SILERO_VAD_BYTES = 643_854
 
 SILERO_VAD_FILE = "silero_vad.onnx"
 
