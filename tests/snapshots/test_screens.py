@@ -138,6 +138,15 @@ async def _ip_ban(pilot: Any) -> None:
     await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
 
 
+async def _ip_ban_configured(pilot: Any) -> None:
+    from servonaut.config.schema import IPBanConfig
+
+    pilot.app.config_manager.get().ip_ban_configs.append(
+        IPBanConfig(name="edge-waf", method="waf", region="us-east-1")
+    )
+    await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
+
+
 async def _cloudwatch(pilot: Any) -> None:
     await _navigate(pilot, "nav_cloudwatch", "CloudWatchBrowserScreen")
 
@@ -226,8 +235,13 @@ def test_custom_servers(screen_snapshot, size: str) -> None:
 
 @sizes
 def test_ip_ban(screen_snapshot, size: str) -> None:
-    """The IP ban manager with nothing configured."""
+    """The IP ban manager with nothing configured: a hint points to Settings."""
     _capture(screen_snapshot, size, _ip_ban)
+
+
+def test_ip_ban_configured(screen_snapshot) -> None:
+    """The IP ban manager once a ban method exists: no hint."""
+    _capture(screen_snapshot, "100x30", _ip_ban_configured)
 
 
 @sizes
