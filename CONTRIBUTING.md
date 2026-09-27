@@ -67,6 +67,37 @@ own two assets; run it on the tag itself
 (`gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z`), or add
 `-f dry_run=true` to build and qualify without attaching anything.
 
+While the desktop app is known to be broken, set the repository variable
+`DESKTOP_PREVIEW_PUBLISH` to `off`
+(`gh variable set DESKTOP_PREVIEW_PUBLISH --body off --repo zb-ss/servonaut`).
+Releases published meanwhile get no preview: the workflow skips the build and
+ends with a notice saying so, and the Python release goes ahead as usual. Set
+it back to `on`, or delete it, once the app works again. Any other value fails
+the run rather than guessing. A manual run ignores the variable, so it can
+still attach a preview to a release that went out without one. To take a
+broken preview off a release that already carries it, delete its `.deb` and
+its `SHA256SUMS`, one command per asset:
+
+```bash
+gh release delete-asset <tag> <asset> --yes --repo zb-ss/servonaut
+# for example:
+gh release delete-asset v2.28.0rc1 servonaut-desktop-preview_2.28.0rc1_amd64.deb --yes --repo zb-ss/servonaut
+gh release delete-asset v2.28.0rc1 servonaut-desktop-preview_2.28.0rc1_SHA256SUMS --yes --repo zb-ss/servonaut
+```
+
+Every published release and candidate also carries the install scripts,
+`install.sh` and `install.ps1`, with `install-scripts_SHA256SUMS`, attached by
+the Release install scripts workflow from the release's tag commit. An install
+command that downloads them from the latest release gets the scripts of the
+newest stable release, so a change to the scripts reaches users with a
+release, not when it is merged. The scripts install Servonaut from PyPI only
+and stop with pipx's error when that fails. The workflow is separate from the
+PyPI publish and replaces only its own three assets. To attach them again,
+run `gh workflow run release-install-scripts.yml -f tag=vX.Y.Z`; the tag's own
+scripts are used whichever branch runs it. Add `-f dry_run=true` to check
+without uploading. Tags from before the workflow existed are refused, since
+their scripts fall back to installing the default branch.
+
 Binary release candidates (standalone CLI archives and desktop installers)
 are assembled and verified by the Release candidate workflow, separately from
 the Python release candidates described under Releasing below.

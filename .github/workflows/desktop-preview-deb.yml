@@ -22,6 +22,11 @@ name: Desktop preview .deb
 # dry_run does everything except the attestation and the upload. A dry run
 # may start from a branch; without a tag it rehearses that branch's commit as
 # if it were tagged rehearsal_version.
+#
+# While the desktop app is known to be broken, set the repository variable
+# DESKTOP_PREVIEW_PUBLISH to off: published releases then get no preview, and
+# say so, while the Python release goes ahead. A manual run still builds and
+# attaches one.
 
 on:
   release:
@@ -71,6 +76,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_REHEARSAL_VERSION: ${{ inputs.rehearsal_version }}
+          PREVIEW_PUBLISH: ${{ vars.DESKTOP_PREVIEW_PUBLISH }}
         run: |
           set -euo pipefail
           version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
@@ -84,6 +90,20 @@ jobs:
                 echo "build=false" >> "${GITHUB_OUTPUT}"
                 exit 0
               fi
+              # The switch holds back only the automatic preview of a release.
+              case "$(printf '%s' "${PREVIEW_PUBLISH}" | tr '[:upper:]' '[:lower:]')" in
+                ""|on) ;;
+                off)
+                  echo "::notice::DESKTOP_PREVIEW_PUBLISH is off, so ${tag} gets no desktop preview. To attach one later: gh workflow run desktop-preview-deb.yml --ref ${tag} -f tag=${tag}"
+                  echo "No desktop preview for ${tag}: the repository variable DESKTOP_PREVIEW_PUBLISH is off." >> "${GITHUB_STEP_SUMMARY}"
+                  echo "build=false" >> "${GITHUB_OUTPUT}"
+                  exit 0
+                  ;;
+                *)
+                  echo "::error::The repository variable DESKTOP_PREVIEW_PUBLISH must be on or off, not '${PREVIEW_PUBLISH}'."
+                  exit 1
+                  ;;
+              esac
               if [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
                 echo "::error::The release event does not name its own tag."
                 exit 1

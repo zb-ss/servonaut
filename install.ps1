@@ -1,10 +1,13 @@
 # Servonaut Installer for Windows
-# Usage: irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+# Usage: irm https://github.com/zb-ss/servonaut/releases/latest/download/install.ps1 | iex
 # Or: .\install.ps1
 #
 # Release candidate instead of the stable release:
-#   $env:SERVONAUT_PRE = "1"; irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+#   $env:SERVONAUT_PRE = "1"; irm https://github.com/zb-ss/servonaut/releases/latest/download/install.ps1 | iex
 # Or: .\install.ps1 -Pre
+#
+# Servonaut is installed from PyPI with pipx. When run from a clone of the
+# repository, .\install.ps1 installs that checkout instead.
 
 param(
     # Install the newest release candidate instead of the stable release
@@ -18,6 +21,7 @@ $MinPythonMajor = 3
 $MinPythonMinor = 10
 
 $RepoUrl = "https://github.com/zb-ss/servonaut"
+$TroubleshootingUrl = "$RepoUrl/blob/master/docs/troubleshooting.md#the-install-script-stops"
 
 # Naming a pre-release in the version specifier lets pip choose a release
 # candidate of Servonaut, or the stable release when that is newer. pip's
@@ -190,48 +194,19 @@ function Install-Servonaut {
 
     # Strategy 2: PyPI
     Write-Info "Installing from PyPI..."
-    & pipx install servonaut 2>$null
+    & pipx install servonaut
     if ($LASTEXITCODE -eq 0) {
         Write-Success "Servonaut installed from PyPI"
         return
     }
 
-    # Strategy 3: Clone and install
-    Write-Warn "PyPI install failed, cloning repository..."
-
-    if (-not (Test-Command "git")) {
-        Write-Err "git is required to clone the repository"
-        Write-Host ""
-        Write-Host "Install git: https://git-scm.com/download/win"
-        Write-Host "Or via winget: winget install Git.Git" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Then try: pipx install servonaut" -ForegroundColor White
-        exit 1
-    }
-
-    $cloneDir = Join-Path $env:TEMP "servonaut-install-$(Get-Random)"
-    Write-Info "Cloning to: $cloneDir"
-
-    try {
-        & git clone --depth 1 "$RepoUrl.git" "$cloneDir\servonaut" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            & pipx install "$cloneDir\servonaut" --force 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Success "Servonaut installed from repository"
-                Remove-Item -Recurse -Force $cloneDir -ErrorAction SilentlyContinue
-                return
-            }
-        }
-    }
-    catch {}
-
-    Remove-Item -Recurse -Force $cloneDir -ErrorAction SilentlyContinue
-    Write-Err "All installation methods failed"
+    # Never fall back to unreleased source: stop and say why
+    Write-Err "Could not install Servonaut from PyPI (pipx's error is shown above)"
     Write-Host ""
-    Write-Host "Try manually:" -ForegroundColor White
-    Write-Host "  git clone $RepoUrl.git"
-    Write-Host "  cd servonaut"
-    Write-Host "  pipx install ."
+    Write-Host "Fix the problem pipx reports and run the installer again, or install manually:"
+    Write-Host "  pipx install servonaut" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Troubleshooting: $TroubleshootingUrl"
     exit 1
 }
 
