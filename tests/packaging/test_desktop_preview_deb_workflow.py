@@ -370,6 +370,7 @@ def _resolve(workflow: str, tmp_path: Path, **env: str):
             "INPUT_TAG": "",
             "INPUT_DRY_RUN": "",
             "INPUT_REHEARSAL_VERSION": "",
+            "PREVIEW_PUBLISH": "",
             **env,
         },
     )
@@ -530,6 +531,105 @@ def test_other_events_are_refused(workflow: str, tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
+
+
+# ---------------------------------------------------------------------------
+# The DESKTOP_PREVIEW_PUBLISH switch
+# ---------------------------------------------------------------------------
+
+
+def test_the_switch_is_the_repository_variable(workflow: str) -> None:
+    step = _step(_job(workflow, "resolve"), "Decide what to build")
+
+    assert "          PREVIEW_PUBLISH: ${{ vars.DESKTOP_PREVIEW_PUBLISH }}\n" in step
+    # Only the resolve job reads it; the later jobs follow its build output.
+    assert workflow.count("vars.DESKTOP_PREVIEW_PUBLISH") == 1
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "Off"])
+def test_a_release_gets_no_preview_while_the_switch_is_off(
+    workflow: str, tmp_path: Path, value: str
+) -> None:
+    result, outputs = _resolve(
+        workflow,
+        tmp_path,
+        GITHUB_EVENT_NAME="release",
+        GITHUB_REF="refs/tags/v2.28.0",
+        RELEASE_TAG="v2.28.0",
+        PREVIEW_PUBLISH=value,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert outputs == {"build": "false"}
+    assert "::notice::DESKTOP_PREVIEW_PUBLISH is off, so v2.28.0 gets no desktop preview." in (
+        result.stdout
+    )
+    assert "gh workflow run desktop-preview-deb.yml --ref v2.28.0 -f tag=v2.28.0" in result.stdout
+    assert "DESKTOP_PREVIEW_PUBLISH is off" in (tmp_path / "summary").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", ["", "on", "ON"])
+def test_a_release_gets_its_preview_while_the_switch_is_on_or_unset(
+    workflow: str, tmp_path: Path, value: str
+) -> None:
+    result, outputs = _resolve(
+        workflow,
+        tmp_path,
+        GITHUB_EVENT_NAME="release",
+        GITHUB_REF="refs/tags/v2.28.0rc1",
+        RELEASE_TAG="v2.28.0rc1",
+        PREVIEW_PUBLISH=value,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert outputs["build"] == "true"
+    assert outputs["tag"] == "v2.28.0rc1"
+
+
+@pytest.mark.parametrize("value", ["false", "0", "skip"])
+def test_an_unknown_switch_value_fails_instead_of_guessing(
+    workflow: str, tmp_path: Path, value: str
+) -> None:
+    result, outputs = _resolve(
+        workflow,
+        tmp_path,
+        GITHUB_EVENT_NAME="release",
+        GITHUB_REF="refs/tags/v2.28.0",
+        RELEASE_TAG="v2.28.0",
+        PREVIEW_PUBLISH=value,
+    )
+
+    assert result.returncode == 1
+    assert f"must be on or off, not '{value}'" in result.stdout
+    assert outputs == {}
+
+
+@pytest.mark.parametrize("dry_run", ["false", "true"])
+def test_a_manual_run_ignores_the_switch(workflow: str, tmp_path: Path, dry_run: str) -> None:
+    result, outputs = _resolve(
+        workflow,
+        tmp_path,
+        GITHUB_EVENT_NAME="workflow_dispatch",
+        GITHUB_REF="refs/tags/v2.28.0",
+        INPUT_TAG="v2.28.0",
+        INPUT_DRY_RUN=dry_run,
+        PREVIEW_PUBLISH="off",
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert outputs["build"] == "true"
+    assert outputs["dry-run"] == dry_run
+
+
+def test_the_switch_and_asset_removal_are_documented() -> None:
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    preview = preview_for_tag("v2.28.0rc1")
+
+    assert "`DESKTOP_PREVIEW_PUBLISH`" in guide
+    assert "gh release delete-asset <tag> <asset> --yes --repo zb-ss/servonaut" in guide
+    for asset in (preview.deb_asset, preview.sums_asset):
+        assert f"gh release delete-asset v2.28.0rc1 {asset} --yes --repo zb-ss/servonaut" in guide
 
 
 @pytest.mark.parametrize(
