@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -134,20 +135,275 @@ def test_only_the_packaged_desktop_runtime_passes(
         selftest._packaged_runtime(home, SimpleNamespace(product_version="2.27.0"))
 
 
+_VOICE_TARGET = "linux-x64-ubuntu-22.04"
+_VOICE_ROLES = ("uv", "wheel", "requirements")
+
+
+def _voice_file_names() -> dict[str, str]:
+    return {
+        "uv": "uv",
+        "wheel": "servonaut-2.27.0-py3-none-any.whl",
+        "requirements": "voice-requirements.txt",
+    }
+
+
+def _write_voice_manifest(voice: Path, **overrides: object) -> None:
+    """Pin every bundled file by its current digest, as the build does."""
+    document: dict[str, object] = {
+        "schema_version": 1,
+        "target": _VOICE_TARGET,
+        "python_version": "3.12.7",
+        "timeouts": {
+            "uv_command_seconds": 600,
+            "stall_seconds": 120,
+            "provision_seconds": 1800,
+        },
+    }
+    for role, name in _voice_file_names().items():
+        digest = hashlib.sha256((voice / name).read_bytes()).hexdigest()
+        document[role] = {"filename": name, "sha256": digest}
+    document.update(overrides)
+    (voice / "voice-runtime.json").write_text(json.dumps(document), encoding="utf-8")
+
+
+def _write_voice_files(voice: Path) -> None:
+    """Write the bundled voice inputs and the manifest that pins them."""
+    contents = {
+        "uv": b"\x7fELF" + bytes(range(256)) * 64,
+        "wheel": b"PK\x03\x04 product wheel stand-in",
+        "requirements": b"sherpa-onnx==1.0.0 --hash=sha256:" + b"0" * 64 + b"\n",
+    }
+    for role, name in _voice_file_names().items():
+        (voice / name).write_bytes(contents[role])
+    _write_voice_manifest(voice)
+
+
 def _voice_payload(tmp_path: Path) -> RuntimeLayout:
     runtime = _layout(
         tmp_path, kind=DistributionKind.PACKAGED_DESKTOP, home=tmp_path / "home"
     )
     voice = runtime.resource_root / "voice"
     voice.mkdir(parents=True)
-    (voice / "voice-runtime.json").write_text("{}", encoding="utf-8")
+    _write_voice_files(voice)
     return runtime
 
 
-def test_voice_payload_needs_only_its_directory_and_manifest(tmp_path: Path) -> None:
+def _replace_with_link(path: Path, target: Path | str) -> None:
+    path.unlink()
+    path.symlink_to(target)
+
+
+def _voice_file(runtime: RuntimeLayout, role: str) -> Path:
+    return runtime.resource_root / "voice" / _voice_file_names()[role]
+
+
+def test_voice_payload_is_verified_file_by_file(tmp_path: Path) -> None:
     runtime = _voice_payload(tmp_path)
 
-    assert selftest._require_voice_payload(runtime) == {"directory": True, "manifest": True}
+    assert selftest._verify_voice_payload(runtime) == {
+        "directory": True,
+        "manifest": True,
+        "target": _VOICE_TARGET,
+        "uv": True,
+        "wheel": True,
+        "requirements": True,
+    }
+
+
+def test_voice_files_are_hashed_in_bounded_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A large uv binary is streamed through the digest, never read at once."""
+    from servonaut.desktop.voice import runtime as voice_runtime
+
+    runtime = _voice_payload(tmp_path)
+    uv = _voice_file(runtime, "uv")
+    reads: list[int] = []
+    open_file = Path.open
+
+    class _RecordingReader:
+        def __init__(self, handle: io.BufferedReader) -> None:
+            self._handle = handle
+
+        def __enter__(self) -> _RecordingReader:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            self._handle.close()
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            return self._handle.read(size)
+
+    def recording_open(path: Path, *args: object, **kwargs: object) -> object:
+        handle = open_file(path, *args, **kwargs)  # type: ignore[arg-type]
+        return _RecordingReader(handle) if path == uv else handle
+
+    monkeypatch.setattr(voice_runtime, "_HASH_CHUNK_BYTES", 1024)
+    monkeypatch.setattr(Path, "open", recording_open)
+
+    selftest._verify_voice_payload(runtime)
+
+    assert uv.stat().st_size > 1024
+    assert len(reads) > 1
+    assert all(0 < size <= 1024 for size in reads)
+
+
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_tampered_voice_file_fails_its_digest(tmp_path: Path, role: str) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    path.write_bytes(path.read_bytes() + b"tampered")
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-digest$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_missing_voice_file_is_refused(tmp_path: Path, role: str) -> None:
+    runtime = _voice_payload(tmp_path)
+    _voice_file(runtime, role).unlink()
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+_POSIX_LINKS = pytest.mark.skipif(
+    os.name == "nt", reason="symlinks need privileges on Windows"
+)
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_voice_file_linked_within_the_resources_is_verified(
+    tmp_path: Path, role: str
+) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    moved = runtime.resource_root / "moved" / path.name
+    moved.parent.mkdir()
+    moved.write_bytes(path.read_bytes())
+    _replace_with_link(path, f"../moved/{path.name}")
+
+    assert selftest._verify_voice_payload(runtime)[role] is True
+
+    moved.write_bytes(moved.read_bytes() + b"tampered")
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-digest$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_voice_file_linked_outside_the_resources_is_refused_even_when_it_matches(
+    tmp_path: Path, role: str
+) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    outside = tmp_path / f"elsewhere-{path.name}"
+    outside.write_bytes(path.read_bytes())
+    _replace_with_link(path, outside)
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_voice_file_link_escaping_through_a_link_inside_is_refused(
+    tmp_path: Path, role: str
+) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    outside = tmp_path / f"elsewhere-{path.name}"
+    outside.write_bytes(path.read_bytes())
+    hop = runtime.resource_root / f"hop-{path.name}"
+    hop.symlink_to(outside)
+    _replace_with_link(path, f"../{hop.name}")
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+@pytest.mark.parametrize("kind", ["dangling", "loop", "directory"])
+def test_voice_file_link_to_no_regular_file_is_refused(
+    tmp_path: Path, role: str, kind: str
+) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    if kind == "dangling":
+        _replace_with_link(path, "missing-file")
+    elif kind == "loop":
+        _replace_with_link(path, path.name)
+    else:
+        (runtime.resource_root / "a-directory").mkdir()
+        _replace_with_link(path, "../a-directory")
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_voice_file_that_is_a_directory_is_refused(tmp_path: Path, role: str) -> None:
+    runtime = _voice_payload(tmp_path)
+    path = _voice_file(runtime, role)
+    path.unlink()
+    path.mkdir()
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"schema_version": 2},
+        {"target": "../elsewhere"},
+        {"uv": {"filename": "../uv", "sha256": "0" * 64}},
+        {"wheel": {"filename": "servonaut.zip", "sha256": "0" * 64}},
+        {"requirements": {"filename": "voice-requirements.txt", "sha256": "0" * 63}},
+        {"timeouts": {"uv_command_seconds": 60, "stall_seconds": 120, "provision_seconds": 1800}},
+        {"unexpected": True},
+    ],
+    ids=[
+        "schema-version",
+        "target",
+        "uv-filename",
+        "wheel-filename",
+        "requirements-digest",
+        "timeouts-order",
+        "unknown-key",
+    ],
+)
+def test_manifest_the_app_would_reject_fails_the_self_test(
+    tmp_path: Path, overrides: dict[str, object]
+) -> None:
+    """The app's own manifest reader decides, including rules only it knows."""
+    runtime = _voice_payload(tmp_path)
+    _write_voice_manifest(runtime.resource_root / "voice", **overrides)
+
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-manifest$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@pytest.mark.parametrize("content", [b"", b"{", b"[]", b"\xff\xfe", b" " * (64 * 1024 + 1)])
+def test_unreadable_manifest_fails_the_self_test(tmp_path: Path, content: bytes) -> None:
+    runtime = _voice_payload(tmp_path)
+    (runtime.resource_root / "voice" / "voice-runtime.json").write_bytes(content)
+
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-manifest$"):
+        selftest._verify_voice_payload(runtime)
+
+
+def test_voice_result_reports_the_manifest_target_for_the_smoke_runner(
+    tmp_path: Path,
+) -> None:
+    """The runtime has no build target; the runner compares the reported one."""
+    runtime = _voice_payload(tmp_path)
+    _write_voice_manifest(runtime.resource_root / "voice", target="macos-arm64")
+
+    assert selftest._verify_voice_payload(runtime)["target"] == "macos-arm64"
 
 
 @pytest.mark.parametrize("remove", ["manifest", "directory"])
@@ -156,30 +412,43 @@ def test_missing_voice_payload_has_its_own_code(tmp_path: Path, remove: str) -> 
     voice = runtime.resource_root / "voice"
     (voice / "voice-runtime.json").unlink()
     if remove == "directory":
+        for entry in voice.iterdir():
+            entry.unlink()
         voice.rmdir()
 
-    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
-        selftest._require_voice_payload(runtime)
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-payload$"):
+        selftest._verify_voice_payload(runtime)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
-def test_symlinked_voice_manifest_is_refused(tmp_path: Path) -> None:
+@_POSIX_LINKS
+def test_voice_manifest_linked_outside_the_resources_is_refused(tmp_path: Path) -> None:
     runtime = _voice_payload(tmp_path)
     manifest = runtime.resource_root / "voice" / "voice-runtime.json"
     outside = tmp_path / "elsewhere.json"
-    outside.write_text("{}", encoding="utf-8")
+    outside.write_bytes(manifest.read_bytes())
     manifest.unlink()
     manifest.symlink_to(outside)
 
-    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
-        selftest._require_voice_payload(runtime)
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-payload$"):
+        selftest._verify_voice_payload(runtime)
 
 
 def _app_bundle_voice_payload(tmp_path: Path, contents: Path) -> RuntimeLayout:
-    """A macOS app bundle: code in Contents/Frameworks, data in Contents/Resources."""
+    """A macOS app bundle: code in Contents/Frameworks, data in Contents/Resources.
+
+    uv is Mach-O, so it stays a real file in Frameworks/voice; the manifest,
+    the wheel and the requirements are data in Resources/voice, linked into
+    Frameworks/voice file by file.
+    """
     frameworks = contents / "Frameworks"
     (frameworks / "voice").mkdir(parents=True)
-    (contents / "Resources" / "voice").mkdir(parents=True)
+    resources_voice = contents / "Resources" / "voice"
+    resources_voice.mkdir(parents=True)
+    _write_voice_files(resources_voice)
+    names = _voice_file_names()
+    (resources_voice / names["uv"]).rename(frameworks / "voice" / names["uv"])
+    for name in ("voice-runtime.json", names["wheel"], names["requirements"]):
+        (frameworks / "voice" / name).symlink_to(f"../../Resources/voice/{name}")
     return _layout(
         tmp_path,
         kind=DistributionKind.PACKAGED_DESKTOP,
@@ -189,41 +458,76 @@ def _app_bundle_voice_payload(tmp_path: Path, contents: Path) -> RuntimeLayout:
     )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
-def test_app_bundle_voice_manifest_links_into_its_resources(tmp_path: Path) -> None:
+@_POSIX_LINKS
+def test_app_bundle_voice_files_link_into_its_resources(tmp_path: Path) -> None:
     contents = tmp_path / "Servonaut.app" / "Contents"
     runtime = _app_bundle_voice_payload(tmp_path, contents)
-    (contents / "Resources" / "voice" / "voice-runtime.json").write_text("{}", encoding="utf-8")
-    (contents / "Frameworks" / "voice" / "voice-runtime.json").symlink_to(
-        "../../Resources/voice/voice-runtime.json"
-    )
 
-    assert selftest._require_voice_payload(runtime) == {"directory": True, "manifest": True}
+    assert selftest._verify_voice_payload(runtime) == {
+        "directory": True,
+        "manifest": True,
+        "target": _VOICE_TARGET,
+        "uv": True,
+        "wheel": True,
+        "requirements": True,
+    }
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+@_POSIX_LINKS
+def test_app_bundle_hashes_the_linked_file_in_its_resources(tmp_path: Path) -> None:
+    contents = tmp_path / "Servonaut.app" / "Contents"
+    runtime = _app_bundle_voice_payload(tmp_path, contents)
+    wheel = contents / "Resources" / "voice" / _voice_file_names()["wheel"]
+    wheel.write_bytes(wheel.read_bytes() + b"tampered")
+
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-wheel-digest$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@_POSIX_LINKS
 def test_voice_manifest_link_must_stay_in_the_bundle_resources(tmp_path: Path) -> None:
     contents = tmp_path / "Servonaut.app" / "Contents"
     runtime = _app_bundle_voice_payload(tmp_path, contents)
-    outside = tmp_path / "Resources" / "voice-runtime.json"
-    outside.parent.mkdir()
-    outside.write_text("{}", encoding="utf-8")
-    (contents / "Frameworks" / "voice" / "voice-runtime.json").symlink_to(outside)
+    decoy = tmp_path / "Resources" / "voice-runtime.json"
+    decoy.parent.mkdir()
+    decoy.write_bytes((contents / "Resources" / "voice" / "voice-runtime.json").read_bytes())
+    _replace_with_link(contents / "Frameworks" / "voice" / "voice-runtime.json", decoy)
 
-    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
-        selftest._require_voice_payload(runtime)
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-payload$"):
+        selftest._verify_voice_payload(runtime)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+@_POSIX_LINKS
+@pytest.mark.parametrize("role", _VOICE_ROLES)
+def test_app_bundle_voice_file_link_must_stay_in_the_bundle_resources(
+    tmp_path: Path, role: str
+) -> None:
+    contents = tmp_path / "Servonaut.app" / "Contents"
+    runtime = _app_bundle_voice_payload(tmp_path, contents)
+    linked = contents / "Frameworks" / "voice" / _voice_file_names()[role]
+    decoy = tmp_path / "Resources" / linked.name
+    decoy.parent.mkdir()
+    decoy.write_bytes(linked.read_bytes())
+    _replace_with_link(linked, decoy)
+
+    with pytest.raises(cli_selftest._SelftestFailure, match=f"^voice-{role}-file$"):
+        selftest._verify_voice_payload(runtime)
+
+
+@_POSIX_LINKS
 def test_a_linked_voice_directory_is_refused(tmp_path: Path) -> None:
     contents = tmp_path / "Servonaut.app" / "Contents"
     runtime = _app_bundle_voice_payload(tmp_path, contents)
-    (contents / "Resources" / "voice" / "voice-runtime.json").write_text("{}", encoding="utf-8")
+    (contents / "Resources" / "voice" / "uv").write_bytes(
+        (contents / "Frameworks" / "voice" / "uv").read_bytes()
+    )
+    for entry in (contents / "Frameworks" / "voice").iterdir():
+        entry.unlink()
     (contents / "Frameworks" / "voice").rmdir()
     (contents / "Frameworks" / "voice").symlink_to("../Resources/voice")
 
-    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
-        selftest._require_voice_payload(runtime)
+    with pytest.raises(cli_selftest._SelftestFailure, match="^voice-payload$"):
+        selftest._verify_voice_payload(runtime)
 
 
 def test_resources_need_notices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,7 +626,7 @@ def test_isolated_check_runs_one_real_session_through_the_child(
     monkeypatch.setattr(selftest, "_packaged_runtime", source_runtime)
     monkeypatch.setattr(selftest, "_import_desktop_stack", lambda: None)
     monkeypatch.setattr(selftest, "_verify_resources", lambda _runtime: {"frontend": True})
-    monkeypatch.setattr(selftest, "_require_voice_payload", lambda _runtime: {"manifest": True})
+    _voice_payload(tmp_path)
     before = dict(os.environ)
 
     result = selftest._run_isolated_check(SimpleNamespace(), "desktop")
@@ -347,6 +651,14 @@ def test_isolated_check_runs_one_real_session_through_the_child(
         "session_rendered": True,
         "session_answered": True,
         "child_exited": True,
+    }
+    assert result["voice"] == {
+        "directory": True,
+        "manifest": True,
+        "target": _VOICE_TARGET,
+        "uv": True,
+        "wheel": True,
+        "requirements": True,
     }
     assert result["fixtures"] == {"config": True, "cache": True}
     assert dict(os.environ) == before
@@ -424,7 +736,7 @@ def _stub_steps(
     monkeypatch.setattr(selftest, "_packaged_runtime", packaged_runtime)
     monkeypatch.setattr(selftest, "_import_desktop_stack", lambda: None)
     monkeypatch.setattr(selftest, "_verify_resources", lambda _runtime: {"frontend": True})
-    monkeypatch.setattr(selftest, "_require_voice_payload", lambda _runtime: {"manifest": True})
+    monkeypatch.setattr(selftest, "_verify_voice_payload", lambda _runtime: {"manifest": True})
     monkeypatch.setattr(selftest, "_bootstrap_host", bootstrap)
     return temporary
 

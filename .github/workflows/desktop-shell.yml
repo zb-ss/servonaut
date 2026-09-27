@@ -215,7 +215,8 @@ jobs:
             --output "${EVIDENCE_DIR}/inspection-report-${TARGET}.json"
 
       # --selftest runs the packaged GUI self-test headlessly: desktop imports,
-      # bundled resources, the presence of the voice bundle and one
+      # bundled resources, the voice bundle checked file by file against its
+      # manifest (and the manifest against this target), and one
       # authenticated session through the real child. Opening the native
       # window needs a display, so --selftest-window stays off on these runners.
       - name: Run policy-bound smoke checks
