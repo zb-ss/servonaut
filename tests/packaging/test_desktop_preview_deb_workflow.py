@@ -770,3 +770,114 @@ def test_the_user_guide_matches_the_published_names() -> None:
     assert f"`{preview.debian_version}`" in section
     assert "does **not** update itself yet" in section
     assert "**preview**" in section
+
+
+# A stand-in for gh: the release is a directory of assets.
+_GH_STUB = r"""
+gh() {
+  printf '%s\n' "$*" >> "${TEST_GH_LOG}"
+  case "$1 $2" in
+    "release upload")
+      shift 3
+      for file in "$@"; do
+        [ "${file}" = "--clobber" ] && continue
+        cp "${file}" "${TEST_RELEASE}/"
+        if [ -n "${TEST_CORRUPT:-}" ]; then printf 'x' >> "${TEST_RELEASE}/$(basename "${file}")"; fi
+      done
+      if [ -n "${TEST_DROP:-}" ]; then rm "${TEST_RELEASE}/${TEST_DROP}"; fi
+      ;;
+    "api repos/"*)
+      ls -1 "${TEST_RELEASE}"
+      ;;
+    "release download")
+      local dir="" names=()
+      shift 3
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --dir) dir="$2"; shift 2 ;;
+          --pattern) names+=("$2"); shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      for name in "${names[@]}"; do cp "${TEST_RELEASE}/${name}" "${dir}/"; done
+      ;;
+    *) return 1 ;;
+  esac
+}
+"""
+
+
+def _upload(workflow: str, tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    preview = preview_for_tag("v2.28.0rc1")
+    workspace = tmp_path / "workspace"
+    (workspace / "preview").mkdir(parents=True)
+    deb = workspace / "preview" / preview.deb_asset
+    deb.write_bytes(b"qualified package")
+    (workspace / "preview" / preview.sums_asset).write_text(
+        f"{hashlib.sha256(deb.read_bytes()).hexdigest()}  {preview.deb_asset}\n",
+        encoding="utf-8",
+    )
+    release = tmp_path / "release"
+    release.mkdir()
+    for name in ("notes.txt", preview.deb_asset, preview.sums_asset):
+        (release / name).write_text("published earlier\n", encoding="utf-8")
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / "assets-before").write_text(
+        "".join(f"{path.name}\n" for path in sorted(release.iterdir())), encoding="utf-8"
+    )
+    return subprocess.run(
+        ["bash", "-c", _GH_STUB + _script(workflow, "Upload the preview to the release")],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "GH_REPO": "example/project",
+            "TAG": preview.tag,
+            "DEB_ASSET": preview.deb_asset,
+            "SUMS_ASSET": preview.sums_asset,
+            "TEST_RELEASE": str(release),
+            "TEST_GH_LOG": str(tmp_path / "gh.log"),
+            **env,
+        },
+    )
+
+
+def test_the_upload_replaces_its_assets_and_checks_what_users_download(
+    workflow: str, tmp_path: Path
+) -> None:
+    result = _upload(workflow, tmp_path)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    preview = preview_for_tag("v2.28.0rc1")
+    release = tmp_path / "release"
+    assert sorted(path.name for path in release.iterdir()) == sorted(
+        ["notes.txt", preview.deb_asset, preview.sums_asset]
+    )
+    assert (release / "notes.txt").read_text(encoding="utf-8") == "published earlier\n"
+    assert (release / preview.deb_asset).read_bytes() == b"qualified package"
+    calls = (tmp_path / "gh.log").read_text(encoding="utf-8").splitlines()
+    assert calls[0] == (
+        f"release upload v2.28.0rc1 preview/{preview.deb_asset} "
+        f"preview/{preview.sums_asset} --clobber"
+    )
+    assert not any("delete" in call for call in calls)
+
+
+def test_the_upload_fails_if_another_asset_disappeared(workflow: str, tmp_path: Path) -> None:
+    result = _upload(workflow, tmp_path, TEST_DROP="notes.txt")
+
+    assert result.returncode == 1
+    assert "::error::The upload removed another asset of v2.28.0rc1." in result.stdout
+
+
+def test_the_upload_fails_if_the_published_package_does_not_match(
+    workflow: str, tmp_path: Path
+) -> None:
+    result = _upload(workflow, tmp_path, TEST_CORRUPT="1")
+
+    assert result.returncode != 0
+    assert "FAILED" in result.stdout + result.stderr
