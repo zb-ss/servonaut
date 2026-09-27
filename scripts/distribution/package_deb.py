@@ -47,6 +47,14 @@ REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     "servonaut-runtime.json",
 )
 
+# The launcher's AppArmor profile, a conffile the maintainer scripts load. Its
+# template names the launcher under this placeholder for the install root.
+APPARMOR_PROFILE_PATH = "/etc/apparmor.d/servonaut-desktop"
+_INSTALL_ROOT_PLACEHOLDER = "@INSTALL_ROOT@"
+# Installing or upgrading AppArmor touches its abi files; the trigger runs the
+# postinst again then, so the profile follows the AppArmor that is present.
+APPARMOR_TRIGGER = "interest-noawait /etc/apparmor.d/abi"
+
 # dpkg's own unpacker rejects the PAX extended headers Python's default tar
 # format writes for a long symlink target or a non-ASCII name, so both
 # archives use the GNU format, as dpkg-deb itself does.
@@ -78,6 +86,15 @@ def _validate_maintainer(maintainer: str) -> None:
         )
 
 
+def render_apparmor_profile(template: str, install_root: str) -> str:
+    """Name the launcher under *install_root* in the AppArmor profile template."""
+    if _INSTALL_ROOT_PLACEHOLDER not in template:
+        raise DebPackagingError(
+            f"AppArmor profile template does not name the launcher via {_INSTALL_ROOT_PLACEHOLDER}"
+        )
+    return template.replace(_INSTALL_ROOT_PLACEHOLDER, install_root)
+
+
 def _format_ar_member(name: str, data: bytes, mtime: int) -> bytes:
     """Format a single ar member header and padded content."""
     header = (
@@ -105,6 +122,8 @@ def _build_control_tar(
     postinst_content: str,
     postrm_content: str,
     md5sums_content: str,
+    conffiles: Sequence[str],
+    triggers: Sequence[str],
     epoch: int,
 ) -> bytes:
     """Construct the control.tar.gz archive in memory."""
@@ -140,12 +159,16 @@ def _build_control_tar(
     postinst_bytes = postinst_content.encode("utf-8")
     postrm_bytes = postrm_content.encode("utf-8")
     md5_bytes = md5sums_content.encode("utf-8")
+    conffiles_bytes = "".join(f"{path}\n" for path in conffiles).encode("utf-8")
+    triggers_bytes = "".join(f"{line}\n" for line in triggers).encode("utf-8")
 
     members = [
         ("./control", 0o644, control_bytes),
+        ("./conffiles", 0o644, conffiles_bytes),
         ("./md5sums", 0o644, md5_bytes),
         ("./postinst", 0o755, postinst_bytes),
         ("./postrm", 0o755, postrm_bytes),
+        ("./triggers", 0o644, triggers_bytes),
     ]
 
     bio = io.BytesIO()
@@ -192,12 +215,15 @@ def package_deb(
     copyright_file: Optional[Path | str] = None,
     postinst_file: Optional[Path | str] = None,
     postrm_file: Optional[Path | str] = None,
+    apparmor_profile_file: Optional[Path | str] = None,
     package_name: str = "servonaut",
     filename: Optional[str] = None,
 ) -> tuple[Path, str, int]:
     """Package a multi-executable desktop onedir payload into a standard Debian (.deb) package.
 
     Payload symbolic links are packaged as links and must resolve inside the payload.
+    The launcher's AppArmor profile is rendered for ``/opt/{package_name}`` and
+    installed as a conffile.
 
     Returns:
         tuple[Path, str, int]: (deb_path, sha256_hex, byte_size)
@@ -234,6 +260,11 @@ def package_deb(
     copy_path = Path(copyright_file) if copyright_file else _DEB_TEMPLATE_DIR / "copyright"
     pinst_path = Path(postinst_file) if postinst_file else _DEB_TEMPLATE_DIR / "postinst"
     prm_path = Path(postrm_file) if postrm_file else _DEB_TEMPLATE_DIR / "postrm"
+    aa_path = (
+        Path(apparmor_profile_file)
+        if apparmor_profile_file
+        else _DEB_TEMPLATE_DIR / "servonaut-desktop.apparmor"
+    )
 
     if not desk_path.is_file():
         raise FileNotFoundError(f"Desktop launcher template missing: {desk_path}")
@@ -245,12 +276,17 @@ def package_deb(
         raise FileNotFoundError(f"postinst script missing: {pinst_path}")
     if not prm_path.is_file():
         raise FileNotFoundError(f"postrm script missing: {prm_path}")
+    if not aa_path.is_file():
+        raise FileNotFoundError(f"AppArmor profile template missing: {aa_path}")
 
     desktop_bytes = desk_path.read_bytes()
     icon_bytes = ic_path.read_bytes()
     copyright_bytes = copy_path.read_bytes()
     postinst_content = pinst_path.read_text(encoding="utf-8")
     postrm_content = prm_path.read_text(encoding="utf-8")
+    apparmor_bytes = render_apparmor_profile(
+        aa_path.read_text(encoding="utf-8"), f"/opt/{package_name}"
+    ).encode("utf-8")
 
     payload_entries = walk_payload(src_dir)
 
@@ -263,6 +299,8 @@ def package_deb(
     # Collect all directories and files for data.tar.gz
     dirs_to_add: set[str] = {
         "./",
+        "./etc",
+        "./etc/apparmor.d",
         "./opt",
         f"./opt/{package_name}",
         "./usr",
@@ -383,7 +421,20 @@ def package_deb(
                 f"usr/share/doc/{package_name}/copyright",
             ))
 
-            # 6. Add symlinks in /usr/bin/
+            # 6. Add the launcher's AppArmor profile. dpkg tracks a conffile's
+            # checksum itself, so md5sums leaves it out.
+            ti_aa = tarfile.TarInfo(name=f".{APPARMOR_PROFILE_PATH}")
+            ti_aa.size = len(apparmor_bytes)
+            ti_aa.mode = 0o644
+            ti_aa.mtime = epoch
+            ti_aa.uid = 0
+            ti_aa.gid = 0
+            ti_aa.uname = "root"
+            ti_aa.gname = "root"
+            tar.addfile(ti_aa, io.BytesIO(apparmor_bytes))
+            total_uncompressed_bytes += len(apparmor_bytes)
+
+            # 7. Add symlinks in /usr/bin/
             for bin_name in ("servonaut", "servonaut-desktop"):
                 ti_sym = tarfile.TarInfo(name=f"./usr/bin/{bin_name}")
                 ti_sym.type = tarfile.SYMTYPE
@@ -417,6 +468,8 @@ def package_deb(
         postinst_content=postinst_content,
         postrm_content=postrm_content,
         md5sums_content=md5sums_content,
+        conffiles=(APPARMOR_PROFILE_PATH,),
+        triggers=(APPARMOR_TRIGGER,),
         epoch=epoch,
     )
 
