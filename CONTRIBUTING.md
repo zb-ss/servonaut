@@ -58,6 +58,15 @@ in-app update check never offers one to a stable installation. Desktop previews
 must be marked as GitHub prereleases; they do not publish to PyPI or the MCP
 registry. Experimental CI artifacts are not stable downloads.
 
+Every published `vX.Y.Z` release and `vX.Y.ZrcN` candidate also gets a Linux
+desktop preview `.deb`, built from the release's tag commit and qualified by
+the Desktop preview .deb workflow before it is attached, with its
+`SHA256SUMS` and a build-provenance attestation. That workflow is separate
+from the PyPI publish and never holds it back. Re-running it replaces only its
+own two assets; run it on the tag itself
+(`gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z`), or add
+`-f dry_run=true` to build and qualify without attaching anything.
+
 Binary release candidates (standalone CLI archives and desktop installers)
 are assembled and verified by the Release candidate workflow, separately from
 the Python release candidates described under Releasing below.

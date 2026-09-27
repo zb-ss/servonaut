@@ -148,6 +148,57 @@ of the previous one first. `servonaut --list-backups` lists your
 configuration backups, and `servonaut --restore-backup N` restores one; a
 restored backup does not contain changes you made later.
 
+## Linux desktop preview
+
+Every release and release candidate on the
+[GitHub releases page](https://github.com/zb-ss/servonaut/releases) also
+carries a preview of the Servonaut desktop app for Ubuntu on 64-bit x86
+(amd64), attached a little while after the release is published:
+
+- `servonaut-desktop-preview_<version>_amd64.deb`, the package;
+- `servonaut-desktop-preview_<version>_SHA256SUMS`, its checksum.
+
+The desktop app is a **preview**: it is not released yet, and each package is
+for trying the desktop app out and reporting problems. It is built on Ubuntu
+22.04 and must pass its self-test, open its window and install cleanly before
+it is attached.
+
+Check the download before you install it. Both commands must succeed; the
+second needs the [GitHub CLI](https://cli.github.com/):
+
+```bash
+sha256sum -c servonaut-desktop-preview_2.28.0rc1_SHA256SUMS
+gh attestation verify servonaut-desktop-preview_2.28.0rc1_amd64.deb --repo zb-ss/servonaut
+```
+
+The attestation shows that the package was built by a workflow in this
+repository, and records the commit it was built from.
+
+Install it with apt, which also installs the system libraries it needs:
+
+```bash
+sudo apt install ./servonaut-desktop-preview_2.28.0rc1_amd64.deb
+```
+
+Start **Servonaut** from your applications menu, or run `servonaut-desktop`.
+The package is named `servonaut` and also provides the `servonaut` command;
+if you installed Servonaut with pipx as well, `which servonaut` shows which
+one your shell runs. Both use your configuration in `~/.servonaut/`.
+
+A candidate's package version is `2.28.0~rc1`, so apt counts the release
+`2.28.0` as newer and installs it over the candidate as an upgrade.
+
+An installed preview does **not** update itself yet. To move to a newer
+candidate or release, download its package and install it the same way.
+
+To remove it:
+
+```bash
+sudo apt remove servonaut
+```
+
+Removing the package keeps your configuration and data in `~/.servonaut/`.
+
 ## Report a problem
 
 Open an issue at
