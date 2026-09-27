@@ -319,3 +319,112 @@ def test_the_report_names_the_host_it_ran_on(
         os_release.write_text(content)
 
     assert window_smoke.host_platform(os_release) == expected
+
+
+# macOS: the same smoke, from the executable inside the app bundle, in the
+# login session. These run the macOS code paths against stand-ins on Linux.
+
+
+def _fake_screencapture(tmp_path: Path) -> dict[str, str]:
+    """A ``screencapture`` stand-in that writes the file it is given, silently."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    program = tools / "screencapture"
+    program.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "assert sys.argv[1:2] == ['-x']\n"
+        "Path(sys.argv[2]).write_bytes(b'\\x89PNG macOS')\n"
+    )
+    program.chmod(0o755)
+    return {"PATH": f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+
+def test_a_macos_window_needs_no_x_display_and_is_photographed_with_screencapture(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(window_smoke.platform, "mac_ver", lambda: ("15.6", ("", "", ""), "arm64"))
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+    screenshot = tmp_path / "shots" / "window.png"
+
+    report = window_smoke.run_window_smoke(
+        payload,
+        "macos-arm64",
+        policy,
+        screenshot=screenshot,
+        inherited=_fake_screencapture(tmp_path),
+        system="darwin",
+    )
+
+    assert report.session_connected is True
+    assert report.host_platform == "macos-15.6"
+    assert screenshot.read_bytes() == b"\x89PNG macOS"
+    assert report.process_tree_exited is True
+
+
+def test_a_macos_window_needs_its_photograph(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy
+) -> None:
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+
+    with pytest.raises(window_smoke.WindowSmokeError, match="photographed with screencapture"):
+        window_smoke.run_window_smoke(
+            payload,
+            "macos-x64",
+            policy,
+            screenshot=tmp_path / "w.png",
+            inherited={"PATH": str(tmp_path / "empty")},
+            system="darwin",
+        )
+
+
+def test_the_macos_environment_is_isolated_without_display_variables(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    environment = window_smoke.window_environment(
+        home, {"DISPLAY": ":99", "AWS_PROFILE": "prod"}, system="darwin"
+    )
+
+    assert environment["HOME"] == str(home)
+    assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert "DISPLAY" not in environment
+    assert "XDG_RUNTIME_DIR" not in environment
+    assert "AWS_PROFILE" not in environment
+
+
+def test_ps_output_maps_live_processes_to_their_parents() -> None:
+    listing = "\n".join(
+        [
+            "    1     0 Ss",
+            "  410     1 S",
+            "  411   410 R+",
+            "  412   410 Z",
+            "  bad line",
+            "",
+        ]
+    )
+
+    assert window_smoke.parse_ps_parents(listing) == {1: 0, 410: 1, 411: 410}
+
+
+def test_without_proc_the_process_list_comes_from_ps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(window_smoke, "_ps_listing", lambda: "  20     1 S\n  21    20 S\n")
+
+    assert window_smoke.process_parents(tmp_path / "no-proc") == {20: 1, 21: 20}
+
+
+@pytest.mark.parametrize(("version", "expected"), [("15.6.1", "macos-15.6.1"), ("", "unknown")])
+def test_the_report_names_the_macos_release(
+    monkeypatch: pytest.MonkeyPatch, version: str, expected: str
+) -> None:
+    monkeypatch.setattr(window_smoke.platform, "mac_ver", lambda: (version, ("", "", ""), ""))
+
+    assert window_smoke.host_platform(system="darwin") == expected
+
+
+def test_the_policy_covers_the_macos_app_targets() -> None:
+    assert {"macos-x64", "macos-arm64"} <= load_desktop_smoke_policy().window_smoke_targets

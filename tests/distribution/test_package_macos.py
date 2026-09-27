@@ -98,13 +98,14 @@ class TestAssembleAppBundle:
         assert plist_data["NSHighResolutionCapable"] is True
         assert "NSMicrophoneUsageDescription" in plist_data
 
-        # Binaries inside Contents/MacOS/
+        # Executables in Contents/MacOS, the payload's contents in Contents/Frameworks
         macos_dir = contents_dir / "MacOS"
         assert (macos_dir / "servonaut-desktop").is_file()
         assert (macos_dir / "servonaut-desktop-child").is_file()
         assert (macos_dir / "servonaut").is_file()
         assert (macos_dir / "servonaut-runtime.json").is_file()
-        assert (macos_dir / "_internal" / "lib" / "libtest.dylib").is_file()
+        assert not (macos_dir / "_internal").exists()
+        assert (contents_dir / "Frameworks" / "lib" / "libtest.dylib").is_file()
 
         # Modes
         assert bool(
@@ -119,6 +120,9 @@ class TestAssembleAppBundle:
             (macos_dir / "servonaut-runtime.json").stat().st_mode
             & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         )
+        assert plist_data["CFBundleInfoDictionaryVersion"] == "6.0"
+        for metadata in (pkg_info, plist_file):
+            assert metadata.stat().st_mode & 0o777 == 0o644
 
         # Resources / AppIcon.icns
         assert (contents_dir / "Resources" / "AppIcon.icns").is_file()
@@ -314,6 +318,41 @@ class TestCLIExecution:
         assert "Simulated macOS DMG placeholder written:" in captured.out
         assert "SHA-256:" in captured.out
 
+    def test_cli_app_only_assembles_the_bundle_without_an_image(
+        self, mock_payload: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out_dir = tmp_path / "out"
+        ret = main([
+            "--payload-dir",
+            str(mock_payload),
+            "--output-dir",
+            str(out_dir),
+            "--version",
+            "2.26.3",
+            "--arch",
+            "macos-arm64",
+            "--app-only",
+        ])
+
+        assert ret == 0
+        assert sorted(path.name for path in out_dir.iterdir()) == ["Servonaut.app"]
+        assert "macOS app bundle assembled:" in capsys.readouterr().out
+
+    def test_cli_app_only_needs_a_payload(self, tmp_path: Path) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "--app-bundle",
+                str(tmp_path / "Servonaut.app"),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--version",
+                "2.26.3",
+                "--arch",
+                "macos-arm64",
+                "--app-only",
+            ])
+        assert excinfo.value.code == 2
+
     def test_cli_package_macos_failure(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -355,11 +394,14 @@ class TestPayloadLinks:
             product_version="2.26.3",
         )
 
-        internal = app_path / "Contents" / "MacOS" / "_internal"
-        assert (internal / "libtest.dylib").is_symlink()
-        assert os.readlink(internal / "libtest.dylib") == "lib/libtest.dylib"
-        assert (internal / "lib-current").is_symlink()
-        assert os.readlink(internal / "lib-current") == "lib"
+        # Links at the top of the contents directory exist on both sides.
+        for side in ("Frameworks", "Resources"):
+            contents = app_path / "Contents" / side
+            assert (contents / "libtest.dylib").is_symlink()
+            assert os.readlink(contents / "libtest.dylib") == "lib/libtest.dylib"
+            assert (contents / "lib-current").is_symlink()
+            assert os.readlink(contents / "lib-current") == "lib"
+            assert (contents / "libtest.dylib").is_file()
 
     def test_assemble_rejects_link_leaving_the_payload(
         self, mock_payload: Path, tmp_path: Path
@@ -389,7 +431,7 @@ class TestPayloadLinks:
         )
 
         members = _simulated_image_members(image_path)
-        link = members["Servonaut.app/Contents/MacOS/_internal/lib-current"]
+        link = members["Servonaut.app/Contents/Frameworks/lib-current"]
         assert link.issym() and link.linkname == "lib"
         assert members["Applications"].issym()
         assert members["Applications"].linkname == "/Applications"
