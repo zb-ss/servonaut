@@ -32,7 +32,8 @@ _PIN_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9._+!-]*)"
     r"(?:\s*;\s*(.+?))?\s*\\?$"
 )
-_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# A release, or a release candidate (X.Y.ZrcN) built from its release branch.
+_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:rc[1-9][0-9]*)?$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PYTHON_VERSION_RE = re.compile(r"^([0-9]+)\.([0-9]+)$")
 _POLICY_KEYS = frozenset({"schema_version", "python_version", "limits"})

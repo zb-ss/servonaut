@@ -17,6 +17,7 @@ from scripts.distribution.package_deb import (
     DEFAULT_DEPENDENCIES,
     REQUIRED_PAYLOAD_FILES,
     DebPackagingError,
+    debian_version,
     main,
     package_deb,
 )
@@ -694,6 +695,106 @@ class TestDebMaintainer:
                 output_dir=tmp_path / "out",
                 product_version="2.26.3",
             )
+
+
+def _control_text(deb_path: Path) -> str:
+    control_tar_data = _parse_ar_archive(deb_path)[1][5]
+    with tarfile.open(fileobj=io.BytesIO(control_tar_data), mode="r:gz") as tar:
+        control = tar.extractfile("./control")
+        assert control is not None
+        return control.read().decode("utf-8")
+
+
+class TestDebVersion:
+    """A release candidate installs as older than the release it leads up to."""
+
+    @pytest.mark.parametrize(
+        ("product_version", "expected"),
+        [
+            ("2.28.0", "2.28.0"),
+            ("2.28.0rc1", "2.28.0~rc1"),
+            ("10.0.12rc23", "10.0.12~rc23"),
+            ("0.0.0", "0.0.0"),
+        ],
+    )
+    def test_debian_version_of_a_release_or_candidate(
+        self, product_version: str, expected: str
+    ) -> None:
+        assert debian_version(product_version) == expected
+
+    @pytest.mark.parametrize(
+        "product_version",
+        [
+            "",
+            "2.28",
+            "v2.28.0",
+            "2.28.0rc0",
+            "2.28.0-rc1",
+            "2.28.0.rc1",
+            "2.28.0~rc1",
+            "2.28.0a1",
+            "2.28.0.dev1",
+            "2.28.0-preview.1",
+            "02.28.0",
+            "2.28.0rc1\n",
+        ],
+    )
+    def test_other_versions_are_refused(self, product_version: str) -> None:
+        with pytest.raises(DebPackagingError, match="X.Y.ZrcN"):
+            debian_version(product_version)
+
+    def test_a_candidate_is_packaged_with_its_debian_version(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        deb_path, _, _ = package_deb(
+            payload_dir=mock_payload,
+            maintainer=_MAINTAINER,
+            output_dir=tmp_path / "out",
+            product_version="2.28.0rc1",
+        )
+
+        assert deb_path.name == "servonaut_2.28.0~rc1_amd64.deb"
+        assert "Version: 2.28.0~rc1\n" in _control_text(deb_path)
+
+    def test_a_revision_follows_the_candidate_version(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        deb_path, _, _ = package_deb(
+            payload_dir=mock_payload,
+            maintainer=_MAINTAINER,
+            output_dir=tmp_path / "out",
+            product_version="2.28.0rc1",
+            packaging_revision=2,
+        )
+
+        assert "Version: 2.28.0~rc1-2\n" in _control_text(deb_path)
+
+    def test_an_invalid_version_writes_nothing(self, mock_payload: Path, tmp_path: Path) -> None:
+        with pytest.raises(DebPackagingError):
+            package_deb(
+                payload_dir=mock_payload,
+                maintainer=_MAINTAINER,
+                output_dir=tmp_path / "out",
+                product_version="2.28.0-rc1",
+            )
+        assert not (tmp_path / "out").exists()
+
+    @pytest.mark.skipif(shutil.which("dpkg") is None, reason="dpkg not installed")
+    @pytest.mark.parametrize(
+        ("older", "newer"),
+        [
+            ("2.28.0rc1", "2.28.0rc2"),
+            ("2.28.0rc2", "2.28.0"),
+            ("2.28.0rc9", "2.28.0rc10"),
+            ("2.27.0", "2.28.0rc1"),
+            ("2.28.0", "2.28.1rc1"),
+        ],
+    )
+    def test_dpkg_orders_candidates_before_their_release(self, older: str, newer: str) -> None:
+        subprocess.run(
+            ["dpkg", "--compare-versions", debian_version(older), "lt", debian_version(newer)],
+            check=True,
+        )
 
 
 class TestDebPackagingAssets:

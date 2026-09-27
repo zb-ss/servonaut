@@ -23,6 +23,7 @@ from scripts.standalone_cli.wheel_tools import (
     WheelToolRequest,
     _parse_lock_pins,
     _pump_stage_stream,
+    _read_project_version,
     _PumpState,
     _run_stage,
     _StageResult,
@@ -222,6 +223,48 @@ def test_build_report_requires_one_matching_verified_wheel(tmp_path: Path) -> No
 
     assert actual_wheel == wheel
     assert actual_hash == wheel_hash
+
+
+def _write_project(path: Path, version: str) -> Path:
+    path.write_text(
+        f'[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n\n'
+        f'[project]\nname = "servonaut"\nversion = "{version}"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("version", ["2.28.0", "2.28.0rc1", "2.28.0rc12"])
+def test_project_version_may_be_a_release_or_a_release_candidate(
+    tmp_path: Path, version: str
+) -> None:
+    project = _write_project(tmp_path / "pyproject.toml", version)
+
+    assert _read_project_version(project, LIMITS.max_metadata_bytes) == version
+
+
+@pytest.mark.parametrize(
+    "version", ["2.28", "2.28.0rc0", "2.28.0-rc1", "2.28.0.rc1", "2.28.0a1", "2.28.0.dev1"]
+)
+def test_project_version_refuses_other_pre_releases(tmp_path: Path, version: str) -> None:
+    project = _write_project(tmp_path / "pyproject.toml", version)
+
+    with pytest.raises(WheelToolError, match="wheel policy"):
+        _read_project_version(project, LIMITS.max_metadata_bytes)
+
+
+def test_build_report_accepts_a_release_candidate_wheel(tmp_path: Path) -> None:
+    wheel_dir = tmp_path / "wheel"
+    wheel_dir.mkdir()
+    wheel = wheel_dir / "servonaut-2.28.0rc1-py3-none-any.whl"
+    wheel_hash = _write_wheel(wheel, version="2.28.0rc1")
+    report = tmp_path / "report.json"
+    _write_report(report, wheel, wheel_hash)
+
+    assert _validate_build_report(report, wheel_dir, "2.28.0rc1", LIMITS) == (
+        wheel,
+        wheel_hash,
+    )
 
 
 def test_build_report_rejects_boolean_size(tmp_path: Path) -> None:

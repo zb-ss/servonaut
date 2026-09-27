@@ -55,6 +55,12 @@ _TAR_FORMAT = tarfile.GNU_FORMAT
 # Debian policy 5.6.2: "Full Name <email@address>" on a single line.
 _MAINTAINER_RE = re.compile(r"^[^<>\s][^<>\r\n]* <[^<>@\s]+@[^<>@\s]+>$")
 
+# The product versions a release carries: X.Y.Z, or a release candidate X.Y.ZrcN
+# in its normalized PEP 440 spelling.
+_PRODUCT_VERSION_RE = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:rc([1-9][0-9]*))?"
+)
+
 
 class DebPackagingError(Exception):
     """Raised when Debian package assembly or validation fails."""
@@ -68,6 +74,23 @@ def resolve_epoch(source_epoch: Optional[int] = None) -> int:
     if env_val and env_val.isdigit():
         return int(env_val)
     return 1700000000  # Default stable fallback epoch (2023-11-14)
+
+
+def debian_version(product_version: str) -> str:
+    """Return the Debian version of a product version: X.Y.ZrcN becomes X.Y.Z~rcN.
+
+    dpkg sorts letters after the end of a version, so X.Y.ZrcN would count as
+    newer than the X.Y.Z it leads up to and block that upgrade; a tilde sorts
+    before everything, even the end of the version.
+    """
+    match = _PRODUCT_VERSION_RE.fullmatch(product_version)
+    if match is None:
+        raise DebPackagingError(
+            "Product version must be X.Y.Z or a release candidate X.Y.ZrcN."
+        )
+    major, minor, patch, candidate = match.groups()
+    release = f"{major}.{minor}.{patch}"
+    return f"{release}~rc{candidate}" if candidate else release
 
 
 def _validate_maintainer(maintainer: str) -> None:
@@ -203,6 +226,7 @@ def package_deb(
         tuple[Path, str, int]: (deb_path, sha256_hex, byte_size)
     """
     _validate_maintainer(maintainer)
+    upstream_version = debian_version(product_version)
     src_dir = Path(payload_dir).resolve()
     out_dir = Path(output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,11 +245,10 @@ def package_deb(
     epoch = resolve_epoch(source_epoch)
     dep_list = tuple(dependencies) if dependencies is not None else DEFAULT_DEPENDENCIES
 
-    # Determine Debian version string
     version_str = (
-        f"{product_version}-{packaging_revision}"
+        f"{upstream_version}-{packaging_revision}"
         if packaging_revision is not None
-        else product_version
+        else upstream_version
     )
 
     # Resolve extra packaging assets
@@ -463,7 +486,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--version",
         required=True,
-        help="Product semantic version (X.Y.Z).",
+        help="Product version, X.Y.Z or X.Y.ZrcN; a candidate is packaged as X.Y.Z~rcN.",
     )
     parser.add_argument(
         "--revision",
