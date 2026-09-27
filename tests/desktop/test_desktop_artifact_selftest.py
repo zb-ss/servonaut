@@ -175,6 +175,57 @@ def test_symlinked_voice_manifest_is_refused(tmp_path: Path) -> None:
         selftest._require_voice_payload(runtime)
 
 
+def _app_bundle_voice_payload(tmp_path: Path, contents: Path) -> RuntimeLayout:
+    """A macOS app bundle: code in Contents/Frameworks, data in Contents/Resources."""
+    frameworks = contents / "Frameworks"
+    (frameworks / "voice").mkdir(parents=True)
+    (contents / "Resources" / "voice").mkdir(parents=True)
+    return _layout(
+        tmp_path,
+        kind=DistributionKind.PACKAGED_DESKTOP,
+        home=tmp_path / "home",
+        resource_root=frameworks,
+        executable_root=contents / "MacOS",
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_app_bundle_voice_manifest_links_into_its_resources(tmp_path: Path) -> None:
+    contents = tmp_path / "Servonaut.app" / "Contents"
+    runtime = _app_bundle_voice_payload(tmp_path, contents)
+    (contents / "Resources" / "voice" / "voice-runtime.json").write_text("{}", encoding="utf-8")
+    (contents / "Frameworks" / "voice" / "voice-runtime.json").symlink_to(
+        "../../Resources/voice/voice-runtime.json"
+    )
+
+    assert selftest._require_voice_payload(runtime) == {"directory": True, "manifest": True}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_voice_manifest_link_must_stay_in_the_bundle_resources(tmp_path: Path) -> None:
+    contents = tmp_path / "Servonaut.app" / "Contents"
+    runtime = _app_bundle_voice_payload(tmp_path, contents)
+    outside = tmp_path / "Resources" / "voice-runtime.json"
+    outside.parent.mkdir()
+    outside.write_text("{}", encoding="utf-8")
+    (contents / "Frameworks" / "voice" / "voice-runtime.json").symlink_to(outside)
+
+    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
+        selftest._require_voice_payload(runtime)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_linked_voice_directory_is_refused(tmp_path: Path) -> None:
+    contents = tmp_path / "Servonaut.app" / "Contents"
+    runtime = _app_bundle_voice_payload(tmp_path, contents)
+    (contents / "Resources" / "voice" / "voice-runtime.json").write_text("{}", encoding="utf-8")
+    (contents / "Frameworks" / "voice").rmdir()
+    (contents / "Frameworks" / "voice").symlink_to("../Resources/voice")
+
+    with pytest.raises(cli_selftest._SelftestFailure, match="voice-payload"):
+        selftest._require_voice_payload(runtime)
+
+
 def test_resources_need_notices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _layout(
         tmp_path, kind=DistributionKind.PACKAGED_DESKTOP, home=tmp_path / "home"

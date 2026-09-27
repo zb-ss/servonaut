@@ -186,18 +186,35 @@ def _require_voice_payload(runtime: RuntimeLayout) -> dict[str, bool]:
 
     Only presence is checked here. What the manifest means is decided by the
     reader the app uses when it provisions voice, not by a second copy of it.
+    The manifest may be a link only within the build's own resources.
     """
     directory = runtime.resource_root / _VOICE_DIRECTORY
     try:
         directory_status = directory.lstat()
-        manifest_status = (directory / _VOICE_MANIFEST).lstat()
-    except OSError:
+        manifest = (directory / _VOICE_MANIFEST).resolve(strict=True)
+        manifest_status = manifest.lstat()
+        roots = _resource_directories(runtime.resource_root)
+    except (OSError, RuntimeError):
         raise _SelftestFailure("voice-payload") from None
-    if not stat.S_ISDIR(directory_status.st_mode) or not stat.S_ISREG(
-        manifest_status.st_mode
+    if (
+        not stat.S_ISDIR(directory_status.st_mode)
+        or not stat.S_ISREG(manifest_status.st_mode)
+        or not any(manifest.is_relative_to(root) for root in roots)
     ):
         raise _SelftestFailure("voice-payload")
     return {"directory": True, "manifest": True}
+
+
+def _resource_directories(resource_root: Path) -> tuple[Path, ...]:
+    """Where the packaged resources live, resolved.
+
+    A macOS app bundle keeps its code in ``Contents/Frameworks`` (the resource
+    root) and its data in ``Contents/Resources``, linked into the root.
+    """
+    roots = [resource_root]
+    if resource_root.name == "Frameworks" and resource_root.parent.name == "Contents":
+        roots.append(resource_root.parent / "Resources")
+    return tuple(root.resolve(strict=True) for root in roots)
 
 
 def _bootstrap_host(runtime: RuntimeLayout, *, open_window: bool) -> dict[str, bool]:

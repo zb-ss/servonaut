@@ -16,6 +16,17 @@ import sys
 import tarfile
 from typing import Optional
 
+from scripts.distribution.macos_layout import (
+    EXECUTABLES,
+    RESOURCES_DIR,
+    RUNTIME_MARKER,
+    MacosLayoutError,
+    code_files,
+    materialize_app_layout,
+    plan_app_layout,
+    require_frontend_copy_matches,
+    verify_app_layout,
+)
 from scripts.distribution.payload_tree import walk_payload
 from scripts.standalone_cli.artifact_types import PayloadEntry
 
@@ -25,15 +36,11 @@ _MACOS_DIR = _REPO_ROOT / "packaging" / "macos"
 # Dry-run disk images get this suffix so they can never pass for a release artifact.
 SIMULATED_SUFFIX = ".simulated"
 
-REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = (
-    "servonaut-desktop",
-    "servonaut-desktop-child",
-    "servonaut",
-)
+REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = EXECUTABLES
 
 REQUIRED_PAYLOAD_FILES: tuple[str, ...] = (
     *REQUIRED_PAYLOAD_BINARIES,
-    "servonaut-runtime.json",
+    RUNTIME_MARKER,
 )
 
 
@@ -62,12 +69,18 @@ def assemble_app_bundle(
     bundle_id: str = "dev.servonaut.desktop",
     min_os_version: str = "13.0",
 ) -> Path:
-    """Assemble a standard macOS Servonaut.app directory structure.
+    """Assemble Servonaut.app from a desktop onedir payload in the signable layout.
 
-    Payload symbolic links are copied as links and must resolve inside the payload.
+    Code goes to ``Contents/MacOS`` and ``Contents/Frameworks`` and data to
+    ``Contents/Resources`` (see :mod:`scripts.distribution.macos_layout`).
+    Payload symbolic links are kept as links and must resolve inside the
+    payload; every link of the bundle must resolve inside the bundle.
 
     Returns:
         Path: Path to the generated Servonaut.app bundle.
+
+    Raises:
+        MacosPackagingError: When the payload cannot be laid out for signing.
     """
     src_dir = Path(payload_dir).resolve()
     out_dir = Path(output_dir).resolve()
@@ -76,85 +89,77 @@ def assemble_app_bundle(
     if not src_dir.is_dir():
         raise FileNotFoundError(f"Payload directory does not exist: {src_dir}")
 
-    # Validate required payload files
     for file_name in REQUIRED_PAYLOAD_FILES:
-        target = src_dir / file_name
-        if not target.exists():
+        if not (src_dir / file_name).exists():
             raise FileNotFoundError(
                 f"Required desktop payload binary or file '{file_name}' missing in {src_dir}"
             )
     payload_entries = walk_payload(src_dir)
+    try:
+        require_frontend_copy_matches(src_dir, payload_entries)
+        layout = plan_app_layout(payload_entries, code_files(src_dir, payload_entries))
+    except MacosLayoutError as error:
+        raise MacosPackagingError(f"Payload cannot be laid out as an app bundle: {error}") from error
 
     app_path = out_dir / bundle_name
-    if app_path.exists():
-        if app_path.is_dir():
-            shutil.rmtree(app_path)
-        else:
-            app_path.unlink()
+    if app_path.is_symlink() or app_path.is_file():
+        app_path.unlink()
+    elif app_path.exists():
+        shutil.rmtree(app_path)
 
     contents_dir = app_path / "Contents"
-    macos_dir = contents_dir / "MacOS"
-    resources_dir = contents_dir / "Resources"
+    for directory in ("MacOS", "Frameworks", "Resources"):
+        (contents_dir / directory).mkdir(mode=0o755, parents=True)
 
-    macos_dir.mkdir(parents=True, exist_ok=True)
-    resources_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. PkgInfo
-    pkg_info = contents_dir / "PkgInfo"
-    pkg_info.write_bytes(b"APPL????")
-
-    # 2. Info.plist
+    (contents_dir / "PkgInfo").write_bytes(b"APPL????")
     version_str = (
         f"{product_version}.{packaging_revision}"
         if packaging_revision is not None
         else product_version
     )
+    _write_info_plist(contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version)
+
+    src_icon = Path(icon_file) if icon_file else _MACOS_DIR / "AppIcon.icns"
+    if src_icon.is_file():
+        dest_icon = app_path / RESOURCES_DIR / "AppIcon.icns"
+        shutil.copyfile(src_icon, dest_icon)
+        dest_icon.chmod(0o644)
+
+    try:
+        materialize_app_layout(src_dir, app_path, layout, copy_file=shutil.copyfile)
+        verify_app_layout(app_path)
+    except (MacosLayoutError, FileExistsError) as error:
+        raise MacosPackagingError(f"App bundle layout is invalid: {error}") from error
+    # Every link the layout created must resolve inside the bundle.
+    walk_payload(app_path)
+    return app_path
+
+
+def _write_info_plist(
+    path: Path, bundle_id: str, bundle_version: str, product_version: str, min_os_version: str
+) -> None:
     plist_data = {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundlePackageType": "APPL",
         "CFBundleName": "Servonaut",
         "CFBundleDisplayName": "Servonaut",
         "CFBundleIdentifier": bundle_id,
-        "CFBundleVersion": version_str,
+        "CFBundleVersion": bundle_version,
         "CFBundleShortVersionString": product_version,
-        "CFBundleExecutable": "servonaut-desktop",
+        "CFBundleExecutable": EXECUTABLES[0],
         "CFBundleIconFile": "AppIcon",
         "LSMinimumSystemVersion": min_os_version,
         "NSHighResolutionCapable": True,
         "NSSupportsAutomaticGraphicsSwitching": True,
+        # The hardened runtime's audio-input entitlement lets the app ask;
+        # macOS shows this text when it does.
         "NSMicrophoneUsageDescription": (
             "Servonaut requires microphone access for local voice commands and transcription."
         ),
     }
-
-    info_plist = contents_dir / "Info.plist"
-    with open(info_plist, "wb") as fp:
+    with open(path, "wb") as fp:
         plistlib.dump(plist_data, fp, fmt=plistlib.FMT_XML)
-
-    # 3. Copy application icon
-    src_icon = Path(icon_file) if icon_file else _MACOS_DIR / "AppIcon.icns"
-    if src_icon.is_file():
-        dest_icon = resources_dir / "AppIcon.icns"
-        shutil.copy2(src_icon, dest_icon)
-        dest_icon.chmod(0o644)
-
-    # 4. Copy payload contents into Contents/MacOS/, keeping symbolic links as links
-    for entry in payload_entries:
-        dest = macos_dir / entry.relative_path
-        if entry.kind == "directory":
-            dest.mkdir(mode=0o755, parents=True, exist_ok=True)
-            continue
-        if entry.kind == "symlink":
-            os.symlink(entry.link_target or "", dest)
-            continue
-
-        shutil.copy2(src_dir / entry.relative_path, dest)
-        is_exec = (
-            entry.relative_path.as_posix() in REQUIRED_PAYLOAD_BINARIES
-            or bool(entry.mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
-        )
-        dest.chmod(0o755 if is_exec else 0o644)
-
-    return app_path
 
 
 def _tar_info(name: str, epoch: int) -> tarfile.TarInfo:
@@ -386,8 +391,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Write a '.dmg.simulated' placeholder instead of running hdiutil.",
     )
+    parser.add_argument(
+        "--app-only",
+        action="store_true",
+        help="Only assemble Servonaut.app from --payload-dir, so it can be signed "
+        "before a disk image is made from it with --app-bundle.",
+    )
 
     args = parser.parse_args(argv)
+    if args.app_only and args.payload_dir is None:
+        parser.error("--app-only needs --payload-dir")
 
     try:
         if args.app_bundle is not None:
@@ -399,6 +412,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 product_version=args.version,
                 packaging_revision=args.revision,
             )
+            if args.app_only:
+                print(f"macOS app bundle assembled: {app_path}")
+                return 0
         dmg_path, sha256, byte_size = package_dmg(
             app_bundle_path=app_path,
             output_dir=args.output_dir,
