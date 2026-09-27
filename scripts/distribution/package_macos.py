@@ -118,6 +118,8 @@ def assemble_app_bundle(
         else product_version
     )
     _write_info_plist(contents_dir / "Info.plist", bundle_id, version_str, product_version, min_os_version)
+    for metadata in ("PkgInfo", "Info.plist"):
+        (contents_dir / metadata).chmod(0o644)
 
     src_icon = Path(icon_file) if icon_file else _MACOS_DIR / "AppIcon.icns"
     if src_icon.is_file():
