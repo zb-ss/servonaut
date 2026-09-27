@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import os
@@ -14,7 +15,9 @@ import struct
 import subprocess
 import sys
 import tarfile
-from typing import Optional
+import tempfile
+import time
+from typing import Callable, Optional, Sequence
 
 from scripts.distribution.macos_layout import (
     EXECUTABLES,
@@ -28,6 +31,7 @@ from scripts.distribution.macos_layout import (
     verify_app_layout,
 )
 from scripts.distribution.payload_tree import walk_payload
+from scripts.distribution.sign_macos import verify_signature
 from scripts.standalone_cli.artifact_types import PayloadEntry
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -35,6 +39,12 @@ _MACOS_DIR = _REPO_ROOT / "packaging" / "macos"
 
 # Dry-run disk images get this suffix so they can never pass for a release artifact.
 SIMULATED_SUFFIX = ".simulated"
+
+# hdiutil intermittently fails with "Resource busy" while the system still
+# holds a disk image or device it has just used; the same command then works.
+# Only that failure is retried, a few times with a growing pause.
+HDIUTIL_BUSY_MARKER = "Resource busy"
+HDIUTIL_RETRY_DELAYS_SECONDS: tuple[float, ...] = (2.0, 5.0, 10.0)
 
 REQUIRED_PAYLOAD_BINARIES: tuple[str, ...] = EXECUTABLES
 
@@ -253,14 +263,57 @@ def _write_simulated_image(
     dest_path.write_bytes(_image_layout_tar(app_path, epoch) + _koly_trailer(volume_name))
 
 
-def _create_dmg_with_hdiutil(app_path: Path, dest_path: Path, volume_name: str) -> None:
-    """Build a compressed UDZO disk image holding the app and an Applications link."""
+def _require_hdiutil() -> str:
     hdiutil_bin = shutil.which("hdiutil")
     if not hdiutil_bin:
         raise MacosPackagingError(
             "hdiutil was not found; macOS disk images can only be built on macOS "
             "(use a dry run to write a simulated placeholder)."
         )
+    return hdiutil_bin
+
+
+def run_hdiutil(
+    hdiutil_bin: str,
+    args: Sequence[str],
+    *,
+    retry_delays: Sequence[float] = HDIUTIL_RETRY_DELAYS_SECONDS,
+    run: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
+    sleep: Optional[Callable[[float], object]] = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one hdiutil command, repeating it only while hdiutil reports a busy resource.
+
+    It runs at most ``len(retry_delays) + 1`` times, pausing for the next delay
+    before each repeat, and says so on stderr.
+
+    Raises:
+        MacosPackagingError: With hdiutil's last error, when it fails for any
+            other reason or is still busy after the last attempt.
+    """
+    runner = run or subprocess.run
+    pause = sleep or time.sleep
+    command = [hdiutil_bin, *args]
+    attempts = len(retry_delays) + 1
+    for attempt in range(1, attempts + 1):
+        res = runner(command, capture_output=True, text=True)
+        if res.returncode == 0:
+            return res
+        output = f"{res.stderr or ''}{res.stdout or ''}".strip()
+        if HDIUTIL_BUSY_MARKER not in output or attempt == attempts:
+            break
+        delay = retry_delays[attempt - 1]
+        print(
+            f"hdiutil {args[0]} failed with a busy resource (attempt {attempt} of "
+            f"{attempts}); retrying in {delay:g}s: {output}",
+            file=sys.stderr,
+        )
+        pause(delay)
+    raise MacosPackagingError(f"hdiutil {args[0]} failed ({res.returncode}): {output}")
+
+
+def _create_dmg_with_hdiutil(app_path: Path, dest_path: Path, volume_name: str) -> None:
+    """Build a compressed UDZO disk image holding the app and an Applications link."""
+    hdiutil_bin = _require_hdiutil()
 
     staging_dir = dest_path.parent / f".staging-{dest_path.name}"
     if staging_dir.exists():
@@ -272,23 +325,58 @@ def _create_dmg_with_hdiutil(app_path: Path, dest_path: Path, volume_name: str) 
 
         if dest_path.exists():
             dest_path.unlink()
-        cmd = [
+        # -ov lets a repeated attempt replace whatever a busy one left behind.
+        run_hdiutil(
             hdiutil_bin,
-            "create",
-            "-volname",
-            volume_name,
-            "-srcfolder",
-            str(staging_dir),
-            "-ov",
-            "-format",
-            "UDZO",
-            str(dest_path),
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            raise MacosPackagingError(f"hdiutil failed ({res.returncode}): {res.stderr}")
+            [
+                "create",
+                "-volname",
+                volume_name,
+                "-srcfolder",
+                str(staging_dir),
+                "-ov",
+                "-format",
+                "UDZO",
+                str(dest_path),
+            ],
+        )
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def verify_image_app_signature(dmg_path: Path | str, app_name: str = "Servonaut.app") -> str:
+    """Mount a disk image read-only and require the app inside it to verify.
+
+    The image is mounted at a private mount point and always detached again.
+
+    Returns:
+        str: codesign's verification report.
+
+    Raises:
+        MacosPackagingError: When hdiutil fails, or the app's signature does not
+            verify inside the image.
+    """
+    image = Path(dmg_path).resolve()
+    if not image.is_file():
+        raise FileNotFoundError(f"Disk image does not exist: {image}")
+    hdiutil_bin = _require_hdiutil()
+    mount_point = Path(tempfile.mkdtemp(prefix="servonaut-dmg-", dir=image.parent))
+    try:
+        run_hdiutil(
+            hdiutil_bin,
+            ["attach", "-readonly", "-nobrowse", "-mountpoint", str(mount_point), str(image)],
+        )
+        try:
+            is_valid, message = verify_signature(mount_point / app_name, gatekeeper=False)
+        finally:
+            run_hdiutil(hdiutil_bin, ["detach", str(mount_point)])
+    finally:
+        # Empty once detached; a mount point still in use stays behind.
+        with contextlib.suppress(OSError):
+            mount_point.rmdir()
+    if not is_valid:
+        raise MacosPackagingError(f"{app_name} inside {image.name}: {message}")
+    return message
 
 
 def package_dmg(
@@ -398,6 +486,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Write a '.dmg.simulated' placeholder instead of running hdiutil.",
     )
     parser.add_argument(
+        "--verify-image",
+        action="store_true",
+        help="Mount the new disk image and require the app inside it to pass "
+        "codesign's strict, deep verification.",
+    )
+    parser.add_argument(
         "--app-only",
         action="store_true",
         help="Only assemble Servonaut.app from --payload-dir, so it can be signed "
@@ -407,6 +501,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.app_only and args.payload_dir is None:
         parser.error("--app-only needs --payload-dir")
+    if args.verify_image and (args.dry_run or args.app_only):
+        parser.error("--verify-image needs a real disk image")
 
     try:
         if args.app_bundle is not None:
@@ -431,6 +527,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             filename=args.filename,
             dry_run=args.dry_run,
         )
+        verification = verify_image_app_signature(dmg_path) if args.verify_image else None
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -439,6 +536,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"{label}: {dmg_path}")
     print(f"  SHA-256: {sha256}")
     print(f"  Size:    {byte_size} bytes")
+    if verification is not None:
+        print(f"  Signature of the app inside the image: {verification}")
     return 0
 
 

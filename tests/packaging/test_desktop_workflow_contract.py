@@ -379,9 +379,11 @@ def test_macos_packages_and_signs_the_app_ad_hoc(workflow_content: str) -> None:
     assert "spctl" not in step
     # uv keeps its publisher's signature.
     assert "grep -q '^Authority=Developer ID Application'" in step
-    # The disk image is made from the signed app, which must still verify inside it.
-    assert 'scripts.distribution.package_macos --app-bundle "${APP}"' in step
-    assert 'codesign --verify --strict --deep --verbose=2 "${MOUNT}/Servonaut.app"' in step
+    # The disk image is made from the signed app, which must still verify inside
+    # it; the packager mounts it, retrying hdiutil only while it is busy.
+    image = step.split('scripts.distribution.package_macos --app-bundle "${APP}"', 1)[1]
+    assert "--verify-image" in image.split("\n          echo", 1)[0]
+    assert "hdiutil" not in step
     assert qualify.index("scripts.desktop_shell.smoke_artifact") < qualify.index(
         "Package and ad-hoc sign the macOS app"
     )

@@ -13,7 +13,7 @@ import tarfile
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
-from scripts.distribution import package_macos
+from scripts.distribution import package_macos, sign_macos
 from scripts.distribution.package_macos import (
     REQUIRED_PAYLOAD_FILES,
     MacosPackagingError,
@@ -554,5 +554,189 @@ class TestPackageExistingApp:
                 "2.26.3",
                 "--arch",
                 "macos-arm64",
+            ])
+        assert excinfo.value.code == 2
+
+
+def _hdiutil_result(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["hdiutil"], returncode, "", stderr)
+
+
+_BUSY = "hdiutil: create failed - Resource busy"
+
+
+class _ScriptedRunner:
+    """A subprocess.run stand-in that answers with the given results in order."""
+
+    def __init__(self, *results: subprocess.CompletedProcess[str]) -> None:
+        self.results = list(results)
+        self.commands: list[list[str]] = []
+
+    def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.commands.append(list(cmd))
+        return self.results.pop(0)
+
+
+class TestHdiutilRetry:
+    """hdiutil is repeated only while it reports a busy resource."""
+
+    def test_a_busy_resource_is_retried_until_it_succeeds(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        runner = _ScriptedRunner(_hdiutil_result(1, _BUSY), _hdiutil_result(0))
+        pauses: list[float] = []
+
+        result = package_macos.run_hdiutil(
+            "/usr/bin/hdiutil", ["create", "image.dmg"], run=runner, sleep=pauses.append
+        )
+
+        assert result.returncode == 0
+        assert runner.commands == [["/usr/bin/hdiutil", "create", "image.dmg"]] * 2
+        assert pauses == [2.0]
+        assert "hdiutil create failed with a busy resource (attempt 1 of 4)" in (
+            capsys.readouterr().err
+        )
+
+    def test_a_resource_busy_every_time_fails_with_the_last_error(self) -> None:
+        runner = _ScriptedRunner(
+            *(_hdiutil_result(1, f"{_BUSY} ({attempt})") for attempt in range(1, 5))
+        )
+        pauses: list[float] = []
+
+        with pytest.raises(MacosPackagingError, match=r"Resource busy \(4\)"):
+            package_macos.run_hdiutil(
+                "/usr/bin/hdiutil", ["create", "image.dmg"], run=runner, sleep=pauses.append
+            )
+
+        assert len(runner.commands) == 4
+        assert pauses == list(package_macos.HDIUTIL_RETRY_DELAYS_SECONDS)
+
+    def test_any_other_failure_is_not_retried(self) -> None:
+        runner = _ScriptedRunner(_hdiutil_result(1, "hdiutil: create failed - No space left"))
+        pauses: list[float] = []
+
+        with pytest.raises(MacosPackagingError, match="No space left"):
+            package_macos.run_hdiutil(
+                "/usr/bin/hdiutil", ["create", "image.dmg"], run=runner, sleep=pauses.append
+            )
+
+        assert len(runner.commands) == 1
+        assert pauses == []
+
+    def test_the_release_image_survives_a_busy_create(
+        self, mock_payload: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app_path = assemble_app_bundle(
+            payload_dir=mock_payload, output_dir=tmp_path / "out", product_version="2.26.3"
+        )
+        monkeypatch.setattr(package_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(package_macos.time, "sleep", lambda seconds: None)
+        creates: list[list[str]] = []
+
+        def busy_once(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            creates.append(cmd)
+            if len(creates) == 1:
+                return _hdiutil_result(1, _BUSY)
+            Path(cmd[-1]).write_bytes(b"udif image")
+            return _hdiutil_result(0)
+
+        monkeypatch.setattr(package_macos.subprocess, "run", busy_once)
+
+        dmg_path, _, _ = package_dmg(
+            app_bundle_path=app_path,
+            output_dir=tmp_path / "dmg",
+            product_version="2.26.3",
+            target_arch="macos-arm64",
+        )
+
+        assert dmg_path.read_bytes() == b"udif image"
+        assert [cmd[1] for cmd in creates] == ["create", "create"]
+        assert "-ov" in creates[-1]
+
+
+class TestImageVerification:
+    """The app inside the disk image is verified from a read-only mount."""
+
+    @pytest.fixture
+    def image(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        monkeypatch.setattr(package_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(sign_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(package_macos.time, "sleep", lambda seconds: None)
+        dmg = tmp_path / "servonaut-desktop-2.26.3-macos-arm64.dmg"
+        dmg.write_bytes(b"udif image")
+        return dmg
+
+    def _mount_with(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        hdiutil: _ScriptedRunner,
+        codesign: subprocess.CompletedProcess[str],
+    ) -> list[list[str]]:
+        """Answer hdiutil from its script, mounting a stand-in app, and codesign with one result."""
+        signing: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if Path(cmd[0]).name == "codesign":
+                signing.append(list(cmd))
+                return codesign
+            if cmd[1] == "attach":
+                (Path(cmd[cmd.index("-mountpoint") + 1]) / "Servonaut.app").mkdir()
+            elif cmd[1] == "detach" and hdiutil.results[0].returncode == 0:
+                (Path(cmd[-1]) / "Servonaut.app").rmdir()
+            return hdiutil(cmd, **kwargs)
+
+        # Both modules run their tools through the one subprocess module.
+        assert package_macos.subprocess is sign_macos.subprocess
+        monkeypatch.setattr(package_macos.subprocess, "run", fake_run)
+        return signing
+
+    def test_a_busy_detach_is_retried_and_the_mount_point_removed(
+        self, image: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hdiutil = _ScriptedRunner(
+            _hdiutil_result(0),
+            _hdiutil_result(1, "hdiutil: couldn't unmount - Resource busy"),
+            _hdiutil_result(0),
+        )
+        signing = self._mount_with(monkeypatch, hdiutil, _hdiutil_result(0))
+
+        message = package_macos.verify_image_app_signature(image)
+
+        assert "successfully verified" in message
+        verbs = [command[1] for command in hdiutil.commands]
+        assert verbs == ["attach", "detach", "detach"]
+        attach = hdiutil.commands[0]
+        assert attach[2:4] == ["-readonly", "-nobrowse"]
+        mount_point = Path(attach[attach.index("-mountpoint") + 1])
+        assert signing[0][1:4] == ["--verify", "--deep", "--strict"]
+        assert Path(signing[0][-1]) == mount_point.resolve() / "Servonaut.app"
+        assert not mount_point.exists()
+
+    def test_an_invalid_signature_fails_after_detaching(
+        self, image: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hdiutil = _ScriptedRunner(_hdiutil_result(0), _hdiutil_result(0))
+        self._mount_with(monkeypatch, hdiutil, _hdiutil_result(1, "a sealed resource is missing"))
+
+        with pytest.raises(MacosPackagingError, match="a sealed resource is missing"):
+            package_macos.verify_image_app_signature(image)
+
+        assert [command[1] for command in hdiutil.commands] == ["attach", "detach"]
+
+    def test_cli_refuses_to_verify_a_simulated_image(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main([
+                "--payload-dir",
+                str(mock_payload),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--version",
+                "2.26.3",
+                "--arch",
+                "macos-arm64",
+                "--dry-run",
+                "--verify-image",
             ])
         assert excinfo.value.code == 2

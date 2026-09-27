@@ -353,14 +353,10 @@ jobs:
           grep -E '^(Authority|TeamIdentifier)=' <<< "${details}"
           grep -q '^Authority=Developer ID Application' <<< "${details}"
 
-          distribution scripts.distribution.package_macos --app-bundle "${APP}" \
-            --output-dir "${MACOS_DIR}" --version "${PRODUCT_VERSION}" --arch "${TARGET}"
           # The app inside the disk image must keep a valid signature.
-          MOUNT="${MACOS_DIR}/image"
-          mkdir "${MOUNT}"
-          hdiutil attach -readonly -nobrowse -mountpoint "${MOUNT}" "${MACOS_DIR}"/servonaut-desktop-*.dmg
-          trap 'hdiutil detach "${MOUNT}" || true' EXIT
-          codesign --verify --strict --deep --verbose=2 "${MOUNT}/Servonaut.app"
+          distribution scripts.distribution.package_macos --app-bundle "${APP}" \
+            --output-dir "${MACOS_DIR}" --version "${PRODUCT_VERSION}" --arch "${TARGET}" \
+            --verify-image
           echo "app-dir=${APP}" >> "${GITHUB_OUTPUT}"
 
       # The packaged self-test again, against the executables inside the
