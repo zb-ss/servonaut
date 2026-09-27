@@ -264,9 +264,23 @@ jobs:
       # Forward qualification on the newer LTS: the payload built above,
       # packaged as the .deb and installed in a clean Ubuntu 24.04 container
       # with nothing but its declared Depends, must open its window the same
-      # way. The container keeps the payload inside this job. WebKit sandboxes
-      # its web processes with bubblewrap, which needs the user namespaces
-      # Docker's default seccomp and AppArmor profiles deny.
+      # way. The container keeps the payload inside this job.
+      #
+      # It runs under 24.04's restriction of unprivileged user namespaces:
+      # this runner's kernel enforces it for the step
+      # (kernel.apparmor_restrict_unprivileged_userns=1), and installing
+      # 24.04's AppArmor in the container loads 24.04's policy into it. The
+      # window needs no user namespace (WebKit's bubblewrap sandbox is off),
+      # so the package ships no AppArmor profile; should that change, the
+      # window stops opening here. The container options serve that check:
+      # - seccomp=unconfined, or Docker's filter would refuse the namespace
+      #   itself before the restriction is reached;
+      # - apparmor=unconfined, so the container's processes are unconfined,
+      #   as in a desktop session, which is what the restriction governs;
+      #   Docker's own profile would also block loading policy;
+      # - MAC_ADMIN and the host's securityfs, so installing AppArmor can
+      #   load 24.04's policy, which stays loaded until the runner is
+      #   discarded. The smoke runs as an unprivileged user without them.
       - name: Run packaged window smoke on Ubuntu 24.04
         id: window-smoke-forward
         if: runner.os == 'Linux'
@@ -282,7 +296,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
-          trap 'cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
+          restriction=kernel.apparmor_restrict_unprivileged_userns
+          if ! host_restriction="$(sysctl -n "${restriction}" 2>/dev/null)"; then
+            echo "This runner's kernel has no ${restriction}, so it cannot qualify the restriction." >&2
+            exit 1
+          fi
+          trap 'sudo sysctl -qw "${restriction}=${host_restriction}"; cp "${FORWARD_DIR}"/out/*.json "${EVIDENCE_DIR}/" 2>/dev/null || true; cp "${FORWARD_DIR}"/out/*.png "${SCREENSHOT_DIR}/" 2>/dev/null || true' EXIT
           # The distribution tooling imports the product's release-identity
           # code, so the packager runs with the checkout's sources.
           env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
@@ -293,9 +312,13 @@ jobs:
             --version "${PRODUCT_VERSION}" \
             --maintainer "Servonaut qualification <qualification@example.com>" \
             --filename servonaut.deb
+          echo "Runner kernel $(uname -r): ${restriction} was ${host_restriction}, now 1"
+          sudo sysctl -qw "${restriction}=1"
           docker run --rm \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
+            --cap-add MAC_ADMIN \
+            --volume /sys/kernel/security:/sys/kernel/security \
             --shm-size=1g \
             --volume "${GITHUB_WORKSPACE}:/src:ro" \
             --volume "${FORWARD_DIR}/deb:/deb:ro" \

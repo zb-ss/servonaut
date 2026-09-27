@@ -129,7 +129,13 @@ def test_a_connected_window_is_photographed_and_stopped_with_its_children(
     assert screenshot.read_bytes() == b"\x89PNG"
     assert report.launcher_exit_code == -15
     assert report.process_tree_exited is True
-    assert json.loads(report.to_json())["target"] == _TARGET
+    written = json.loads(report.to_json())
+    assert written["target"] == _TARGET
+    # Whatever the host's security module says, the report carries it.
+    assert all(
+        labels and labels == sorted(labels)
+        for labels in written["process_security_labels"].values()
+    )
 
 
 def test_a_blank_window_fails_after_the_bound_with_its_logs(
@@ -252,6 +258,34 @@ def test_process_parents_reads_proc_and_skips_zombies(tmp_path: Path) -> None:
     assert window_smoke.process_parents(tmp_path) == {10: 1, 11: 10}
 
 
+def test_security_labels_group_the_tree_by_command_name(tmp_path: Path) -> None:
+    profile = "servonaut-desktop (unconfined)\n"
+    processes = {
+        # AppArmor's own attribute file, as on Ubuntu.
+        "10": ("servonaut-deskt", {"attr/apparmor/current": profile}),
+        # Only the shared attribute file, as on older kernels.
+        "11": ("bwrap", {"attr/current": profile}),
+        "12": ("bwrap", {"attr/apparmor/current": profile}),
+        "13": ("WebKitWebProces", {"attr/current": "unconfined\n"}),
+        # No security module: the attribute cannot be read.
+        "14": ("xdg-dbus-proxy", {}),
+    }
+    for pid, (name, attributes) in processes.items():
+        (tmp_path / pid).mkdir()
+        (tmp_path / pid / "comm").write_text(f"{name}\n")
+        for relative, text in attributes.items():
+            (tmp_path / pid / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / pid / relative).write_text(text)
+
+    labels = window_smoke.security_labels([10, 11, 12, 13, 14, 15], tmp_path)
+
+    assert labels == {
+        "WebKitWebProces": ["unconfined"],
+        "bwrap": ["servonaut-desktop (unconfined)"],
+        "servonaut-deskt": ["servonaut-desktop (unconfined)"],
+    }
+
+
 def test_descendants_walk_the_whole_tree() -> None:
     parents = {10: 1, 11: 10, 12: 11, 13: 10, 20: 1}
 
@@ -361,6 +395,30 @@ def test_a_macos_window_needs_no_x_display_and_is_photographed_with_screencaptur
     assert report.host_platform == "macos-15.6"
     assert screenshot.read_bytes() == b"\x89PNG macOS"
     assert report.process_tree_exited is True
+
+
+def test_a_macos_window_reports_no_security_labels(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security labels are Linux's (/proc/*/attr); macOS has none to read."""
+
+    def linux_only(*args: object, **kwargs: object) -> None:
+        raise AssertionError("macOS processes carry no Linux security label")
+
+    monkeypatch.setattr(window_smoke, "security_labels", linux_only)
+    payload = _payload(tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE))
+
+    report = window_smoke.run_window_smoke(
+        payload,
+        "macos-x64",
+        policy,
+        screenshot=tmp_path / "window.png",
+        inherited=_fake_screencapture(tmp_path),
+        system="darwin",
+    )
+
+    assert report.process_security_labels == {}
+    assert json.loads(report.to_json())["process_security_labels"] == {}
 
 
 def test_a_macos_window_needs_its_photograph(
