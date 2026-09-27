@@ -1,6 +1,15 @@
 # Servonaut Installer for Windows
 # Usage: irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
 # Or: .\install.ps1
+#
+# Release candidate instead of the stable release:
+#   $env:SERVONAUT_PRE = "1"; irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+# Or: .\install.ps1 -Pre
+
+param(
+    # Install the newest release candidate instead of the stable release
+    [switch]$Pre
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -9,6 +18,11 @@ $MinPythonMajor = 3
 $MinPythonMinor = 10
 
 $RepoUrl = "https://github.com/zb-ss/servonaut"
+
+# Naming a pre-release in the version specifier lets pip choose a release
+# candidate of Servonaut, or the stable release when that is newer. pip's
+# --pre flag would also allow pre-release versions of every dependency.
+$PreReleaseSpec = "servonaut>=0rc0"
 
 function Write-Header {
     Write-Host ""
@@ -24,6 +38,20 @@ function Write-Warn { param([string]$Message) Write-Host "[!] $Message" -Foregro
 function Write-Info { param([string]$Message) Write-Host "[-] $Message" -ForegroundColor Cyan }
 
 function Test-Command { param([string]$Name) return [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
+
+# True when -Pre or SERVONAUT_PRE asks for the newest release candidate
+function Test-PreReleaseRequested {
+    param([bool]$Switch)
+
+    if ($Switch) { return $true }
+
+    $value = "$env:SERVONAUT_PRE".Trim().ToLowerInvariant()
+    if ($value -in @("", "0", "false", "no")) { return $false }
+    if ($value -in @("1", "true", "yes")) { return $true }
+
+    Write-Err "SERVONAUT_PRE must be 1 or 0, not '$env:SERVONAUT_PRE'"
+    exit 2
+}
 
 function Test-PythonVersion {
     Write-Info "Checking Python installation..."
@@ -106,7 +134,44 @@ function Install-Pipx {
     }
 }
 
+# Version of servonaut that pipx has installed, or "unknown"
+function Get-InstalledVersion {
+    try {
+        $line = & pipx list --short | Where-Object { $_ -match '^servonaut\s' } | Select-Object -First 1
+    }
+    catch {
+        return "unknown"
+    }
+    if ($line) { return ($line -split '\s+')[1] }
+    return "unknown"
+}
+
+function Install-ReleaseCandidate {
+    Write-Info "Installing the newest Servonaut release candidate from PyPI..."
+    Write-Info "When no candidate is newer than the stable release, the stable release is installed."
+
+    # --force also switches an existing installation over
+    & pipx install --force $PreReleaseSpec
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Servonaut $(Get-InstalledVersion) installed from PyPI"
+        return
+    }
+
+    Write-Err "Could not install a release candidate"
+    Write-Host ""
+    Write-Host "Try manually:" -ForegroundColor White
+    Write-Host "  pipx install --force `"$PreReleaseSpec`""
+    exit 1
+}
+
 function Install-Servonaut {
+    param([bool]$Pre)
+
+    if ($Pre) {
+        Install-ReleaseCandidate
+        return
+    }
+
     Write-Info "Installing Servonaut..."
 
     # Strategy 1: Local repository
@@ -224,6 +289,8 @@ function Test-SshClient {
 }
 
 function Write-FinalMessage {
+    param([bool]$Pre)
+
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "   Installation Complete!" -ForegroundColor Green
@@ -242,12 +309,20 @@ function Write-FinalMessage {
     Write-Host "Documentation:" -ForegroundColor White
     Write-Host "  $RepoUrl"
     Write-Host ""
+    if ($Pre) {
+        Write-Host "Release candidate:" -ForegroundColor White
+        Write-Host "  Report problems at: $RepoUrl/issues"
+        Write-Host "  Return to the stable release with: pipx install --force servonaut"
+        Write-Host ""
+    }
     Write-Host "Configuration:" -ForegroundColor White
     Write-Host "  Config: $env:USERPROFILE\.servonaut\config.json"
     Write-Host ""
 }
 
 # Main
+$installPre = Test-PreReleaseRequested -Switch $Pre.IsPresent
+
 Write-Header
 
 $pythonCmd = Test-PythonVersion
@@ -256,7 +331,7 @@ Write-Host ""
 Install-Pipx -PythonCmd $pythonCmd
 Write-Host ""
 
-Install-Servonaut
+Install-Servonaut -Pre $installPre
 Write-Host ""
 
 $response = Read-Host "Run setup wizard? (checks AWS CLI, SSH, configuration) (y/n)"
@@ -267,4 +342,4 @@ if ($response -eq "y" -or $response -eq "Y") {
     Test-SshClient
 }
 
-Write-FinalMessage
+Write-FinalMessage -Pre $installPre

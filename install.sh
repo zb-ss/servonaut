@@ -2,6 +2,10 @@
 # Servonaut Installer
 # Usage: curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
 # Or: ./install.sh
+#
+# Release candidate instead of the stable release:
+#   curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+# Or: SERVONAUT_PRE=1 ./install.sh
 
 set -e
 
@@ -10,6 +14,14 @@ MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=10
 
 REPO_URL="https://github.com/zb-ss/servonaut"
+
+# Naming a pre-release in the version specifier lets pip choose a release
+# candidate of Servonaut, or the stable release when that is newer. pip's
+# --pre flag would also allow pre-release versions of every dependency.
+PRE_RELEASE_SPEC="servonaut>=0rc0"
+
+# 1 when --pre or SERVONAUT_PRE asks for the newest release candidate
+INSTALL_PRE=0
 
 # Color codes for terminal output
 # Use tput if available, otherwise fallback to ANSI codes
@@ -52,6 +64,41 @@ print_warning() {
 
 print_info() {
     echo "${BLUE}→${RESET} $1"
+}
+
+print_usage() {
+    echo "Usage: install.sh [--pre]"
+    echo ""
+    echo "  --pre       Install the newest release candidate instead of the stable release."
+    echo "              SERVONAUT_PRE=1 in the environment does the same."
+    echo "  -h, --help  Show this help and exit."
+}
+
+# Read SERVONAUT_PRE, then the command-line options
+parse_options() {
+    case "$(printf '%s' "${SERVONAUT_PRE:-}" | tr '[:upper:]' '[:lower:]')" in
+        ""|0|false|no) ;;
+        1|true|yes) INSTALL_PRE=1 ;;
+        *)
+            print_error "SERVONAUT_PRE must be 1 or 0, not '$SERVONAUT_PRE'"
+            exit 2
+            ;;
+    esac
+
+    for arg in "$@"; do
+        case "$arg" in
+            --pre) INSTALL_PRE=1 ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                print_error "Unknown option: $arg"
+                print_usage >&2
+                exit 2
+                ;;
+        esac
+    done
 }
 
 # Check if a command exists
@@ -194,8 +241,36 @@ install_pipx() {
     fi
 }
 
+# Version of servonaut that pipx has installed, or "unknown"
+installed_servonaut_version() {
+    pipx list --short 2>/dev/null | awk '$1 == "servonaut" { print $2; found = 1 } END { if (!found) print "unknown" }'
+}
+
+# Install the newest release candidate from PyPI
+install_release_candidate() {
+    print_info "Installing the newest Servonaut release candidate from PyPI..."
+    print_info "When no candidate is newer than the stable release, the stable release is installed."
+
+    # --force also switches an existing installation over
+    if pipx install --force "$PRE_RELEASE_SPEC"; then
+        print_success "Servonaut $(installed_servonaut_version) installed from PyPI"
+        return 0
+    fi
+
+    print_error "Could not install a release candidate"
+    echo ""
+    echo "Please try manually:"
+    echo "  ${BOLD}pipx install --force '$PRE_RELEASE_SPEC'${RESET}"
+    exit 1
+}
+
 # Install servonaut
 install_servonaut() {
+    if [ "$INSTALL_PRE" -eq 1 ]; then
+        install_release_candidate
+        return 0
+    fi
+
     print_info "Installing Servonaut..."
 
     # Strategy 1: Local repository (if running ./install.sh from cloned repo)
@@ -384,6 +459,12 @@ print_final_message() {
     echo "${BOLD}Documentation:${RESET}"
     echo "  $REPO_URL"
     echo ""
+    if [ "$INSTALL_PRE" -eq 1 ]; then
+        echo "${BOLD}Release candidate:${RESET}"
+        echo "  Report problems at: $REPO_URL/issues"
+        echo "  Return to the stable release with: ${BOLD}pipx install --force servonaut${RESET}"
+        echo ""
+    fi
     echo "${BOLD}Configuration:${RESET}"
     echo "  Config dir:  ~/.servonaut/"
     echo "  Config file: ~/.servonaut/config.json"
@@ -392,6 +473,7 @@ print_final_message() {
 
 # Main installation flow
 main() {
+    parse_options "$@"
     print_header
 
     # Check Python (sets PYTHON_CMD)
@@ -420,4 +502,4 @@ main() {
 }
 
 # Run main function
-main
+main "$@"
