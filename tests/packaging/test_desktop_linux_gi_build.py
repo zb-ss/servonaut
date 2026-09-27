@@ -497,8 +497,33 @@ def test_typelib_hooks_collect_the_typelib_and_never_the_library(
 
     assert requested == [(namespace, version)]
     assert hook_api.datas == [(f"/usr/lib/girepository-1.0/{typelib}.typelib", "gi_typelibs")]
-    assert hook_api.imports == ["gi.repository.GObject"]
+    # Gdk also brings the binding's cairo integration, as PyInstaller's hook does.
+    extra = ["gi._gi_cairo"] if namespace == "Gdk" else []
+    assert hook_api.imports == ["gi.repository.GObject", *extra]
     assert hook_api.binaries == []
+
+
+def test_every_required_namespace_is_analysed_as_a_run_time_module() -> None:
+    """PyInstaller runs a gi.repository hook only for a namespace a
+    pre-safe-import hook turned into a run-time module."""
+    pyinstaller_hooks = pytest.importorskip("PyInstaller.hooks")
+    upstream = Path(pyinstaller_hooks.__file__).parent / "pre_safe_import_module"
+    ours = _HOOKS_DIR / "pre_safe_import_module"
+    for typelib in REQUIRED_TYPELIBS:
+        name = f"hook-gi.repository.{typelib.rsplit('-', 1)[0]}.py"
+        assert (ours / name).is_file() or (upstream / name).is_file(), typelib
+    for path in ours.glob("*.py"):
+        converted: list[str] = []
+        api = SimpleNamespace(module_name=path.stem.removeprefix("hook-"))
+        api.add_runtime_module = converted.append
+        _load_hook(path).pre_safe_import_module(api)
+        assert converted == [api.module_name]
+
+
+def test_the_cairo_integration_brings_pycairo() -> None:
+    module = _load_hook(_HOOKS_DIR / "hook-gi._gi_cairo.py")
+
+    assert module.hiddenimports == ["cairo"]
 
 
 def test_typelib_hooks_skip_an_unavailable_namespace(monkeypatch: pytest.MonkeyPatch) -> None:

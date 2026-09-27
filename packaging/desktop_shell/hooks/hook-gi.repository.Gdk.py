@@ -11,5 +11,7 @@ def hook(hook_api):
     if not module_info.available:
         return
     _host_libraries, typelibs, hiddenimports = module_info.collect_typelib_data()
+    # As PyInstaller's own hook does: Gdk hands cairo structures to Python.
+    hiddenimports += ["gi._gi_cairo"]
     hook_api.add_datas(typelibs)
     hook_api.add_imports(*hiddenimports)
