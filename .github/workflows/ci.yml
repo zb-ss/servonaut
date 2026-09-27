@@ -116,9 +116,10 @@ jobs:
   e2e:
     name: end-to-end journeys / Python 3.12
     runs-on: ubuntu-latest
-    # The suite targets about five minutes including the install; the limit
-    # only stops a hung run.
-    timeout-minutes: 10
+    # The suite takes seven to ten minutes including the install, and more on
+    # a busy runner; the limit only stops a hung run, so it leaves that
+    # headroom rather than cancelling a healthy run near the end.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
