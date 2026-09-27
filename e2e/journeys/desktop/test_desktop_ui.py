@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.desktop import DesktopTimeout, wait_until
+from e2e.harness.desktop import wait_until
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_browser, pytest.mark.asyncio]
 
@@ -131,35 +131,27 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
         assert page.errors() == []
 
 
-class TypingWentNowhere(AssertionError):
-    """Keys typed into the window reached no widget."""
+async def test_keys_reach_the_fleet_right_after_the_window_gains_focus(desktop, seed):
+    from servonaut.widgets.instance_table import InstanceTable
 
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypingWentNowhere,
-    reason="Known bug: in the desktop window no widget has keyboard focus when the "
-    "window gains focus, so typing does not reach the fleet search box (the "
-    "terminal app starts with it focused). The web driver blurs the app while "
-    "the sidebar still holds the initial focus; the sidebar is made unfocusable "
-    "right after, so focus is never restored.",
-)
-async def test_typing_right_after_the_window_gains_focus_searches_the_fleet(desktop, seed):
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
         page = await _open_session(browser, app)
-        # The window becomes the active one; the user starts typing.
+        tui = app.tui
+        # The window becomes the active one: the fleet table holds the focus,
+        # as it does when the terminal app starts.
         await page.focus_terminal()
         await wait_until(lambda: app.app.app_focus, desc="the app to have focus")
-        before = len(page.sent)
+        table = tui.on_screen(InstanceTable)
+        await tui.wait_until(
+            lambda: table.has_focus, desc=f"the fleet table focused, not {tui.focused_id()}"
+        )
+        # "/" jumps to the search box. Wait for it before typing: a printable
+        # key sent in the same batch as a bound one can be applied first.
+        await page.press("/")
+        await tui.wait_until(lambda: tui.focused_id() == "search_input", desc="search focused")
         await page.type("edge")
-        await wait_until(lambda: "edge" in page.stdin_sent(before), desc="the keys sent")
-        try:
-            await wait_until(
-                lambda: _fleet_rows(app) == ["edge-1"], timeout=5, desc="typing filters the fleet"
-            )
-        except DesktopTimeout:
-            raise TypingWentNowhere(f"focused widget: {app.tui.focused_id()}") from None
+        await tui.wait_until(lambda: _fleet_rows(app) == ["edge-1"], desc="typing filters the fleet")
 
 
 async def test_keyboard_search_help_and_command_palette(desktop, seed):
