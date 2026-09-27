@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 import pytest
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, Select
 
 from . import _harness
 
@@ -140,6 +140,33 @@ async def _cloudwatch(pilot: Any) -> None:
     await _navigate(pilot, "nav_cloudwatch", "CloudWatchBrowserScreen")
 
 
+async def _cloudwatch_top_ips(pilot: Any) -> None:
+    app = pilot.app
+
+    async def log_groups(prefix: str = "", region: str = "") -> list:
+        del prefix, region
+        return [{"name": _harness.CLOUDWATCH_GROUP}]
+
+    async def log_events(**_kwargs: Any) -> list:
+        return _harness.cloudwatch_events()
+
+    app.cloudwatch_service.list_log_groups = log_groups
+    app.cloudwatch_service.get_log_events = log_events
+    screen = await _navigate(pilot, "nav_cloudwatch", "CloudWatchBrowserScreen")
+    screen.query_one("#cw_select_region", Select).value = _harness.CLOUDWATCH_REGION
+    groups = screen.query_one("#cw_select_log_group", Select)
+    await _harness.wait_until(
+        pilot, lambda: groups.prompt == "Select log group", "the log group list"
+    )
+    groups.value = _harness.CLOUDWATCH_GROUP
+    await pilot.pause()
+    screen.action_fetch()
+    ips = screen.query_one("#cloudwatch_ips_table", DataTable)
+    await _harness.wait_until(pilot, lambda: ips.row_count > 0, "the Top IPs table")
+    ips.focus()
+    app.clear_notifications()
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -215,3 +242,9 @@ def test_ip_ban(screen_snapshot, size: str) -> None:
 def test_cloudwatch_empty(screen_snapshot, size: str) -> None:
     """The CloudWatch browser before a log group is chosen."""
     _capture(screen_snapshot, size, _cloudwatch)
+
+
+@sizes
+def test_cloudwatch_top_ips(screen_snapshot, size: str) -> None:
+    """The CloudWatch browser after fetching WAF logs, Top IPs focused."""
+    _capture(screen_snapshot, size, _cloudwatch_top_ips)
