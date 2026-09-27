@@ -26,8 +26,6 @@ name: Desktop preview .deb
 on:
   release:
     types: [published]
-  push:
-    branches: [feature/desktop/linux-release-deb]
   workflow_dispatch:
     inputs:
       tag:
