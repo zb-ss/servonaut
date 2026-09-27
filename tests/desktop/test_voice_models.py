@@ -48,9 +48,7 @@ from servonaut.desktop.voice.models import (
 from servonaut.desktop.voice.runtime import VoiceRuntimeLock
 from servonaut.services import voice_engines
 from servonaut.services.voice_engines import (
-    KOKORO_ARCHIVE_BYTES,
     NEMOTRON_LATENCY_OPTIONS,
-    SILERO_VAD_BYTES,
     is_kokoro_model_present,
     is_nemotron_model_present,
     is_silero_vad_model_present,
@@ -205,10 +203,6 @@ class TestRegistryPins:
             assert f"{latency}ms" in spec.assets[0].url
         assert nemotron_spec(300) is nemotron_spec(320)
         assert NEMOTRON_ASR_SPEC is nemotron_spec(320)
-
-    def test_confirmation_copy_matches_pins(self) -> None:
-        assert SILERO_VAD_SPEC.total_download_bytes == SILERO_VAD_BYTES
-        assert KOKORO_TTS_SPEC.total_download_bytes == KOKORO_ARCHIVE_BYTES
 
     @pytest.mark.parametrize(
         "kwargs",

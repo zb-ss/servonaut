@@ -19,6 +19,15 @@
     color: $text-muted;
 }
 
+/* Shown only while no ban configuration exists. */
+#ip_ban_empty_hint {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border: round $warning;
+    color: $text;
+}
+
 .field_label {
     margin: 0 0 0 0;
     color: $text-muted;
@@ -42,7 +51,15 @@
 
 #ban_config_selector {
     width: 100%;
-    height: 3;
+    height: auto;
+}
+
+/* Keep the prompt or the chosen configuration on one line. Wrapped, it
+   makes the select taller than its row, which cuts off the bottom border. */
+#ban_config_selector SelectCurrent #label {
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #ip_input {

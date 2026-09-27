@@ -102,6 +102,13 @@ class DiscardChangesModal(ModalScreen[bool]):
 class SettingsScreen(Screen):
     """Master/detail settings editor with per-panel save + unsaved guard."""
 
+    # The sidebar and the nav rail take a fixed ~58 columns, so below 120
+    # columns a label column would leave the fields next to no room: the
+    # stylesheet stacks each label above its field on ``-narrow``. Below 40
+    # rows it trims the vertical padding on ``-short``.
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("ctrl+f", "focus_search", "Search", show=True),

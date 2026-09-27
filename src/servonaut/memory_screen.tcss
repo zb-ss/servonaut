@@ -37,6 +37,33 @@
     margin-right: 1;
 }
 
+/* The per-server screen stacks a title, status, banner, table and four
+   action rows; together they are taller than a small terminal. The page
+   scrolls instead of clipping, the title keeps a row between itself and the
+   header, and the table keeps enough height to show its rows (a 1fr share
+   of an over-full page is zero). */
+MemoryScreen #memory-container {
+    padding: 1 1 0 1;
+    overflow-y: auto;
+}
+
+MemoryScreen #memory-table {
+    min-height: 8;
+}
+
+/* Narrow terminals (see MemoryScreen.HORIZONTAL_BREAKPOINTS): the five
+   action buttons do not fit on one row, so they wrap onto a grid. */
+MemoryScreen.-narrow #memory-actions {
+    layout: grid;
+    grid-size: 3;
+    grid-gutter: 0 1;
+}
+
+MemoryScreen.-narrow #memory-actions Button {
+    width: 1fr;
+    margin: 0;
+}
+
 /* Hidden utility class */
 .hidden {
     display: none;

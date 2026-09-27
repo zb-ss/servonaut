@@ -37,12 +37,12 @@ from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.services.voice_engines import (
     DEFAULT_TTS_VOICE,
     ENGINES,
-    KOKORO_ARCHIVE_BYTES,
     KOKORO_VOICES,
     NEMOTRON_LATENCY_OPTIONS,
     engine_spec,
     human_bytes,
 )
+from servonaut.services.voice_models import KOKORO_TTS_SPEC
 from servonaut.utils.credential_scrub import scrub_credentials
 
 logger = logging.getLogger(__name__)
@@ -231,7 +231,7 @@ def tts_model_action(model_ok: bool) -> tuple:
     if model_ok:
         return ("Remove speech model", "voice_btn_tts_remove", "error")
     return (
-        f"Download speech model (~{human_bytes(KOKORO_ARCHIVE_BYTES)})",
+        f"Download speech model (~{human_bytes(KOKORO_TTS_SPEC.total_download_bytes)})",
         "voice_btn_tts_download",
         "primary",
     )
@@ -1643,9 +1643,8 @@ class VoicePanel(SettingsPanel):
     def _on_download_progress(self, label: str, done: int, total: int) -> None:
         """Progress callback for the downloader; always runs on the event loop.
 
-        The in-process setup service downloads in a coroutine on the loop;
-        the desktop service downloads on a worker thread and delivers each
-        report back onto the loop. Either way widgets may be touched here.
+        Both setup services download on a worker thread and deliver each
+        report back onto the loop, so widgets may be touched here.
         """
         self._render_download_progress(label, done, total)
 

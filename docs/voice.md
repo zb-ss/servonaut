@@ -61,13 +61,20 @@ Every download states its size before you press anything:
 | Model | Used for | Download |
 |---|---|---|
 | Whisper `tiny` → `medium` | Voice input (batch engine) | ~75 MB to ~1.5 GB; `small` (~490 MB) is the default |
-| Nemotron streaming | Voice input (streaming engine) | ~683 MB |
+| Nemotron streaming | Voice input (streaming engine) | ~651 MB |
 | Kokoro | Spoken replies | ~126 MB |
 | Silero voice detection | Conversation mode and barge-in | under 1 MB |
 
 Model weights live in `~/.servonaut/voice_models/`, except Whisper's, which
 land in the Hugging Face cache (`~/.cache/huggingface/hub`, or wherever
 `HF_HOME` points).
+
+The Nemotron, Kokoro and Silero models are downloaded from fixed sources (a
+specific repository revision or release) and checked against their known
+size and SHA-256 before they are installed. A file that does not match is
+discarded with an error naming the model, and an interrupted download is
+resumed or discarded; neither is ever left where the voice engines would
+load it. Whisper weights are fetched by the transcription library itself.
 
 ## Voice input
 

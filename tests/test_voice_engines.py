@@ -22,7 +22,6 @@ from servonaut.services.voice_engines import (
     DEFAULT_ENGINE,
     ENGINES,
     NEMOTRON_LATENCY_OPTIONS,
-    SILERO_VAD_BYTES,
     SILERO_VAD_FILE,
     SILERO_VAD_MODEL_ID,
     SILERO_VAD_URL,
@@ -36,6 +35,7 @@ from servonaut.services.voice_engines import (
     nemotron_repo,
     silero_vad_model_dir,
 )
+from servonaut.services.voice_models import SILERO_VAD_SPEC
 
 
 class TestSileroVadRegistry:
@@ -53,8 +53,9 @@ class TestSileroVadRegistry:
     def test_model_dir_lives_under_the_voice_model_root(self):
         assert silero_vad_model_dir() == VOICE_MODEL_ROOT / SILERO_VAD_MODEL_ID
 
-    def test_size_constant_is_plausible(self):
-        assert 0 < SILERO_VAD_BYTES < 10_000_000  # a small VAD, not an LLM
+    def test_pinned_size_is_plausible(self):
+        # A small VAD, not an LLM.
+        assert 0 < SILERO_VAD_SPEC.total_download_bytes < 10_000_000
 
 
 class TestModelsRoot:

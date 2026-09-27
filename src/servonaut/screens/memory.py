@@ -342,6 +342,15 @@ class MemoryScreen(Screen):
 
     CSS_PATH = [*_APP_CSS_FILES, Path(__file__).parent.parent / "memory_screen.tcss"]
 
+    # Below 120 columns the action buttons wrap onto a grid and each status
+    # line sits above its buttons (see the ``-narrow`` rules in the styles).
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+
+    # Initial focus is set in ``_focus_initial_control``. Left to the
+    # default, it would land on the first focusable widget, the Memory Sync
+    # banner's button: an upsell must never be what Enter does on arrival.
+    AUTO_FOCUS = ""
+
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh_all", "Refresh All", show=True),
@@ -448,23 +457,34 @@ class MemoryScreen(Screen):
                         "available without an AI plan.[/dim]",
                         id="memory-summary-status",
                     ),
-                    Button("v. View Summary", variant="primary", id="btn_view_summary"),
-                    Button("e. Export", id="btn_export"),
+                    # Each row's buttons are grouped so a narrow screen can
+                    # move them, together, under the status text.
+                    Horizontal(
+                        Button("v. View Summary", variant="primary", id="btn_view_summary"),
+                        Button("e. Export", id="btn_export"),
+                        classes="memory-row-buttons",
+                    ),
                     id="memory-summary-row",
                 ),
                 Horizontal(
                     Static(
                         "[dim]Cloud sync: unavailable[/dim]", id="memory-sync-status"
                     ),
-                    Button("S. Sync This Server", id="btn_sync_now"),
+                    Horizontal(
+                        Button("S. Sync This Server", id="btn_sync_now"),
+                        classes="memory-row-buttons",
+                    ),
                     id="memory-sync-row",
                 ),
                 Horizontal(
                     Static(
                         "[dim]AI enhancement: optional[/dim]", id="memory-ai-status"
                     ),
-                    Button("A. Enhance Local Summary", id="btn_enhance_ai"),
-                    Button("H. Generate from Memory Sync", id="btn_build_ai"),
+                    Horizontal(
+                        Button("A. Enhance Local Summary", id="btn_enhance_ai"),
+                        Button("H. Generate from Memory Sync", id="btn_build_ai"),
+                        classes="memory-row-buttons",
+                    ),
                     id="memory-ai-row",
                 ),
                 Static(
@@ -493,6 +513,18 @@ class MemoryScreen(Screen):
         self._refresh_sync_status()
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
+        self._focus_initial_control()
+
+    def _focus_initial_control(self) -> None:
+        """Start on the memory table, or on the probe button when it is empty.
+
+        The page is not scrolled to the focused widget: it opens at the top,
+        with the title and status in view.
+        """
+        if self.query_one("#memory-empty-state").has_class("hidden"):
+            self.query_one("#memory-table", DataTable).focus(scroll_visible=False)
+        else:
+            self.query_one("#btn_empty_probe", Button).focus(scroll_visible=False)
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the title and the observed/declared values for the new mode.
