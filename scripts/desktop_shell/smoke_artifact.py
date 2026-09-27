@@ -50,6 +50,8 @@ _HOST_RESULT_KEYS = (
     "session_answered",
     "child_exited",
 )
+# The bundled voice inputs the self-test verifies against their manifest.
+_VOICE_RESULT_KEYS = ("directory", "manifest", "uv", "wheel", "requirements")
 
 _POLICY_KEYS = frozenset(
     {
@@ -458,6 +460,7 @@ def smoke_desktop_payload(
                     active_policy,
                     check=_SELFTEST_WINDOW_CHECK if selftest_window else _SELFTEST_CHECK,
                     identity=_marker_identity(payload_root),
+                    target=target.name,
                 )
             )
 
@@ -512,6 +515,7 @@ def _run_gui_selftest(
     *,
     check: str,
     identity: ReleaseIdentity,
+    target: str,
 ) -> dict[str, CheckResult]:
     """Require the GUI to refuse a wrong token, then pass the authenticated check."""
     rejected = _run_process(
@@ -537,7 +541,7 @@ def _run_gui_selftest(
         timeout=policy.selftest_timeout_seconds,
         max_output_bytes=policy.stdout_stderr_max_bytes,
     )
-    _validate_selftest_result(passed, check, identity)
+    _validate_selftest_result(passed, check, identity, target)
     return {
         "gui_selftest_auth_rejection": rejected.to_check_result(
             ok=True, details="Unauthenticated selftest rejected"
@@ -564,7 +568,7 @@ def _selftest_error(result: _ProcessResult) -> object:
 
 
 def _validate_selftest_result(
-    result: _ProcessResult, check: str, identity: ReleaseIdentity
+    result: _ProcessResult, check: str, identity: ReleaseIdentity, target: str
 ) -> None:
     """Require every step of the packaged check and the build's own identity."""
     payload = _selftest_payload(result)
@@ -591,6 +595,17 @@ def _validate_selftest_result(
     required = (*_HOST_RESULT_KEYS, *(("window",) if check == _SELFTEST_WINDOW_CHECK else ()))
     if not isinstance(host, dict) or any(host.get(key) is not True for key in required):
         raise DesktopSmokeError("GUI selftest did not complete every host step")
+    voice = payload.get("voice")
+    if not isinstance(voice, dict) or any(
+        voice.get(key) is not True for key in _VOICE_RESULT_KEYS
+    ):
+        raise DesktopSmokeError("GUI selftest did not verify every bundled voice file")
+    # The frozen app does not know its build target, so the manifest's is
+    # compared here, where the target being qualified is known.
+    if voice.get("target") != target:
+        raise DesktopSmokeError(
+            f"GUI selftest found a voice manifest for another target, not {target}"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

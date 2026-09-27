@@ -1086,7 +1086,7 @@ class _Provisioning:
         python_version = self._manifest.python_version
 
         self._begin(0)
-        _verify_sha256(self._bundle_dir / self._manifest.uv.filename, self._manifest.uv.sha256)
+        verify_sha256(self._bundle_dir / self._manifest.uv.filename, self._manifest.uv.sha256)
         requirements = self._stage_input(self._manifest.requirements, inputs)
         wheel = self._stage_input(self._manifest.wheel, inputs)
         self._begin(1)
@@ -1094,14 +1094,14 @@ class _Provisioning:
         self._begin(2)
         self._uv(2, "venv", "--python", python_version, str(staging / _VENV_DIRNAME))
         self._begin(3)
-        _verify_sha256(requirements, self._manifest.requirements.sha256)
+        verify_sha256(requirements, self._manifest.requirements.sha256)
         self._uv(
             3, "pip", "install", "--python", venv_python,
             "--require-hashes", "--only-binary", ":all:", "--no-deps",
             "-r", str(requirements),
         )
         self._begin(4)
-        _verify_sha256(wheel, self._manifest.wheel.sha256)
+        verify_sha256(wheel, self._manifest.wheel.sha256)
         self._uv(
             4, "pip", "install", "--python", venv_python,
             "--no-deps", "--no-index", str(wheel),
@@ -1127,13 +1127,13 @@ class _Provisioning:
 
     def _uv(self, index: int, *args: str) -> None:
         uv = self._bundle_dir / self._manifest.uv.filename
-        _verify_sha256(uv, self._manifest.uv.sha256)
+        verify_sha256(uv, self._manifest.uv.sha256)
         self._runner.run(_STEP_LABELS[index], [str(uv), *args], env=self._uv_env)
 
     def _stage_input(self, bundled: BundledFile, inputs: Path) -> Path:
         """Copy a verified bundled file into staging and verify the copy."""
         source = self._bundle_dir / bundled.filename
-        _verify_sha256(source, bundled.sha256)
+        verify_sha256(source, bundled.sha256)
         copy = inputs / bundled.filename
         try:
             inputs.mkdir(exist_ok=True)
@@ -1142,7 +1142,7 @@ class _Provisioning:
             raise VoiceRuntimeError(
                 f"The bundled file {bundled.filename} could not be staged: {error}"
             ) from error
-        _verify_sha256(copy, bundled.sha256)
+        verify_sha256(copy, bundled.sha256)
         return copy
 
     def _promote(self, staging: Path) -> VoiceRuntimeManifest:
@@ -1592,7 +1592,16 @@ def _venv_python(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
-def _verify_sha256(path: Path, expected: str) -> None:
+def verify_sha256(path: Path, expected: str) -> None:
+    """Require the SHA-256 of *path* to be *expected*.
+
+    The file is read in bounded chunks, so a bundled uv executable of tens of
+    megabytes is never held in memory at once. The packaged desktop self-test
+    runs this same check on the bundled voice inputs.
+
+    Raises:
+        VoiceRuntimeIntegrityError: If the file cannot be read or differs.
+    """
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:

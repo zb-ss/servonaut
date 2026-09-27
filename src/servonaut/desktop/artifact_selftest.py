@@ -2,11 +2,11 @@
 
 The packaged GUI runs this instead of opening its window when it is started
 with ``--_artifact-selftest``. Without a display it proves that the frozen
-payload imports its desktop stack, finds its bundled resources and the bundled
-voice runtime manifest, and bootstraps the loopback host through the real
-child executable. The host must serve the page, refuse an unauthenticated
-session, hand the token over through the one-shot bridge, run the real app for
-one authenticated session and then let the child exit cleanly.
+payload imports its desktop stack, finds its bundled resources, holds intact
+the voice runtime inputs its manifest pins, and bootstraps the loopback host
+through the real child executable. The host must serve the page, refuse an
+unauthenticated session, hand the token over through the one-shot bridge, run
+the real app for one authenticated session and then let the child exit cleanly.
 
 Opening the native window needs a display, so it runs only when the request
 asks for the ``desktop-window`` check.
@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
@@ -43,6 +44,7 @@ from servonaut._artifact_selftest import (
 
 if TYPE_CHECKING:
     from servonaut.desktop.launcher import DesktopSessionOwner
+    from servonaut.desktop.voice.packaged_manifest import BundledFile
     from servonaut.runtime import RuntimeLayout
 
 DESKTOP_CHECK: Final = "desktop"
@@ -56,9 +58,6 @@ _SESSION_SECONDS: Final = 30.0
 _CHILD_EXIT_SECONDS: Final = 10.0
 _WINDOW_SECONDS: Final = 20.0
 _MAX_PAGE_BYTES: Final = 1024 * 1024
-# Where the desktop build places the voice runtime inputs, under the resources.
-_VOICE_DIRECTORY: Final = "voice"
-_VOICE_MANIFEST: Final = "voice-runtime.json"
 _PING_PAYLOAD: Final = "artifact-selftest"
 
 
@@ -92,7 +91,7 @@ def _run_isolated_check(initial_runtime: object, check: str) -> dict[str, object
             runtime = _packaged_runtime(home, initial_runtime)
             _import_desktop_stack()
             resources = _verify_resources(runtime)
-            voice = _require_voice_payload(runtime)
+            voice = _verify_voice_payload(runtime)
             config_path, cache_path, expected = _create_fixtures(runtime.data_root)
             host = _bootstrap_host(runtime, open_window=check == DESKTOP_WINDOW_CHECK)
             preserved = _verify_fixtures(config_path, cache_path, expected)
@@ -181,23 +180,75 @@ def _verify_resources(runtime: RuntimeLayout) -> dict[str, bool]:
     return {"frontend": True, "notices": True}
 
 
-def _require_voice_payload(runtime: RuntimeLayout) -> dict[str, bool]:
-    """Require the bundled voice runtime inputs and their manifest to be present.
+def _verify_voice_payload(runtime: RuntimeLayout) -> dict[str, object]:
+    """Verify the bundled voice runtime inputs against the manifest that pins them.
 
-    Only presence is checked here. What the manifest means is decided by the
-    reader the app uses when it provisions voice, not by a second copy of it.
+    The manifest is read by the loader the app uses when it provisions voice,
+    and every file it pins goes through the digest check provisioning runs, so
+    what the manifest means is never decided by a second copy here. The runtime
+    does not record which target it was built for; the manifest's target is
+    reported so the smoke runner, which knows the target, can compare them.
     """
-    directory = runtime.resource_root / _VOICE_DIRECTORY
-    try:
-        directory_status = directory.lstat()
-        manifest_status = (directory / _VOICE_MANIFEST).lstat()
-    except OSError:
-        raise _SelftestFailure("voice-payload") from None
-    if not stat.S_ISDIR(directory_status.st_mode) or not stat.S_ISREG(
-        manifest_status.st_mode
+    from servonaut.desktop.voice.packaged_manifest import (
+        PACKAGED_MANIFEST_FILENAME,
+        PACKAGED_VOICE_DIRNAME,
+        PackagedVoiceManifestError,
+        load_packaged_manifest,
+    )
+
+    directory = runtime.resource_root / PACKAGED_VOICE_DIRNAME
+    manifest_path = directory / PACKAGED_MANIFEST_FILENAME
+    if not _lstat_is(directory, stat.S_ISDIR) or not _lstat_is(
+        manifest_path, stat.S_ISREG
     ):
         raise _SelftestFailure("voice-payload")
-    return {"directory": True, "manifest": True}
+    try:
+        manifest = load_packaged_manifest(manifest_path)
+    except PackagedVoiceManifestError:
+        raise _SelftestFailure("voice-manifest") from None
+    pinned = {
+        "uv": manifest.uv,
+        "wheel": manifest.wheel,
+        "requirements": manifest.requirements,
+    }
+    for role, bundled in pinned.items():
+        _verify_bundled_file(directory, role, bundled)
+    return {
+        "directory": True,
+        "manifest": True,
+        "target": manifest.target,
+        **dict.fromkeys(pinned, True),
+    }
+
+
+def _verify_bundled_file(directory: Path, role: str, bundled: BundledFile) -> None:
+    """Require a pinned file to be a regular file in the voice directory, intact.
+
+    The manifest's filename pattern admits no path separator and no leading
+    dot, so the file can only sit directly in the voice directory. A link is
+    refused even when its target matches: the build copies real files. Fails
+    with ``voice-<role>-file`` or ``voice-<role>-digest``.
+    """
+    from servonaut.desktop.voice.runtime import (
+        VoiceRuntimeIntegrityError,
+        verify_sha256,
+    )
+
+    path = directory / bundled.filename
+    if not _lstat_is(path, stat.S_ISREG):
+        raise _SelftestFailure(f"voice-{role}-file")
+    try:
+        verify_sha256(path, bundled.sha256)
+    except VoiceRuntimeIntegrityError:
+        raise _SelftestFailure(f"voice-{role}-digest") from None
+
+
+def _lstat_is(path: Path, is_kind: Callable[[int], bool]) -> bool:
+    """Whether *path* itself, never the target of a link, is of the kind."""
+    try:
+        return is_kind(path.lstat().st_mode)
+    except OSError:
+        return False
 
 
 def _bootstrap_host(runtime: RuntimeLayout, *, open_window: bool) -> dict[str, bool]:

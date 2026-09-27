@@ -30,6 +30,8 @@ def _make_mock_payload(
     reported_revision: int = 1,
     skipped_host_step: str | None = None,
     rejection_error: str = "authentication-failed",
+    voice_target: str = "linux-x64-ubuntu-22.04",
+    skipped_voice_step: str | None = None,
 ) -> Path:
     """Create a mock desktop onedir payload with lightweight executable scripts."""
     root = tmp_path / "servonaut-desktop"
@@ -94,6 +96,15 @@ if args and args[0] == "--_artifact-selftest":
         "child_exited": True,
     }}
     host.pop({skipped_host_step!r}, None)
+    voice = {{
+        "directory": True,
+        "manifest": True,
+        "target": {voice_target!r},
+        "uv": True,
+        "wheel": True,
+        "requirements": True,
+    }}
+    voice.pop({skipped_voice_step!r}, None)
     print(json.dumps({{
         "schema_version": 1,
         "ok": True,
@@ -105,6 +116,7 @@ if args and args[0] == "--_artifact-selftest":
             "packaging_revision": {reported_revision},
         }},
         "host": host,
+        "voice": voice,
     }}))
     sys.exit(0)
 sys.exit(0)
@@ -331,6 +343,26 @@ def test_selftest_result_must_complete_every_host_step(tmp_path: Path, step: str
     target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
 
     with pytest.raises(DesktopSmokeError, match="every host step"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
+
+
+@pytest.mark.parametrize(
+    "step", ["directory", "manifest", "uv", "wheel", "requirements", "target"]
+)
+def test_selftest_result_must_verify_every_bundled_voice_file(tmp_path: Path, step: str):
+    payload = _make_mock_payload(tmp_path, skipped_voice_step=step)
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="voice"):
+        smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
+
+
+def test_selftest_voice_manifest_must_be_for_the_qualified_target(tmp_path: Path):
+    """The frozen app cannot know its build target; the runner compares it."""
+    payload = _make_mock_payload(tmp_path, voice_target="windows-x64")
+    target = load_desktop_target_spec("linux-x64-ubuntu-22.04")
+
+    with pytest.raises(DesktopSmokeError, match="another target, not linux-x64-ubuntu-22.04"):
         smoke_desktop_payload(payload, target, product_version="1.2.3", skip_mcp=True)
 
 
