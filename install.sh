@@ -347,7 +347,12 @@ setup_wizard() {
             echo ""
             if ask_yes_no "Would you like to configure AWS now?"; then
                 print_info "Running 'aws configure'..."
-                aws configure
+                if [ -t 0 ]; then
+                    aws configure
+                else
+                    # The answer came from the terminal, so aws can read it too
+                    aws configure < /dev/tty
+                fi
             else
                 print_info "Skipping AWS configuration"
                 echo ""
