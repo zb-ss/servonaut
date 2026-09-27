@@ -26,8 +26,6 @@ name: Release install scripts
 on:
   release:
     types: [published]
-  push:
-    branches: [fix/install/stable-only]
   workflow_dispatch:
     inputs:
       tag:
