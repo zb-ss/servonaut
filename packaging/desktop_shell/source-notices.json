@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "download": {
+    "origin_host": "files.pythonhosted.org",
+    "max_archive_bytes": 4194304,
+    "max_expanded_bytes": 33554432,
+    "download_timeout_seconds": 300,
+    "socket_timeout_seconds": 60
+  },
+  "archives": [
+    {
+      "distribution": "pycairo",
+      "version": "1.29.1",
+      "targets": ["linux-x64-ubuntu-22.04"],
+      "url": "https://files.pythonhosted.org/packages/26/7c/ab4637b028d9ee12280ab9342f28310e613d5ca30c4d72d2aebeaa6a4969/pycairo-1.29.1.tar.gz",
+      "sha256": "4fbd26b4af24c9787d84cf5448e34eb8dca064b732479aaecd03109520eebd5f",
+      "notices": [
+        {
+          "member": "pycairo-1.29.1/COPYING",
+          "payload_path": "_internal/notices/pycairo-COPYING.txt",
+          "sha256": "360b9a526d47c51a7cab7f1ec49ca5893050562d639b742d588934ff84823a72"
+        },
+        {
+          "member": "pycairo-1.29.1/COPYING-LGPL-2.1",
+          "payload_path": "_internal/notices/pycairo-COPYING-LGPL-2.1.txt",
+          "sha256": "d80c9d084ebfb50ea1ed91bfbc2410d6ce542097a32c43b00781b83adcb8c77f"
+        },
+        {
+          "member": "pycairo-1.29.1/COPYING-MPL-1.1",
+          "payload_path": "_internal/notices/pycairo-COPYING-MPL-1.1.txt",
+          "sha256": "53692a2ed6c6a2c6ec9b32dd0b820dfae91e0a1fcdf625ca9ed0bdf8705fcc4f"
+        }
+      ]
+    },
+    {
+      "distribution": "pygobject",
+      "version": "3.48.2",
+      "targets": ["linux-x64-ubuntu-22.04"],
+      "url": "https://files.pythonhosted.org/packages/f9/9e/6bab1ed3bd878f0912d9a0600c21f3d88bab0e8a8d4c3ce50f5cf336faaf/pygobject-3.48.2.tar.gz",
+      "sha256": "c3c0a7afbe5b2c1c64dc0530109b4dd571085153dbedfbccb8ec7c5ad233f977",
+      "notices": [
+        {
+          "member": "pygobject-3.48.2/COPYING",
+          "payload_path": "_internal/notices/PyGObject-COPYING.txt",
+          "sha256": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b"
+        }
+      ]
+    }
+  ]
+}

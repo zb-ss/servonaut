@@ -40,6 +40,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POLICY_PATH = _REPO_ROOT / "packaging" / "desktop_shell" / "target-policy.json"
 _TARGETS = ("windows-x64", "macos-x64", "macos-arm64", "linux-x64-ubuntu-22.04")
 _NOTICE_DISTRIBUTIONS = ("aaa-one", "bbb-two", "ccc-three", "ddd-four", "eee-five")
+# Notices the Linux target takes from the source archives it builds.
+_SOURCE_NOTICES = ("fff-six-COPYING.txt", "fff-six-COPYING-LGPL.txt")
 _SAFE_TOC = [("servonaut", "/site/servonaut/__init__.py", "PYMODULE")]
 _CPU_TYPES = {"x86_64": 0x01000007, "arm64": 0x0100000C}
 _GI_EXTENSIONS = (
@@ -119,7 +121,40 @@ def notice_policy(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
     policy = root / "embedded-notices.json"
     policy.write_text(json.dumps({"schema_version": 1, "notices": rows}))
     monkeypatch.setattr(desktop_inspect, "EMBEDDED_NOTICE_POLICY_PATH", policy)
+    source_policy = root / "source-notices.json"
+    source_policy.write_text(json.dumps(_source_notice_policy()))
+    monkeypatch.setattr(desktop_inspect, "SOURCE_NOTICE_POLICY_PATH", source_policy)
     return policy
+
+
+def _source_notice_policy() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "download": {
+            "origin_host": "files.pythonhosted.org",
+            "max_archive_bytes": 1024,
+            "max_expanded_bytes": 1024,
+            "download_timeout_seconds": 1,
+            "socket_timeout_seconds": 1,
+        },
+        "archives": [
+            {
+                "distribution": "fff-six",
+                "version": "1.0.0",
+                "targets": ["linux-x64-ubuntu-22.04"],
+                "url": "https://files.pythonhosted.org/packages/ff/fff-six-1.0.0.tar.gz",
+                "sha256": "0" * 64,
+                "notices": [
+                    {
+                        "member": f"fff-six-1.0.0/{name.removeprefix('fff-six-')}",
+                        "payload_path": f"_internal/notices/{name}",
+                        "sha256": hashlib.sha256(_notice_text(name)).hexdigest(),
+                    }
+                    for name in _SOURCE_NOTICES
+                ],
+            }
+        ],
+    }
 
 
 def _notice_text(distribution: str) -> bytes:
@@ -167,6 +202,9 @@ def _create_mock_payload(
     (notices / "CPython-LICENSE.txt").write_text("Python license\n")
     for distribution in _NOTICE_DISTRIBUTIONS:
         (notices / f"{distribution}-LICENSE.txt").write_bytes(_notice_text(distribution))
+    if target.linux_abi is not None:
+        for name in _SOURCE_NOTICES:
+            (notices / name).write_bytes(_notice_text(name))
     _create_voice_bundle(root, target, version)
     if target.linux_abi is not None:
         _create_gi_binding(root)
@@ -268,7 +306,8 @@ def test_inspect_desktop_payload_success(
     assert report.product_version == "2.26.3"
     assert report.marker_valid is True
     assert report.assets_verified_count > 0
-    assert report.notices_verified_count == 6
+    # CPython, the five wheel notices and the Linux source-archive notices.
+    assert report.notices_verified_count == 1 + 5 + len(_SOURCE_NOTICES)
     assert report.voice_files_verified_count == 4
     assert report.regular_file_count > 0
     assert report.binary_formats == {"gui": "elf", "child": "elf", "console": "elf"}

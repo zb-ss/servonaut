@@ -47,6 +47,11 @@ from scripts.desktop_shell.native_headers import (
     macho_minimum_macos,
     read_native_identity,
 )
+from scripts.desktop_shell.source_notices import (
+    SOURCE_NOTICE_POLICY_PATH,
+    SourceNoticeError,
+    load_source_notice_policy,
+)
 from scripts.desktop_shell.voice_bundle import VoiceBundleError, verify_voice_bundle
 from scripts.standalone_cli.artifact_filesystem import matches_forbidden_path
 from scripts.standalone_cli.artifact_types import (
@@ -343,14 +348,20 @@ def _verify_frontend(payload_root: Path, target: DesktopTargetSpec) -> tuple[int
 def _verify_notices(
     payload_root: Path, target: DesktopTargetSpec, max_bytes: int
 ) -> int:
-    """Require exactly the CPython notice and the reviewed third-party notices."""
+    """Require exactly the CPython notice and the reviewed third-party notices.
+
+    The third-party notices come from installed wheels and, for packages the
+    target builds from source, from their pinned source archives.
+    """
     try:
         policy = load_embedded_notice_policy(EMBEDDED_NOTICE_POLICY_PATH, max_bytes)
-    except BuildValidationError as error:
+        source_notices = load_source_notice_policy(SOURCE_NOTICE_POLICY_PATH)
+    except (BuildValidationError, SourceNoticeError) as error:
         raise DesktopInspectionError("embedded notice policy is invalid") from error
     expected: dict[str, str | None] = {RUNTIME_NOTICE_NAME: None}
     for notice in policy:
         expected[notice.payload_path.name] = notice.sha256_by_target[target.name]
+    expected.update(source_notices.payload_notices(target.name))
 
     notices_dir = payload_root.joinpath(*PAYLOAD_NOTICES_DIRECTORY.parts)
     if notices_dir.is_symlink() or not notices_dir.is_dir():

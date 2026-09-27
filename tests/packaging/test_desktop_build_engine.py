@@ -355,7 +355,7 @@ def test_capture_build_metadata_persists_warnings_and_every_toc(
     metadata = tmp_path / "build-metadata"
     metadata.mkdir()
 
-    notices = SimpleNamespace(runtime=None, embedded=None)
+    notices = SimpleNamespace(runtime=None, embedded=None, source=())
 
     desktop_build._capture_build_metadata(
         tmp_path / "work", metadata, _request(wheel, target, tmp_path), notices
@@ -364,6 +364,10 @@ def test_capture_build_metadata_persists_warnings_and_every_toc(
     assert (metadata / "pyinstaller" / "warn-servonaut_desktop.txt").is_file()
     assert (metadata / "runtime-notice.json").is_file()
     assert (metadata / "third-party-notices.json").is_file()
+    assert json.loads((metadata / "source-notices.json").read_text()) == {
+        "schema_version": 1,
+        "notices": [],
+    }
     for index, role in enumerate(("gui", "child", "console")):
         tocs = metadata / "executables" / role / "pyinstaller"
         assert (tocs / "Analysis-00.toc").read_text() == f"[('Analysis{index}',)]"

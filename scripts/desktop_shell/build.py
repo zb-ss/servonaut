@@ -42,6 +42,15 @@ from scripts.desktop_shell.model import (
     validate_desktop_build_request,
     voice_lock_path,
 )
+from scripts.desktop_shell.source_notices import (
+    SOURCE_NOTICE_POLICY_PATH,
+    SourceNoticeError,
+    SourceNoticeRecord,
+    load_source_notice_policy,
+    stage_source_notices,
+    validate_payload_source_notices,
+    write_source_notice_metadata,
+)
 from scripts.desktop_shell.voice_bundle import load_voice_lock, stage_voice_bundle
 
 # The desktop payload embeds the same CPython and third-party notices as the
@@ -129,6 +138,8 @@ class _BuildContext:
 class _StagedNotices:
     runtime: _RuntimeNoticeSource
     embedded: StagedEmbeddedNotices
+    # Linux: license texts from the source archives of the GTK binding.
+    source: tuple[SourceNoticeRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -308,6 +319,7 @@ def _require_builder_inputs() -> None:
         _GI_BUILD_TOOLS_LOCK,
         _GI_BINDING_PROBE,
         EMBEDDED_NOTICE_POLICY_PATH,
+        SOURCE_NOTICE_POLICY_PATH,
     ):
         if not path.is_file():
             raise DesktopPolicyValidationError(
@@ -509,10 +521,10 @@ def _stage_frontend(
 
 @contextmanager
 def _notice_errors() -> Iterator[None]:
-    """Report failures of the shared notice code as desktop build errors."""
+    """Report failures of the notice code as desktop build errors."""
     try:
         yield
-    except (BuildValidationError, subprocess.CalledProcessError) as error:
+    except (BuildValidationError, SourceNoticeError, subprocess.CalledProcessError) as error:
         raise DesktopPolicyValidationError(
             f"license notice staging failed: {error}"
         ) from error
@@ -555,7 +567,30 @@ def _stage_notices(
             metadata_dir,
             context.policy.max_metadata_file_bytes,
         )
-    return _StagedNotices(runtime, embedded)
+        source = _stage_source_notices(context, target, embedded.staging_root)
+    return _StagedNotices(runtime, embedded, source)
+
+
+def _stage_source_notices(
+    context: _BuildContext, target: DesktopTargetSpec, staging_root: Path
+) -> tuple[SourceNoticeRecord, ...]:
+    """Stage the license texts of the target's source-built packages as notices.
+
+    They land beside the other third-party notices, where the spec collects
+    every staged notice into the payload.
+    """
+    policy = load_source_notice_policy()
+    if not policy.for_target(target.name):
+        return ()
+    work_dir = context.working_directory / "source-archives"
+    work_dir.mkdir()
+    return stage_source_notices(
+        policy,
+        target.name,
+        target.requirements_lock.read_text(encoding="utf-8"),
+        staging_root,
+        work_dir,
+    )
 
 
 def _validate_payload_notices(
@@ -564,6 +599,7 @@ def _validate_payload_notices(
     with _notice_errors():
         _validate_payload_runtime_notice(payload_root, notices.runtime)
         validate_payload_embedded_notices(payload_root, notices.embedded, max_bytes)
+        validate_payload_source_notices(payload_root, notices.source, max_bytes)
 
 
 def _write_cli_entry(staging_root: Path) -> Path:
@@ -767,6 +803,7 @@ def _capture_build_metadata(
         write_embedded_notice_metadata(
             metadata_dir / "third-party-notices.json", notices.embedded
         )
+        write_source_notice_metadata(metadata_dir / "source-notices.json", notices.source)
     _write_build_provenance(metadata_dir, request, gi_binding)
 
 
