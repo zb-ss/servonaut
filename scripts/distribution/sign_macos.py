@@ -28,6 +28,12 @@ from scripts.distribution.macos_layout import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MACOS_PACKAGING = _REPO_ROOT / "packaging" / "macos"
+# The hardened runtime's entitlements hold only what the app needs. The
+# launcher, the executable macOS attributes the app's microphone use to, may
+# ask for audio input; the helpers need nothing. The frozen Python, its ctypes
+# and PyObjC callbacks and WKWebView (whose JIT runs in WebKit's own processes)
+# work without allow-jit, allow-unsigned-executable-memory or
+# disable-library-validation: CI opens the signed app's window without them.
 _DEFAULT_ENTITLEMENTS = _MACOS_PACKAGING / "entitlements.plist"
 _DEFAULT_HELPER_ENTITLEMENTS = _MACOS_PACKAGING / "helper-entitlements.plist"
 
