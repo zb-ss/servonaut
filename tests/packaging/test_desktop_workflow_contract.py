@@ -300,6 +300,13 @@ def test_the_window_screenshot_is_uploaded_before_cleanup(workflow_content: str)
 
 
 _FORWARD_SCRIPT = _REPO_ROOT / "scripts" / "desktop_shell" / "forward_window_smoke.sh"
+_WESTON_RUN = _REPO_ROOT / "scripts" / "desktop_shell" / "weston_run.sh"
+_FORWARD_STEP = "Run packaged window smoke on Ubuntu 24.04 and 26.04"
+
+
+def _forward_images(step: str) -> list[str]:
+    block = step.split("FORWARD_IMAGES: >-\n", 1)[1].split("\n        run: |", 1)[0]
+    return [line.strip() for line in block.splitlines()]
 
 
 def test_linux_payload_is_qualified_on_every_policy_platform(workflow_content: str) -> None:
@@ -311,16 +318,37 @@ def test_linux_payload_is_qualified_on_every_policy_platform(workflow_content: s
     qualify = _job_block(workflow_content, "qualify")
     build_runner = f"runner: {linux.build_platform}"
     assert f"target: linux-x64-ubuntu-22.04\n            {build_runner}" in qualify
-    for platform in linux.qualification_platforms:
-        if platform == linux.build_platform:
-            continue
-        name, version = platform.split("-")
-        assert re.search(rf"FORWARD_IMAGE: {name}:{version}@sha256:[0-9a-f]{{64}}\n", qualify)
+    forward = [
+        platform.replace("-", ":", 1)
+        for platform in linux.qualification_platforms
+        if platform != linux.build_platform
+    ]
+    images = _forward_images(_named_step(qualify, _FORWARD_STEP))
+    # Pinned by digest, in the policy's order: 24.04's tripwire runs before
+    # 26.04's policy, which stays loaded, could blunt it.
+    assert [image.split("@", 1)[0] for image in images] == forward == [
+        "ubuntu:24.04",
+        "ubuntu:26.04",
+    ]
+    for image in images:
+        assert re.fullmatch(r"ubuntu:\d\d\.04@sha256:[0-9a-f]{64}", image), image
+
+
+def test_every_forward_release_is_qualified_before_the_step_fails(workflow_content: str) -> None:
+    step = _named_step(_job_block(workflow_content, "qualify"), _FORWARD_STEP)
+    loop = step.split('for image in "${images[@]}"; do', 1)[1]
+
+    assert 'read -ra images <<< "${FORWARD_IMAGES}"' in step
+    assert "if ! docker run --rm" in loop
+    assert 'failed+=("${image%%@*}")' in loop
+    after = loop.split("\n          done\n", 1)[1]
+    assert after.split("fi", 1)[0].strip().startswith("if ((${#failed[@]})); then")
+    assert "exit 1" in after
 
 
 def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: str) -> None:
     qualify = _job_block(workflow_content, "qualify")
-    step = _named_step(qualify, "Run packaged window smoke on Ubuntu 24.04")
+    step = _named_step(qualify, _FORWARD_STEP)
 
     assert "id: window-smoke-forward" in step
     assert "if: runner.os == 'Linux'" in step
@@ -329,10 +357,11 @@ def test_forward_smoke_installs_the_deb_in_a_clean_container(workflow_content: s
     assert 'PYTHONPATH="${GITHUB_WORKSPACE}/src"' in step
     assert "docker run --rm" in step
     assert '--volume "${GITHUB_WORKSPACE}:/src:ro"' in step
+    assert '"${image}"' in step
     assert "bash scripts/desktop_shell/forward_window_smoke.sh" in step
     # The payload never leaves the job: no artifact carries it to another job.
     assert qualify.index("Run packaged window smoke\n") < qualify.index(
-        "Run packaged window smoke on Ubuntu 24.04"
+        _FORWARD_STEP
     ) < qualify.index("Prepare sanitized non-executable evidence")
     gate = _named_step(qualify, "Require successful qualification")
     assert 'test "${WINDOW_SMOKE_FORWARD_STATUS}" = "success"' in gate
@@ -343,7 +372,7 @@ def test_forward_smoke_runs_under_ubuntus_user_namespace_restriction(
     workflow_content: str,
 ) -> None:
     qualify = _job_block(workflow_content, "qualify")
-    step = _named_step(qualify, "Run packaged window smoke on Ubuntu 24.04")
+    step = _named_step(qualify, _FORWARD_STEP)
 
     assert "restriction=kernel.apparmor_restrict_unprivileged_userns" in step
     # A runner without the restriction fails instead of passing vacuously.
@@ -351,7 +380,9 @@ def test_forward_smoke_runs_under_ubuntus_user_namespace_restriction(
     assert missing.split("fi\n", 1)[0].rstrip().endswith("exit 1")
     enable = 'sudo sysctl -qw "${restriction}=1"'
     restore = "trap 'sudo sysctl -qw \"${restriction}=${host_restriction}\";"
-    assert step.index(restore) < step.index(enable) < step.index("docker run --rm")
+    # One restriction for every release, restored once they all ran.
+    assert step.index(restore) < step.index(enable) < step.index("for image in")
+    assert step.count("sysctl -qw") == 2
     # Unconfined like a desktop session, so the restriction applies; seccomp
     # off, or Docker's filter would refuse the namespace first; and allowed to
     # load AppArmor policy, as installing AppArmor and the package does.
@@ -376,17 +407,60 @@ def test_forward_script_opens_the_window_under_the_release_restriction() -> None
         'runuser -u "${smoke_user}" -- unshare --user --map-root-user true',
         '[[ "${refusal}" == *"/proc/self/uid_map"* ]]',
         "-m scripts.desktop_shell.window_smoke",
-        "ship an AppArmor profile",
         '"process_security_labels"',
+        "AppArmor profile that grants the launcher userns",
     ]
     positions = [script.index(step) for step in steps]
     assert positions == sorted(positions)
     # The control must fail closed: a namespace that works means no restriction.
     control = script.split("unshare --user --map-root-user true", 1)[1]
     assert control.split("\nfi\n", 1)[0].strip().startswith("2>&1); then\n  fail ")
+    # Every window runs as the unprivileged user, after the control.
+    opener = script.split("open_window() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'runuser -u "${smoke_user}" --' in opener
+    assert script.index("unshare --user") < script.index("open_window() {")
     # No profile is shipped, and nothing switches the sandbox off to pass.
     assert "apparmor_parser" not in script
     assert "WEBKIT_DISABLE_SANDBOX" not in script
+
+
+def test_forward_script_opens_the_window_on_x11_and_then_on_wayland_only() -> None:
+    script = _FORWARD_SCRIPT.read_text(encoding="utf-8")
+    opener = script.split("open_window() {", 1)[1].split("\n}\n", 1)[0]
+
+    assert '--display "${display}"' in opener
+    assert '--screenshot "${output}/desktop-window-${target}-on-${host}-${display}.png"' in opener
+    x11 = 'if open_window x11 xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24"; then'
+    weston = "apt-get install --yes --no-install-recommends weston\n"
+    no_xwayland = "if [[ -e /usr/bin/Xwayland ]]; then\n  fail "
+    wayland = "if open_window wayland bash scripts/desktop_shell/weston_run.sh; then"
+    verdict = "if ((${#failed[@]})); then\n  fail "
+    # The X11 window opens with the tools it always had; weston, and a check
+    # that it brought no X server, come before the Wayland window. A failed
+    # X11 window still lets the Wayland one run, and either fails the script.
+    positions = [script.index(line) for line in (x11, weston, no_xwayland, wayland, verdict)]
+    assert positions == sorted(positions)
+    assert script.count("failed+=(") == 2
+    assert script.count("if open_window ") == 2
+
+
+def test_weston_run_offers_wayland_and_nothing_else() -> None:
+    script = _WESTON_RUN.read_text(encoding="utf-8")
+    subprocess.run(["bash", "-n", str(_WESTON_RUN)], check=True)
+
+    for option in (
+        "--backend=headless",
+        "--renderer=pixman",
+        "--shell=kiosk",
+        "--debug",
+        "--no-config",
+    ):
+        assert option in script
+    # Without --xwayland weston starts no X server; DISPLAY never reaches the command.
+    code = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
+    assert not any("xwayland" in line.lower() for line in code)
+    assert "env -u DISPLAY -u XAUTHORITY" in script
+    assert 'WAYLAND_DISPLAY="${socket_name}"' in script
 
 
 def test_forward_script_installs_only_the_depends_before_its_own_tools() -> None:

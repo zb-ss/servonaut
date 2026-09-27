@@ -262,27 +262,36 @@ jobs:
             --evidence-dir "${EVIDENCE_DIR}" \
             --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
-      # Forward qualification on the newer LTS: the payload built above,
-      # packaged as the .deb and installed in a clean Ubuntu 24.04 container
-      # with nothing but its declared Depends, must open its window the same
-      # way. The container keeps the payload inside this job.
+      # Forward qualification on the newer LTS releases: the payload built
+      # above, packaged as the .deb and installed in a clean container of each
+      # release with nothing but its declared Depends, must open its window
+      # the same way, on a virtual X display and then on a headless Wayland
+      # compositor with no X server (forward_window_smoke.sh). The containers
+      # keep the payload inside this job. Every release is qualified even when
+      # an earlier one fails; the step fails if any window did not open.
       #
-      # It runs under 24.04's restriction of unprivileged user namespaces:
-      # this runner's kernel enforces it for the step
-      # (kernel.apparmor_restrict_unprivileged_userns=1), and installing
-      # 24.04's AppArmor in the container loads 24.04's policy into it. The
+      # Each runs under its release's restriction of unprivileged user
+      # namespaces: this runner's kernel enforces it for the step
+      # (kernel.apparmor_restrict_unprivileged_userns=1), and installing the
+      # release's AppArmor in its container loads that policy into it. The
       # window needs no user namespace (WebKit's bubblewrap sandbox is off),
       # so the package ships no AppArmor profile; should that change, the
-      # window stops opening here. The container options serve that check:
+      # window stops opening on 24.04. 26.04's policy lets bubblewrap itself
+      # create one (bwrap-userns-restrict), which GTK's own image loaders use
+      # there, so 26.04 qualifies the window under the policy its users run
+      # rather than tripping on a sandbox. 24.04 goes first: policy stays
+      # loaded until the runner is discarded, and 26.04's bubblewrap profile
+      # would otherwise blunt the 24.04 tripwire. The container options serve
+      # these checks:
       # - seccomp=unconfined, or Docker's filter would refuse the namespace
       #   itself before the restriction is reached;
       # - apparmor=unconfined, so the container's processes are unconfined,
       #   as in a desktop session, which is what the restriction governs;
       #   Docker's own profile would also block loading policy;
       # - MAC_ADMIN and the host's securityfs, so installing AppArmor can
-      #   load 24.04's policy, which stays loaded until the runner is
-      #   discarded. The smoke runs as an unprivileged user without them.
-      - name: Run packaged window smoke on Ubuntu 24.04
+      #   load the release's policy. The smoke runs as an unprivileged user
+      #   without them.
+      - name: Run packaged window smoke on Ubuntu 24.04 and 26.04
         id: window-smoke-forward
         if: runner.os == 'Linux'
         env:
@@ -293,7 +302,10 @@ jobs:
           FORWARD_DIR: ${{ steps.paths.outputs.forward-dir }}
           EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
           SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
-          FORWARD_IMAGE: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+          # In qualification order, 24.04 first.
+          FORWARD_IMAGES: >-
+            ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+            ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78
         run: |
           set -euo pipefail
           mkdir "${FORWARD_DIR}/deb" "${FORWARD_DIR}/out"
@@ -315,19 +327,31 @@ jobs:
             --filename servonaut.deb
           echo "Runner kernel $(uname -r): ${restriction} was ${host_restriction}, now 1"
           sudo sysctl -qw "${restriction}=1"
-          docker run --rm \
-            --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
-            --cap-add MAC_ADMIN \
-            --volume /sys/kernel/security:/sys/kernel/security \
-            --shm-size=1g \
-            --volume "${GITHUB_WORKSPACE}:/src:ro" \
-            --volume "${FORWARD_DIR}/deb:/deb:ro" \
-            --volume "${FORWARD_DIR}/out:/out" \
-            --workdir /src \
-            "${FORWARD_IMAGE}" \
-            bash scripts/desktop_shell/forward_window_smoke.sh \
-            /deb/servonaut.deb "${TARGET}" /out "$(id -u):$(id -g)"
+          read -ra images <<< "${FORWARD_IMAGES}"
+          failed=()
+          for image in "${images[@]}"; do
+            echo "::group::${image%%@*}"
+            if ! docker run --rm \
+              --security-opt seccomp=unconfined \
+              --security-opt apparmor=unconfined \
+              --cap-add MAC_ADMIN \
+              --volume /sys/kernel/security:/sys/kernel/security \
+              --shm-size=1g \
+              --volume "${GITHUB_WORKSPACE}:/src:ro" \
+              --volume "${FORWARD_DIR}/deb:/deb:ro" \
+              --volume "${FORWARD_DIR}/out:/out" \
+              --workdir /src \
+              "${image}" \
+              bash scripts/desktop_shell/forward_window_smoke.sh \
+              /deb/servonaut.deb "${TARGET}" /out "$(id -u):$(id -g)"; then
+              failed+=("${image%%@*}")
+            fi
+            echo "::endgroup::"
+          done
+          if ((${#failed[@]})); then
+            echo "The packaged window did not qualify on ${failed[*]}." >&2
+            exit 1
+          fi
 
       # macOS: the qualified onedir becomes Servonaut.app in the layout the
       # PyInstaller bootloader expects of an app bundle (code in
