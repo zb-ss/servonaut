@@ -377,6 +377,18 @@ class Sidebar(Widget):
         if active_id:
             for section in self.query(SidebarSection):
                 section.collapsed = not section.contains_button(active_id)
+            # On a short terminal the active entry can sit below the fold.
+            # Scroll to it once the expanded section has been laid out.
+            self.call_after_refresh(self._scroll_to_button, active_id)
+
+    def _scroll_to_button(self, button_id: str) -> None:
+        """Scroll the sidebar so the nav button *button_id* is in view."""
+        try:
+            button = self.query_one(f"#{button_id}", Button)
+        except NoMatches:
+            return
+        if button.display:
+            button.scroll_visible(animate=False, immediate=True)
 
     def _sync_update_button(self) -> None:
         """Show the update button if the app already found a newer version."""
