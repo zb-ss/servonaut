@@ -221,9 +221,13 @@ async def test_browser_rendering_interactions_and_rejection(
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(host.config.probe_poll_seconds * 2)
                 assert b"Renderer interaction confirmation" in frames
-                # Ctrl+U clears the input (Ctrl+A only moves to its start).
-                await page.keyboard.press("Control+U")
-                await page.keyboard.type("CONFIRM")
+                # Correct the phrase with plain keys: modifier chords do not
+                # reach the terminal the same way in every engine.
+                await page.keyboard.press("Backspace")
+                await page.keyboard.type("M")
+                # Let the input's change enable Continue before Tab looks
+                # for it; a disabled button is skipped.
+                await asyncio.sleep(host.config.probe_poll_seconds * 2)
                 rendered.clear()
                 # Focus order: input, Cancel, then Continue once enabled.
                 await page.keyboard.press("Tab")
