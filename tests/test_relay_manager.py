@@ -28,6 +28,13 @@ from servonaut.services.relay_manager import (
 )
 from tests._async_bounds import STEP_TIMEOUT_SECONDS, run_within, wait_until
 
+# Time limits for the control server itself in tests that shorten the
+# manager's own limits to exercise a bounded stop. The server's limits also
+# cover writing the discovery record at start, which on Windows runs helper
+# processes to set the file's permissions and can take well over a few
+# hundred milliseconds on a busy runner.
+_WRITE_SAFE_CONTROL_LIMITS = {"timeout_seconds": 5.0, "cleanup_timeout_seconds": 5.0}
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -879,7 +886,9 @@ class TestStartStop:
             auth_service=_make_auth(),
             lock_path=lock_path,
             listener_factory=lambda **kwargs: listener.__init__(**kwargs) or listener,
-            control_server_factory=lambda **kwargs: _NeverClosingControlServer(**kwargs),
+            control_server_factory=lambda **kwargs: _NeverClosingControlServer(
+                **{**kwargs, **_WRITE_SAFE_CONTROL_LIMITS}
+            ),
             control_timeout_seconds=0.3,
             cleanup_timeout_seconds=0.3,
         )
@@ -934,6 +943,9 @@ class TestStartStop:
             auth_service=_make_auth(),
             lock_path=lock_path,
             listener_factory=listener_factory,
+            control_server_factory=lambda **kwargs: LocalControlServer(
+                **{**kwargs, **_WRITE_SAFE_CONTROL_LIMITS}
+            ),
             control_timeout_seconds=0.2,
             cleanup_timeout_seconds=0.2,
         )
