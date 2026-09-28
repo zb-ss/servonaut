@@ -130,9 +130,241 @@ def _write_macos_launcher(path: Path, helper_name: str) -> None:
     path.chmod(0o755)
 
 
-def _install_desktop() -> None:
-    """Create a desktop shortcut for the current OS."""
+# Each prefix must take the app argv as separate arguments: xfce4-terminal's
+# ``-e`` expects a single command string, so it uses ``-x`` instead.
+_TERMINAL_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("kitty", ("kitty", "-e")),
+    ("alacritty", ("alacritty", "-e")),
+    ("gnome-terminal", ("gnome-terminal", "--")),
+    ("konsole", ("konsole", "-e")),
+    ("xfce4-terminal", ("xfce4-terminal", "-x")),
+    ("xterm", ("xterm", "-e")),
+)
+# The shortcuts --install-desktop writes are named apart from the packaged
+# desktop app: its Linux launcher is dev.servonaut.Servonaut.desktop, which a
+# user launcher of the same file name would hide, and its macOS bundle is
+# Servonaut.app with the identifier dev.servonaut.desktop.
+_TERMINAL_LAUNCHER_FILE = "dev.servonaut.Servonaut.Terminal.desktop"
+_TERMINAL_LAUNCHER_MARKER = "X-Servonaut-Launcher=terminal"
+_TERMINAL_LAUNCHER_COMMENT = "Server Manager — SSH, SCP, AI Analysis, and more"
+_MACOS_TERMINAL_BUNDLE = "Servonaut Terminal.app"
+_MACOS_TERMINAL_NAME = "Servonaut Terminal"
+_MACOS_TERMINAL_IDENTIFIER = "dev.servonaut.terminal"
+_MACOS_TERMINAL_EXECUTABLE = "ServonautTerminal"
+_MACOS_COMMAND_HELPER = "Servonaut.command"
+# Earlier versions wrote the shortcuts under the desktop app's names.
+_LEGACY_LINUX_LAUNCHER_FILE = "servonaut.desktop"
+_LEGACY_TERMINAL_PREFIXES = frozenset(
+    {prefix for _name, prefix in _TERMINAL_PREFIXES} | {("xfce4-terminal", "-e")}
+)
+_LEGACY_MACOS_BUNDLE = "Servonaut.app"
+_LEGACY_MACOS_IDENTIFIER = "com.servonaut.app"
+_LEGACY_MACOS_EXECUTABLE = "Contents/MacOS/Servonaut"
+_LEGACY_MACOS_FILES = (
+    "Contents/MacOS/Servonaut.command",
+    _LEGACY_MACOS_EXECUTABLE,
+    "Contents/Info.plist",
+)
+_LEGACY_MACOS_DIRECTORIES = ("Contents/MacOS", "Contents")
+
+
+def _linux_applications_dir() -> Path:
+    return Path.home() / ".local" / "share" / "applications"
+
+
+def _macos_applications_dir() -> Path:
+    return Path.home() / "Applications"
+
+
+def _terminal_launcher_entry(desktop_exec: str) -> str:
+    """The desktop entry of the Linux launcher that opens the TUI in a terminal."""
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Servonaut (terminal)\n"
+        f"Comment={_TERMINAL_LAUNCHER_COMMENT}\n"
+        f"Exec={desktop_exec}\n"
+        "Icon=utilities-terminal\n"
+        "Terminal=false\n"
+        # Not TerminalEmulator: that category offers an entry as the default terminal.
+        "Categories=System;\n"
+        "Keywords=ssh;server;aws;ec2;\n"
+        f"{_TERMINAL_LAUNCHER_MARKER}\n"
+    )
+
+
+def _is_generated_linux_launcher(path: Path) -> bool:
+    """Whether *path* is a terminal launcher ``--install-desktop`` wrote.
+
+    It carries the marker key, or, from earlier versions, their Comment line
+    and an Exec line that runs servonaut in one of their terminals.
+    """
+    import stat
+
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return False
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if _TERMINAL_LAUNCHER_MARKER in lines:
+        return True
+    if f"Comment={_TERMINAL_LAUNCHER_COMMENT}" not in lines:
+        return False
+    commands = [line.removeprefix("Exec=") for line in lines if line.startswith("Exec=")]
+    return len(commands) == 1 and _runs_servonaut_in_a_terminal(commands[0])
+
+
+def _runs_servonaut_in_a_terminal(command: str) -> bool:
+    """Whether a desktop-entry command runs servonaut behind a known terminal prefix."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return tuple(argv[:2]) in _LEGACY_TERMINAL_PREFIXES and any(
+        "servonaut" in Path(argument).name for argument in argv[2:]
+    )
+
+
+def _is_generated_macos_shortcut(bundle: Path) -> bool:
+    """Whether *bundle* is the terminal shortcut an earlier ``--install-desktop`` wrote.
+
+    Those versions gave it the identifier com.servonaut.app and wrote nothing
+    into it but its Info.plist, a launcher asking Terminal to open servonaut
+    and, later, that launcher's command helper.
+    """
+    import plistlib
+    from xml.parsers.expat import ExpatError
+
+    entries = _macos_bundle_entries(bundle)
+    if entries is None or not entries <= {*_LEGACY_MACOS_FILES, *_LEGACY_MACOS_DIRECTORIES}:
+        return False
+    try:
+        info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+        launcher = (bundle / _LEGACY_MACOS_EXECUTABLE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError, ExpatError):
+        return False
+    return (
+        isinstance(info, dict)
+        and info.get("CFBundleIdentifier") == _LEGACY_MACOS_IDENTIFIER
+        and info.get("CFBundleExecutable") == Path(_LEGACY_MACOS_EXECUTABLE).name
+        and "open -a Terminal" in launcher
+    )
+
+
+def _macos_bundle_entries(bundle: Path) -> set[str] | None:
+    """Everything under the directory *bundle*, relative to it; None if a link is involved."""
+    if bundle.is_symlink() or not bundle.is_dir():
+        return None
+    entries: set[str] = set()
+    for directory, subdirectories, files in os.walk(bundle):
+        for name in (*subdirectories, *files):
+            path = Path(directory) / name
+            if path.is_symlink():
+                return None
+            entries.add(path.relative_to(bundle).as_posix())
+    return entries
+
+
+def _remove_legacy_linux_launcher(path: Path) -> None:
+    """Remove the terminal launcher earlier versions wrote under the desktop app's name."""
+    if not (path.exists() or path.is_symlink()):
+        return
+    if not _is_generated_linux_launcher(path):
+        print(f"Left {path} unchanged: servonaut --install-desktop did not create it.")
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        print(f"Could not remove the previous terminal launcher {path}: {exc}")
+        return
+    print(f"Removed the previous terminal launcher {path}, which had the desktop app's name.")
+
+
+def _remove_legacy_macos_shortcut(bundle: Path) -> None:
+    """Remove the terminal shortcut earlier versions wrote as ~/Applications/Servonaut.app."""
+    if not (bundle.exists() or bundle.is_symlink()):
+        return
+    if not _is_generated_macos_shortcut(bundle):
+        print(f"Left {bundle} unchanged: servonaut --install-desktop did not create it.")
+        return
+    try:
+        for name in _LEGACY_MACOS_FILES:
+            (bundle / name).unlink(missing_ok=True)
+        for name in _LEGACY_MACOS_DIRECTORIES:
+            (bundle / name).rmdir()
+        bundle.rmdir()
+    except OSError as exc:
+        print(f"Could not remove the previous terminal shortcut {bundle}: {exc}")
+        return
+    print(f"Removed the previous terminal shortcut {bundle}, which had the desktop app's name.")
+
+
+def _generated_legacy_shortcut(os_type: str) -> Path | None:
+    """The terminal shortcut an earlier ``--install-desktop`` left, if any."""
+    if os_type == "linux":
+        launcher = _linux_applications_dir() / _LEGACY_LINUX_LAUNCHER_FILE
+        return launcher if _is_generated_linux_launcher(launcher) else None
+    if os_type == "darwin":
+        bundle = _macos_applications_dir() / _LEGACY_MACOS_BUNDLE
+        return bundle if _is_generated_macos_shortcut(bundle) else None
+    return None
+
+
+def _install_linux_terminal_launcher(app_argv: Sequence[str]) -> None:
+    """Write the launcher that opens the TUI in the first terminal found."""
     import shutil
+
+    terminal_argv = next(
+        (prefix for name, prefix in _TERMINAL_PREFIXES if shutil.which(name)), None
+    )
+    if terminal_argv is None:
+        print("Error: No supported terminal emulator found.")
+        return
+    try:
+        desktop_exec = _desktop_exec([*terminal_argv, *app_argv])
+    except ValueError as exc:
+        print(f"Error: could not create a desktop launcher: {exc}")
+        return
+
+    desktop_dir = _linux_applications_dir()
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    desktop_file = desktop_dir / _TERMINAL_LAUNCHER_FILE
+    desktop_file.write_text(_terminal_launcher_entry(desktop_exec), encoding="utf-8")
+    desktop_file.chmod(0o755)
+    print(f"Terminal launcher created: {desktop_file}")
+    print("Servonaut (terminal) should now appear in your application launcher.")
+    _remove_legacy_linux_launcher(desktop_dir / _LEGACY_LINUX_LAUNCHER_FILE)
+
+
+def _install_macos_terminal_shortcut(app_argv: Sequence[str]) -> None:
+    """Write the app bundle that opens the TUI in Terminal."""
+    import plistlib
+
+    applications = _macos_applications_dir()
+    bundle = applications / _MACOS_TERMINAL_BUNDLE
+    app_dir = bundle / "Contents" / "MacOS"
+    app_dir.mkdir(parents=True, exist_ok=True)
+
+    command_helper = app_dir / _MACOS_COMMAND_HELPER
+    _write_macos_command_helper(command_helper, app_argv)
+    _write_macos_launcher(app_dir / _MACOS_TERMINAL_EXECUTABLE, command_helper.name)
+    info = {
+        "CFBundleDisplayName": _MACOS_TERMINAL_NAME,
+        "CFBundleExecutable": _MACOS_TERMINAL_EXECUTABLE,
+        "CFBundleIdentifier": _MACOS_TERMINAL_IDENTIFIER,
+        "CFBundleName": _MACOS_TERMINAL_NAME,
+        "CFBundlePackageType": "APPL",
+        "CFBundleVersion": "1.0",
+    }
+    (bundle / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+    print(f"App bundle created: {bundle}")
+    print(f"{_MACOS_TERMINAL_NAME} should now appear in ~/Applications and Spotlight.")
+    _remove_legacy_macos_shortcut(applications / _LEGACY_MACOS_BUNDLE)
+
+
+def _install_desktop() -> None:
+    """Create a shortcut that opens the TUI in a terminal, for the current OS."""
     from servonaut.runtime import (
         DistributionKind,
         RuntimeCapabilityError,
@@ -142,8 +374,15 @@ def _install_desktop() -> None:
     from servonaut.utils.platform_utils import get_os
 
     runtime = detect_runtime()
+    os_type = get_os()
     if runtime.kind is DistributionKind.PACKAGED_DESKTOP:
         print("This packaged desktop build already provides its GUI launcher.")
+        legacy = _generated_legacy_shortcut(os_type)
+        if legacy is not None:
+            print(
+                f"An older Servonaut terminal shortcut is at {legacy}; "
+                "delete it if you no longer use it."
+            )
         return
     try:
         app_argv = validate_launch_argv(runtime.current_app_argv(), runtime=runtime)
@@ -151,85 +390,10 @@ def _install_desktop() -> None:
         print(f"Error: could not validate the Servonaut launch command: {exc}")
         return
 
-    os_type = get_os()
-
     if os_type == "linux":
-        desktop_dir = Path.home() / ".local" / "share" / "applications"
-        desktop_dir.mkdir(parents=True, exist_ok=True)
-        desktop_file = desktop_dir / "servonaut.desktop"
-
-        # Find a suitable terminal emulator. Each prefix must take the app
-        # argv as separate arguments: xfce4-terminal's ``-e`` expects a single
-        # command string, so it uses ``-x`` instead.
-        terminals = [
-            ("kitty", ("kitty", "-e")),
-            ("alacritty", ("alacritty", "-e")),
-            ("gnome-terminal", ("gnome-terminal", "--")),
-            ("konsole", ("konsole", "-e")),
-            ("xfce4-terminal", ("xfce4-terminal", "-x")),
-            ("xterm", ("xterm", "-e")),
-        ]
-        terminal_argv = None
-        for name, prefix in terminals:
-            if shutil.which(name):
-                terminal_argv = prefix
-                break
-
-        if not terminal_argv:
-            print("Error: No supported terminal emulator found.")
-            return
-
-        try:
-            desktop_exec = _desktop_exec([*terminal_argv, *app_argv])
-        except ValueError as exc:
-            print(f"Error: could not create a desktop launcher: {exc}")
-            return
-
-        content = f"""[Desktop Entry]
-Type=Application
-Name=Servonaut
-Comment=Server Manager — SSH, SCP, AI Analysis, and more
-Exec={desktop_exec}
-Icon=utilities-terminal
-Terminal=false
-Categories=System;TerminalEmulator;
-Keywords=ssh;server;aws;ec2;
-"""
-        desktop_file.write_text(content, encoding="utf-8")
-        desktop_file.chmod(0o755)
-        print(f"Desktop shortcut created: {desktop_file}")
-        print("Servonaut should now appear in your application launcher.")
-
+        _install_linux_terminal_launcher(app_argv)
     elif os_type == "darwin":
-        app_dir = Path.home() / "Applications" / "Servonaut.app" / "Contents" / "MacOS"
-        app_dir.mkdir(parents=True, exist_ok=True)
-
-        command_helper = app_dir / "Servonaut.command"
-        _write_macos_command_helper(command_helper, app_argv)
-
-        script = app_dir / "Servonaut"
-        _write_macos_launcher(script, command_helper.name)
-
-        plist_dir = app_dir.parent
-        plist = plist_dir / "Info.plist"
-        plist.write_text("""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>Servonaut</string>
-    <key>CFBundleName</key>
-    <string>Servonaut</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.servonaut.app</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-</dict>
-</plist>
-""")
-        print(f"App bundle created: {app_dir.parent.parent}")
-        print("Servonaut should now appear in ~/Applications and Spotlight.")
-
+        _install_macos_terminal_shortcut(app_argv)
     else:
         print(f"Desktop shortcuts not yet supported on {os_type}.")
         print(f"You can launch Servonaut with: {shlex.join(app_argv)}")

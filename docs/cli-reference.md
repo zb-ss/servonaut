@@ -473,7 +473,7 @@ Once connected, the exit code is the remote command's (or the session's);
 | `servonaut --update` | Check for and apply updates from PyPI |
 | `servonaut --list-backups` | List local configuration backups, newest first |
 | `servonaut --restore-backup [N]` | Restore configuration backup `N` from `--list-backups` (1 = newest); without `N`, choose from a list |
-| `servonaut --install-desktop` | Create a desktop shortcut (Linux/macOS) |
+| `servonaut --install-desktop` | Add a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS. It replaces the shortcut earlier versions created under the desktop app's name |
 | `servonaut --setup-ovh` | Guided OVHcloud credential setup |
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
 | `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |
