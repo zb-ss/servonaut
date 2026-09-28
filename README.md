@@ -190,7 +190,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 - **Instance caching** — stale-while-revalidate for fast startup.
 - **Auto-update** — startup check + one-click update (`servonaut --update`). Stable installations are offered stable releases only; see [Release candidates](docs/release-candidates.md).
-- **Desktop shortcut** — `servonaut --install-desktop` (Linux/macOS).
+- **Terminal shortcut** — `servonaut --install-desktop` adds a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS.
 - **Fully configurable** — everything in `~/.servonaut/config.json`.
 
 ## Prerequisites
@@ -226,7 +226,7 @@ A few flags you may want on day one:
 
 ```bash
 servonaut --update                # Check for updates and upgrade
-servonaut --install-desktop       # Create desktop shortcut (Linux/macOS)
+servonaut --install-desktop       # Add a launcher that opens the TUI in a terminal (Linux/macOS)
 servonaut --setup-ovh             # Guided OVHcloud credential setup
 servonaut --debug                 # Verbose logging to stderr
 ```

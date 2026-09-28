@@ -20,6 +20,14 @@ from scripts.distribution.payload_tree import walk_payload
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEB_TEMPLATE_DIR = _REPO_ROOT / "packaging" / "deb"
 
+# The desktop-file ID of the GUI launcher, which also names its icon and is
+# the program name the GUI's window announces (StartupWMClass). It does not
+# follow the package name: a launcher of the same ID in a user's
+# ~/.local/share/applications would hide this one.
+DESKTOP_APP_ID = "dev.servonaut.Servonaut"
+DESKTOP_ENTRY_PATH = f"usr/share/applications/{DESKTOP_APP_ID}.desktop"
+DESKTOP_ICON_PATH = f"usr/share/icons/hicolor/scalable/apps/{DESKTOP_APP_ID}.svg"
+
 DEFAULT_DEPENDENCIES: tuple[str, ...] = (
     "libgtk-3-0 (>= 3.24.0) | libgtk-3-0t64",
     "libwebkit2gtk-4.1-0",
@@ -252,8 +260,10 @@ def package_deb(
     )
 
     # Resolve extra packaging assets
-    desk_path = Path(desktop_file) if desktop_file else _DEB_TEMPLATE_DIR / "servonaut.desktop"
-    ic_path = Path(icon_file) if icon_file else _DEB_TEMPLATE_DIR / "servonaut.svg"
+    desk_path = (
+        Path(desktop_file) if desktop_file else _DEB_TEMPLATE_DIR / f"{DESKTOP_APP_ID}.desktop"
+    )
+    ic_path = Path(icon_file) if icon_file else _DEB_TEMPLATE_DIR / f"{DESKTOP_APP_ID}.svg"
     copy_path = Path(copyright_file) if copyright_file else _DEB_TEMPLATE_DIR / "copyright"
     pinst_path = Path(postinst_file) if postinst_file else _DEB_TEMPLATE_DIR / "postinst"
     prm_path = Path(postrm_file) if postrm_file else _DEB_TEMPLATE_DIR / "postrm"
@@ -357,7 +367,7 @@ def package_deb(
                 tar.addfile(ti, io.BytesIO(content))
 
             # 3. Add desktop entry
-            ti_desk = tarfile.TarInfo(name=f"./usr/share/applications/{package_name}.desktop")
+            ti_desk = tarfile.TarInfo(name=f"./{DESKTOP_ENTRY_PATH}")
             ti_desk.size = len(desktop_bytes)
             ti_desk.mode = 0o644
             ti_desk.mtime = epoch
@@ -369,13 +379,11 @@ def package_deb(
             total_uncompressed_bytes += len(desktop_bytes)
             md5_entries.append((
                 hashlib.md5(desktop_bytes).hexdigest(),
-                f"usr/share/applications/{package_name}.desktop",
+                DESKTOP_ENTRY_PATH,
             ))
 
             # 4. Add SVG icon
-            ti_icon = tarfile.TarInfo(
-                name=f"./usr/share/icons/hicolor/scalable/apps/{package_name}.svg"
-            )
+            ti_icon = tarfile.TarInfo(name=f"./{DESKTOP_ICON_PATH}")
             ti_icon.size = len(icon_bytes)
             ti_icon.mode = 0o644
             ti_icon.mtime = epoch
@@ -387,7 +395,7 @@ def package_deb(
             total_uncompressed_bytes += len(icon_bytes)
             md5_entries.append((
                 hashlib.md5(icon_bytes).hexdigest(),
-                f"usr/share/icons/hicolor/scalable/apps/{package_name}.svg",
+                DESKTOP_ICON_PATH,
             ))
 
             # 5. Add copyright notice
