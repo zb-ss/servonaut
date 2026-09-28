@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import io
 import os
@@ -15,6 +16,9 @@ import pytest
 
 from scripts.distribution.package_deb import (
     DEFAULT_DEPENDENCIES,
+    DESKTOP_APP_ID,
+    DESKTOP_ENTRY_PATH,
+    DESKTOP_ICON_PATH,
     REQUIRED_PAYLOAD_FILES,
     DebPackagingError,
     debian_version,
@@ -309,14 +313,17 @@ class TestDebDataHierarchy:
             assert sym_gui.issym()
             assert sym_gui.linkname == "/opt/servonaut/servonaut-desktop"
 
-            # Desktop entry
-            assert "./usr/share/applications/servonaut.desktop" in members_by_name
-            desk_entry = members_by_name["./usr/share/applications/servonaut.desktop"]
+            # Desktop entry, named by its desktop-file ID
+            desk_entry = members_by_name[
+                "./usr/share/applications/dev.servonaut.Servonaut.desktop"
+            ]
             assert desk_entry.mode == 0o644
+            assert "./usr/share/applications/servonaut.desktop" not in members_by_name
 
-            # Scalable SVG Icon
-            assert "./usr/share/icons/hicolor/scalable/apps/servonaut.svg" in members_by_name
-            icon_entry = members_by_name["./usr/share/icons/hicolor/scalable/apps/servonaut.svg"]
+            # Scalable SVG Icon, named like the desktop entry
+            icon_entry = members_by_name[
+                "./usr/share/icons/hicolor/scalable/apps/dev.servonaut.Servonaut.svg"
+            ]
             assert icon_entry.mode == 0o644
 
             # Copyright
@@ -432,7 +439,7 @@ class TestSystemToolInteroperability:
         )
         assert "./opt/servonaut/servonaut" in res_contents.stdout
         assert "./usr/bin/servonaut -> /opt/servonaut/servonaut" in res_contents.stdout
-        assert "./usr/share/applications/servonaut.desktop" in res_contents.stdout
+        assert "./usr/share/applications/dev.servonaut.Servonaut.desktop" in res_contents.stdout
 
         # 3. dpkg-deb -x (extract data)
         extract_dir = tmp_path / "extracted"
@@ -454,7 +461,10 @@ class TestSystemToolInteroperability:
     )
     def test_desktop_file_validates_cleanly(self) -> None:
         desktop_file = (
-            Path(__file__).resolve().parents[2] / "packaging" / "deb" / "servonaut.desktop"
+            Path(__file__).resolve().parents[2]
+            / "packaging"
+            / "deb"
+            / f"{DESKTOP_APP_ID}.desktop"
         )
         res = subprocess.run(
             ["desktop-file-validate", str(desktop_file)],
@@ -803,7 +813,7 @@ class TestDebPackagingAssets:
     _DEB_DIR = Path(__file__).resolve().parents[2] / "packaging" / "deb"
 
     def test_desktop_entry_categories(self) -> None:
-        desktop = (self._DEB_DIR / "servonaut.desktop").read_text(encoding="utf-8")
+        desktop = (self._DEB_DIR / f"{DESKTOP_APP_ID}.desktop").read_text(encoding="utf-8")
         categories = [
             line.split("=", 1)[1]
             for line in desktop.splitlines()
@@ -811,11 +821,59 @@ class TestDebPackagingAssets:
         ]
         assert categories == ["System;Network;"]
 
+    def test_desktop_entry_is_matched_to_the_window_by_its_id(self) -> None:
+        """The GUI names itself dev.servonaut.Servonaut; GNOME matches that to this entry."""
+        entry = (self._DEB_DIR / f"{DESKTOP_APP_ID}.desktop").read_text(encoding="utf-8")
+        lines = entry.splitlines()
+
+        assert DESKTOP_APP_ID == "dev.servonaut.Servonaut"
+        assert f"Icon={DESKTOP_APP_ID}" in lines
+        assert f"StartupWMClass={DESKTOP_APP_ID}" in lines
+        assert "Exec=/usr/bin/servonaut-desktop" in lines
+        assert _launcher_app_id() == DESKTOP_APP_ID
+        assert (self._DEB_DIR / f"{DESKTOP_APP_ID}.svg").is_file()
+        assert not list(self._DEB_DIR.glob("servonaut.*"))
+
+    def test_desktop_entry_is_named_by_its_id_whatever_the_package_name(
+        self, mock_payload: Path, tmp_path: Path
+    ) -> None:
+        deb_path, _, _ = package_deb(
+            payload_dir=mock_payload,
+            maintainer=_MAINTAINER,
+            output_dir=tmp_path / "out",
+            product_version="2.28.0rc2",
+            package_name="servonaut-preview",
+        )
+
+        members = _data_members(deb_path)
+        assert DESKTOP_ENTRY_PATH == "usr/share/applications/dev.servonaut.Servonaut.desktop"
+        assert DESKTOP_ICON_PATH == (
+            "usr/share/icons/hicolor/scalable/apps/dev.servonaut.Servonaut.svg"
+        )
+        assert members[f"./{DESKTOP_ENTRY_PATH}"].isfile()
+        assert members[f"./{DESKTOP_ICON_PATH}"].isfile()
+        applications = [name for name in members if name.startswith("./usr/share/applications/")]
+        assert applications == [f"./{DESKTOP_ENTRY_PATH}"]
+        assert {DESKTOP_ENTRY_PATH, DESKTOP_ICON_PATH} <= _md5sums_paths(deb_path)
+
     def test_assets_carry_no_placeholder_contact_address(self) -> None:
         for asset in self._DEB_DIR.iterdir():
             if asset.suffix == ".svg":
                 continue
             assert "@example." not in asset.read_text(encoding="utf-8"), asset.name
+
+
+def _launcher_app_id() -> str:
+    """The GUI's program name, read without importing the desktop launcher."""
+    launcher = Path(__file__).resolve().parents[2] / "src/servonaut/desktop/launcher.py"
+    for node in ast.walk(ast.parse(launcher.read_text(encoding="utf-8"))):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "LINUX_APP_ID"
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("launcher.py defines no LINUX_APP_ID")
 
 
 # Over 100 characters, so it does not fit a ustar link field.
