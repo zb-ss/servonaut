@@ -7,6 +7,7 @@ import importlib.util
 import logging
 import re
 import socket
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -551,3 +552,82 @@ def test_gui_entry_writes_its_log_under_the_data_root(
     log_file = runtime.data_root / "logs" / "desktop.log"
     assert requests[0].log_file == log_file
     assert "desktop start probe" in log_file.read_text(encoding="utf-8")
+
+
+# GTK names a window after the program: its Wayland app_id and X11 WM_CLASS.
+# The packaged Linux launcher is dev.servonaut.Servonaut.desktop with that
+# StartupWMClass, so the desktop shell can match the window to it.
+
+
+def _fake_gi(glib: object) -> dict[str, object]:
+    repository = SimpleNamespace(GLib=glib)
+    return {"gi": SimpleNamespace(repository=repository), "gi.repository": repository}
+
+
+def test_the_linux_program_name_is_the_launchers_desktop_id() -> None:
+    glib = MagicMock()
+
+    with patch.dict("sys.modules", _fake_gi(glib)):
+        launcher.set_linux_program_name(platform_name="linux")
+
+    assert launcher.LINUX_APP_ID == "dev.servonaut.Servonaut"
+    glib.set_prgname.assert_called_once_with(launcher.LINUX_APP_ID)
+
+
+@pytest.mark.parametrize("platform_name", ["darwin", "win32"])
+def test_other_platforms_keep_their_program_name(platform_name: str) -> None:
+    glib = MagicMock()
+
+    with patch.dict("sys.modules", _fake_gi(glib)):
+        launcher.set_linux_program_name(platform_name=platform_name)
+
+    glib.set_prgname.assert_not_called()
+
+
+def test_a_missing_gtk_binding_leaves_the_program_name_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with patch.dict("sys.modules", {"gi": None, "gi.repository": None}):
+        with caplog.at_level(logging.WARNING, logger=launcher.__name__):
+            launcher.set_linux_program_name(platform_name="linux")
+
+    assert "Could not set the desktop program name" in caplog.text
+
+
+def test_run_desktop_names_the_program_before_it_creates_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child_script = tmp_path / "mock_child.py"
+    child_script.write_text(_child_script_code(), encoding="utf-8")
+    request = DesktopLaunchRequest(
+        runtime=_test_runtime(tmp_path), child_argv=[sys.executable, str(child_script)]
+    )
+    steps: list[str] = []
+    monkeypatch.setattr(launcher, "set_linux_program_name", lambda: steps.append("name"))
+    mock_webview = MagicMock()
+    mock_webview.create_window.side_effect = lambda **_kwargs: steps.append("window") or MagicMock()
+    mock_webview.start.side_effect = lambda **_kwargs: steps.append("start")
+
+    with patch.dict("sys.modules", {"webview": mock_webview}):
+        assert run_desktop(request) == 0
+
+    assert steps == ["name", "window", "start"]
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or importlib.util.find_spec("gi") is None,
+    reason="needs the GTK binding on Linux",
+)
+def test_glib_takes_the_program_name() -> None:
+    probe = (
+        "from servonaut.desktop.launcher import LINUX_APP_ID, set_linux_program_name\n"
+        "set_linux_program_name()\n"
+        "from gi.repository import GLib\n"
+        "assert GLib.get_prgname() == LINUX_APP_ID, GLib.get_prgname()\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=60, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
