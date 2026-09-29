@@ -115,12 +115,9 @@ def usable_account(registry: AccountRegistry, ref: AccountRef) -> AccountRef:
     """*ref* when it can connect.
 
     Raises:
-        AccountUnavailableError: It cannot, with the registry's reason.
+        AccountUnavailableError: It cannot; the registry says why.
     """
-    try:
-        return registry.account(ref.provider, ref.label)
-    except UnknownAccountError as exc:
-        raise AccountUnavailableError(ref, str(exc)) from exc
+    return registry.account(ref.provider, ref.label)
 
 
 def check_qualifier(registry: Optional[AccountRegistry], reference: str) -> None:

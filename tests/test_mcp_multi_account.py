@@ -826,3 +826,22 @@ def test_listing_an_account_that_cannot_connect_says_why(staging_down):
     tools, _ = staging_down
     assert _run(tools.list_instances(account="staging")) == STAGING_DOWN
     assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+
+
+@pytest.mark.parametrize("call", [
+    lambda tools: tools.hetzner_list_ssh_keys(account="staging"),
+    lambda tools: tools.hetzner_power_off("web-1", account="staging"),
+    lambda tools: tools.hetzner_power_off("staging/web-1"),
+], ids=["account-level", "account-argument", "qualified-reference"])
+def test_every_path_to_an_account_that_cannot_connect_is_audited_alike(staging_down, call):
+    tools, services = staging_down
+    assert _run(call(tools)) == STAGING_DOWN
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+    assert services[("hetzner", "hetzner")].calls == []
+
+
+def test_a_label_that_names_nothing_is_still_a_validation_error(staging_down):
+    tools, _ = staging_down
+    out = _run(tools.hetzner_list_ssh_keys(account="nope"))
+    assert out.startswith("Error: No Hetzner account named 'nope'")
+    assert audit_rows(tools)[-1][3].startswith("validation: unknown account: ")
