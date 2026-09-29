@@ -499,6 +499,236 @@ async def test_cloudwatch_single_account_has_no_account_column(ec2) -> None:
 
 
 # ---------------------------------------------------------------------------
+# IP ban screen
+# ---------------------------------------------------------------------------
+
+
+def _ban_config() -> AppConfig:
+    config = _config()
+    config.ip_ban_configs = [
+        IPBanConfig(name="edge", method="waf", region="us-east-1",
+                    ip_set_id="set-1", ip_set_name="block"),
+        IPBanConfig(name="edge-staging", method="waf", region="eu-west-1",
+                    account="staging", ip_set_id="set-2", ip_set_name="block"),
+        IPBanConfig(name="old", method="waf", region="eu-west-1",
+                    account="retired", ip_set_id="set-3", ip_set_name="block"),
+    ]
+    return config
+
+
+class _FakeWAF:
+    def __init__(self) -> None:
+        self.updates: List[dict] = []
+
+    def get_ip_set(self, **kwargs: Any) -> dict:
+        return {"IPSet": {"Addresses": []}, "LockToken": "t"}
+
+    def update_ip_set(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+
+def _ip_ban_host(registry: AccountRegistry) -> Host:
+    from servonaut.screens.ip_ban import IPBanScreen
+    from servonaut.services.ip_ban_service import IPBanService
+
+    app = Host(registry, IPBanScreen)
+    app.ip_ban_service = IPBanService(app.config_manager, accounts=registry)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_ip_ban_shows_each_configs_account_and_bans_there(ec2, monkeypatch) -> None:
+    registry = _registry(_ban_config())
+    used: List[Any] = []
+    waf = _FakeWAF()
+
+    def fake_client(account, boto3_module, service, **kwargs):  # noqa: ANN001
+        used.append(account)
+        return waf
+
+    monkeypatch.setattr("servonaut.services.ip_ban_service.aws_client", fake_client)
+    app = _ip_ban_host(registry)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        options = [str(label) for label, _value in screen._get_config_options()]
+        assert options == [
+            "edge (waf, prod)", "edge-staging (waf, staging)", "old (waf, retired)",
+        ]
+        await screen._ban_ip("9.9.9.9", "edge-staging")
+        await pilot.pause()
+
+    assert used and all(ctx is registry.aws_context("staging") for ctx in used)
+    assert waf.updates and waf.updates[0]["Addresses"] == ["9.9.9.9/32"]
+
+
+@pytest.mark.asyncio
+async def test_ip_ban_refuses_a_config_of_a_removed_account(ec2) -> None:
+    registry = _registry(_ban_config())
+    app = _ip_ban_host(registry)
+    ban = MagicMock()
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        app.ip_ban_service.ban_ip = ban
+        screen.query_one("#ban_config_selector", Select).value = "old"
+        screen.query_one("#ip_input", Input).value = "9.9.9.9"
+        await pilot.pause()
+        screen._do_ban()
+        await pilot.pause()
+
+    ban.assert_not_called()
+    errors = [text for severity, text in app.notices if severity == "error"]
+    assert any("'retired'" in text and "Settings" in text for text in errors)
+
+
+@pytest.mark.asyncio
+async def test_ip_ban_single_account_labels_are_unchanged(ec2) -> None:
+    config = _config(extra=False)
+    config.ip_ban_configs = [IPBanConfig(name="edge", method="waf", region="us-east-1")]
+    app = _ip_ban_host(_registry(config))
+    async with app.run_test(size=(160, 50)):
+        options = [str(label) for label, _value in app.screen._get_config_options()]
+    assert options == ["edge (waf)"]
+
+
+# ---------------------------------------------------------------------------
+# IP ban settings panel
+# ---------------------------------------------------------------------------
+
+
+class PanelHost(App):
+    def __init__(self, registry: Optional[AccountRegistry], config: AppConfig) -> None:
+        super().__init__()
+        self.accounts = registry
+        self.config_manager = MagicMock()
+        self.config_manager.get.return_value = config
+        self.auth_service = MagicMock()
+        self.auth_service.is_authenticated = False
+        self.notices: List[tuple] = []
+        self.panel = None
+
+    def notify(self, message, *, severity="information", **kwargs):  # noqa: ANN001
+        self.notices.append((severity, str(message)))
+
+    def on_mount(self) -> None:
+        from servonaut.screens.settings.panels.ip_ban import IpBanPanel
+
+        self.panel = IpBanPanel()
+        self.mount(self.panel)
+
+
+def _fill_waf_form(panel, name: str) -> None:
+    panel.query_one("#ipban_input_name", Input).value = name
+    panel.query_one("#ipban_select_method", Select).value = "waf"
+    panel.query_one("#ipban_input_ip_set_id", Input).value = "set-9"
+    panel.query_one("#ipban_input_ip_set_name", Input).value = "block"
+
+
+@pytest.mark.asyncio
+async def test_panel_saves_the_chosen_account(ec2) -> None:
+    config = _config()
+    app = PanelHost(_registry(config), config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        panel = app.panel
+        panel._handle_ipban_add()
+        await pilot.pause()
+        assert panel.query_one("#ipban_account_row").display is True
+        _fill_waf_form(panel, "edge-staging")
+        panel.query_one("#ipban_select_account", Select).value = "staging"
+        panel._handle_ipban_save()
+        panel._handle_ipban_add()
+        await pilot.pause()
+        _fill_waf_form(panel, "edge-prod")
+        panel.query_one("#ipban_select_account", Select).value = "prod"
+        panel._handle_ipban_save()
+        await pilot.pause()
+        headers = [str(col.label) for col in panel.query_one("#ipban_table", DataTable).columns.values()]
+
+    saved = {cfg.name: cfg.account for cfg in config.ip_ban_configs}
+    # The default account is saved as "", so the entry follows it.
+    assert saved == {"edge-staging": "staging", "edge-prod": ""}
+    assert headers == ["Name", "Account", "Method", "Region", "Details"]
+
+
+@pytest.mark.asyncio
+async def test_panel_refuses_an_account_that_is_not_configured(ec2) -> None:
+    config = _config()
+    config.ip_ban_configs = [
+        IPBanConfig(name="old", method="waf", region="eu-west-1", account="retired",
+                    ip_set_id="set-3", ip_set_name="block"),
+    ]
+    app = PanelHost(_registry(config), config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        panel = app.panel
+        row = panel.query_one("#ipban_table", DataTable).get_row_at(0)
+        assert str(row[1]) == "retired (not configured)"
+        panel._handle_ipban_edit()
+        await pilot.pause()
+        select = panel.query_one("#ipban_select_account", Select)
+        assert select.value == "retired"
+        assert "retired (not configured)" in [str(label) for label, _ in select._options]
+        panel._handle_ipban_save()
+        assert config.ip_ban_configs[0].account == "retired"
+        assert any("retired" in text for severity, text in app.notices if severity == "error")
+
+        select.value = "staging"
+        panel._handle_ipban_save()
+    assert config.ip_ban_configs[0].account == "staging"
+
+
+@pytest.mark.asyncio
+async def test_panel_discovers_with_the_chosen_accounts_credentials(ec2, monkeypatch) -> None:
+    registry = _registry()
+    used: List[Any] = []
+
+    class FakeWAFv2:
+        def list_ip_sets(self, **kwargs: Any) -> dict:
+            return {"IPSets": [{"Id": "set-7", "Name": "block", "ARN": ""}]}
+
+    def fake_client(account, boto3_module, service, **kwargs):  # noqa: ANN001
+        used.append((account, service, kwargs.get("region_name")))
+        return FakeWAFv2()
+
+    monkeypatch.setattr(
+        "servonaut.screens.settings.panels.ip_ban.aws_client", fake_client
+    )
+    app = PanelHost(registry, registry.config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        panel = app.panel
+        panel._handle_ipban_add()
+        await pilot.pause()
+        panel.query_one("#ipban_select_method", Select).value = "waf"
+        panel.query_one("#ipban_select_region", Select).value = "eu-west-1"
+        panel.query_one("#ipban_select_account", Select).value = "staging"
+        await pilot.pause()
+        panel._handle_ipban_discover()
+        await _wait_for(pilot, lambda: used, "discovery")
+        await pilot.pause()
+
+    assert used == [(registry.aws_context("staging"), "wafv2", "eu-west-1")]
+
+
+@pytest.mark.asyncio
+async def test_panel_hides_the_account_with_one_account(ec2) -> None:
+    config = _config(extra=False)
+    app = PanelHost(_registry(config), config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        panel = app.panel
+        panel._handle_ipban_add()
+        await pilot.pause()
+        assert panel.query_one("#ipban_account_row").display is False
+        _fill_waf_form(panel, "edge")
+        panel._handle_ipban_save()
+        headers = [str(col.label) for col in panel.query_one("#ipban_table", DataTable).columns.values()]
+
+    assert config.ip_ban_configs[0].account == ""
+    assert headers == ["Name", "Method", "Region", "Details"]
+
+
+# ---------------------------------------------------------------------------
 # Screen account helpers
 # ---------------------------------------------------------------------------
 

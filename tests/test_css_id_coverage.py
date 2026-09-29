@@ -545,12 +545,14 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Invite form ----
         "invite_form",          # Reason: Form container; inherits layout
         # ---- IP ban form fields ----
+        "ipban_account_row",    # Reason: .setting_row Horizontal; shown only with several AWS accounts
         "ipban_input_ip_set_id",
         "ipban_input_ip_set_name",
         "ipban_input_nacl_id",
         "ipban_input_name",
         "ipban_input_rule_number_start",
         "ipban_input_sg_id",
+        "ipban_select_account",
         "ipban_select_ip_set",
         "ipban_select_method",
         "ipban_select_nacl",

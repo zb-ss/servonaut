@@ -1,4 +1,8 @@
-"""IP Ban Manager screen for Servonaut v2.0."""
+"""IP Ban Manager screen for Servonaut v2.0.
+
+Each ban configuration acts in the AWS account it names. With several AWS
+accounts configured the configuration picker shows that account.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +25,9 @@ from textual.widgets import (
     Static,
 )
 
+from servonaut.screens._accounts import account_registry, default_label, is_multi
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.accounts import UnknownAccountError
 
 
 class AmbiguousAddress(ValueError):
@@ -145,7 +151,50 @@ class IPBanScreen(Screen):
         configs = self.app.ip_ban_service.get_configs()
         if not configs:
             return []
-        return [(f"{self._demo_config_name(c.name)} ({c.method})", c.name) for c in configs]
+        return [(self._config_label(c), c.name) for c in configs]
+
+    def _config_label(self, config) -> str:  # noqa: ANN001
+        """``name (method)``; ``name (method, account)`` with several AWS accounts."""
+        details = str(config.method)
+        if is_multi(self.app, "aws"):
+            account = getattr(config, "account", "") or default_label(self.app, "aws")
+            details = f"{details}, {account}"
+        return f"{self._demo_config_name(config.name)} ({details})"
+
+    def _account_problem(self, config_name: str) -> Optional[str]:
+        """Why *config_name* cannot be used: it names an unknown AWS account.
+
+        An account removed in Settings leaves its ban configurations behind;
+        they are refused with a pointer to the fix rather than sent to
+        another account.
+        """
+        accounts = account_registry(self.app)
+        if accounts is None:
+            return None
+        config = next(
+            (c for c in self.app.ip_ban_service.get_configs() if c.name == config_name),
+            None,
+        )
+        account = getattr(config, "account", "") if config is not None else ""
+        if not account:
+            return None
+        try:
+            accounts.account("aws", account)
+        except UnknownAccountError:
+            return (
+                f"'{self._demo_config_name(config_name)}' belongs to AWS account "
+                f"'{account}', which is not configured. Choose its account in "
+                "Settings → IP Ban."
+            )
+        return None
+
+    def _refuse_unknown_account(self, config_name: str) -> bool:
+        """True, after telling the user, when the config's account is gone."""
+        problem = self._account_problem(config_name)
+        if problem is None:
+            return False
+        self.app.notify(problem, severity="error", markup=False)
+        return True
 
     def _setup_table(self) -> None:
         table = self.query_one("#banned_table", DataTable)
@@ -236,6 +285,8 @@ class IPBanScreen(Screen):
         method = next((c.method for c in configs if c.name == config_name), "unknown")
         ban_counts = self._get_ban_counts()
         self._banned_real = []
+        if self._refuse_unknown_account(config_name):
+            return
         try:
             banned = await self.app.ip_ban_service.list_banned(config_name)
             # Rows are read back by position: stand-ins may repeat.
@@ -336,6 +387,8 @@ class IPBanScreen(Screen):
         if not ip:
             self.app.notify("Enter an IP address to ban.", severity="warning")
             return
+        if self._refuse_unknown_account(config_name):
+            return
         self.run_worker(self._ban_ip(ip, config_name), name="ban_ip", exclusive=True)
 
     def _do_unban(self) -> None:
@@ -348,6 +401,8 @@ class IPBanScreen(Screen):
             return
         if not ip:
             self.app.notify("Enter an IP address to unban.", severity="warning")
+            return
+        if self._refuse_unknown_account(config_name):
             return
         self.run_worker(self._unban_ip(ip, config_name), name="unban_ip", exclusive=True)
 

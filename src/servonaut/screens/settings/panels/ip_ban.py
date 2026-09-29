@@ -7,6 +7,10 @@ entries; Add / Edit / Remove buttons toggle an inline CRUD form; a Discover
 button queries AWS WAF / EC2 APIs asynchronously to populate the method-specific
 dropdowns.
 
+Each entry belongs to an AWS account (``IPBanConfig.account``, empty for the
+default one). The Account row appears only when there are several AWS
+accounts, and discovery runs with the chosen account's credentials.
+
 Panel-specific CSS lives in :attr:`DEFAULT_CSS` — never in the main stylesheet bundle.
 """
 
@@ -21,7 +25,10 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.config.schema import IPBanConfig
+from servonaut.screens._accounts import account_registry, aws_context, default_label
 from servonaut.screens.settings.base import SettingsPanel
+from servonaut.services.accounts import UnknownAccountError
+from servonaut.services.accounts.aws_account import aws_client
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +102,9 @@ class IpBanPanel(SettingsPanel):
         super().__init__()
         # Name of the config being edited; None when adding a new one.
         self._editing_ipban_name: Optional[str] = None
+        # Account of the entry in the form, kept as-is on hosts without an
+        # account registry.
+        self._form_account_fallback: str = ""
         # Real config names in table order (the table may show stand-ins).
         self._ipban_names: List[str] = []
         # Raw discovery results kept so Select auto-fill can look up names.
@@ -130,6 +140,19 @@ class IpBanPanel(SettingsPanel):
                     id="ipban_input_name",
                 ),
                 classes="setting_row",
+            ),
+            # Shown only when there is an account to choose (see
+            # _fill_account_select).
+            Horizontal(
+                Static("Account:", classes="label"),
+                Select(
+                    [],
+                    prompt="Select account...",
+                    id="ipban_select_account",
+                    allow_blank=True,
+                ),
+                classes="setting_row",
+                id="ipban_account_row",
             ),
             Horizontal(
                 Static("Method:", classes="label"),
@@ -329,7 +352,12 @@ class IpBanPanel(SettingsPanel):
         config = self.app.config_manager.get()
         table = self.query_one("#ipban_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Name", "Method", "Region", "Details")
+        accounts = account_registry(self.app)
+        multi = accounts is not None and accounts.is_multi("aws")
+        if multi:
+            table.add_columns("Name", "Account", "Method", "Region", "Details")
+        else:
+            table.add_columns("Name", "Method", "Region", "Details")
         table.cursor_type = "row"
         redaction = (
             getattr(self.app, "redaction_service", None)
@@ -339,7 +367,22 @@ class IpBanPanel(SettingsPanel):
         for cfg in config.ip_ban_configs:
             name = redaction.redact_name(cfg.name) if redaction else cfg.name
             details = _entry_details(cfg, redaction)
-            table.add_row(name, cfg.method, cfg.region or "N/A", details)
+            cells = [name, cfg.method, cfg.region or "N/A", details]
+            if multi:
+                cells.insert(1, self._account_cell(cfg.account))
+            table.add_row(*cells)
+
+    def _account_cell(self, account: str) -> str:
+        """An entry's account as the table shows it; flags a removed one."""
+        accounts = account_registry(self.app)
+        if not account:
+            return default_label(self.app, "aws")
+        try:
+            if accounts is not None:
+                accounts.account("aws", account)
+        except UnknownAccountError:
+            return f"{account} (not configured)"
+        return account
 
     def _get_selected_name(self) -> Optional[str]:
         """Return the real name of the currently-highlighted configuration."""
@@ -391,6 +434,61 @@ class IpBanPanel(SettingsPanel):
         self._discovered_sgs = []
         self._discovered_nacls = []
         self._set_method_fields_visible(None)
+        self._fill_account_select("")
+
+    def _fill_account_select(self, current: str) -> None:
+        """Offer the AWS accounts, with *current* ("" = default) chosen.
+
+        The row is shown when there is a choice to make, or when *current*
+        names an account that is no longer configured, so the entry can be
+        moved to one that is (saving refuses the missing one).
+        """
+        self._form_account_fallback = current
+        row = self.query_one("#ipban_account_row")
+        select = self.query_one("#ipban_select_account", Select)
+        accounts = account_registry(self.app)
+        if accounts is None:
+            select.set_options([])
+            row.display = False
+            return
+        refs = accounts.accounts("aws")
+        options = [(ref.label, ref.label) for ref in refs]
+        wanted = current.lower() if current else (refs[0].key if refs else "")
+        chosen = next((ref.label for ref in refs if ref.key == wanted), None)
+        missing = bool(current) and chosen is None
+        if missing:
+            options.append((f"{current} (not configured)", current))
+            chosen = current
+        select.set_options(options)
+        if chosen is not None:
+            select.value = chosen
+        row.display = len(refs) > 1 or missing
+
+    def _form_account(self) -> Optional[str]:
+        """The account to save for the entry ("" = the default account).
+
+        Returns None, after telling the user, when the chosen account is
+        not configured.
+        """
+        accounts = account_registry(self.app)
+        if accounts is None:
+            return self._form_account_fallback
+        value = self.query_one("#ipban_select_account", Select).value
+        if not isinstance(value, str) or not value:
+            return ""
+        try:
+            ref = accounts.account("aws", value)
+        except UnknownAccountError as exc:
+            self.app.notify(
+                f"{exc}. Choose a configured account.",
+                severity="error",
+                markup=False,
+            )
+            self.query_one("#ipban_select_account", Select).focus()
+            return None
+        # The default account is saved as "" so the entry keeps following
+        # it even if the account is renamed.
+        return "" if ref.primary else ref.label
 
     def _set_method_fields_visible(self, method: Optional[str]) -> None:
         """Show only the sub-form container that matches *method*."""
@@ -439,6 +537,7 @@ class IpBanPanel(SettingsPanel):
         if cfg.region:
             self.query_one("#ipban_select_region", Select).value = cfg.region
         self.query_one("#ipban_select_waf_scope", Select).value = cfg.waf_scope
+        self._fill_account_select(cfg.account)
         self._set_method_fields_visible(cfg.method)
         self._show_form()
         self.query_one("#ipban_input_name", Input).focus()
@@ -483,6 +582,9 @@ class IpBanPanel(SettingsPanel):
 
         method = str(method_value)
         region = str(region_value) if region_value is not Select.BLANK else ""
+        account = self._form_account()
+        if account is None:
+            return
 
         # Method-specific required-field validation
         if method == "waf":
@@ -542,6 +644,7 @@ class IpBanPanel(SettingsPanel):
             name=name,
             method=method,
             region=region,
+            account=account,
             ip_set_id=ip_set_id,
             ip_set_name=ip_set_name,
             waf_scope=waf_scope,
@@ -607,28 +710,37 @@ class IpBanPanel(SettingsPanel):
         scope = (
             str(scope_value) if scope_value is not Select.BLANK else "REGIONAL"
         )
+        # Discover in the account the entry will ban in.
+        account = self._form_account()
+        if account is None:
+            return
+        context = aws_context(self.app, account)
 
         self.query_one("#btn_ipban_discover", Button).disabled = True
         self.query_one("#ipban_discover_hint", Static).update("Discovering...")
 
         self.run_worker(
-            self._discover_aws_resources(method, region, scope),
+            self._discover_aws_resources(method, region, scope, context),
             name="ipban_discover",
             group="discover",
             exclusive=True,
         )
 
     async def _discover_aws_resources(
-        self, method: str, region: str, scope: str
+        self, method: str, region: str, scope: str, account: Any = None
     ) -> None:
-        """Dispatch the appropriate AWS discovery call by *method*."""
+        """Dispatch the appropriate AWS discovery call by *method*.
+
+        *account* is the AWS account context to discover in (None = the
+        default credential chain).
+        """
         try:
             if method == "waf":
-                await self._discover_waf_ip_sets(region, scope)
+                await self._discover_waf_ip_sets(region, scope, account)
             elif method == "security_group":
-                await self._discover_security_groups(region)
+                await self._discover_security_groups(region, account)
             elif method == "nacl":
-                await self._discover_nacls(region)
+                await self._discover_nacls(region, account)
         except Exception as exc:
             self.app.notify(
                 f"Discovery failed: {exc}",
@@ -642,14 +754,16 @@ class IpBanPanel(SettingsPanel):
                 "Select a method and region first, then discover available resources"
             )
 
-    async def _discover_waf_ip_sets(self, region: str, scope: str) -> None:
+    async def _discover_waf_ip_sets(
+        self, region: str, scope: str, account: Any = None
+    ) -> None:
         """Fetch WAF IP sets from *region* and populate the dropdown."""
         import asyncio
 
         def _fetch() -> List[Dict[str, str]]:
             import boto3  # optional dependency — only needed for discovery
 
-            client = boto3.client("wafv2", region_name=region)
+            client = aws_client(account, boto3, "wafv2", region_name=region)
             ip_sets: List[Dict[str, str]] = []
             params: Dict[str, Any] = {"Scope": scope}
             while True:
@@ -694,14 +808,14 @@ class IpBanPanel(SettingsPanel):
                 markup=False,
             )
 
-    async def _discover_security_groups(self, region: str) -> None:
+    async def _discover_security_groups(self, region: str, account: Any = None) -> None:
         """Fetch EC2 Security Groups from *region* and populate the dropdown."""
         import asyncio
 
         def _fetch() -> List[Dict[str, str]]:
             import boto3
 
-            ec2 = boto3.client("ec2", region_name=region)
+            ec2 = aws_client(account, boto3, "ec2", region_name=region)
             sgs: List[Dict[str, str]] = []
             paginator = ec2.get_paginator("describe_security_groups")
             for page in paginator.paginate():
@@ -738,14 +852,14 @@ class IpBanPanel(SettingsPanel):
                 markup=False,
             )
 
-    async def _discover_nacls(self, region: str) -> None:
+    async def _discover_nacls(self, region: str, account: Any = None) -> None:
         """Fetch Network ACLs from *region* and populate the dropdown."""
         import asyncio
 
         def _fetch() -> List[Dict[str, str]]:
             import boto3
 
-            ec2 = boto3.client("ec2", region_name=region)
+            ec2 = aws_client(account, boto3, "ec2", region_name=region)
             nacls: List[Dict[str, str]] = []
             response = ec2.describe_network_acls()
             for acl in response.get("NetworkAcls", []):
