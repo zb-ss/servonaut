@@ -28,7 +28,6 @@ from textual.widgets import Select
 from servonaut.config.accounts import (
     AWS,
     HETZNER,
-    PROVIDER_TITLES,
     AccountRef,
     hetzner_accounts,
     ovh_accounts,
@@ -123,16 +122,6 @@ def inventory(app: Any, provider: str) -> Any:
     return getattr(app, _ALIASES[provider], None)
 
 
-def _unavailable(registry: AccountRegistry, provider: str, label: Optional[str],
-                 error: UnknownAccountError) -> UnknownAccountError:
-    """*error*, or a clearer one when *label* is configured but cannot connect."""
-    reason = registry.unavailable.get(f"{provider}:{(label or '').strip().lower()}")
-    if not reason:
-        return error
-    title = PROVIDER_TITLES.get(provider, provider)
-    return UnknownAccountError(f"{title} account {label!r} is not available: {reason}")
-
-
 def account_ref(app: Any, provider: str, account: Optional[str] = None) -> Optional[AccountRef]:
     """The account named *account* ("" or None = default); None without a registry.
 
@@ -142,10 +131,8 @@ def account_ref(app: Any, provider: str, account: Optional[str] = None) -> Optio
     registry = registry_for(app, provider)
     if registry is None:
         return None
-    try:
-        return registry.account(provider, account or None)
-    except UnknownAccountError as exc:
-        raise _unavailable(registry, provider, account, exc) from None
+    # The registry's message says why a configured account cannot be used.
+    return registry.account(provider, account or None)
 
 
 def account_service(app: Any, provider: str, account: Optional[str] = None) -> Any:
@@ -214,7 +201,7 @@ def account_settings(app: Any, provider: str, account: Optional[str] = None) -> 
     ref = account_ref(app, provider, account)
     if ref is None or ref.primary:
         return live
-    return getattr(account_service(app, provider, ref.label), "_config", live)
+    return registry_for(app, provider).settings(provider, ref.label)
 
 
 def aws_services(app: Any, account: Optional[str] = None) -> Optional[AWSAccountServices]:
