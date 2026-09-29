@@ -21,8 +21,9 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
-from servonaut.screens._accounts import account_registry, cloudwatch_service
+from servonaut.screens._accounts import cloudwatch_service
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import provider_accounts, show_account_labels
 from servonaut.services.cloudwatch_service import CloudWatchService
 from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
 from servonaut.widgets.account_picker import AccountPicker
@@ -159,9 +160,7 @@ class CloudWatchBrowserScreen(Screen):
             Container(
                 # Shown only when there are several AWS accounts; the
                 # stylesheet then gives the grid a column for it.
-                AccountPicker.for_provider(
-                    account_registry(self.app), "aws", id="cw_filter_account",
-                ),
+                AccountPicker(provider_accounts(self.app, "aws"), id="cw_filter_account"),
                 Vertical(
                     Label("Region"),
                     Select(
@@ -249,6 +248,7 @@ class CloudWatchBrowserScreen(Screen):
 
         picker = self.query_one("#cw_filter_account", AccountPicker)
         self._account = picker.account
+        show_account_labels(picker)
         self.query_one("#cloudwatch_filter_bar").set_class(
             picker.display, "-with-account"
         )
@@ -282,6 +282,7 @@ class CloudWatchBrowserScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched events and their top IPs for the new mode."""
+        show_account_labels(self.query_one("#cw_filter_account", AccountPicker))
         self._populate_events_table()
         if self._events:
             self._refresh_ips_table()
