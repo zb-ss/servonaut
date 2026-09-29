@@ -1347,13 +1347,10 @@ class RelayListener:
         Among those, one in *region* is preferred.
         """
         from servonaut.services.accounts import UnknownAccountError
-        from servonaut.services.ip_ban_service import configs_for_server
 
         svc = self._executors.ip_ban_service
         try:
-            configs, account = configs_for_server(
-                svc.get_configs(), self._executors.accounts, instance,
-            )
+            configs, account = svc.configs_for_server(instance)
         except UnknownAccountError as exc:
             return None, f"{slug}: cannot choose an IP-ban configuration — {exc}"
         candidates = [c for c in configs if c.method == method]

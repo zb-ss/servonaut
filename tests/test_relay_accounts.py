@@ -243,14 +243,17 @@ def _ban_configs():
 def _ban_listener(monkeypatch, *, configs, instance, aws_accounts=("aws", "prod")):
     from servonaut.services.relay_listener import RelayListener
 
+    from types import SimpleNamespace
+
+    from servonaut.services.ip_ban_service import IPBanService
+
     registry, _ = build_registry(monkeypatch, aws={label: [] for label in aws_accounts})
+    registry.config.ip_ban_configs = configs
     executors = MagicMock()
-    executors.accounts = registry
     executors.find_instance = AsyncMock(
         return_value=None if instance is None else dict(instance, account=aws_accounts[-1]),
     )
-    ip_ban = MagicMock()
-    ip_ban.get_configs = MagicMock(return_value=configs)
+    ip_ban = IPBanService(SimpleNamespace(get=lambda: registry.config), accounts=registry)
     ip_ban.ban_ip = AsyncMock(return_value={"success": True, "message": "banned", "rule_id": "r"})
     ip_ban.unban_ip = AsyncMock(return_value={"success": True, "message": "unbanned"})
     executors.ip_ban_service = ip_ban

@@ -3843,23 +3843,14 @@ class ServonautTools:
     # IP ban tools (WAF / Security Group / NACL)
     # ------------------------------------------------------------------
 
-    def _default_aws_label(self) -> str:
-        """Label of the default AWS account."""
-        if self._accounts is not None and self._accounts.accounts('aws'):
-            return self._accounts.account('aws').label
-        return primary_label('aws', getattr(self._config_manager.get(), 'aws', None))
-
     def _ban_configs(self, account: Optional[str] = None) -> List[Any]:
         """The IP-ban configs; only those acting in *account* unless it is None.
 
         ``""`` means the default AWS account.
         """
-        from servonaut.services.ip_ban_service import configs_in_account
-
-        configs = list(self._ip_ban_service.get_configs())
         if account is None:
-            return configs
-        return configs_in_account(configs, self._accounts, account)
+            return list(self._ip_ban_service.get_configs())
+        return self._ip_ban_service.configs_for_account(account)
 
     def _ban_config_mismatch(self, config_name: str, account: str) -> Optional[str]:
         """Why *config_name* cannot be used for *account*, or None.
@@ -3876,14 +3867,11 @@ class ServonautTools:
         )
         if config is None:
             return None  # the service reports the unknown config itself
-        from servonaut.services.ip_ban_service import configs_in_account
-
-        if configs_in_account([config], self._accounts, account):
+        if config in self._ip_ban_service.configs_for_account(account):
             return None
-        acts_in = getattr(config, 'account', '') or self._default_aws_label()
         return (
             f"IP ban config {config_name!r} acts in AWS account "
-            f"{acts_in!r}, not {account!r}."
+            f"{self._ip_ban_service.account_of(config)!r}, not {account!r}."
         )
 
     async def ip_ban_list_configs(self, account: str = "") -> str:
@@ -3930,7 +3918,7 @@ class ServonautTools:
             else:
                 target = ''
             acts_in = (
-                f"{(getattr(c, 'account', '') or self._default_aws_label())[:16]:<16} "
+                f"{self._ip_ban_service.account_of(c)[:16]:<16} "
                 if show_account else ""
             )
             lines.append(

@@ -417,6 +417,12 @@ def test_aws_call_label_and_account_id(monkeypatch):
     assert out.startswith("Error: No AWS account named 'nope'")
 
 
+def _ip_ban_service(tools, registry):
+    from servonaut.services.ip_ban_service import IPBanService
+
+    return IPBanService(tools._config_manager, accounts=registry)
+
+
 def test_ip_ban_configs_filtered_by_account(monkeypatch):
     from servonaut.config.schema import IPBanConfig
 
@@ -427,8 +433,7 @@ def test_ip_ban_configs_filtered_by_account(monkeypatch):
                     account="prod"),
     ]
     tools = make_tools(registry)
-    tools._ip_ban_service = MagicMock()
-    tools._ip_ban_service.get_configs.return_value = registry.config.ip_ban_configs
+    tools._ip_ban_service = _ip_ban_service(tools, registry)
     out = _run(tools.ip_ban_list_configs(account="prod"))
     assert "prod-sg" in out and "main-waf" not in out
     everything = _run(tools.ip_ban_list_configs())
@@ -448,8 +453,7 @@ def _block_ip_tools(monkeypatch, site_account):
         IPBanConfig(name="waf-prod", method="waf", ip_set_name="p", account="prod"),
     ]
     tools = make_tools(registry)
-    service = MagicMock()
-    service.get_configs.return_value = registry.config.ip_ban_configs
+    service = _ip_ban_service(tools, registry)
     banned = []
 
     async def _ban(ip, config_name):

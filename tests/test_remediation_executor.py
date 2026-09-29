@@ -447,8 +447,6 @@ def make_listener(*, executors="default"):
     if executors == "default":
         executors = MagicMock()
         executors.execute = AsyncMock()
-        # One account per provider: every IP-ban config qualifies.
-        executors.accounts = None
     listener = RelayListener(
         executors=executors,
         base_url="https://app.example.com",
@@ -793,6 +791,8 @@ def make_block_ip_listener(
     ip_ban.get_configs = MagicMock(
         return_value=configs if configs is not None else [_ip_ban_config()],
     )
+    # One AWS account: every config can shield the target.
+    ip_ban.configs_for_server = lambda server: (ip_ban.get_configs(), "")
     ip_ban.ban_ip = AsyncMock(
         return_value=ban_result if ban_result is not None else {
             "success": True,
@@ -1265,6 +1265,8 @@ def make_unblock_ip_listener(*, configs=None, unban_result=None, instance=None):
     ip_ban.get_configs = MagicMock(
         return_value=configs if configs is not None else [_ip_ban_config()],
     )
+    # One AWS account: every config can shield the target.
+    ip_ban.configs_for_server = lambda server: (ip_ban.get_configs(), "")
     ip_ban.unban_ip = AsyncMock(
         return_value=unban_result if unban_result is not None else {
             "success": True,
