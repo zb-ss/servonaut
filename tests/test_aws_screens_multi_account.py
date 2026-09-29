@@ -211,6 +211,144 @@ def _pick_account(screen, picker_id: str, label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# AWS manager
+# ---------------------------------------------------------------------------
+
+
+def _names(table: DataTable) -> List[str]:
+    return [str(table.get_row_at(i)[1]) for i in range(table.row_count)]
+
+
+@pytest.mark.asyncio
+async def test_manager_lists_every_account_with_qualified_names(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        table = app.screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        assert _names(table) == [
+            "prod/app-1", "prod/db-1", "staging/app-1", "staging/worker-1",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_manager_says_which_account_failed_to_refresh(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    ec2["staging"].last_fetch_error = "could not list AWS regions: denied"
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        table = app.screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        status = str(app.screen.query_one("#aws_mgr_status", Static).render())
+    assert "4 instances." in status
+    assert "Refresh incomplete: staging: could not list AWS regions: denied" in status
+
+
+@pytest.mark.asyncio
+async def test_manager_single_account_keeps_plain_names(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(_config(extra=False)), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        table = app.screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 2, "the rows")
+        assert _names(table) == ["app-1", "db-1"]
+        status = str(app.screen.query_one("#aws_mgr_status", Static).render())
+        assert status.strip() == "2 instances."
+
+
+@pytest.mark.asyncio
+async def test_manager_starts_in_the_rows_account_and_refreshes_all(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        table.move_cursor(row=2)  # staging/app-1, stopped
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: ec2["staging"].called("start_instance"), "the start")
+
+        assert ec2["staging"].called("start_instance") == [
+            ("start_instance", "i-00000000000000011", "eu-west-1")
+        ]
+        assert not ec2["prod"].called("start_instance")
+        details = app.aws_audit.log_action.call_args.kwargs["details"]
+        assert details == {"region": "eu-west-1", "account": "staging"}
+        # The refresh after the action reads every account, not just staging.
+        await _wait_for(pilot, lambda: len(ec2["prod"].called("fetch")) == 2, "the refresh")
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts again")
+
+
+@pytest.mark.asyncio
+async def test_manager_stops_in_the_rows_account_after_confirming(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        table.move_cursor(row=3)  # staging/worker-1, running
+        await pilot.pause()
+        screen.action_stop()
+        await _wait_for(
+            pilot, lambda: type(app.screen).__name__ == "PowerActionConfirmModal", "the prompt"
+        )
+        assert "staging/worker-1" in str(app.screen.message)
+        app.screen.query_one("#btn_power_confirm_yes", Button).press()
+        await _wait_for(pilot, lambda: ec2["staging"].called("stop_instance"), "the stop")
+        assert not ec2["prod"].called("stop_instance")
+
+
+@pytest.mark.asyncio
+async def test_manager_terminates_in_the_rows_account(ec2) -> None:
+    from unittest.mock import AsyncMock
+
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        app.push_screen_wait = AsyncMock(return_value=True)
+        await screen._do_terminate(screen._instances[3])
+
+        assert ec2["staging"].called("terminate_instance") == [
+            ("terminate_instance", "i-00000000000000012", "eu-west-1")
+        ]
+        assert not ec2["prod"].called("terminate_instance")
+        details = app.aws_audit.log_action.call_args.kwargs["details"]
+        assert details["account"] == "staging"
+        assert details["name"] == "staging/worker-1"
+
+
+@pytest.mark.asyncio
+async def test_manager_refuses_a_row_whose_account_was_removed(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 4, "both accounts' rows")
+        app.accounts.rebuild(_config(extra=False))  # staging removed in Settings
+        table.move_cursor(row=2)
+        await pilot.pause()
+        screen.action_start()
+        await pilot.pause()
+
+        assert not ec2["staging"].called("start_instance")
+        assert not ec2["prod"].called("start_instance")
+        assert any("staging" in text for severity, text in app.notices if severity == "error")
+
+
+# ---------------------------------------------------------------------------
 # Screen account helpers
 # ---------------------------------------------------------------------------
 
