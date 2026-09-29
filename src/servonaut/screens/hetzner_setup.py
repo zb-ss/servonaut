@@ -913,7 +913,7 @@ class HetznerSetupScreen(Screen):
         from servonaut.config.accounts import primary_label
 
         config = self.app.config_manager.get()
-        key = primary_label("hetzner", config.hetzner).lower()
+        key = primary_label("hetzner", config).lower()
         unavailable = getattr(getattr(self.app, "accounts", None), "unavailable", None) or {}
         reason = unavailable.get(f"hetzner:{key}")
         if reason:

@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from servonaut.config.schema import (
     ACCOUNT_LABEL_MAX_LENGTH,
     AWSAccount,
-    AWSConfig,
     HetznerAccount,
     HetznerConfig,
     OVHAccount,
@@ -77,17 +76,41 @@ class AWSAccountSettings:
     regions: Tuple[str, ...]
 
 
-def primary_label(provider: str, provider_config) -> str:
-    """Label of the primary account: the configured one, else the provider slug.
+def primary_label(provider: str, config: "AppConfig") -> str:
+    """Label of *provider*'s primary account: the configured one, else the provider name.
 
-    A configured label that is not a valid label (hand-edited config) is not
-    used: it could not be typed in an ``account/name`` reference, so the
-    account keeps the provider slug and the problem is reported instead.
+    A configured label is not used when it is not a valid label, or when an
+    earlier provider's primary account (in AWS, Hetzner, OVH order) already
+    uses it; both can only come from a hand-edited config. The account then
+    keeps its provider name, which no other account can hold, and the
+    problem is reported instead (:func:`primary_label_problems`). The config
+    itself is never changed.
     """
+    return _primary_labels(config)[provider]
+
+
+def _primary_blocks(config: "AppConfig"):
+    return ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh))
+
+
+def _valid_primary_label(provider: str, provider_config) -> str:
+    """The configured primary label when it is a valid label, else ""."""
     label = (getattr(provider_config, "label", "") or "").strip()
     if not label or _primary_label_problem(provider, label) is not None:
-        return provider
+        return ""
     return label
+
+
+def _primary_labels(config: "AppConfig") -> Dict[str, str]:
+    labels: Dict[str, str] = {}
+    taken: set = set()
+    for provider, block in _primary_blocks(config):
+        label = _valid_primary_label(provider, block)
+        if not label or label.lower() in taken:
+            label = provider
+        taken.add(label.lower())
+        labels[provider] = label
+    return labels
 
 
 def _primary_label_problem(provider: str, label: str) -> Optional[str]:
@@ -118,11 +141,12 @@ def account_cache_path(base_path: str, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def aws_accounts(config: AWSConfig) -> List[AWSAccountSettings]:
+def aws_accounts(app_config: "AppConfig") -> List[AWSAccountSettings]:
     """Every configured AWS account, primary first, in config order."""
+    config = app_config.aws
     accounts = [
         AWSAccountSettings(
-            ref=AccountRef(AWS, primary_label(AWS, config), True),
+            ref=AccountRef(AWS, primary_label(AWS, app_config), True),
             profile=(config.profile or "").strip(),
             regions=tuple(config.regions or ()),
         )
@@ -138,7 +162,7 @@ def aws_accounts(config: AWSConfig) -> List[AWSAccountSettings]:
     return accounts
 
 
-def hetzner_accounts(config: HetznerConfig) -> List[Tuple[AccountRef, HetznerConfig]]:
+def hetzner_accounts(app_config: "AppConfig") -> List[Tuple[AccountRef, HetznerConfig]]:
     """Every configured Hetzner project with the HetznerConfig it runs with.
 
     The primary project uses the block unchanged. An extra project gets a
@@ -146,8 +170,9 @@ def hetzner_accounts(config: HetznerConfig) -> List[Tuple[AccountRef, HetznerCon
     cache file; provider-wide settings (image, type, location, TTL, audit
     log) are shared.
     """
+    config = app_config.hetzner
     accounts: List[Tuple[AccountRef, HetznerConfig]] = [
-        (AccountRef(HETZNER, primary_label(HETZNER, config), True), config)
+        (AccountRef(HETZNER, primary_label(HETZNER, app_config), True), config)
     ]
     for extra in config.accounts:
         ref = AccountRef(HETZNER, (extra.label or "").strip(), False)
@@ -173,10 +198,11 @@ def _hetzner_effective(
     )
 
 
-def ovh_accounts(config: OVHConfig) -> List[Tuple[AccountRef, OVHConfig]]:
+def ovh_accounts(app_config: "AppConfig") -> List[Tuple[AccountRef, OVHConfig]]:
     """Every configured OVH account with the OVHConfig it runs with."""
+    config = app_config.ovh
     accounts: List[Tuple[AccountRef, OVHConfig]] = [
-        (AccountRef(OVH, primary_label(OVH, config), True), config)
+        (AccountRef(OVH, primary_label(OVH, app_config), True), config)
     ]
     for extra in config.accounts:
         ref = AccountRef(OVH, (extra.label or "").strip(), False)
@@ -217,9 +243,9 @@ def ovh_cache_path(base_path: str, ref: AccountRef) -> str:
 
 def all_account_refs(config: "AppConfig") -> List[AccountRef]:
     """Every configured account of every provider, primaries first per provider."""
-    refs: List[AccountRef] = [a.ref for a in aws_accounts(config.aws)]
-    refs.extend(ref for ref, _ in hetzner_accounts(config.hetzner))
-    refs.extend(ref for ref, _ in ovh_accounts(config.ovh))
+    refs: List[AccountRef] = [a.ref for a in aws_accounts(config)]
+    refs.extend(ref for ref, _ in hetzner_accounts(config))
+    refs.extend(ref for ref, _ in ovh_accounts(config))
     return refs
 
 
@@ -279,9 +305,9 @@ def account_problems(config: "AppConfig") -> Dict[Tuple[str, int], str]:
     problems: Dict[Tuple[str, int], str] = {}
     taken: Dict[str, AccountRef] = {}
     for ref in (
-        AccountRef(AWS, primary_label(AWS, config.aws), True),
-        AccountRef(HETZNER, primary_label(HETZNER, config.hetzner), True),
-        AccountRef(OVH, primary_label(OVH, config.ovh), True),
+        AccountRef(AWS, primary_label(AWS, config), True),
+        AccountRef(HETZNER, primary_label(HETZNER, config), True),
+        AccountRef(OVH, primary_label(OVH, config), True),
     ):
         taken.setdefault(ref.key, ref)
 
@@ -313,48 +339,22 @@ def account_problems(config: "AppConfig") -> Dict[Tuple[str, int], str]:
 def primary_label_problems(config: "AppConfig") -> List[str]:
     """Problems with the primary accounts' own labels (charset, collisions)."""
     problems: List[str] = []
-    seen: Dict[str, str] = {}
-    for provider, block in ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh)):
+    holders: Dict[str, str] = {}
+    for provider, block in _primary_blocks(config):
+        title = PROVIDER_TITLES[provider]
         configured = (getattr(block, "label", "") or "").strip()
         problem = _primary_label_problem(provider, configured) if configured else None
         if problem is not None:
+            problems.append(f"{title} primary account: {problem}; using {provider!r} instead")
+        label = _valid_primary_label(provider, block)
+        if label and label.lower() in holders:
             problems.append(
-                f"{PROVIDER_TITLES[provider]} primary account: {problem}; "
-                f"using {provider!r} instead"
+                f"{title} primary account label {label!r} is already used by the "
+                f"{holders[label.lower()]} primary account; using {provider!r} instead"
             )
-        label = primary_label(provider, block)
-        if label.lower() in seen:
-            problems.append(
-                f"{PROVIDER_TITLES[provider]} primary account label {label!r} is "
-                f"already used by the {seen[label.lower()]} primary account"
-            )
-        seen.setdefault(label.lower(), PROVIDER_TITLES[provider])
+            continue
+        holders.setdefault((label or provider).lower(), title)
     return problems
-
-
-def drop_repeated_primary_labels(config: "AppConfig") -> List[str]:
-    """Clear a primary account label another provider's primary already uses.
-
-    Settings never saves such a pair, but a hand-edited config can. Labels
-    must be unique for ``label/name`` to name one account, so the later
-    provider (in AWS, Hetzner, OVH order) falls back to its provider name,
-    the same fallback an invalid label gets. Returns one sentence per label
-    cleared.
-    """
-    cleared: List[str] = []
-    seen: Dict[str, str] = {}
-    for provider, block in ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh)):
-        label = primary_label(provider, block)
-        holder = seen.get(label.lower())
-        if holder is not None:
-            cleared.append(
-                f"{PROVIDER_TITLES[provider]} primary account label {label!r} is "
-                f"already used by the {holder} primary account; using {provider!r} instead"
-            )
-            block.label = ""
-            label = provider
-        seen.setdefault(label.lower(), PROVIDER_TITLES[provider])
-    return cleared
 
 
 def describe_account_problems(config: "AppConfig") -> List[str]:

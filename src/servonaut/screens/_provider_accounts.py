@@ -257,7 +257,7 @@ def object_storage_accounts(app: Any, provider: str) -> List[AccountRef]:
         return registry.accounts(AWS)
     config = registry.config
     configured = (
-        hetzner_accounts(config.hetzner) if provider == HETZNER else ovh_accounts(config.ovh)
+        hetzner_accounts(config) if provider == HETZNER else ovh_accounts(config)
     )
     usable = set(usable_extra_indexes(config, provider))
     return [

@@ -375,7 +375,7 @@ class IPBanService(IPBanServiceInterface):
         """
         from servonaut.config.accounts import primary_label
 
-        return _label(config) or primary_label("aws", self._config_manager.get().aws)
+        return _label(config) or primary_label("aws", self._config_manager.get())
 
     def configs_for_account(self, account: str = "") -> List['IPBanConfig']:
         """The configs that act in AWS account *account* ("" = the default).

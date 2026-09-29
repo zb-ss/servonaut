@@ -40,16 +40,16 @@ def _config(**provider_accounts) -> AppConfig:
 class TestShape:
     def test_a_config_without_extra_accounts_has_one_account_per_provider(self):
         config = AppConfig()
-        assert [a.ref.label for a in aws_accounts(config.aws)] == ["aws"]
-        assert [r.label for r, _ in hetzner_accounts(config.hetzner)] == ["hetzner"]
-        assert [r.label for r, _ in ovh_accounts(config.ovh)] == ["ovh"]
+        assert [a.ref.label for a in aws_accounts(config)] == ["aws"]
+        assert [r.label for r, _ in hetzner_accounts(config)] == ["hetzner"]
+        assert [r.label for r, _ in ovh_accounts(config)] == ["ovh"]
 
     def test_an_invalid_primary_label_falls_back_to_the_provider_name(self):
         config = AppConfig()
         config.aws.label = "prod/eu"
         config.hetzner.label = "custom"
-        assert primary_label(AWS, config.aws) == "aws"
-        assert primary_label(HETZNER, config.hetzner) == "hetzner"
+        assert primary_label(AWS, config) == "aws"
+        assert primary_label(HETZNER, config) == "hetzner"
         problems = describe_account_problems(config)
         assert any("AWS primary account" in p and "using 'aws'" in p for p in problems)
 
@@ -57,13 +57,13 @@ class TestShape:
         config = AppConfig()
         config.aws.label = "Hetzner"
         config.hetzner.label = "hetzner"  # its own name is fine
-        assert primary_label(AWS, config.aws) == "aws"
-        assert primary_label(HETZNER, config.hetzner) == "hetzner"
+        assert primary_label(AWS, config) == "aws"
+        assert primary_label(HETZNER, config) == "hetzner"
 
     def test_the_primary_label_can_be_renamed(self):
         config = AppConfig()
         config.hetzner.label = "  prod "
-        assert primary_label(HETZNER, config.hetzner) == "prod"
+        assert primary_label(HETZNER, config) == "prod"
 
     def test_an_extra_hetzner_project_keeps_its_own_token_and_cache(self):
         config = AppConfig()
@@ -73,7 +73,7 @@ class TestShape:
         config.hetzner.accounts = [
             HetznerAccount(label="staging", api_token="$STAGING", default_username="deploy")
         ]
-        (primary_ref, primary), (ref, extra) = hetzner_accounts(config.hetzner)
+        (primary_ref, primary), (ref, extra) = hetzner_accounts(config)
         assert primary is config.hetzner and primary_ref.primary
         assert not ref.primary and ref.label == "staging"
         assert extra.api_token == "$STAGING"
@@ -92,7 +92,7 @@ class TestShape:
         config.ovh.accounts = [
             OVHAccount(label="ca", endpoint="ovh-ca", client_id="cid", client_secret="$S")
         ]
-        _, (ref, extra) = ovh_accounts(config.ovh)
+        _, (ref, extra) = ovh_accounts(config)
         assert extra.endpoint == "ovh-ca"
         assert extra.application_key == ""
         assert (extra.client_id, extra.client_secret) == ("cid", "$S")
@@ -133,7 +133,7 @@ class TestRoundTrip:
         loaded = ConfigManager(config_path=path).get()
         assert [a.label for a in loaded.hetzner.accounts] == ["ok"]
 
-    def test_a_repeated_primary_label_falls_back_to_the_provider_name(self, tmp_path, caplog):
+    def test_a_repeated_primary_label_falls_back_to_the_provider_name(self, tmp_path):
         # Settings refuses the pair; a hand-edited config can still hold it.
         path = tmp_path / "config.json"
         path.write_text(json.dumps({
@@ -142,15 +142,20 @@ class TestRoundTrip:
             "hetzner": {"label": "Prod"},
             "ovh": {"label": "backup"},
         }))
-        with caplog.at_level("WARNING", logger="servonaut.config.manager"):
-            loaded = ConfigManager(config_path=path).get()
-        assert primary_label(AWS, loaded.aws) == "prod"
-        assert primary_label(HETZNER, loaded.hetzner) == "hetzner"
-        assert primary_label(OVH, loaded.ovh) == "backup"
+        manager = ConfigManager(config_path=path)
+        loaded = manager.get()
+        assert primary_label(AWS, loaded) == "prod"
+        assert primary_label(HETZNER, loaded) == "hetzner"
+        assert primary_label(OVH, loaded) == "backup"
+        assert [r.label for r, _ in hetzner_accounts(loaded)] == ["hetzner"]
         assert (
             "Hetzner primary account label 'Prod' is already used by the AWS primary "
             "account; using 'hetzner' instead"
-        ) in caplog.text
+        ) in describe_account_problems(loaded)
+        # The config keeps what the user wrote; an unrelated save leaves it alone.
+        manager.update(theme="light")
+        saved = json.loads(path.read_text())
+        assert saved["hetzner"]["label"] == "Prod"
 
     def test_local_key_paths_of_extra_accounts_are_saved_home_relative(self, tmp_path):
         from pathlib import Path

@@ -195,7 +195,7 @@ class AccountRegistry:
 
         config = state.config
         accounts = _ProviderAccounts()
-        for index, settings in enumerate(aws_accounts(config.aws)):
+        for index, settings in enumerate(aws_accounts(config)):
             if not settings.ref.primary and (AWS, index - 1) in skipped:
                 continue
             ref = settings.ref
@@ -230,7 +230,7 @@ class AccountRegistry:
             HetznerService,
         )
 
-        for index, (ref, effective) in enumerate(hetzner_accounts(config.hetzner)):
+        for index, (ref, effective) in enumerate(hetzner_accounts(config)):
             if not ref.primary and (HETZNER, index - 1) in skipped:
                 continue
             accounts.configured.append(ref)
@@ -252,7 +252,7 @@ class AccountRegistry:
             return
         from servonaut.services.ovh_service import _OVH_CACHE_PATH, OVHService
 
-        for index, (ref, effective) in enumerate(ovh_accounts(config.ovh)):
+        for index, (ref, effective) in enumerate(ovh_accounts(config)):
             if not ref.primary and (OVH, index - 1) in skipped:
                 continue
             accounts.configured.append(ref)
@@ -633,7 +633,7 @@ def _object_storage_source(state: _RegistryState, provider: str, account: Option
     if provider not in (HETZNER, OVH):
         raise UnknownAccountError(f"No object storage for provider {provider!r}")
     block = config.hetzner if provider == HETZNER else config.ovh
-    primary = primary_label(provider, block)
+    primary = primary_label(provider, config)
     wanted = (account or "").strip().lower()
     if not wanted or wanted == primary.lower():
         return primary.lower(), block.object_storage, None
