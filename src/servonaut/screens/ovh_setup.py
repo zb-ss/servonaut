@@ -727,6 +727,17 @@ class OVHSetupScreen(Screen):
                     severity="warning",
                 )
                 return
+        elif save and not all(
+            values[key] for key in ('application_key', 'application_secret', 'consumer_key')
+        ):
+            # An extra account never borrows the primary's keys, so all
+            # three must be its own.
+            self.app.notify(
+                "Enter the Application Key, Application Secret and Consumer Key "
+                "(or request one) to save this account.",
+                severity="warning",
+            )
+            return
         elif not values['application_key']:
             self.app.notify(
                 "Enter at least Application Key and Consumer Key to test.",

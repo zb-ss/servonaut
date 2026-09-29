@@ -501,12 +501,28 @@ class TestOvhAddAccount:
             assert ovh_service.built == []
             assert "Enter the Client ID and Client Secret to test." in app.messages
 
+    async def test_an_incomplete_key_set_is_not_tested(self, tmp_path, ovh_service) -> None:
+        app = Host(_manager(tmp_path, _ovh_config()), lambda: OVHSetupScreen(add_extra=True))
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            _fill(app.screen, {"ovh_input_label": "client-a", "ovh_input_app_key": "ak-a"})
+            app.screen.query_one("#btn_ovh_save", Button).press()
+            await _settle(pilot)
+            assert ovh_service.built == []
+            assert any("Consumer Key" in m for m in app.messages)
+        assert _reread(tmp_path).ovh.accounts == []
+
     async def test_refused_credentials_are_not_saved(self, tmp_path, ovh_service) -> None:
         ovh_service.succeed = False
         app = Host(_manager(tmp_path, _ovh_config()), lambda: OVHSetupScreen(add_extra=True))
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
-            _fill(app.screen, {"ovh_input_label": "client-a", "ovh_input_app_key": "ak-a"})
+            _fill(app.screen, {
+                "ovh_input_label": "client-a",
+                "ovh_input_app_key": "ak-a",
+                "ovh_input_app_secret": "as-a",
+                "ovh_input_consumer_key": "ck-a",
+            })
             app.screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert isinstance(app.screen, OVHSetupScreen)
