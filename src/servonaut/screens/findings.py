@@ -40,11 +40,13 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._provider_accounts import UnknownAccountError, registry_for
 from servonaut.services.findings_service import (
     FINDING_SEVERITIES,
     FINDING_STATUSES,
     DEFAULT_PAGE_SIZE,
 )
+from servonaut.utils.instance_resolver import AmbiguousInstanceError, resolve_unique
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -1138,12 +1140,50 @@ class FindingDetailScreen(Screen[bool]):
     _AWS_PROVIDER_NAMES = frozenset({"", "aws", "ec2", "amazon"})
 
     def _find_finding_instance(self) -> Optional[Dict[str, Any]]:
-        """Locate the finding's instance in the merged fleet list."""
+        """Locate the finding's instance in the merged fleet list.
+
+        The finding names the real server, so it is matched against the
+        real records (the listed rows carry stand-ins in demo mode). An
+        instance id always wins; a name must name exactly one server.
+
+        Raises:
+            AmbiguousInstanceError: The finding names a server by a name
+                that servers in several accounts share.
+        """
         instance_id = str(self._finding.get("instance_id") or "")
-        for inst in getattr(self.app, "instances", None) or []:
-            if inst.get("id") == instance_id or inst.get("name") == instance_id:
-                return inst
-        return None
+        if not instance_id:
+            return None
+        listed = getattr(self.app, "instances", None) or []
+        return resolve_unique(
+            instance_id, [connection_instance(self.app, row) for row in listed],
+        )
+
+    def _ban_configs_for(self, instance: Optional[Dict[str, Any]], configs: list) -> tuple:
+        """``(configs, account)``: the IP-ban configs that shield *instance*.
+
+        Each ban config acts in one AWS account (its ``account``; empty is
+        the default account). With several AWS accounts only the configs
+        of the server's own account can shield it, and *account* names it
+        for the message shown when none does. With one account, or a
+        server missing from the list, every config qualifies as before.
+
+        Raises:
+            UnknownAccountError: The server's account no longer exists.
+        """
+        registry = registry_for(self.app, "aws")
+        if registry is None or not registry.is_multi("aws") or instance is None:
+            return list(configs), ""
+        owner = registry.account_for(instance)
+        matching = []
+        for config in configs:
+            label = getattr(config, "account", "")
+            try:
+                ref = registry.account("aws", label if isinstance(label, str) and label else None)
+            except UnknownAccountError:
+                continue
+            if ref.key == owner.key:
+                matching.append(config)
+        return matching, owner.label
 
     @classmethod
     def _is_aws_instance(cls, instance: Optional[Dict[str, Any]]) -> bool:
@@ -1179,14 +1219,27 @@ class FindingDetailScreen(Screen[bool]):
         IP-ban config, so an AWS finding raised before the fleet list
         loads still resolves.
         """
-        instance = self._find_finding_instance()
+        try:
+            instance = self._find_finding_instance()
+        except AmbiguousInstanceError as exc:
+            return None, str(exc)
 
         if instance is None or self._is_aws_instance(instance):
             svc = getattr(self.app, "ip_ban_service", None)
             configs = svc.get_configs() if svc is not None else []
+            try:
+                configs, account = self._ban_configs_for(instance, configs)
+            except UnknownAccountError as exc:
+                return None, str(exc)
             methods = sorted({
                 c.method for c in configs if getattr(c, "method", None)
             })
+            if not methods and account:
+                return None, (
+                    f"No IP-ban configuration acts in AWS account "
+                    f"{account!r} — add one for it under Settings ▸ IP Ban "
+                    "before blocking an address."
+                )
             if not methods:
                 return None, (
                     "No IP-ban configuration found — add one under "
@@ -1201,7 +1254,9 @@ class FindingDetailScreen(Screen[bool]):
                 "Can't detect the box's firewall in this session — "
                 "on-box blocking is unavailable here."
             )
-        instance_id = str(self._finding.get("instance_id") or "")
+        # The server's own id: unique even when its name is shared by
+        # servers of other accounts.
+        instance_id = str(instance.get("id") or self._finding.get("instance_id") or "")
         detected = await tools.detect_onbox_firewall(instance_id)
         if detected in ("nftables", "ufw", "firewalld"):
             return detected, None

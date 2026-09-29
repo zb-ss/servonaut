@@ -12,6 +12,9 @@ via this surface never appeared in the cloud-create wizard's keys
 table — the wizard reads ``/cloud/project/{id}/sshkey``. The two
 registries do not sync, which led to "I added a key, why does the
 wizard say I have none?" reports.
+
+With several OVH accounts configured, a picker chooses the account whose
+first Public Cloud project is listed and changed.
 """
 
 from __future__ import annotations
@@ -28,7 +31,15 @@ from textual.widgets import (
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_settings,
+    ovh_services,
+    registry_for,
+    show_account_labels,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -47,6 +58,9 @@ class OVHSSHKeysScreen(Screen):
         Binding("d", "delete_key", "Delete", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -78,6 +92,11 @@ class OVHSSHKeysScreen(Screen):
                     "separate registry — manage those via the OVH "
                     "web console.[/dim]",
                     classes="note",
+                ),
+                # Hidden unless several OVH accounts are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh",
+                    id="ovh_ssh_keys_account",
                 ),
                 Static("", id="ovh_ssh_keys_project_label", classes="note"),
 
@@ -135,7 +154,28 @@ class OVHSSHKeysScreen(Screen):
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "Fingerprint", "Public Key (first 40 chars)")
+        picker = self.query_one("#ovh_ssh_keys_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._refresh()
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: list its project's keys instead."""
+        self._account = event.account
+        self._project_id = ""
+        self._keys = []
+        self._hide_form()
+        self.query_one("#ovh_ssh_keys_project_label", Static).update("")
+        self._render_keys()
+        self._refresh()
+
+    def _cloud_service(self):
+        """The chosen account's Public Cloud service (None when unavailable)."""
+        try:
+            return ovh_services(self.app, self._account).cloud
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
 
     # ------------------------------------------------------------------
     # Loading
@@ -146,17 +186,16 @@ class OVHSSHKeysScreen(Screen):
         if config_manager is None:
             return None
         try:
-            config = config_manager.get()
+            ovh_cfg = account_settings(self.app, "ovh", self._account)
         except Exception:
             return None
-        ovh_cfg = getattr(config, "ovh", None)
         if ovh_cfg is None:
             return None
         ids = list(getattr(ovh_cfg, "cloud_project_ids", []))
         return ids[0] if ids else None
 
     def _refresh(self) -> None:
-        cloud_svc = getattr(self.app, "ovh_cloud_service", None)
+        cloud_svc = self._cloud_service()
         if cloud_svc is None:
             self._set_status(
                 "[red]OVH Cloud service is not initialised. "
@@ -178,7 +217,9 @@ class OVHSSHKeysScreen(Screen):
         )
 
     async def _load_keys(self) -> None:
-        cloud_svc = self.app.ovh_cloud_service
+        cloud_svc = self._cloud_service()
+        if cloud_svc is None:
+            return
         try:
             self._keys = list(
                 await cloud_svc.list_ssh_keys(self._project_id)
@@ -193,6 +234,7 @@ class OVHSSHKeysScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the project label and key rows for the new demo-mode state."""
+        show_account_labels(self.query_one("#ovh_ssh_keys_account", AccountPicker))
         if self._project_id:
             self._render_project_label()
         self._render_keys()
@@ -354,7 +396,9 @@ class OVHSSHKeysScreen(Screen):
 
     async def _do_add(self, name: str, public_key: str) -> None:
         self._set_status(f"[dim]Adding key {name}…[/dim]")
-        cloud_svc = self.app.ovh_cloud_service
+        cloud_svc = self._cloud_service()
+        if cloud_svc is None:
+            return
         try:
             await cloud_svc.add_ssh_key(self._project_id, name, public_key)
         except Exception as exc:
@@ -401,7 +445,9 @@ class OVHSSHKeysScreen(Screen):
         if not confirmed:
             return
         self._set_status(f"[dim]Deleting key {key_name}…[/dim]")
-        cloud_svc = self.app.ovh_cloud_service
+        cloud_svc = self._cloud_service()
+        if cloud_svc is None:
+            return
         try:
             await cloud_svc.delete_ssh_key(self._project_id, key_id)
         except Exception as exc:

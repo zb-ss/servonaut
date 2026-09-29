@@ -84,7 +84,9 @@ def test_manager_lifecycle_preserves_raw_target(fails: bool, is_demo: bool) -> N
         patch.object(screen, "notify") as notify,
         patch.object(screen, "_load_instances", new_callable=AsyncMock),
     ):
-        asyncio.run(screen._do_lifecycle("start_instance", identifier, "cloud", "started"))
+        asyncio.run(screen._do_lifecycle(
+            app.ovh_service, "start_instance", identifier, "cloud", "started",
+        ))
     call.assert_awaited_once_with(identifier, "cloud")
     visible = str(notify.call_args_list) + str(status.call_args_list)
     assert (("a" * 32) not in visible) is is_demo
