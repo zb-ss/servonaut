@@ -31,11 +31,12 @@ REGION = "us-east-1"
 PRIMARY_HOSTS = (fleet.APP_1, fleet.AWS_WEB_1)
 ADDRESS = "9.9.9.9"
 # The launch wizard lists every launch option for the default account, then
-# again for the picked one. moto answers the instance-type list with every
-# type it knows (over a thousand rows, several seconds each on a busy
-# machine), so the options wait, and the journey, get more time.
-LAUNCH_OPTIONS_TIMEOUT = 120.0
-LAUNCH_JOURNEY_TIMEOUT = 180
+# for the picked one. moto answers the instance-type list with every type it
+# knows (over a thousand rows, several seconds each on a busy machine), so
+# the options wait, and the journey, get more time than the defaults. About
+# 25 s on an idle machine; up to about twice that under a full parallel run.
+LAUNCH_OPTIONS_TIMEOUT = 60.0
+LAUNCH_JOURNEY_TIMEOUT = 120
 
 
 def _seed_aws(moto) -> str:

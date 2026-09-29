@@ -31,7 +31,7 @@ scope. ``notify()`` is already auto-scrubbed by the app override; pass
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from rich.markup import escape as markup_escape
 from textual.app import ComposeResult
@@ -106,6 +106,11 @@ class AWSCreateScreen(Screen):
         self._security_groups: List[dict] = []
         # Timer handle for AMI search debounce (set_timer returns a Timer)
         self._ami_search_timer: Optional[object] = None
+        # (account, region) the region-scoped tables were last loaded for.
+        # Loading the regions asks for them once and moving the cursor onto
+        # the preselected region asks again; each list call is a paginated
+        # describe, so a repeat is skipped rather than sent.
+        self._dependents_for: Optional[Tuple[str, str]] = None
 
     # ------------------------------------------------------------------
     # Compose
@@ -324,9 +329,14 @@ class AWSCreateScreen(Screen):
             )
 
     def _load_region_dependents(self, region: str) -> None:
-        """Fire all region-scoped loaders in exclusive named groups."""
-        if not region:
+        """Fire all region-scoped loaders in exclusive named groups.
+
+        Once per account and region: asking again for the tables already
+        loading (or loaded) for them does nothing.
+        """
+        if not region or self._dependents_for == (self._account, region):
             return
+        self._dependents_for = (self._account, region)
         ami_filter = ""
         try:
             ami_filter = self.query_one(
@@ -535,6 +545,7 @@ class AWSCreateScreen(Screen):
             self._ami_search_timer = None
         for group in _DEPENDENT_GROUPS:
             self.workers.cancel_group(self, group)
+        self._dependents_for = None
         for table_id in (
             "aws_regions_table", "aws_amis_table", "aws_types_table",
             "aws_keys_table", "aws_subnets_table", "aws_sg_table",
