@@ -413,6 +413,92 @@ async def test_create_hides_the_picker_with_one_account(ec2) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CloudTrail
+# ---------------------------------------------------------------------------
+
+
+def _bundle_fakes(registry: AccountRegistry, attr: str, factory) -> Dict[str, Any]:
+    fakes = {}
+    for ref in registry.accounts("aws"):
+        fakes[ref.key] = factory(ref.key)
+        setattr(registry.aws_services(ref.label), attr, fakes[ref.key])
+    return fakes
+
+
+@pytest.mark.asyncio
+async def test_cloudtrail_reads_the_picked_accounts_trail(ec2) -> None:
+    from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+
+    registry = _registry()
+    trails = _bundle_fakes(registry, "cloudtrail", FakeCloudTrail)
+    app = Host(registry, CloudTrailBrowserScreen)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        screen.action_fetch()
+        await _wait_for(pilot, lambda: screen._events, "prod events")
+        assert screen._events[0]["event_name"] == "prod-event"
+        assert not trails["staging"].calls
+
+        _pick_account(screen, "ct_filter_account", "staging")
+        await _wait_for(pilot, lambda: trails["staging"].calls, "the staging fetch")
+        await _wait_for(
+            pilot, lambda: screen._events and screen._events[0]["event_name"] == "staging-event",
+            "staging events",
+        )
+        assert len(trails["prod"].calls) == 1
+        users = [value for _label, value in screen.query_one("#ct_select_username", Select)._options]
+        assert "prod-user" not in users
+
+
+# ---------------------------------------------------------------------------
+# CloudWatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cloudwatch_reads_the_picked_accounts_logs(ec2) -> None:
+    from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
+
+    registry = _registry()
+    logs = _bundle_fakes(registry, "cloudwatch", FakeCloudWatch)
+    app = Host(registry, CloudWatchBrowserScreen)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        assert screen.query_one("#cloudwatch_filter_bar").has_class("-with-account")
+        screen.query_one("#cw_select_region", Select).value = "us-east-1"
+        groups = screen.query_one("#cw_select_log_group", Select)
+        await _wait_for(pilot, lambda: groups.prompt == "Select log group", "prod groups")
+        groups.value = "prod-group"
+        await pilot.pause()
+        screen.action_fetch()
+        await _wait_for(pilot, lambda: screen._events, "prod events")
+
+        _pick_account(screen, "cw_filter_account", "staging")
+        await _wait_for(pilot, lambda: logs["staging"].group_calls, "staging groups")
+        assert logs["staging"].group_calls == ["us-east-1"]
+        assert screen._events == [] and screen._top_ips == []
+        await _wait_for(pilot, lambda: groups.prompt == "Select log group", "staging groups")
+        groups.value = "staging-group"
+        await pilot.pause()
+        screen.action_fetch()
+        await _wait_for(pilot, lambda: logs["staging"].event_calls, "staging events")
+        assert logs["staging"].event_calls[0]["log_group"] == "staging-group"
+        assert len(logs["prod"].event_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cloudwatch_single_account_has_no_account_column(ec2) -> None:
+    from servonaut.screens.cloudwatch_browser import CloudWatchBrowserScreen
+
+    app = Host(_registry(_config(extra=False)), CloudWatchBrowserScreen)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert not screen.query_one("#cloudwatch_filter_bar").has_class("-with-account")
+        assert screen.query_one("#cw_filter_account").display is False
+
+
+# ---------------------------------------------------------------------------
 # Screen account helpers
 # ---------------------------------------------------------------------------
 
