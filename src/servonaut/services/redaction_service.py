@@ -235,9 +235,11 @@ class RedactionService:
         self._fake_names: set[str] = set()
         # Stand-ins emitted by redact_dns_label (idempotence, as above).
         self._fake_labels: set[str] = set()
-        # Provider account labels: real -> stand-in, and the stand-ins emitted.
+        # Provider account labels: real -> stand-in, the stand-ins emitted,
+        # and the labels known to be real (lower-cased).
         self._account_label_cache: dict[str, str] = {}
         self._fake_account_labels: set[str] = set()
+        self._real_account_labels: set[str] = set()
 
     def redact_ip(self, ip: str) -> str:
         """Map a real IP to a documentation-range IP."""
@@ -583,6 +585,16 @@ class RedactionService:
             return username
         return _hash_pick(username, _USERNAMES)
 
+    def register_account_labels(self, labels) -> None:
+        """Record the configured account labels, before any is redacted.
+
+        A stand-in is never picked equal to a real label, and a real label
+        is never mistaken for a stand-in (and shown as it is).
+        """
+        self._real_account_labels.update(
+            str(label).strip().lower() for label in labels if str(label or "").strip()
+        )
+
     def redact_account_label(self, label: str) -> str:
         """Map a provider account label to a stable stand-in.
 
@@ -592,7 +604,9 @@ class RedactionService:
         share one, so ``label/name`` references stay distinguishable.
         Environment words ("prod", "staging", ...) identify nobody and stay.
         """
-        if not label or label in self._authored or label in self._fake_account_labels:
+        if not label or label in self._authored:
+            return label
+        if label in self._fake_account_labels and label.lower() not in self._real_account_labels:
             return label
         if label.strip().lower() in _GENERIC_ACCOUNT_LABELS:
             return label
@@ -601,7 +615,11 @@ class RedactionService:
             return cached
         base = _hash_pick(label.lower(), _ACCOUNT_LABELS)
         fake, number = base, 1
-        while fake in self._fake_account_labels or fake in _GENERIC_ACCOUNT_LABELS:
+        while (
+            fake in self._fake_account_labels
+            or fake in _GENERIC_ACCOUNT_LABELS
+            or fake in self._real_account_labels
+        ):
             number += 1
             fake = f"{base}-{number}"
         self._account_label_cache[label.lower()] = fake

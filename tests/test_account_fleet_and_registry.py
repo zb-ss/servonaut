@@ -135,12 +135,38 @@ class TestAccountFleet:
 
     def test_the_same_account_configured_twice_is_listed_once(self):
         fleet = _fleet(
-            FakeService([{"id": "1", "name": "a"}]),
+            FakeService([{"id": "1", "name": "a"}, {"id": "3", "name": "c"}]),
             FakeService([{"id": "1", "name": "a"}, {"id": "3", "name": "c"}]),
         )
         rows = _run(fleet.fetch_instances_cached(force_refresh=True))
-        assert [(r["id"], r[ACCOUNT_KEY]) for r in rows] == [("1", "hetzner"), ("3", "staging")]
+        assert [(r["id"], r[ACCOUNT_KEY]) for r in rows] == [("1", "hetzner"), ("3", "hetzner")]
         assert fleet.duplicate_accounts == {"staging": "hetzner"}
+
+    def test_accounts_sharing_only_some_servers_are_not_called_duplicates(self):
+        fleet = _fleet(
+            FakeService([{"id": "1", "name": "a"}]),
+            FakeService([{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]),
+        )
+        rows = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert [r["id"] for r in rows] == ["1", "2"]
+        assert fleet.duplicate_accounts == {}
+
+    def test_a_failed_account_id_lookup_is_retried(self):
+        calls = []
+
+        def lookup():
+            calls.append(1)
+            return "" if len(calls) == 1 else "123456789012"
+
+        bindings = [
+            AccountBinding(AccountRef("aws", "aws", True), FakeService([{"id": "i-1"}]), lookup),
+            AccountBinding(AccountRef("aws", "prod", False), FakeService([{"id": "i-2"}]), lambda: "210987654321"),
+        ]
+        fleet = AccountFleet("aws", bindings)
+        first = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert "account_id" not in first[0]
+        second = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert second[0]["account_id"] == "123456789012"
 
     def test_fresh_only_when_every_account_is(self):
         assert _fleet(FakeService([]), FakeService([])).is_cache_fresh()

@@ -1,13 +1,12 @@
 """Factory for constructing per-provider ObjectStorageService instances.
 
-Shared between ``ServonautApp._init_services``, the headless MCP server and
-the account registry, so every surface sees the same provider availability
-under identical config.
+Used by the account registry, the single place every surface gets object
+storage from, so they all see the same availability under identical config.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -95,23 +94,3 @@ def build_keyed_object_storage(provider: str, storage_config) -> Optional[object
             "%s Object Storage: invalid config (%s) — service not initialised", title, exc,
         )
         return None
-
-
-def build_object_storage_services(
-    config,
-) -> Tuple[Optional[object], Optional[object], Optional[object]]:
-    """Build the primary account's AWS, Hetzner, and OVH object storage.
-
-    Args:
-        config: AppConfig instance.
-
-    Returns:
-        Tuple of (aws_service, hetzner_service, ovh_service). Each is an
-        ObjectStorageService instance or None when the provider is not
-        configured or has invalid configuration.
-    """
-    return (
-        build_aws_object_storage(config.aws.object_storage, config.aws.default_region),
-        build_keyed_object_storage("hetzner", config.hetzner.object_storage),
-        build_keyed_object_storage("ovh", config.ovh.object_storage),
-    )

@@ -52,9 +52,10 @@ class TestMatchConditions:
         assert not matches_conditions(QUALIFIED, {"account": "prod"})
         assert not matches_conditions({"id": "c", "is_custom": True}, {"account": "archive"})
 
-    def test_provider_condition_ignores_case(self):
-        assert matches_conditions(QUALIFIED, {"provider": "Hetzner"})
-        assert matches_conditions({"id": "i-1"}, {"provider": "aws"})
+    def test_provider_condition_is_unchanged(self):
+        # An exact match, as before: a dormant rule must not start matching.
+        assert matches_conditions(QUALIFIED, {"provider": "hetzner"})
+        assert not matches_conditions({"id": "i-1"}, {"provider": "aws"})
 
 
 class TestOVHConnectionDefaults:
@@ -93,6 +94,19 @@ class TestDemoMode:
         assert redaction.redact_account_label("ACME-EU") == first
         assert redaction.redact_account_label(first) == first  # idempotent
         assert redaction.redact_account_label("acme-us") != first
+
+    def test_a_real_label_is_never_mistaken_for_a_stand_in(self):
+        redaction = RedactionService()
+        # Every word a stand-in could be, used as real labels.
+        from servonaut.services.redaction_service import _ACCOUNT_LABELS
+
+        redaction.register_account_labels(["acme-eu", *_ACCOUNT_LABELS])
+        stand_in = redaction.redact_account_label("acme-eu")
+        assert stand_in.lower() not in {w.lower() for w in _ACCOUNT_LABELS}
+        for word in _ACCOUNT_LABELS:
+            assert redaction.redact_account_label(word) != word
+        shown = {redaction.redact_account_label(w) for w in ["acme-eu", *_ACCOUNT_LABELS]}
+        assert len(shown) == len(_ACCOUNT_LABELS) + 1  # never two accounts on one stand-in
 
     def test_provider_defaults_and_environment_words_stay(self):
         redaction = RedactionService()

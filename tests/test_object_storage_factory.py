@@ -1,4 +1,4 @@
-"""Tests for services/object_storage_factory.build_object_storage_services.
+"""Tests for the object storage builders in services/object_storage_factory.
 
 Covers:
 - AWS service always constructed (boto3 credential chain, no access_key required).
@@ -47,6 +47,20 @@ def _make_config(
     return config
 
 
+def build_object_storage_services(config):
+    """The primary account's AWS, Hetzner and OVH object storage."""
+    from servonaut.services.object_storage_factory import (
+        build_aws_object_storage,
+        build_keyed_object_storage,
+    )
+
+    return (
+        build_aws_object_storage(config.aws.object_storage, config.aws.default_region),
+        build_keyed_object_storage("hetzner", config.hetzner.object_storage),
+        build_keyed_object_storage("ovh", config.ovh.object_storage),
+    )
+
+
 def _call_factory(config, resolve_side_effect=None):
     """Call build_object_storage_services with ObjectStorageService and resolve_secret mocked.
 
@@ -61,7 +75,6 @@ def _call_factory(config, resolve_side_effect=None):
         "servonaut.config.secrets.resolve_secret",
         side_effect=resolve_side_effect,
     ):
-        from servonaut.services.object_storage_factory import build_object_storage_services
         result = build_object_storage_services(config)
         return result, mock_cls
 
@@ -102,7 +115,6 @@ class TestAWSObjectStorageConstruction:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             aws_svc, _, _ = build_object_storage_services(config)
 
         # Service should NOT be constructed for bad region
@@ -119,7 +131,6 @@ class TestAWSObjectStorageConstruction:
             "servonaut.config.secrets.resolve_secret",
             side_effect=lambda v: f"resolved:{v}",
         ) as mock_resolve:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             build_object_storage_services(config)
         resolved_vals = [c.args[0] for c in mock_resolve.call_args_list]
         assert "$AWS_KEY" in resolved_vals
@@ -138,7 +149,6 @@ class TestHetznerObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         # Hetzner-specific call should not happen; only AWS may be called
         hetzner_calls = [
@@ -156,7 +166,6 @@ class TestHetznerObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         hetzner_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"
@@ -173,7 +182,6 @@ class TestHetznerObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         hetzner_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"
@@ -189,7 +197,6 @@ class TestHetznerObjectStorageConstruction:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         hetzner_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"
@@ -207,7 +214,6 @@ class TestHetznerObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             build_object_storage_services(config)
         hetzner_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"
@@ -226,7 +232,6 @@ class TestHetznerObjectStorageConstruction:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         hetzner_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"
@@ -245,7 +250,6 @@ class TestHetznerObjectStorageConstruction:
             "servonaut.config.secrets.resolve_secret",
             side_effect=lambda v: f"resolved:{v}",
         ) as mock_resolve:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             build_object_storage_services(config)
         resolved_vals = [c.args[0] for c in mock_resolve.call_args_list]
         assert "$HETZNER_KEY" in resolved_vals
@@ -264,7 +268,6 @@ class TestOVHObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -278,7 +281,6 @@ class TestOVHObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -295,7 +297,6 @@ class TestOVHObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -310,7 +311,6 @@ class TestOVHObjectStorageConstruction:
         ) as mock_cls, patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -329,7 +329,6 @@ class TestOVHObjectStorageConstruction:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -346,7 +345,6 @@ class TestOVHObjectStorageConstruction:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         ovh_calls = [
             c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"
@@ -364,7 +362,6 @@ class TestOVHObjectStorageConstruction:
             "servonaut.config.secrets.resolve_secret",
             side_effect=lambda v: f"resolved:{v}",
         ) as mock_resolve:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             build_object_storage_services(config)
         resolved_vals = [c.args[0] for c in mock_resolve.call_args_list]
         assert "$OVH_KEY" in resolved_vals
@@ -388,7 +385,6 @@ class TestConstructorExceptionHandling:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             aws_svc, _, _ = build_object_storage_services(config)
         # The ValueError from constructor must be caught and logged, not propagated
         assert aws_svc is None
@@ -412,7 +408,6 @@ class TestConstructorExceptionHandling:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, hetzner_svc, _ = build_object_storage_services(config)
         assert hetzner_svc is None
         mock_logger.warning.assert_called()
@@ -433,7 +428,6 @@ class TestConstructorExceptionHandling:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ) as mock_logger:
-            from servonaut.services.object_storage_factory import build_object_storage_services
             _, _, ovh_svc = build_object_storage_services(config)
         assert ovh_svc is None
         mock_logger.warning.assert_called()
@@ -447,7 +441,6 @@ class TestReturnShape:
         ), patch(
             "servonaut.config.secrets.resolve_secret", side_effect=lambda v: v
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             result = build_object_storage_services(config)
         assert len(result) == 3
 
@@ -460,7 +453,6 @@ class TestReturnShape:
         ), patch(
             "servonaut.services.object_storage_factory.logger"
         ):
-            from servonaut.services.object_storage_factory import build_object_storage_services
             aws_svc, hetzner_svc, ovh_svc = build_object_storage_services(config)
         assert hetzner_svc is None
         assert ovh_svc is None

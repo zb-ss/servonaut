@@ -75,6 +75,16 @@ class TestResolution:
         for ref in ("prod/web-1", "staging/web-1", "hetzner/web-1"):
             assert ref in message
 
+    def test_hints_fall_back_to_ids_when_names_repeat_inside_an_account(self):
+        # Two servers of one account sharing a Name tag (an auto-scaling group).
+        first = {"id": "i-1", "name": "worker", "account": "aws"}
+        second = {"id": "i-2", "name": "worker", "account": "aws"}
+        with pytest.raises(AmbiguousInstanceError) as caught:
+            resolve_unique("worker", [first, second])
+        message = str(caught.value)
+        assert "aws/worker" not in message
+        assert "i-1 (AWS)" in message and "i-2 (AWS)" in message
+
     @pytest.mark.parametrize("reference", ["", "   ", "nope", "prod/nope", "nope/web-1", "/web-1"])
     def test_references_that_pick_nothing(self, reference):
         assert resolve_unique(reference, FLEET) is None

@@ -1318,6 +1318,10 @@ class HetznerService:
                 'success': bool(success),
                 **fields,
             }
+            # Projects share one audit log: a labelled project (every extra
+            # one, the primary once renamed) names itself on its rows.
+            if self._config.label:
+                row['account'] = self._config.label
             flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
             if hasattr(os, 'O_NOFOLLOW'):
                 flags |= os.O_NOFOLLOW

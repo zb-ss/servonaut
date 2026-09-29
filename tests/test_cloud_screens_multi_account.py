@@ -209,16 +209,16 @@ def _registry(config: AppConfig) -> Accounts:
         real = registry.service("hetzner", ref.label)
         rows = HETZNER_ROWS["hetzner" if ref.primary else "staging"]
         hetzner[ref.label] = FakeHetzner(ref.label, real._config, rows)
-        registry._providers["hetzner"].services[ref.key] = hetzner[ref.label]
+        registry._state.providers["hetzner"].services[ref.key] = hetzner[ref.label]
     ovh: Dict[str, FakeOVH] = {}
     bundles: Dict[str, OVHAccountServices] = {}
     for ref in registry.accounts("ovh"):
         real = registry.service("ovh", ref.label)
         rows = OVH_ROWS["ovh" if ref.primary else "ca"]
         ovh[ref.label] = FakeOVH(ref.label, real._config, rows)
-        registry._providers["ovh"].services[ref.key] = ovh[ref.label]
+        registry._state.providers["ovh"].services[ref.key] = ovh[ref.label]
         bundles[ref.label] = _ovh_bundle(ovh[ref.label])
-        registry._ovh_bundles[ref.key] = bundles[ref.label]
+        registry._state.ovh_bundles[ref.key] = bundles[ref.label]
     return Accounts(registry=registry, hetzner=hetzner, ovh=ovh, bundles=bundles)
 
 

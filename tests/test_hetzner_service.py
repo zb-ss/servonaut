@@ -909,3 +909,19 @@ class TestAuditPerms:
             asyncio.run(svc.delete_server("ghost"))
         mode = Path(cfg.audit_path).stat().st_mode & 0o777
         assert mode == 0o600
+
+    def test_rows_name_a_labelled_project_only(self, tmp_path, monkeypatch):
+        import json
+        from dataclasses import replace
+
+        fake_client = MagicMock()
+        fake_client.servers.get_by_name.return_value = None
+        fake_client.servers.get_by_id.return_value = None
+        for label, expected in (("", None), ("staging", "staging")):
+            cfg = replace(_make_config(tmp_path), label=label)
+            svc = HetznerService(cfg)
+            monkeypatch.setattr(svc, "_get_client", lambda: fake_client)
+            with pytest.raises(HetznerError):
+                asyncio.run(svc.delete_server("ghost"))
+            row = json.loads(Path(cfg.audit_path).read_text().splitlines()[-1])
+            assert row.get("account") == expected

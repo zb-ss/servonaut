@@ -35,7 +35,7 @@ class AmbiguousInstanceError(LookupError):
     def __init__(self, reference: str, candidates: Sequence[dict]):
         self.reference = reference
         self.candidates = list(candidates)
-        options = ", ".join(describe_candidate(row) for row in self.candidates)
+        options = ", ".join(describe_candidate(row, self.candidates) for row in self.candidates)
         super().__init__(
             f"{reference!r} matches {len(self.candidates)} servers: {options}. "
             f"Use one of these references or an instance ID."
@@ -79,9 +79,22 @@ def qualified_reference(row: dict) -> str:
     return instance_id or name
 
 
-def describe_candidate(row: dict) -> str:
-    """``prod/web-1 (i-0abc, AWS)`` for an ambiguity message."""
+def candidate_reference(row: dict, candidates: Sequence[dict] = ()) -> str:
+    """The reference to suggest for *row* among *candidates*.
+
+    ``account/name`` when that picks this row alone; the instance id when
+    another candidate has the same ``account/name`` (two servers of one
+    account sharing a name, e.g. an auto-scaling group).
+    """
     ref = qualified_reference(row)
+    if sum(1 for other in candidates if qualified_reference(other) == ref) > 1:
+        return str(row.get("id") or ref)
+    return ref
+
+
+def describe_candidate(row: dict, candidates: Sequence[dict] = ()) -> str:
+    """``prod/web-1 (i-0abc, AWS)`` for an ambiguity message."""
+    ref = candidate_reference(row, candidates)
     instance_id = str(row.get("id") or "")
     provider = _provider(row)
     title = _PROVIDER_TITLES.get(provider, provider)
