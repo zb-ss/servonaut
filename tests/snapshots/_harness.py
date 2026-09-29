@@ -296,6 +296,15 @@ class SnapshotApp(ServonautApp):
         self.ovh_service = StaticProviderService(OVH_ROWS)
         self.hetzner_service = StaticProviderService(HETZNER_ROWS)
 
+    def provider_inventory(self, provider: str):
+        # The fleet table reads every provider through its inventory; OVH and
+        # Hetzner serve the pinned rows, AWS its (patched) real account.
+        if provider == "ovh":
+            return self.ovh_service
+        if provider == "hetzner":
+            return self.hetzner_service
+        return super().provider_inventory(provider)
+
 
 # ---------------------------------------------------------------------------
 # Driving

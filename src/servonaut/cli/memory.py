@@ -139,12 +139,12 @@ def _resolve_instance(
 ) -> Optional[Dict[str, Any]]:
     """Resolve *id_or_name* to an instance dict.
 
-    Search order: AWS first, then custom, then OVH, then Hetzner —
-    matching by ``id`` or ``name`` (case-insensitive). AWS takes
-    precedence on name collisions.
-
     Delegates to the shared ``resolve_instance_from_lists`` helper so the
-    resolution contract is defined once.
+    resolution contract (ids, names, ``account/name``; a shared name is
+    refused) is defined once.
+
+    Raises:
+        AmbiguousInstanceError: The reference names several servers.
     """
     return resolve_instance_from_lists(
         id_or_name, aws_list, custom_list, ovh_list, hetzner_list,
