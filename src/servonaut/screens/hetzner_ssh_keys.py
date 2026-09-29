@@ -59,6 +59,8 @@ class HetznerSSHKeysScreen(Screen):
 
     # Label of the chosen project; "" is the default project.
     _account: str = ""
+    # Counts list loads; see _load_keys.
+    _loads: int = 0
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -204,22 +206,33 @@ class HetznerSSHKeysScreen(Screen):
             )
             return
         self._set_status("[dim]Loading keys…[/dim]")
+        # A group of its own: a reload cancels an older load, never a key
+        # being added or deleted.
         self.run_worker(
-            self._load_keys(), exclusive=True, name="hetzner_ssh_load",
+            self._load_keys(), group="hetzner_ssh_load", exclusive=True,
+            name="hetzner_ssh_load",
         )
 
     async def _load_keys(self) -> None:
         svc = self._project_service()
         if svc is None:
             return
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         try:
-            self._keys = list(await svc.list_ssh_keys())
+            keys = list(await svc.list_ssh_keys())
         except Exception as exc:
             logger.error("Failed to load Hetzner SSH keys: %s", exc)
-            self._set_status(
-                f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
-            )
+            if load == self._loads:
+                self._set_status(
+                    f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
+                )
             return
+        if load != self._loads:
+            return
+        self._keys = keys
         self._render_keys()
 
     def refresh_after_demo_toggle(self) -> None:

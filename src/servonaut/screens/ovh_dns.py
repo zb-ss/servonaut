@@ -511,7 +511,11 @@ class OVHDNSScreen(Screen):
             if zone:
                 self._selected_zone = zone
                 self._hide_form()
-                self.run_worker(self._load_records(zone), exclusive=True)
+                # A group of its own: picking a zone cancels an older records
+                # load, never a record change that is still running.
+                self.run_worker(
+                    self._load_records(zone), group="ovh_dns_records", exclusive=True,
+                )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
