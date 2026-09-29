@@ -584,3 +584,70 @@ def test_build_headless_tools_serves_the_registry(monkeypatch, tmp_path):
     assert tools._hetzner_service is registry.default_service("hetzner")
     assert tools._aws_service is registry.default_service("aws")
     assert tools._cloudwatch_service is registry.aws_services().cloudwatch
+
+
+# ---------------------------------------------------------------------------
+# The primary account cannot be used, another one can
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def primary_down(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [WEB_PRIMARY], "staging": [WEB_STAGING, WORKER]},
+        unusable={"hetzner"},
+    )
+    return make_tools(registry), services
+
+
+def test_a_call_without_account_gets_the_registrys_reason(primary_down):
+    tools, services = primary_down
+    out = _run(tools.hetzner_list_ssh_keys())
+    assert out.startswith("Error: The primary Hetzner account 'hetzner' is not available")
+    assert "staging" in out
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+    assert services[("hetzner", "staging")].called("list_ssh_keys") == []
+
+
+def test_a_named_account_still_works_while_the_primary_is_down(primary_down):
+    tools, services = primary_down
+    services[("hetzner", "staging")].returns["list_ssh_keys"] = [
+        {"name": "deploy", "id": 7, "fingerprint": "aa"},
+    ]
+    assert "deploy" in _run(tools.hetzner_list_ssh_keys(account="staging"))
+
+
+def test_calls_that_find_the_account_work_while_the_primary_is_down(primary_down):
+    tools, services = primary_down
+    assert _run(tools.hetzner_power_on("worker")) == "Hetzner server 'worker': started."
+    assert services[("hetzner", "staging")].called("power_on") == [("worker",)]
+    listing = _run(tools.hetzner_list_servers())
+    assert "staging/worker" in listing
+
+
+def test_an_ovh_call_without_account_gets_the_registrys_reason(monkeypatch):
+    registry, _ = build_registry(monkeypatch, ovh={"ovh": [], "backup": []}, unusable={"ovh"})
+    tools = make_tools(registry)
+    out = _run(tools.ovh_list_ips())
+    assert out.startswith("Error: The primary OVH account 'ovh' is not available")
+    ip_service = MagicMock()
+
+    async def _ips():
+        return [{"ip": "1.1.1.1/32", "type": "failover"}]
+
+    ip_service.list_ips = _ips
+    registry.ovh_services("backup").ip = ip_service
+    assert "1.1.1.1/32" in _run(tools.ovh_list_ips(account="backup"))
+
+
+def test_ovh_snapshots_of_a_server_that_is_not_an_ovh_one(monkeypatch):
+    registry, _ = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "api", "region": "eu-west-1"}]},
+        ovh={"ovh": [], "backup": []},
+    )
+    tools = make_tools(registry)
+    out = _run(tools.ovh_snapshots("api"))
+    assert out.startswith("Error: Cannot determine project_id for instance api")
+    assert audit_rows(tools)[-1][3] == "missing_project_id"

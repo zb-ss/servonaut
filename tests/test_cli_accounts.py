@@ -263,3 +263,39 @@ def test_destroy_a_server_no_project_lists_is_refused(projects):
     assert "No Hetzner server 'ghost' in any account (hetzner, staging)." in err
     assert "--account" in err
     assert all(not s.called("delete_server") for s in services.values())
+
+
+# ---------------------------------------------------------------------------
+# The primary project cannot be used, the second one can
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def primary_down(monkeypatch):
+    registry, services = build_registry(monkeypatch, hetzner=PROJECTS, unusable={"hetzner"})
+    monkeypatch.setattr(cli_hetzner, "_hetzner_registry", lambda: registry)
+    return registry, services
+
+
+def test_a_subcommand_without_account_gets_the_registrys_reason(primary_down, capsys):
+    args = _parser().parse_args(["hetzner", "server-types"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli_hetzner.handle_hetzner_command(args)
+    assert exit_info.value.code == cli_hetzner._EXIT_VALIDATION
+    err = capsys.readouterr().err
+    assert "The primary Hetzner account 'hetzner' is not available" in err
+    assert "staging" in err
+
+
+def test_the_second_project_still_serves_while_the_primary_is_down(primary_down):
+    _, services = primary_down
+    services[("hetzner", "staging")].returns["list_server_types"] = []
+    rc, _, _ = _cli(["server-types", "--account", "staging"])
+    assert rc == 0
+    rc, out, err = _cli(["list"])
+    assert rc == 0
+    assert "staging/worker" in out
+    assert "Warning: some projects were not listed: hetzner: not available" in err
+    rc, _, _ = _cli(["destroy", "worker", "--yes"])
+    assert rc == 0
+    assert services[("hetzner", "staging")].called("delete_server") == [("worker",)]

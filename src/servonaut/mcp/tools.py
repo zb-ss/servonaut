@@ -1178,6 +1178,59 @@ class ServonautTools:
         }, result, returncode == 0, **key_extras)
         return result
 
+    def _provider_refusal(
+        self, tool_name: str, payload: Dict[str, Any], provider: str,
+        account: str, default: Any, unavailable, *, any_account: bool = False,
+    ) -> Optional[str]:
+        """Why *provider* cannot serve this call, already audited, or None.
+
+        Without a registry, or when the config sets up no account of the
+        provider, the provider's own service (*default*) must exist; else
+        *unavailable()* answers. With accounts configured, a call naming an
+        account goes ahead (that account is checked when it is resolved),
+        and so does an *any_account* call (one that finds the server's
+        account itself, or lists every account) while any account is
+        usable. Otherwise the call acts in the primary account, and when
+        that cannot be used the registry says why: another account is never
+        used in its place.
+        """
+        registry = self._accounts
+        if registry is None or not registry.configured_accounts(provider):
+            return unavailable() if default is None else None
+        if account or (any_account and registry.accounts(provider)):
+            return None
+        try:
+            registry.account(provider, None)
+        except UnknownAccountError as exc:
+            self._audit.log(tool_name, payload, '', False, f'{provider}_unavailable')
+            return f"Error: {exc}"
+        return None
+
+    def _hetzner_refusal(
+        self, tool_name: str, payload: Dict[str, Any], account: str,
+        *, any_account: bool = False,
+    ) -> Optional[str]:
+        return self._provider_refusal(
+            tool_name, payload, 'hetzner', account, self._hetzner_service,
+            lambda: self._hetzner_unavailable(tool_name, payload),
+            any_account=any_account,
+        )
+
+    def _ovh_refusal(
+        self, tool_name: str, payload: Dict[str, Any], account: str, default: Any,
+        *, read: str = "", any_account: bool = False,
+    ) -> Optional[str]:
+        """:meth:`_provider_refusal` for OVH; *read* names the read service."""
+        def unavailable() -> str:
+            if read:
+                return self._ovh_read_unavailable(tool_name, payload, read)
+            return self._ovh_unavailable(tool_name, payload)
+
+        return self._provider_refusal(
+            tool_name, payload, 'ovh', account, default, unavailable,
+            any_account=any_account,
+        )
+
     def _ovh_read_unavailable(
         self, tool_name: str, args: Dict[str, Any], service_label: str,
     ) -> str:
@@ -1196,8 +1249,11 @@ class ServonautTools:
             self._audit.log('ovh_list_ips', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_ip_service is None:
-            return self._ovh_read_unavailable('ovh_list_ips', args, 'IP service')
+        refusal = self._ovh_refusal(
+            'ovh_list_ips', args, account, self._ovh_ip_service, read='IP service',
+        )
+        if refusal:
+            return refusal
         try:
             ip_service = self._ovh_part(account, 'ip')
         except UnknownAccountError as e:
@@ -1244,8 +1300,11 @@ class ServonautTools:
             self._audit.log('ovh_firewall_rules', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_ip_service is None:
-            return self._ovh_read_unavailable('ovh_firewall_rules', args, 'IP service')
+        refusal = self._ovh_refusal(
+            'ovh_firewall_rules', args, account, self._ovh_ip_service, read='IP service',
+        )
+        if refusal:
+            return refusal
         try:
             ip_service = self._ovh_part(account, 'ip')
         except UnknownAccountError as e:
@@ -1288,8 +1347,11 @@ class ServonautTools:
             self._audit.log('ovh_ssh_keys', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_service is None:
-            return self._ovh_read_unavailable('ovh_ssh_keys', args, 'service')
+        refusal = self._ovh_refusal(
+            'ovh_ssh_keys', args, account, self._ovh_service, read='service',
+        )
+        if refusal:
+            return refusal
         try:
             ovh_service = self._ovh_part(account, 'ovh')
         except UnknownAccountError as e:
@@ -1337,8 +1399,13 @@ class ServonautTools:
             self._audit.log('ovh_snapshots', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_snapshot_service is None:
-            return self._ovh_read_unavailable('ovh_snapshots', args, 'snapshot service')
+        # The instance's own account serves its snapshots.
+        refusal = self._ovh_refusal(
+            'ovh_snapshots', args, '', self._ovh_snapshot_service,
+            read='snapshot service', any_account=True,
+        )
+        if refusal:
+            return refusal
 
         instance, error = await self._lookup_instance(
             'ovh_snapshots', args, instance_id,
@@ -1346,11 +1413,14 @@ class ServonautTools:
         if error is not None:
             return error
 
-        try:
-            # Snapshots belong to the account the instance is in.
-            snapshot_service = self._ovh_part_for(instance, 'snapshot')
-        except UnknownAccountError as e:
-            return self._account_refused('ovh_snapshots', args, e)
+        # Snapshots belong to the OVH account the instance is in. Any other
+        # instance keeps the answer it always had (no project to list).
+        snapshot_service = self._ovh_snapshot_service
+        if instance.get('is_ovh'):
+            try:
+                snapshot_service = self._ovh_part_for(instance, 'snapshot')
+            except UnknownAccountError as e:
+                return self._account_refused('ovh_snapshots', args, e)
 
         provider_type = instance.get('provider_type', '')
         name = instance.get('id', '') or instance.get('name', '')
@@ -1406,8 +1476,11 @@ class ServonautTools:
             self._audit.log('ovh_dns_records', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_dns_service is None:
-            return self._ovh_read_unavailable('ovh_dns_records', args, 'DNS service')
+        refusal = self._ovh_refusal(
+            'ovh_dns_records', args, account, self._ovh_dns_service, read='DNS service',
+        )
+        if refusal:
+            return refusal
         try:
             dns_service = self._ovh_part(account, 'dns')
         except UnknownAccountError as e:
@@ -1451,8 +1524,11 @@ class ServonautTools:
             self._audit.log('ovh_billing', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_billing_service is None:
-            return self._ovh_read_unavailable('ovh_billing', args, 'billing service')
+        refusal = self._ovh_refusal(
+            'ovh_billing', args, account, self._ovh_billing_service, read='billing service',
+        )
+        if refusal:
+            return refusal
         try:
             billing_service = self._ovh_part(account, 'billing')
         except UnknownAccountError as e:
@@ -1495,8 +1571,11 @@ class ServonautTools:
             self._audit.log('ovh_invoices', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_billing_service is None:
-            return self._ovh_read_unavailable('ovh_invoices', args, 'billing service')
+        refusal = self._ovh_refusal(
+            'ovh_invoices', args, account, self._ovh_billing_service, read='billing service',
+        )
+        if refusal:
+            return refusal
         try:
             billing_service = self._ovh_part(account, 'billing')
         except UnknownAccountError as e:
@@ -2489,8 +2568,11 @@ class ServonautTools:
     async def hetzner_list_servers(self, account: str = "") -> str:
         """List Hetzner Cloud servers: one project's, or every project's."""
         args = self._with_account({}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_servers', args)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_servers', args, account, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_servers')
         if not allowed:
@@ -2540,8 +2622,11 @@ class ServonautTools:
     async def hetzner_list_server_types(self, account: str = "") -> str:
         """List Hetzner Cloud server types with their EUR prices."""
         args = self._with_account({}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_server_types', args)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_server_types', args, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_server_types')
         if not allowed:
@@ -2587,8 +2672,11 @@ class ServonautTools:
     async def hetzner_list_ssh_keys(self, account: str = "") -> str:
         """List SSH keys registered on the Hetzner Cloud project."""
         args = self._with_account({}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_ssh_keys', args)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_ssh_keys', args, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_ssh_keys')
         if not allowed:
@@ -2630,8 +2718,11 @@ class ServonautTools:
         """Register a new SSH public key with Hetzner Cloud."""
         # public_key intentionally not logged
         payload = self._with_account({'name': name}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_create_ssh_key', payload)
+        refusal = self._hetzner_refusal(
+            'hetzner_create_ssh_key', payload, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_create_ssh_key')
         if not allowed:
@@ -2666,10 +2757,9 @@ class ServonautTools:
     async def hetzner_delete_ssh_key(self, identifier: str, account: str = "") -> str:
         """Delete a Hetzner Cloud SSH key by name or numeric ID."""
         payload = self._with_account({'identifier': identifier}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable(
-                'hetzner_delete_ssh_key', payload,
-            )
+        refusal = self._hetzner_refusal('hetzner_delete_ssh_key', payload, account)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_delete_ssh_key')
         if not allowed:
@@ -2718,8 +2808,11 @@ class ServonautTools:
             'location': location, 'ssh_keys': ssh_keys,
             'wait_until_running': wait_until_running,
         }, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_create_server', payload)
+        refusal = self._hetzner_refusal(
+            'hetzner_create_server', payload, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_create_server')
         if not allowed:
@@ -2768,8 +2861,11 @@ class ServonautTools:
     async def hetzner_delete_server(self, identifier: str, account: str = "") -> str:
         """Delete a Hetzner Cloud server by ID or name."""
         payload = self._with_account({'identifier': identifier}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_delete_server', payload)
+        refusal = self._hetzner_refusal(
+            'hetzner_delete_server', payload, account, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_delete_server')
         if not allowed:
@@ -2839,8 +2935,9 @@ class ServonautTools:
         ``HetznerService`` method and the human-readable verb.
         """
         payload = self._with_account({'identifier': identifier}, account)
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable(tool_name, payload)
+        refusal = self._hetzner_refusal(tool_name, payload, account, any_account=True)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool(tool_name)
         if not allowed:
@@ -2924,8 +3021,9 @@ class ServonautTools:
             'region': region, 'ssh_key_id': ssh_key_id,
         }, account)
         cloud_svc = getattr(self, '_ovh_cloud_service', None)
-        if cloud_svc is None:
-            return self._ovh_unavailable('ovh_create_instance', payload)
+        refusal = self._ovh_refusal('ovh_create_instance', payload, account, cloud_svc)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('ovh_create_instance')
         if not allowed:
@@ -2973,8 +3071,11 @@ class ServonautTools:
             {'project_id': project_id, 'instance_id': instance_id}, account,
         )
         cloud_svc = getattr(self, '_ovh_cloud_service', None)
-        if cloud_svc is None:
-            return self._ovh_unavailable('ovh_delete_instance', payload)
+        refusal = self._ovh_refusal(
+            'ovh_delete_instance', payload, account, cloud_svc, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('ovh_delete_instance')
         if not allowed:
@@ -3050,8 +3151,11 @@ class ServonautTools:
         payload = self._with_account(
             {'instance_id': instance_id, 'provider_type': provider_type}, account,
         )
-        if self._ovh_service is None:
-            return self._ovh_unavailable(tool_name, payload)
+        refusal = self._ovh_refusal(
+            tool_name, payload, account, self._ovh_service, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool(tool_name)
         if not allowed:
