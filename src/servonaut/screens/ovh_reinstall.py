@@ -13,6 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.screens._account_audit import ServerAuditMixin
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -20,7 +21,7 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 
-class OVHReinstallScreen(ServerAccountMixin, Screen):
+class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Screen for reinstalling a VPS with a new OS image.
 
     Fetches available images from OVHcloud, shows them in a DataTable,
@@ -185,7 +186,9 @@ class OVHReinstallScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="vps_reinstall",
                 target=vps_name,
-                details={"image_id": image.get('id', ''), "image_name": image_name},
+                details=self._audit_details(
+                    {"image_id": image.get('id', ''), "image_name": image_name},
+                ),
                 confirmed=bool(confirmed),
             )
 

@@ -15,6 +15,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -316,7 +317,7 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_move",
                 target=ip_addr,
-                details={"target_service": target},
+                details=with_account(self.app, "ovh", self._account, {"target_service": target}),
                 confirmed=bool(confirmed),
             )
 
@@ -383,7 +384,9 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_set_reverse_dns",
                 target=ip,
-                details={"ip_block": ip_block, "reverse": reverse},
+                details=with_account(
+                    self.app, "ovh", self._account, {"ip_block": ip_block, "reverse": reverse},
+                ),
                 confirmed=True,
             )
 
@@ -431,7 +434,7 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_delete_reverse_dns",
                 target=ip,
-                details={"ip_block": ip_block},
+                details=with_account(self.app, "ovh", self._account, {"ip_block": ip_block}),
                 confirmed=bool(confirmed),
             )
 

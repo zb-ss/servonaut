@@ -436,6 +436,7 @@ async def test_ovh_cloud_create_uses_the_chosen_accounts_project(accounts, confi
     from textual.widgets import Input
 
     app = Host(accounts, config)
+    app.ovh_audit = MagicMock()
     async with app.run_test(size=(160, 60)) as pilot:
         screen = OVHCloudCreateScreen()
         await app.push_screen(screen)
@@ -459,6 +460,8 @@ async def test_ovh_cloud_create_uses_the_chosen_accounts_project(accounts, confi
             await screen._on_create()
         assert "in account [bold]ca[/bold]" in ask.call_args.args[0]._description
 
+    audit = app.ovh_audit.log_action.call_args.kwargs
+    assert (audit["target"], audit["details"]["account"]) == ("proj-ca", "ca")
     create = accounts.bundles["ca"].cloud.create_instance
     create.assert_awaited_once()
     assert create.call_args.kwargs["project_id"] == "proj-ca"
@@ -940,3 +943,75 @@ def test_demo_mode_finding_is_matched_against_the_real_records():
         connection_instance=lambda row: real if row is drawn else row,
     )
     assert _resolve_method({"instance_id": "i-0abc"}, app) == ("security_group", None)
+
+
+# ---------------------------------------------------------------------------
+# OVH audit rows name the account when OVH has several
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ovh_manager_audit_rows_name_the_owning_account(accounts, config):
+    from servonaut.screens.ovh_manager import OVHManagerScreen
+
+    app = Host(accounts, config)
+    app.ovh_audit = MagicMock()
+    async with app.run_test(size=(200, 48)) as pilot:
+        screen = OVHManagerScreen()
+        await app.push_screen(screen)
+        table = screen.query_one("#ovh_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 2, "both accounts' instances")
+        table.focus()
+        table.move_cursor(row=1)
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: app.ovh_audit.log_action.called, "the audit row")
+    details = app.ovh_audit.log_action.call_args.kwargs["details"]
+    assert details == {"provider_type": "cloud", "success": True, "account": "ca"}
+
+
+@pytest.mark.asyncio
+async def test_single_account_ovh_audit_rows_are_unchanged():
+    from servonaut.screens.ovh_manager import OVHManagerScreen
+
+    config = _config(hetzner_extra=False, ovh_extra=False)
+    accounts = _registry(config)
+    app = Host(accounts, config)
+    app.ovh_audit = MagicMock()
+    async with app.run_test(size=(200, 48)) as pilot:
+        screen = OVHManagerScreen()
+        await app.push_screen(screen)
+        table = screen.query_one("#ovh_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1, "the instance")
+        table.focus()
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: app.ovh_audit.log_action.called, "the audit row")
+    details = app.ovh_audit.log_action.call_args.kwargs["details"]
+    assert details == {"provider_type": "vps", "success": True}
+
+
+def test_per_server_audit_details_name_the_servers_real_account(accounts):
+    from servonaut.screens.ovh_firewall import OVHFirewallScreen
+
+    real = _ca_row()
+    drawn = dict(real, account="stand-in")
+    app = SimpleNamespace(
+        accounts=accounts.registry,
+        connection_instance=lambda row: real if row is drawn else row,
+    )
+    rule = {"sequence": 1}
+    screen = OVHFirewallScreen(drawn)
+    with patch.object(OVHFirewallScreen, "app", new_callable=PropertyMock, return_value=app):
+        assert screen._audit_details(rule) == {"sequence": 1, "account": "ca"}
+    assert rule == {"sequence": 1}, "the caller's dict is left alone"
+
+
+def test_account_level_audit_details_name_the_chosen_account(accounts):
+    from servonaut.screens._account_audit import with_account
+
+    multi = SimpleNamespace(accounts=accounts.registry)
+    assert with_account(multi, "ovh", "ca", {"ip": "10.0.0.1"}) == {"ip": "10.0.0.1", "account": "ca"}
+    single = SimpleNamespace(accounts=_registry(_config(ovh_extra=False)).registry)
+    assert with_account(single, "ovh", "ovh", {"ip": "10.0.0.1"}) == {"ip": "10.0.0.1"}
+    assert with_account(SimpleNamespace(), "ovh", "ovh", None) == {}

@@ -36,6 +36,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
 
+from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens._provider_accounts import (
@@ -328,6 +329,11 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         """
         return display_name(inst) or str(inst.get("id") or "")
 
+    def _row_account(self, inst: dict) -> str:
+        """The real account label of a drawn row (the fetched row keeps it)."""
+        fetched = fetched_row(self._instances, self._raw_instances, inst)
+        return str(fetched.get("account") or "")
+
     def _owning(self, resolve, inst: dict):
         """*resolve* the row's account (service or bundle), or None after telling why."""
         try:
@@ -469,6 +475,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         svc = self._owning(row_service, inst)
         if svc is None:
             return
+        account = self._row_account(inst)
 
         self.run_worker(
             confirm_and_run_power_action(
@@ -478,11 +485,14 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
-                run=lambda: self._do_lifecycle(svc, method, identifier, ptype, done_verb),
+                run=lambda: self._do_lifecycle(
+                    svc, method, identifier, ptype, done_verb, account=account,
+                ),
                 # Declined stops and reboots are recorded like declined
                 # deletes, so the audit log shows every answered question.
                 on_declined=lambda: self._audit_action(
                     method, identifier, ptype, success=False, confirmed=False,
+                    account=account,
                 ),
             ),
             exclusive=False,
@@ -491,6 +501,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
     async def _do_lifecycle(
         self, svc, method: str, identifier: str, ptype: str, done_verb: str,
+        *, account: str = "",
     ) -> None:
         try:
             await getattr(svc, method)(identifier, ptype)
@@ -509,7 +520,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             )
             return
 
-        self._audit_action(method, identifier, ptype, success=True)
+        self._audit_action(method, identifier, ptype, success=True, account=account)
         self.notify(
             f"OVH {ptype} {self._display_id(identifier)}: {done_verb}.",
             severity="information", markup=False,
@@ -533,6 +544,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         services = self._owning(row_ovh_services, inst)
         if services is None:
             return
+        account = self._row_account(inst)
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
@@ -555,7 +567,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             )
         )
         self._audit_action("cloud_delete", composite_id, ptype,
-                           success=False, confirmed=bool(confirmed))
+                           success=False, confirmed=bool(confirmed), account=account)
         if not confirmed:
             return
 
@@ -573,7 +585,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             logger.error("OVH delete failed for %s: %s", composite_id, exc)
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
-                               error=str(exc)[:200])
+                               error=str(exc)[:200], account=account)
             err_msg = escape(self._provider_error(exc))
             self._set_status(
                 f"[red]Delete failed: {err_msg}[/red]"
@@ -585,7 +597,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return
 
         self._audit_action("cloud_delete", composite_id, ptype,
-                           success=True, confirmed=True)
+                           success=True, confirmed=True, account=account)
         self.notify(
             f"OVH instance {self._display_id(composite_id)} deleted.",
             severity="information", markup=False,
@@ -605,12 +617,15 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         success: bool,
         confirmed: bool = True,
         error: str = "",
+        account: str = "",
     ) -> None:
         """Forward to the app's :class:`OVHAuditLogger` if present.
 
         Mirrors the pattern :class:`OVHCloudCreateScreen` already uses
         for ``cloud_create`` so the OVH audit trail captures the full
         lifecycle (create → start/stop/reboot/delete) in one log file.
+        *account* (the row's real account label) is recorded when OVH has
+        several accounts.
         """
         ovh_audit = getattr(self.app, "ovh_audit", None)
         if ovh_audit is None:
@@ -625,7 +640,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             ovh_audit.log_action(
                 action=action,
                 target=target,
-                details=details,
+                details=with_account(self.app, "ovh", account, details),
                 confirmed=confirmed,
             )
         except Exception as exc:  # pragma: no cover - defensive
