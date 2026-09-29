@@ -85,6 +85,13 @@ async def _aws_manager(pilot: Any) -> None:
     table = screen.query_one("#aws_mgr_table", DataTable)
     expected = len(_harness.AWS_ROWS) + len(STAGING_ROWS)
     await _harness.wait_until(pilot, lambda: table.row_count == expected, "the EC2 table")
+    # A DataTable counts rows as they are added but measures its columns
+    # later; wait for the widest name, or the capture can show the table
+    # before its columns fit the rows.
+    widest = max(len(f"staging/{row['name']}") for row in STAGING_ROWS)
+    await _harness.wait_until(
+        pilot, lambda: table.ordered_columns[1].content_width >= widest, "the EC2 columns"
+    )
     pilot.app.clear_notifications()
 
 
