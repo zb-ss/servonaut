@@ -92,6 +92,11 @@ async def _aws_manager(pilot: Any) -> None:
     await _harness.wait_until(
         pilot, lambda: table.ordered_columns[1].content_width >= widest, "the EC2 columns"
     )
+    # A plain DataTable keeps lines drawn before its columns were measured
+    # until its next refresh (the fleet's InstanceTable redraws itself);
+    # draw once more so the capture shows the measured columns.
+    table.refresh()
+    await pilot.pause()
     pilot.app.clear_notifications()
 
 
