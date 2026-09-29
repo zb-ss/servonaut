@@ -133,6 +133,25 @@ class TestRoundTrip:
         loaded = ConfigManager(config_path=path).get()
         assert [a.label for a in loaded.hetzner.accounts] == ["ok"]
 
+    def test_a_repeated_primary_label_falls_back_to_the_provider_name(self, tmp_path, caplog):
+        # Settings refuses the pair; a hand-edited config can still hold it.
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps({
+            "version": 6,
+            "aws": {"label": "prod"},
+            "hetzner": {"label": "Prod"},
+            "ovh": {"label": "backup"},
+        }))
+        with caplog.at_level("WARNING", logger="servonaut.config.manager"):
+            loaded = ConfigManager(config_path=path).get()
+        assert primary_label(AWS, loaded.aws) == "prod"
+        assert primary_label(HETZNER, loaded.hetzner) == "hetzner"
+        assert primary_label(OVH, loaded.ovh) == "backup"
+        assert (
+            "Hetzner primary account label 'Prod' is already used by the AWS primary "
+            "account; using 'hetzner' instead"
+        ) in caplog.text
+
     def test_local_key_paths_of_extra_accounts_are_saved_home_relative(self, tmp_path):
         from pathlib import Path
 

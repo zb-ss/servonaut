@@ -332,6 +332,31 @@ def primary_label_problems(config: "AppConfig") -> List[str]:
     return problems
 
 
+def drop_repeated_primary_labels(config: "AppConfig") -> List[str]:
+    """Clear a primary account label another provider's primary already uses.
+
+    Settings never saves such a pair, but a hand-edited config can. Labels
+    must be unique for ``label/name`` to name one account, so the later
+    provider (in AWS, Hetzner, OVH order) falls back to its provider name,
+    the same fallback an invalid label gets. Returns one sentence per label
+    cleared.
+    """
+    cleared: List[str] = []
+    seen: Dict[str, str] = {}
+    for provider, block in ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh)):
+        label = primary_label(provider, block)
+        holder = seen.get(label.lower())
+        if holder is not None:
+            cleared.append(
+                f"{PROVIDER_TITLES[provider]} primary account label {label!r} is "
+                f"already used by the {holder} primary account; using {provider!r} instead"
+            )
+            block.label = ""
+            label = provider
+        seen.setdefault(label.lower(), PROVIDER_TITLES[provider])
+    return cleared
+
+
 def describe_account_problems(config: "AppConfig") -> List[str]:
     """Every account problem as a readable sentence, for logs and settings."""
     messages = primary_label_problems(config)

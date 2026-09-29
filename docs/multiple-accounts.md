@@ -25,7 +25,10 @@ accounts are added next to it. Every account has a short **label**:
 
 - the primary account is labelled after its provider (`aws`, `hetzner`,
   `ovh`) unless you rename it;
-- labels are unique across all providers, compared without regard to case;
+- labels are unique across all providers, compared without regard to case
+  (if a hand-edited config gives two providers' primary accounts the same
+  label, the later provider in the order AWS, Hetzner, OVH uses its provider
+  name instead, and a warning is logged);
 - they start with a letter or digit and use letters, digits, `.`, `_` and `-`
   (at most 32 characters);
 - `custom` is reserved.
@@ -207,5 +210,9 @@ environment words such as `prod` or `staging` are left as they are.
   account). Its servers are listed once, under the first.
 - **"No … account named 'x'"** — the label in a command or tool call does not
   match a configured account; the message lists the ones that exist.
+- **"… account 'x' is not available: …"** / **"No … account is available (…)"**
+  — the account is configured but cannot connect (for example its token is a
+  `$VARIABLE` that is not set in this shell); the message gives the reason
+  for each account.
 - **Refresh warnings name an account** (`staging: …`) — that account failed to
   refresh; its last known servers stay listed and every other account is fresh.
