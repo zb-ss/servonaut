@@ -138,7 +138,7 @@ Wherever you name a server — the CLI, MCP tools, the AI chat — you can use:
 | `web-1` | `web-1`, if exactly one server has that name |
 
 A name shared by several servers is **refused**, with the references that pick
-each one:
+each one (the instance id when two servers of one account share the name):
 
 ```
 'web-1' matches 2 servers: prod/web-1 (i-0aaa…, AWS), staging/web-1 (i-0bbb…, AWS).
@@ -164,11 +164,24 @@ servers can use their own bastion:
 
 - `servonaut hetzner … --account <label>` runs a Hetzner command in one
   project; `servonaut hetzner list` shows every project's servers.
+- `servonaut ssh`, `servonaut servers verify` and `servonaut memory` see the
+  servers of every account and accept `label/name`.
 - MCP tools that work on a whole account (AWS listings, CloudTrail,
   CloudWatch, IP bans, S3, Hetzner and OVH registries, billing, create) take
   an optional `account` argument; without it they use the provider's primary
-  account. Tools that act on a server find its account themselves.
+  account. Tools that act on a server find its account themselves. See the
+  [MCP tools reference](mcp-tools.md#several-accounts-per-provider).
 - `list_instances` shows the `label/name` form and accepts an `account` filter.
+
+## The primary account
+
+The provider block's own settings are always the **default** account: every
+command or tool call that names no account uses it. If it cannot connect (for
+example its token comes from a `$VARIABLE` that is not set in this shell),
+there is no default: Servonaut says why and asks you to name one of the other
+accounts, rather than acting in an account you did not choose. Its servers
+stay listed from cache, and every refresh names the account that is
+unavailable.
 
 ## Config sync
 
