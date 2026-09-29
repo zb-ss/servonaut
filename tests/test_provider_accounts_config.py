@@ -44,6 +44,15 @@ class TestShape:
         assert [r.label for r, _ in hetzner_accounts(config.hetzner)] == ["hetzner"]
         assert [r.label for r, _ in ovh_accounts(config.ovh)] == ["ovh"]
 
+    def test_an_invalid_primary_label_falls_back_to_the_provider_name(self):
+        config = AppConfig()
+        config.aws.label = "prod/eu"
+        config.hetzner.label = "custom"
+        assert primary_label(AWS, config.aws) == "aws"
+        assert primary_label(HETZNER, config.hetzner) == "hetzner"
+        problems = describe_account_problems(config)
+        assert any("AWS primary account" in p and "using 'aws'" in p for p in problems)
+
     def test_the_primary_label_can_be_renamed(self):
         config = AppConfig()
         config.hetzner.label = "  prod "
