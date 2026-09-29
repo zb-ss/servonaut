@@ -132,11 +132,11 @@ def _resolve_or_exit(
 def _report_ambiguous(exc: AmbiguousInstanceError, use_json: bool) -> int:
     """Print an ambiguous reference with its candidates; return the exit code."""
     if use_json:
-        from servonaut.utils.instance_resolver import qualified_reference
+        from servonaut.utils.instance_resolver import candidate_reference
         print(json.dumps({"error": {
             "code": "ambiguous",
             "message": str(exc),
-            "candidates": [qualified_reference(row) for row in exc.candidates],
+            "candidates": [candidate_reference(row, exc.candidates) for row in exc.candidates],
         }}))
     else:
         print(f"Error: {exc}", file=sys.stderr)
