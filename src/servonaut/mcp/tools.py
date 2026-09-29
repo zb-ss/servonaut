@@ -3668,7 +3668,8 @@ class ServonautTools:
             try:
                 self._names_account('aws', account)
             except UnknownAccountError as e:
-                return self._account_refused('aws_call', args, e)
+                if not self._is_role_alias(account):
+                    return self._account_refused('aws_call', args, e)
 
         is_read = op.startswith(_AWS_READ_PREFIXES)
         is_destructive = op.startswith(_AWS_DESTRUCTIVE_PREFIXES)
@@ -3797,6 +3798,15 @@ class ServonautTools:
                     "was confirmed. Re-run without confirm to get a fresh token.")
         return None  # valid → proceed to execute
 
+    def _is_role_alias(self, account: str) -> bool:
+        """True when *account* keys a control-plane role map (read or write)."""
+        aws_config = self._config_manager.get().aws
+        key = (account or "").strip()
+        return bool(key) and (
+            key in (aws_config.control_plane_role_arns or {})
+            or key in (aws_config.control_plane_mutate_role_arns or {})
+        )
+
     def _aws_call_factory(self, account: str):
         """The client factory and role-map key ``aws_call(account=...)`` uses.
 
@@ -3804,8 +3814,10 @@ class ServonautTools:
         with several AWS accounts it also selects the credentials of the
         configured account with that id (the default account when none has
         it). A label selects that account's credentials, plus the role
-        mapped to its id when roles are mapped per account. Blocking (may
-        call STS once per account): runs in the worker thread.
+        mapped to its id when roles are mapped per account. Any other key
+        of a role map (an alias) keeps selecting that role on the default
+        account, as it always did. Blocking (may call STS once per
+        account): runs in the worker thread.
         """
         account = (account or "").strip()
         if _AWS_ACCOUNT_ID_RE.match(account):
@@ -3814,7 +3826,13 @@ class ServonautTools:
                 if ref is not None:
                     return self._accounts.aws_client_factory(ref.label), account
             return self._get_aws_factory(), account
-        if not self._names_account('aws', account):
+        try:
+            named = self._names_account('aws', account)
+        except UnknownAccountError:
+            if self._is_role_alias(account):
+                return self._get_aws_factory(), account
+            raise
+        if not named:
             return self._get_aws_factory(), ""
         ref = self._accounts.account('aws', account)
         role_key = ""
