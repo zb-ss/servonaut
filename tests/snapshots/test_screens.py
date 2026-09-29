@@ -234,6 +234,32 @@ def test_fleet_table_demo_mode(screen_snapshot, size: str) -> None:
     _capture(screen_snapshot, size, _fleet, demo=True)
 
 
+def _capture_multi_account(
+    screen_snapshot: Any, size: str, scenario: Scenario, *, demo: bool = False,
+) -> None:
+    async def run_before(pilot: Any) -> None:
+        await _harness.wait_for_fleet(pilot, rows=_harness.MULTI_ACCOUNT_FLEET_SIZE)
+        await scenario(pilot)
+        await pilot.pause()
+        _harness.freeze_cursors(pilot.app)
+
+    screen_snapshot(
+        _harness.MultiAccountSnapshotApp(demo=demo), _harness.SIZES[size], run_before,
+    )
+
+
+@sizes
+def test_fleet_table_two_hetzner_projects(screen_snapshot, size: str) -> None:
+    """A provider with two accounts lists its servers as account/name."""
+    _capture_multi_account(screen_snapshot, size, _fleet)
+
+
+@sizes
+def test_fleet_table_two_hetzner_projects_demo_mode(screen_snapshot, size: str) -> None:
+    """Demo mode also stands in for the account label."""
+    _capture_multi_account(screen_snapshot, size, _fleet, demo=True)
+
+
 @sizes
 def test_server_actions(screen_snapshot, size: str) -> None:
     """The actions screen of an AWS server with cached memory."""

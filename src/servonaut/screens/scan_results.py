@@ -15,6 +15,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.services.scan_service import ScanConnectionError, is_scannable
+from servonaut.utils.instance_resolver import display_name
 
 
 class ScanResultsScreen(Screen):
@@ -46,7 +47,7 @@ class ScanResultsScreen(Screen):
             yield Container(
                 Static(
                     f"[bold cyan]Scan Results[/bold cyan]\n"
-                    f"Instance: {self._instance.get('name') or self._instance.get('id')}",
+                    f"Instance: {escape(str(display_name(self._instance) or self._instance.get('id')))}",
                     id="scan_banner"
                 ),
                 Vertical(

@@ -141,6 +141,14 @@ servonaut hetzner server-types
 | 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` without `--yes` when input is not a terminal |
 | 4    | input validation error, unknown `--account`, or a server name several projects use |
 
+## Several projects
+
+Each Hetzner Cloud project has its own API token. Add further projects as
+extra accounts (Settings → Hetzner, or `hetzner.accounts` in the config); their
+servers join the fleet as `label/name`, and `servonaut hetzner … --account
+<label>` runs a command in one project. See
+[Multiple accounts per provider](multiple-accounts.md).
+
 ## TUI integration
 
 When `hetzner.enabled = true` and a token resolves, the instance list
