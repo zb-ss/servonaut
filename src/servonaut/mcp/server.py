@@ -20,6 +20,10 @@ def build_headless_tools(config_manager=None):
     listener's AI-tool executor. Optional providers (Hetzner, OVH, object
     storage, memory, secret provider) degrade to ``None`` exactly as the
     MCP server always has.
+
+    Provider services come from the account registry, like the TUI's: the
+    single-service arguments are each provider's default account, and the
+    registry gives the tools every other account.
     """
     from servonaut.mcp.installer import prune_empty_forwarded_env
     pruned = prune_empty_forwarded_env()
@@ -27,8 +31,8 @@ def build_headless_tools(config_manager=None):
         logger.info("Ignoring empty environment variables: %s", ", ".join(pruned))
 
     from servonaut.config.manager import ConfigManager
+    from servonaut.services.accounts import AccountRegistry
     from servonaut.services.cache_service import CacheService
-    from servonaut.services.aws_service import AWSService
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.log_viewer_service import LogViewerService
@@ -55,7 +59,11 @@ def build_headless_tools(config_manager=None):
         config_manager = ConfigManager()
     config = config_manager.get()
     cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
+    # Every provider account; the services below are the default accounts.
+    accounts = AccountRegistry(
+        config, aws_cache_service=cache_service, config_manager=config_manager,
+    )
+    aws_service = accounts.default_service('aws')
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
@@ -110,76 +118,42 @@ def build_headless_tools(config_manager=None):
     except Exception as e:
         logger.warning("Bitwarden SSH-ref service unavailable in MCP: %s", e)
 
-    # Hetzner Cloud service — optional, only if configured and enabled
-    hetzner_service = None
-    try:
-        hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
-        if hetzner_config and hetzner_config.enabled:
-            from servonaut.services.hetzner_service import (
-                HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
-            )
-            provisional = HetznerService(hetzner_config)
-            try:
-                provisional.resolve_token()
-            except HetznerNotConfiguredError:
-                provisional = None
-            if provisional is not None:
-                hetzner_service = provisional
-                logger.info("Hetzner service initialized for MCP")
-    except ImportError:
-        logger.warning(
-            "hcloud SDK not installed; Hetzner provider unavailable in MCP. "
-            "Install with: pip install 'servonaut[hetzner]'"
-        )
-    except Exception as e:
-        logger.error("Failed to initialise Hetzner service for MCP: %s", e)
-
-    # OVH service — optional, only if configured and enabled
-    ovh_service = None
+    # Hetzner Cloud and OVH — optional. The registry builds an account only
+    # when it can connect (Hetzner: a token resolves; OVH: credentials are
+    # configured), so an unusable provider stays None here.
+    hetzner_service = accounts.default_service('hetzner')
+    ovh_service = accounts.default_service('ovh')
     ovh_ip_service = None
     ovh_snapshot_service = None
     ovh_dns_service = None
     ovh_billing_service = None
     ovh_cloud_service = None
-    try:
-        ovh_config = config.ovh
-        if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
-            from servonaut.services.ovh_service import OVHService
-            from servonaut.services.ovh_ip_service import OVHIPService
-            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
-            from servonaut.services.ovh_dns_service import OVHDNSService
-            from servonaut.services.ovh_billing_service import OVHBillingService
-            from servonaut.services.ovh_cloud_service import OVHCloudService
-            ovh_service = OVHService(ovh_config)
-            ovh_ip_service = OVHIPService(ovh_service)
-            ovh_snapshot_service = OVHSnapshotService(ovh_service)
-            ovh_dns_service = OVHDNSService(ovh_service)
-            ovh_billing_service = OVHBillingService(ovh_service)
-            ovh_cloud_service = OVHCloudService(ovh_service)
-            logger.info("OVH services initialized for MCP")
-    except ImportError:
-        logger.warning("python-ovh not installed; OVH provider unavailable in MCP")
-    except Exception as e:
-        logger.error("Failed to initialize OVH service for MCP: %s", e)
+    if ovh_service is not None:
+        ovh = accounts.ovh_services()
+        ovh_ip_service = ovh.ip
+        ovh_snapshot_service = ovh.snapshot
+        ovh_dns_service = ovh.dns
+        ovh_billing_service = ovh.billing
+        ovh_cloud_service = ovh.cloud
+        logger.info("OVH services initialized for MCP")
+    if hetzner_service is not None:
+        logger.info("Hetzner service initialized for MCP")
 
     # AWS CloudWatch / CloudTrail / IP-ban services — dependency-light
-    # (boto3 is a required dependency; AWS credentials resolve through the
-    # same default chain as AWSService), so they're wired unconditionally.
+    # (boto3 is a required dependency), so they're wired unconditionally,
+    # each acting in its account. The shared control-plane client factory
+    # (STS role / region pinning) backs aws_call and CloudWatch reads; no
+    # role configured → the account's own credentials, exactly as before.
     cloudtrail_service = None
     cloudwatch_service = None
     ip_ban_service = None
-    # Shared boto3 client factory (control-plane STS role / region pinning).
-    # Built unconditionally so aws_call and CloudWatch reads share it; no role
-    # configured → ambient credential chain, exactly as before.
-    from servonaut.services.aws_client_factory import build_aws_client_factory
-    aws_client_factory = build_aws_client_factory(config)
+    default_aws = accounts.aws_services()
+    aws_client_factory = default_aws.client_factory
     try:
-        from servonaut.services.cloudtrail_service import CloudTrailService
-        from servonaut.services.cloudwatch_service import CloudWatchService
         from servonaut.services.ip_ban_service import IPBanService
-        cloudtrail_service = CloudTrailService(config_manager)
-        cloudwatch_service = CloudWatchService(client_factory=aws_client_factory)
-        ip_ban_service = IPBanService(config_manager)
+        cloudtrail_service = default_aws.cloudtrail
+        cloudwatch_service = default_aws.cloudwatch
+        ip_ban_service = IPBanService(config_manager, accounts=accounts)
         logger.info("CloudWatch/CloudTrail/IP-ban services initialized for MCP")
     except Exception as e:
         logger.error("Failed to initialize AWS security services for MCP: %s", e)
@@ -252,6 +226,7 @@ def build_headless_tools(config_manager=None):
         ovh_object_storage_service=ovh_object_storage_service,
         secret_provider=secret_provider,
         ip_enrichment_service=ip_enrichment_service,
+        account_registry=accounts,
     )
     return tools
 
