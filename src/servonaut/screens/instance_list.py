@@ -27,6 +27,7 @@ from servonaut.screens._demo_resolve import (
     replace_instances,
 )
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.instance_resolver import display_name
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -157,6 +158,8 @@ class InstanceListScreen(Screen):
         self._instances: List[dict] = []
         self._search_debounce_timer: Optional[Timer] = None
         self._initial_search = initial_search
+        # (provider, account) pairs already reported as configured twice.
+        self._reported_duplicate_accounts: set = set()
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
@@ -367,6 +370,7 @@ class InstanceListScreen(Screen):
                 self._instances = replace_instances(self.app, "ovh", new_ovh)
                 self._update_table()
                 self._update_status_bar()
+                self._report_duplicate_accounts("ovh")
                 fetch_error = getattr(
                     self.app.provider_inventory("ovh"), "last_fetch_error", None
                 )
@@ -400,6 +404,7 @@ class InstanceListScreen(Screen):
                 self._instances = replace_instances(self.app, "hetzner", new_hetzner)
                 self._update_table()
                 self._update_status_bar()
+                self._report_duplicate_accounts("hetzner")
                 inventory = self.app.provider_inventory("hetzner")
                 fetch_error = getattr(inventory, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:
@@ -453,6 +458,7 @@ class InstanceListScreen(Screen):
                     )
                     self._update_table()
                     self._update_status_bar()
+                    self._report_duplicate_accounts("aws")
 
                     aws = self.app.provider_inventory("aws")
                     fetch_error = getattr(aws, "last_fetch_error", None)
@@ -486,6 +492,29 @@ class InstanceListScreen(Screen):
                                 f"Refreshed: {len(new_instances)} instances (up to date)",
                                 severity="information"
                             )
+
+    def _report_duplicate_accounts(self, provider: str) -> None:
+        """Say once per session when two accounts list the same servers.
+
+        The fleet already lists each server once; the notice tells the user
+        why an account shows no servers of its own (it is the same account
+        configured twice, e.g. two AWS profiles for one account).
+        """
+        from servonaut.config.accounts import PROVIDER_TITLES
+
+        inventory = self.app.provider_inventory(provider)
+        duplicates = getattr(inventory, "duplicate_accounts", None) or {}
+        for later, earlier in duplicates.items():
+            if (provider, later) in self._reported_duplicate_accounts:
+                continue
+            self._reported_duplicate_accounts.add((provider, later))
+            self.app.notify(
+                f"{PROVIDER_TITLES.get(provider, provider)} accounts '{later}' and "
+                f"'{earlier}' list the same servers; they look like the same "
+                "account configured twice.",
+                severity="warning",
+                markup=False,
+            )
 
     def _ovh_refresh_warning(self, fetch_error: str) -> str:
         """Wording for an OVH refresh that failed in full or in part."""
@@ -632,6 +661,11 @@ class InstanceListScreen(Screen):
             return
 
         parts = []
+        if instance.get("account_qualified") and instance.get("account"):
+            # Several accounts of this provider: say which one the server is in.
+            parts.append(f"Account: {instance['account']}")
+            if instance.get("account_id"):
+                parts.append(f"Account ID: {instance['account_id']}")
         for key, label in [
             ("name", "Name"),
             ("id", "ID"),
@@ -879,14 +913,12 @@ class InstanceListScreen(Screen):
                 port = instance.get('port') or 22
                 key_path = instance.get('ssh_key') or instance.get('key_name') or None
             elif instance.get('is_ovh'):
-                from servonaut.services.ovh_service import OVHService
-                provider_type = instance.get('provider_type', '')
-                username = (
-                    (profile.username if profile else None)
-                    or OVHService.default_username(provider_type)
-                )
+                # The OVH account's own default key and username, the same
+                # ones the server actions and background reads use.
+                ovh_options = self.app.connection_service.resolve_ovh_connection(instance)
+                username = (profile.username if profile else None) or ovh_options["username"]
                 port = None
-                key_path = self.app.config_manager.get().default_key or None
+                key_path = ovh_options["key_path"] or None
             elif instance.get('is_hetzner'):
                 username = (
                     (profile.username if profile else None)
@@ -1106,7 +1138,7 @@ class InstanceListScreen(Screen):
             return
 
         fields = [
-            ("Name", instance.get('name', '')),
+            ("Name", display_name(instance)),
             ("ID", instance.get('id', '')),
             ("Type", instance.get('type', '')),
             ("State", instance.get('state', '')),

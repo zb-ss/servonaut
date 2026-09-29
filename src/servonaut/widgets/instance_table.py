@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence
 from rich.text import Text
 from textual.widgets import DataTable
 
+from servonaut.utils.instance_resolver import display_name
+
 # What an empty cell shows.
 _EMPTY = "-"
 
@@ -65,6 +67,37 @@ def _fit(value: str, max_width: Optional[int]) -> Text:
     if max_width is not None and text.cell_len > max_width:
         text.truncate(max_width, overflow="ellipsis")
     return text
+
+
+def _name_cell(instance: dict, max_width: Optional[int]) -> Text:
+    """The Name cell: ``account/name`` when the provider has several accounts.
+
+    The account part is dimmed so the server name stays the eye's anchor;
+    a provider with a single account shows the plain name, as before.
+    """
+    shown = display_name(instance)
+    name = str(instance.get("name") or "")
+    if shown == name:
+        return _fit(name or _EMPTY, max_width)
+    account, _, rest = shown.partition("/")
+    text = Text(no_wrap=True, end="")
+    text.append(f"{account}/", style="dim")
+    text.append(rest)
+    if max_width is not None and text.cell_len > max_width:
+        text.truncate(max_width, overflow="ellipsis")
+    return text
+
+
+def _search_fields(instance: dict) -> List[str]:
+    """What the search box matches: name, type, id, provider and account."""
+    fields = [
+        instance.get("name"),
+        instance.get("type"),
+        instance.get("id"),
+        instance.get("provider"),
+        instance.get("account") if instance.get("account_qualified") else None,
+    ]
+    return [str(value).lower() for value in fields if value]
 
 
 def _key_label(key: str) -> str:
@@ -147,7 +180,9 @@ class InstanceTable(DataTable):
     def filter(self, query: str) -> None:
         """Filter table rows by query string.
 
-        Filters by instance name or type (case-insensitive substring match).
+        Case-insensitive substring match on name, type, id, provider and,
+        when the provider has several accounts, the account label — so
+        ``prod/`` lists that account's servers.
 
         Args:
             query: Search query string.
@@ -158,10 +193,8 @@ class InstanceTable(DataTable):
             query_lower = query.lower()
             self._filtered_instances = [
                 inst for inst in self._all_instances
-                if query_lower in inst.get('name', '').lower()
-                or query_lower in inst.get('type', '').lower()
-                or query_lower in inst.get('id', '').lower()
-                or query_lower in inst.get('provider', '').lower()
+                if any(query_lower in value for value in _search_fields(inst))
+                or query_lower in display_name(inst).lower()
             ]
         self._refresh_table()
 
@@ -245,7 +278,7 @@ class InstanceTable(DataTable):
         coloured = self._colorize_state(state)
         return {
             "index": str(idx + 1),
-            "name": plain("name", instance.get("name")),
+            "name": _name_cell(instance, limits["name"]),
             # A state without a colour is provider text: never read as markup.
             "state": coloured if coloured != state else plain("state", state),
             "provider": plain("provider", instance.get("provider", "AWS")),

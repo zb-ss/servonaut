@@ -27,6 +27,7 @@ from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.utils.instance_resolver import display_name
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class DbScanRootsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        name = escape(str(self._instance.get("name") or self._instance.get("id") or "?"))
+        name = escape(str(display_name(self._instance) or self._instance.get("id") or "?"))
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(

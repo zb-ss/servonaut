@@ -242,7 +242,7 @@ class InventoryScrubber:
     @classmethod
     def for_fleet(
         cls, redaction: RedactionService, rows: Iterable[Dict[str, Any]],
-        ids: Iterable[str] = (),
+        ids: Iterable[str] = (), accounts: Iterable[str] = (),
     ) -> "InventoryScrubber":
         """Identifying values of *rows* (real records) -> the stand-ins
         *redaction* shows for them this session.
@@ -257,6 +257,10 @@ class InventoryScrubber:
                 collector.add_instance(row, labels=False)
         for value in ids:
             collector.add_id(value)
+        # Account labels also appear in messages about accounts with no
+        # servers listed (one that failed to load, say).
+        for label in accounts:
+            collector.add_account(label)
         return cls(redaction, collector.found)
 
     @staticmethod
@@ -406,10 +410,15 @@ class _IdentifierCollector:
     def add_username(self, value: Any) -> None:
         self.add(value, self._redaction.redact_username)
 
+    def add_account(self, value: Any) -> None:
+        self.add(value, self._redaction.redact_account_label)
+
     def add_instance(self, instance: Dict[str, Any], labels: bool = True) -> None:
         """A server's identifying values; with *labels*, its group and tags."""
         self.add_id(instance.get("id"))
         self.add_name(instance.get("name"))
+        self.add_account(instance.get("account"))
+        self.add(instance.get("account_id"), self._redaction.redact_account_id)
         for field in ("public_ip", "private_ip", "host"):
             self.add_host(instance.get(field))
         self.add_username(instance.get("username"))
@@ -444,7 +453,9 @@ class _IdentifierCollector:
             self.add_host(db.get("host"))
             self.add_username(db.get("user"))
             self.add_name(db.get("database"))
+        self._add_provider_accounts(config)
         for ban in _items(config, "ip_ban_configs"):
+            self.add_account(ban.get("account"))
             self.add_name(ban.get("name"))
             self.add_name(ban.get("ip_set_name"))
             for field in ("ip_set_id", "security_group_id", "nacl_id"):
@@ -475,6 +486,22 @@ class _IdentifierCollector:
             _value(config, "hetzner.default_username"),
         ):
             self.add_username(username)
+
+
+    def _add_provider_accounts(self, config: Dict[str, Any]) -> None:
+        """Account labels, AWS profiles and per-account keys and ids."""
+        for provider in ("aws", "hetzner", "ovh"):
+            self.add_account(_value(config, f"{provider}.label"))
+            for account in _items(config, f"{provider}.accounts"):
+                self.add_account(account.get("label"))
+                self.add_name(account.get("profile"))
+                self.add_id(account.get("client_id"))
+                for project_id in account.get("cloud_project_ids") or []:
+                    self.add_id(project_id)
+                for field in ("default_ssh_key", "default_local_ssh_key", "default_hetzner_ssh_key"):
+                    self.add_key(account.get(field))
+                self.add_username(account.get("default_username"))
+        self.add_name(_value(config, "aws.profile"))
 
 
 def _value(config: Dict[str, Any], path: str) -> Any:
