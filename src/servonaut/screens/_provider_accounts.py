@@ -41,7 +41,6 @@ __all__ = [
     "ovh_services",
     "provider_accounts",
     "registry_for",
-    "row_account_label",
     "row_ovh_services",
     "row_service",
     "show_account_labels",
@@ -132,17 +131,6 @@ def account_service(app: Any, provider: str, account: Optional[str] = None) -> A
         return getattr(app, _ALIASES[provider], None)
     ref = account_ref(app, provider, account)
     return registry.service(provider, ref.label)
-
-
-def row_account_label(app: Any, row: Dict[str, Any]) -> str:
-    """Label of the account a server row belongs to ("" without a registry).
-
-    Raises:
-        UnknownAccountError: The row's account is gone or cannot connect.
-    """
-    provider = row_provider(row)
-    ref = account_ref(app, provider, row.get("account") or None)
-    return ref.label if ref is not None else ""
 
 
 def row_service(app: Any, row: Dict[str, Any]) -> Any:
