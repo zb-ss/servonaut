@@ -19,8 +19,9 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
-from servonaut.screens._accounts import account_registry, cloudtrail_service
+from servonaut.screens._accounts import cloudtrail_service
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import provider_accounts, show_account_labels
 from servonaut.widgets.account_picker import AccountPicker
 import re
 
@@ -187,9 +188,7 @@ class CloudTrailBrowserScreen(Screen):
                 ),
             Horizontal(
                 # Shown only when there are several AWS accounts.
-                AccountPicker.for_provider(
-                    account_registry(self.app), "aws", id="ct_filter_account",
-                ),
+                AccountPicker(provider_accounts(self.app, "aws"), id="ct_filter_account"),
                 Vertical(
                     Label("Region"),
                     Select(
@@ -267,7 +266,9 @@ class CloudTrailBrowserScreen(Screen):
         table.add_columns("Time", "Event", "User", "Source IP", "Resource", "Region", "Error")
         table.cursor_type = "row"
         self._update_pager()
-        self._account = self.query_one("#ct_filter_account", AccountPicker).account
+        picker = self.query_one("#ct_filter_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
 
         config = self.app.config_manager.get()
         if config.cloudtrail_default_region:
@@ -475,6 +476,7 @@ class CloudTrailBrowserScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched events for the new demo-mode state."""
+        show_account_labels(self.query_one("#ct_filter_account", AccountPicker))
         self._populate_table()
 
     def _populate_table(self) -> None:

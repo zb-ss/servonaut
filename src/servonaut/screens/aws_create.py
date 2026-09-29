@@ -40,15 +40,16 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
-from servonaut.screens._accounts import (
-    account_registry,
-    aws_service,
-    is_multi,
-    provider_inventory,
-)
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
-from servonaut.services.accounts import UnknownAccountError
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_service,
+    inventory,
+    provider_accounts,
+    show_account_labels,
+    shown_label,
+)
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -110,7 +111,6 @@ class AWSCreateScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        accounts = account_registry(self.app)
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
@@ -131,7 +131,7 @@ class AWSCreateScreen(Screen):
 
                 # Shown only when there are several AWS accounts.
                 AccountPicker(
-                    accounts.accounts("aws") if accounts is not None else [],
+                    provider_accounts(self.app, "aws"),
                     label="Select Account",
                     id="aws_create_account",
                 ),
@@ -210,7 +210,9 @@ class AWSCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
-        self._account = self.query_one("#aws_create_account", AccountPicker).account
+        picker = self.query_one("#aws_create_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
 
         svc = getattr(self.app, "aws_service", None)
         if svc is None:
@@ -282,7 +284,7 @@ class AWSCreateScreen(Screen):
         Raises:
             UnknownAccountError: The account was removed in Settings.
         """
-        return aws_service(self.app, self._account)
+        return account_service(self.app, "aws", self._account)
 
     async def _load_regions(self) -> None:
         tbl = self.query_one("#aws_regions_table", DataTable)
@@ -716,8 +718,9 @@ class AWSCreateScreen(Screen):
 
         # With several accounts, say which one gets billed.
         where = markup_escape(region)
-        if self._account and is_multi(self.app, "aws"):
-            where = f"{markup_escape(self._account)}[/bold], [bold]{where}"
+        if len(provider_accounts(self.app, "aws")) > 1:
+            account = shown_label(self.app, self._account)
+            where = f"{markup_escape(account)}[/bold], [bold]{where}"
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Launch EC2 Instance",
@@ -835,10 +838,10 @@ class AWSCreateScreen(Screen):
         fresh fetch of every AWS account (the slice holds them all, so
         one account's rows alone would drop the others).
         """
-        inventory = provider_inventory(self.app, "aws")
-        if inventory is None:
+        fleet = inventory(self.app, "aws")
+        if fleet is None:
             return
-        new_aws = await inventory.fetch_instances_cached(force_refresh=True)
+        new_aws = await fleet.fetch_instances_cached(force_refresh=True)
         # Keeps the real rows aside and lists them redacted in demo mode.
         replace_instances(self.app, "aws", new_aws)
 

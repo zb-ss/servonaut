@@ -349,6 +349,7 @@ class TestAWSManagerOnButtonPressed:
     def test_refresh_button_calls_action_refresh(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
         app = _mgr_app()
 
@@ -370,6 +371,7 @@ class TestAWSManagerOnButtonPressed:
     def test_new_button_calls_action_new(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
         svc = MagicMock()
         app = _mgr_app(aws_service=svc)
@@ -412,6 +414,7 @@ class TestAWSManagerActionStop:
     def test_stop_blocked_when_no_instance_selected(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
         app = _mgr_app()
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
@@ -463,6 +466,7 @@ class TestAWSManagerDoLifecycle:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
@@ -480,6 +484,7 @@ class TestAWSManagerDoLifecycle:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         status_set = []
@@ -498,6 +503,7 @@ class TestAWSManagerDoLifecycle:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         inst = {"id": "i-0abc12345678def90", "region": "us-east-1", "name": "web",
@@ -521,6 +527,7 @@ class TestAWSManagerDoLifecycle:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         inst = {"id": "i-0abc12345678def90", "region": "us-east-1", "name": "web",
@@ -1696,6 +1703,7 @@ class TestAWSManagerLoadInstancesErrorPath:
         app = _mgr_app2(aws_service=mock_svc)
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = True
 
         status_msgs = []
@@ -1718,6 +1726,7 @@ class TestAWSManagerLoadInstancesErrorPath:
                         redaction_service=redaction)
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = True
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
@@ -1761,6 +1770,7 @@ class TestAWSManagerActionStart:
     def test_action_start_no_selection_returns(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         app = _mgr_app2()
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_selected_instance", return_value=None), \
@@ -1807,6 +1817,7 @@ class TestAWSManagerActionTerminate:
     def test_action_terminate_no_selection(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         app = _mgr_app2()
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_selected_instance", return_value=None), \
@@ -1864,6 +1875,7 @@ class TestAWSManagerRunLifecycleMissingId:
     def test_run_lifecycle_no_selection_returns(self) -> None:
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         app = _mgr_app2()
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_selected_instance", return_value=None), \
@@ -1883,6 +1895,7 @@ class TestAWSManagerDoLifecycleDemoRedaction:
                         redaction_service=redaction)
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
@@ -1904,6 +1917,7 @@ class TestAWSManagerDoTerminateAuditAndFailure:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         inst = {"id": "i-0abc", "region": "us-east-1", "name": "web",
@@ -1930,6 +1944,7 @@ class TestAWSManagerDoTerminateAuditAndFailure:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         inst = {"id": "i-0abc", "region": "us-east-1", "name": "web",
@@ -1953,6 +1968,7 @@ class TestAWSManagerDoTerminateAuditAndFailure:
 
         screen = AWSManagerScreen.__new__(AWSManagerScreen)
         screen._instances = []
+        screen._raw_instances = []
         screen._loading = False
 
         inst = {"id": "i-0abc", "region": "us-east-1", "name": "web",

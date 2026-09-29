@@ -45,15 +45,15 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Select, Static,
 )
 
-from servonaut.screens._accounts import (
-    account_registry,
-    aws_service,
-    is_multi,
-    object_storage,
-)
+from servonaut.screens._accounts import object_storage, object_storage_accounts
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_service,
+    show_account_labels,
+    shown_label,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
-from servonaut.services.accounts import UnknownAccountError
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -141,8 +141,8 @@ class ObjectStorageScreen(Screen):
                     id="s3_title",
                 ),
                 # Shown only when the provider has several accounts.
-                AccountPicker.for_provider(
-                    account_registry(self.app), self._provider, id="s3_account",
+                AccountPicker(
+                    object_storage_accounts(self.app, self._provider), id="s3_account",
                 ),
                 Static("", id="s3_breadcrumb"),
                 DataTable(id="s3_table", cursor_type="row", zebra_stripes=True),
@@ -258,7 +258,9 @@ class ObjectStorageScreen(Screen):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
-        self._account = self.query_one("#s3_account", AccountPicker).account
+        picker = self.query_one("#s3_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._setup_table()
         self._hide_all_forms()
         self._refresh()
@@ -364,10 +366,11 @@ class ObjectStorageScreen(Screen):
         svc = self._get_storage_service()
         if svc is None:
             label = _PROVIDER_LABELS.get(self._provider, self._provider)
-            if self._account and is_multi(self.app, self._provider):
+            if len(object_storage_accounts(self.app, self._provider)) > 1:
+                account = shown_label(self.app, self._account)
                 self._set_status(
                     f"[yellow]{markup_escape(label)} is not configured for "
-                    f"account {markup_escape(self._account)}. Add S3 "
+                    f"account {markup_escape(account)}. Add S3 "
                     "credentials for this account in Settings.[/yellow]"
                 )
             else:
@@ -714,7 +717,7 @@ class ObjectStorageScreen(Screen):
         """Populate the region picker from the live EC2 region list."""
         select = self.query_one("#s3_select_bucket_region", Select)
         try:
-            svc = aws_service(self.app, self._account)
+            svc = account_service(self.app, "aws", self._account)
         except UnknownAccountError:
             svc = None
         if svc is None:

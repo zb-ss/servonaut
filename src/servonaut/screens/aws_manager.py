@@ -41,11 +41,16 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
-from servonaut.screens._accounts import aws_service, provider_inventory, row_service
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_ref,
+    account_service,
+    fetched_row,
+    inventory,
+)
 from servonaut.screens.power_confirm import confirm_and_run_power_action
-from servonaut.services.accounts import UnknownAccountError
 from servonaut.utils.formatting import escape_cell
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
@@ -184,7 +189,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     def _refresh(self) -> None:
         if self._loading:
             return
-        if provider_inventory(self.app, "aws") is None:
+        if inventory(self.app, "aws") is None:
             self._set_status(
                 "[red]AWS is not configured. "
                 "Ensure boto3 credentials are available (env vars, ~/.aws/, "
@@ -202,9 +207,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     async def _load_instances(self) -> None:
         # Every AWS account's instances: a refresh after acting on one
         # account must never leave the table showing that account alone.
-        inventory = provider_inventory(self.app, "aws")  # guard ran in _refresh
+        fleet = inventory(self.app, "aws")  # guard ran in _refresh
         try:
-            instances = await inventory.fetch_instances_cached(force_refresh=True)
+            instances = await fleet.fetch_instances_cached(force_refresh=True)
             # Keep the fetched rows untouched; what the table draws is
             # derived from them (demo-mode fakes when demo mode is on).
             self._raw_instances = list(instances)
@@ -218,7 +223,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 )
             else:
                 status = f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
-            self._set_status(status + self._incomplete_refresh_note(inventory))
+            self._set_status(status + self._incomplete_refresh_note(fleet))
         except Exception as exc:
             logger.error("Failed to load EC2 instances: %s", exc)
             err_msg = self._short_err(exc)
@@ -231,15 +236,16 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             self._loading = False
 
     @staticmethod
-    def _incomplete_refresh_note(inventory) -> str:  # noqa: ANN001
+    def _incomplete_refresh_note(fleet) -> str:  # noqa: ANN001
         """Which accounts failed to refresh, when there are several accounts.
 
         A failed account lists its cached instances (or none), which would
         otherwise pass for its current state. A single account keeps the
-        status line it always had.
+        status line it always had. (The status line swaps account labels
+        for their stand-ins in demo mode.)
         """
-        error = getattr(inventory, "last_fetch_error", None)
-        if getattr(inventory, "multi", False) is not True or not isinstance(error, str):
+        error = getattr(fleet, "last_fetch_error", None)
+        if getattr(fleet, "multi", False) is not True or not isinstance(error, str):
             return ""
         return f" [yellow]Refresh incomplete: {markup_escape(error)}[/yellow]" if error else ""
 
@@ -303,20 +309,27 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         return display_name(inst) or str(inst.get("id") or "")
 
     def _row_account(self, inst: dict) -> Optional[str]:
-        """Label of the account a row belongs to; None (reported) when gone.
+        """Real label of the account a row belongs to; None (reported) when gone.
 
-        Every action runs in the row's own account. An account removed in
-        Settings since the table was loaded is refused rather than guessed.
+        Every action runs in the row's own account, read from the fetched
+        row: in demo mode the drawn row carries a stand-in label. An account
+        removed in Settings since the table was loaded is refused rather
+        than guessed.
         """
+        fetched = fetched_row(self._instances, self._raw_instances, inst)
+        account = str(fetched.get("account") or "")
         try:
-            _service, account = row_service(self.app, "aws", inst)
+            ref = account_ref(self.app, "aws", account)
         except UnknownAccountError as exc:
+            # The message names the real account; demo mode keeps it off
+            # the screen (a removed account has no stand-in to swap in).
+            reason = "its AWS account is not available" if self.app.demo_mode else str(exc)
             self.notify(
-                f"{exc}. Refresh the list and try again.",
+                f"{self._row_label(inst)}: {reason}. Refresh the list and try again.",
                 severity="error", markup=False,
             )
             return None
-        return account
+        return ref.label if ref is not None else account
 
     def _display_id(self, api_id: str) -> str:
         """An API id as the table shows it (a placeholder in demo mode)."""
@@ -497,7 +510,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         The call runs in *account* (its label; "" = the default account).
         """
         try:
-            svc = aws_service(self.app, account)
+            svc = account_service(self.app, "aws", account)
             await getattr(svc, method)(instance_id, region)
         except Exception as exc:
             logger.error(
@@ -581,7 +594,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
 
         self._set_status(f"[dim]Terminating {markup_escape(name)}…[/dim]")
         try:
-            svc = aws_service(self.app, account)
+            svc = account_service(self.app, "aws", account)
             await svc.terminate_instance(instance_id, region)
         except Exception as exc:
             logger.error(

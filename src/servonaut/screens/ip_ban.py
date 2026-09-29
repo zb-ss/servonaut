@@ -25,9 +25,13 @@ from textual.widgets import (
     Static,
 )
 
-from servonaut.screens._accounts import account_registry, default_label, is_multi
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.services.accounts import UnknownAccountError
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_ref,
+    provider_accounts,
+    shown_label,
+)
 
 
 class AmbiguousAddress(ValueError):
@@ -156,9 +160,10 @@ class IPBanScreen(Screen):
     def _config_label(self, config) -> str:  # noqa: ANN001
         """``name (method)``; ``name (method, account)`` with several AWS accounts."""
         details = str(config.method)
-        if is_multi(self.app, "aws"):
-            account = getattr(config, "account", "") or default_label(self.app, "aws")
-            details = f"{details}, {account}"
+        accounts = provider_accounts(self.app, "aws")
+        if len(accounts) > 1:
+            account = getattr(config, "account", "") or accounts[0].label
+            details = f"{details}, {shown_label(self.app, account)}"
         return f"{self._demo_config_name(config.name)} ({details})"
 
     def _account_problem(self, config_name: str) -> Optional[str]:
@@ -168,9 +173,6 @@ class IPBanScreen(Screen):
         they are refused with a pointer to the fix rather than sent to
         another account.
         """
-        accounts = account_registry(self.app)
-        if accounts is None:
-            return None
         config = next(
             (c for c in self.app.ip_ban_service.get_configs() if c.name == config_name),
             None,
@@ -179,12 +181,12 @@ class IPBanScreen(Screen):
         if not account:
             return None
         try:
-            accounts.account("aws", account)
+            account_ref(self.app, "aws", account)
         except UnknownAccountError:
             return (
                 f"'{self._demo_config_name(config_name)}' belongs to AWS account "
-                f"'{account}', which is not configured. Choose its account in "
-                "Settings → IP Ban."
+                f"'{shown_label(self.app, account)}', which is not configured. "
+                "Choose its account in Settings → IP Ban."
             )
         return None
 

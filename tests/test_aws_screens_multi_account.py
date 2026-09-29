@@ -16,8 +16,15 @@ import pytest
 from textual.app import App
 from textual.widgets import Button, DataTable, Input, Select, Static
 
-from servonaut.config.schema import AppConfig, AWSAccount, IPBanConfig
-from servonaut.services.accounts import AccountRegistry
+from servonaut.config.schema import (
+    AppConfig,
+    AWSAccount,
+    HetznerAccount,
+    IPBanConfig,
+    ObjectStorageConfig,
+)
+from servonaut.services.accounts import AccountRegistry, UnknownAccountError
+from servonaut.services.redaction_service import RedactionService
 from servonaut.services.accounts.aws_account import AWSAccountContext
 from servonaut.services.cloudtrail_service import LookupPage
 
@@ -26,7 +33,7 @@ from servonaut.services.cloudtrail_service import LookupPage
 # Fakes
 # ---------------------------------------------------------------------------
 
-_REGIONS = {"prod": "us-east-1", "staging": "eu-west-1"}
+_REGIONS = {"prod": "us-east-1", "staging": "eu-west-1", "sandbox": "eu-west-2"}
 
 
 def _row(label: str, number: int, name: str, state: str) -> dict:
@@ -142,11 +149,11 @@ class FakeCloudWatch:
 # ---------------------------------------------------------------------------
 
 
-def _config(*, extra: bool = True) -> AppConfig:
+def _config(*, extra: bool = True, extra_label: str = "staging") -> AppConfig:
     config = AppConfig()
     config.aws.label = "prod"
     if extra:
-        config.aws.accounts = [AWSAccount(label="staging", profile="staging")]
+        config.aws.accounts = [AWSAccount(label=extra_label, profile=extra_label)]
     return config
 
 
@@ -158,6 +165,8 @@ def ec2(monkeypatch: pytest.MonkeyPatch) -> Dict[str, FakeEC2]:
                                   _row("prod", 2, "db-1", "stopped")]),
         "staging": FakeEC2("staging", [_row("staging", 11, "app-1", "stopped"),
                                         _row("staging", 12, "worker-1", "running")]),
+        # Not an environment word, so demo mode shows a stand-in for it.
+        "sandbox": FakeEC2("sandbox", [_row("sandbox", 21, "lab-1", "stopped")]),
     }
     monkeypatch.setattr(
         "servonaut.services.aws_service.AWSService",
@@ -741,29 +750,31 @@ class FakeStorage:
         return [{"name": f"{self.label}-bucket", "creation_date": "2026-01-01"}]
 
 
+def _record_object_storage(monkeypatch, registry: AccountRegistry, stores: Dict[str, Any]):
+    asked: List[tuple] = []
+
+    def object_storage(provider: str, account: Optional[str] = None):
+        asked.append((provider, account))
+        return stores.get(account or "")
+
+    monkeypatch.setattr(registry, "object_storage", object_storage)
+    return asked
+
+
 @pytest.mark.asyncio
 async def test_object_storage_uses_the_picked_account(ec2, monkeypatch) -> None:
     from servonaut.screens.object_storage import ObjectStorageScreen
 
     registry = _registry()
-    extra: Dict[str, Optional[FakeStorage]] = {"staging": None}
-    asked: List[tuple] = []
-
-    def object_storage(provider: str, account: Optional[str] = None):
-        ref = registry.account(provider, account)
-        asked.append((provider, ref.label))
-        return extra[ref.key]
-
-    monkeypatch.setattr(registry, "object_storage", object_storage)
+    stores: Dict[str, Any] = {"prod": FakeStorage("prod"), "staging": None}
+    asked = _record_object_storage(monkeypatch, registry, stores)
     app = Host(registry, lambda: ObjectStorageScreen("aws"))
-    # The primary account keeps the app's own service (rebuilt by Settings).
-    app.aws_object_storage_service = FakeStorage("prod")
     async with app.run_test(size=(160, 50)) as pilot:
         screen = app.screen
         table = screen.query_one("#s3_table", DataTable)
         await _wait_for(pilot, lambda: table.row_count == 1, "prod buckets")
         assert "prod-bucket" in str(table.get_row_at(0)[1])
-        assert asked == []
+        assert set(asked) == {("aws", "prod")}
 
         _pick_account(screen, "s3_account", "staging")
         await _wait_for(pilot, lambda: ("aws", "staging") in asked, "the staging lookup")
@@ -772,26 +783,126 @@ async def test_object_storage_uses_the_picked_account(ec2, monkeypatch) -> None:
         assert "not configured for account staging" in status
         assert table.row_count == 0
 
-        extra["staging"] = FakeStorage("staging")
+        stores["staging"] = FakeStorage("staging")
         screen.action_refresh()
         await _wait_for(pilot, lambda: table.row_count == 1, "staging buckets")
         assert "staging-bucket" in str(table.get_row_at(0)[1])
 
 
+def _hetzner_config() -> AppConfig:
+    """Hetzner used for object storage only: S3 keys, no Cloud API token."""
+    config = _config()
+    config.hetzner.object_storage = ObjectStorageConfig(
+        access_key="k", secret_key="s", region="fsn1",
+    )
+    config.hetzner.accounts = [
+        HetznerAccount(label="eu-project", api_token="t2"),
+        HetznerAccount(label="no-token"),  # skipped: an extra needs a token
+    ]
+    return config
+
+
 @pytest.mark.asyncio
-async def test_object_storage_without_compute_accounts_uses_the_app_service(ec2) -> None:
-    """Hetzner object storage works with S3 keys alone (no API token)."""
+async def test_object_storage_offers_accounts_without_a_cloud_token(ec2, monkeypatch) -> None:
     from servonaut.screens.object_storage import ObjectStorageScreen
 
-    registry = _registry()
-    assert registry.accounts("hetzner") == []
+    registry = _registry(_hetzner_config())
+    assert registry.accounts("hetzner") == []  # no compute account at all
+    stores = {"hetzner": FakeStorage("hetzner")}
+    asked = _record_object_storage(monkeypatch, registry, stores)
     app = Host(registry, lambda: ObjectStorageScreen("hetzner"))
-    app.hetzner_object_storage_service = FakeStorage("hetzner")
     async with app.run_test(size=(160, 50)) as pilot:
         screen = app.screen
         table = screen.query_one("#s3_table", DataTable)
         await _wait_for(pilot, lambda: table.row_count == 1, "the buckets")
-        assert screen.query_one("#s3_account").display is False
+        picker = screen.query_one("#s3_account")
+        assert picker.display is True
+        assert [ref.label for ref in picker.accounts] == ["hetzner", "eu-project"]
+        assert asked == [("hetzner", "hetzner")] * len(asked)
+
+
+# ---------------------------------------------------------------------------
+# Demo mode
+# ---------------------------------------------------------------------------
+
+
+def _demo(app: Host) -> Host:
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+    return app
+
+
+@pytest.mark.asyncio
+async def test_demo_manager_shows_stand_in_labels_and_acts_in_the_real_account(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = _demo(Host(_registry(_config(extra_label="sandbox")), AWSManagerScreen))
+    stand_in = app.redaction_service.redact_account_label("sandbox")
+    assert stand_in != "sandbox"
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 3, "both accounts' rows")
+        names = _names(table)
+        assert names[2].startswith(f"{stand_in}/")
+        assert not any("sandbox" in name for name in names)
+        table.move_cursor(row=2)
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: ec2["sandbox"].called("start_instance"), "the start")
+
+    assert ec2["sandbox"].called("start_instance") == [
+        ("start_instance", "i-00000000000000021", "eu-west-2")
+    ]
+    assert app.aws_audit.log_action.call_args.kwargs["details"]["account"] == "sandbox"
+
+
+@pytest.mark.asyncio
+async def test_demo_picker_shows_stand_ins_and_keeps_real_values(ec2) -> None:
+    from servonaut.screens.cloudtrail_browser import CloudTrailBrowserScreen
+
+    registry = _registry(_config(extra_label="sandbox"))
+    trails = _bundle_fakes(registry, "cloudtrail", FakeCloudTrail)
+    app = _demo(Host(registry, CloudTrailBrowserScreen))
+    stand_in = app.redaction_service.redact_account_label("sandbox")
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        select = screen.query_one("#ct_filter_account_select", Select)
+        assert [(str(text), value) for text, value in select._options] == [
+            ("prod", "prod"), (stand_in, "sandbox"),
+        ]
+        _pick_account(screen, "ct_filter_account", "sandbox")
+        await _wait_for(pilot, lambda: trails["sandbox"].calls, "the sandbox fetch")
+
+
+@pytest.mark.asyncio
+async def test_demo_ip_ban_and_settings_show_stand_in_accounts(ec2) -> None:
+    config = _config(extra_label="sandbox")
+    config.ip_ban_configs = [IPBanConfig(name="edge", method="waf", account="sandbox")]
+    registry = _registry(config)
+    app = _demo(_ip_ban_host(registry))
+    stand_in = app.redaction_service.redact_account_label("sandbox")
+    async with app.run_test(size=(160, 50)):
+        (label,) = [str(text) for text, _value in app.screen._get_config_options()]
+    assert label.endswith(f"(waf, {stand_in})")
+
+    panel_app = PanelHost(registry, config)
+    panel_app.demo_mode = True
+    panel_app.redaction_service = app.redaction_service
+    async with panel_app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        panel = panel_app.panel
+        assert str(panel.query_one("#ipban_table", DataTable).get_row_at(0)[1]) == stand_in
+        panel._handle_ipban_add()
+        await pilot.pause()
+        select = panel.query_one("#ipban_select_account", Select)
+        assert [
+            (str(text), value) for text, value in select._options if value is not Select.NULL
+        ] == [("prod", "prod"), (stand_in, "sandbox")]
+        _fill_waf_form(panel, "edge-2")
+        select.value = "sandbox"
+        panel._handle_ipban_save()
+    assert config.ip_ban_configs[-1].account == "sandbox"
 
 
 # ---------------------------------------------------------------------------
@@ -806,22 +917,33 @@ def test_helpers_use_the_registry_of_the_app(ec2) -> None:
 
     registry = _registry()
     app = SimpleNamespace(accounts=registry, provider_inventory=registry.fleet)
-    assert _accounts.account_registry(app) is registry
-    assert _accounts.is_multi(app, "aws")
-    assert _accounts.default_label(app, "aws") == "prod"
-    assert _accounts.provider_inventory(app, "aws") is registry.fleet("aws")
-    assert _accounts.aws_service(app) is ec2["prod"]
-    assert _accounts.aws_service(app, "staging") is ec2["staging"]
-    assert _accounts.row_service(app, "aws", {"account": "staging"}) == (
-        ec2["staging"], "staging",
-    )
-    assert _accounts.cloudtrail_service(app, "staging") is (
-        registry.aws_services("staging").cloudtrail
-    )
-    assert _accounts.cloudwatch_service(app, "staging") is (
-        registry.aws_services("staging").cloudwatch
-    )
+    staging = registry.aws_services("staging")
+    assert _accounts.aws_services(app, "staging") is staging
+    assert _accounts.cloudtrail_service(app, "staging") is staging.cloudtrail
+    assert _accounts.cloudwatch_service(app, "staging") is staging.cloudwatch
+    assert _accounts.cloudtrail_service(app) is registry.aws_services("prod").cloudtrail
     assert _accounts.aws_context(app, "staging") is registry.aws_context("staging")
+    assert [ref.label for ref in _accounts.object_storage_accounts(app, "aws")] == [
+        "prod", "staging",
+    ]
+    with pytest.raises(UnknownAccountError):
+        _accounts.cloudtrail_service(app, "retired")
+
+
+def test_object_storage_needs_s3_keys_not_api_credentials(ec2) -> None:
+    from types import SimpleNamespace
+
+    from servonaut.screens import _accounts
+
+    registry = _registry(_hetzner_config())
+    app = SimpleNamespace(accounts=registry)
+    assert [ref.label for ref in _accounts.object_storage_accounts(app, "hetzner")] == [
+        "hetzner", "eu-project",
+    ]
+    assert _accounts.object_storage(app, "hetzner") is not None
+    assert _accounts.object_storage(app, "hetzner", "eu-project") is None  # no S3 keys
+    with pytest.raises(UnknownAccountError):
+        _accounts.object_storage(app, "hetzner", "retired")
 
 
 def test_helpers_fall_back_to_the_default_services_on_a_stand_in_app() -> None:
@@ -834,15 +956,9 @@ def test_helpers_fall_back_to_the_default_services_on_a_stand_in_app() -> None:
         "aws_object_storage_service",
     )}
     for app in (SimpleNamespace(**services), MagicMock(**services)):
-        assert _accounts.account_registry(app) is None
-        assert not _accounts.is_multi(app, "aws")
-        assert _accounts.default_label(app, "aws") == ""
-        assert _accounts.provider_inventory(app, "aws") is services["aws_service"]
-        assert _accounts.aws_service(app) is services["aws_service"]
-        assert _accounts.row_service(app, "aws", {"id": "i-1"}) == (
-            services["aws_service"], "",
-        )
+        assert _accounts.aws_services(app) is None
         assert _accounts.cloudtrail_service(app) is services["cloudtrail_service"]
         assert _accounts.cloudwatch_service(app) is services["cloudwatch_service"]
         assert _accounts.aws_context(app) is None
+        assert _accounts.object_storage_accounts(app, "aws") == []
         assert _accounts.object_storage(app, "aws") is services["aws_object_storage_service"]

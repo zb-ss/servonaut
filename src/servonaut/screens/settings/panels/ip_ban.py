@@ -25,9 +25,14 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.config.schema import IPBanConfig
-from servonaut.screens._accounts import account_registry, aws_context, default_label
+from servonaut.screens._accounts import aws_context
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_ref,
+    provider_accounts,
+    shown_label,
+)
 from servonaut.screens.settings.base import SettingsPanel
-from servonaut.services.accounts import UnknownAccountError
 from servonaut.services.accounts.aws_account import aws_client
 
 logger = logging.getLogger(__name__)
@@ -352,8 +357,7 @@ class IpBanPanel(SettingsPanel):
         config = self.app.config_manager.get()
         table = self.query_one("#ipban_table", DataTable)
         table.clear(columns=True)
-        accounts = account_registry(self.app)
-        multi = accounts is not None and accounts.is_multi("aws")
+        multi = len(provider_accounts(self.app, "aws")) > 1
         if multi:
             table.add_columns("Name", "Account", "Method", "Region", "Details")
         else:
@@ -373,16 +377,15 @@ class IpBanPanel(SettingsPanel):
             table.add_row(*cells)
 
     def _account_cell(self, account: str) -> str:
-        """An entry's account as the table shows it; flags a removed one."""
-        accounts = account_registry(self.app)
-        if not account:
-            return default_label(self.app, "aws")
+        """An entry's account as the table shows it; flags a removed one.
+
+        Account labels are stand-ins in demo mode.
+        """
         try:
-            if accounts is not None:
-                accounts.account("aws", account)
+            ref = account_ref(self.app, "aws", account)
         except UnknownAccountError:
-            return f"{account} (not configured)"
-        return account
+            return f"{shown_label(self.app, account)} (not configured)"
+        return shown_label(self.app, ref.label if ref is not None else account)
 
     def _get_selected_name(self) -> Optional[str]:
         """Return the real name of the currently-highlighted configuration."""
@@ -446,18 +449,18 @@ class IpBanPanel(SettingsPanel):
         self._form_account_fallback = current
         row = self.query_one("#ipban_account_row")
         select = self.query_one("#ipban_select_account", Select)
-        accounts = account_registry(self.app)
-        if accounts is None:
+        refs = provider_accounts(self.app, "aws")
+        if not refs:  # no account registry: nothing to choose from
             select.set_options([])
             row.display = False
             return
-        refs = accounts.accounts("aws")
-        options = [(ref.label, ref.label) for ref in refs]
-        wanted = current.lower() if current else (refs[0].key if refs else "")
+        # Demo mode shows stand-in labels; each value stays the real label.
+        options = [(shown_label(self.app, ref.label), ref.label) for ref in refs]
+        wanted = current.lower() if current else refs[0].key
         chosen = next((ref.label for ref in refs if ref.key == wanted), None)
         missing = bool(current) and chosen is None
         if missing:
-            options.append((f"{current} (not configured)", current))
+            options.append((f"{shown_label(self.app, current)} (not configured)", current))
             chosen = current
         select.set_options(options)
         if chosen is not None:
@@ -470,17 +473,17 @@ class IpBanPanel(SettingsPanel):
         Returns None, after telling the user, when the chosen account is
         not configured.
         """
-        accounts = account_registry(self.app)
-        if accounts is None:
+        if not provider_accounts(self.app, "aws"):
             return self._form_account_fallback
         value = self.query_one("#ipban_select_account", Select).value
         if not isinstance(value, str) or not value:
             return ""
         try:
-            ref = accounts.account("aws", value)
-        except UnknownAccountError as exc:
+            ref = account_ref(self.app, "aws", value)
+        except UnknownAccountError:
             self.app.notify(
-                f"{exc}. Choose a configured account.",
+                f"AWS account '{shown_label(self.app, value)}' is not configured. "
+                "Choose a configured account.",
                 severity="error",
                 markup=False,
             )
