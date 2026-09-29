@@ -279,24 +279,48 @@ def test_ovh_account_level_tools_use_the_named_account(monkeypatch):
     assert "1.1.1.1/32" in _run(tools.ovh_list_ips(account="eu2"))
 
 
+def _staging_storage(registry):
+    from servonaut.config.schema import ObjectStorageConfig
+
+    registry.config.hetzner.accounts[0].object_storage = ObjectStorageConfig(
+        access_key="AKEXAMPLE", secret_key="secret", region="fsn1",
+    )
+
+
 def test_s3_tools_use_the_named_accounts_storage(monkeypatch):
     registry, _ = build_registry(monkeypatch, hetzner={"hetzner": [], "staging": []})
+    _staging_storage(registry)
     tools = make_tools(registry)
-    storage = MagicMock()
+    storage = registry.object_storage("hetzner", "staging")
 
     async def _buckets():
         return [{"name": "staging-assets", "creation_date": "2026-01-01"}]
 
-    storage.list_buckets = _buckets
-    monkeypatch.setattr(
-        registry, "object_storage",
-        lambda provider, account=None: storage if account == "staging" else None,
-    )
+    monkeypatch.setattr(storage, "list_buckets", _buckets)
     out = _run(tools.s3_list_buckets("hetzner", account="staging"))
     assert "staging-assets" in out
     assert audit_rows(tools)[-1][1] == {"provider": "hetzner", "account": "staging"}
     refused = _run(tools.s3_list_buckets("hetzner", account="prod"))
     assert refused.startswith("Error: No Hetzner account named 'prod'")
+    assert audit_rows(tools)[-1][3].startswith("validation: unknown account")
+
+
+def test_s3_storage_of_an_account_without_compute_credentials(monkeypatch):
+    """Object storage keys work even when the project's API token does not."""
+    registry, _ = build_registry(monkeypatch, hetzner={"hetzner": [], "staging": []})
+    _staging_storage(registry)
+    registry.config.hetzner.accounts[0].api_token = ""
+    registry.rebuild(registry.config)
+    assert [ref.label for ref in registry.accounts("hetzner")] == ["hetzner"]
+    tools = make_tools(registry)
+    storage = registry.object_storage("hetzner", "staging")
+    assert storage is not None
+
+    async def _buckets():
+        return [{"name": "archive", "creation_date": "2026-01-01"}]
+
+    monkeypatch.setattr(storage, "list_buckets", _buckets)
+    assert "archive" in _run(tools.s3_list_buckets("hetzner", account="staging"))
 
 
 def test_aws_call_label_and_account_id(monkeypatch):

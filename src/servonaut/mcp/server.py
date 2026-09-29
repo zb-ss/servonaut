@@ -162,18 +162,15 @@ def build_headless_tools(config_manager=None, accounts=None):
     except Exception as e:
         logger.error("Failed to initialize AWS security services for MCP: %s", e)
 
-    # Object Storage services — shared factory ensures identical config logic
-    # with app.py::_init_services.
+    # Object storage of the primary accounts, from the registry like the
+    # TUI's (each works without the provider's compute credentials).
     aws_object_storage_service = None
     hetzner_object_storage_service = None
     ovh_object_storage_service = None
     try:
-        from servonaut.services.object_storage_factory import build_object_storage_services
-        (
-            aws_object_storage_service,
-            hetzner_object_storage_service,
-            ovh_object_storage_service,
-        ) = build_object_storage_services(config)
+        aws_object_storage_service = accounts.object_storage('aws')
+        hetzner_object_storage_service = accounts.object_storage('hetzner')
+        ovh_object_storage_service = accounts.object_storage('ovh')
         logger.info("Object storage services initialized for MCP")
     except Exception as e:
         logger.error("Failed to initialise object storage services for MCP: %s", e)

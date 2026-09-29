@@ -372,25 +372,13 @@ class ServonautTools:
             self._cloudwatch_service = aws.cloudwatch
             self._aws_client_factory = aws.client_factory
         for provider in sorted(_S3_PROVIDERS):
-            try:
-                storage = registry.object_storage(provider)
-            except UnknownAccountError:
-                # Object storage has keys of its own: it keeps working
-                # without the provider's compute account, as it always has.
-                storage = self._primary_object_storage(registry.config, provider)
-            setattr(self, f'_{provider}_object_storage_service', storage)
+            setattr(
+                self, f'_{provider}_object_storage_service',
+                registry.object_storage(provider),
+            )
         if self._ip_ban_service is not None:
             from servonaut.services.ip_ban_service import IPBanService
             self._ip_ban_service = IPBanService(self._config_manager, accounts=registry)
-
-    @staticmethod
-    def _primary_object_storage(config: Any, provider: str) -> Any:
-        """The primary account's object storage built from *config* alone."""
-        from servonaut.services.object_storage_factory import (
-            build_object_storage_services,
-        )
-        services = dict(zip(('aws', 'hetzner', 'ovh'), build_object_storage_services(config)))
-        return services[provider]
 
     def _provider_inventories(self) -> Dict[str, Any]:
         """Each provider's inventory: every account when a registry is bound."""
@@ -4644,9 +4632,12 @@ class ServonautTools:
             self._audit.log(tool_name, payload, '', False, 'validation: invalid_provider')
             return None, msg
         try:
-            if self._names_account(provider, account):
+            if account and self._accounts is not None:
+                # Object storage has keys of its own: an account's storage
+                # works even without usable compute credentials.
                 svc = self._accounts.object_storage(provider, account)
             else:
+                self._names_account(provider, account)
                 svc = self._get_object_storage(provider)
         except UnknownAccountError as exc:
             return None, self._account_refused(tool_name, payload, exc)
