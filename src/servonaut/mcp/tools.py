@@ -25,6 +25,7 @@ from servonaut.mcp.db_staging import (
 from servonaut.services.accounts.headless import (
     InstanceDirectory,
     ProviderTarget,
+    fetch_provider_rows,
     qualifier_provider,
     resolve_provider_target,
     row_account_key,
@@ -2494,14 +2495,15 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            inventory = self._hetzner_inventory(account)
+            if self._accounts is None:
+                service = self._account_service('hetzner', account, self._hetzner_service)
+                instances = await service.fetch_instances_cached(force_refresh=True)
+            else:
+                instances = await fetch_provider_rows(
+                    self._accounts, 'hetzner', account, force_refresh=True,
+                )
         except UnknownAccountError as exc:
             return self._account_refused('hetzner_list_servers', args, exc)
-
-        try:
-            instances = await inventory.fetch_instances_cached(
-                force_refresh=True,
-            )
         except Exception as exc:
             self._audit.log(
                 'hetzner_list_servers', args, '', False, f"api_error: {exc}",
@@ -2531,12 +2533,6 @@ class ServonautTools:
         result = '\n'.join(lines)
         self._audit.log('hetzner_list_servers', args, result, True)
         return result
-
-    def _hetzner_inventory(self, account: str) -> Any:
-        """One project's service, or every project as one inventory."""
-        if account or self._accounts is None:
-            return self._account_service('hetzner', account, self._hetzner_service)
-        return self._accounts.fleet('hetzner') or self._hetzner_service
 
     async def hetzner_list_server_types(self, account: str = "") -> str:
         """List Hetzner Cloud server types with their EUR prices."""
@@ -2930,7 +2926,8 @@ class ServonautTools:
             self._audit.log('ovh_create_instance', payload, '', False, reason)
             return f"Blocked: {reason}"
         try:
-            cloud_svc = self._ovh_part(account, 'cloud') or cloud_svc
+            if self._names_account('ovh', account):
+                cloud_svc = self._accounts.ovh_services(account).cloud
         except UnknownAccountError as exc:
             return self._account_refused('ovh_create_instance', payload, exc)
 

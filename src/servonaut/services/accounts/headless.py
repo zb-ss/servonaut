@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from servonaut.config.accounts import AWS, HETZNER, OVH, PROVIDER_TITLES, AccountRef
-from servonaut.services.accounts.fleet import ACCOUNT_KEY
+from servonaut.services.accounts.fleet import ACCOUNT_KEY, tag_rows
 from servonaut.services.accounts.registry import AccountRegistry, UnknownAccountError
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
@@ -271,6 +271,29 @@ class InstanceDirectory:
             rows.extend(batch)
             matched = matched or bool(match_instances(needle, batch))
         return resolve_unique(needle, rows)
+
+
+async def fetch_provider_rows(
+    registry: AccountRegistry, provider: str, account: str = "", *,
+    force_refresh: bool = False,
+) -> List[dict]:
+    """Every account's servers of *provider*, or only *account*'s.
+
+    One account's rows are tagged exactly like the fleet's, and only that
+    account is read.
+
+    Raises:
+        UnknownAccountError: *account* names no account of *provider*, or
+            the provider has no usable account.
+    """
+    fleet = registry.fleet(provider)
+    if fleet is None:
+        registry.account(provider)  # raises: the provider is not configured
+    if not account:
+        return await fleet.fetch_instances_cached(force_refresh=force_refresh)
+    binding = fleet.binding(registry.account(provider, account).label)
+    rows = await binding.service.fetch_instances_cached(force_refresh=force_refresh)
+    return tag_rows(rows or [], binding.ref, qualified=fleet.multi)
 
 
 # ---------------------------------------------------------------------------

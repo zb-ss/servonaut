@@ -343,20 +343,14 @@ async def _list_servers(account: Optional[str]) -> List[dict]:
 
     Rows of configured projects carry their ``account``.
     """
-    from servonaut.services.accounts.fleet import tag_rows
+    from servonaut.services.accounts.headless import fetch_provider_rows
 
     registry = _hetzner_registry()
     if registry is None:
         return await _build_service(account).fetch_instances_cached(force_refresh=True)
-    fleet = registry.fleet('hetzner')
-    if not account:
-        return await fleet.fetch_instances_cached(force_refresh=True)
-    binding = fleet.binding(account)
-    if binding is None:
-        # Raises with the project labels that exist.
-        registry.account('hetzner', account)
-    rows = await binding.service.fetch_instances_cached(force_refresh=True)
-    return tag_rows(rows, binding.ref, qualified=fleet.multi)
+    return await fetch_provider_rows(
+        registry, 'hetzner', account or '', force_refresh=True,
+    )
 
 
 def _cmd_list(args: argparse.Namespace) -> int:

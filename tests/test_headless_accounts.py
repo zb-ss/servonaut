@@ -263,3 +263,32 @@ def test_target_ovh_cloud_ids(monkeypatch):
     assert (qualified.account.label, qualified.native_id) == ("eu2", "proj1/inst-1")
     uncached = resolve_provider_target(registry, "ovh", "eu2/proj9/inst-9")
     assert (uncached.account.label, uncached.native_id) == ("eu2", "proj9/inst-9")
+
+
+# ---------------------------------------------------------------------------
+# fetch_provider_rows
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_provider_rows_of_one_account(hetzner_two_projects):
+    from servonaut.services.accounts.headless import fetch_provider_rows
+
+    rows = _run(fetch_provider_rows(hetzner_two_projects, "hetzner", "Staging"))
+    assert [(r["id"], r["account"], r.get("account_qualified")) for r in rows] == [
+        ("2", "staging", True), ("4", "staging", True),
+    ]
+    every = _run(fetch_provider_rows(hetzner_two_projects, "hetzner"))
+    assert [r["id"] for r in every] == ["1", "3", "2", "4"]
+    with pytest.raises(UnknownAccountError):
+        _run(fetch_provider_rows(hetzner_two_projects, "hetzner", "nope"))
+    with pytest.raises(UnknownAccountError):
+        _run(fetch_provider_rows(hetzner_two_projects, "ovh"))
+
+
+def test_fetch_provider_rows_reads_only_the_named_account(monkeypatch):
+    from servonaut.services.accounts.headless import fetch_provider_rows
+
+    registry, services = build_registry(monkeypatch, hetzner={"hetzner": [], "staging": []})
+    _run(fetch_provider_rows(registry, "hetzner", "staging", force_refresh=True))
+    assert services[("hetzner", "staging")].fetches == 1
+    assert services[("hetzner", "hetzner")].fetches == 0
