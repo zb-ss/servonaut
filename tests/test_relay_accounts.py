@@ -119,7 +119,7 @@ def test_resolve_webacl_walks_the_instance_in_its_account(monkeypatch):
         async def describe(self, *args):
             walked.append(self.account.ref.label)
             return {"load_balancers": [{"web_acl": {
-                "arn": "arn:aws:wafv2:eu-west-1:111122223333:regional/webacl/acl/id-1",
+                "arn": "arn:aws:wafv2:eu-west-1:111:regional/webacl/acl/id-1",
             }}]}
 
     with patch("servonaut.services.ingress_path_service.IngressPathService", _Ingress):

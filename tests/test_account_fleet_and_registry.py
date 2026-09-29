@@ -275,16 +275,16 @@ class TestRegistry:
 class TestControlPlaneRoles:
     def _registry(self):
         config = AppConfig()
-        config.aws.control_plane_role_arn = "arn:aws:iam::111111111111:role/read"
-        config.aws.control_plane_mutate_role_arn = "arn:aws:iam::111111111111:role/write"
-        config.aws.control_plane_role_arns = {"222222222222": "arn:aws:iam::222222222222:role/read"}
+        config.aws.control_plane_role_arn = "arn:aws:iam::111:role/read"
+        config.aws.control_plane_mutate_role_arn = "arn:aws:iam::111:role/write"
+        config.aws.control_plane_role_arns = {"222222222222": "arn:aws:iam::222:role/read"}
         config.aws.accounts = [AWSAccount(label="prod", profile="prod")]
         return AccountRegistry(config)
 
     def test_the_primary_account_keeps_the_default_roles(self):
         factory = self._registry().aws_client_factory()
-        assert factory.role_for() == "arn:aws:iam::111111111111:role/read"
-        assert factory.role_for(mutate=True) == "arn:aws:iam::111111111111:role/write"
+        assert factory.role_for() == "arn:aws:iam::111:role/read"
+        assert factory.role_for(mutate=True) == "arn:aws:iam::111:role/write"
 
     def test_an_extra_account_never_borrows_the_default_roles(self):
         # Assumed with the extra account's credentials, the primary account's
@@ -295,4 +295,4 @@ class TestControlPlaneRoles:
 
     def test_an_extra_account_uses_a_role_mapped_to_its_id(self):
         factory = self._registry().aws_client_factory("prod")
-        assert factory.role_for("222222222222") == "arn:aws:iam::222222222222:role/read"
+        assert factory.role_for("222222222222") == "arn:aws:iam::222:role/read"
