@@ -112,7 +112,7 @@ class AwsAccountsSection(AccountsSection):
     AwsAccountsSection #aws_account_form_actions {
         margin: 1 0;
     }
-    AwsAccountsSection #aws_account_form_actions Button {
+    AwsAccountsSection .aws-account-form-action {
         width: auto;
         margin: 0 1 0 0;
     }
@@ -145,7 +145,10 @@ class AwsAccountsSection(AccountsSection):
 
     def action_buttons(self) -> List[Button]:
         add, edit, remove = super().action_buttons()
-        return [add, Button("Add from profiles", id="btn_aws_account_add_profile"), edit, remove]
+        detected = Button(
+            "Add from profiles", id="btn_aws_account_add_profile", classes="accounts-action"
+        )
+        return [add, detected, edit, remove]
 
     def form_rows(self) -> ComposeResult:
         yield Container(
@@ -182,8 +185,13 @@ class AwsAccountsSection(AccountsSection):
             Static("", id="aws_account_form_hint"),
             Static("", id="aws_account_form_error"),
             Horizontal(
-                Button("Save account", id="btn_aws_account_save", variant="primary"),
-                Button("Cancel", id="btn_aws_account_cancel"),
+                Button(
+                    "Save account",
+                    id="btn_aws_account_save",
+                    variant="primary",
+                    classes="aws-account-form-action",
+                ),
+                Button("Cancel", id="btn_aws_account_cancel", classes="aws-account-form-action"),
                 id="aws_account_form_actions",
             ),
             id="aws_account_form",
