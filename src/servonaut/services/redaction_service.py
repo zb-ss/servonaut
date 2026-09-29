@@ -76,6 +76,21 @@ _KEY_NAMES = [
 # Fake usernames
 _USERNAMES = ["ubuntu", "ec2-user", "admin", "deploy", "root", "centos"]
 
+# Stand-ins for provider account labels, which often name a client or team.
+_ACCOUNT_LABELS = [
+    "north", "south", "east", "west", "alpha", "bravo", "delta", "echo",
+    "harbor", "summit", "meadow", "canyon",
+]
+# A primary account is named after its provider unless renamed; those labels
+# name public taxonomy, not a customer, and stay as they are.
+_PROVIDER_ACCOUNT_LABELS = frozenset({"aws", "hetzner", "ovh"})
+# Environment words identify nobody (the report scrubber leaves them in
+# running text too, so table and messages agree).
+_GENERIC_ACCOUNT_LABELS = _PROVIDER_ACCOUNT_LABELS | frozenset({
+    "prod", "production", "staging", "stage", "dev", "development", "test",
+    "testing", "demo", "main", "default", "primary", "secondary", "backup",
+})
+
 # ---------------------------------------------------------------------------
 # Regex patterns for scrub_stream primitives (compiled once at import time)
 # ---------------------------------------------------------------------------
@@ -220,6 +235,9 @@ class RedactionService:
         self._fake_names: set[str] = set()
         # Stand-ins emitted by redact_dns_label (idempotence, as above).
         self._fake_labels: set[str] = set()
+        # Provider account labels: real -> stand-in, and the stand-ins emitted.
+        self._account_label_cache: dict[str, str] = {}
+        self._fake_account_labels: set[str] = set()
 
     def redact_ip(self, ip: str) -> str:
         """Map a real IP to a documentation-range IP."""
@@ -565,6 +583,31 @@ class RedactionService:
             return username
         return _hash_pick(username, _USERNAMES)
 
+    def redact_account_label(self, label: str) -> str:
+        """Map a provider account label to a stable stand-in.
+
+        Labels often name a client or a team. The default labels of primary
+        accounts ("aws", "hetzner", "ovh") are public taxonomy and stay; any
+        other label always maps to the same stand-in, and two labels never
+        share one, so ``label/name`` references stay distinguishable.
+        Environment words ("prod", "staging", ...) identify nobody and stay.
+        """
+        if not label or label in self._authored or label in self._fake_account_labels:
+            return label
+        if label.strip().lower() in _GENERIC_ACCOUNT_LABELS:
+            return label
+        cached = self._account_label_cache.get(label.lower())
+        if cached is not None:
+            return cached
+        base = _hash_pick(label.lower(), _ACCOUNT_LABELS)
+        fake, number = base, 1
+        while fake in self._fake_account_labels or fake in _GENERIC_ACCOUNT_LABELS:
+            number += 1
+            fake = f"{base}-{number}"
+        self._account_label_cache[label.lower()] = fake
+        self._fake_account_labels.add(fake)
+        return fake
+
     def redact_instance(self, instance: dict[str, Any]) -> dict[str, Any]:
         """Redact all identifiable fields in an instance dict (in-place)."""
         if instance.get("name"):
@@ -586,6 +629,10 @@ class RedactionService:
             instance["provider"] = self.redact_provider(instance["provider"])
         if instance.get("group"):
             instance["group"] = self.redact_group(instance["group"])
+        if instance.get("account"):
+            instance["account"] = self.redact_account_label(instance["account"])
+        if instance.get("account_id"):
+            instance["account_id"] = self.redact_account_id(str(instance["account_id"]))
         if instance.get("username"):
             instance["username"] = self.redact_username(instance["username"])
         # Hostnames in custom servers (may also be a plain IP)

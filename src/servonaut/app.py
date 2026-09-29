@@ -45,6 +45,19 @@ if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
 
 
+def _configured_account_labels(app) -> List[str]:
+    """Every account label in *app*'s config, usable or not (demo scrubbing)."""
+    from servonaut.config.accounts import all_account_refs
+
+    manager = getattr(app, "config_manager", None)
+    if manager is None:
+        return []
+    try:
+        return [ref.label for ref in all_account_refs(manager.get())]
+    except Exception:  # a display helper never breaks a notification
+        return []
+
+
 class ServonautApp(App):
     """Servonaut TUI application."""
 
@@ -262,7 +275,8 @@ class ServonautApp(App):
         cached = self._demo_known_cache
         if cached is None or cached[0] != key:
             known = InventoryScrubber.for_fleet(
-                redaction, self._instances_pristine or [], redaction.real_ids_seen()
+                redaction, self._instances_pristine or [], redaction.real_ids_seen(),
+                accounts=_configured_account_labels(self),
             )
             # Building may hand out stand-ins itself; key on the count after.
             key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
