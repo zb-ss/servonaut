@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from servonaut.models.relay_messages import CommandRequest, CommandType
 from servonaut.services.relay_executors import RelayExecutors
 from servonaut.services.relay_listener import RelayListener, _resolve_account_labels
+from servonaut.services.remediation_executor import REMEDIATION_SOURCE
 from tests._account_fixtures import build_registry
 
 
@@ -218,3 +220,100 @@ def test_build_executors_builds_a_registry_when_none_is_given(monkeypatch):
     config_manager.get.return_value = registry.config
     executors = relay_manager._build_executors(config_manager)
     assert _run(executors.find_instance("mail"))["id"] == "vps-1.example"
+
+
+# ---------------------------------------------------------------------------
+# Ban remediations act in the target server's AWS account
+# ---------------------------------------------------------------------------
+
+PROD_SHOP = {"id": "i-2", "name": "shop", "region": "eu-west-1",
+             "public_ip": "1.1.1.1", "private_ip": "10.0.0.2"}
+
+
+def _ban_configs():
+    from servonaut.config.schema import IPBanConfig
+
+    return [
+        IPBanConfig(name="waf-a", method="waf", ip_set_name="a", region="eu-west-1"),
+        IPBanConfig(name="waf-prod", method="waf", ip_set_name="p", region="eu-west-1",
+                    account="prod"),
+    ]
+
+
+def _ban_listener(monkeypatch, *, configs, instance, aws_accounts=("aws", "prod")):
+    from servonaut.services.relay_listener import RelayListener
+
+    registry, _ = build_registry(monkeypatch, aws={label: [] for label in aws_accounts})
+    executors = MagicMock()
+    executors.accounts = registry
+    executors.find_instance = AsyncMock(
+        return_value=None if instance is None else dict(instance, account=aws_accounts[-1]),
+    )
+    ip_ban = MagicMock()
+    ip_ban.get_configs = MagicMock(return_value=configs)
+    ip_ban.ban_ip = AsyncMock(return_value={"success": True, "message": "banned", "rule_id": "r"})
+    ip_ban.unban_ip = AsyncMock(return_value={"success": True, "message": "unbanned"})
+    executors.ip_ban_service = ip_ban
+    listener = RelayListener(
+        executors=executors, base_url="https://app.example.com",
+        mercure_url="https://hub.example.com/.well-known/mercure",
+        auth_token="tok", user_id="user-1",
+    )
+    listener._post_result = AsyncMock()
+    return listener, ip_ban
+
+
+def _remediation(verb, target="shop"):
+    return json.dumps({
+        "id": f"rmd-{verb}", "user_id": "user-1", "type": verb,
+        "target_server_id": target,
+        "payload": {"finding_id": "fnd-1", "action": verb, "ip": "9.9.9.9",
+                    "method": "waf", "dry_run": False, "applied_strategy": "waf",
+                    "rule_id": "9.9.9.9/32"},
+        "ttl_seconds": 300,
+        "source": REMEDIATION_SOURCE,
+    })
+
+
+def _posted(listener):
+    return listener._post_result.await_args.args[0]
+
+
+@pytest.mark.parametrize("verb,method", [("block_ip", "ban_ip"), ("unblock_ip", "unban_ip")])
+def test_ban_remediation_uses_the_config_of_the_servers_account(monkeypatch, verb, method):
+    listener, ip_ban = _ban_listener(monkeypatch, configs=_ban_configs(), instance=PROD_SHOP)
+    _run(listener._handle_event(_remediation(verb)))
+    getattr(ip_ban, method).assert_awaited_once_with("9.9.9.9", "waf-prod")
+    assert _posted(listener).status == "success"
+
+
+@pytest.mark.parametrize("verb,slug", [
+    ("block_ip", "block_ip_config_missing"), ("unblock_ip", "unblock_ip_config_missing"),
+])
+def test_no_config_in_the_servers_account_is_refused(monkeypatch, verb, slug):
+    configs = [c for c in _ban_configs() if c.name == "waf-a"]
+    listener, ip_ban = _ban_listener(monkeypatch, configs=configs, instance=PROD_SHOP)
+    _run(listener._handle_event(_remediation(verb)))
+    ip_ban.ban_ip.assert_not_awaited()
+    ip_ban.unban_ip.assert_not_awaited()
+    response = _posted(listener)
+    assert response.status == "error"
+    assert response.error_message.startswith(f"{slug}: no IP-ban configuration with method "
+                                             "'waf' acts in AWS account 'prod'")
+
+
+def test_unknown_target_is_refused_with_several_accounts(monkeypatch):
+    listener, ip_ban = _ban_listener(monkeypatch, configs=_ban_configs(), instance=None)
+    _run(listener._handle_event(_remediation("block_ip", target="i-gone")))
+    ip_ban.ban_ip.assert_not_awaited()
+    response = _posted(listener)
+    assert response.status == "error"
+    assert response.error_message.startswith("block_ip_config_missing: cannot choose")
+
+
+def test_single_account_keeps_the_first_matching_config(monkeypatch):
+    listener, ip_ban = _ban_listener(
+        monkeypatch, configs=_ban_configs(), instance=PROD_SHOP, aws_accounts=("aws",),
+    )
+    _run(listener._handle_event(_remediation("block_ip")))
+    ip_ban.ban_ip.assert_awaited_once_with("9.9.9.9", "waf-a")

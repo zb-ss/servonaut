@@ -1286,21 +1286,13 @@ class RelayListener:
         # Resolve the IPBanConfig for the requested method, preferring a
         # region match (envelope region, else the instance's region).
         svc = self._executors.ip_ban_service
-        candidates = [c for c in svc.get_configs() if c.method == method]
         region = str(payload.get("region") or "") or region_hint
-        config = None
-        if region:
-            config = next(
-                (c for c in candidates if c.region == region), None,
-            )
-        if config is None and candidates:
-            config = candidates[0]
+        config, refusal = self._ban_config(
+            instance, method, region, "block_ip_config_missing",
+            "add one under IP Ban settings first",
+        )
         if config is None:
-            return "error", "", (
-                f"block_ip_config_missing: no IP-ban configuration with "
-                f"method '{method}' exists on this CLI — add one under "
-                f"IP Ban settings first"
-            )
+            return "error", "", refusal
 
         extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
         if coerce_dry_run(payload):
@@ -1342,6 +1334,41 @@ class RelayListener:
             payload=payload, slug="block_ip_failed", extra=extra,
         )
         return "success", output, ""
+
+    def _ban_config(
+        self, instance: Optional[dict], method: str, region: str,
+        slug: str, missing_hint: str,
+    ) -> tuple:
+        """``(config, "")``, or ``(None, slug-first refusal)``: the ban config to use.
+
+        Only configs acting in the target server's AWS account qualify: a ban
+        in another account's IP set would be reported as applied while the
+        server stays exposed (and an unban there would miss the real one).
+        Among those, one in *region* is preferred.
+        """
+        from servonaut.services.accounts import UnknownAccountError
+        from servonaut.services.ip_ban_service import configs_for_server
+
+        svc = self._executors.ip_ban_service
+        try:
+            configs, account = configs_for_server(
+                svc.get_configs(), self._executors.accounts, instance,
+            )
+        except UnknownAccountError as exc:
+            return None, f"{slug}: cannot choose an IP-ban configuration — {exc}"
+        candidates = [c for c in configs if c.method == method]
+        config = None
+        if region:
+            config = next((c for c in candidates if c.region == region), None)
+        if config is None and candidates:
+            config = candidates[0]
+        if config is None:
+            where = f"acts in AWS account '{account}'" if account else "exists on this CLI"
+            return None, (
+                f"{slug}: no IP-ban configuration with method '{method}' "
+                f"{where} — {missing_hint}"
+            )
+        return config, ""
 
     async def _execute_rate_limit(
         self, raw: dict, payload: dict, verb: str,
@@ -1628,6 +1655,7 @@ class RelayListener:
         # instance lookup for the region hint only — no self-ban mirror is
         # needed on the unban path.
         region_hint = ""
+        instance = None
         target = str(raw.get("target_server_id") or "")
         if target:
             try:
@@ -1638,21 +1666,13 @@ class RelayListener:
                 region_hint = str(instance.get("region") or "")
 
         svc = self._executors.ip_ban_service
-        candidates = [c for c in svc.get_configs() if c.method == method]
         region = str(payload.get("region") or "") or region_hint
-        config = None
-        if region:
-            config = next(
-                (c for c in candidates if c.region == region), None,
-            )
-        if config is None and candidates:
-            config = candidates[0]
+        config, refusal = self._ban_config(
+            instance, method, region, "unblock_ip_config_missing",
+            f"cannot undo a '{method}' ban without its config",
+        )
         if config is None:
-            return "error", "", (
-                f"unblock_ip_config_missing: no IP-ban configuration with "
-                f"method '{method}' exists on this CLI — cannot undo a "
-                f"'{method}' ban without its config"
-            )
+            return "error", "", refusal
 
         extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
         if coerce_dry_run(payload):

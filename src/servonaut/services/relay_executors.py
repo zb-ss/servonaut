@@ -220,6 +220,11 @@ class RelayExecutors:
         return await self._find_instance(identifier)
 
     @property
+    def accounts(self):
+        """The account registry (None: only the default accounts are known)."""
+        return self._accounts
+
+    @property
     def ip_ban_service(self):
         """Lazily-built :class:`IPBanService` for local-dispatch
         remediation verbs. Built from this executor's own config manager

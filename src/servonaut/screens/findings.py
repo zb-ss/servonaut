@@ -1174,20 +1174,13 @@ class FindingDetailScreen(Screen[bool]):
         Raises:
             UnknownAccountError: The server's account no longer exists.
         """
+        from servonaut.services.ip_ban_service import configs_in_account
+
         registry = registry_for(self.app, "aws")
         if registry is None or not registry.is_multi("aws") or instance is None:
             return list(configs), ""
         owner = registry.account_for(instance)
-        matching = []
-        for config in configs:
-            label = getattr(config, "account", "")
-            try:
-                ref = registry.account("aws", label if isinstance(label, str) and label else None)
-            except UnknownAccountError:
-                continue
-            if ref.key == owner.key:
-                matching.append(config)
-        return matching, owner.label
+        return configs_in_account(configs, registry, owner.label), owner.label
 
     @classmethod
     def _is_aws_instance(cls, instance: Optional[Dict[str, Any]]) -> bool:
