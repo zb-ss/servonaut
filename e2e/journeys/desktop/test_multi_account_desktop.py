@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from e2e.harness import aws, fleet
-from e2e.journeys.desktop.test_desktop_ui import _click_widget, _nav, _open_session
+from e2e.harness.desktop import click_widget, nav, open_session
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_browser, pytest.mark.asyncio]
 
@@ -50,7 +50,7 @@ def _group_options(tui) -> list[str]:
 async def test_desktop_fleet_and_account_picker(desktop, seed, moto):
     _seed_accounts(seed, moto)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tui = app.tui
 
         # The fleet names each server after its account.
@@ -59,7 +59,7 @@ async def test_desktop_fleet_and_account_picker(desktop, seed, moto):
         assert {"aws/app-1", "aws/web-1", f"{SECOND}/web-1", f"{SECOND}/jobs-1"} <= rows
 
         # CloudWatch opens on the default account's log groups...
-        await _nav(page, app, "nav_cloudwatch")
+        await nav(page, app, "nav_cloudwatch")
         await tui.wait_for_screen("CloudWatchBrowserScreen")
         await tui.wait_until(lambda: PRIMARY_GROUP in _group_options(tui), desc="primary groups")
         picker = tui.on_screen("#cw_filter_account")
@@ -67,7 +67,7 @@ async def test_desktop_fleet_and_account_picker(desktop, seed, moto):
 
         # ...and picking the other account with the mouse and keyboard lists its own.
         select = tui.on_screen("#cw_filter_account_select")
-        await _click_widget(page, app, select)
+        await click_widget(page, app, select)
         await tui.wait_until(lambda: select.expanded, desc="the account list open")
         # One key at a time: the menu must have moved before Enter picks.
         menu = select.query_one("SelectOverlay")
