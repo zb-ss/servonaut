@@ -447,6 +447,8 @@ def make_listener(*, executors="default"):
     if executors == "default":
         executors = MagicMock()
         executors.execute = AsyncMock()
+        # One account per provider: every IP-ban config qualifies.
+        executors.accounts = None
     listener = RelayListener(
         executors=executors,
         base_url="https://app.example.com",

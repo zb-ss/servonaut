@@ -422,6 +422,75 @@ def test_ip_ban_configs_filtered_by_account(monkeypatch):
     assert audit_rows(tools)[-1][3] == "validation: account_mismatch"
 
 
+def _block_ip_tools(monkeypatch, site_account):
+    """Tools with two AWS accounts, a ban config in each, and no WebACL."""
+    from servonaut.config.schema import IPBanConfig
+
+    registry, _ = build_registry(monkeypatch, aws={"aws": [], "prod": []})
+    registry.config.ip_ban_configs = [
+        IPBanConfig(name="waf-a", method="waf", ip_set_name="a"),
+        IPBanConfig(name="waf-prod", method="waf", ip_set_name="p", account="prod"),
+    ]
+    tools = make_tools(registry)
+    service = MagicMock()
+    service.get_configs.return_value = registry.config.ip_ban_configs
+    banned = []
+
+    async def _ban(ip, config_name):
+        banned.append(config_name)
+        return {"success": True, "message": "banned"}
+
+    service.ban_ip = _ban
+    tools._ip_ban_service = service
+    acl = {"error": "no WebACL found"}
+    if site_account is not None:
+        acl["account"] = site_account
+
+    async def _resolve(site, region="", account=""):
+        return dict(acl)
+
+    monkeypatch.setattr(tools, "_resolve_webacl", _resolve)
+    return tools, banned
+
+
+def test_block_ip_uses_a_ban_config_of_the_sites_account(monkeypatch):
+    tools, banned = _block_ip_tools(monkeypatch, site_account="prod")
+    out = _run(tools.block_ip("9.9.9.9", site="prod/shop"))
+    assert "config 'waf-prod'" in out and banned == ["waf-prod"]
+
+
+def test_block_ip_never_guesses_the_sites_account(monkeypatch):
+    tools, banned = _block_ip_tools(monkeypatch, site_account=None)
+    out = _run(tools.block_ip("9.9.9.9", site="gone-1"))
+    assert "layer_used: host" in out and "AWS account is unknown" in out
+    assert banned == []
+
+
+def test_webacl_site_account_is_only_named_when_known(monkeypatch):
+    from unittest.mock import patch
+
+    registry, _ = build_registry(
+        monkeypatch,
+        aws={"aws": [], "prod": [{"id": "i-2", "name": "shop", "region": "eu-west-1"}]},
+    )
+    tools = make_tools(registry)
+
+    class _Ingress:
+        def __init__(self, account=None):
+            pass
+
+        async def describe(self, *args):
+            return {"load_balancers": []}
+
+    with patch("servonaut.services.ingress_path_service.IngressPathService", _Ingress):
+        found = _run(tools._resolve_webacl("prod/shop"))
+        missing = _run(tools._resolve_webacl("gone-1"))
+        named = _run(tools._resolve_webacl("gone-1", account="prod"))
+    assert found["account"] == "prod" and "error" in found
+    assert "account" not in missing
+    assert named["account"] == "prod"
+
+
 def test_fleet_health_snapshot_account_filter(two_projects, monkeypatch):
     tools, _ = two_projects
     probed = []
