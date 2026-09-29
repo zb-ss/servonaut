@@ -254,3 +254,12 @@ def test_unknown_account_without_configured_projects(monkeypatch, capsys):
         cli_hetzner.handle_hetzner_command(args)
     assert exit_info.value.code == cli_hetzner._EXIT_VALIDATION
     assert "No Hetzner account named 'staging'" in capsys.readouterr().err
+
+
+def test_destroy_a_server_no_project_lists_is_refused(projects):
+    _, services = projects
+    rc, _, err = _cli(["destroy", "ghost", "--yes"])
+    assert rc == cli_hetzner._EXIT_GENERIC_ERROR
+    assert "No Hetzner server 'ghost' in any account (hetzner, staging)." in err
+    assert "--account" in err
+    assert all(not s.called("delete_server") for s in services.values())
