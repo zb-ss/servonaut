@@ -89,6 +89,28 @@ def qualifier_provider(registry: Optional[AccountRegistry], reference: str) -> O
     return ref.provider if ref is not None else None
 
 
+def with_ovh_login(row: dict, config: Any) -> dict:
+    """*row*, and for an OVH server a copy carrying its account's login.
+
+    The CLI reads ``username`` and ``ssh_key`` from the row, as custom and
+    Hetzner rows carry them. An OVH server takes both from the account it
+    belongs to, the same way the TUI and the MCP tools connect to it. A
+    username already on the row is kept.
+    """
+    if not row.get("is_ovh"):
+        return row
+    from types import SimpleNamespace
+
+    from servonaut.services.connection_service import ConnectionService
+
+    login = ConnectionService(SimpleNamespace(get=lambda: config)).resolve_ovh_connection(row)
+    enriched = dict(row)
+    enriched["username"] = row.get("username") or login["username"]
+    if login["key_path"] and not row.get("ssh_key"):
+        enriched["ssh_key"] = login["key_path"]
+    return enriched
+
+
 def _rows(value: Any) -> List[dict]:
     """*value* as a list of server rows (anything else reads as no rows)."""
     if not isinstance(value, (list, tuple)):
