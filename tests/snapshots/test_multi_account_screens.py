@@ -141,6 +141,7 @@ def test_cloudwatch_two_accounts(screen_snapshot, size: str) -> None:
     _capture(screen_snapshot, size, _cloudwatch)
 
 
-def test_cloudtrail_two_accounts(screen_snapshot) -> None:
-    """The account picker leads the CloudTrail filters."""
-    _capture(screen_snapshot, "160x50", _cloudtrail)
+@sizes
+def test_cloudtrail_two_accounts(screen_snapshot, size: str) -> None:
+    """The account picker leads the CloudTrail filters, wide and narrow."""
+    _capture(screen_snapshot, size, _cloudtrail)
