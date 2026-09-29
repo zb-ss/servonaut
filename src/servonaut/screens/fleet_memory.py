@@ -35,6 +35,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.instance_resolver import display_name
 
 # Status constants and classifier live in the dependency-free service module
 # so that both the fleet scan service and this screen share one implementation.
@@ -454,6 +455,9 @@ class FleetMemoryScreen(Screen):
             inst = inst_by_id.get(iid) or inst_by_id.get(raw_iid, {
                 "id": iid, "name": iname, "provider": provider,
             })
+            if inst.get("account_qualified"):
+                # A listed server of a provider with several accounts.
+                iname = display_name(inst)
             status = compute_memory_status(inst, memory_service)
 
             modules_count = fleet_row.get("modules", 0)
@@ -513,7 +517,7 @@ class FleetMemoryScreen(Screen):
         self._rows = []
         for inst in instances:
             iid = inst.get("id") or inst.get("name", "")
-            iname = inst.get("name", iid)
+            iname = display_name(inst) if inst.get("account_qualified") else inst.get("name", iid)
             provider = instance_provider(inst)
             status = compute_memory_status(inst, memory_service)
 

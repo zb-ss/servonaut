@@ -45,6 +45,19 @@ if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
 
 
+def _configured_account_labels(app) -> List[str]:
+    """Every account label in *app*'s config, usable or not (demo scrubbing)."""
+    from servonaut.config.accounts import all_account_refs
+
+    manager = getattr(app, "config_manager", None)
+    if manager is None:
+        return []
+    try:
+        return [ref.label for ref in all_account_refs(manager.get())]
+    except Exception:  # a display helper never breaks a notification
+        return []
+
+
 class ServonautApp(App):
     """Servonaut TUI application."""
 
@@ -262,7 +275,8 @@ class ServonautApp(App):
         cached = self._demo_known_cache
         if cached is None or cached[0] != key:
             known = InventoryScrubber.for_fleet(
-                redaction, self._instances_pristine or [], redaction.real_ids_seen()
+                redaction, self._instances_pristine or [], redaction.real_ids_seen(),
+                accounts=_configured_account_labels(self),
             )
             # Building may hand out stand-ins itself; key on the count after.
             key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
@@ -398,6 +412,12 @@ class ServonautApp(App):
         self.aws_service = accounts.default_service("aws") or self.aws_service
         self.hetzner_service = accounts.default_service("hetzner")
         self.ovh_service = accounts.default_service("ovh")
+        # Object storage of the provider blocks (the primary accounts). The
+        # default AWS account signs with its own credentials (its profile
+        # when aws.profile is set); Hetzner and OVH need their S3 keys.
+        self.aws_object_storage_service = accounts.object_storage("aws")
+        self.hetzner_object_storage_service = accounts.object_storage("hetzner")
+        self.ovh_object_storage_service = accounts.object_storage("ovh")
         if self.ovh_service is None:
             self.ovh_billing_service = None
             self.ovh_vps_service = self.ovh_dedicated_service = None
@@ -462,7 +482,6 @@ class ServonautApp(App):
         """Create all service instances."""
         from servonaut.config.manager import ConfigManager
         from servonaut.services.cache_service import CacheService
-        from servonaut.services.aws_service import AWSService
         from servonaut.services.ssh_service import SSHService
         from servonaut.services.connection_service import ConnectionService
         from servonaut.services.scan_service import ScanService
@@ -491,23 +510,18 @@ class ServonautApp(App):
         self.accounts = AccountRegistry(
             config, aws_cache_service=self.cache_service, config_manager=self.config_manager,
         )
-        self.aws_service = self.accounts.default_service("aws") or AWSService(self.cache_service)
-        # AWS audit logger and S3 object storage — always constructed;
-        # boto3 default credential chain is used when keys are empty.
+        # OVH and Hetzner Cloud are optional: the registry builds an account
+        # only when it can connect (OVH: credentials configured; Hetzner: a
+        # token resolves), so a provider without one stays None and the rest
+        # of the app stays blind to it.
+        self._bind_provider_aliases()
+        # AWS audit logger — always constructed.
         from servonaut.services.aws_audit import AWSAuditLogger
-        from servonaut.services.object_storage_factory import build_object_storage_services
         self.aws_audit = AWSAuditLogger(config.aws.audit_path)
         # Shared boto3 client factory — control-plane STS role / region pinning.
         # Backs aws_call + CloudWatch reads; defaults to the ambient credential
         # chain when no control-plane role is configured (no behaviour change).
         self.aws_client_factory = self.accounts.aws_client_factory()
-        # Delegate object-storage construction to the shared factory so that
-        # the headless MCP server (mcp/server.py) reuses the same logic.
-        (
-            self.aws_object_storage_service,
-            self.hetzner_object_storage_service,
-            self.ovh_object_storage_service,
-        ) = build_object_storage_services(config)
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -564,12 +578,6 @@ class ServonautApp(App):
         )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         self._init_voice_services(config.voice)
-        # OVH and Hetzner Cloud — optional. The registry builds an account
-        # only when it can connect (OVH: credentials configured; Hetzner: a
-        # token resolves), so a provider without one stays None here and the
-        # rest of the app stays blind to it.
-        self._bind_provider_aliases()
-
         # Initialize GCP/Azure if configured
         try:
             gcp_config = config.gcp if hasattr(config, 'gcp') else None
