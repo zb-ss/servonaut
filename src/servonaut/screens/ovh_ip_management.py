@@ -1,4 +1,8 @@
-"""OVH IP management screen — list IPs, move failover IPs, manage reverse DNS."""
+"""OVH IP management screen — list IPs, move failover IPs, manage reverse DNS.
+
+IP blocks belong to one OVH account: with several accounts configured, a
+picker chooses the account listed and changed.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,12 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    ovh_services,
+    registry_for,
+)
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -27,6 +37,9 @@ class OVHIPManagementScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":
@@ -56,6 +69,10 @@ class OVHIPManagementScreen(Screen):
                 yield Static(
                     "[bold cyan]OVH IP Management[/bold cyan]",
                     id="ip_mgmt_title",
+                )
+                # Hidden unless several OVH accounts are configured.
+                yield AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh", id="ip_mgmt_account",
                 )
                 yield DataTable(id="ip_table")
                 with Horizontal(id="ip_actions"):
@@ -115,7 +132,26 @@ class OVHIPManagementScreen(Screen):
         table = self.query_one("#ip_table", DataTable)
         table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
         table.cursor_type = "row"
+        self._account = self.query_one("#ip_mgmt_account", AccountPicker).account
         self.run_worker(self._load_ips(), exclusive=True)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: list its IPs instead."""
+        self._account = event.account
+        self._ips = []
+        self._selected_ip = None
+        self._hide_move_form()
+        self._hide_rdns_form()
+        self.query_one("#ip_table", DataTable).clear()
+        self.run_worker(self._load_ips(), exclusive=True)
+
+    def _ip_service(self):
+        """The chosen account's IP service (None when unavailable)."""
+        try:
+            return ovh_services(self.app, self._account).ip
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -184,7 +220,7 @@ class OVHIPManagementScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_ips(self) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -289,7 +325,7 @@ class OVHIPManagementScreen(Screen):
         )
 
     async def _do_move_ip(self, ip: str, target: str) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -333,7 +369,7 @@ class OVHIPManagementScreen(Screen):
             self.notify("Please enter a reverse DNS hostname.", severity="warning")
             return
 
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -398,7 +434,7 @@ class OVHIPManagementScreen(Screen):
         if not confirmed:
             return
 
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return

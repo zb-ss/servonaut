@@ -1,4 +1,8 @@
-"""OVH DNS zone and record management screen for Servonaut."""
+"""OVH DNS zone and record management screen for Servonaut.
+
+Zones and reverse DNS belong to one OVH account: with several accounts
+configured, a picker chooses the account shown and changed.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,13 @@ from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import keep_cursor
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    ovh_services,
+    registry_for,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -43,6 +53,8 @@ class OVHDNSScreen(Screen):
     # Internal state
     # ------------------------------------------------------------------
 
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
     _domains: List[str]
     _records: List[dict]
     _selected_zone: Optional[str]
@@ -67,6 +79,10 @@ class OVHDNSScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static("[bold cyan]OVH DNS Management[/bold cyan]", id="dns_title"),
+                # Hidden unless several OVH accounts are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh", id="dns_account",
+                ),
 
                 Static(
                     "[bold]Domains[/bold]", classes="section_header",
@@ -147,8 +163,35 @@ class OVHDNSScreen(Screen):
         self._setup_tables()
         self._hide_form()
         self._hide_rdns_form()
+        self._account = self.query_one("#dns_account", AccountPicker).account
         self.run_worker(self._load_domains(), exclusive=False)
         self.run_worker(self._load_rdns(), exclusive=False)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: show its zones and reverse DNS instead.
+
+        Loads still running for the previous account notice the switch and
+        drop what they fetched (see ``_still_showing``).
+        """
+        self._account = event.account
+        self._domains = []
+        self._records = []
+        self._selected_zone = None
+        self._edit_record_id = None
+        self._rdns_entries = []
+        self._rdns_loaded = False
+        self._hide_form()
+        self._hide_rdns_form()
+        self._set_domains_status(None)
+        self.query_one("#selected_zone", Static).update("")
+        for selector in ("#domains_table", "#records_table", "#rdns_table"):
+            self.query_one(selector, DataTable).clear()
+        self.run_worker(self._load_domains(), exclusive=False)
+        self.run_worker(self._load_rdns(), exclusive=False)
+
+    def _still_showing(self, account: str) -> bool:
+        """Whether *account* is still the chosen one (a load may outlive a switch)."""
+        return account == self._account
 
     def _setup_tables(self) -> None:
         domains_tbl = self.query_one("#domains_table", DataTable)
@@ -263,8 +306,17 @@ class OVHDNSScreen(Screen):
     # Data helpers
     # ------------------------------------------------------------------
 
+    def _services(self):
+        """The chosen account's services, or None after telling the user why."""
+        try:
+            return ovh_services(self.app, self._account)
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
+
     def _get_dns_service(self):
-        return getattr(self.app, "ovh_dns_service", None)
+        services = self._services()
+        return services.dns if services is not None else None
 
     def _get_selected_domain(self) -> Optional[str]:
         tbl = self.query_one("#domains_table", DataTable)
@@ -281,7 +333,8 @@ class OVHDNSScreen(Screen):
         return self._records[row]
 
     def _get_ip_service(self):
-        return getattr(self.app, "ovh_ip_service", None)
+        services = self._services()
+        return services.ip if services is not None else None
 
     def _get_selected_rdns(self) -> Optional[dict]:
         tbl = self.query_one("#rdns_table", DataTable)
@@ -295,6 +348,7 @@ class OVHDNSScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_domains(self) -> None:
+        account = self._account
         svc = self._get_dns_service()
         tbl = self.query_one("#domains_table", DataTable)
         tbl.clear()
@@ -305,6 +359,8 @@ class OVHDNSScreen(Screen):
 
         try:
             domains = await svc.list_domains()
+            if not self._still_showing(account):
+                return
             self._domains = domains
             self._render_domains()
             if domains:
@@ -312,11 +368,13 @@ class OVHDNSScreen(Screen):
             else:
                 # list_domains() swallows API errors and returns [] — an
                 # empty result might be a revoked credential, not zero zones.
-                ovh_svc = getattr(self.app, "ovh_service", None)
+                services = self._services()
+                ovh_svc = services.ovh if services is not None else None
                 cred_error = (
                     await ovh_svc.check_credentials() if ovh_svc else None
                 )
-                self._set_domains_status(cred_error)
+                if self._still_showing(account):
+                    self._set_domains_status(cred_error)
         except Exception as exc:
             logger.error("_load_domains failed: %s", exc)
             self.notify(
@@ -351,6 +409,7 @@ class OVHDNSScreen(Screen):
         header.update(f"[bold]Domains[/bold]\n[red]⚠ {escape(error)}[/red]")
 
     async def _load_records(self, zone_name: str) -> None:
+        account = self._account
         svc = self._get_dns_service()
         self.query_one("#records_table", DataTable).clear()
         self._records = []
@@ -360,7 +419,10 @@ class OVHDNSScreen(Screen):
 
         self._render_records(zone_name)
         try:
-            self._records = await svc.list_records(zone_name)
+            records = await svc.list_records(zone_name)
+            if not self._still_showing(account):
+                return
+            self._records = records
             self._render_records(zone_name)
         except Exception as exc:
             logger.error("_load_records(%r) failed: %s", zone_name, exc)
@@ -382,6 +444,7 @@ class OVHDNSScreen(Screen):
 
     async def _load_rdns(self) -> None:
         """Load reverse DNS entries for all IP blocks on the account."""
+        account = self._account
         ip_svc = self._get_ip_service()
         self.query_one("#rdns_table", DataTable).clear()
         self._rdns_entries = []
@@ -414,6 +477,8 @@ class OVHDNSScreen(Screen):
             except Exception as exc:
                 logger.error("_load_rdns: list_reverse_dns(%r) failed: %s", ip_block, exc)
 
+        if not self._still_showing(account):
+            return
         self._rdns_entries = entries_found
         self._rdns_loaded = True
         self._render_rdns()
