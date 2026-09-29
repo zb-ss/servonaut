@@ -692,9 +692,19 @@ def test_tools_of_a_provider_without_usable_accounts_are_hidden(monkeypatch):
     assert not tools.has_hetzner and not tools.has_ovh
 
 
-def test_a_single_hetzner_project_that_cannot_connect_says_why(monkeypatch, tmp_path):
-    """The token error already says where the token is read from: no extra hint."""
-    from servonaut.config.schema import AppConfig, HetznerConfig
+PRIMARY_TOKEN_MISSING = "No Hetzner Cloud API token configured. Set config.hetzner.api_token"
+EXTRA_TOKEN_MISSING = "No API token resolved for this Hetzner project. Check its api_token"
+
+
+@pytest.mark.parametrize("extra, starts, reasons", [
+    (False, "Error: Hetzner is not available: ", [PRIMARY_TOKEN_MISSING]),
+    (True, "Error: No Hetzner account is available (hetzner: ",
+     [PRIMARY_TOKEN_MISSING, EXTRA_TOKEN_MISSING]),
+])
+def test_hetzner_projects_that_cannot_connect_say_why_once(monkeypatch, tmp_path,
+                                                           extra, starts, reasons):
+    """Each token error already says where the token is read from: no extra hint."""
+    from servonaut.config.schema import AppConfig, HetznerAccount, HetznerConfig
     from servonaut.services.accounts import AccountRegistry
 
     monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
@@ -702,10 +712,16 @@ def test_a_single_hetzner_project_that_cannot_connect_says_why(monkeypatch, tmp_
         "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE", tmp_path / "missing",
     )
     config = AppConfig()
-    config.hetzner = HetznerConfig(enabled=True, api_token="$UNSET_HETZNER_TOKEN")
+    config.hetzner = HetznerConfig(
+        enabled=True, api_token="$UNSET_HETZNER_TOKEN",
+        accounts=[HetznerAccount(label="staging", api_token="$UNSET_STAGING_TOKEN")]
+        if extra else [],
+    )
     tools = make_tools(AccountRegistry(config))
     out = _run(tools.hetzner_list_ssh_keys())
-    assert out.startswith("Error: Hetzner is not available: No Hetzner Cloud API token configured")
+    assert out.startswith(starts)
+    for reason in reasons:
+        assert out.count(reason) == 1
     assert out.count("HCLOUD_TOKEN") == 1 and ".." not in out
     assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
 
