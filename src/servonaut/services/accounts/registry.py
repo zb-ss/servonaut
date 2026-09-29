@@ -35,6 +35,7 @@ from servonaut.config.accounts import (
     hetzner_accounts,
     ovh_accounts,
     ovh_cache_path,
+    primary_label,
 )
 from servonaut.services.accounts.aws_account import AWSAccountContext
 from servonaut.services.accounts.fleet import ACCOUNT_KEY, AccountBinding, AccountFleet
@@ -393,43 +394,54 @@ class AccountRegistry:
     def object_storage(self, provider: str, account: Optional[str] = None) -> Any:
         """One account's object storage service, or None when not configured.
 
-        AWS accounts sign with their own credentials unless S3 keys are set
-        for the primary account. A Hetzner project or OVH account needs its
-        own S3 keys (object storage is a separate product with its own
-        credentials); an extra account without them has no object storage.
+        Object storage is a product of its own: a Hetzner project or OVH
+        account can have S3 keys without any usable compute credentials, so
+        the keys are read from the account's config entry directly. AWS
+        accounts sign with their own credentials unless S3 keys are set for
+        the primary account (extra AWS accounts have no S3 settings).
 
         Raises:
-            UnknownAccountError: No usable account of *provider* has that label.
+            UnknownAccountError: No account of *provider* has that label.
         """
         from servonaut.services.object_storage_factory import (
             build_aws_object_storage,
             build_keyed_object_storage,
         )
 
-        ref = self.account(provider, account)
-        cache_key = f"{provider}:{ref.key}"
+        key, storage, context = self._object_storage_source(provider, account)
+        cache_key = f"{provider}:{key}"
         if cache_key in self._object_storage:
             return self._object_storage[cache_key]
-        config = self._config
         if provider == AWS:
-            # Only the primary account has S3 settings of its own; extra
-            # accounts use their profile and the provider default region.
-            storage = config.aws.object_storage if ref.primary else _empty_storage()
             service = build_aws_object_storage(
-                storage, config.aws.default_region, self._aws_contexts[ref.key]
-            )
-        elif provider == HETZNER:
-            service = build_keyed_object_storage(
-                HETZNER, self._providers[HETZNER].services[ref.key]._config.object_storage
-            )
-        elif provider == OVH:
-            service = build_keyed_object_storage(
-                OVH, self._providers[OVH].services[ref.key]._config.object_storage
+                storage, self._config.aws.default_region, context
             )
         else:
-            raise UnknownAccountError(f"No object storage for provider {provider!r}")
+            service = build_keyed_object_storage(provider, storage)
         self._object_storage[cache_key] = service
         return service
+
+    def _object_storage_source(self, provider: str, account: Optional[str]):
+        """(cache key, ObjectStorageConfig, AWS context or None) for an account."""
+        config = self._config
+        if provider == AWS:
+            ref = self.account(AWS, account)
+            storage = config.aws.object_storage if ref.primary else _empty_storage()
+            return ref.key, storage, self._aws_contexts[ref.key]
+        if provider not in (HETZNER, OVH):
+            raise UnknownAccountError(f"No object storage for provider {provider!r}")
+        block = config.hetzner if provider == HETZNER else config.ovh
+        primary = primary_label(provider, block)
+        wanted = (account or "").strip().lower()
+        if not wanted or wanted == primary.lower():
+            return primary.lower(), block.object_storage, None
+        for entry in block.accounts:
+            if (entry.label or "").strip().lower() == wanted:
+                return wanted, entry.object_storage, None
+        known = ", ".join([primary] + [e.label for e in block.accounts if e.label])
+        raise UnknownAccountError(
+            f"No {PROVIDER_TITLES[provider]} account named {account!r}. Accounts: {known}"
+        )
 
     def aws_account_for_id(self, account_id: str) -> Optional[AccountRef]:
         """The configured AWS account whose 12-digit id is *account_id*.

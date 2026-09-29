@@ -40,6 +40,7 @@ from servonaut.services.memory.status import (
 )
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.utils.instance_resolver import display_name
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +399,7 @@ class MemoryScreen(Screen):
         from rich.markup import escape
 
         instance_id = self._instance.get("id") or self._instance.get("name", "unknown")
-        instance_name = self._instance.get("name") or instance_id
+        instance_name = display_name(self._instance) or instance_id
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
@@ -538,9 +539,7 @@ class MemoryScreen(Screen):
     def _render_title(self) -> None:
         from rich.markup import escape
 
-        name = (
-            self._instance.get("name") or self._instance.get("id") or "unknown"
-        )
+        name = display_name(self._instance) or self._instance.get("id") or "unknown"
         self.query_one("#memory-title", Static).update(
             f"[bold cyan]Server Memory: {escape(str(name))}[/bold cyan]"
         )
