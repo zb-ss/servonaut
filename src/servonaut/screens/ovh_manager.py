@@ -43,6 +43,7 @@ from servonaut.screens._provider_accounts import (
     fetched_row,
     inventory,
     ovh_services,
+    provider_accounts,
     row_ovh_services,
     row_service,
     with_account,
@@ -398,14 +399,25 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         self._refresh()
 
     def action_new(self) -> None:
-        if ovh_services(self.app).cloud is None:
+        # The wizard picks the account itself; it starts on the first usable
+        # one, which is not the primary account when that one cannot connect.
+        usable = provider_accounts(self.app, "ovh")
+        account = usable[0].label if usable else None
+        try:
+            cloud = ovh_services(self.app, account).cloud
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return
+        if cloud is None:
             self.notify(
                 "OVH Cloud service is not available.",
                 severity="warning", markup=False,
             )
             return
         from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
-        self.app.push_screen(OVHCloudCreateScreen(), callback=self._on_create_closed)
+        self.app.push_screen(
+            OVHCloudCreateScreen(account=account), callback=self._on_create_closed,
+        )
 
     def _on_create_closed(self, created: Optional[bool]) -> None:
         """Reload the list once the wizard has created an instance."""

@@ -307,3 +307,40 @@ async def test_ovh_server_action_uses_the_servers_own_account(tui, seed, provide
     assert _mutations(providers, "ovh", BACKUP) == [("POST", f"{vps_path}/createSnapshot")]
     assert _mutations(providers, "ovh", OVH) == []
     assert not providers.requests("ovh", path=f"{vps_path}(/.*)?", account=OVH)
+
+
+async def test_ovh_new_instance_opens_when_only_the_second_account_works(tui, seed, providers):
+    # The primary OVH account has no credentials; only the second one works.
+    fleet.seed_provider_fleet(providers, hetzner=False)
+    fleet.seed_second_accounts(providers, hetzner=False)
+    seed.cache(fleet.cache_rows(fleet.APP_1), fresh=True)
+    seed.config(ovh=seed.ovh_config(
+        application_key="", accounts=[seed.ovh_account(BACKUP)],
+    ))
+    batch_3 = fleet.OVH_SECOND_BATCH_3
+
+    async with tui() as t:
+        await t.nav("nav_ovh_manage")
+        await t.wait_for_screen("OVHManagerScreen")
+        # Only the second account's servers, still named by account; the
+        # primary account is reported rather than silently dropped.
+        await t.wait_until(
+            lambda: set(_names(t, OVH_TABLE)) == {f"{BACKUP}/{WEB_1}", f"{BACKUP}/{batch_3.name}"},
+            desc="the second account's servers",
+        )
+        await t.wait_for_toast(rf"^OVH refresh incomplete\. {OVH}: not available: ")
+        await press(t, "#btn_ovh_mgr_new")
+        await t.wait_for_screen("OVHCloudCreateScreen")
+        await t.wait_until(
+            lambda: t.table_rows("#flavors_table") and t.table_rows("#images_table"),
+            desc="the second account's flavors and images",
+        )
+        await t.press("escape")
+        await t.wait_for_screen("OVHManagerScreen")
+
+    project = fleet.OVH_SECOND_PROJECT_ID
+    assert providers.requests(
+        "ovh", method="GET", path=rf"/cloud/project/{project}/.+", account=BACKUP
+    )
+    assert not providers.requests("ovh", path=rf"/cloud/project/{fleet.OVH_PROJECT_ID}(/.*)?")
+    assert providers.mutations("ovh") == []

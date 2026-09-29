@@ -236,7 +236,10 @@ class Host(App):
         self.instances: List[dict] = []
         self.hetzner_service = accounts.registry.default_service("hetzner")
         self.ovh_service = accounts.registry.default_service("ovh")
-        self.ovh_cloud_service = accounts.registry.ovh_services().cloud
+        # Like the app: without a usable primary account there is no default.
+        self.ovh_cloud_service = (
+            accounts.registry.ovh_services().cloud if self.ovh_service is not None else None
+        )
 
     def provider_inventory(self, provider: str):
         return self.accounts.fleet(provider)
@@ -1193,3 +1196,200 @@ async def test_an_older_key_load_never_draws_over_a_newer_one(accounts, config):
         await older
         assert [key["name"] for key in screen._keys] == ["new"]
         assert _names(screen, "hetzner_ssh_keys_table") == ["new"]
+
+
+# ---------------------------------------------------------------------------
+# The primary account cannot connect, another account can
+# ---------------------------------------------------------------------------
+#
+# There is no default account then: every screen must work in the usable
+# account, and anything that still asks for the default one must say why it
+# cannot instead of ending the app.
+
+
+@pytest.fixture
+def extra_only(monkeypatch) -> tuple:
+    """Hetzner and OVH whose primary accounts cannot connect, plus one extra each."""
+    monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+    config = _config()
+    config.hetzner.api_token = ""
+    config.ovh.application_key = ""
+    accounts = _registry(config)
+    assert [r.label for r in accounts.registry.accounts("hetzner")] == ["staging"]
+    assert [r.label for r in accounts.registry.accounts("ovh")] == ["ca"]
+    return accounts, config
+
+
+@pytest.mark.asyncio
+async def test_ovh_manager_works_without_a_usable_primary_account(extra_only):
+    from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
+    from servonaut.screens.ovh_manager import OVHManagerScreen
+
+    accounts, config = extra_only
+    app = Host(accounts, config)
+    async with app.run_test(size=(200, 48)) as pilot:
+        screen = OVHManagerScreen()
+        await app.push_screen(screen)
+        table = screen.query_one("#ovh_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1, "the usable account's instance")
+        table.focus()
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: accounts.ovh["ca"].calls, "the start")
+
+        # New opens the wizard on the usable account instead of ending the app.
+        screen.action_new()
+        await _wait_for(pilot, lambda: isinstance(app.screen, OVHCloudCreateScreen), "the wizard")
+        wizard = app.screen
+        await _wait_for(
+            pilot, lambda: accounts.bundles["ca"].cloud.list_regions.await_count >= 1,
+            "the usable account's regions",
+        )
+        assert wizard._account == "ca" and wizard._project_id == "proj-ca"
+        app.pop_screen()
+        await pilot.pause()
+        assert app.is_running and app.screen is screen
+    assert accounts.ovh["ca"].calls == [("start_instance", "proj-ca/inst-1", "cloud")]
+
+
+@pytest.mark.parametrize(("module", "cls", "loaded", "act"), [
+    (
+        "servonaut.screens.ovh_ssh_keys", "OVHSSHKeysScreen",
+        lambda screen: _names(screen, "ssh_keys_table") == ["ca-key"],
+        lambda screen: screen.action_refresh(),
+    ),
+    (
+        "servonaut.screens.ovh_storage", "OVHStorageScreen",
+        lambda screen: _names(screen, "volumes_table") == ["ca-vol"],
+        lambda screen: screen.action_refresh(),
+    ),
+    (
+        "servonaut.screens.ovh_billing", "OVHBillingScreen",
+        lambda screen: _column(screen, "invoices_table", 1) == ["ca-bill"],
+        lambda screen: screen.refresh_after_demo_toggle(),
+    ),
+    (
+        "servonaut.screens.ovh_dns", "OVHDNSScreen",
+        lambda screen: _names(screen, "domains_table") == ["ca.example"],
+        lambda screen: screen.run_worker(screen._load_records("ca.example")),
+    ),
+    (
+        "servonaut.screens.ovh_ip_management", "OVHIPManagementScreen",
+        lambda screen: bool(screen._ips),
+        lambda screen: screen._start_load(),
+    ),
+])
+@pytest.mark.asyncio
+async def test_ovh_account_screens_work_without_a_usable_primary_account(
+    extra_only, module, cls, loaded, act
+):
+    import importlib
+
+    accounts, config = extra_only
+    app = Host(accounts, config)
+    notes: List[str] = []
+    app.notify = lambda message, *args, **kwargs: notes.append(str(message))
+    async with app.run_test(size=(160, 60)) as pilot:
+        screen = getattr(importlib.import_module(module), cls)()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: loaded(screen), "the usable account's data")
+        assert screen._account == "ca"
+        act(screen)
+        await pilot.pause(0.05)
+        await _wait_for(pilot, lambda: loaded(screen), "the data again")
+        assert app.is_running and app.screen is screen
+    assert not [n for n in notes if "not available" in n], notes
+
+
+@pytest.mark.asyncio
+async def test_hetzner_screens_work_without_a_usable_primary_project(extra_only):
+    from servonaut.screens.hetzner_create import HetznerCreateScreen
+    from servonaut.screens.hetzner_manager import HetznerManagerScreen
+    from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+
+    accounts, config = extra_only
+    staging = accounts.hetzner["staging"]
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        manager = HetznerManagerScreen()
+        await app.push_screen(manager)
+        table = manager.query_one("#hetzner_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1, "the usable project's server")
+        table.focus()
+        await pilot.pause()
+        manager.action_power_on()
+        await _wait_for(pilot, lambda: staging.calls, "the start")
+
+        manager.action_new()
+        await _wait_for(pilot, lambda: isinstance(app.screen, HetznerCreateScreen), "the wizard")
+        wizard = app.screen
+        await _wait_for(pilot, lambda: wizard.is_mounted, "the wizard mounted")
+        await _wait_for(
+            pilot, lambda: _names(wizard, "hetzner_types_table") == ["staging-type"], "its lists"
+        )
+        assert wizard._account == "staging" and wizard._default_ssh_key() == "staging-key"
+        app.pop_screen()
+        await pilot.pause()
+
+        keys = HetznerSSHKeysScreen()
+        await app.push_screen(keys)
+        await _wait_for(pilot, lambda: len(keys._keys) == 2, "the usable project's keys")
+        keys.action_refresh()
+        await pilot.pause(0.05)
+        assert app.is_running and app.screen is keys
+    assert staging.calls == [("power_on", "22")]
+
+
+def test_per_server_screens_explain_a_server_without_a_usable_account(extra_only):
+    import importlib
+
+    accounts, _config_ = extra_only
+    # A row listed before accounts existed has no account tag: it belongs to
+    # the primary account, which cannot connect.
+    untagged = {key: value for key, value in OVH_ROWS["ovh"][0].items()}
+    tagged = _ca_row()
+    app = SimpleNamespace(accounts=accounts.registry)
+    for module, cls, kind in (
+        ("servonaut.screens.ovh_reinstall", "OVHReinstallScreen", "vps"),
+        ("servonaut.screens.ovh_resize", "OVHResizeScreen", "vps"),
+        ("servonaut.screens.ovh_snapshots", "OVHSnapshotsScreen", "snapshot"),
+        ("servonaut.screens.ovh_firewall", "OVHFirewallScreen", "ip"),
+        ("servonaut.screens.server_actions", "ServerActionsScreen", "vps"),
+    ):
+        screen_cls = getattr(importlib.import_module(module), cls)
+        with patch.object(screen_cls, "app", new_callable=PropertyMock, return_value=app):
+            assert screen_cls(tagged)._ovh_service(kind) is getattr(accounts.bundles["ca"], kind)
+            screen = screen_cls(untagged)
+            with patch.object(screen, "notify") as notify:
+                assert screen._ovh_service(kind) is None
+            assert notify.call_args.kwargs["markup"] is False
+            assert "OVH" in notify.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_server_actions_reverse_dns_skips_a_server_without_a_usable_account(extra_only):
+    from servonaut.screens.server_actions import ServerActionsScreen
+
+    accounts, _config_ = extra_only
+    screen = ServerActionsScreen(dict(OVH_ROWS["ovh"][0]))
+    app = SimpleNamespace(accounts=accounts.registry)
+    with (
+        patch.object(ServerActionsScreen, "app", new_callable=PropertyMock, return_value=app),
+        patch.object(screen, "notify") as notify,
+        patch.object(screen, "_render_server_info") as render,
+    ):
+        await screen._fetch_rdns()
+    notify.assert_called_once()
+    render.assert_not_called()
+
+
+def test_block_ip_on_a_server_of_a_usable_extra_account(extra_only):
+    accounts, _config_ = extra_only
+    tools = SimpleNamespace(detect_onbox_firewall=AsyncMock(return_value="nftables"))
+    app = SimpleNamespace(
+        accounts=accounts.registry,
+        servonaut_tools=tools,
+        instances=[_ca_row()],
+    )
+    assert _resolve_method({"instance_id": "proj-ca/inst-1"}, app) == ("nftables", None)
+    tools.detect_onbox_firewall.assert_awaited_once_with("proj-ca/inst-1")
