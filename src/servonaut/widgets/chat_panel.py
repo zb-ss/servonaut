@@ -53,6 +53,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Static, TextArea
 
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.instance_resolver import AmbiguousInstanceError
 
 # D6 — module-level ``logger`` placed AFTER all imports so static analysers
 # can verify import ordering and lint rules don't flag the gap.
@@ -664,6 +665,10 @@ class ChatPanel(Widget):
 
         Returns:
             Tuple of (instance_dict_or_None, effective_text).
+
+        Raises:
+            AmbiguousInstanceError: The name matches several servers; the
+                turn must not silently go to another one.
         """
         parts = text.split(None, 1)
         if not parts or not parts[0].startswith("@"):
@@ -687,11 +692,21 @@ class ChatPanel(Widget):
                     ),
                     None,
                 )
+        except AmbiguousInstanceError:
+            raise
         except Exception:
             return None, text
         if inst is None:
             return None, text
         return inst, rest
+
+    def _ambiguous_reference(self, text: str) -> Optional[AmbiguousInstanceError]:
+        """The error when *text* starts with an ``@name`` several servers share."""
+        try:
+            self._parse_at_prefix(text)
+        except AmbiguousInstanceError as exc:
+            return exc
+        return None
 
     def _resolve_active_instance(self, text: str) -> Tuple[Optional[dict], str]:
         """Determine the active instance and strip any ``@`` prefix from text.
@@ -3275,6 +3290,11 @@ class ChatPanel(Widget):
 
         text = inp.text.strip()
         if not text:
+            return
+        ambiguous = self._ambiguous_reference(text)
+        if ambiguous is not None:
+            # Nothing is sent; the text stays in the box to name one server.
+            self.app.notify(str(ambiguous), severity="warning", markup=False)
             return
 
         # The user has moved on: a reply still being read aloud from the

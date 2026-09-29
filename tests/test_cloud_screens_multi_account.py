@@ -209,16 +209,16 @@ def _registry(config: AppConfig) -> Accounts:
         real = registry.service("hetzner", ref.label)
         rows = HETZNER_ROWS["hetzner" if ref.primary else "staging"]
         hetzner[ref.label] = FakeHetzner(ref.label, real._config, rows)
-        registry._providers["hetzner"].services[ref.key] = hetzner[ref.label]
+        registry._state.providers["hetzner"].services[ref.key] = hetzner[ref.label]
     ovh: Dict[str, FakeOVH] = {}
     bundles: Dict[str, OVHAccountServices] = {}
     for ref in registry.accounts("ovh"):
         real = registry.service("ovh", ref.label)
         rows = OVH_ROWS["ovh" if ref.primary else "ca"]
         ovh[ref.label] = FakeOVH(ref.label, real._config, rows)
-        registry._providers["ovh"].services[ref.key] = ovh[ref.label]
+        registry._state.providers["ovh"].services[ref.key] = ovh[ref.label]
         bundles[ref.label] = _ovh_bundle(ovh[ref.label])
-        registry._ovh_bundles[ref.key] = bundles[ref.label]
+        registry._state.ovh_bundles[ref.key] = bundles[ref.label]
     return Accounts(registry=registry, hetzner=hetzner, ovh=ovh, bundles=bundles)
 
 
@@ -1008,10 +1008,177 @@ def test_per_server_audit_details_name_the_servers_real_account(accounts):
 
 
 def test_account_level_audit_details_name_the_chosen_account(accounts):
-    from servonaut.screens._account_audit import with_account
+    from servonaut.screens._provider_accounts import with_account
 
     multi = SimpleNamespace(accounts=accounts.registry)
     assert with_account(multi, "ovh", "ca", {"ip": "10.0.0.1"}) == {"ip": "10.0.0.1", "account": "ca"}
     single = SimpleNamespace(accounts=_registry(_config(ovh_extra=False)).registry)
     assert with_account(single, "ovh", "ovh", {"ip": "10.0.0.1"}) == {"ip": "10.0.0.1"}
     assert with_account(SimpleNamespace(), "ovh", "ovh", None) == {}
+
+
+# ---------------------------------------------------------------------------
+# A change still running survives an account switch
+# ---------------------------------------------------------------------------
+
+
+def _gated(result=None):
+    """An async stand-in that waits for ``release`` and records its calls."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: List[tuple] = []
+
+    async def call(*args, **kwargs):
+        calls.append(args)
+        started.set()
+        await release.wait()
+        return result
+
+    call.started, call.release, call.calls = started, release, calls
+    return call
+
+
+def _notes(screen, app) -> List[str]:
+    """Every notification the screen or the app shows from now on."""
+    seen: List[str] = []
+    for target in (screen, app):
+        target.notify = lambda message, *args, **kwargs: seen.append(str(message))
+    return seen
+
+
+async def _wait_event(pilot, event: asyncio.Event, what: str) -> None:
+    await _wait_for(pilot, event.is_set, what)
+
+
+@pytest.mark.asyncio
+async def test_hetzner_key_added_while_switching_projects_is_reported(accounts, config):
+    from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+    from textual.widgets import Input
+
+    primary = accounts.hetzner["hetzner"]
+    add = _gated({"name": "laptop"})
+    primary.create_ssh_key = add
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = HetznerSSHKeysScreen()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: len(screen._keys) == 2, "the default project's keys")
+        notes = _notes(screen, app)
+        screen.action_add_key()
+        screen.query_one("#hetzner_ssh_input_name", Input).value = "laptop"
+        screen.query_one("#hetzner_ssh_input_public_key", Input).value = "ssh-ed25519 AAAA test"
+        screen._save_key()
+        await _wait_event(pilot, add.started, "the key upload")
+
+        await _pick(pilot, screen, "hetzner_ssh_keys_account", "staging")
+        await _wait_for(
+            pilot, lambda: screen._keys and screen._keys[0]["name"] == "staging-other",
+            "the staging project's keys",
+        )
+        add.release.set()
+        await _wait_for(pilot, lambda: "SSH key 'laptop' registered." in notes, "the notice")
+        # The list still shows the project now picked.
+        assert screen._keys[0]["name"] == "staging-other"
+    assert add.calls == [("laptop", "ssh-ed25519 AAAA test")]
+
+
+@pytest.mark.asyncio
+async def test_ovh_key_added_while_switching_accounts_names_its_project(accounts, config):
+    from servonaut.screens.ovh_ssh_keys import OVHSSHKeysScreen
+
+    add = _gated({})
+    accounts.bundles["ovh"].cloud.add_ssh_key = add
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = OVHSSHKeysScreen()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: _names(screen, "ssh_keys_table") == ["ovh-key"], "keys")
+        notes = _notes(screen, app)
+        screen.run_worker(screen._do_add("laptop", "ssh-ed25519 AAAA test"), exclusive=True)
+        await _wait_event(pilot, add.started, "the key upload")
+
+        await _pick(pilot, screen, "ovh_ssh_keys_account", "ca")
+        await _wait_for(pilot, lambda: _names(screen, "ssh_keys_table") == ["ca-key"], "ca keys")
+        add.release.set()
+        await _wait_for(
+            pilot, lambda: "SSH key 'laptop' registered with project proj-eu." in notes,
+            "the notice naming the project the key went to",
+        )
+    assert add.calls == [("proj-eu", "laptop", "ssh-ed25519 AAAA test")]
+
+
+@pytest.mark.asyncio
+async def test_ip_move_while_switching_accounts_is_reported(accounts, config):
+    from servonaut.screens.ovh_ip_management import OVHIPManagementScreen
+
+    move = _gated(True)
+    accounts.bundles["ovh"].ip.move_failover_ip = move
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = OVHIPManagementScreen()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: screen._ips, "the default account's IPs")
+        notes = _notes(screen, app)
+        screen.run_worker(screen._do_move_ip("10.0.0.1/32", "vps-2.example"), exclusive=False)
+        await _wait_event(pilot, move.started, "the move")
+
+        await _pick(pilot, screen, "ip_mgmt_account", "ca")
+        await _wait_for(
+            pilot, lambda: accounts.bundles["ca"].ip.list_ips.await_count == 1, "ca IPs"
+        )
+        move.release.set()
+        await _wait_for(
+            pilot, lambda: any("is being moved to vps-2.example" in n for n in notes),
+            "the notice",
+        )
+    assert move.calls == [("10.0.0.1/32", "vps-2.example")]
+
+
+@pytest.mark.asyncio
+async def test_volume_created_while_switching_accounts_is_reported(accounts, config):
+    from servonaut.screens.ovh_storage import OVHStorageScreen
+
+    create = _gated({})
+    accounts.bundles["ovh"].storage.create_volume = create
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = OVHStorageScreen()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: _names(screen, "volumes_table") == ["ovh-vol"], "volumes")
+        notes = _notes(screen, app)
+        screen.run_worker(
+            screen._create_volume("proj-eu", "data-1", 10, "GRA7", "classic"), exclusive=False,
+        )
+        await _wait_event(pilot, create.started, "the create")
+
+        await _pick(pilot, screen, "storage_account", "ca")
+        await _wait_for(pilot, lambda: _names(screen, "volumes_table") == ["ca-vol"], "ca volumes")
+        create.release.set()
+        await _wait_for(pilot, lambda: "Volume 'data-1' created" in notes, "the notice")
+        await pilot.pause()
+        # The reload after the create shows the account now picked.
+        assert _names(screen, "volumes_table") == ["ca-vol"]
+    assert create.calls == [("proj-eu", "data-1", 10, "GRA7", "classic")]
+
+
+@pytest.mark.asyncio
+async def test_an_older_key_load_never_draws_over_a_newer_one(accounts, config):
+    from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+
+    primary = accounts.hetzner["hetzner"]
+    app = Host(accounts, config)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = HetznerSSHKeysScreen()
+        await app.push_screen(screen)
+        await _wait_for(pilot, lambda: len(screen._keys) == 2, "the first load")
+
+        slow = _gated([{"name": "old", "id": 9, "fingerprint": ""}])
+        primary.list_ssh_keys = slow
+        older = asyncio.ensure_future(screen._load_keys())
+        await _wait_event(pilot, slow.started, "the older load")
+        primary.list_ssh_keys = AsyncMock(return_value=[{"name": "new", "id": 10, "fingerprint": ""}])
+        await screen._load_keys()
+        slow.release.set()
+        await older
+        assert [key["name"] for key in screen._keys] == ["new"]
+        assert _names(screen, "hetzner_ssh_keys_table") == ["new"]

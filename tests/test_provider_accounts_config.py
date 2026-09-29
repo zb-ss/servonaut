@@ -53,6 +53,13 @@ class TestShape:
         problems = describe_account_problems(config)
         assert any("AWS primary account" in p and "using 'aws'" in p for p in problems)
 
+    def test_a_primary_label_cannot_be_another_providers_name(self):
+        config = AppConfig()
+        config.aws.label = "Hetzner"
+        config.hetzner.label = "hetzner"  # its own name is fine
+        assert primary_label(AWS, config.aws) == "aws"
+        assert primary_label(HETZNER, config.hetzner) == "hetzner"
+
     def test_the_primary_label_can_be_renamed(self):
         config = AppConfig()
         config.hetzner.label = "  prod "

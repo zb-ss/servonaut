@@ -21,7 +21,6 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Select, Static,
 )
 
-from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -33,6 +32,7 @@ from servonaut.screens._provider_accounts import (
     registry_for,
     show_account_labels,
     shown_label,
+    with_account,
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader

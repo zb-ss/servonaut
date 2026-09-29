@@ -211,12 +211,10 @@ class AWSClientFactory:
 
 
 def build_aws_client_factory(config) -> AWSClientFactory:
-    """Construct an :class:`AWSClientFactory` from an :class:`AppConfig`.
+    """Construct the ambient-credential :class:`AWSClientFactory` from an :class:`AppConfig`.
 
-    Mirrors :func:`servonaut.services.object_storage_factory.build_object_storage_services`
-    — the single shared construction helper called by every wiring site
-    (``app.py``, ``mcp/server.py``, the CLI) so the STS/region resolution logic
-    lives in exactly one place.
+    The account registry (``AccountRegistry.aws_client_factory``) builds the
+    per-account factories; this is the fallback for callers without one.
     """
     aws_config = getattr(config, "aws", None)
     return AWSClientFactory(aws_config)

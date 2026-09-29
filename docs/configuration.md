@@ -50,7 +50,7 @@ Match conditions are used by both scan rules and connection rules to target spec
 | `id` | string | Exact instance ID match |
 | `type_contains` | string | Substring match on instance type (e.g., `t3`) |
 | `has_public_ip` | string | `"true"` or `"false"` — whether instance has a public IP |
-| `provider` | string | Provider label, any letter case (e.g., `AWS`, `Hetzner`, a custom server's provider) |
+| `provider` | string | Exact provider label (e.g., `AWS`, `OVH`, `hetzner`, a custom server's provider) |
 | `account` | string | Provider account label, any letter case (see [Multiple accounts](multiple-accounts.md)) |
 | `group` | string | Exact group match (custom servers) |
 | `tag:<key>` | string | Exact match on a tag's value |

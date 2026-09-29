@@ -135,12 +135,38 @@ class TestAccountFleet:
 
     def test_the_same_account_configured_twice_is_listed_once(self):
         fleet = _fleet(
-            FakeService([{"id": "1", "name": "a"}]),
+            FakeService([{"id": "1", "name": "a"}, {"id": "3", "name": "c"}]),
             FakeService([{"id": "1", "name": "a"}, {"id": "3", "name": "c"}]),
         )
         rows = _run(fleet.fetch_instances_cached(force_refresh=True))
-        assert [(r["id"], r[ACCOUNT_KEY]) for r in rows] == [("1", "hetzner"), ("3", "staging")]
+        assert [(r["id"], r[ACCOUNT_KEY]) for r in rows] == [("1", "hetzner"), ("3", "hetzner")]
         assert fleet.duplicate_accounts == {"staging": "hetzner"}
+
+    def test_accounts_sharing_only_some_servers_are_not_called_duplicates(self):
+        fleet = _fleet(
+            FakeService([{"id": "1", "name": "a"}]),
+            FakeService([{"id": "1", "name": "a"}, {"id": "2", "name": "b"}]),
+        )
+        rows = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert [r["id"] for r in rows] == ["1", "2"]
+        assert fleet.duplicate_accounts == {}
+
+    def test_a_failed_account_id_lookup_is_retried(self):
+        calls = []
+
+        def lookup():
+            calls.append(1)
+            return "" if len(calls) == 1 else "123456789012"
+
+        bindings = [
+            AccountBinding(AccountRef("aws", "aws", True), FakeService([{"id": "i-1"}]), lookup),
+            AccountBinding(AccountRef("aws", "prod", False), FakeService([{"id": "i-2"}]), lambda: "210987654321"),
+        ]
+        fleet = AccountFleet("aws", bindings)
+        first = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert "account_id" not in first[0]
+        second = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert second[0]["account_id"] == "123456789012"
 
     def test_fresh_only_when_every_account_is(self):
         assert _fleet(FakeService([]), FakeService([])).is_cache_fresh()
@@ -296,3 +322,114 @@ class TestControlPlaneRoles:
     def test_an_extra_account_uses_a_role_mapped_to_its_id(self):
         factory = self._registry().aws_client_factory("prod")
         assert factory.role_for("222222222222") == "arn:aws:iam::222:role/read"
+
+
+class TestOVHAmbientConfig:
+    """python-ovh fills unset credentials from OVH_* variables and ovh.conf."""
+
+    def test_an_extra_oauth2_account_ignores_the_primary_accounts_variables(self, monkeypatch):
+        # A primary account configured through the conventional variables
+        # used to make python-ovh refuse every OAuth2 extra account.
+        monkeypatch.setenv("OVH_APPLICATION_KEY", "primary-ak")
+        monkeypatch.setenv("OVH_APPLICATION_SECRET", "primary-as")
+        monkeypatch.setenv("OVH_CONSUMER_KEY", "primary-ck")
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.application_key = "$OVH_APPLICATION_KEY"
+        config.ovh.accounts = [OVHAccount(label="ca", client_id="cid", client_secret="cs")]
+        registry = AccountRegistry(config)
+        client = registry.service("ovh", "ca").client
+        assert client._client_id == "cid"
+        assert client._application_key is None and client._consumer_key is None
+
+    def test_an_extra_classic_account_ignores_the_primary_oauth2_variables(self, monkeypatch):
+        monkeypatch.setenv("OVH_CLIENT_ID", "primary-cid")
+        monkeypatch.setenv("OVH_CLIENT_SECRET", "primary-cs")
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.client_id = "$OVH_CLIENT_ID"
+        config.ovh.accounts = [OVHAccount(label="eu2", application_key="ak",
+                                          application_secret="as", consumer_key="ck")]
+        client = AccountRegistry(config).service("ovh", "eu2").client
+        assert client._application_key == "ak" and client._client_id is None
+
+    def test_the_primary_account_still_reads_the_ambient_config(self, monkeypatch):
+        import ovh
+        from ovh.exceptions import InvalidConfiguration
+
+        original = ovh.client.config.ConfigurationManager
+        # Building an extra account's client puts python-ovh's own
+        # configuration source back afterwards.
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.client_id = "cid"
+        config.ovh.client_secret = "cs"
+        config.ovh.accounts = [OVHAccount(label="ca", client_id="cid2", client_secret="cs2")]
+        registry = AccountRegistry(config)
+        registry.service("ovh", "ca").client
+        assert ovh.client.config.ConfigurationManager is original
+
+        # The primary account keeps python-ovh's ambient lookup, as before
+        # extra accounts existed (here it conflicts with OAuth2, as it did).
+        monkeypatch.setenv("OVH_APPLICATION_KEY", "ambient-ak")
+        monkeypatch.setenv("OVH_APPLICATION_SECRET", "ambient-as")
+        with pytest.raises(InvalidConfiguration):
+            AccountRegistry(config).service("ovh").client
+
+
+class TestUnavailablePrimary:
+    """The default account is the primary one; another is never promoted."""
+
+    def _registry(self, monkeypatch):
+        monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE",
+            __import__("pathlib").Path("/nonexistent/hcloud-token"),
+        )
+        config = AppConfig()
+        config.hetzner.enabled = True
+        config.hetzner.api_token = "$SERVONAUT_TEST_UNSET_PRIMARY_TOKEN"
+        config.hetzner.accounts = [HetznerAccount(label="staging", api_token="b")]
+        return AccountRegistry(config)
+
+    def test_no_default_account_while_the_primary_cannot_connect(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        with pytest.raises(UnknownAccountError) as refused:
+            registry.account("hetzner")
+        message = str(refused.value)
+        assert "primary Hetzner account 'hetzner' is not available" in message
+        assert "staging" in message
+        assert registry.default_service("hetzner") is None
+        # Naming the account still works.
+        assert registry.service("hetzner", "staging") is not None
+
+    def test_the_other_account_still_names_its_servers(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        assert registry.is_multi("hetzner")
+        assert [r.label for r in registry.accounts("hetzner")] == ["staging"]
+        assert [r.label for r in registry.configured_accounts("hetzner")] == ["hetzner", "staging"]
+        fleet = registry.fleet("hetzner")
+        assert fleet.multi
+        assert set(fleet.unavailable) == {"hetzner"}
+
+    def test_every_refresh_reports_the_unavailable_primary(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        fleet = registry.fleet("hetzner")
+        fleet.bindings[0].service = FakeService([{"id": "7", "name": "web-1"}])
+        rows = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert rows[0]["account"] == "staging" and rows[0]["account_qualified"] is True
+        assert fleet.last_fetch_error.startswith("hetzner: not available: ")
+        assert fleet.last_fetch_partial is True
+
+    def test_a_single_unusable_primary_is_simply_not_configured(self, monkeypatch):
+        monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE",
+            __import__("pathlib").Path("/nonexistent/hcloud-token"),
+        )
+        config = AppConfig()
+        config.hetzner.enabled = True
+        registry = AccountRegistry(config)
+        assert registry.fleet("hetzner") is None and not registry.is_multi("hetzner")
+        with pytest.raises(UnknownAccountError, match="not configured"):
+            registry.account("hetzner")

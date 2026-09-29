@@ -61,6 +61,8 @@ class OVHSSHKeysScreen(Screen):
 
     # Label of the chosen account; "" is the default account.
     _account: str = ""
+    # Counts list loads; see _load_keys.
+    _loads: int = 0
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -212,24 +214,33 @@ class OVHSSHKeysScreen(Screen):
         self._project_id = project_id
         self._render_project_label()
         self._set_status("[dim]Loading keys…[/dim]")
+        # A group of its own: a reload cancels an older load, never a key
+        # being added or deleted.
         self.run_worker(
-            self._load_keys(), exclusive=True, name="ovh_ssh_load",
+            self._load_keys(), group="ovh_ssh_load", exclusive=True,
+            name="ovh_ssh_load",
         )
 
     async def _load_keys(self) -> None:
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             return
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         try:
-            self._keys = list(
-                await cloud_svc.list_ssh_keys(self._project_id)
-            )
+            keys = list(await cloud_svc.list_ssh_keys(self._project_id))
         except Exception as exc:
             logger.error("Failed to load OVH project SSH keys: %s", exc)
-            self._set_status(
-                f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
-            )
+            if load == self._loads:
+                self._set_status(
+                    f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
+                )
             return
+        if load != self._loads:
+            return
+        self._keys = keys
         self._render_keys()
 
     def refresh_after_demo_toggle(self) -> None:
@@ -399,8 +410,11 @@ class OVHSSHKeysScreen(Screen):
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             return
+        # The project of the account the key was added in, even if another
+        # account is picked while the request runs.
+        project_id = self._project_id
         try:
-            await cloud_svc.add_ssh_key(self._project_id, name, public_key)
+            await cloud_svc.add_ssh_key(project_id, name, public_key)
         except Exception as exc:
             logger.error("OVH project SSH key add failed for %s: %s",
                          name, exc)
@@ -411,7 +425,8 @@ class OVHSSHKeysScreen(Screen):
                         markup=False)
             return
         self.notify(
-            f"SSH key {name!r} registered with project {self._display_project_id()}.",
+            f"SSH key {name!r} registered with project "
+            f"{self._display_project_id(project_id)}.",
             severity="information", markup=False,
         )
         await self._load_keys()
@@ -448,8 +463,9 @@ class OVHSSHKeysScreen(Screen):
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             return
+        project_id = self._project_id
         try:
-            await cloud_svc.delete_ssh_key(self._project_id, key_id)
+            await cloud_svc.delete_ssh_key(project_id, key_id)
         except Exception as exc:
             logger.error(
                 "OVH project SSH key delete failed for %s: %s",
@@ -462,7 +478,8 @@ class OVHSSHKeysScreen(Screen):
                         markup=False)
             return
         self.notify(
-            f"SSH key {key_name!r} deleted from project {self._display_project_id()}.",
+            f"SSH key {key_name!r} deleted from project "
+            f"{self._display_project_id(project_id)}.",
             severity="information", markup=False,
         )
         await self._load_keys()
@@ -479,11 +496,13 @@ class OVHSSHKeysScreen(Screen):
         except Exception:  # pragma: no cover - defensive
             pass
 
-    def _display_project_id(self) -> str:
+    def _display_project_id(self, project_id: Optional[str] = None) -> str:
+        """*project_id* (default: the listed project) as the screen shows it."""
+        project_id = self._project_id if project_id is None else project_id
         if not self.app.demo_mode:
-            return self._project_id
+            return project_id
         redactor = self.app.redaction_service
-        return redactor.redact_name(self._project_id) if redactor else "Hidden"
+        return redactor.redact_name(project_id) if redactor else "Hidden"
 
     def _short_err(self, exc: Exception) -> str:
         if self.app.demo_mode:

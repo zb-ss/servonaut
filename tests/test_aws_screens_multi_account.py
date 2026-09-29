@@ -294,6 +294,22 @@ async def test_manager_starts_in_the_rows_account_and_refreshes_all(ec2) -> None
 
 
 @pytest.mark.asyncio
+async def test_manager_single_account_audit_rows_are_unchanged(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(_config(extra=False)), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 2, "the rows")
+        table.move_cursor(row=1)  # db-1, stopped
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: app.aws_audit.log_action.called, "the audit row")
+    assert app.aws_audit.log_action.call_args.kwargs["details"] == {"region": "us-east-1"}
+
+
+@pytest.mark.asyncio
 async def test_manager_stops_in_the_rows_account_after_confirming(ec2) -> None:
     from servonaut.screens.aws_manager import AWSManagerScreen
 
@@ -419,6 +435,43 @@ async def test_create_hides_the_picker_with_one_account(ec2) -> None:
         await _wait_for_create_tables(pilot, screen)
         assert screen.query_one("#aws_create_account").display is False
         assert screen.query_one("#aws_create_account_select", Select).disabled
+
+
+async def _launch(app: Host, pilot, name: str) -> None:
+    """Fill in the wizard's name and launch with everything as preselected."""
+    from unittest.mock import AsyncMock
+
+    screen = app.screen
+    await _wait_for_create_tables(pilot, screen)
+    screen.query_one("#aws_input_name", Input).value = name
+    app.push_screen_wait = AsyncMock(return_value=True)
+    await screen._on_create()
+
+
+@pytest.mark.asyncio
+async def test_create_single_account_audit_row_is_unchanged(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = Host(_registry(_config(extra=False)), AWSCreateScreen)
+    async with app.run_test(size=(160, 80)) as pilot:
+        await _launch(app, pilot, "web-9")
+    details = app.aws_audit.log_action.call_args.kwargs["details"]
+    assert "account" not in details
+    assert details["region"] == "us-east-1" and details["name_tag"] == "web-9"
+
+
+@pytest.mark.asyncio
+async def test_demo_create_audit_row_names_the_real_account(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = _demo(Host(_registry(_config(extra_label="sandbox")), AWSCreateScreen))
+    async with app.run_test(size=(160, 80)) as pilot:
+        await _wait_for_create_tables(pilot, app.screen)
+        _pick_account(app.screen, "aws_create_account", "sandbox")
+        await _wait_for(pilot, lambda: ec2["sandbox"].called("list_security_groups"), "reload")
+        await _launch(app, pilot, "web-9")
+    assert ec2["sandbox"].called("run_instances")
+    assert app.aws_audit.log_action.call_args.kwargs["details"]["account"] == "sandbox"
 
 
 # ---------------------------------------------------------------------------
@@ -913,52 +966,52 @@ async def test_demo_ip_ban_and_settings_show_stand_in_accounts(ec2) -> None:
 def test_helpers_use_the_registry_of_the_app(ec2) -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     registry = _registry()
     app = SimpleNamespace(accounts=registry, provider_inventory=registry.fleet)
     staging = registry.aws_services("staging")
-    assert _accounts.aws_services(app, "staging") is staging
-    assert _accounts.cloudtrail_service(app, "staging") is staging.cloudtrail
-    assert _accounts.cloudwatch_service(app, "staging") is staging.cloudwatch
-    assert _accounts.cloudtrail_service(app) is registry.aws_services("prod").cloudtrail
-    assert _accounts.aws_context(app, "staging") is registry.aws_context("staging")
-    assert [ref.label for ref in _accounts.object_storage_accounts(app, "aws")] == [
+    assert accounts.aws_services(app, "staging") is staging
+    assert accounts.cloudtrail_service(app, "staging") is staging.cloudtrail
+    assert accounts.cloudwatch_service(app, "staging") is staging.cloudwatch
+    assert accounts.cloudtrail_service(app) is registry.aws_services("prod").cloudtrail
+    assert accounts.aws_context(app, "staging") is registry.aws_context("staging")
+    assert [ref.label for ref in accounts.object_storage_accounts(app, "aws")] == [
         "prod", "staging",
     ]
     with pytest.raises(UnknownAccountError):
-        _accounts.cloudtrail_service(app, "retired")
+        accounts.cloudtrail_service(app, "retired")
 
 
 def test_object_storage_needs_s3_keys_not_api_credentials(ec2) -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     registry = _registry(_hetzner_config())
     app = SimpleNamespace(accounts=registry)
-    assert [ref.label for ref in _accounts.object_storage_accounts(app, "hetzner")] == [
+    assert [ref.label for ref in accounts.object_storage_accounts(app, "hetzner")] == [
         "hetzner", "eu-project",
     ]
-    assert _accounts.object_storage(app, "hetzner") is not None
-    assert _accounts.object_storage(app, "hetzner", "eu-project") is None  # no S3 keys
+    assert accounts.object_storage(app, "hetzner") is not None
+    assert accounts.object_storage(app, "hetzner", "eu-project") is None  # no S3 keys
     with pytest.raises(UnknownAccountError):
-        _accounts.object_storage(app, "hetzner", "retired")
+        accounts.object_storage(app, "hetzner", "retired")
 
 
 def test_helpers_fall_back_to_the_default_services_on_a_stand_in_app() -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     services = {name: object() for name in (
         "aws_service", "cloudtrail_service", "cloudwatch_service",
         "aws_object_storage_service",
     )}
     for app in (SimpleNamespace(**services), MagicMock(**services)):
-        assert _accounts.aws_services(app) is None
-        assert _accounts.cloudtrail_service(app) is services["cloudtrail_service"]
-        assert _accounts.cloudwatch_service(app) is services["cloudwatch_service"]
-        assert _accounts.aws_context(app) is None
-        assert _accounts.object_storage_accounts(app, "aws") == []
-        assert _accounts.object_storage(app, "aws") is services["aws_object_storage_service"]
+        assert accounts.aws_services(app) is None
+        assert accounts.cloudtrail_service(app) is services["cloudtrail_service"]
+        assert accounts.cloudwatch_service(app) is services["cloudwatch_service"]
+        assert accounts.aws_context(app) is None
+        assert accounts.object_storage_accounts(app, "aws") == []
+        assert accounts.object_storage(app, "aws") is services["aws_object_storage_service"]

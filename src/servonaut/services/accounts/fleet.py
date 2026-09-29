@@ -61,11 +61,30 @@ def tag_rows(
 class AccountFleet:
     """All accounts of one provider behind a single-service-like surface."""
 
-    def __init__(self, provider: str, bindings: Sequence[AccountBinding]):
+    def __init__(
+        self,
+        provider: str,
+        bindings: Sequence[AccountBinding],
+        *,
+        qualified: Optional[bool] = None,
+        unavailable: Optional[Dict[str, str]] = None,
+    ):
+        """Merge *bindings* (the usable accounts) into one inventory.
+
+        Args:
+            qualified: Whether rows name their account (``label/name``).
+                Defaults to "more than one usable account"; the registry
+                passes "more than one configured account", so a second
+                account keeps its servers named while the other one is down.
+            unavailable: Configured accounts that cannot connect, by label,
+                with the reason; every refresh reports them.
+        """
         if not bindings:
             raise ValueError(f"AccountFleet for {provider} needs at least one account")
         self.provider = provider
         self.bindings: List[AccountBinding] = list(bindings)
+        self._qualified = len(self.bindings) > 1 if qualified is None else qualified
+        self.unavailable: Dict[str, str] = dict(unavailable or {})
         # Why the last refresh could not be trusted (per account, labelled
         # when the provider has several accounts), or None after a clean one.
         self.last_fetch_error: Optional[str] = None
@@ -82,8 +101,8 @@ class AccountFleet:
 
     @property
     def multi(self) -> bool:
-        """True when this provider has more than one account."""
-        return len(self.bindings) > 1
+        """True when this provider's servers name their account."""
+        return self._qualified
 
     @property
     def refs(self) -> List[AccountRef]:
@@ -139,7 +158,11 @@ class AccountFleet:
             return_exceptions=True,
         )
         rows: List[dict] = []
-        errors: List[str] = []
+        # A configured account that cannot connect is reported on every
+        # refresh, so a missing primary account never goes unnoticed.
+        errors: List[str] = [
+            f"{label}: not available: {reason}" for label, reason in self.unavailable.items()
+        ]
         partial = False
         clean = 0
         raised: List[BaseException] = []
@@ -172,7 +195,9 @@ class AccountFleet:
     async def _fetch_one(self, binding: AccountBinding, force_refresh: bool) -> List[dict]:
         rows = await binding.service.fetch_instances_cached(force_refresh=force_refresh)
         if self.multi and binding.account_id is not None and binding.ref.key not in self._account_ids:
-            self._account_ids[binding.ref.key] = await asyncio.to_thread(binding.account_id)
+            account_id = await asyncio.to_thread(binding.account_id)
+            if account_id:  # a failed lookup (expired SSO, say) is retried next time
+                self._account_ids[binding.ref.key] = account_id
         return self._tag(binding, rows or [])
 
     # ------------------------------------------------------------------
@@ -193,23 +218,34 @@ class AccountFleet:
     def _dedupe(self, rows: List[dict]) -> List[dict]:
         """Drop rows whose id an earlier account already listed.
 
-        Instance ids are unique per provider, so a repeat means the same
-        underlying account is configured twice (for example two AWS profiles
-        for one account). The first (primary-most) account keeps the row.
+        Instance ids are unique per provider, so the first (primary-most)
+        account keeps a repeated row. An account is reported as a duplicate
+        only when EVERY one of its servers was already listed: that is the
+        same account configured twice (two AWS profiles for one account).
+        Two accounts may legitimately share some servers (two OVH accounts
+        with access to one Public Cloud project), which is not reported.
         """
         seen: Dict[str, str] = {}
         kept: List[dict] = []
-        duplicates: Dict[str, str] = {}
+        repeated_from: Dict[str, str] = {}
+        rows_of: Dict[str, int] = {}
+        repeats_of: Dict[str, int] = {}
         for row in rows:
             instance_id = str(row.get("id") or "")
             owner = row.get(ACCOUNT_KEY, "")
+            rows_of[owner] = rows_of.get(owner, 0) + 1
             if instance_id and instance_id in seen:
                 if seen[instance_id] != owner:
-                    duplicates.setdefault(owner, seen[instance_id])
+                    repeats_of[owner] = repeats_of.get(owner, 0) + 1
+                    repeated_from.setdefault(owner, seen[instance_id])
                 continue
             if instance_id:
                 seen[instance_id] = owner
             kept.append(row)
+        duplicates = {
+            owner: earlier for owner, earlier in repeated_from.items()
+            if repeats_of.get(owner) == rows_of.get(owner)
+        }
         if duplicates and duplicates != self.duplicate_accounts:
             for later, earlier in duplicates.items():
                 logger.warning(

@@ -18,13 +18,13 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._account_audit import with_account
 from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     ovh_services,
     registry_for,
     show_account_labels,
+    with_account,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
@@ -511,7 +511,11 @@ class OVHDNSScreen(Screen):
             if zone:
                 self._selected_zone = zone
                 self._hide_form()
-                self.run_worker(self._load_records(zone), exclusive=True)
+                # A group of its own: picking a zone cancels an older records
+                # load, never a record change that is still running.
+                self.run_worker(
+                    self._load_records(zone), group="ovh_dns_records", exclusive=True,
+                )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""

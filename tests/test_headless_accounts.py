@@ -204,34 +204,84 @@ def hetzner_two_projects(monkeypatch):
 
 
 def test_target_found_in_the_cache_of_its_account(hetzner_two_projects):
-    target = resolve_provider_target(hetzner_two_projects, "hetzner", "worker")
+    target = _run(resolve_provider_target(hetzner_two_projects, "hetzner", "worker"))
     assert (target.account.label, target.reference, target.native_id) == ("staging", "worker", "4")
 
 
 def test_target_by_id(hetzner_two_projects):
-    target = resolve_provider_target(hetzner_two_projects, "hetzner", "2")
+    target = _run(resolve_provider_target(hetzner_two_projects, "hetzner", "2"))
     assert target.account.label == "staging"
 
 
 def test_target_qualified(hetzner_two_projects):
-    target = resolve_provider_target(hetzner_two_projects, "hetzner", "staging/web-1")
+    target = _run(resolve_provider_target(hetzner_two_projects, "hetzner", "staging/web-1"))
     assert (target.account.label, target.reference) == ("staging", "web-1")
 
 
 def test_target_with_explicit_account(hetzner_two_projects):
-    target = resolve_provider_target(hetzner_two_projects, "hetzner", "web-1", "STAGING")
+    target = _run(resolve_provider_target(hetzner_two_projects, "hetzner", "web-1", "STAGING"))
     assert (target.account.label, target.native_id) == ("staging", "2")
 
 
 def test_target_name_in_two_projects_is_refused(hetzner_two_projects):
     with pytest.raises(AmbiguousInstanceError) as err:
-        resolve_provider_target(hetzner_two_projects, "hetzner", "web-1")
+        _run(resolve_provider_target(hetzner_two_projects, "hetzner", "web-1"))
     assert "hetzner/web-1" in str(err.value) and "staging/web-1" in str(err.value)
 
 
-def test_target_unknown_to_the_cache_goes_to_the_default_account(hetzner_two_projects):
-    target = resolve_provider_target(hetzner_two_projects, "hetzner", "brand-new")
+def test_target_no_project_lists_is_refused_with_several_projects(hetzner_two_projects):
+    from servonaut.services.accounts.headless import TargetNotFoundError
+
+    with pytest.raises(TargetNotFoundError) as err:
+        _run(resolve_provider_target(hetzner_two_projects, "hetzner", "brand-new"))
+    assert err.value.labels == ["hetzner", "staging"]
+    assert "No Hetzner server 'brand-new' in any account (hetzner, staging)" in str(err.value)
+
+
+def test_target_named_account_passes_an_unlisted_server_through(hetzner_two_projects):
+    target = _run(resolve_provider_target(hetzner_two_projects, "hetzner", "brand-new", "staging"))
+    assert (target.account.label, target.reference, target.row) == ("staging", "brand-new", None)
+
+
+def test_single_project_keeps_the_cache_only_default(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch, hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}]},
+    )
+    target = _run(resolve_provider_target(registry, "hetzner", "brand-new"))
     assert (target.account.label, target.reference, target.row) == ("hetzner", "brand-new", None)
+    assert services[("hetzner", "hetzner")].fetches == 0
+
+
+def test_target_in_a_project_whose_cache_is_gone(monkeypatch):
+    """A power action drops a project's cache; its servers stay findable."""
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={
+            "hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+            "staging": [{"id": "2", "name": "web-1", "is_hetzner": True},
+                        {"id": "4", "name": "worker", "is_hetzner": True}],
+        },
+    )
+    services[("hetzner", "staging")].cached = None
+    target = _run(resolve_provider_target(registry, "hetzner", "worker"))
+    assert target.account.label == "staging"
+    with pytest.raises(AmbiguousInstanceError):
+        _run(resolve_provider_target(registry, "hetzner", "web-1"))
+
+
+def test_target_falls_back_to_caches_when_every_refresh_fails(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [], "staging": [{"id": "4", "name": "worker", "is_hetzner": True}]},
+    )
+
+    async def refused(force_refresh=False):
+        raise RuntimeError("token refused")
+
+    for service in services.values():
+        if service.provider == "hetzner":
+            service.fetch_instances_cached = refused
+    assert _run(resolve_provider_target(registry, "hetzner", "worker")).account.label == "staging"
 
 
 @pytest.mark.parametrize("reference,account", [
@@ -241,7 +291,7 @@ def test_target_unknown_to_the_cache_goes_to_the_default_account(hetzner_two_pro
 ])
 def test_target_refusals(hetzner_two_projects, reference, account):
     with pytest.raises(UnknownAccountError):
-        resolve_provider_target(hetzner_two_projects, "hetzner", reference, account)
+        _run(resolve_provider_target(hetzner_two_projects, "hetzner", reference, account))
 
 
 def test_target_label_of_another_provider_is_refused(monkeypatch):
@@ -249,7 +299,7 @@ def test_target_label_of_another_provider_is_refused(monkeypatch):
         monkeypatch, aws={"aws": [], "prod": []}, hetzner={"hetzner": []},
     )
     with pytest.raises(UnknownAccountError, match="AWS account"):
-        resolve_provider_target(registry, "hetzner", "prod/web-1")
+        _run(resolve_provider_target(registry, "hetzner", "prod/web-1"))
 
 
 def test_target_ovh_cloud_ids(monkeypatch):
@@ -257,11 +307,11 @@ def test_target_ovh_cloud_ids(monkeypatch):
         monkeypatch,
         ovh={"ovh": [], "eu2": [{"id": "proj1/inst-1", "name": "api", "is_ovh": True}]},
     )
-    exact = resolve_provider_target(registry, "ovh", "proj1/inst-1")
+    exact = _run(resolve_provider_target(registry, "ovh", "proj1/inst-1"))
     assert (exact.account.label, exact.native_id) == ("eu2", "proj1/inst-1")
-    qualified = resolve_provider_target(registry, "ovh", "eu2/proj1/inst-1")
+    qualified = _run(resolve_provider_target(registry, "ovh", "eu2/proj1/inst-1"))
     assert (qualified.account.label, qualified.native_id) == ("eu2", "proj1/inst-1")
-    uncached = resolve_provider_target(registry, "ovh", "eu2/proj9/inst-9")
+    uncached = _run(resolve_provider_target(registry, "ovh", "eu2/proj9/inst-9"))
     assert (uncached.account.label, uncached.native_id) == ("eu2", "proj9/inst-9")
 
 

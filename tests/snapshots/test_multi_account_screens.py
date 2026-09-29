@@ -85,6 +85,13 @@ async def _aws_manager(pilot: Any) -> None:
     table = screen.query_one("#aws_mgr_table", DataTable)
     expected = len(_harness.AWS_ROWS) + len(STAGING_ROWS)
     await _harness.wait_until(pilot, lambda: table.row_count == expected, "the EC2 table")
+    # A DataTable counts rows as they are added but measures its columns
+    # later; wait for the widest name, or the capture can show the table
+    # before its columns fit the rows.
+    widest = max(len(f"staging/{row['name']}") for row in STAGING_ROWS)
+    await _harness.wait_until(
+        pilot, lambda: table.ordered_columns[1].content_width >= widest, "the EC2 columns"
+    )
     pilot.app.clear_notifications()
 
 
@@ -141,6 +148,7 @@ def test_cloudwatch_two_accounts(screen_snapshot, size: str) -> None:
     _capture(screen_snapshot, size, _cloudwatch)
 
 
-def test_cloudtrail_two_accounts(screen_snapshot) -> None:
-    """The account picker leads the CloudTrail filters."""
-    _capture(screen_snapshot, "160x50", _cloudtrail)
+@sizes
+def test_cloudtrail_two_accounts(screen_snapshot, size: str) -> None:
+    """The account picker leads the CloudTrail filters, wide and narrow."""
+    _capture(screen_snapshot, size, _cloudtrail)

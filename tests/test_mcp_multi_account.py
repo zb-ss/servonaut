@@ -175,6 +175,49 @@ def test_hetzner_single_account_audit_row_is_unchanged(monkeypatch):
     assert audit_rows(tools)[-1][1] == {"identifier": "web-1"}
 
 
+def test_a_power_action_that_drops_a_cache_does_not_hide_its_servers(two_projects):
+    """Hetzner drops a project's cache after a power action; the next call
+    must still see that project's servers, and refuse the shared name."""
+    tools, services = two_projects
+    staging = services[("hetzner", "staging")]
+    staging.invalidates_cache = True
+    _run(tools.hetzner_power_off("staging/web-1"))
+    assert staging.cached is None
+
+    out = _run(tools.hetzner_power_off("worker"))
+    assert out == "Hetzner server 'worker': powered off."
+    refused = _run(tools.hetzner_power_off("web-1"))
+    assert "matches 2 servers" in refused
+    assert services[("hetzner", "hetzner")].called("power_off") == []
+    assert staging.called("power_off") == [("web-1",), ("worker",)]
+
+
+def test_a_project_never_listed_is_read_before_acting(two_projects):
+    tools, services = two_projects
+    services[("hetzner", "staging")].cached = None
+    _run(tools.hetzner_reboot("worker"))
+    assert services[("hetzner", "staging")].called("reboot") == [("worker",)]
+
+
+def test_a_server_no_project_lists_is_refused(two_projects):
+    tools, services = two_projects
+    out = _run(tools.hetzner_delete_server("ghost"))
+    assert out.startswith("Error: No Hetzner server 'ghost' in any account (hetzner, staging).")
+    assert "account=<label>" in out and "'staging/ghost'" in out
+    assert all(not s.called("delete_server") for s in services.values())
+    assert audit_rows(tools)[-1][2:] == (False, "instance_not_found")
+    # Naming the project still passes the reference to it.
+    _run(tools.hetzner_delete_server("ghost", account="staging"))
+    assert services[("hetzner", "staging")].called("delete_server") == [("ghost",)]
+
+
+def test_single_project_unlisted_server_still_goes_to_it(monkeypatch):
+    registry, services = build_registry(monkeypatch, hetzner={"hetzner": [WEB_PRIMARY]})
+    tools = make_tools(registry)
+    _run(tools.hetzner_power_on("ghost"))
+    assert services[("hetzner", "hetzner")].called("power_on") == [("ghost",)]
+
+
 def test_aws_lifecycle_uses_the_account_that_lists_the_instance(monkeypatch):
     registry, services = build_registry(
         monkeypatch,
@@ -377,6 +420,75 @@ def test_ip_ban_configs_filtered_by_account(monkeypatch):
     mismatch = _run(tools.ip_ban_list_banned("main-waf", account="prod"))
     assert "acts in AWS account 'aws'" in mismatch
     assert audit_rows(tools)[-1][3] == "validation: account_mismatch"
+
+
+def _block_ip_tools(monkeypatch, site_account):
+    """Tools with two AWS accounts, a ban config in each, and no WebACL."""
+    from servonaut.config.schema import IPBanConfig
+
+    registry, _ = build_registry(monkeypatch, aws={"aws": [], "prod": []})
+    registry.config.ip_ban_configs = [
+        IPBanConfig(name="waf-a", method="waf", ip_set_name="a"),
+        IPBanConfig(name="waf-prod", method="waf", ip_set_name="p", account="prod"),
+    ]
+    tools = make_tools(registry)
+    service = MagicMock()
+    service.get_configs.return_value = registry.config.ip_ban_configs
+    banned = []
+
+    async def _ban(ip, config_name):
+        banned.append(config_name)
+        return {"success": True, "message": "banned"}
+
+    service.ban_ip = _ban
+    tools._ip_ban_service = service
+    acl = {"error": "no WebACL found"}
+    if site_account is not None:
+        acl["account"] = site_account
+
+    async def _resolve(site, region="", account=""):
+        return dict(acl)
+
+    monkeypatch.setattr(tools, "_resolve_webacl", _resolve)
+    return tools, banned
+
+
+def test_block_ip_uses_a_ban_config_of_the_sites_account(monkeypatch):
+    tools, banned = _block_ip_tools(monkeypatch, site_account="prod")
+    out = _run(tools.block_ip("9.9.9.9", site="prod/shop"))
+    assert "config 'waf-prod'" in out and banned == ["waf-prod"]
+
+
+def test_block_ip_never_guesses_the_sites_account(monkeypatch):
+    tools, banned = _block_ip_tools(monkeypatch, site_account=None)
+    out = _run(tools.block_ip("9.9.9.9", site="gone-1"))
+    assert "layer_used: host" in out and "AWS account is unknown" in out
+    assert banned == []
+
+
+def test_webacl_site_account_is_only_named_when_known(monkeypatch):
+    from unittest.mock import patch
+
+    registry, _ = build_registry(
+        monkeypatch,
+        aws={"aws": [], "prod": [{"id": "i-2", "name": "shop", "region": "eu-west-1"}]},
+    )
+    tools = make_tools(registry)
+
+    class _Ingress:
+        def __init__(self, account=None):
+            pass
+
+        async def describe(self, *args):
+            return {"load_balancers": []}
+
+    with patch("servonaut.services.ingress_path_service.IngressPathService", _Ingress):
+        found = _run(tools._resolve_webacl("prod/shop"))
+        missing = _run(tools._resolve_webacl("gone-1"))
+        named = _run(tools._resolve_webacl("gone-1", account="prod"))
+    assert found["account"] == "prod" and "error" in found
+    assert "account" not in missing
+    assert named["account"] == "prod"
 
 
 def test_fleet_health_snapshot_account_filter(two_projects, monkeypatch):

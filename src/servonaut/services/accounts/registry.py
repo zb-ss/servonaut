@@ -98,6 +98,37 @@ class _ProviderAccounts:
 
     refs: List[AccountRef] = field(default_factory=list)
     services: Dict[str, Any] = field(default_factory=dict)  # key -> service
+    # Effective settings each usable account runs with (key -> settings).
+    settings: Dict[str, Any] = field(default_factory=dict)
+    # Every account the config sets up (valid label and settings), whether
+    # or not it can connect right now.
+    configured: List[AccountRef] = field(default_factory=list)
+
+
+@dataclass
+class _RegistryState:
+    """Everything built from one config.
+
+    A rebuild builds a whole new state and swaps it in with one assignment,
+    and every lookup reads the state once, so a caller on another thread
+    never sees half of one config and half of the next.
+    """
+
+    config: "AppConfig"
+    providers: Dict[str, _ProviderAccounts] = field(default_factory=dict)
+    aws_contexts: Dict[str, AWSAccountContext] = field(default_factory=dict)
+    # Built on first use, into the state they belong to.
+    aws_factories: Dict[str, Any] = field(default_factory=dict)
+    object_storage: Dict[str, Any] = field(default_factory=dict)
+    aws_bundles: Dict[str, "AWSAccountServices"] = field(default_factory=dict)
+    ovh_bundles: Dict[str, OVHAccountServices] = field(default_factory=dict)
+    fleets: Dict[str, AccountFleet] = field(default_factory=dict)
+    # Why a configured account is not usable: {"hetzner:staging": reason}.
+    unavailable: Dict[str, str] = field(default_factory=dict)
+    problems: List[str] = field(default_factory=list)
+
+    def provider(self, name: str) -> _ProviderAccounts:
+        return self.providers.get(name) or _ProviderAccounts()
 
 
 class AccountRegistry:
@@ -123,16 +154,7 @@ class AccountRegistry:
         """
         self._aws_cache_service = aws_cache_service
         self._config_manager = config_manager
-        self._providers: Dict[str, _ProviderAccounts] = {}
-        self._aws_contexts: Dict[str, AWSAccountContext] = {}
-        self._aws_factories: Dict[str, Any] = {}
-        self._object_storage: Dict[str, Any] = {}
-        self._aws_bundles: Dict[str, AWSAccountServices] = {}
-        self._ovh_bundles: Dict[str, OVHAccountServices] = {}
-        self._fleets: Dict[str, AccountFleet] = {}
-        # Why a configured account is not usable: {"hetzner:staging": reason}.
-        self.unavailable: Dict[str, str] = {}
-        self.problems: List[str] = []
+        self._state = _RegistryState(config=config)
         self.rebuild(config)
 
     # ------------------------------------------------------------------
@@ -140,28 +162,25 @@ class AccountRegistry:
     # ------------------------------------------------------------------
 
     def rebuild(self, config: "AppConfig") -> None:
-        """(Re)build every account from *config* (after settings change)."""
-        self._config = config
-        self._providers = {}
-        self._aws_contexts = {}
-        self._aws_factories = {}
-        self._object_storage = {}
-        self._aws_bundles = {}
-        self._ovh_bundles = {}
-        self._fleets = {}
-        self.unavailable = {}
-        self.problems = describe_account_problems(config)
-        for message in self.problems:
+        """(Re)build every account from *config* (after settings change).
+
+        The new accounts replace the old ones all at once, and only once
+        they are fully built: a failure leaves the previous accounts in use.
+        """
+        state = _RegistryState(config=config, problems=describe_account_problems(config))
+        for message in state.problems:
             logger.warning("Account configuration: %s", message)
         skipped = account_problems(config)
-        self._build_aws(config, skipped)
-        self._build_hetzner(config, skipped)
-        self._build_ovh(config, skipped)
+        self._build_aws(state, skipped)
+        self._build_hetzner(state, skipped)
+        self._build_ovh(state, skipped)
+        self._state = state
 
-    def _build_aws(self, config: "AppConfig", skipped) -> None:
+    def _build_aws(self, state: _RegistryState, skipped) -> None:
         from servonaut.services.aws_service import AWSService
         from servonaut.services.cache_service import CacheService
 
+        config = state.config
         accounts = _ProviderAccounts()
         for index, settings in enumerate(aws_accounts(config.aws)):
             if not settings.ref.primary and (AWS, index - 1) in skipped:
@@ -180,62 +199,61 @@ class AccountRegistry:
                         account_cache_path(str(CacheService.CACHE_PATH), ref.key)
                     ),
                 )
-            self._aws_contexts[ref.key] = context
+            state.aws_contexts[ref.key] = context
+            accounts.configured.append(ref)
             accounts.refs.append(ref)
+            accounts.settings[ref.key] = settings
             accounts.services[ref.key] = AWSService(cache, account=context)
-        self._providers[AWS] = accounts
+        state.providers[AWS] = accounts
 
-    def _build_hetzner(self, config: "AppConfig", skipped) -> None:
+    def _build_hetzner(self, state: _RegistryState, skipped) -> None:
+        config = state.config
         accounts = _ProviderAccounts()
+        state.providers[HETZNER] = accounts
         if not config.hetzner.enabled:
-            self._providers[HETZNER] = accounts
             return
-        try:
-            from servonaut.services.hetzner_service import (
-                HetznerNotConfiguredError,
-                HetznerService,
-            )
-        except ImportError as exc:  # pragma: no cover - module is pure python
-            logger.warning("Hetzner provider unavailable: %s", exc)
-            self._providers[HETZNER] = accounts
-            return
+        from servonaut.services.hetzner_service import (
+            HetznerNotConfiguredError,
+            HetznerService,
+        )
+
         for index, (ref, effective) in enumerate(hetzner_accounts(config.hetzner)):
             if not ref.primary and (HETZNER, index - 1) in skipped:
                 continue
+            accounts.configured.append(ref)
             service = HetznerService(effective, allow_ambient_token=ref.primary)
             try:
                 service.resolve_token()
             except HetznerNotConfiguredError as exc:
-                self._mark_unavailable(ref, str(exc))
+                _mark_unavailable(state, ref, str(exc))
                 continue
             accounts.refs.append(ref)
+            accounts.settings[ref.key] = effective
             accounts.services[ref.key] = service
-        self._providers[HETZNER] = accounts
 
-    def _build_ovh(self, config: "AppConfig", skipped) -> None:
+    def _build_ovh(self, state: _RegistryState, skipped) -> None:
+        config = state.config
         accounts = _ProviderAccounts()
+        state.providers[OVH] = accounts
         if not config.ovh.enabled:
-            self._providers[OVH] = accounts
             return
         from servonaut.services.ovh_service import _OVH_CACHE_PATH, OVHService
 
         for index, (ref, effective) in enumerate(ovh_accounts(config.ovh)):
-            if ref.primary:
-                # The primary account was only ever built with at least one
-                # credential set; keep that rule.
-                if not (effective.application_key or effective.client_id):
-                    self._mark_unavailable(ref, "no OVH credentials configured")
-                    continue
-            elif (OVH, index - 1) in skipped:
+            if not ref.primary and (OVH, index - 1) in skipped:
+                continue
+            accounts.configured.append(ref)
+            # The primary account was only ever built with at least one
+            # credential set; keep that rule.
+            if ref.primary and not (effective.application_key or effective.client_id):
+                _mark_unavailable(state, ref, "no OVH credentials configured")
                 continue
             cache = None if ref.primary else Path(ovh_cache_path(str(_OVH_CACHE_PATH), ref))
             accounts.refs.append(ref)
-            accounts.services[ref.key] = OVHService(effective, cache_path=cache)
-        self._providers[OVH] = accounts
-
-    def _mark_unavailable(self, ref: AccountRef, reason: str) -> None:
-        self.unavailable[f"{ref.provider}:{ref.key}"] = reason
-        logger.info("%s is not available: %s", ref.title, reason)
+            accounts.settings[ref.key] = effective
+            accounts.services[ref.key] = OVHService(
+                effective, cache_path=cache, allow_ambient_config=ref.primary,
+            )
 
     # ------------------------------------------------------------------
     # Accounts
@@ -243,54 +261,81 @@ class AccountRegistry:
 
     @property
     def config(self) -> "AppConfig":
-        return self._config
+        return self._state.config
+
+    @property
+    def unavailable(self) -> Dict[str, str]:
+        """Why configured accounts cannot be used: ``{"hetzner:staging": reason}``."""
+        return self._state.unavailable
+
+    @property
+    def problems(self) -> List[str]:
+        """Configuration problems that made accounts be skipped, as sentences."""
+        return self._state.problems
 
     def accounts(self, provider: str) -> List[AccountRef]:
         """Usable accounts of *provider*, primary first."""
-        return list(self._providers.get(provider, _ProviderAccounts()).refs)
+        return list(self._state.provider(provider).refs)
+
+    def configured_accounts(self, provider: str) -> List[AccountRef]:
+        """Every account the config sets up for *provider*, usable or not."""
+        return list(self._state.provider(provider).configured)
+
+    def unavailable_reason(self, ref: AccountRef) -> Optional[str]:
+        """Why a configured account cannot be used, or None when it can."""
+        return self._state.unavailable.get(f"{ref.provider}:{ref.key}")
 
     def is_multi(self, provider: str) -> bool:
-        """True when *provider* has more than one usable account."""
-        return len(self.accounts(provider)) > 1
+        """True when the config sets up more than one account of *provider*.
+
+        Counted on configured accounts, usable or not: with a second account
+        configured, every server names its account and every account-level
+        view says which account it works on, even while one of the two
+        cannot connect.
+        """
+        return len(self.configured_accounts(provider)) > 1
 
     def has_multiple_accounts(self) -> bool:
-        """True when any provider has more than one usable account."""
+        """True when any provider has more than one configured account."""
         return any(self.is_multi(p) for p in (AWS, HETZNER, OVH))
 
     def account(self, provider: str, label: Optional[str] = None) -> AccountRef:
         """The account of *provider* named *label* (None = default account).
 
+        The default account is always the primary one. When it cannot be
+        used, there is no default: another account must be named, so nothing
+        ever runs in an account the caller did not choose.
+
         Raises:
-            UnknownAccountError: No usable account has that label, or the
-                provider has no usable account at all.
+            UnknownAccountError: No usable account has that label (the
+                message says why when the account is configured but cannot
+                connect), the provider has no usable account at all, or no
+                label was given and the primary account cannot be used.
         """
-        refs = self.accounts(provider)
-        if not refs:
-            raise UnknownAccountError(
-                f"{PROVIDER_TITLES.get(provider, provider)} is not configured"
-            )
-        if not label:
-            return refs[0]
-        wanted = label.strip().lower()
-        for ref in refs:
-            if ref.key == wanted:
-                return ref
-        known = ", ".join(r.label for r in refs)
-        raise UnknownAccountError(
-            f"No {PROVIDER_TITLES.get(provider, provider)} account named "
-            f"{label!r}. Accounts: {known}"
-        )
+        return _account(self._state, provider, label)
 
     def find_account(self, label: str) -> Optional[AccountRef]:
         """The account named *label* in any provider (labels are unique)."""
         wanted = (label or "").strip().lower()
         if not wanted:
             return None
+        state = self._state
         for provider in (AWS, HETZNER, OVH):
-            for ref in self.accounts(provider):
+            for ref in state.provider(provider).refs:
                 if ref.key == wanted:
                     return ref
         return None
+
+    def settings(self, provider: str, account: Optional[str] = None) -> Any:
+        """The effective settings one account runs with.
+
+        ``HetznerConfig`` / ``OVHConfig`` with the account's own credentials,
+        SSH defaults and projects on top of the provider-wide values; for AWS
+        the account's profile and regions.
+        """
+        state = self._state
+        ref = _account(state, provider, account)
+        return state.providers[provider].settings[ref.key]
 
     # ------------------------------------------------------------------
     # Services
@@ -298,15 +343,20 @@ class AccountRegistry:
 
     def service(self, provider: str, account: Optional[str] = None) -> Any:
         """One account's provider service (None label = default account)."""
-        ref = self.account(provider, account)
-        return self._providers[provider].services[ref.key]
+        state = self._state
+        ref = _account(state, provider, account)
+        return state.providers[provider].services[ref.key]
 
     def default_service(self, provider: str) -> Any:
-        """The default account's service, or None when the provider has none."""
-        refs = self.accounts(provider)
-        if not refs:
+        """The primary account's service, or None when it cannot be used.
+
+        Never another account's service: code without an account context
+        must not act in an account nobody chose.
+        """
+        accounts = self._state.provider(provider)
+        if not accounts.refs or not accounts.refs[0].primary:
             return None
-        return self._providers[provider].services[refs[0].key]
+        return accounts.services[accounts.refs[0].key]
 
     def service_for(self, row: Dict[str, Any]) -> Any:
         """The service of the account a server row belongs to.
@@ -333,8 +383,9 @@ class AccountRegistry:
 
     def aws_context(self, account: Optional[str] = None) -> AWSAccountContext:
         """Credentials of one AWS account (None label = default account)."""
-        ref = self.account(AWS, account)
-        return self._aws_contexts[ref.key]
+        state = self._state
+        ref = _account(state, AWS, account)
+        return state.aws_contexts[ref.key]
 
     def aws_client_factory(self, account: Optional[str] = None) -> Any:
         """Control-plane client factory of one AWS account (None = default).
@@ -342,14 +393,7 @@ class AccountRegistry:
         Roles configured for control-plane reads and writes apply on top of
         the account's own credentials.
         """
-        from servonaut.services.aws_client_factory import AWSClientFactory
-
-        ref = self.account(AWS, account)
-        factory = self._aws_factories.get(ref.key)
-        if factory is None:
-            factory = AWSClientFactory(self._config.aws, self._aws_contexts[ref.key])
-            self._aws_factories[ref.key] = factory
-        return factory
+        return _aws_client_factory(self._state, _account(self._state, AWS, account))
 
     def aws_services(self, account: Optional[str] = None) -> AWSAccountServices:
         """One AWS account's services (None label = default account)."""
@@ -360,15 +404,16 @@ class AccountRegistry:
         from servonaut.services.ssm_service import SSMService
         from servonaut.services.waf_management_service import WAFManagementService
 
-        ref = self.account(AWS, account)
-        bundle = self._aws_bundles.get(ref.key)
+        state = self._state
+        ref = _account(state, AWS, account)
+        bundle = state.aws_bundles.get(ref.key)
         if bundle is not None:
             return bundle
-        context = self._aws_contexts[ref.key]
-        factory = self.aws_client_factory(ref.label)
+        context = state.aws_contexts[ref.key]
+        factory = _aws_client_factory(state, ref)
         bundle = AWSAccountServices(
             context=context,
-            ec2=self._providers[AWS].services[ref.key],
+            ec2=state.providers[AWS].services[ref.key],
             client_factory=factory,
             cloudtrail=CloudTrailService(self._live_config_source(), context),
             cloudwatch=CloudWatchService(client_factory=factory),
@@ -377,7 +422,7 @@ class AccountRegistry:
             ingress=IngressPathService(context),
             waf=WAFManagementService(context),
         )
-        self._aws_bundles[ref.key] = bundle
+        state.aws_bundles[ref.key] = bundle
         return bundle
 
     def _live_config_source(self) -> Any:
@@ -387,7 +432,7 @@ class AccountRegistry:
 
         class _Snapshot:
             def get(self):
-                return registry._config
+                return registry.config
 
         return _Snapshot()
 
@@ -408,40 +453,19 @@ class AccountRegistry:
             build_keyed_object_storage,
         )
 
-        key, storage, context = self._object_storage_source(provider, account)
+        state = self._state
+        key, storage, context = _object_storage_source(state, provider, account)
         cache_key = f"{provider}:{key}"
-        if cache_key in self._object_storage:
-            return self._object_storage[cache_key]
+        if cache_key in state.object_storage:
+            return state.object_storage[cache_key]
         if provider == AWS:
             service = build_aws_object_storage(
-                storage, self._config.aws.default_region, context
+                storage, state.config.aws.default_region, context
             )
         else:
             service = build_keyed_object_storage(provider, storage)
-        self._object_storage[cache_key] = service
+        state.object_storage[cache_key] = service
         return service
-
-    def _object_storage_source(self, provider: str, account: Optional[str]):
-        """(cache key, ObjectStorageConfig, AWS context or None) for an account."""
-        config = self._config
-        if provider == AWS:
-            ref = self.account(AWS, account)
-            storage = config.aws.object_storage if ref.primary else _empty_storage()
-            return ref.key, storage, self._aws_contexts[ref.key]
-        if provider not in (HETZNER, OVH):
-            raise UnknownAccountError(f"No object storage for provider {provider!r}")
-        block = config.hetzner if provider == HETZNER else config.ovh
-        primary = primary_label(provider, block)
-        wanted = (account or "").strip().lower()
-        if not wanted or wanted == primary.lower():
-            return primary.lower(), block.object_storage, None
-        for entry in block.accounts:
-            if (entry.label or "").strip().lower() == wanted:
-                return wanted, entry.object_storage, None
-        known = ", ".join([primary] + [e.label for e in block.accounts if e.label])
-        raise UnknownAccountError(
-            f"No {PROVIDER_TITLES[provider]} account named {account!r}. Accounts: {known}"
-        )
 
     def aws_account_for_id(self, account_id: str) -> Optional[AccountRef]:
         """The configured AWS account whose 12-digit id is *account_id*.
@@ -451,38 +475,124 @@ class AccountRegistry:
         wanted = (account_id or "").strip()
         if not wanted:
             return None
-        for ref in self.accounts(AWS):
-            if self._aws_contexts[ref.key].account_id() == wanted:
+        state = self._state
+        for ref in state.provider(AWS).refs:
+            if state.aws_contexts[ref.key].account_id() == wanted:
                 return ref
         return None
 
     def ovh_services(self, account: Optional[str] = None) -> OVHAccountServices:
         """One OVH account's API service plus the services wrapping it."""
-        ref = self.account(OVH, account)
-        bundle = self._ovh_bundles.get(ref.key)
+        state = self._state
+        ref = _account(state, OVH, account)
+        bundle = state.ovh_bundles.get(ref.key)
         if bundle is None:
-            bundle = _build_ovh_bundle(self._providers[OVH].services[ref.key])
-            self._ovh_bundles[ref.key] = bundle
+            bundle = _build_ovh_bundle(state.providers[OVH].services[ref.key])
+            state.ovh_bundles[ref.key] = bundle
         return bundle
 
     def fleet(self, provider: str) -> Optional[AccountFleet]:
         """Every account of *provider* as one inventory; None when unused."""
-        fleet = self._fleets.get(provider)
+        state = self._state
+        fleet = state.fleets.get(provider)
         if fleet is not None:
             return fleet
-        refs = self.accounts(provider)
-        if not refs:
+        accounts = state.provider(provider)
+        if not accounts.refs:
             return None
-        services = self._providers[provider].services
         bindings = []
-        for ref in refs:
+        for ref in accounts.refs:
             account_id = None
             if provider == AWS:
-                account_id = self._aws_contexts[ref.key].account_id
-            bindings.append(AccountBinding(ref, services[ref.key], account_id))
-        fleet = AccountFleet(provider, bindings)
-        self._fleets[provider] = fleet
+                account_id = state.aws_contexts[ref.key].account_id
+            bindings.append(AccountBinding(ref, accounts.services[ref.key], account_id))
+        unavailable = {
+            ref.label: state.unavailable.get(f"{ref.provider}:{ref.key}") or "not available"
+            for ref in accounts.configured
+            if ref.key not in accounts.services
+        }
+        fleet = AccountFleet(
+            provider, bindings, qualified=len(accounts.configured) > 1,
+            unavailable=unavailable,
+        )
+        state.fleets[provider] = fleet
         return fleet
+
+
+# ---------------------------------------------------------------------------
+# State lookups (each reads one state, never two)
+# ---------------------------------------------------------------------------
+
+
+def _mark_unavailable(state: _RegistryState, ref: AccountRef, reason: str) -> None:
+    state.unavailable[f"{ref.provider}:{ref.key}"] = reason
+    logger.info("%s is not available: %s", ref.title, reason)
+
+
+def _account(state: _RegistryState, provider: str, label: Optional[str]) -> AccountRef:
+    """See :meth:`AccountRegistry.account`."""
+    title = PROVIDER_TITLES.get(provider, provider)
+    accounts = state.provider(provider)
+    refs = accounts.refs
+    if not label:
+        if refs and refs[0].primary:
+            return refs[0]
+        if not refs:
+            raise UnknownAccountError(f"{title} is not configured")
+        primary = next((ref for ref in accounts.configured if ref.primary), None)
+        reason = state.unavailable.get(f"{provider}:{primary.key}") if primary else None
+        detail = f": {reason}" if reason else ""
+        raise UnknownAccountError(
+            f"The primary {title} account"
+            f"{' ' + repr(primary.label) if primary else ''} is not available{detail}. "
+            f"Name the account to use: {', '.join(r.label for r in refs)}"
+        )
+    wanted = label.strip().lower()
+    for ref in refs:
+        if ref.key == wanted:
+            return ref
+    for ref in accounts.configured:
+        if ref.key == wanted:
+            reason = state.unavailable.get(f"{provider}:{ref.key}") or "cannot connect"
+            raise UnknownAccountError(f"{title} account {ref.label!r} is not available: {reason}")
+    if not refs:
+        raise UnknownAccountError(f"{title} is not configured")
+    raise UnknownAccountError(
+        f"No {title} account named {label!r}. Accounts: {', '.join(r.label for r in refs)}"
+    )
+
+
+def _aws_client_factory(state: _RegistryState, ref: AccountRef) -> Any:
+    from servonaut.services.aws_client_factory import AWSClientFactory
+
+    factory = state.aws_factories.get(ref.key)
+    if factory is None:
+        factory = AWSClientFactory(state.config.aws, state.aws_contexts[ref.key])
+        state.aws_factories[ref.key] = factory
+    return factory
+
+
+def _object_storage_source(state: _RegistryState, provider: str, account: Optional[str]):
+    """(cache key, ObjectStorageConfig, AWS context or None) for an account."""
+    config = state.config
+    if provider == AWS:
+        ref = _account(state, AWS, account)
+        storage = config.aws.object_storage if ref.primary else _empty_storage()
+        return ref.key, storage, state.aws_contexts[ref.key]
+    if provider not in (HETZNER, OVH):
+        raise UnknownAccountError(f"No object storage for provider {provider!r}")
+    block = config.hetzner if provider == HETZNER else config.ovh
+    primary = primary_label(provider, block)
+    wanted = (account or "").strip().lower()
+    if not wanted or wanted == primary.lower():
+        return primary.lower(), block.object_storage, None
+    for entry in block.accounts:
+        if (entry.label or "").strip().lower() == wanted:
+            return wanted, entry.object_storage, None
+    known = ", ".join([primary] + [e.label for e in block.accounts if e.label])
+    raise UnknownAccountError(
+        f"No {PROVIDER_TITLES[provider]} account named {account!r}. Accounts: {known}"
+    )
 
 
 def _empty_storage():

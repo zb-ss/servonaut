@@ -25,6 +25,7 @@ from servonaut.mcp.db_staging import (
 from servonaut.services.accounts.headless import (
     InstanceDirectory,
     ProviderTarget,
+    TargetNotFoundError,
     fetch_provider_rows,
     qualifier_provider,
     resolve_provider_target,
@@ -509,7 +510,7 @@ class ServonautTools:
             return None, f"Instance not found: {instance_id}"
         return instance, None
 
-    def _provider_target(
+    async def _provider_target(
         self, provider: str, reference: str, account: str,
     ) -> Optional[ProviderTarget]:
         """The account a lifecycle call on *reference* acts in.
@@ -521,11 +522,25 @@ class ServonautTools:
             UnknownAccountError: *account* or the reference's qualifier names
                 no account of *provider*.
             AmbiguousInstanceError: The reference names several servers.
+            TargetNotFoundError: Several accounts, none of which lists it.
         """
         if self._accounts is None:
             self._names_account(provider, account)
             return None
-        return resolve_provider_target(self._accounts, provider, reference, account)
+        return await resolve_provider_target(
+            self._accounts, provider, reference, account,
+        )
+
+    def _target_not_found(
+        self, tool_name: str, args: Dict[str, Any], exc: TargetNotFoundError,
+    ) -> str:
+        """Audit row + error for a server no account of the provider lists."""
+        self._audit.log(tool_name, args, '', False, 'instance_not_found')
+        example = exc.labels[-1] if exc.labels else '<account>'
+        return (
+            f"Error: {exc} Pass account=<label> to act in one account, "
+            f"or name it '{example}/{exc.reference}'."
+        )
 
     def _target_args(
         self, provider: str, args: Dict[str, Any], account: str,
@@ -2761,7 +2776,7 @@ class ServonautTools:
             self._audit.log('hetzner_delete_server', payload, '', False, reason)
             return f"Blocked: {reason}"
 
-        resolved = self._hetzner_target('hetzner_delete_server', payload, identifier, account)
+        resolved = await self._hetzner_target('hetzner_delete_server', payload, identifier, account)
         if isinstance(resolved, str):
             return resolved
         service, server = resolved
@@ -2787,23 +2802,26 @@ class ServonautTools:
     # Hetzner power management — boot / halt / reboot
     # ------------------------------------------------------------------
 
-    def _hetzner_target(
+    async def _hetzner_target(
         self, tool_name: str, payload: Dict[str, Any], identifier: str, account: str,
     ):
         """``(service, identifier)`` for a call on one Hetzner server.
 
         The server's project is the ``account`` asked for, the project a
-        ``<account>/`` qualifier names, or the project whose cached servers
-        list it (the default project when none does). A name that several
-        projects use is refused with the candidates. Returns the refusal
-        message (already audited) instead of a pair when it cannot tell.
+        ``<account>/`` qualifier names, or the project whose servers list
+        it. A name that several projects use, or one no project lists, is
+        refused (with one project, an unlisted name goes to it, as before).
+        Returns the refusal message (already audited) instead of a pair
+        when it cannot tell.
         """
         try:
-            target = self._provider_target('hetzner', identifier, account)
+            target = await self._provider_target('hetzner', identifier, account)
         except UnknownAccountError as exc:
             return self._account_refused(tool_name, payload, exc)
         except AmbiguousInstanceError as exc:
             return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
         if target is None:
             return self._hetzner_service, identifier
         self._target_args('hetzner', payload, account, target)
@@ -2829,7 +2847,7 @@ class ServonautTools:
             self._audit.log(tool_name, payload, '', False, reason)
             return f"Blocked: {reason}"
 
-        resolved = self._hetzner_target(tool_name, payload, identifier, account)
+        resolved = await self._hetzner_target(tool_name, payload, identifier, account)
         if isinstance(resolved, str):
             return resolved
         service, server = resolved
@@ -2964,8 +2982,8 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         # The instance's account: the one asked for, a "<account>/"
-        # qualifier on project_id, or the account whose cache lists it.
-        resolved = self._ovh_target(
+        # qualifier on project_id, or the account whose inventory lists it.
+        resolved = await self._ovh_target(
             'ovh_delete_instance', payload, f"{project_id}/{instance_id}", account,
         )
         if isinstance(resolved, str):
@@ -2992,22 +3010,25 @@ class ServonautTools:
         self._audit.log('ovh_delete_instance', payload, text, True)
         return text
 
-    def _ovh_target(
+    async def _ovh_target(
         self, tool_name: str, payload: Dict[str, Any], instance_id: str, account: str,
     ):
         """``(account label, instance id)`` for a call on one OVH instance.
 
         The label is None when no registry is bound (the default service
         and *instance_id* are used unchanged). Returns the refusal message
-        (already audited) instead of a pair when the account is unknown or
-        the reference names several instances.
+        (already audited) instead of a pair when the account is unknown, or
+        the reference names several instances or, with several accounts,
+        none.
         """
         try:
-            target = self._provider_target('ovh', instance_id, account)
+            target = await self._provider_target('ovh', instance_id, account)
         except UnknownAccountError as exc:
             return self._account_refused(tool_name, payload, exc)
         except AmbiguousInstanceError as exc:
             return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
         if target is None:
             return None, instance_id
         self._target_args('ovh', payload, account, target)
@@ -3037,7 +3058,7 @@ class ServonautTools:
             self._audit.log(tool_name, payload, '', False, reason)
             return f"Blocked: {reason}"
 
-        resolved = self._ovh_target(tool_name, payload, instance_id, account)
+        resolved = await self._ovh_target(tool_name, payload, instance_id, account)
         if isinstance(resolved, str):
             return resolved
         ovh_account, native_id = resolved
@@ -3822,28 +3843,23 @@ class ServonautTools:
     # IP ban tools (WAF / Security Group / NACL)
     # ------------------------------------------------------------------
 
-    def _aws_account_key(self, label: str) -> str:
-        """Lower-cased AWS account label, "" meaning the default account."""
-        label = (label or "").strip()
-        if label:
-            return label.lower()
+    def _default_aws_label(self) -> str:
+        """Label of the default AWS account."""
         if self._accounts is not None and self._accounts.accounts('aws'):
-            return self._accounts.account('aws').key
-        return primary_label('aws', getattr(self._config_manager.get(), 'aws', None)).lower()
+            return self._accounts.account('aws').label
+        return primary_label('aws', getattr(self._config_manager.get(), 'aws', None))
 
     def _ban_configs(self, account: Optional[str] = None) -> List[Any]:
         """The IP-ban configs; only those acting in *account* unless it is None.
 
         ``""`` means the default AWS account.
         """
+        from servonaut.services.ip_ban_service import configs_in_account
+
         configs = list(self._ip_ban_service.get_configs())
         if account is None:
             return configs
-        wanted = self._aws_account_key(account)
-        return [
-            c for c in configs
-            if self._aws_account_key(getattr(c, 'account', '')) == wanted
-        ]
+        return configs_in_account(configs, self._accounts, account)
 
     def _ban_config_mismatch(self, config_name: str, account: str) -> Optional[str]:
         """Why *config_name* cannot be used for *account*, or None.
@@ -3860,12 +3876,14 @@ class ServonautTools:
         )
         if config is None:
             return None  # the service reports the unknown config itself
-        acts_in = getattr(config, 'account', '') or ''
-        if self._aws_account_key(acts_in) == self._aws_account_key(account):
+        from servonaut.services.ip_ban_service import configs_in_account
+
+        if configs_in_account([config], self._accounts, account):
             return None
+        acts_in = getattr(config, 'account', '') or self._default_aws_label()
         return (
             f"IP ban config {config_name!r} acts in AWS account "
-            f"{acts_in or self._aws_account_key('')!r}, not {account!r}."
+            f"{acts_in!r}, not {account!r}."
         )
 
     async def ip_ban_list_configs(self, account: str = "") -> str:
@@ -3912,7 +3930,7 @@ class ServonautTools:
             else:
                 target = ''
             acts_in = (
-                f"{(getattr(c, 'account', '') or self._accounts.account('aws').label)[:16]:<16} "
+                f"{(getattr(c, 'account', '') or self._default_aws_label())[:16]:<16} "
                 if show_account else ""
             )
             lines.append(
@@ -4199,13 +4217,15 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         # The instance's account: the one asked for, an "<account>/"
-        # qualifier, or the account whose cached inventory lists it.
+        # qualifier, or the account whose inventory lists it.
         try:
-            target = self._provider_target('aws', instance_id, account)
+            target = await self._provider_target('aws', instance_id, account)
         except UnknownAccountError as exc:
             return self._account_refused(tool_name, payload, exc)
         except AmbiguousInstanceError as exc:
             return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
         service = self._aws_service
         if target is not None:
             self._target_args('aws', payload, account, target)
@@ -5782,17 +5802,19 @@ class ServonautTools:
 
         An ARN is looked up in *account* (with several AWS accounts and no
         *account*, in the configured account the ARN names); an instance in
-        the account it belongs to. When a registry is bound the result
-        carries that ``account`` label, so the WebACL is changed with the
-        credentials it was found with. An instance reference that names
-        several servers returns ``error`` with ``ambiguous`` set.
+        the account it belongs to. When a registry is bound and the site's
+        account is known, the result carries that ``account`` label, so the
+        WebACL (or a ban config of that account) is changed with the right
+        credentials. An instance reference that names several servers
+        returns ``error`` with ``ambiguous`` set.
         """
         from servonaut.services.waf_management_service import resolve_webacl
         label = account or await self._arn_account(target)
-        used = {'account': label}
+        used = {'account': label, 'known': bool(label)}
 
         def _account_for(instance: Dict[str, Any]):
             used['account'] = instance.get('account') or ''
+            used['known'] = True
             return self._aws_context_for(instance)
 
         try:
@@ -5802,7 +5824,7 @@ class ServonautTools:
             )
         except AmbiguousInstanceError as exc:
             return {"error": str(exc), "ambiguous": True}
-        if self._accounts is not None:
+        if self._accounts is not None and used['known']:
             acl["account"] = used['account']
         return acl
 
@@ -6109,9 +6131,16 @@ class ServonautTools:
             webacl_note = acl["error"]
 
         # --- layer 2: a configured SG/NACL/WAF ip_ban config ---
-        if self._ip_ban_service is not None:
-            # Only a config in the site's own account can protect it.
-            configs = self._ban_configs(acl.get("account", "") or account)
+        # Only a config in the site's own AWS account can protect it; with
+        # several accounts and the site's unknown, no config is guessed.
+        site_account = acl.get("account")
+        if (
+            site_account is None and self._accounts is not None
+            and self._accounts.is_multi('aws')
+        ):
+            webacl_note += "; the site's AWS account is unknown, so no ban config applies"
+        elif self._ip_ban_service is not None:
+            configs = self._ban_configs(site_account or "")
             if configs:
                 cfg = configs[0]
                 try:
