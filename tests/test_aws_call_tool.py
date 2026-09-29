@@ -382,7 +382,7 @@ def test_aws_call_account_alias_of_a_role_map_is_passed_through(roles_field):
     tools = _make_tools(aws_factory=factory)
     setattr(
         tools._config_manager.get().aws, roles_field,
-        {"billing": "arn:aws:iam::111122223333:role/read"},
+        {"billing": "arn:aws:iam::111:role/read"},
     )
     out = _run(tools.aws_call("ec2", "describe_vpcs", account="billing"))
     assert out.startswith("aws_call ec2.describe_vpcs")
