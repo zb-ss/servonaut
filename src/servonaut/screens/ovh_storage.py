@@ -42,6 +42,8 @@ class OVHStorageScreen(Screen):
 
     # Label of the chosen account; "" is the default account.
     _account: str = ""
+    # Counts volume list loads; see _load_volumes.
+    _loads: int = 0
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -130,7 +132,7 @@ class OVHStorageScreen(Screen):
         picker = self.query_one("#storage_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
-        self.run_worker(self._load_volumes(), exclusive=True)
+        self._start_load()
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
         """Another account was picked: list its volumes instead."""
@@ -247,6 +249,10 @@ class OVHStorageScreen(Screen):
             )
             return
 
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         all_volumes: List[dict] = []
         for pid in project_ids:
             try:
@@ -258,6 +264,8 @@ class OVHStorageScreen(Screen):
                 logger.error("list_volumes failed for project %s: %s", pid, exc)
                 self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error", markup=False)
 
+        if load != self._loads:
+            return
         self._volumes: List[dict] = all_volumes
 
         table = self.query_one("#volumes_table", DataTable)
@@ -317,7 +325,15 @@ class OVHStorageScreen(Screen):
 
     def action_refresh(self) -> None:
         self._hide_all_forms()
-        self.run_worker(self._load_volumes(), exclusive=True)
+        self._start_load()
+
+    def _start_load(self) -> None:
+        """Load the volumes in a group of their own.
+
+        A reload cancels an older load, never a volume change that is
+        still running.
+        """
+        self.run_worker(self._load_volumes(), group="ovh_storage_load", exclusive=True)
 
     # ------------------------------------------------------------------
     # Create volume

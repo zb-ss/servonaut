@@ -42,6 +42,8 @@ class OVHIPManagementScreen(Screen):
 
     # Label of the chosen account; "" is the default account.
     _account: str = ""
+    # Counts list loads; see _load_ips.
+    _loads: int = 0
 
     @property
     def app(self) -> "ServonautApp":
@@ -137,7 +139,7 @@ class OVHIPManagementScreen(Screen):
         picker = self.query_one("#ip_mgmt_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
-        self.run_worker(self._load_ips(), exclusive=True)
+        self._start_load()
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
         """Another account was picked: list its IPs instead."""
@@ -147,7 +149,15 @@ class OVHIPManagementScreen(Screen):
         self._hide_move_form()
         self._hide_rdns_form()
         self.query_one("#ip_table", DataTable).clear()
-        self.run_worker(self._load_ips(), exclusive=True)
+        self._start_load()
+
+    def _start_load(self) -> None:
+        """Load the IPs in a group of their own.
+
+        A reload cancels an older load, never an IP move or a reverse DNS
+        change that is still running.
+        """
+        self.run_worker(self._load_ips(), group="ovh_ip_load", exclusive=True)
 
     def _ip_service(self):
         """The chosen account's IP service (None when unavailable)."""
@@ -229,13 +239,20 @@ class OVHIPManagementScreen(Screen):
             self.notify("OVH IP service is not available.", severity="error")
             return
 
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         try:
-            self._ips = await svc.list_ips()
+            ips = await svc.list_ips()
         except Exception as exc:
             logger.error("Error loading OVH IPs: %s", exc)
-            self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
+            if load == self._loads:
+                self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
             return
-
+        if load != self._loads:
+            return
+        self._ips = ips
         self._populate_table()
 
     def refresh_after_demo_toggle(self) -> None:
