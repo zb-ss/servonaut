@@ -294,6 +294,22 @@ async def test_manager_starts_in_the_rows_account_and_refreshes_all(ec2) -> None
 
 
 @pytest.mark.asyncio
+async def test_manager_single_account_audit_rows_are_unchanged(ec2) -> None:
+    from servonaut.screens.aws_manager import AWSManagerScreen
+
+    app = Host(_registry(_config(extra=False)), AWSManagerScreen)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        table = screen.query_one("#aws_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 2, "the rows")
+        table.move_cursor(row=1)  # db-1, stopped
+        await pilot.pause()
+        screen.action_start()
+        await _wait_for(pilot, lambda: app.aws_audit.log_action.called, "the audit row")
+    assert app.aws_audit.log_action.call_args.kwargs["details"] == {"region": "us-east-1"}
+
+
+@pytest.mark.asyncio
 async def test_manager_stops_in_the_rows_account_after_confirming(ec2) -> None:
     from servonaut.screens.aws_manager import AWSManagerScreen
 
