@@ -20,13 +20,13 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Select, Static
 
 from servonaut.config.schema import AWSAccount
+from servonaut.screens._provider_accounts import shown_label
 from servonaut.screens.settings.accounts import (
     AccountRow,
     AccountsSection,
     demo_redaction,
     label_error,
     parse_regions,
-    shown_label,
     shown_profile,
     shown_text,
     suggest_label,
@@ -197,17 +197,17 @@ class AwsAccountsSection(AccountsSection):
     # Drawing
     # ------------------------------------------------------------------
 
-    def cells(self, config: Any, row: AccountRow, redaction: Any) -> Tuple[str, ...]:
+    def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:
         account = config.aws if row.primary else config.aws.accounts[row.index]
         profile = (account.profile or "").strip()
         if profile:
-            profile = shown_profile(redaction, profile)
+            profile = shown_profile(self.app, profile)
         elif row.primary:
             profile = "default credentials"
         else:
             profile = "missing"
         regions = ", ".join(account.regions) if account.regions else "all enabled"
-        return (shown_label(redaction, row.label), profile, regions)
+        return (shown_label(self.app, row.label), profile, regions)
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw; an open form holds real names, so demo mode closes it."""
@@ -329,7 +329,7 @@ class AwsAccountsSection(AccountsSection):
         for widget in self.query(".field-error"):
             widget.remove_class("field-error")
         error = self.query_one("#aws_account_form_error", Static)
-        error.update(escape(shown_text(demo_redaction(self.app), config, message)))
+        error.update(escape(shown_text(self.app, config, message)))
         error.display = bool(message)
         if field_id:
             field = self.query_one(f"#{field_id}", Input)
@@ -381,7 +381,7 @@ class AwsAccountsSection(AccountsSection):
             # Typed during this demo session: show it as typed.
             redaction.keep_as_authored(label, profile)
         self._close_form()
-        shown = shown_label(redaction, label or "aws")
+        shown = shown_label(self.app, label or "aws")
         self.accounts_changed(f"Saved AWS account '{shown}'")
 
     def _profile_problem(
