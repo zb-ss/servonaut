@@ -93,6 +93,93 @@ def test_servers_verify_refuses_a_shared_name(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
+# OVH logins: each account's username and key
+# ---------------------------------------------------------------------------
+
+
+def _ovh(id_, name):
+    return {"id": id_, "name": name, "type": "vps-starter", "state": "running",
+            "public_ip": "8.8.4.4", "region": "gra", "provider": "ovh",
+            "provider_type": "vps", "is_ovh": True}
+
+
+@pytest.fixture
+def ovh_logins(monkeypatch, tmp_path):
+    """Two OVH accounts that each log in with their own user and key."""
+    registry, _ = build_registry(monkeypatch, ovh={
+        "ovh": [_ovh("vps-a.vps.ovh.net", "web-1")],
+        "backup": [_ovh("vps-b.vps.ovh.net", "web-1")],
+    })
+    keys = {label: tmp_path / f"{label}_ed25519" for label in ("ovh", "backup")}
+    for key in keys.values():
+        key.write_text("private key")
+    config = registry.config
+    config.ovh.default_username, config.ovh.default_ssh_key = "ubuntu", str(keys["ovh"])
+    backup = config.ovh.accounts[0]
+    backup.default_username, backup.default_ssh_key = "debian", str(keys["backup"])
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    return config, CachedFleet.from_registry(registry, custom).instances(), keys
+
+
+@pytest.mark.parametrize("reference, user, expected_user, account", [
+    ("backup/web-1", None, "debian", "backup"),
+    ("ovh/web-1", None, "ubuntu", "ovh"),
+    ("backup/web-1", "root", "root", "backup"),
+])
+def test_ssh_logs_in_to_an_ovh_server_as_its_account_says(
+    ovh_logins, reference, user, expected_user, account,
+):
+    from servonaut.cli import ssh as ssh_mod
+
+    config, rows, keys = ovh_logins
+    ssh_service = MagicMock()
+    ssh_service.build_ssh_command.return_value = ["ssh"]
+    headless = (config, MagicMock(is_authenticated=False), None, None, None,
+                ssh_service, MagicMock())
+    with patch.object(ssh_mod, "_init_headless_services", return_value=headless), \
+         patch.object(ssh_mod, "_load_instances", return_value=rows), \
+         patch.object(ssh_mod.subprocess, "run", return_value=MagicMock(returncode=0)):
+        rc = ssh_mod.handle_ssh_command(argparse.Namespace(
+            instance=reference, user=user, port=None, remote_command=[],
+        ))
+    assert rc == 0
+    call = ssh_service.build_ssh_command.call_args.kwargs
+    assert (call["username"], call["key_path"]) == (expected_user, str(keys[account]))
+
+
+def test_servers_verify_probes_an_ovh_server_as_its_accounts_user(ovh_logins, monkeypatch):
+    from servonaut.cli import servers as cli_servers
+
+    config, rows, _ = ovh_logins
+    config_manager = MagicMock()
+    config_manager.get.return_value = config
+    services = (config_manager, MagicMock(is_authenticated=True), MagicMock(),
+                MagicMock(), MagicMock(), MagicMock())
+    monkeypatch.setattr(cli_servers, "_init_headless_services", lambda: services)
+    probe = AsyncMock(return_value=None)
+    monkeypatch.setattr(cli_servers, "_probe_personal", probe)
+    with patch("servonaut.cli.servers._load_all_instances", return_value=rows):
+        cli_servers.handle_servers_command(argparse.Namespace(
+            servers_command="verify", instance="backup/web-1", host=None, user=None,
+            port=None, timeout=5,
+        ))
+    _bw, _resolver, instance, host, user = probe.call_args.args[:5]
+    assert (instance["id"], host, user) == ("vps-b.vps.ovh.net", "8.8.4.4", "debian")
+
+
+def test_only_ovh_rows_take_an_account_login(ovh_logins):
+    from servonaut.services.accounts.headless import with_ovh_login
+
+    config, rows, _ = ovh_logins
+    hetzner = _hetzner("1", "web-1")
+    assert with_ovh_login(hetzner, config) is hetzner
+    named = dict(rows[1], username="admin")
+    assert with_ovh_login(named, config)["username"] == "admin"
+    assert "username" not in rows[1]
+
+
+# ---------------------------------------------------------------------------
 # servonaut memory
 # ---------------------------------------------------------------------------
 
@@ -263,3 +350,39 @@ def test_destroy_a_server_no_project_lists_is_refused(projects):
     assert "No Hetzner server 'ghost' in any account (hetzner, staging)." in err
     assert "--account" in err
     assert all(not s.called("delete_server") for s in services.values())
+
+
+# ---------------------------------------------------------------------------
+# The primary project cannot be used, the second one can
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def primary_down(monkeypatch):
+    registry, services = build_registry(monkeypatch, hetzner=PROJECTS, unusable={"hetzner"})
+    monkeypatch.setattr(cli_hetzner, "_hetzner_registry", lambda: registry)
+    return registry, services
+
+
+def test_a_subcommand_without_account_gets_the_registrys_reason(primary_down, capsys):
+    args = _parser().parse_args(["hetzner", "server-types"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli_hetzner.handle_hetzner_command(args)
+    assert exit_info.value.code == cli_hetzner._EXIT_VALIDATION
+    err = capsys.readouterr().err
+    assert "The primary Hetzner account 'hetzner' is not available" in err
+    assert "staging" in err
+
+
+def test_the_second_project_still_serves_while_the_primary_is_down(primary_down):
+    _, services = primary_down
+    services[("hetzner", "staging")].returns["list_server_types"] = []
+    rc, _, _ = _cli(["server-types", "--account", "staging"])
+    assert rc == 0
+    rc, out, err = _cli(["list"])
+    assert rc == 0
+    assert "staging/worker" in out
+    assert "Warning: some projects were not listed: hetzner: not available" in err
+    rc, _, _ = _cli(["destroy", "worker", "--yes"])
+    assert rc == 0
+    assert services[("hetzner", "staging")].called("delete_server") == [("worker",)]

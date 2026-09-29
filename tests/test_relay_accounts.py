@@ -5,6 +5,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from types import SimpleNamespace
+
 import pytest
 
 from servonaut.models.relay_messages import CommandRequest, CommandType
@@ -170,9 +172,53 @@ def test_handshake_names_the_account_labels(monkeypatch):
 
 
 def test_handshake_without_accounts_keeps_its_shape():
-    handshake = _listener()._build_handshake()
-    assert "accounts" not in handshake
-    assert "accounts" not in _listener(accounts={"aws": ["aws"]})._build_heartbeat()
+    listener = _listener()
+    assert "accounts" not in listener._build_handshake()
+    assert "accounts" not in listener._build_heartbeat()
+
+
+def test_accounts_are_read_for_every_handshake_and_heartbeat():
+    labels = {"aws": ["aws"], "hetzner": ["hetzner"], "ovh": []}
+    providers = ["aws", "hetzner"]
+    listener = _listener(accounts=lambda: labels, providers_configured=lambda: providers)
+    assert listener._build_handshake()["accounts"]["hetzner"] == ["hetzner"]
+    # A project added in the settings reaches the next heartbeat.
+    labels = {"aws": ["aws"], "hetzner": ["hetzner", "staging"], "ovh": []}
+    providers = ["aws", "hetzner", "ovh"]
+    heartbeat = listener._build_heartbeat()
+    assert heartbeat["accounts"]["hetzner"] == ["hetzner", "staging"]
+    assert heartbeat["providers_configured"] == ["aws", "hetzner", "ovh"]
+
+
+def test_a_failing_read_keeps_the_last_known_labels():
+    state = {"fail": False}
+
+    def labels():
+        if state["fail"]:
+            raise RuntimeError("config being rewritten")
+        return {"aws": ["aws"], "hetzner": [], "ovh": []}
+
+    listener = _listener(accounts=labels)
+    first = listener._build_heartbeat()["accounts"]
+    state["fail"] = True
+    assert listener._build_heartbeat()["accounts"] == first
+
+
+def test_providers_count_any_usable_account(monkeypatch):
+    from servonaut.services.relay_listener import _resolve_providers_configured
+
+    registry, _ = build_registry(
+        monkeypatch, hetzner={"hetzner": [], "staging": []}, unusable={"hetzner"},
+    )
+    app = SimpleNamespace(
+        accounts=registry, aws_service=None, hetzner_service=None, ovh_service=None,
+        aws_object_storage_service=None, hetzner_object_storage_service=None,
+        ovh_object_storage_service=None,
+    )
+    # The primary project is down but staging serves: Hetzner is listed,
+    # consistent with the labels advertised next to it.
+    assert _resolve_providers_configured(app) == ["aws", "hetzner"]
+    assert _resolve_account_labels(app)["hetzner"] == ["staging"]
 
 
 def test_app_without_a_registry_sends_no_accounts():
@@ -209,7 +255,8 @@ def test_tui_listener_factory_passes_accounts(monkeypatch):
     manager._handle_degraded = lambda *a: None
     manager._default_listener_factory(on_connected=None, on_disconnected=None)
     assert built["accounts"] is registry
-    assert captured["accounts"]["hetzner"] == ["hetzner", "staging"]
+    assert captured["accounts"]()["hetzner"] == ["hetzner", "staging"]
+    assert "hetzner" in captured["providers_configured"]()
 
 
 def test_build_executors_builds_a_registry_when_none_is_given(monkeypatch):
@@ -243,14 +290,17 @@ def _ban_configs():
 def _ban_listener(monkeypatch, *, configs, instance, aws_accounts=("aws", "prod")):
     from servonaut.services.relay_listener import RelayListener
 
+    from types import SimpleNamespace
+
+    from servonaut.services.ip_ban_service import IPBanService
+
     registry, _ = build_registry(monkeypatch, aws={label: [] for label in aws_accounts})
+    registry.config.ip_ban_configs = configs
     executors = MagicMock()
-    executors.accounts = registry
     executors.find_instance = AsyncMock(
         return_value=None if instance is None else dict(instance, account=aws_accounts[-1]),
     )
-    ip_ban = MagicMock()
-    ip_ban.get_configs = MagicMock(return_value=configs)
+    ip_ban = IPBanService(SimpleNamespace(get=lambda: registry.config), accounts=registry)
     ip_ban.ban_ip = AsyncMock(return_value={"success": True, "message": "banned", "rule_id": "r"})
     ip_ban.unban_ip = AsyncMock(return_value={"success": True, "message": "unbanned"})
     executors.ip_ban_service = ip_ban

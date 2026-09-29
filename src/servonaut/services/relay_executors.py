@@ -220,11 +220,6 @@ class RelayExecutors:
         return await self._find_instance(identifier)
 
     @property
-    def accounts(self):
-        """The account registry (None: only the default accounts are known)."""
-        return self._accounts
-
-    @property
     def ip_ban_service(self):
         """Lazily-built :class:`IPBanService` for local-dispatch
         remediation verbs. Built from this executor's own config manager
@@ -325,53 +320,12 @@ class RelayExecutors:
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        extra_options = self._connection_service.get_extra_options(instance, profile)
+        from servonaut.services.connection_service import server_connection
 
-        if instance.get('is_ovh'):
-            options = self._connection_service.resolve_ovh_connection(instance)
-            username = options['username']
-            key_path = options['key_path']
-            port = None
-        elif instance.get('is_hetzner'):
-            # Hetzner rows carry their project's SSH defaults.
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            key_path = instance.get('ssh_key') or None
-            port = None
-        elif instance.get('is_custom'):
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            key_path = instance.get('ssh_key') or instance.get('key_name') or None
-            port = instance.get('port') or None
-        else:
-            username = (
-                (profile.username if profile else None)
-                or self._config_manager.get().default_username
-            )
-            instance_id = instance.get('id', '')
-            key_path = self._ssh_service.get_key_path(instance_id)
-            if not key_path and instance.get('key_name'):
-                key_path = self._ssh_service.discover_key(instance['key_name'])
-            port = None
-
-        return {
-            'host': host,
-            'username': username,
-            'key_path': key_path,
-            'proxy_args': proxy_args,
-            'profile': profile,
-            'port': port,
-            'extra_options': extra_options,
-        }
+        return server_connection(
+            instance, self._connection_service, self._ssh_service,
+            self._config_manager.get().default_username,
+        )
 
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""

@@ -251,6 +251,7 @@ def handle_ssh_command(args: Any) -> int:
 
 
 async def _handle_ssh_async(args: Any) -> int:
+    from servonaut.services.accounts.headless import with_ovh_login
     from servonaut.services.ssh_ref_resolver import SshRefResolver
     from servonaut.services.bw_resolver import (
         BwResolver,
@@ -302,7 +303,7 @@ async def _handle_ssh_async(args: Any) -> int:
             print(f"  {i}. {describe_candidate(inst)}", file=sys.stderr)
         return _EXIT_AMBIGUOUS
 
-    instance = matches[0]
+    instance = with_ovh_login(matches[0], config)
     iid = instance.get("id") or instance.get("name") or args.instance
 
     # --- Build resolver ---

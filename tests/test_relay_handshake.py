@@ -88,6 +88,7 @@ class TestResolveProvidersConfigured:
 
     def test_aws_service_present(self):
         app = MagicMock()
+        app.accounts = None  # a host that never built the account registry
         app.aws_service = MagicMock()
         app.aws_object_storage_service = None
         app.hetzner_service = None
@@ -99,6 +100,7 @@ class TestResolveProvidersConfigured:
 
     def test_aws_object_storage_only(self):
         app = MagicMock()
+        app.accounts = None  # a host that never built the account registry
         app.aws_service = None
         app.aws_object_storage_service = MagicMock()
         app.hetzner_service = None
@@ -110,6 +112,7 @@ class TestResolveProvidersConfigured:
 
     def test_hetzner_and_ovh(self):
         app = MagicMock()
+        app.accounts = None  # a host that never built the account registry
         app.aws_service = None
         app.aws_object_storage_service = None
         app.hetzner_service = MagicMock()
@@ -121,6 +124,7 @@ class TestResolveProvidersConfigured:
 
     def test_all_providers_sorted_alphabetically(self):
         app = MagicMock()
+        app.accounts = None  # a host that never built the account registry
         app.aws_service = MagicMock()
         app.aws_object_storage_service = None
         app.hetzner_service = MagicMock()
@@ -133,6 +137,7 @@ class TestResolveProvidersConfigured:
 
     def test_no_services_returns_empty(self):
         app = MagicMock()
+        app.accounts = None  # a host that never built the account registry
         app.aws_service = None
         app.aws_object_storage_service = None
         app.hetzner_service = None

@@ -57,8 +57,10 @@ class FakeProvider:
         self.cache_reads += 1
         return [dict(r) for r in (self.cached or [])]
 
+    fresh = True
+
     def is_cache_fresh(self) -> bool:
-        return True
+        return self.fresh
 
     def resolve_token(self) -> str:
         return "token"
@@ -91,13 +93,17 @@ def build_registry(
     ovh: Optional[Mapping[str, Rows]] = None,
     account_ids: Optional[Mapping[str, str]] = None,
     config: Optional[AppConfig] = None,
+    unusable: Iterable[str] = (),
 ) -> Tuple[AccountRegistry, Dict[Tuple[str, str], FakeProvider]]:
     """A registry with the given accounts (label -> rows; first = primary).
 
     Providers left out: AWS gets only its primary account ``aws`` (no rows);
-    Hetzner and OVH are disabled. Returns the registry and the fake service
+    Hetzner and OVH are disabled. Accounts in *unusable* are configured but
+    cannot connect (a Hetzner token that does not resolve, a primary OVH
+    account without credentials). Returns the registry and the fake service
     of every account, keyed ``(provider, label)``.
     """
+    unusable = set(unusable)
     services: Dict[Tuple[str, str], FakeProvider] = {}
     aws = aws or {"aws": []}
 
@@ -109,9 +115,16 @@ def build_registry(
         return service
 
     def fake_hetzner(effective, allow_ambient_token=True):
+        from servonaut.services.hetzner_service import HetznerNotConfiguredError
+
         label = effective.label or "hetzner"
         service = FakeProvider("hetzner", label, (hetzner or {}).get(label, ()), effective)
         services[("hetzner", label)] = service
+        if label in unusable:
+            def refuse():
+                raise HetznerNotConfiguredError("No Hetzner Cloud API token configured")
+
+            service.resolve_token = refuse
         return service
 
     def fake_ovh(effective, cache_path=None, allow_ambient_config=True):
@@ -143,8 +156,9 @@ def build_registry(
         )
     if ovh:
         labels = _labels(ovh, "ovh")
+        primary_key = "" if labels[0] in unusable else "k"
         config.ovh = OVHConfig(
-            enabled=True, application_key="k", application_secret="s", consumer_key="c",
+            enabled=True, application_key=primary_key, application_secret="s", consumer_key="c",
             label="" if labels[0] == "ovh" else labels[0],
             accounts=[
                 OVHAccount(label=l, application_key="k", application_secret="s", consumer_key="c")

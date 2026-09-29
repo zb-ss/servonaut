@@ -115,6 +115,22 @@ def test_ambiguous_reference_is_refused_with_candidates(two_projects):
     )
 
 
+def test_run_command_never_takes_a_name_as_unique_before_listing_it(monkeypatch):
+    """AWS web-1 matches first; Hetzner was never listed and has one too."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1", "region": "eu-west-1"}]},
+        hetzner={"hetzner": [WEB_PRIMARY]},
+    )
+    services[("hetzner", "hetzner")].cached = None
+    tools = make_tools(registry)
+    ran = MagicMock()
+    monkeypatch.setattr(tools, "_run_command_via_ssh", ran)
+    out = _run(tools.run_command("web-1", "uptime"))
+    assert "matches 2 servers" in out and "hetzner/web-1" in out
+    ran.assert_not_called()
+
+
 def test_ambiguous_reference_on_run_command_never_runs(two_projects, monkeypatch):
     tools, _ = two_projects
     ran = MagicMock()
@@ -401,6 +417,12 @@ def test_aws_call_label_and_account_id(monkeypatch):
     assert out.startswith("Error: No AWS account named 'nope'")
 
 
+def _ip_ban_service(tools, registry):
+    from servonaut.services.ip_ban_service import IPBanService
+
+    return IPBanService(tools._config_manager, accounts=registry)
+
+
 def test_ip_ban_configs_filtered_by_account(monkeypatch):
     from servonaut.config.schema import IPBanConfig
 
@@ -411,8 +433,7 @@ def test_ip_ban_configs_filtered_by_account(monkeypatch):
                     account="prod"),
     ]
     tools = make_tools(registry)
-    tools._ip_ban_service = MagicMock()
-    tools._ip_ban_service.get_configs.return_value = registry.config.ip_ban_configs
+    tools._ip_ban_service = _ip_ban_service(tools, registry)
     out = _run(tools.ip_ban_list_configs(account="prod"))
     assert "prod-sg" in out and "main-waf" not in out
     everything = _run(tools.ip_ban_list_configs())
@@ -432,8 +453,7 @@ def _block_ip_tools(monkeypatch, site_account):
         IPBanConfig(name="waf-prod", method="waf", ip_set_name="p", account="prod"),
     ]
     tools = make_tools(registry)
-    service = MagicMock()
-    service.get_configs.return_value = registry.config.ip_ban_configs
+    service = _ip_ban_service(tools, registry)
     banned = []
 
     async def _ban(ip, config_name):
@@ -564,3 +584,70 @@ def test_build_headless_tools_serves_the_registry(monkeypatch, tmp_path):
     assert tools._hetzner_service is registry.default_service("hetzner")
     assert tools._aws_service is registry.default_service("aws")
     assert tools._cloudwatch_service is registry.aws_services().cloudwatch
+
+
+# ---------------------------------------------------------------------------
+# The primary account cannot be used, another one can
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def primary_down(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [WEB_PRIMARY], "staging": [WEB_STAGING, WORKER]},
+        unusable={"hetzner"},
+    )
+    return make_tools(registry), services
+
+
+def test_a_call_without_account_gets_the_registrys_reason(primary_down):
+    tools, services = primary_down
+    out = _run(tools.hetzner_list_ssh_keys())
+    assert out.startswith("Error: The primary Hetzner account 'hetzner' is not available")
+    assert "staging" in out
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+    assert services[("hetzner", "staging")].called("list_ssh_keys") == []
+
+
+def test_a_named_account_still_works_while_the_primary_is_down(primary_down):
+    tools, services = primary_down
+    services[("hetzner", "staging")].returns["list_ssh_keys"] = [
+        {"name": "deploy", "id": 7, "fingerprint": "aa"},
+    ]
+    assert "deploy" in _run(tools.hetzner_list_ssh_keys(account="staging"))
+
+
+def test_calls_that_find_the_account_work_while_the_primary_is_down(primary_down):
+    tools, services = primary_down
+    assert _run(tools.hetzner_power_on("worker")) == "Hetzner server 'worker': started."
+    assert services[("hetzner", "staging")].called("power_on") == [("worker",)]
+    listing = _run(tools.hetzner_list_servers())
+    assert "staging/worker" in listing
+
+
+def test_an_ovh_call_without_account_gets_the_registrys_reason(monkeypatch):
+    registry, _ = build_registry(monkeypatch, ovh={"ovh": [], "backup": []}, unusable={"ovh"})
+    tools = make_tools(registry)
+    out = _run(tools.ovh_list_ips())
+    assert out.startswith("Error: The primary OVH account 'ovh' is not available")
+    ip_service = MagicMock()
+
+    async def _ips():
+        return [{"ip": "1.1.1.1/32", "type": "failover"}]
+
+    ip_service.list_ips = _ips
+    registry.ovh_services("backup").ip = ip_service
+    assert "1.1.1.1/32" in _run(tools.ovh_list_ips(account="backup"))
+
+
+def test_ovh_snapshots_of_a_server_that_is_not_an_ovh_one(monkeypatch):
+    registry, _ = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "api", "region": "eu-west-1"}]},
+        ovh={"ovh": [], "backup": []},
+    )
+    tools = make_tools(registry)
+    out = _run(tools.ovh_snapshots("api"))
+    assert out.startswith("Error: Cannot determine project_id for instance api")
+    assert audit_rows(tools)[-1][3] == "missing_project_id"

@@ -486,7 +486,7 @@ def _relay_run_foreground() -> None:
     from servonaut.config.manager import ConfigManager
     from servonaut.runtime import detect_runtime
     from servonaut.services.accounts.headless import (
-        account_labels, build_account_registry,
+        account_labels, build_account_registry, usable_providers,
     )
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
@@ -703,7 +703,9 @@ def _relay_run_foreground() -> None:
         session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
         probe_bridge=probe_bridge,
-        accounts=account_labels(accounts),
+        # Read on every handshake and heartbeat.
+        providers_configured=lambda: usable_providers(accounts),
+        accounts=lambda: account_labels(accounts),
     )
 
     print(f"Starting Servonaut relay listener (user: {user_id})")

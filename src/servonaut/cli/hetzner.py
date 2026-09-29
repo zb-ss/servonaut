@@ -338,24 +338,28 @@ def _print_server_types_table(types: List[dict]) -> None:
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
-async def _list_servers(account: Optional[str]) -> List[dict]:
-    """Every project's servers, or the servers of the project *account* names.
+async def _list_servers(account: Optional[str]) -> tuple:
+    """``(rows, warning)``: every project's servers, or those of *account*.
 
-    Rows of configured projects carry their ``account``.
+    Rows of configured projects carry their ``account``. *warning* says
+    which projects could not be listed (one that cannot connect, a refresh
+    that failed), or is None.
     """
     from servonaut.services.accounts.headless import fetch_provider_rows
 
     registry = _hetzner_registry()
     if registry is None:
-        return await _build_service(account).fetch_instances_cached(force_refresh=True)
-    return await fetch_provider_rows(
+        rows = await _build_service(account).fetch_instances_cached(force_refresh=True)
+        return rows, None
+    rows = await fetch_provider_rows(
         registry, 'hetzner', account or '', force_refresh=True,
     )
+    return rows, None if account else registry.fleet('hetzner').last_fetch_error
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
     try:
-        instances = _run_async(_list_servers(getattr(args, 'account', None)))
+        instances, warning = _run_async(_list_servers(getattr(args, 'account', None)))
     except UnknownAccountError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_VALIDATION
@@ -363,6 +367,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
         print(f"Error listing servers: {exc}", file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
+    if warning:
+        print(f"Warning: some projects were not listed: {warning}", file=sys.stderr)
     if args.state:
         instances = [i for i in instances if i.get('state') == args.state]
 

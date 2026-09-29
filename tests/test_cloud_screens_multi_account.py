@@ -781,6 +781,14 @@ def _ban_configs():
     ]
 
 
+def _ip_ban(configs, accounts=None):
+    """An IP-ban service holding *configs*, acting in the AWS accounts of the app."""
+    from servonaut.services.ip_ban_service import IPBanService
+
+    config = AppConfig(ip_ban_configs=list(configs))
+    return IPBanService(SimpleNamespace(get=lambda: config), accounts=accounts)
+
+
 def _resolve_method(finding: dict, app) -> tuple:
     from servonaut.screens.findings import FindingDetailScreen
 
@@ -791,9 +799,10 @@ def _resolve_method(finding: dict, app) -> tuple:
 
 @pytest.mark.parametrize(("account", "method"), [("aws", "waf"), ("prod", "security_group")])
 def test_block_ip_uses_a_ban_plane_of_the_servers_aws_account(account, method):
+    registry = _aws_registry()
     app = SimpleNamespace(
-        accounts=_aws_registry(),
-        ip_ban_service=SimpleNamespace(get_configs=_ban_configs),
+        accounts=registry,
+        ip_ban_service=_ip_ban(_ban_configs(), registry),
         instances=[{"id": "i-0abc", "name": "web-1", "account": account, "account_qualified": True}],
     )
     assert _resolve_method({"instance_id": "i-0abc"}, app) == (method, None)
@@ -802,11 +811,10 @@ def test_block_ip_uses_a_ban_plane_of_the_servers_aws_account(account, method):
 def test_block_ip_refuses_when_no_ban_plane_covers_the_servers_account():
     from servonaut.config.schema import IPBanConfig
 
+    registry = _aws_registry()
     app = SimpleNamespace(
-        accounts=_aws_registry(),
-        ip_ban_service=SimpleNamespace(
-            get_configs=lambda: [IPBanConfig(name="edge", method="waf")],
-        ),
+        accounts=registry,
+        ip_ban_service=_ip_ban([IPBanConfig(name="edge", method="waf")], registry),
         instances=[{"id": "i-0abc", "name": "web-1", "account": "prod", "account_qualified": True}],
     )
     method, error = _resolve_method({"instance_id": "i-0abc"}, app)
@@ -815,9 +823,10 @@ def test_block_ip_refuses_when_no_ban_plane_covers_the_servers_account():
 
 
 def test_block_ip_with_one_aws_account_offers_every_ban_plane():
+    registry = AccountRegistry(AppConfig())
     app = SimpleNamespace(
-        accounts=AccountRegistry(AppConfig()),
-        ip_ban_service=SimpleNamespace(get_configs=_ban_configs),
+        accounts=registry,
+        ip_ban_service=_ip_ban(_ban_configs(), registry),
         instances=[{"id": "i-0abc", "name": "web-1", "account": "aws"}],
     )
     # Unchanged single-account rule: the first plane alphabetically.
@@ -825,9 +834,10 @@ def test_block_ip_with_one_aws_account_offers_every_ban_plane():
 
 
 def test_block_ip_refuses_a_name_shared_by_several_servers():
+    registry = _aws_registry()
     app = SimpleNamespace(
-        accounts=_aws_registry(),
-        ip_ban_service=SimpleNamespace(get_configs=_ban_configs),
+        accounts=registry,
+        ip_ban_service=_ip_ban(_ban_configs(), registry),
         instances=[
             {"id": "i-0abc", "name": "web-1", "account": "aws", "account_qualified": True},
             {"id": "i-0def", "name": "web-1", "account": "prod", "account_qualified": True},
@@ -936,9 +946,10 @@ def test_demo_mode_per_server_screen_uses_the_real_account(accounts):
 def test_demo_mode_finding_is_matched_against_the_real_records():
     real = {"id": "i-0abc", "name": "web-1", "account": "prod", "account_qualified": True}
     drawn = dict(real, id="i-fake", name="fake-name", account="stand-in")
+    registry = _aws_registry()
     app = SimpleNamespace(
-        accounts=_aws_registry(),
-        ip_ban_service=SimpleNamespace(get_configs=_ban_configs),
+        accounts=registry,
+        ip_ban_service=_ip_ban(_ban_configs(), registry),
         instances=[drawn],
         connection_instance=lambda row: real if row is drawn else row,
     )

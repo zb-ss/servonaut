@@ -335,6 +335,7 @@ def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Opt
 async def _cmd_verify(args: Any) -> int:
     """Async body of ``servers verify``."""
     from servonaut import __version__
+    from servonaut.services.accounts.headless import with_ovh_login
     from servonaut.services.bw_ssh_config_service import STATUS_VERIFIED
 
     checked_by_client = f"servonaut-cli/{__version__}"
@@ -418,6 +419,7 @@ async def _cmd_verify(args: Any) -> int:
     # ------------------------------------------------------------------
 
     if personal_instance is not None:
+        personal_instance = with_ovh_login(personal_instance, config)
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
         port = _resolve_port(personal_instance, port_override)

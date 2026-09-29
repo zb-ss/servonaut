@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import boto3
 
@@ -36,57 +36,10 @@ def _aws_account_key(accounts: Any, label: str) -> Optional[str]:
         return None
 
 
-def configs_in_account(
-    configs: Iterable['IPBanConfig'], accounts: Optional[Any], account: str = "",
-) -> List['IPBanConfig']:
-    """The ban configs that act in AWS account *account* ("" = the default).
-
-    Each config acts in the account it names (empty = the default account),
-    so only these change that account's WAF IP sets, security groups and
-    network ACLs. A config naming an account that no longer exists acts in
-    none. Without an account registry (*accounts* None) there is one
-    account and every config acts in it.
-    """
-    configs = list(configs)
-    if accounts is None:
-        return configs
-    wanted = _aws_account_key(accounts, account)
-    if wanted is None:
-        return []
-    return [config for config in configs if _aws_account_key(accounts, _label(config)) == wanted]
-
-
 def _label(config: Any) -> str:
-    """The account label a config names ("" = default)."""
+    """The account label a config names ("" = the default account)."""
     label = getattr(config, "account", "")
     return label if isinstance(label, str) else ""
-
-
-def configs_for_server(
-    configs: Iterable['IPBanConfig'], accounts: Optional[Any],
-    server: Optional[Dict[str, Any]],
-) -> Tuple[List['IPBanConfig'], str]:
-    """The ban configs that can shield *server*, and the account they act in.
-
-    With one AWS account (or no registry) every config qualifies and the
-    account label is "". With several, only the configs of the server's own
-    AWS account do: a ban in another account's IP set would be reported as
-    applied while the server stays exposed.
-
-    Raises:
-        UnknownAccountError: There are several AWS accounts and the server's
-            cannot be told (not a listed AWS server, or its account was
-            removed from the settings).
-    """
-    if accounts is None or not accounts.is_multi("aws"):
-        return list(configs), ""
-    if not server or row_provider(server) != "aws":
-        name = (server or {}).get("name") or (server or {}).get("id") or "the target"
-        raise UnknownAccountError(
-            f"the AWS account of {name} is unknown: it is not a listed AWS server"
-        )
-    owner = accounts.account_for(server)
-    return configs_in_account(configs, accounts, owner.label), owner.label
 
 
 class _AccountClients:
@@ -366,6 +319,7 @@ class IPBanService(IPBanServiceInterface):
                 AWS account it names. None uses the default credential chain.
         """
         self._config_manager = config_manager
+        self._accounts = accounts
         self._strategies = {k: v(accounts) for k, v in self.STRATEGIES.items()}
 
     def _get_config(self, config_name: str) -> 'IPBanConfig':
@@ -408,6 +362,61 @@ class IPBanService(IPBanServiceInterface):
 
     def get_configs(self) -> List['IPBanConfig']:
         return self._config_manager.get().ip_ban_configs
+
+    # ------------------------------------------------------------------
+    # Which AWS account each config acts in
+    # ------------------------------------------------------------------
+
+    def account_of(self, config: 'IPBanConfig') -> str:
+        """Label of the AWS account *config* acts in.
+
+        Its own ``account``, or the default account's label when it names
+        none.
+        """
+        from servonaut.config.accounts import primary_label
+
+        return _label(config) or primary_label("aws", self._config_manager.get().aws)
+
+    def configs_for_account(self, account: str = "") -> List['IPBanConfig']:
+        """The configs that act in AWS account *account* ("" = the default).
+
+        Only these change that account's WAF IP sets, security groups and
+        network ACLs. A config naming an account that no longer exists acts
+        in none. Without an account registry there is one account and every
+        config acts in it.
+        """
+        configs = list(self.get_configs())
+        if self._accounts is None:
+            return configs
+        wanted = _aws_account_key(self._accounts, account)
+        if wanted is None:
+            return []
+        return [c for c in configs if _aws_account_key(self._accounts, _label(c)) == wanted]
+
+    def configs_for_server(
+        self, server: Optional[Dict[str, Any]],
+    ) -> Tuple[List['IPBanConfig'], str]:
+        """The configs that can shield *server*, and the account they act in.
+
+        With one AWS account (or no registry) every config qualifies and the
+        account label is "". With several, only the configs of the server's
+        own AWS account do: a ban in another account's IP set would be
+        reported as applied while the server stays exposed.
+
+        Raises:
+            UnknownAccountError: There are several AWS accounts and the
+                server's cannot be told (not a listed AWS server, or its
+                account was removed from the settings).
+        """
+        if self._accounts is None or not self._accounts.is_multi("aws"):
+            return list(self.get_configs()), ""
+        if not server or row_provider(server) != "aws":
+            name = (server or {}).get("name") or (server or {}).get("id") or "the target"
+            raise UnknownAccountError(
+                f"the AWS account of {name} is unknown: it is not a listed AWS server"
+            )
+        owner = self._accounts.account_for(server)
+        return self.configs_for_account(owner.label), owner.label
 
     def validate_ip(self, ip_address: str) -> bool:
         """Accept a bare IP or a CIDR block (additive — old callers unaffected)."""

@@ -1,11 +1,13 @@
 """Which IP-ban configs act in which AWS account."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from servonaut.config.schema import IPBanConfig
+from servonaut.config.schema import AppConfig, IPBanConfig
 from servonaut.services.accounts import UnknownAccountError
-from servonaut.services.ip_ban_service import configs_for_server, configs_in_account
+from servonaut.services.ip_ban_service import IPBanService
 from tests._account_fixtures import build_registry
 
 DEFAULT = IPBanConfig(name="waf-a", method="waf")
@@ -15,30 +17,42 @@ GONE = IPBanConfig(name="waf-gone", method="waf", account="retired")
 CONFIGS = [DEFAULT, NAMED_DEFAULT, PROD, GONE]
 
 
+def _service(registry=None, config=None):
+    config = config or (registry.config if registry else AppConfig())
+    config.ip_ban_configs = list(CONFIGS)
+    return IPBanService(SimpleNamespace(get=lambda: config), accounts=registry)
+
+
 @pytest.fixture
 def two_accounts(monkeypatch):
-    return build_registry(monkeypatch, aws={"aws": [], "prod": []})[0]
+    return _service(build_registry(monkeypatch, aws={"aws": [], "prod": []})[0])
 
 
 def _names(configs):
     return [c.name for c in configs]
 
 
-def test_configs_in_account(two_accounts):
-    assert _names(configs_in_account(CONFIGS, two_accounts, "")) == ["waf-a", "sg-a"]
-    assert _names(configs_in_account(CONFIGS, two_accounts, "aws")) == ["waf-a", "sg-a"]
-    assert _names(configs_in_account(CONFIGS, two_accounts, "PROD")) == ["waf-prod"]
+def test_configs_for_account(two_accounts):
+    assert _names(two_accounts.configs_for_account("")) == ["waf-a", "sg-a"]
+    assert _names(two_accounts.configs_for_account("aws")) == ["waf-a", "sg-a"]
+    assert _names(two_accounts.configs_for_account("PROD")) == ["waf-prod"]
     # A config naming a removed account acts nowhere; an unknown label has none.
-    assert configs_in_account(CONFIGS, two_accounts, "retired") == []
+    assert two_accounts.configs_for_account("retired") == []
+
+
+def test_account_of(two_accounts):
+    assert [two_accounts.account_of(c) for c in CONFIGS] == ["aws", "AWS", "prod", "retired"]
 
 
 def test_without_a_registry_every_config_is_in_the_one_account():
-    assert configs_in_account(CONFIGS, None, "prod") == CONFIGS
+    service = _service()
+    assert service.configs_for_account("prod") == CONFIGS
+    assert service.configs_for_server({"id": "i-1"}) == (CONFIGS, "")
 
 
 def test_configs_for_a_server_of_the_second_account(two_accounts):
     server = {"id": "i-2", "name": "shop", "account": "prod"}
-    configs, account = configs_for_server(CONFIGS, two_accounts, server)
+    configs, account = two_accounts.configs_for_server(server)
     assert (_names(configs), account) == (["waf-prod"], "prod")
 
 
@@ -49,10 +63,9 @@ def test_configs_for_a_server_of_the_second_account(two_accounts):
 ])
 def test_a_server_whose_aws_account_cannot_be_told_is_refused(two_accounts, server):
     with pytest.raises(UnknownAccountError, match="AWS account"):
-        configs_for_server(CONFIGS, two_accounts, server)
+        two_accounts.configs_for_server(server)
 
 
 def test_one_account_keeps_every_config(monkeypatch):
     registry, _ = build_registry(monkeypatch)
-    assert configs_for_server(CONFIGS, registry, None) == (CONFIGS, "")
-    assert configs_for_server(CONFIGS, None, {"id": "i-1"}) == (CONFIGS, "")
+    assert _service(registry).configs_for_server(None) == (CONFIGS, "")
