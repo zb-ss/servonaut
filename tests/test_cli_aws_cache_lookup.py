@@ -1,10 +1,10 @@
 """The CLI finds cached AWS instances through a real AWSService.
 
 ``servonaut ssh``, ``servonaut servers`` and ``servonaut memory`` resolve
-instances from the on-disk AWS cache. These tests drive the real
-``AWSService`` + ``CacheService`` pair (no mocks on the cache path) so a
-read of an attribute the service does not have fails the test instead of
-being swallowed and reported as "instance not found".
+instances from the on-disk caches of every provider account. These tests
+drive the real ``AWSService`` + ``CacheService`` pair (no mocks on the cache
+path) so a read of an attribute the service does not have fails the test
+instead of being swallowed and reported as "instance not found".
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from servonaut.config.schema import AppConfig
+from servonaut.services.accounts.headless import CachedFleet
 from servonaut.services.aws_service import AWSService
 from servonaut.services.cache_service import CacheService
 
@@ -29,6 +31,8 @@ _AWS_INSTANCE = {
     "region": "eu-west-1",
     "key_name": "web-key",
 }
+# The same row as the CLI lists it: tagged with the account it belongs to.
+_LISTED = {**_AWS_INSTANCE, "account": "aws"}
 
 
 @pytest.fixture
@@ -76,40 +80,38 @@ class TestCliFindsCachedAwsInstances:
     def test_servers_cli(self, aws_cache: Path) -> None:
         from servonaut.cli.servers import _find_instance, _load_all_instances
 
-        instances = _load_all_instances(_aws_service(), _custom_service())
-        assert _find_instance("web-1", instances) == _AWS_INSTANCE
+        instances = _load_all_instances(AppConfig(cache_ttl_seconds=60), _custom_service())
+        assert _find_instance("web-1", instances) == _LISTED
 
     def test_memory_cli_list(self, aws_cache: Path) -> None:
         from servonaut.cli.memory import _list_all_instances
 
-        instances = _list_all_instances(_aws_service(), _custom_service(), None)
+        instances = _list_all_instances(CachedFleet(_custom_service(), aws=_aws_service()))
         assert _AWS_INSTANCE in instances
 
     def test_memory_cli_resolve(self, aws_cache: Path) -> None:
         from servonaut.cli.memory import _resolve_or_exit
 
         args = SimpleNamespace(instance="i-0123456789abcdef0")
-        inst = _resolve_or_exit(args, _aws_service(), _custom_service(), None)
+        inst = _resolve_or_exit(args, CachedFleet(_custom_service(), aws=_aws_service()))
         assert inst == _AWS_INSTANCE
 
     def test_ssh_cli(self, aws_cache: Path) -> None:
         from servonaut.cli.ssh import _find_instance, _load_instances
 
-        config = SimpleNamespace(cache_ttl_seconds=60)
+        config = AppConfig(cache_ttl_seconds=60)
         instances = _load_instances(_custom_service(), config)
-        assert _find_instance(instances, "web-1") == [_AWS_INSTANCE]
+        assert _find_instance(instances, "web-1") == [_LISTED]
 
 
 class TestCacheReadBugsSurface:
     """A programming error on the AWS cache read must not be swallowed."""
 
-    def test_servers_cli_does_not_swallow_attribute_error(self) -> None:
-        from servonaut.cli.servers import _load_all_instances
-
+    def test_cli_fleet_does_not_swallow_attribute_error(self) -> None:
         broken = MagicMock(spec=AWSService)
         broken.get_cached_instances.side_effect = AttributeError("boom")
         with pytest.raises(AttributeError):
-            _load_all_instances(broken, _custom_service())
+            CachedFleet(_custom_service(), aws=broken).instances()
 
     def test_memory_cli_does_not_swallow_attribute_error(self) -> None:
         from servonaut.cli.memory import _list_all_instances
@@ -117,7 +119,7 @@ class TestCacheReadBugsSurface:
         broken = MagicMock(spec=AWSService)
         broken.get_cached_instances.side_effect = AttributeError("boom")
         with pytest.raises(AttributeError):
-            _list_all_instances(broken, _custom_service(), None)
+            _list_all_instances(CachedFleet(_custom_service(), aws=broken))
 
 
 class TestSshCliSurvivesOddCacheFiles:
@@ -137,7 +139,7 @@ class TestSshCliSurvivesOddCacheFiles:
         cache_path.write_text(json.dumps(payload))
         monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
 
-        config = SimpleNamespace(cache_ttl_seconds=60)
+        config = AppConfig(cache_ttl_seconds=60)
         assert _load_instances(_custom_service(), config) == []
 
     def test_aware_timestamp_still_finds_instance(
@@ -154,6 +156,6 @@ class TestSshCliSurvivesOddCacheFiles:
         }))
         monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
 
-        config = SimpleNamespace(cache_ttl_seconds=60)
+        config = AppConfig(cache_ttl_seconds=60)
         instances = _load_instances(_custom_service(), config)
-        assert _find_instance(instances, "web-1") == [_AWS_INSTANCE]
+        assert _find_instance(instances, "web-1") == [_LISTED]

@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from servonaut.utils.instance_resolver import resolve_instance_from_lists
+from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.services.memory.provider import instance_provider
 
 logger = logging.getLogger(__name__)
@@ -42,15 +42,17 @@ def _run_async(coro: Any) -> Any:
 # Headless service initialisation (mirrors mcp/server.py create_mcp_server)
 # ---------------------------------------------------------------------------
 
-def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
-    """Initialise Config, MemoryService, AWSService, CustomServerService, OVHService.
+def _init_headless_services() -> Tuple[Any, Any, Any]:
+    """Initialise Config, MemoryService and the cached fleet.
+
+    The fleet holds every account's cached servers of every provider (AWS,
+    OVH, Hetzner) plus the custom servers.
 
     Returns:
-        ``(config, memory_service, aws_service, custom_server_service, ovh_service)``
+        ``(config, memory_service, fleet)``
     """
     from servonaut.config.manager import ConfigManager
-    from servonaut.services.aws_service import AWSService
-    from servonaut.services.cache_service import CacheService
+    from servonaut.services.accounts.headless import CachedFleet
     from servonaut.services.custom_server_service import CustomServerService
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
@@ -63,8 +65,6 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
     config_manager = ConfigManager()
     config = config_manager.get()
 
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
     log_viewer_service = LogViewerService(config_manager)
@@ -87,106 +87,38 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any]:
     # Back-reference for log-viewer cache lookups.
     log_viewer_service.set_memory_service(memory_service)
 
-    ovh_service = None
-    try:
-        ovh_config = config.ovh
-        if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
-            from servonaut.services.ovh_service import OVHService
-            ovh_service = OVHService(ovh_config)
-    except (ImportError, AttributeError):
-        pass
-
-    return config, memory_service, aws_service, custom_server_service, ovh_service
+    fleet = CachedFleet.from_config(config, custom_server_service, config_manager)
+    return config, memory_service, fleet
 
 
 # ---------------------------------------------------------------------------
 # Instance resolution
 # ---------------------------------------------------------------------------
 
-def _list_all_instances(
-    aws_service: Any,
-    custom_server_service: Any,
-    ovh_service: Optional[Any],
-    hetzner_service: Optional[Any] = None,
-) -> List[Dict[str, Any]]:
-    """Return combined list of AWS + custom + OVH + Hetzner instances."""
-    # No try/except: the cache layer already absorbs a missing or corrupt
-    # file, so anything raised here is a bug that must surface loudly.
-    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
-    try:
-        instances.extend(custom_server_service.list_as_instances())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-    if ovh_service is not None:
-        try:
-            instances.extend(ovh_service.get_cached_instances())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not load OVH cached instances: %s", exc)
-    if hetzner_service is not None:
-        try:
-            instances.extend(hetzner_service.get_cached_instances())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not load Hetzner cached instances: %s", exc)
-    return instances
-
-
-def _resolve_instance(
-    id_or_name: str,
-    aws_list: List[Dict[str, Any]],
-    custom_list: List[Dict[str, Any]],
-    ovh_list: List[Dict[str, Any]],
-    hetzner_list: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Dict[str, Any]]:
-    """Resolve *id_or_name* to an instance dict.
-
-    Delegates to the shared ``resolve_instance_from_lists`` helper so the
-    resolution contract (ids, names, ``account/name``; a shared name is
-    refused) is defined once.
-
-    Raises:
-        AmbiguousInstanceError: The reference names several servers.
-    """
-    return resolve_instance_from_lists(
-        id_or_name, aws_list, custom_list, ovh_list, hetzner_list,
-    )
+def _list_all_instances(fleet: Any) -> List[Dict[str, Any]]:
+    """Return every cached server: AWS, custom, OVH and Hetzner, all accounts."""
+    return fleet.instances()
 
 
 def _resolve_or_exit(
     args: Any,
-    aws_service: Any,
-    custom_server_service: Any,
-    ovh_service: Optional[Any],
+    fleet: Any,
     use_json: bool = False,
-    hetzner_service: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Resolve instance from args.instance (if present), printing error on failure."""
+    """Resolve instance from args.instance (if present), printing error on failure.
+
+    Accepts an id, a name or an ``<account>/<name>`` reference (see
+    :mod:`servonaut.utils.instance_resolver`).
+
+    Raises:
+        AmbiguousInstanceError: The reference names several servers; the
+            caller reports it with :func:`_report_ambiguous`.
+    """
     instance_arg = getattr(args, "instance", None)
     if not instance_arg:
         return None
 
-    aws_instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
-    custom_instances: List[Dict[str, Any]] = []
-    try:
-        custom_instances = custom_server_service.list_as_instances()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-    ovh_instances: List[Dict[str, Any]] = []
-    if ovh_service is not None:
-        try:
-            ovh_instances = ovh_service.get_cached_instances()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not load OVH cached instances: %s", exc)
-    hetzner_instances: List[Dict[str, Any]] = []
-    if hetzner_service is not None:
-        try:
-            hetzner_instances = hetzner_service.get_cached_instances()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not load Hetzner cached instances: %s", exc)
-
-    inst = _resolve_instance(
-        instance_arg, aws_instances, custom_instances, ovh_instances,
-        hetzner_instances,
-    )
+    inst = fleet.resolve(instance_arg)
     if inst is None:
         msg = f"Instance not found: {instance_arg!r}"
         if use_json:
@@ -195,6 +127,20 @@ def _resolve_or_exit(
             print(f"Error: {msg}", file=sys.stderr)
         return None
     return inst
+
+
+def _report_ambiguous(exc: AmbiguousInstanceError, use_json: bool) -> int:
+    """Print an ambiguous reference with its candidates; return the exit code."""
+    if use_json:
+        from servonaut.utils.instance_resolver import qualified_reference
+        print(json.dumps({"error": {
+            "code": "ambiguous",
+            "message": str(exc),
+            "candidates": [qualified_reference(row) for row in exc.candidates],
+        }}))
+    else:
+        print(f"Error: {exc}", file=sys.stderr)
+    return _EXIT_USAGE_ERROR
 
 
 def _check_opt_out(
@@ -290,12 +236,10 @@ def _cmd_build_all(
     args: Any,
     config: Any,
     memory_service: Any,
-    aws_service: Any,
-    custom_server_service: Any,
-    ovh_service: Optional[Any],
+    fleet: Any,
 ) -> int:
     """Handle ``memory build --all``."""
-    instances = _list_all_instances(aws_service, custom_server_service, ovh_service)
+    instances = _list_all_instances(fleet)
     if not instances:
         print("No instances found.", file=sys.stderr)
         return _EXIT_NOT_FOUND
@@ -755,9 +699,7 @@ def run_memory(args: Any) -> int:
     if memory_command == "reset-prompts":
         return _cmd_reset_prompts(args)
 
-    config, memory_service, aws_service, custom_server_service, ovh_service = (
-        _init_headless_services()
-    )
+    config, memory_service, fleet = _init_headless_services()
 
     # Attempt to wire optional sync services.  Both annotate (enqueue on
     # change) and pull need them; other subcommands ignore them silently.
@@ -775,13 +717,14 @@ def run_memory(args: Any) -> int:
 
     # --all path for build
     if memory_command == "build" and getattr(args, "all", False):
-        return _cmd_build_all(
-            args, config, memory_service, aws_service, custom_server_service, ovh_service
-        )
+        return _cmd_build_all(args, config, memory_service, fleet)
 
     # Most subcommands require an instance argument.
     use_json = getattr(args, "json", False)
-    inst = _resolve_or_exit(args, aws_service, custom_server_service, ovh_service, use_json)
+    try:
+        inst = _resolve_or_exit(args, fleet, use_json)
+    except AmbiguousInstanceError as exc:
+        return _report_ambiguous(exc, use_json)
     if inst is None:
         # Only fail if the subcommand actually needs an instance.
         if memory_command not in ("build",):

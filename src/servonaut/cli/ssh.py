@@ -26,6 +26,7 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from servonaut.services.ssh_host_keys import HostKeyPolicy, host_key_alias_options
+from servonaut.utils.instance_resolver import describe_candidate, match_instances
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,10 @@ def add_ssh_parser(subparsers: Any) -> None:
     p.__class__ = _RemoteCommandParser
     p.add_argument(
         "instance",
-        help="Instance name or id (case-insensitive match).",
+        help=(
+            "Instance name or id (case-insensitive match); "
+            "<account>/<name> picks the server of one provider account."
+        ),
     )
     p.add_argument(
         "--user", "-u",
@@ -188,33 +192,18 @@ def _load_instances(
     custom_server_service: Any,
     config: Any,
 ) -> List[Dict[str, Any]]:
-    """Return merged list of cached AWS + custom instances."""
-    from servonaut.services.cache_service import CacheService
-    from servonaut.services.aws_service import AWSService
+    """Return every account's cached servers (AWS, OVH, Hetzner) + custom ones.
 
-    # AWS — load from disk cache (no network round-trip for the CLI). No
-    # try/except: the cache layer already absorbs a missing or corrupt file,
-    # so anything raised here is a bug that must surface loudly.
-    aws_service = AWSService(CacheService(ttl_seconds=config.cache_ttl_seconds))
-    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
+    Read from the disk caches: no network round-trip for the CLI.
+    """
+    from servonaut.services.accounts.headless import CachedFleet
 
-    # Custom servers
-    try:
-        instances.extend(custom_server_service.list_as_instances())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-
-    return instances
+    return CachedFleet.from_config(config, custom_server_service).instances()
 
 
 def _find_instance(instances: List[Dict[str, Any]], search: str) -> List[Dict[str, Any]]:
-    """Return all instances whose ``id`` or ``name`` match *search* (case-insensitive)."""
-    needle = search.lower()
-    return [
-        inst for inst in instances
-        if (inst.get("id") or "").lower() == needle
-        or (inst.get("name") or "").lower() == needle
-    ]
+    """Return every instance *search* could mean (id, name or ``<account>/<name>``)."""
+    return match_instances(search, instances)
 
 
 # ---------------------------------------------------------------------------
@@ -306,13 +295,11 @@ async def _handle_ssh_async(args: Any) -> int:
 
     if len(matches) > 1:
         print(
-            f"Multiple instances match {args.instance!r}. Be more specific:",
+            f"Multiple instances match {args.instance!r}. Use one of these references:",
             file=sys.stderr,
         )
         for i, inst in enumerate(matches, 1):
-            iid = inst.get("id", "?")
-            iname = inst.get("name", "?")
-            print(f"  {i}. {iname} ({iid})", file=sys.stderr)
+            print(f"  {i}. {describe_candidate(inst)}", file=sys.stderr)
         return _EXIT_AMBIGUOUS
 
     instance = matches[0]
