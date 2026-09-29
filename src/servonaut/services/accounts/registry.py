@@ -314,14 +314,24 @@ class AccountRegistry:
         """
         return _account(self._state, provider, label)
 
-    def find_account(self, label: str) -> Optional[AccountRef]:
-        """The account named *label* in any provider (labels are unique)."""
+    def find_account(
+        self, label: str, *, include_unavailable: bool = False
+    ) -> Optional[AccountRef]:
+        """The account named *label* in any provider (labels are unique).
+
+        Only usable accounts are found unless *include_unavailable* is set;
+        then a configured account that cannot connect is returned too, so a
+        caller can report why (``account(ref.provider, ref.label)`` raises
+        with the reason) instead of treating ``label/...`` as a plain name.
+        """
         wanted = (label or "").strip().lower()
         if not wanted:
             return None
         state = self._state
         for provider in (AWS, HETZNER, OVH):
-            for ref in state.provider(provider).refs:
+            accounts = state.provider(provider)
+            refs = accounts.configured if include_unavailable else accounts.refs
+            for ref in refs:
                 if ref.key == wanted:
                     return ref
         return None
@@ -538,13 +548,13 @@ def _account(state: _RegistryState, provider: str, label: Optional[str]) -> Acco
         if refs and refs[0].primary:
             return refs[0]
         if not refs:
-            raise UnknownAccountError(f"{title} is not configured")
+            raise _no_usable_account(state, provider)
         primary = next((ref for ref in accounts.configured if ref.primary), None)
-        reason = state.unavailable.get(f"{provider}:{primary.key}") if primary else None
-        detail = f": {reason}" if reason else ""
+        reason = _unavailable_reason(state, primary) if primary else ""
         raise UnknownAccountError(
             f"The primary {title} account"
-            f"{' ' + repr(primary.label) if primary else ''} is not available{detail}. "
+            f"{' ' + repr(primary.label) if primary else ''} is not available"
+            f"{': ' + reason if reason else ''}. "
             f"Name the account to use: {', '.join(r.label for r in refs)}"
         )
     wanted = label.strip().lower()
@@ -553,13 +563,37 @@ def _account(state: _RegistryState, provider: str, label: Optional[str]) -> Acco
             return ref
     for ref in accounts.configured:
         if ref.key == wanted:
-            reason = state.unavailable.get(f"{provider}:{ref.key}") or "cannot connect"
+            reason = _unavailable_reason(state, ref) or "cannot connect"
             raise UnknownAccountError(f"{title} account {ref.label!r} is not available: {reason}")
     if not refs:
-        raise UnknownAccountError(f"{title} is not configured")
+        raise _no_usable_account(state, provider)
     raise UnknownAccountError(
         f"No {title} account named {label!r}. Accounts: {', '.join(r.label for r in refs)}"
     )
+
+
+def _unavailable_reason(state: _RegistryState, ref: AccountRef) -> str:
+    """Why *ref* cannot connect, without a closing period (it is embedded)."""
+    return (state.unavailable.get(f"{ref.provider}:{ref.key}") or "").strip().rstrip(".")
+
+
+def _no_usable_account(state: _RegistryState, provider: str) -> UnknownAccountError:
+    """The error for a provider none of whose accounts can be used.
+
+    A configured provider says why each account cannot connect, so a single
+    account keeps its setup hint (for Hetzner: where the token is read from).
+    """
+    title = PROVIDER_TITLES.get(provider, provider)
+    configured = state.provider(provider).configured
+    if not configured:
+        return UnknownAccountError(f"{title} is not configured")
+    if len(configured) == 1:
+        reason = _unavailable_reason(state, configured[0]) or "cannot connect"
+        return UnknownAccountError(f"{title} is not available: {reason}")
+    reasons = "; ".join(
+        f"{ref.label}: {_unavailable_reason(state, ref) or 'cannot connect'}" for ref in configured
+    )
+    return UnknownAccountError(f"No {title} account is available ({reasons})")
 
 
 def _aws_client_factory(state: _RegistryState, ref: AccountRef) -> Any:

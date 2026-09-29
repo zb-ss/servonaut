@@ -421,7 +421,9 @@ class TestUnavailablePrimary:
         assert fleet.last_fetch_error.startswith("hetzner: not available: ")
         assert fleet.last_fetch_partial is True
 
-    def test_a_single_unusable_primary_is_simply_not_configured(self, monkeypatch):
+    def test_a_single_unusable_primary_says_why_and_where_the_token_is_read(
+        self, monkeypatch
+    ):
         monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
         monkeypatch.setattr(
             "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE",
@@ -431,5 +433,41 @@ class TestUnavailablePrimary:
         config.hetzner.enabled = True
         registry = AccountRegistry(config)
         assert registry.fleet("hetzner") is None and not registry.is_multi("hetzner")
-        with pytest.raises(UnknownAccountError, match="not configured"):
+        with pytest.raises(UnknownAccountError) as refused:
             registry.account("hetzner")
+        message = str(refused.value)
+        assert message.startswith("Hetzner is not available: No Hetzner Cloud API token")
+        assert "HCLOUD_TOKEN" in message
+        assert not message.endswith("..")
+
+    def test_a_disabled_provider_is_not_configured(self):
+        registry = AccountRegistry(AppConfig())
+        with pytest.raises(UnknownAccountError, match="^Hetzner is not configured$"):
+            registry.account("hetzner")
+
+    def test_no_usable_account_names_each_accounts_reason(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        registry.config.hetzner.accounts[0].api_token = "$SERVONAUT_TEST_UNSET_STAGING_TOKEN"
+        registry.rebuild(registry.config)
+        with pytest.raises(UnknownAccountError) as refused:
+            registry.account("hetzner")
+        message = str(refused.value)
+        assert message.startswith("No Hetzner account is available (hetzner: ")
+        assert "; staging: No API token resolved for this Hetzner project" in message
+
+    def test_the_primarys_reason_is_not_doubly_punctuated(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        with pytest.raises(UnknownAccountError) as refused:
+            registry.account("hetzner")
+        message = str(refused.value)
+        assert ".." not in message
+        assert message.endswith(". Name the account to use: staging")
+
+    def test_an_unavailable_account_is_found_only_on_request(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        assert registry.find_account("hetzner") is None
+        found = registry.find_account("HETZNER", include_unavailable=True)
+        assert found is not None and found.primary and found.provider == "hetzner"
+        assert registry.find_account("staging").label == "staging"
+        with pytest.raises(UnknownAccountError, match="account 'hetzner' is not available: "):
+            registry.account(found.provider, found.label)
