@@ -256,6 +256,7 @@ class ServonautTools:
         # attributes above are each provider's default account; None keeps
         # them the only account (surfaces that never build the registry).
         self._accounts = account_registry
+        self._directory = self._new_directory()
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
         # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
@@ -380,6 +381,8 @@ class ServonautTools:
         service built from the old credentials.
         """
         self._accounts = registry
+        # A new directory: reads made for the previous accounts are dropped.
+        self._directory = self._new_directory()
         self._aws_service = registry.default_service('aws') or self._aws_service
         self._hetzner_service = registry.default_service('hetzner')
         self._ovh_service = registry.default_service('ovh')
@@ -413,8 +416,13 @@ class ServonautTools:
             'hetzner': self._hetzner_service,
         }
 
-    @property
-    def _directory(self) -> InstanceDirectory:
+    def _new_directory(self) -> InstanceDirectory:
+        """The lookups of every tool call; one per bound set of accounts.
+
+        Shared by all calls, so what it learns about an account without
+        cached servers (see ``InstanceDirectory.checked_provider_rows``)
+        outlives a single lookup.
+        """
         return InstanceDirectory(
             self._custom_server_service, self._provider_inventories,
             lambda: self._accounts,
