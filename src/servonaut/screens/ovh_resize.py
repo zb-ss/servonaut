@@ -12,6 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.screens._account_audit import ServerAuditMixin
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -19,7 +20,7 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 
-class OVHResizeScreen(ServerAccountMixin, Screen):
+class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Screen for upgrading/resizing a VPS to a larger plan.
 
     Fetches available upgrade models from OVHcloud, shows them in a DataTable,
@@ -170,7 +171,7 @@ class OVHResizeScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="vps_upgrade",
                 target=vps_name,
-                details={"model": model_name},
+                details=self._audit_details({"model": model_name}),
                 confirmed=bool(confirmed),
             )
 

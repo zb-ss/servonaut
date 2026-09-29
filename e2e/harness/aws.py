@@ -8,6 +8,11 @@ without public addressing, so the fleet only ever shows RFC 1918 addresses.
 The other seeders cover the AWS screens and tools beyond the fleet: WAF-style
 log events, WAF IP sets, security groups, network ACLs, S3 objects and IAM
 roles to assume. Account ids are the example ids from the AWS documentation.
+
+Further AWS accounts are reached the way users reach them: a named profile
+that assumes a role in the other account (:meth:`MotoAws.seed_account` plus
+``HomeSeeder.aws_profile``). moto runs every request made with the role's
+credentials in the role's account, so each account has its own instances.
 """
 
 from __future__ import annotations
@@ -31,6 +36,10 @@ READ_ROLE_ACCOUNT = "111122223333"
 MUTATE_ROLE_ACCOUNT = "444455556666"
 # The account the suite's own credentials act in (moto's default).
 DEFAULT_ACCOUNT = "123456789012"
+# The second AWS account journeys use (it holds fleet.AWS_SECOND_FLEET).
+SECOND_ACCOUNT = "777788889999"
+# The role a named profile assumes to reach another account.
+ACCOUNT_ROLE = "e2e-account-access"
 # Newest seeded log event: a little in the past, well inside any time window.
 _NEWEST_LOG_EVENT_AGE_SECONDS = 30
 # Upper bound for one reset. A journey that listed the fleet touched every
@@ -51,9 +60,10 @@ class MotoAws:
 
     def __init__(self) -> None:
         self._server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
-        # region -> (subnet id, image id); key pairs already created per region.
-        self._networks: dict[str, tuple[str, str]] = {}
-        self._key_pairs: set[tuple[str, str]] = set()
+        # (role ARN or "", region) -> (subnet id, image id); key pairs already
+        # created, per account and region.
+        self._networks: dict[tuple[str, str], tuple[str, str]] = {}
+        self._key_pairs: set[tuple[str, str, str]] = set()
 
     def start(self) -> "MotoAws":
         self._server.start()
@@ -85,19 +95,25 @@ class MotoAws:
     def client(self, service: str, region: str = "us-east-1"):
         return boto3.client(service, region_name=region, endpoint_url=self.url, **_CREDENTIALS)
 
-    def seed_fleet(self, hosts: Iterable[AwsHost]) -> dict[str, str]:
-        """Launch *hosts* with their Name tags; returns name → moto instance id."""
+    def seed_fleet(
+        self, hosts: Iterable[AwsHost], *, role_arn: Optional[str] = None
+    ) -> dict[str, str]:
+        """Launch *hosts* with their Name tags; returns name → moto instance id.
+
+        With *role_arn* they are launched in that role's account.
+        """
         by_region: dict[str, list[AwsHost]] = defaultdict(list)
         for host in hosts:
             by_region[host.region].append(host)
         launched: dict[str, str] = {}
+        role_key = role_arn or ""
         for region, region_hosts in by_region.items():
-            ec2 = self.client("ec2", region)
-            subnet_id, image_id = self._network(ec2, region)
+            ec2 = self._client_for(role_arn, "ec2", region)
+            subnet_id, image_id = self._network(ec2, role_key, region)
             for key_name in {host.key_name for host in region_hosts}:
-                if (region, key_name) not in self._key_pairs:
+                if (role_key, region, key_name) not in self._key_pairs:
                     ec2.create_key_pair(KeyName=key_name)
-                    self._key_pairs.add((region, key_name))
+                    self._key_pairs.add((role_key, region, key_name))
             for host in region_hosts:
                 params = {
                     "ImageId": image_id,
@@ -118,18 +134,40 @@ class MotoAws:
                 launched[host.name] = instance_id
         return launched
 
-    def _network(self, ec2, region: str) -> tuple[str, str]:
-        """A private subnet (no public addressing) and an image, per region."""
-        if region not in self._networks:
+    def seed_account(
+        self, account_id: str, hosts: Iterable[AwsHost] = (), *, role: str = ACCOUNT_ROLE
+    ) -> str:
+        """Another AWS account, reached by assuming *role* in it, holding *hosts*.
+
+        Returns the role's ARN: give it to ``HomeSeeder.aws_profile`` as the
+        profile's ``role_arn``.
+        """
+        role_arn = self.seed_role(role, account_id)
+        self.seed_fleet(hosts, role_arn=role_arn)
+        return role_arn
+
+    def _client_for(self, role_arn: Optional[str], service: str, region: str) -> Any:
+        return self.client_as(role_arn, service, region) if role_arn else self.client(service, region)
+
+    def _network(self, ec2, role_key: str, region: str) -> tuple[str, str]:
+        """A private subnet (no public addressing) and an image, per account and region."""
+        if (role_key, region) not in self._networks:
             vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
             subnet = ec2.create_subnet(VpcId=vpc_id, CidrBlock="10.0.0.0/16")["Subnet"]
             image_id = ec2.describe_images(Owners=["amazon"])["Images"][0]["ImageId"]
-            self._networks[region] = (subnet["SubnetId"], image_id)
-        return self._networks[region]
+            self._networks[(role_key, region)] = (subnet["SubnetId"], image_id)
+        return self._networks[(role_key, region)]
 
-    def describe_names(self, region: str = "us-east-1") -> list[str]:
-        """Name tags of the instances in *region* (for assertions)."""
-        reservations = self.client("ec2", region).describe_instances()["Reservations"]
+    def describe_names(
+        self, region: str = "us-east-1", *, role_arn: Optional[str] = None
+    ) -> list[str]:
+        """Name tags of the instances in *region* (for assertions).
+
+        With *role_arn*, those of that role's account.
+        """
+        reservations = self._client_for(role_arn, "ec2", region).describe_instances()[
+            "Reservations"
+        ]
         names = []
         for reservation in reservations:
             for instance in reservation["Instances"]:

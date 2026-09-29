@@ -18,6 +18,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._account_audit import with_account
 from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -641,7 +642,10 @@ class OVHDNSScreen(Screen):
                 audit.log_action(
                     "dns_create_record",
                     zone_name,
-                    {"fieldType": field_type, "subDomain": sub_domain, "target": target, "ttl": ttl},
+                    with_account(self.app, "ovh", self._account, {
+                        "fieldType": field_type, "subDomain": sub_domain,
+                        "target": target, "ttl": ttl,
+                    }),
                     confirmed=True,
                 )
             await svc.refresh_zone(zone_name)
@@ -670,7 +674,10 @@ class OVHDNSScreen(Screen):
                 audit.log_action(
                     "dns_update_record",
                     zone_name,
-                    {"record_id": record_id, "subDomain": sub_domain, "target": target, "ttl": ttl},
+                    with_account(self.app, "ovh", self._account, {
+                        "record_id": record_id, "subDomain": sub_domain,
+                        "target": target, "ttl": ttl,
+                    }),
                     confirmed=True,
                 )
             await svc.refresh_zone(zone_name)
@@ -724,7 +731,9 @@ class OVHDNSScreen(Screen):
                     audit.log_action(
                         "dns_delete_record",
                         zone_name,
-                        {"record_id": record_id, "target": raw_target},
+                        with_account(self.app, "ovh", self._account, {
+                            "record_id": record_id, "target": raw_target,
+                        }),
                         confirmed=True,
                     )
                 await self._delete_record(zone_name, record_id)
@@ -817,7 +826,7 @@ class OVHDNSScreen(Screen):
                 audit.log_action(
                     "rdns_set",
                     ip_block,
-                    {"ip": ip, "reverse": hostname},
+                    with_account(self.app, "ovh", self._account, {"ip": ip, "reverse": hostname}),
                     confirmed=True,
                 )
             self.notify(f"Reverse DNS set for {self.redact_rdns_host(ip)}", severity="information")
@@ -865,7 +874,9 @@ class OVHDNSScreen(Screen):
                     audit.log_action(
                         "rdns_delete",
                         ip_block,
-                        {"ip": ip, "hostname": hostname},
+                        with_account(
+                            self.app, "ovh", self._account, {"ip": ip, "hostname": hostname},
+                        ),
                         confirmed=True,
                     )
                 await self._do_delete_rdns(ip_block, ip)

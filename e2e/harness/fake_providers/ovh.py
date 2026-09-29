@@ -1,8 +1,19 @@
-"""OVHcloud API stand-in (the subset Servonaut calls), under ``/ovh/1.0``.
+"""OVHcloud API stand-in (the subset Servonaut calls), under ``/ovh``.
 
-python-ovh signs every request; the fake accepts any signature and answers
-``/auth/time`` so the client can compute its clock delta. Resources live in
-:class:`OvhState`: VPS (with their IP details, snapshot and backup options),
+Every python-ovh endpoint name has its own base URL: ``ovh-eu`` is served at
+``/ovh/1.0`` and any other name at ``/ovh/<name>/1.0`` (see
+:func:`endpoint_prefix`), each with an OAuth2 token service next to it.
+
+Each account (:class:`OvhState`) answers its own credentials on its own
+endpoint, as a real one does: a classic application key with its consumer
+key, and an OAuth2 client whose client-credentials tokens the fake issues.
+The primary account answers :data:`PRIMARY_CREDENTIALS` (what
+``HomeSeeder.ovh_config`` writes) on ``ovh-eu``; :meth:`OvhAccounts.add`
+creates further accounts. Unknown credentials are refused with the API's
+errors. The fake accepts any request signature and answers ``/auth/time``
+so the client can compute its clock delta.
+
+An account holds VPS (with their IP details, snapshot and backup options),
 dedicated servers, Public Cloud projects (instances, flavors, images,
 regions, SSH keys, snapshots and volumes), VPS reinstall images and upgrade
 plans, DNS zones and records, IP blocks
@@ -11,25 +22,44 @@ once. Error bodies use the API's ``{"message": ...}`` shape, which python-ovh
 turns into its typed exceptions.
 
 Journeys seed an account through the ``seed_*`` methods and read back what
-the product changed; ``FakeProviders.requests("ovh", ...)`` records the calls.
+the product changed; ``FakeProviders.requests("ovh", ...)`` records the calls
+with the endpoint and the label of the account each one reached.
 """
 
 from __future__ import annotations
 
 import itertools
 import json
+import re
+import secrets
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional
+from dataclasses import astuple, dataclass, field
+from typing import Any, Iterable, Mapping, Optional, Union
 
-from aiohttp import web
+from aiohttp import BasicAuth, web
 
-PREFIX = "/ovh/1.0"
+from e2e.harness.fake_providers.accounts import ACCOUNT, bearer_token
+from e2e.harness.provider_redirects import OVH_OAUTH2_TOKEN_PATH
+
+ROOT = "/ovh"
+# The default endpoint's API (``ovh-eu``); other endpoints: endpoint_prefix().
+PREFIX = f"{ROOT}/1.0"
+DEFAULT_ENDPOINT = "ovh-eu"
+# The endpoint name in a route (python-ovh names: ovh-ca, kimsufi-eu, ...).
+_ENDPOINT = "ovh_endpoint"
+_ENDPOINT_SEGMENT = f"{{{_ENDPOINT}:[a-z]+-[a-z]+}}"
+_PATH = re.compile(
+    rf"{ROOT}(?:/(?P<endpoint>[a-z]+-[a-z]+))?"
+    rf"(?:/1\.0(?P<api>/.*)?|(?P<token>{re.escape(OVH_OAUTH2_TOKEN_PATH)}))"
+)
 CREATED_AT = "2026-01-05T10:00:00+00:00"
+# The primary account, as the product labels it when nothing renames it.
+PRIMARY_LABEL = "ovh"
 # Account handle for GET /me. Deliberately no e-mail address.
 NIC_HANDLE = "ee00000-ovh"
+ACCESS_TOKEN_SECONDS = 3600
 # Deterministic namespace for runtime-generated UUIDs (no UUID literals in
 # committed fixtures).
 _UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "servonaut-e2e.test")
@@ -42,6 +72,45 @@ _NOT_FOUND = "The requested object does not exist"
 def runtime_uuid(label: str) -> str:
     """A stable UUID derived from *label*, built at run time."""
     return str(uuid.uuid5(_UUID_NAMESPACE, label))
+
+
+def endpoint_prefix(endpoint: str) -> str:
+    """Where the fake serves the API of the python-ovh endpoint *endpoint*."""
+    return PREFIX if endpoint == DEFAULT_ENDPOINT else f"{ROOT}/{endpoint}/1.0"
+
+
+def split_path(path: str) -> Optional[tuple[str, str]]:
+    """``(endpoint, API path)`` of a request path to the fake, None if not one.
+
+    The API path is the part below the endpoint's base URL (``/vps``); the
+    token service's is ``/auth/oauth2/token``.
+    """
+    match = _PATH.fullmatch(path)
+    if match is None:
+        return None
+    api_path = match["api"] or (OVH_OAUTH2_TOKEN_PATH if match["token"] else "/")
+    return match["endpoint"] or DEFAULT_ENDPOINT, api_path
+
+
+@dataclass(frozen=True)
+class OvhCredentials:
+    """What one fake account answers: a classic key set and an OAuth2 client."""
+
+    application_key: str
+    application_secret: str
+    consumer_key: str
+    client_id: str
+    client_secret: str
+
+
+PRIMARY_CREDENTIALS = OvhCredentials("ak-fake", "as-fake", "ck-fake", "ci-fake", "cs-fake")
+
+
+def credentials_for(label: str) -> OvhCredentials:
+    """The placeholder credentials of the account labelled *label*."""
+    if label == PRIMARY_LABEL:
+        return PRIMARY_CREDENTIALS
+    return OvhCredentials(*(f"{value}-{label}" for value in astuple(PRIMARY_CREDENTIALS)))
 
 
 @dataclass(frozen=True)
@@ -157,9 +226,22 @@ def image_id(name: str) -> str:
 
 
 class OvhState:
-    """The fake OVH account."""
+    """One fake OVH account.
 
-    def __init__(self) -> None:
+    *label* names the account in the request log; it answers *credentials*
+    on the python-ovh endpoint *endpoint* only.
+    """
+
+    def __init__(
+        self,
+        label: str = PRIMARY_LABEL,
+        endpoint: str = DEFAULT_ENDPOINT,
+        credentials: OvhCredentials = PRIMARY_CREDENTIALS,
+    ) -> None:
+        self.label = label
+        self.endpoint = endpoint
+        self.credentials = credentials
+        self.nic_handle = NIC_HANDLE if label == PRIMARY_LABEL else f"ee-{label}-ovh"
         self._lock = threading.Lock()
         self.reset()
 
@@ -182,7 +264,7 @@ class OvhState:
             self._task_ids = itertools.count(88000001)
             self._record_ids = itertools.count(5000001)
             # Set to an OVH errorCode (e.g. "INVALID_CREDENTIAL") to refuse
-            # every authenticated call with 403.
+            # every authenticated call to this account with 403.
             self.fail_with: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -436,6 +518,88 @@ class OvhState:
         return task
 
 
+class OvhAccounts:
+    """Every fake account, found by the credentials a request carries."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.primary = OvhState()
+        self._extra: dict[str, OvhState] = {}
+        # OAuth2 access token -> the account it was issued to.
+        self._access_tokens: dict[str, OvhState] = {}
+
+    def reset(self) -> None:
+        """Forget the extra accounts and issued tokens; empty the primary account."""
+        with self._lock:
+            self._extra.clear()
+            self._access_tokens.clear()
+        primary = self.primary
+        primary.label, primary.endpoint = PRIMARY_LABEL, DEFAULT_ENDPOINT
+        primary.credentials, primary.nic_handle = PRIMARY_CREDENTIALS, NIC_HANDLE
+        primary.reset()
+
+    def add(
+        self,
+        label: str,
+        endpoint: str = DEFAULT_ENDPOINT,
+        credentials: Optional[OvhCredentials] = None,
+    ) -> OvhState:
+        """A further, empty account (credentials default to :func:`credentials_for`)."""
+        credentials = credentials or credentials_for(label)
+        with self._lock:
+            taken = any(
+                account.label == label
+                or account.credentials.application_key == credentials.application_key
+                or account.credentials.client_id == credentials.client_id
+                for account in self._all()
+            )
+            if taken:
+                raise ValueError(f"the OVH fake already has an account like {label!r}")
+            account = OvhState(label, endpoint, credentials)
+            self._extra[label] = account
+            return account
+
+    def get(self, label: str) -> OvhState:
+        with self._lock:
+            for account in self._all():
+                if account.label == label:
+                    return account
+        raise KeyError(f"the OVH fake has no account {label!r}")
+
+    def by_application_key(self, key: Optional[str], endpoint: str) -> Optional[OvhState]:
+        with self._lock:
+            return next(
+                (a for a in self._all()
+                 if key and a.endpoint == endpoint and a.credentials.application_key == key),
+                None,
+            )
+
+    def by_client(
+        self, client_id: Optional[str], client_secret: Optional[str], endpoint: str
+    ) -> Optional[OvhState]:
+        with self._lock:
+            return next(
+                (a for a in self._all()
+                 if client_id and a.endpoint == endpoint
+                 and (a.credentials.client_id, a.credentials.client_secret)
+                 == (client_id, client_secret)),
+                None,
+            )
+
+    def issue_access_token(self, account: OvhState) -> str:
+        token = secrets.token_urlsafe(24)
+        with self._lock:
+            self._access_tokens[token] = account
+        return token
+
+    def by_access_token(self, token: str) -> Optional[OvhState]:
+        with self._lock:
+            return self._access_tokens.get(token)
+
+    def _all(self) -> list[OvhState]:
+        return [self.primary, *self._extra.values()]
+
+
 def _key_id(name: str) -> str:
     # Project SSH-key ids are opaque strings; derive one from the name.
     return runtime_uuid(f"ssh-key:{name}").replace("-", "")[:24]
@@ -524,16 +688,35 @@ def _not_found() -> web.Response:
     return error_response(404, _NOT_FOUND)
 
 
-def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a route table
-    """Register the OVH routes on *app*."""
+def add_routes(app: web.Application, accounts: OvhAccounts) -> None:  # noqa: C901 - a route table
+    """Register the OVH routes on *app*, for every endpoint name."""
+
+    def authenticate(request: web.Request, endpoint: str) -> Union[OvhState, web.Response]:
+        """The account the request's credentials belong to, or the API's refusal."""
+        token = bearer_token(request)
+        if token is not None:
+            account = accounts.by_access_token(token)
+            if account is None or account.endpoint != endpoint:
+                return error_response(401, "Invalid or expired access token")
+            return account
+        account = accounts.by_application_key(request.headers.get("X-Ovh-Application"), endpoint)
+        if account is None:
+            return error_response(403, "Invalid application key", "INVALID_KEY")
+        if request.headers.get("X-Ovh-Consumer") != account.credentials.consumer_key:
+            return error_response(403, "This credential does not exist", "INVALID_CREDENTIAL")
+        return account
 
     def guarded(handler: Any) -> Any:
-        """Refuse every authenticated call while ``state.fail_with`` is set."""
+        """Run *handler* for the request's account; refuse it while ``fail_with`` is set."""
 
         async def wrapper(request: web.Request) -> web.StreamResponse:
-            if state.fail_with:
-                return error_response(403, "This credential is not valid", state.fail_with)
-            return await handler(request)
+            account = authenticate(request, request.match_info.get(_ENDPOINT, DEFAULT_ENDPOINT))
+            if isinstance(account, web.Response):
+                return account
+            request[ACCOUNT] = account.label
+            if account.fail_with:
+                return error_response(403, "This credential is not valid", account.fail_with)
+            return await handler(request, account)
 
         return wrapper
 
@@ -549,78 +732,100 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
     async def auth_time(request: web.Request) -> web.Response:
         return ok(int(time.time()))
 
-    async def me(request: web.Request) -> web.Response:
-        return ok({"nichandle": NIC_HANDLE, "firstname": "E2E", "name": "Account",
+    async def oauth2_token(request: web.Request) -> web.Response:
+        """OAuth2 client credentials grant, as python-ovh's service accounts use it."""
+        form = await request.post()
+        client_id, client_secret = form.get("client_id"), form.get("client_secret")
+        if request.headers.get("Authorization", "").lower().startswith("basic "):
+            basic = BasicAuth.decode(request.headers["Authorization"])
+            client_id, client_secret = basic.login, basic.password
+        if form.get("grant_type") != "client_credentials":
+            return web.json_response({"error": "unsupported_grant_type"}, status=400)
+        endpoint = request.match_info.get(_ENDPOINT, DEFAULT_ENDPOINT)
+        account = accounts.by_client(client_id, client_secret, endpoint)
+        if account is None:
+            return web.json_response(
+                {"error": "invalid_client", "error_description": "client authentication failed"},
+                status=401,
+            )
+        request[ACCOUNT] = account.label
+        return web.json_response({
+            "access_token": accounts.issue_access_token(account), "token_type": "Bearer",
+            "expires_in": ACCESS_TOKEN_SECONDS, "scope": "all",
+        })
+
+    async def me(request: web.Request, state: OvhState) -> web.Response:
+        return ok({"nichandle": state.nic_handle, "firstname": "E2E", "name": "Account",
                    "country": "FR", "currency": {"code": "EUR", "symbol": "EURO"},
                    "ovhSubsidiary": "FR", "state": "complete"})
 
     # ---- VPS --------------------------------------------------------------
 
-    def _vps(request: web.Request) -> Optional[dict]:
+    def _vps(request: web.Request, state: OvhState) -> Optional[dict]:
         return state.vps.get(request.match_info["name"])
 
-    async def list_vps(request: web.Request) -> web.Response:
+    async def list_vps(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.vps))
 
-    async def get_vps(request: web.Request) -> web.Response:
+    async def get_vps(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             return ok(vps["detail"]) if vps else _not_found()
 
-    async def vps_ips(request: web.Request) -> web.Response:
+    async def vps_ips(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             return ok(vps["ips"]) if vps else _not_found()
 
-    async def vps_ip_detail(request: web.Request) -> web.Response:
+    async def vps_ip_detail(request: web.Request, state: OvhState) -> web.Response:
         ip = request.match_info["ip"]
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None or ip not in vps["ips"]:
                 return _not_found()
             return ok({"ipAddress": ip, "reverse": vps["reverse"].get(ip), "type": "primary",
                        "version": "v6" if ":" in ip else "v4", "gateway": None,
                        "macAddress": None, "geolocation": "fr"})
 
-    async def vps_set_reverse(request: web.Request) -> web.Response:
+    async def vps_set_reverse(request: web.Request, state: OvhState) -> web.Response:
         ip = request.match_info["ip"]
         body = await body_of(request)
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None or ip not in vps["ips"]:
                 return _not_found()
             vps["reverse"][ip] = body.get("reverse")
         return ok(None)
 
-    async def vps_action(request: web.Request) -> web.Response:
+    async def vps_action(request: web.Request, state: OvhState) -> web.Response:
         verb = request.match_info["verb"]
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None:
                 return _not_found()
             vps["detail"]["state"] = VPS_ACTIONS[verb]
             return ok(state.task(f"{verb}VM"))
 
-    async def vps_snapshot(request: web.Request) -> web.Response:
+    async def vps_snapshot(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None or vps["snapshot"] is None:
                 return _not_found()
             return ok(vps["snapshot"])
 
-    async def vps_delete_snapshot(request: web.Request) -> web.Response:
+    async def vps_delete_snapshot(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None or vps["snapshot"] is None:
                 return _not_found()
             vps["snapshot"] = None
             return ok(state.task("deleteSnapshot"))
 
-    async def vps_create_snapshot(request: web.Request) -> web.Response:
+    async def vps_create_snapshot(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None:
                 return _not_found()
             if vps["snapshot"] is not None:
@@ -633,35 +838,35 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             }
             return ok(state.task("createSnapshot"))
 
-    async def vps_revert_snapshot(request: web.Request) -> web.Response:
+    async def vps_revert_snapshot(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             snapshot = vps["snapshot"] if vps else None
             if snapshot is None or snapshot["id"] != request.match_info["snapshot_id"]:
                 return _not_found()
             return ok(state.task("revertSnapshot"))
 
-    async def vps_backup(request: web.Request) -> web.Response:
+    async def vps_backup(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             return ok(vps["backup"]) if vps else _not_found()
 
-    async def vps_images(request: web.Request) -> web.Response:
+    async def vps_images(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            if _vps(request) is None:
+            if _vps(request, state) is None:
                 return _not_found()
         return ok([vps_image_id(image["name"]) for image in VPS_IMAGES])
 
-    async def vps_image(request: web.Request) -> web.Response:
+    async def vps_image(request: web.Request, state: OvhState) -> web.Response:
         for image in VPS_IMAGES:
             if vps_image_id(image["name"]) == request.match_info["image_id"]:
                 return ok({"id": request.match_info["image_id"], **image})
         return _not_found()
 
-    async def vps_reinstall(request: web.Request) -> web.Response:
+    async def vps_reinstall(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None:
                 return _not_found()
             if body.get("imageId") not in {vps_image_id(i["name"]) for i in VPS_IMAGES}:
@@ -669,16 +874,16 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             vps["detail"]["state"] = "installing"
             return ok(state.task("reinstallVm"))
 
-    async def vps_upgrades(request: web.Request) -> web.Response:
+    async def vps_upgrades(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            if _vps(request) is None:
+            if _vps(request, state) is None:
                 return _not_found()
         return ok([dict(model) for model in VPS_UPGRADES])
 
-    async def vps_change(request: web.Request) -> web.Response:
+    async def vps_change(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            vps = _vps(request)
+            vps = _vps(request, state)
             if vps is None:
                 return _not_found()
             if body.get("model") not in {m["name"] for m in VPS_UPGRADES}:
@@ -687,7 +892,7 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             return ok(state.task("changeModel"))
 
     def service_infos(kind: str) -> Any:
-        async def handler(request: web.Request) -> web.Response:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
                 table = state.vps if kind == "vps" else state.dedicated
                 name = request.match_info["name"]
@@ -700,80 +905,80 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
 
     # ---- Dedicated --------------------------------------------------------
 
-    def _dedicated(request: web.Request) -> Optional[dict]:
+    def _dedicated(request: web.Request, state: OvhState) -> Optional[dict]:
         return state.dedicated.get(request.match_info["name"])
 
-    async def list_dedicated(request: web.Request) -> web.Response:
+    async def list_dedicated(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.dedicated))
 
     def dedicated_part(part: str) -> Any:
-        async def handler(request: web.Request) -> web.Response:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
-                server = _dedicated(request)
+                server = _dedicated(request, state)
                 return ok(server[part]) if server else _not_found()
 
         return handler
 
-    async def dedicated_reboot(request: web.Request) -> web.Response:
+    async def dedicated_reboot(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            if _dedicated(request) is None:
+            if _dedicated(request, state) is None:
                 return _not_found()
             return ok(state.task("hardReboot"))
 
     # ---- Public Cloud -------------------------------------------------------
 
-    def _project(request: web.Request) -> Optional[CloudProject]:
+    def _project(request: web.Request, state: OvhState) -> Optional[CloudProject]:
         return state.projects.get(request.match_info["project_id"])
 
-    async def list_projects(request: web.Request) -> web.Response:
+    async def list_projects(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.projects))
 
-    async def get_project(request: web.Request) -> web.Response:
+    async def get_project(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             if project is None:
                 return _not_found()
             return ok({"project_id": project.project_id, "projectName": project.description,
                        "description": project.description, "status": "ok",
                        "planCode": "project.2018", "creationDate": CREATED_AT})
 
-    async def list_instances(request: web.Request) -> web.Response:
+    async def list_instances(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             return ok(list(project.instances.values())) if project else _not_found()
 
-    async def get_instance(request: web.Request) -> web.Response:
+    async def get_instance(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             instance = project.instances.get(request.match_info["instance_id"]) if project else None
             return ok(instance) if instance else _not_found()
 
-    async def delete_instance(request: web.Request) -> web.Response:
+    async def delete_instance(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             if project is None or project.instances.pop(
                 request.match_info["instance_id"], None
             ) is None:
                 return _not_found()
         return ok(None)
 
-    async def instance_action(request: web.Request) -> web.Response:
+    async def instance_action(request: web.Request, state: OvhState) -> web.Response:
         verb = request.match_info["verb"]
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             instance = project.instances.get(request.match_info["instance_id"]) if project else None
             if instance is None:
                 return _not_found()
             instance["status"] = CLOUD_ACTIONS[verb]
         return ok(None)
 
-    async def instance_snapshot(request: web.Request) -> web.Response:
+    async def instance_snapshot(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         name = body.get("snapshotName") or ""
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             instance = project.instances.get(request.match_info["instance_id"]) if project else None
             if instance is None:
                 return _not_found()
@@ -785,10 +990,10 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             }
         return ok(None)
 
-    async def create_instance(request: web.Request) -> web.Response:
+    async def create_instance(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             if project is None:
                 return _not_found()
             instance_id = runtime_uuid(f"cloud-instance:{body.get('name')}")
@@ -800,8 +1005,8 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             return ok(instance)
 
     def static_list(items: tuple) -> Any:
-        async def handler(request: web.Request) -> web.Response:
-            if _project(request) is None:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
+            if _project(request, state) is None:
                 return _not_found()
             region = request.query.get("region")
             out = []
@@ -815,23 +1020,23 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
 
         return handler
 
-    async def list_regions(request: web.Request) -> web.Response:
+    async def list_regions(request: web.Request, state: OvhState) -> web.Response:
         return ok(list(REGIONS))
 
     def project_collection(attribute: str) -> Any:
-        async def handler(request: web.Request) -> web.Response:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
-                project = _project(request)
+                project = _project(request, state)
                 if project is None:
                     return _not_found()
                 return ok(list(getattr(project, attribute).values()))
 
         return handler
 
-    async def add_project_key(request: web.Request) -> web.Response:
+    async def add_project_key(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            project = _project(request)
+            project = _project(request, state)
             if project is None:
                 return _not_found()
             name = body.get("name", "")
@@ -842,9 +1047,9 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             return ok(key)
 
     def delete_project_item(attribute: str, key: str) -> Any:
-        async def handler(request: web.Request) -> web.Response:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
-                project = _project(request)
+                project = _project(request, state)
                 if project is None or getattr(project, attribute).pop(
                     request.match_info[key], None
                 ) is None:
@@ -853,22 +1058,22 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
 
         return handler
 
-    async def cloud_usage(request: web.Request) -> web.Response:
-        if _project(request) is None:
+    async def cloud_usage(request: web.Request, state: OvhState) -> web.Response:
+        if _project(request, state) is None:
             return _not_found()
         return ok({"hourlyUsage": {"instance": [], "storage": []},
                    "monthlyUsage": {"instance": []}})
 
     # ---- DNS --------------------------------------------------------------
 
-    def _zone(request: web.Request) -> Optional[dict[int, dict]]:
+    def _zone(request: web.Request, state: OvhState) -> Optional[dict[int, dict]]:
         return state.zones.get(request.match_info["zone"])
 
-    async def list_zones(request: web.Request) -> web.Response:
+    async def list_zones(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.zones))
 
-    async def get_zone(request: web.Request) -> web.Response:
+    async def get_zone(request: web.Request, state: OvhState) -> web.Response:
         zone = request.match_info["zone"]
         with state._lock:
             if zone not in state.zones:
@@ -876,11 +1081,11 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
         return ok({"name": zone, "dnssecSupported": True, "hasDnsAnycast": False,
                    "nameServers": [f"ns1.{zone}", f"ns2.{zone}"], "lastUpdate": CREATED_AT})
 
-    async def list_records(request: web.Request) -> web.Response:
+    async def list_records(request: web.Request, state: OvhState) -> web.Response:
         field_type = request.query.get("fieldType")
         sub_domain = request.query.get("subDomain")
         with state._lock:
-            records = _zone(request)
+            records = _zone(request, state)
             if records is None:
                 return _not_found()
             return ok([
@@ -889,17 +1094,17 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
                 and (sub_domain is None or record["subDomain"] == sub_domain)
             ])
 
-    async def get_record(request: web.Request) -> web.Response:
+    async def get_record(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            records = _zone(request)
+            records = _zone(request, state)
             record = records.get(int(request.match_info["record_id"])) if records else None
             return ok(record) if record else _not_found()
 
-    async def create_record(request: web.Request) -> web.Response:
+    async def create_record(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         zone = request.match_info["zone"]
         with state._lock:
-            records = _zone(request)
+            records = _zone(request, state)
             if records is None:
                 return _not_found()
             record_id = next(state._record_ids)
@@ -909,10 +1114,10 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             records[record_id] = record
             return ok(record)
 
-    async def update_record(request: web.Request) -> web.Response:
+    async def update_record(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            records = _zone(request)
+            records = _zone(request, state)
             record = records.get(int(request.match_info["record_id"])) if records else None
             if record is None:
                 return _not_found()
@@ -921,31 +1126,31 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
                     record[key] = body[key]
         return ok(None)
 
-    async def delete_record(request: web.Request) -> web.Response:
+    async def delete_record(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            records = _zone(request)
+            records = _zone(request, state)
             if records is None or records.pop(int(request.match_info["record_id"]), None) is None:
                 return _not_found()
         return ok(None)
 
-    async def refresh_zone(request: web.Request) -> web.Response:
+    async def refresh_zone(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            if _zone(request) is None:
+            if _zone(request, state) is None:
                 return _not_found()
         return ok(None)
 
     # ---- IPs: blocks, reverse DNS, firewall ---------------------------------
 
-    async def list_ip_blocks(request: web.Request) -> web.Response:
+    async def list_ip_blocks(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.ip_blocks))
 
-    async def get_ip_block(request: web.Request) -> web.Response:
+    async def get_ip_block(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             block = state.ip_blocks.get(request.match_info["block"])
             return ok(block) if block else _not_found()
 
-    async def move_ip(request: web.Request) -> web.Response:
+    async def move_ip(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
             block = state.ip_blocks.get(request.match_info["block"])
@@ -954,18 +1159,18 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             block["routedTo"] = {"serviceName": body.get("to")}
             return ok(state.task("genericMoveFloatingIp"))
 
-    async def list_reverse(request: web.Request) -> web.Response:
+    async def list_reverse(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             reverses = state.reverses.get(request.match_info["block"])
             return ok(sorted(reverses)) if reverses is not None else _not_found()
 
-    async def get_reverse(request: web.Request) -> web.Response:
+    async def get_reverse(request: web.Request, state: OvhState) -> web.Response:
         ip = request.match_info["ip"]
         with state._lock:
             host = state.reverses.get(request.match_info["block"], {}).get(ip)
             return ok({"ipReverse": ip, "reverse": host}) if host else _not_found()
 
-    async def set_reverse(request: web.Request) -> web.Response:
+    async def set_reverse(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
             reverses = state.reverses.get(request.match_info["block"])
@@ -974,49 +1179,49 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             reverses[body["ipReverse"]] = body["reverse"]
             return ok({"ipReverse": body["ipReverse"], "reverse": body["reverse"]})
 
-    async def delete_reverse(request: web.Request) -> web.Response:
+    async def delete_reverse(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             reverses = state.reverses.get(request.match_info["block"])
             if reverses is None or reverses.pop(request.match_info["ip"], None) is None:
                 return _not_found()
         return ok(None)
 
-    def _firewall(request: web.Request) -> Optional[dict]:
+    def _firewall(request: web.Request, state: OvhState) -> Optional[dict]:
         return state.firewalls.get(request.match_info["ip"])
 
-    async def get_firewall(request: web.Request) -> web.Response:
+    async def get_firewall(request: web.Request, state: OvhState) -> web.Response:
         ip = request.match_info["ip"]
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             if firewall is None:
                 return _not_found()
             return ok({"ipOnFirewall": ip, "enabled": firewall["enabled"], "state": "ok"})
 
-    async def toggle_firewall(request: web.Request) -> web.Response:
+    async def toggle_firewall(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             if firewall is None:
                 return _not_found()
             firewall["enabled"] = bool(body.get("enabled"))
         return ok(None)
 
-    async def list_rules(request: web.Request) -> web.Response:
+    async def list_rules(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             return ok(sorted(firewall["rules"])) if firewall else _not_found()
 
-    async def get_rule(request: web.Request) -> web.Response:
+    async def get_rule(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             rule = firewall["rules"].get(int(request.match_info["sequence"])) if firewall else None
             return ok(rule) if rule else _not_found()
 
-    async def add_rule(request: web.Request) -> web.Response:
+    async def add_rule(request: web.Request, state: OvhState) -> web.Response:
         body = await body_of(request)
         ip = request.match_info["ip"]
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             if firewall is None:
                 return _not_found()
             sequence = int(body.get("sequence", -1))
@@ -1026,9 +1231,9 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
             firewall["rules"][sequence] = rule
             return ok(rule)
 
-    async def delete_rule(request: web.Request) -> web.Response:
+    async def delete_rule(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
-            firewall = _firewall(request)
+            firewall = _firewall(request, state)
             if firewall is None or firewall["rules"].pop(
                 int(request.match_info["sequence"]), None
             ) is None:
@@ -1037,26 +1242,26 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
 
     # ---- Account SSH keys and billing ----------------------------------------
 
-    async def list_account_keys(request: web.Request) -> web.Response:
+    async def list_account_keys(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.account_ssh_keys))
 
-    async def get_account_key(request: web.Request) -> web.Response:
+    async def get_account_key(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             key = state.account_ssh_keys.get(request.match_info["key_name"])
             return ok(key) if key else _not_found()
 
-    async def list_bills(request: web.Request) -> web.Response:
+    async def list_bills(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             return ok(sorted(state.bills))
 
-    async def get_bill(request: web.Request) -> web.Response:
+    async def get_bill(request: web.Request, state: OvhState) -> web.Response:
         with state._lock:
             bill = state.bills.get(request.match_info["bill_id"])
             return ok(bill) if bill else _not_found()
 
     def usage(which: str) -> Any:
-        async def handler(request: web.Request) -> web.Response:
+        async def handler(request: web.Request, state: OvhState) -> web.Response:
             with state._lock:
                 return ok(dict(getattr(state, which)))
 
@@ -1145,6 +1350,8 @@ def add_routes(app: web.Application, state: OvhState) -> None:  # noqa: C901 - a
         ("GET", "/me/consumption/usage/current", usage("usage_current")),
         ("GET", "/me/consumption/usage/forecast", usage("usage_forecast")),
     ]
-    app.router.add_get(f"{PREFIX}/auth/time", auth_time)
-    for method, path, handler in routes:
-        app.router.add_route(method, f"{PREFIX}{path}", guarded(handler))
+    for root in (ROOT, f"{ROOT}/{_ENDPOINT_SEGMENT}"):
+        app.router.add_post(f"{root}{OVH_OAUTH2_TOKEN_PATH}", oauth2_token)
+        app.router.add_get(f"{root}/1.0/auth/time", auth_time)
+        for method, path, handler in routes:
+            app.router.add_route(method, f"{root}/1.0{path}", guarded(handler))
