@@ -46,7 +46,11 @@ from servonaut.services.findings_service import (
     FINDING_STATUSES,
     DEFAULT_PAGE_SIZE,
 )
-from servonaut.utils.instance_resolver import AmbiguousInstanceError, resolve_unique
+from servonaut.utils.instance_resolver import (
+    AmbiguousInstanceError,
+    display_name,
+    resolve_unique,
+)
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -283,9 +287,9 @@ class FindingsScreen(Screen):
         """Best-effort name for an instance id from the shared list."""
         for inst in getattr(self.app, "instances", None) or []:
             if inst.get("id") == instance_id:
-                name = inst.get("name")
+                name = display_name(inst)
                 if name:
-                    return f"{name}"
+                    return name
         return instance_id
 
     def _card(
