@@ -15,9 +15,13 @@ Notable differences from the OVH wizard:
   combination here matches what the API would do, but earlier and
   with a clearer message.
 * The SSH-key table is single-select with a "use default" hint;
-  leaving it unselected delegates to
-  ``config.hetzner.default_hetzner_ssh_key`` and the service-side
-  no-keys footgun guard.
+  leaving it unselected delegates to the chosen project's
+  ``default_hetzner_ssh_key`` and the service-side no-keys footgun
+  guard.
+
+With several Hetzner projects configured, a project picker comes first:
+server types, images, locations and SSH keys are read from the chosen
+project, and the server is created there.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, TYPE_CHECKING
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer
@@ -33,6 +38,15 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_service,
+    account_settings,
+    inventory,
+    provider_accounts,
+    registry_for,
+)
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -49,6 +63,9 @@ class HetznerCreateScreen(Screen):
         Binding("escape", "back", "Back", show=True),
     ]
 
+    # Label of the chosen project; "" is the default project.
+    _account: str = ""
+
     @property
     def app(self) -> "ServonautApp":
         return super().app  # type: ignore
@@ -60,8 +77,9 @@ class HetznerCreateScreen(Screen):
     # State
     # ------------------------------------------------------------------
 
-    def __init__(self) -> None:
+    def __init__(self, account: Optional[str] = None) -> None:
         super().__init__()
+        self._account = account or ""
         self._server_types: List[dict] = []
         self._images: List[dict] = []
         self._locations: List[dict] = []
@@ -79,6 +97,11 @@ class HetznerCreateScreen(Screen):
                 Static(
                     "[bold cyan]Create Hetzner Cloud Server[/bold cyan]",
                     id="hetzner_create_title",
+                ),
+                # Hidden unless several Hetzner projects are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "hetzner"), "hetzner",
+                    value=self._account or None, id="hetzner_create_account",
                 ),
 
                 Static("[bold]Server Name[/bold]", classes="section_header"),
@@ -146,9 +169,11 @@ class HetznerCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
+        self._account = self.query_one(
+            "#hetzner_create_account", AccountPicker,
+        ).account
 
-        svc = getattr(self.app, "hetzner_service", None)
-        if svc is None:
+        if inventory(self.app, "hetzner") is None:
             self.query_one(
                 "#hetzner_create_container", ScrollableContainer,
             ).mount(
@@ -163,10 +188,57 @@ class HetznerCreateScreen(Screen):
             ).disabled = True
             return
 
-        self.run_worker(self._load_server_types(), exclusive=False)
-        self.run_worker(self._load_images(), exclusive=False)
-        self.run_worker(self._load_locations(), exclusive=False)
-        self.run_worker(self._load_ssh_keys(), exclusive=False)
+        self._load_project()
+
+    def _load_project(self) -> None:
+        """Load the chosen project's server types, images, locations and keys."""
+        if self._project_service() is None:
+            return
+        # One group per table: switching projects cancels the loads still
+        # running for the previous one, so they cannot fill the new tables.
+        for loader, group in (
+            (self._load_server_types, "hetzner_create_types"),
+            (self._load_images, "hetzner_create_images"),
+            (self._load_locations, "hetzner_create_locations"),
+            (self._load_ssh_keys, "hetzner_create_keys"),
+        ):
+            self.run_worker(loader(), group=group, exclusive=True)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another project was picked: its lists replace the current ones."""
+        self._account = event.account
+        self._server_types, self._images = [], []
+        self._locations, self._ssh_keys = [], []
+        for selector in (
+            "#hetzner_types_table", "#hetzner_images_table",
+            "#hetzner_locations_table", "#hetzner_keys_table",
+        ):
+            self.query_one(selector, DataTable).clear()
+        self._load_project()
+
+    def _project_service(self):
+        """The chosen project's service, or None after telling the user why."""
+        try:
+            return account_service(self.app, "hetzner", self._account)
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
+
+    def _defaults(self):
+        """Settings holding the provider-wide type, image and location defaults."""
+        return self.app.config_manager.get().hetzner
+
+    def _default_ssh_key(self) -> str:
+        """The chosen project's default Hetzner-side SSH key name.
+
+        A key name belongs to one project's registry, so it is never
+        borrowed from another project.
+        """
+        try:
+            settings = account_settings(self.app, "hetzner", self._account)
+        except UnknownAccountError:
+            return ""
+        return (getattr(settings, "default_hetzner_ssh_key", "") or "").strip()
 
     # ------------------------------------------------------------------
     # Table setup
@@ -195,7 +267,9 @@ class HetznerCreateScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_server_types(self) -> None:
-        svc = self.app.hetzner_service
+        svc = self._project_service()
+        if svc is None:
+            return
         tbl = self.query_one("#hetzner_types_table", DataTable)
         try:
             self._server_types = await svc.list_server_types()
@@ -210,8 +284,7 @@ class HetznerCreateScreen(Screen):
                 )
             self._preselect_default(
                 tbl, self._server_types, "name",
-                getattr(self.app.config_manager.get().hetzner,
-                        "default_server_type", ""),
+                getattr(self._defaults(), "default_server_type", ""),
             )
         except Exception as exc:
             logger.error("Failed to load Hetzner server types: %s", exc)
@@ -219,7 +292,9 @@ class HetznerCreateScreen(Screen):
                         severity="error", markup=False)
 
     async def _load_images(self) -> None:
-        svc = self.app.hetzner_service
+        svc = self._project_service()
+        if svc is None:
+            return
         tbl = self.query_one("#hetzner_images_table", DataTable)
         try:
             self._images = await svc.list_images()
@@ -231,8 +306,7 @@ class HetznerCreateScreen(Screen):
                 )
             self._preselect_default(
                 tbl, self._images, "name",
-                getattr(self.app.config_manager.get().hetzner,
-                        "default_image", ""),
+                getattr(self._defaults(), "default_image", ""),
             )
         except Exception as exc:
             logger.error("Failed to load Hetzner images: %s", exc)
@@ -240,7 +314,9 @@ class HetznerCreateScreen(Screen):
                         severity="error", markup=False)
 
     async def _load_locations(self) -> None:
-        svc = self.app.hetzner_service
+        svc = self._project_service()
+        if svc is None:
+            return
         tbl = self.query_one("#hetzner_locations_table", DataTable)
         try:
             self._locations = await svc.list_locations()
@@ -253,8 +329,7 @@ class HetznerCreateScreen(Screen):
                 )
             self._preselect_default(
                 tbl, self._locations, "name",
-                getattr(self.app.config_manager.get().hetzner,
-                        "default_location", ""),
+                getattr(self._defaults(), "default_location", ""),
             )
         except Exception as exc:
             logger.error("Failed to load Hetzner locations: %s", exc)
@@ -262,7 +337,9 @@ class HetznerCreateScreen(Screen):
                         severity="error", markup=False)
 
     async def _load_ssh_keys(self) -> None:
-        svc = self.app.hetzner_service
+        svc = self._project_service()
+        if svc is None:
+            return
         tbl = self.query_one("#hetzner_keys_table", DataTable)
         try:
             self._ssh_keys = await svc.list_ssh_keys()
@@ -285,9 +362,7 @@ class HetznerCreateScreen(Screen):
             # "Refusing to create…without SSH keys" error if the
             # default_hetzner_ssh_key happens to be empty.
             self._preselect_default(
-                tbl, self._ssh_keys, "name",
-                getattr(self.app.config_manager.get().hetzner,
-                        "default_hetzner_ssh_key", ""),
+                tbl, self._ssh_keys, "name", self._default_ssh_key(),
             )
         except Exception as exc:
             logger.error("Failed to load Hetzner SSH keys: %s", exc)
@@ -401,9 +476,7 @@ class HetznerCreateScreen(Screen):
         # here rather than let the service-layer footgun guard fire
         # with a generic "Refusing to create" stack trace. Mirrors the
         # service-side guard's intent but at a UX-friendly layer.
-        config_default = (
-            self.app.config_manager.get().hetzner.default_hetzner_ssh_key or ""
-        ).strip()
+        config_default = self._default_ssh_key()
         if not ssh_keys and not config_default:
             if not self._ssh_keys:
                 self.notify(
@@ -435,13 +508,18 @@ class HetznerCreateScreen(Screen):
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
+        # With several projects, say which one is billed.
+        project = (
+            f" in project [bold]{escape(self._account)}[/bold]"
+            if len(provider_accounts(self.app, "hetzner")) > 1 else ""
+        )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Create Hetzner Cloud Server",
                 description=(
                     f"Create [bold]{name}[/bold] in [bold]{location_name}[/bold] "
                     f"as [bold]{type_name}[/bold] / [bold]{image_name}[/bold] "
-                    f"with SSH key [bold]{ssh_key_label}[/bold]."
+                    f"with SSH key [bold]{ssh_key_label}[/bold]{project}."
                 ),
                 consequences=[
                     f"Billing starts immediately (~€{monthly_price}/month gross)",
@@ -456,7 +534,7 @@ class HetznerCreateScreen(Screen):
         if not confirmed:
             return
 
-        svc = self.app.hetzner_service
+        svc = self._project_service()
         if svc is None:
             self.notify("Hetzner Cloud service is not available.",
                         severity="error", markup=False)
@@ -506,9 +584,11 @@ class HetznerCreateScreen(Screen):
 
         Mirrors the merge pattern used by ``InstanceListScreen`` and
         ``HetznerSetupScreen`` — non-Hetzner rows are preserved, the
-        Hetzner slice is replaced with a fresh fetch.
+        Hetzner slice is replaced with a fresh fetch of every project, so
+        the new server is listed under its own project and no other
+        project's servers drop out.
         """
-        svc = self.app.hetzner_service
+        svc = inventory(self.app, "hetzner")
         if svc is None:
             return
         new_hetzner = await svc.fetch_instances_cached(force_refresh=True)
