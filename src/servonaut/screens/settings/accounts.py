@@ -31,6 +31,7 @@ from servonaut.config.accounts import (
     primary_label,
     primary_label_problems,
 )
+from servonaut.screens._provider_accounts import shown_label
 
 logger = logging.getLogger(__name__)
 
@@ -151,49 +152,36 @@ def demo_redaction(app: Any) -> Any:
     return getattr(app, "redaction_service", None)
 
 
-def shown_label(redaction: Any, label: str) -> str:
-    """*label* as the screen shows it: a stand-in in demo mode.
-
-    The same stand-in the server list shows for the account, so a label
-    reads the same on every screen. Provider names (the default labels of
-    primary accounts) are public taxonomy and stay.
-    """
-    if redaction is None or not label:
-        return label
-    redact = getattr(redaction, "redact_account_label", None)
-    if callable(redact):
-        return redact(label)
-    return label if label.lower() in PROVIDERS else redaction.redact_name(label)
-
-
-def shown_profile(redaction: Any, profile: str) -> str:
+def shown_profile(app: Any, profile: str) -> str:
     """An AWS profile name as the screen shows it (a stand-in in demo mode)."""
+    redaction = demo_redaction(app)
     if redaction is None or not profile:
         return profile
     return redaction.redact_name(profile)
 
 
-def shown_text(redaction: Any, config: Any, text: str) -> str:
+def shown_text(app: Any, config: Any, text: str) -> str:
     """*text* with every account label and AWS profile hidden in demo mode.
 
     Problem sentences and refresh errors name accounts; one pass replaces
     all of them, so a stand-in is never itself replaced again.
     """
+    redaction = demo_redaction(app)
     if redaction is None or not text:
         return text
     names: Dict[str, str] = {}
     for provider in PROVIDERS:
         block = provider_block(config, provider)
-        names[primary_label(provider, block)] = shown_label(redaction, primary_label(provider, block))
+        names[primary_label(provider, block)] = shown_label(app, primary_label(provider, block))
         for extra in block.accounts:
             label = (extra.label or "").strip()
             if label:
-                names[label] = shown_label(redaction, label)
+                names[label] = shown_label(app, label)
     profiles = [config.aws.profile] + [extra.profile for extra in config.aws.accounts]
     for profile in profiles:
         profile = (profile or "").strip()
         if profile and profile not in names:
-            names[profile] = shown_profile(redaction, profile)
+            names[profile] = shown_profile(app, profile)
     # Case-insensitive: some messages carry an account's lower-cased key.
     hidden = {real.lower(): fake for real, fake in names.items() if real != fake}
     if hidden:
@@ -351,20 +339,19 @@ def refresh_provider_fleet(app: Any, provider: str) -> None:
 async def _refresh_in_background(app: Any, provider: str) -> None:
     title = PROVIDER_TITLES[provider]
     config = app.config_manager.get()
-    redaction = demo_redaction(app)
     try:
         rows, error = await reload_provider_fleet(app, provider)
     except Exception as exc:  # any provider SDK error; nothing to keep
         logger.warning("%s refresh after an accounts change failed: %s", title, exc)
         app.notify(
-            f"{title} refresh failed: {shown_text(redaction, config, str(exc))}",
+            f"{title} refresh failed: {shown_text(app, config, str(exc))}",
             severity="warning",
             markup=False,
         )
         return
     if error:
         app.notify(
-            f"{title} refresh incomplete. {shown_text(redaction, config, error)}",
+            f"{title} refresh incomplete. {shown_text(app, config, error)}",
             severity="warning",
             markup=False,
         )
@@ -503,14 +490,13 @@ class AccountsSection(Vertical):
         )
         return rows
 
-    def cells(self, config: Any, row: AccountRow, redaction: Any) -> Tuple[str, ...]:
-        """The row's cells, one per column (redacted in demo mode)."""
-        return (shown_label(redaction, row.label),)
+    def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:
+        """The row's cells, one per column, with stand-ins in demo mode."""
+        return (shown_label(self.app, row.label),)
 
     def refresh_accounts(self) -> None:
         """Redraw the table and the problem list from the saved config."""
         config = self.app.config_manager.get()
-        redaction = demo_redaction(self.app)
         table = self.query_one(DataTable)
         cursor = table.cursor_row
         table.clear(columns=True)
@@ -521,14 +507,14 @@ class AccountsSection(Vertical):
         self._rows = self.rows(config)
         for row in self._rows:
             status = account_status(self.app, config, self.PROVIDER, row)
-            shown, *rest = self.cells(config, row, redaction)
+            shown, *rest = self.redacted_cells(config, row)
             table.add_row(shown, status, *rest)
         if 0 < cursor < table.row_count:
             table.move_cursor(row=cursor)
 
         problems = self.query_one(f"#{self.PROVIDER}_accounts_problems", Static)
         messages = [
-            shown_text(redaction, config, message)
+            shown_text(self.app, config, message)
             for message in provider_problems(self.app, config, self.PROVIDER)
         ]
         problems.update("\n".join(f"• {escape(m)}" for m in messages))
@@ -603,7 +589,7 @@ class AccountsSection(Vertical):
         if row.primary:
             self.app.notify(self.primary_removal_hint(), severity="warning", markup=False)
             return
-        shown = shown_label(demo_redaction(self.app), row.label)
+        shown = shown_label(self.app, row.label)
         message = (
             f"Remove the {escape(title)} {self.NOUN} [b]{escape(shown)}[/b]?\n\n"
             f"Its servers leave the server list. Nothing changes at {escape(title)}."
@@ -640,7 +626,7 @@ class AccountsSection(Vertical):
             return
         del accounts[index]
         save_extra_accounts(self.app, self.PROVIDER, accounts)
-        shown = shown_label(demo_redaction(self.app), row.label)
+        shown = shown_label(self.app, row.label)
         self.accounts_changed(f"Removed {PROVIDER_TITLES[self.PROVIDER]} {self.NOUN} '{shown}'")
 
     def accounts_changed(self, message: str) -> None:
@@ -677,13 +663,13 @@ class HetznerAccountsSection(AccountsSection):
     HELP = "One API token per project, entered in the setup wizard."
     COLUMNS = ("Label", "API token")
 
-    def cells(self, config: Any, row: AccountRow, redaction: Any) -> Tuple[str, ...]:
+    def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:
         block = config.hetzner
         token = block.api_token if row.primary else block.accounts[row.index].api_token
         state = _credential_kind(token) or (
             "from environment" if row.primary else "missing"
         )
-        return (shown_label(redaction, row.label), state)
+        return (shown_label(self.app, row.label), state)
 
     def add_account(self) -> None:
         from servonaut.screens.hetzner_setup import HetznerSetupScreen
@@ -733,11 +719,11 @@ class OvhAccountsSection(AccountsSection):
     HELP = "Each account has its own API credentials, entered in the setup wizard."
     COLUMNS = ("Label", "Endpoint", "Auth", "Projects")
 
-    def cells(self, config: Any, row: AccountRow, redaction: Any) -> Tuple[str, ...]:
+    def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:
         account = config.ovh if row.primary else config.ovh.accounts[row.index]
         projects = len(account.cloud_project_ids)
         return (
-            shown_label(redaction, row.label),
+            shown_label(self.app, row.label),
             account.endpoint or "ovh-eu",
             ovh_auth_kind(account),
             str(projects) if projects else "none",

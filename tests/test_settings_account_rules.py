@@ -7,6 +7,7 @@ the demo-mode text scrubber and the fleet refresh after an accounts change.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import List
 from unittest.mock import MagicMock
 
@@ -103,9 +104,16 @@ class TestParseRegions:
             rules.parse_regions(text)
 
 
+def _demo_app(redaction: RedactionService | None = None) -> SimpleNamespace:
+    """What the helpers read from the app: demo mode on, and its redactor."""
+    return SimpleNamespace(demo_mode=True, redaction_service=redaction or RedactionService())
+
+
 class TestShownText:
     def test_outside_demo_mode_text_is_unchanged(self) -> None:
-        assert rules.shown_text(None, _config(), "prod failed") == "prod failed"
+        app = SimpleNamespace(demo_mode=False, redaction_service=RedactionService())
+        assert rules.shown_text(app, _config(), "prod failed") == "prod failed"
+        assert rules.shown_profile(app, "prod-admin") == "prod-admin"
 
     def test_labels_and_profiles_are_replaced_in_demo_mode(self) -> None:
         # Names no stand-in can contain, so the checks cannot pass by luck.
@@ -117,7 +125,7 @@ class TestShownText:
         )
         redaction = RedactionService()
         text = rules.shown_text(
-            redaction,
+            _demo_app(redaction),
             config,
             "northwind: profile northwind-admin failed; "
             "account 'contoso' is not available",
@@ -132,15 +140,15 @@ class TestShownText:
 
     def test_environment_words_stay_in_demo_mode(self) -> None:
         # "prod" and "staging" identify nobody (see redact_account_label).
-        assert rules.shown_label(RedactionService(), "prod") == "prod"
-        assert rules.shown_label(RedactionService(), "hetzner") == "hetzner"
+        assert rules.shown_label(_demo_app(), "prod") == "prod"
+        assert rules.shown_label(_demo_app(), "hetzner") == "hetzner"
 
     def test_provider_names_stay(self) -> None:
-        text = rules.shown_text(RedactionService(), _config(), "AWS account 'aws' is fine")
+        text = rules.shown_text(_demo_app(), _config(), "AWS account 'aws' is fine")
         assert text == "AWS account 'aws' is fine"
 
     def test_a_label_inside_a_longer_word_is_left_alone(self) -> None:
-        text = rules.shown_text(RedactionService(), _config(), "production")
+        text = rules.shown_text(_demo_app(), _config(), "production")
         assert text == "production"
 
 
