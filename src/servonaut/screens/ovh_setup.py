@@ -894,7 +894,7 @@ class OVHSetupScreen(Screen):
             from servonaut.config.accounts import primary_label
 
             config = self.app.config_manager.get()
-            key = primary_label("ovh", config.ovh).lower()
+            key = primary_label("ovh", config).lower()
             unavailable = getattr(getattr(self.app, "accounts", None), "unavailable", None) or {}
             reason = unavailable.get(f"ovh:{key}") or "no usable OVH account"
             self.app.notify(

@@ -40,7 +40,6 @@ from .schema import (
     VoiceConfig,
     CONFIG_VERSION,
 )
-from .accounts import drop_repeated_primary_labels
 from .migration import migrate_to_latest
 from .paths import normalize_config_paths
 from .secrets import load_secrets_env
@@ -936,7 +935,4 @@ class ConfigManager:
         if unknown_keys:
             logger.warning("Ignoring unknown config keys: %s", unknown_keys)
 
-        config = AppConfig(**config_dict)
-        for message in drop_repeated_primary_labels(config):
-            logger.warning("%s", message)
-        return config
+        return AppConfig(**config_dict)

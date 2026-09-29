@@ -77,7 +77,7 @@ def taken_labels(
         block = provider_block(config, provider)
         title = PROVIDER_TITLES[provider]
         if skip != (provider, None):
-            label = primary_label(provider, block)
+            label = primary_label(provider, config)
             taken.setdefault(label.lower(), f"{title} · {label}")
         for index, extra in enumerate(block.accounts):
             label = (extra.label or "").strip()
@@ -172,7 +172,8 @@ def shown_text(app: Any, config: Any, text: str) -> str:
     names: Dict[str, str] = {}
     for provider in PROVIDERS:
         block = provider_block(config, provider)
-        names[primary_label(provider, block)] = shown_label(app, primary_label(provider, block))
+        primary = primary_label(provider, config)
+        names[primary] = shown_label(app, primary)
         for extra in block.accounts:
             label = (extra.label or "").strip()
             if label:
@@ -235,7 +236,8 @@ def provider_problems(app: Any, config: Any, provider: str) -> List[str]:
     messages = [m for m in describe_account_problems(config) if m.startswith(f"{title} ")]
     if not provider_off(config, provider):
         block = provider_block(config, provider)
-        labels = {primary_label(provider, block).lower(): primary_label(provider, block)}
+        primary = primary_label(provider, config)
+        labels = {primary.lower(): primary}
         labels.update(
             ((a.label or "").strip().lower(), (a.label or "").strip()) for a in block.accounts
         )
@@ -495,7 +497,7 @@ class AccountsSection(Vertical):
     def rows(self, config: Any) -> List[AccountRow]:
         """The primary account, then every extra account, in config order."""
         block = provider_block(config, self.PROVIDER)
-        rows = [AccountRow(primary_label(self.PROVIDER, block))]
+        rows = [AccountRow(primary_label(self.PROVIDER, config))]
         rows.extend(
             AccountRow((extra.label or "").strip() or f"#{index + 1}", index)
             for index, extra in enumerate(block.accounts)

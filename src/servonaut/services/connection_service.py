@@ -37,7 +37,7 @@ def _ovh_account_config(config, instance: dict):
 
     label = str(instance.get("account") or "").lower()
     if label:
-        for ref, effective in ovh_accounts(config.ovh):
+        for ref, effective in ovh_accounts(config):
             if ref.key == label:
                 return effective
     return config.ovh

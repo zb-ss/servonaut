@@ -463,6 +463,23 @@ class TestUnavailablePrimary:
         assert ".." not in message
         assert message.endswith(". Name the account to use: staging")
 
+    def test_an_account_that_cannot_connect_is_classified_on_every_path(self, monkeypatch):
+        from servonaut.services.accounts import AccountUnavailableError
+
+        registry = self._registry(monkeypatch)
+        # Named, as an account= argument does.
+        with pytest.raises(AccountUnavailableError) as named:
+            registry.account("hetzner", "HETZNER")
+        assert (named.value.provider, named.value.label) == ("hetzner", "hetzner")
+        # Unnamed: the primary is the default and cannot connect.
+        with pytest.raises(AccountUnavailableError) as default:
+            registry.service("hetzner")
+        assert default.value.label == "hetzner"
+        # A label nobody configured is still just unknown.
+        with pytest.raises(UnknownAccountError) as unknown:
+            registry.account("hetzner", "nope")
+        assert not isinstance(unknown.value, AccountUnavailableError)
+
     def test_an_unavailable_account_is_found_only_on_request(self, monkeypatch):
         registry = self._registry(monkeypatch)
         assert registry.find_account("hetzner") is None

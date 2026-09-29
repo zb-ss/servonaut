@@ -442,9 +442,7 @@ class ServonautTools:
         if not label:
             return False
         if self._accounts is None:
-            primary = primary_label(
-                provider, getattr(self._config_manager.get(), provider, None),
-            )
+            primary = primary_label(provider, self._config_manager.get())
             if label.lower() == primary.lower():
                 return False
             raise UnknownAccountError(

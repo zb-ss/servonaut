@@ -229,7 +229,7 @@ def _build_service(account: Optional[str] = None):
 
     cm = ConfigManager()
     cfg = cm.get()
-    primary = primary_label('hetzner', getattr(cfg, 'hetzner', None))
+    primary = primary_label('hetzner', cfg)
     if account and account.strip().lower() != primary.lower():
         raise _unknown_account(UnknownAccountError(
             f"No Hetzner account named {account!r}. Accounts: {primary}"

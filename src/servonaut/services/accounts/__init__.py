@@ -9,6 +9,7 @@ from servonaut.services.accounts.fleet import (
 )
 from servonaut.services.accounts.registry import (
     AccountRegistry,
+    AccountUnavailableError,
     AWSAccountServices,
     OVHAccountServices,
     UnknownAccountError,
@@ -22,6 +23,7 @@ __all__ = [
     "AccountBinding",
     "AccountFleet",
     "AccountRegistry",
+    "AccountUnavailableError",
     "AWSAccountServices",
     "OVHAccountServices",
     "UnknownAccountError",

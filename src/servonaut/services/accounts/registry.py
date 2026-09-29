@@ -54,6 +54,19 @@ class UnknownAccountError(ValueError):
     """An account label that names no usable account of the provider."""
 
 
+class AccountUnavailableError(UnknownAccountError):
+    """An account that is set up but cannot connect.
+
+    The message says why (a token that does not resolve, missing
+    credentials); *provider* and *label* name the account.
+    """
+
+    def __init__(self, ref: AccountRef, message: str):
+        super().__init__(message)
+        self.provider = ref.provider
+        self.label = ref.label
+
+
 def row_provider(row: Dict[str, Any]) -> str:
     """``"custom"``, ``"ovh"``, ``"hetzner"`` or ``"aws"`` for an instance row."""
     for flag, provider in _ROW_FLAGS:
@@ -182,7 +195,7 @@ class AccountRegistry:
 
         config = state.config
         accounts = _ProviderAccounts()
-        for index, settings in enumerate(aws_accounts(config.aws)):
+        for index, settings in enumerate(aws_accounts(config)):
             if not settings.ref.primary and (AWS, index - 1) in skipped:
                 continue
             ref = settings.ref
@@ -217,7 +230,7 @@ class AccountRegistry:
             HetznerService,
         )
 
-        for index, (ref, effective) in enumerate(hetzner_accounts(config.hetzner)):
+        for index, (ref, effective) in enumerate(hetzner_accounts(config)):
             if not ref.primary and (HETZNER, index - 1) in skipped:
                 continue
             accounts.configured.append(ref)
@@ -239,7 +252,7 @@ class AccountRegistry:
             return
         from servonaut.services.ovh_service import _OVH_CACHE_PATH, OVHService
 
-        for index, (ref, effective) in enumerate(ovh_accounts(config.ovh)):
+        for index, (ref, effective) in enumerate(ovh_accounts(config)):
             if not ref.primary and (OVH, index - 1) in skipped:
                 continue
             accounts.configured.append(ref)
@@ -550,12 +563,14 @@ def _account(state: _RegistryState, provider: str, label: Optional[str]) -> Acco
         if not refs:
             raise _no_usable_account(state, provider)
         primary = next((ref for ref in accounts.configured if ref.primary), None)
-        reason = _unavailable_reason(state, primary) if primary else ""
-        raise UnknownAccountError(
-            f"The primary {title} account"
-            f"{' ' + repr(primary.label) if primary else ''} is not available"
+        if primary is None:  # every provider block is its primary account
+            raise UnknownAccountError(f"{title} has no primary account")
+        reason = _unavailable_reason(state, primary)
+        raise AccountUnavailableError(
+            primary,
+            f"The primary {title} account {primary.label!r} is not available"
             f"{': ' + reason if reason else ''}. "
-            f"Name the account to use: {', '.join(r.label for r in refs)}"
+            f"Name the account to use: {', '.join(r.label for r in refs)}",
         )
     wanted = label.strip().lower()
     for ref in refs:
@@ -564,7 +579,9 @@ def _account(state: _RegistryState, provider: str, label: Optional[str]) -> Acco
     for ref in accounts.configured:
         if ref.key == wanted:
             reason = _unavailable_reason(state, ref) or "cannot connect"
-            raise UnknownAccountError(f"{title} account {ref.label!r} is not available: {reason}")
+            raise AccountUnavailableError(
+                ref, f"{title} account {ref.label!r} is not available: {reason}"
+            )
     if not refs:
         raise _no_usable_account(state, provider)
     raise UnknownAccountError(
@@ -616,7 +633,7 @@ def _object_storage_source(state: _RegistryState, provider: str, account: Option
     if provider not in (HETZNER, OVH):
         raise UnknownAccountError(f"No object storage for provider {provider!r}")
     block = config.hetzner if provider == HETZNER else config.ovh
-    primary = primary_label(provider, block)
+    primary = primary_label(provider, config)
     wanted = (account or "").strip().lower()
     if not wanted or wanted == primary.lower():
         return primary.lower(), block.object_storage, None

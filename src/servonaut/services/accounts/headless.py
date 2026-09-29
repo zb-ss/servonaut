@@ -24,7 +24,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from servonaut.config.accounts import AWS, HETZNER, OVH, PROVIDER_TITLES, AccountRef
 from servonaut.services.accounts.fleet import ACCOUNT_KEY, AccountFleet, tag_rows
-from servonaut.services.accounts.registry import AccountRegistry, UnknownAccountError
+from servonaut.services.accounts.registry import (
+    AccountRegistry,
+    AccountUnavailableError,
+    UnknownAccountError,
+)
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
     AmbiguousInstanceError,
@@ -87,19 +91,6 @@ def unknown_account_error(registry: Optional[AccountRegistry], label: str) -> Un
     known = [ref.label for p in PROVIDERS for ref in (registry.accounts(p) if registry else [])]
     listing = f" Accounts: {', '.join(known)}" if known else ""
     return UnknownAccountError(f"No account named {label!r}.{listing}")
-
-
-class AccountUnavailableError(UnknownAccountError):
-    """An account named by a reference or argument is set up but cannot connect.
-
-    The message is the registry's, with the reason (a token that does not
-    resolve, missing credentials).
-    """
-
-    def __init__(self, ref: AccountRef, message: str):
-        super().__init__(message)
-        self.provider = ref.provider
-        self.label = ref.label
 
 
 def qualifier_account(
