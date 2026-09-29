@@ -180,6 +180,10 @@ async def _ip_ban_configured(pilot: Any) -> None:
     await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
 
 
+async def _cloudtrail(pilot: Any) -> None:
+    await _navigate(pilot, "nav_cloudtrail", "CloudTrailBrowserScreen")
+
+
 async def _cloudwatch(pilot: Any) -> None:
     await _navigate(pilot, "nav_cloudwatch", "CloudWatchBrowserScreen")
 
@@ -352,6 +356,12 @@ def test_ip_ban(screen_snapshot, size: str) -> None:
 def test_ip_ban_configured(screen_snapshot) -> None:
     """The IP ban manager once a ban method exists: no hint."""
     _capture(screen_snapshot, "100x30", _ip_ban_configured)
+
+
+@sizes
+def test_cloudtrail_empty(screen_snapshot, size: str) -> None:
+    """The CloudTrail browser before a fetch: every filter reads on one line."""
+    _capture(screen_snapshot, size, _cloudtrail)
 
 
 @sizes

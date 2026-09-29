@@ -78,9 +78,16 @@ class AWSAccountSettings:
 
 
 def primary_label(provider: str, provider_config) -> str:
-    """Label of the primary account: the configured one, else the provider slug."""
+    """Label of the primary account: the configured one, else the provider slug.
+
+    A configured label that is not a valid label (hand-edited config) is not
+    used: it could not be typed in an ``account/name`` reference, so the
+    account keeps the provider slug and the problem is reported instead.
+    """
     label = (getattr(provider_config, "label", "") or "").strip()
-    return label or provider
+    if not label or label_problem(label) is not None:
+        return provider
+    return label
 
 
 def account_cache_path(base_path: str, key: str) -> str:
@@ -296,11 +303,14 @@ def primary_label_problems(config: "AppConfig") -> List[str]:
     problems: List[str] = []
     seen: Dict[str, str] = {}
     for provider, block in ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh)):
-        label = primary_label(provider, block)
-        problem = label_problem(label)
+        configured = (getattr(block, "label", "") or "").strip()
+        problem = label_problem(configured) if configured else None
         if problem is not None:
-            problems.append(f"{PROVIDER_TITLES[provider]} primary account: {problem}")
-            continue
+            problems.append(
+                f"{PROVIDER_TITLES[provider]} primary account: {problem}; "
+                f"using {provider!r} instead"
+            )
+        label = primary_label(provider, block)
         if label.lower() in seen:
             problems.append(
                 f"{PROVIDER_TITLES[provider]} primary account label {label!r} is "

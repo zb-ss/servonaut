@@ -15,7 +15,6 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
-from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -23,6 +22,7 @@ from servonaut.screens._provider_accounts import (
     ovh_services,
     registry_for,
     show_account_labels,
+    with_account,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker

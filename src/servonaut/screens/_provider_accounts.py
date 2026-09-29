@@ -1,9 +1,9 @@
-"""Provider accounts as the Hetzner and OVH screens use them.
+"""Provider accounts as the screens use them.
 
 Account-level screens (SSH keys, billing, DNS, IPs, storage, the create
-wizards) work on one account chosen with an ``AccountPicker``; anything
-done to one server acts in the account that server belongs to; the
-managers list every account's servers.
+wizards, CloudTrail, CloudWatch, object storage) work on one account
+chosen with an ``AccountPicker``; anything done to one server acts in the
+account that server belongs to; the managers list every account's servers.
 
 Hosts that never build the account registry (tests, previews), and a
 provider the registry has no account for, keep using the app's
@@ -12,6 +12,10 @@ extra accounts existed.
 
 Demo mode redacts the rows a screen draws, account label included, so
 every account lookup starts from the real record behind a drawn row.
+
+Audit details name the account an action ran in only when the provider
+has several accounts, so a single-account user's audit log reads exactly
+as before.
 """
 
 from __future__ import annotations
@@ -21,10 +25,19 @@ from typing import Any, Dict, List, Optional
 from textual.css.query import NoMatches
 from textual.widgets import Select
 
-from servonaut.config.accounts import PROVIDER_TITLES, AccountRef
+from servonaut.config.accounts import (
+    AWS,
+    HETZNER,
+    PROVIDER_TITLES,
+    AccountRef,
+    hetzner_accounts,
+    ovh_accounts,
+    usable_extra_indexes,
+)
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.accounts.registry import (
     AccountRegistry,
+    AWSAccountServices,
     OVHAccountServices,
     UnknownAccountError,
     row_provider,
@@ -32,19 +45,28 @@ from servonaut.services.accounts.registry import (
 
 __all__ = [
     "ServerAccountMixin",
+    "ServerAuditMixin",
     "UnknownAccountError",
     "account_ref",
     "account_service",
     "account_settings",
+    "aws_context",
+    "aws_services",
+    "cloudtrail_service",
+    "cloudwatch_service",
     "fetched_row",
     "inventory",
+    "object_storage",
+    "object_storage_accounts",
     "ovh_services",
     "provider_accounts",
     "registry_for",
+    "row_account",
     "row_ovh_services",
     "row_service",
     "show_account_labels",
     "shown_label",
+    "with_account",
 ]
 
 # The app attribute holding each provider's default-account service.
@@ -67,10 +89,16 @@ _OVH_ALIASES: Dict[str, str] = {
 }
 
 
+def _account_registry(app: Any) -> Optional[AccountRegistry]:
+    """The app's account registry, or None on a host that never built one."""
+    registry = getattr(app, "accounts", None)
+    return registry if isinstance(registry, AccountRegistry) else None
+
+
 def registry_for(app: Any, provider: str) -> Optional[AccountRegistry]:
     """The app's account registry when it serves *provider*, else None."""
-    registry = getattr(app, "accounts", None)
-    if not isinstance(registry, AccountRegistry) or not registry.accounts(provider):
+    registry = _account_registry(app)
+    if registry is None or not registry.accounts(provider):
         return None
     return registry
 
@@ -189,6 +217,83 @@ def account_settings(app: Any, provider: str, account: Optional[str] = None) -> 
     return getattr(account_service(app, provider, ref.label), "_config", live)
 
 
+def aws_services(app: Any, account: Optional[str] = None) -> Optional[AWSAccountServices]:
+    """One AWS account's services ("" or None = default account).
+
+    None on a host without an account registry, whose single-account
+    attributes (``cloudtrail_service``, ...) then stand in.
+
+    Raises:
+        UnknownAccountError: No usable AWS account has that label.
+    """
+    registry = registry_for(app, AWS)
+    if registry is None:
+        return None
+    return registry.aws_services(account_ref(app, AWS, account).label)
+
+
+def cloudtrail_service(app: Any, account: Optional[str] = None) -> Any:
+    """One AWS account's CloudTrail service (see :func:`aws_services`)."""
+    services = aws_services(app, account)
+    if services is None:
+        return getattr(app, "cloudtrail_service", None)
+    return services.cloudtrail
+
+
+def cloudwatch_service(app: Any, account: Optional[str] = None) -> Any:
+    """One AWS account's CloudWatch Logs service (see :func:`aws_services`)."""
+    services = aws_services(app, account)
+    if services is None:
+        return getattr(app, "cloudwatch_service", None)
+    return services.cloudwatch
+
+
+def aws_context(app: Any, account: Optional[str] = None) -> Any:
+    """One AWS account's credentials; None (the default credential chain)
+    on a host without an account registry (see :func:`aws_services`)."""
+    services = aws_services(app, account)
+    return services.context if services is not None else None
+
+
+def object_storage_accounts(app: Any, provider: str) -> List[AccountRef]:
+    """Accounts of *provider* that can have object storage, primary first.
+
+    Object storage is a product of its own: a Hetzner project or OVH
+    account needs S3 keys, not working API credentials, so every usable
+    configured account is offered, even when the registry cannot reach
+    the provider's API. Empty without a registry.
+    """
+    registry = _account_registry(app)
+    if registry is None:
+        return []
+    if provider == AWS:
+        return registry.accounts(AWS)
+    config = registry.config
+    configured = (
+        hetzner_accounts(config.hetzner) if provider == HETZNER else ovh_accounts(config.ovh)
+    )
+    usable = set(usable_extra_indexes(config, provider))
+    return [
+        ref for index, (ref, _settings) in enumerate(configured)
+        if ref.primary or index - 1 in usable
+    ]
+
+
+def object_storage(app: Any, provider: str, account: Optional[str] = None) -> Any:
+    """One account's object storage service, or None when not configured.
+
+    A host without an account registry keeps the app's own
+    ``<provider>_object_storage_service``.
+
+    Raises:
+        UnknownAccountError: No account of *provider* has that label.
+    """
+    registry = _account_registry(app)
+    if registry is None:
+        return getattr(app, f"{provider}_object_storage_service", None)
+    return registry.object_storage(provider, account or None)
+
+
 class ServerAccountMixin:
     """Per-server screens: act in the account the server belongs to.
 
@@ -251,3 +356,45 @@ def show_account_labels(picker: Any) -> None:
     with select.prevent(Select.Changed):
         select.set_options([(shown_label(app, ref.label), ref.label) for ref in accounts])
         select.value = picker.account
+
+
+# ---------------------------------------------------------------------------
+# Audit details
+# ---------------------------------------------------------------------------
+
+
+def with_account(
+    app: Any, provider: str, account: Optional[str], details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """A copy of *details* naming *account* (a real label) when it matters."""
+    recorded = dict(details or {})
+    if account and len(provider_accounts(app, provider)) > 1:
+        recorded["account"] = account
+    return recorded
+
+
+def row_account(app: Any, row: Optional[Dict[str, Any]]) -> str:
+    """The real account label of a drawn server row ("" when it has none).
+
+    Demo mode draws a stand-in label; the audit log keeps the real one.
+    """
+    if not isinstance(row, dict):
+        return ""
+    real = connection_instance(app, row)
+    return str((real or {}).get("account") or "")
+
+
+class ServerAuditMixin:
+    """Per-server screens: audit details naming the server's account.
+
+    The host screen keeps the server's row, as drawn, in ``_instance``.
+    """
+
+    _instance: Dict[str, Any]
+
+    def _audit_details(self, details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """A copy of *details*, naming the server's account when it matters."""
+        app = self.app  # type: ignore[attr-defined]
+        return with_account(
+            app, row_provider(self._instance), row_account(app, self._instance), details,
+        )

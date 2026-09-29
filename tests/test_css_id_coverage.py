@@ -403,7 +403,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ct_btn_fetch",
         "ct_btn_next",
         "ct_btn_prev",
+        "ct_filter_account",      # Reason: Filter grid cell; styled via #cloudtrail_filters
         "ct_filter_event_name",   # Reason: Filter row; inherits layout
+        "ct_filter_region",
         "ct_filter_resource_type",
         "ct_filter_time_range",
         "ct_filter_username",

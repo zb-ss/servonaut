@@ -49,6 +49,7 @@ from servonaut.screens._provider_accounts import (
     provider_accounts,
     show_account_labels,
     shown_label,
+    with_account,
 )
 from servonaut.utils.formatting import escape_cell
 from servonaut.widgets.account_picker import AccountPicker
@@ -792,21 +793,18 @@ class AWSCreateScreen(Screen):
         if audit is not None:
             try:
                 launched_ids = [i.get("id", "") for i in new_instances]
-                details = {
-                    "region": region,
-                    "ami_id": ami_id,
-                    "instance_type": type_name,
-                    "key_name": key_name,
-                    "subnet_id": subnet_id,
-                    "security_group_ids": [sg_id],
-                    "name_tag": name,
-                }
-                if self._account:
-                    details["account"] = self._account
                 audit.log_action(
                     action="run_instances",
                     target=",".join(launched_ids),
-                    details=details,
+                    details=with_account(self.app, "aws", self._account, {
+                        "region": region,
+                        "ami_id": ami_id,
+                        "instance_type": type_name,
+                        "key_name": key_name,
+                        "subnet_id": subnet_id,
+                        "security_group_ids": [sg_id],
+                        "name_tag": name,
+                    }),
                     confirmed=True,
                 )
             except Exception as exc:  # pragma: no cover - defensive

@@ -1008,7 +1008,7 @@ def test_per_server_audit_details_name_the_servers_real_account(accounts):
 
 
 def test_account_level_audit_details_name_the_chosen_account(accounts):
-    from servonaut.screens._account_audit import with_account
+    from servonaut.screens._provider_accounts import with_account
 
     multi = SimpleNamespace(accounts=accounts.registry)
     assert with_account(multi, "ovh", "ca", {"ip": "10.0.0.1"}) == {"ip": "10.0.0.1", "account": "ca"}

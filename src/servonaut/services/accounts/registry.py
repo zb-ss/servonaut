@@ -230,7 +230,9 @@ class AccountRegistry:
                 continue
             cache = None if ref.primary else Path(ovh_cache_path(str(_OVH_CACHE_PATH), ref))
             accounts.refs.append(ref)
-            accounts.services[ref.key] = OVHService(effective, cache_path=cache)
+            accounts.services[ref.key] = OVHService(
+                effective, cache_path=cache, allow_ambient_config=ref.primary,
+            )
         self._providers[OVH] = accounts
 
     def _mark_unavailable(self, ref: AccountRef, reason: str) -> None:

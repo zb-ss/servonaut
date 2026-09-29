@@ -296,3 +296,56 @@ class TestControlPlaneRoles:
     def test_an_extra_account_uses_a_role_mapped_to_its_id(self):
         factory = self._registry().aws_client_factory("prod")
         assert factory.role_for("222222222222") == "arn:aws:iam::222:role/read"
+
+
+class TestOVHAmbientConfig:
+    """python-ovh fills unset credentials from OVH_* variables and ovh.conf."""
+
+    def test_an_extra_oauth2_account_ignores_the_primary_accounts_variables(self, monkeypatch):
+        # A primary account configured through the conventional variables
+        # used to make python-ovh refuse every OAuth2 extra account.
+        monkeypatch.setenv("OVH_APPLICATION_KEY", "primary-ak")
+        monkeypatch.setenv("OVH_APPLICATION_SECRET", "primary-as")
+        monkeypatch.setenv("OVH_CONSUMER_KEY", "primary-ck")
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.application_key = "$OVH_APPLICATION_KEY"
+        config.ovh.accounts = [OVHAccount(label="ca", client_id="cid", client_secret="cs")]
+        registry = AccountRegistry(config)
+        client = registry.service("ovh", "ca").client
+        assert client._client_id == "cid"
+        assert client._application_key is None and client._consumer_key is None
+
+    def test_an_extra_classic_account_ignores_the_primary_oauth2_variables(self, monkeypatch):
+        monkeypatch.setenv("OVH_CLIENT_ID", "primary-cid")
+        monkeypatch.setenv("OVH_CLIENT_SECRET", "primary-cs")
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.client_id = "$OVH_CLIENT_ID"
+        config.ovh.accounts = [OVHAccount(label="eu2", application_key="ak",
+                                          application_secret="as", consumer_key="ck")]
+        client = AccountRegistry(config).service("ovh", "eu2").client
+        assert client._application_key == "ak" and client._client_id is None
+
+    def test_the_primary_account_still_reads_the_ambient_config(self, monkeypatch):
+        import ovh
+        from ovh.exceptions import InvalidConfiguration
+
+        original = ovh.client.config.ConfigurationManager
+        # Building an extra account's client puts python-ovh's own
+        # configuration source back afterwards.
+        config = AppConfig()
+        config.ovh.enabled = True
+        config.ovh.client_id = "cid"
+        config.ovh.client_secret = "cs"
+        config.ovh.accounts = [OVHAccount(label="ca", client_id="cid2", client_secret="cs2")]
+        registry = AccountRegistry(config)
+        registry.service("ovh", "ca").client
+        assert ovh.client.config.ConfigurationManager is original
+
+        # The primary account keeps python-ovh's ambient lookup, as before
+        # extra accounts existed (here it conflicts with OAuth2, as it did).
+        monkeypatch.setenv("OVH_APPLICATION_KEY", "ambient-ak")
+        monkeypatch.setenv("OVH_APPLICATION_SECRET", "ambient-as")
+        with pytest.raises(InvalidConfiguration):
+            AccountRegistry(config).service("ovh").client

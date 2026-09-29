@@ -14,8 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
-from servonaut.screens._account_audit import ServerAuditMixin
-from servonaut.screens._provider_accounts import ServerAccountMixin
+from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
