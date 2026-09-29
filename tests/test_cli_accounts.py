@@ -68,7 +68,7 @@ def test_ssh_suggests_ids_for_servers_of_one_account_sharing_a_name(monkeypatch,
     custom = MagicMock()
     custom.list_as_instances.return_value = []
     rows = CachedFleet.from_registry(registry, custom).instances()
-    headless = (MagicMock(), MagicMock(is_authenticated=False), None, None, None,
+    headless = (registry.config, MagicMock(is_authenticated=False), None, None, None,
                 MagicMock(), MagicMock())
     with patch.object(ssh_mod, "_init_headless_services", return_value=headless), \
          patch.object(ssh_mod, "_load_instances", return_value=rows):
@@ -431,3 +431,90 @@ def test_the_second_project_still_serves_while_the_primary_is_down(primary_down)
     rc, _, _ = _cli(["destroy", "worker", "--yes"])
     assert rc == 0
     assert services[("hetzner", "staging")].called("delete_server") == [("worker",)]
+
+
+# ---------------------------------------------------------------------------
+# A reference to a project that cannot connect
+# ---------------------------------------------------------------------------
+
+STAGING_DOWN = (
+    "Hetzner account 'staging' is not available: No Hetzner Cloud API token configured"
+)
+
+
+@pytest.fixture
+def staging_down(monkeypatch):
+    registry, services = build_registry(monkeypatch, hetzner=PROJECTS, unusable={"staging"})
+    monkeypatch.setattr(cli_hetzner, "_hetzner_registry", lambda: registry)
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    return registry, CachedFleet.from_registry(registry, custom)
+
+
+def test_ssh_to_a_project_that_cannot_connect_says_why(staging_down, capsys):
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, fleet = staging_down
+    headless = (registry.config, MagicMock(is_authenticated=False), None, None, None,
+                MagicMock(), MagicMock())
+    with patch.object(ssh_mod, "_init_headless_services", return_value=headless), \
+         patch.object(ssh_mod, "_load_instances", return_value=fleet.instances()):
+        rc = ssh_mod.handle_ssh_command(argparse.Namespace(
+            instance="staging/web-1", user=None, port=None, remote_command=[],
+        ))
+    assert rc == ssh_mod._EXIT_NOT_FOUND
+    assert STAGING_DOWN in capsys.readouterr().err
+
+
+def test_servers_verify_on_a_project_that_cannot_connect_says_why(staging_down, monkeypatch,
+                                                                   capsys):
+    from servonaut.cli import servers as cli_servers
+
+    registry, fleet = staging_down
+    config_manager = MagicMock()
+    config_manager.get.return_value = registry.config
+    services = (config_manager, MagicMock(is_authenticated=True), MagicMock(),
+                MagicMock(), MagicMock(), MagicMock())
+    monkeypatch.setattr(cli_servers, "_init_headless_services", lambda: services)
+    with patch("servonaut.cli.servers._load_all_instances", return_value=fleet.instances()):
+        rc = cli_servers.handle_servers_command(argparse.Namespace(
+            servers_command="verify", instance="staging/web-1", host=None, user=None,
+            port=None, timeout=5,
+        ))
+    assert rc == cli_servers._EXIT_FATAL
+    assert STAGING_DOWN in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("use_json", [False, True])
+def test_memory_on_a_project_that_cannot_connect_says_why(staging_down, monkeypatch, capsys,
+                                                          use_json):
+    from servonaut.cli import memory as mem_mod
+
+    registry, fleet = staging_down
+    monkeypatch.setattr(
+        mem_mod, "_init_headless_services", lambda: (registry.config, MagicMock(), fleet),
+    )
+    monkeypatch.setattr(mem_mod, "_init_headless_sync_services", lambda *a: (None, None))
+    rc = mem_mod.run_memory(
+        argparse.Namespace(memory_command="show", instance="staging/web-1", json=use_json),
+    )
+    out = capsys.readouterr()
+    assert rc == mem_mod._EXIT_NOT_FOUND
+    if use_json:
+        error = json.loads(out.out)["error"]
+        assert (error["code"], error["message"]) == ("account_unavailable", STAGING_DOWN)
+    else:
+        assert STAGING_DOWN in out.err
+
+
+@pytest.mark.parametrize("argv", [
+    ["list", "--account", "staging"],
+    ["destroy", "staging/web-1", "--yes"],
+])
+def test_hetzner_commands_on_a_project_that_cannot_connect_say_why(staging_down, argv, capsys):
+    try:
+        rc, _, err = _cli(argv)
+    except SystemExit as exit_info:
+        rc, err = exit_info.code, capsys.readouterr().err
+    assert rc == cli_hetzner._EXIT_VALIDATION
+    assert STAGING_DOWN in err

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
+from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
@@ -216,6 +217,8 @@ class RelayExecutors:
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: It is qualified with an account that
+                cannot connect.
         """
         return await self._find_instance(identifier)
 
@@ -256,7 +259,7 @@ class RelayExecutors:
                 target, region, find_instance=self.find_instance,
                 account=self._aws_context(None), account_for=_account_for,
             )
-        except AmbiguousInstanceError as exc:
+        except (AmbiguousInstanceError, UnknownAccountError) as exc:
             return {"error": str(exc)}
         if used.get('account'):
             acl["account"] = used['account']
@@ -287,6 +290,8 @@ class RelayExecutors:
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: It is qualified with an account that
+                cannot connect.
         """
         return await self._directory.find(identifier)
 
@@ -294,7 +299,7 @@ class RelayExecutors:
         """``(instance, None)``, or ``(None, error response)`` for the target."""
         try:
             instance = await self._find_instance(request.target_server_id)
-        except AmbiguousInstanceError as exc:
+        except (AmbiguousInstanceError, UnknownAccountError) as exc:
             return None, CommandResponse(
                 request_id=request.id, status="error", error_message=str(exc),
             )

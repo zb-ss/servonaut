@@ -335,7 +335,11 @@ def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Opt
 async def _cmd_verify(args: Any) -> int:
     """Async body of ``servers verify``."""
     from servonaut import __version__
-    from servonaut.services.accounts.headless import with_ovh_login
+    from servonaut.services.accounts import UnknownAccountError
+    from servonaut.services.accounts.headless import (
+        check_configured_reference,
+        with_ovh_login,
+    )
     from servonaut.services.bw_ssh_config_service import STATUS_VERIFIED
 
     checked_by_client = f"servonaut-cli/{__version__}"
@@ -380,8 +384,9 @@ async def _cmd_verify(args: Any) -> int:
 
     all_instances = _load_all_instances(config, custom_server_service)
     try:
+        check_configured_reference(config, instance_arg)
         personal_instance = _find_instance(instance_arg, all_instances)
-    except AmbiguousInstanceError as exc:
+    except (AmbiguousInstanceError, UnknownAccountError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_FATAL
 

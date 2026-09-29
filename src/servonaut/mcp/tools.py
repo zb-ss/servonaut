@@ -23,6 +23,7 @@ from servonaut.mcp.db_staging import (
     DBCredentialStaging,
 )
 from servonaut.services.accounts.headless import (
+    AccountUnavailableError,
     InstanceDirectory,
     ProviderTarget,
     TargetNotFoundError,
@@ -31,6 +32,7 @@ from servonaut.services.accounts.headless import (
     resolve_provider_target,
     row_account_key,
     unknown_account_error,
+    usable_account,
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
@@ -496,10 +498,16 @@ class ServonautTools:
     def _account_refused(
         self, tool_name: str, args: Dict[str, Any], exc: Exception,
     ) -> str:
-        """Audit row + error for an ``account`` that names no account."""
-        self._audit.log(
-            tool_name, args, '', False, f"validation: unknown account: {exc}",
-        )
+        """Audit row + error for an ``account`` that names no account.
+
+        An account that is set up but cannot connect is audited as its
+        provider being unavailable, like a call without ``account``.
+        """
+        if isinstance(exc, AccountUnavailableError):
+            reason = f"{exc.provider}_unavailable"
+        else:
+            reason = f"validation: unknown account: {exc}"
+        self._audit.log(tool_name, args, '', False, reason)
         return f"Error: {exc}"
 
     def _ambiguous(
@@ -516,13 +524,17 @@ class ServonautTools:
         """Resolve *instance_id* for a tool call.
 
         Returns ``(instance, None)``, or ``(None, message)`` once the refusal
-        is audited: ``instance_not_found``, or ``ambiguous_instance`` for a
-        name several servers share (the message lists their references).
+        is audited: ``instance_not_found``, ``ambiguous_instance`` for a
+        name several servers share (the message lists their references), or
+        ``<provider>_unavailable`` for an ``<account>/...`` reference to an
+        account that cannot connect (the message says why).
         """
         try:
             instance = await self._find_instance(instance_id)
         except AmbiguousInstanceError as exc:
             return None, self._ambiguous(tool_name, args, exc)
+        except UnknownAccountError as exc:
+            return None, self._account_refused(tool_name, args, exc)
         if not instance:
             self._audit.log(
                 tool_name, args, audit_result, False, 'instance_not_found',
@@ -581,7 +593,8 @@ class ServonautTools:
         ``"custom"`` selects the custom servers.
 
         Raises:
-            UnknownAccountError: No account has that label.
+            UnknownAccountError: No account has that label, or (an
+                :class:`AccountUnavailableError`) it cannot connect.
         """
         label = account.strip()
         if label.lower() == CUSTOM_QUALIFIER:
@@ -594,10 +607,10 @@ class ServonautTools:
                 except UnknownAccountError:
                     continue
             raise unknown_account_error(None, label)
-        ref = self._accounts.find_account(label)
+        ref = self._accounts.find_account(label, include_unavailable=True)
         if ref is None:
             raise unknown_account_error(self._accounts, label)
-        return ref.provider
+        return usable_account(self._accounts, ref).provider
 
     async def _account_rows(self, account: str) -> List[Dict]:
         """The servers of one account (``"custom"``: the custom servers).
@@ -4254,6 +4267,8 @@ class ServonautTools:
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: It is qualified with an account that
+                cannot connect.
         """
         return await self._directory.find(instance_id)
 
@@ -5914,6 +5929,8 @@ class ServonautTools:
             )
         except AmbiguousInstanceError as exc:
             return {"error": str(exc), "ambiguous": True}
+        except UnknownAccountError as exc:
+            return {"error": str(exc)}
         if self._accounts is not None and used['known']:
             acl["account"] = used['account']
         return acl
@@ -6623,6 +6640,8 @@ class ServonautTools:
             target = await self._db_profile_target(instance_id, staged)
         except AmbiguousInstanceError as exc:
             return self._ambiguous('db_setup_save', args, exc)
+        except UnknownAccountError as exc:
+            return self._account_refused('db_setup_save', args, exc)
         if isinstance(target, str):
             self._audit.log('db_setup_save', args, '', False, target)
             return self._db_profile_target_error(target, instance_id)
@@ -6745,6 +6764,8 @@ class ServonautTools:
 
         Raises:
             AmbiguousInstanceError: ``instance_id`` names several servers.
+            UnknownAccountError: It is qualified with an account that
+                cannot connect.
         """
         explicit = instance_id.strip()
         if not explicit:
@@ -6846,9 +6867,10 @@ class ServonautTools:
         target = instance_id.strip().lower()
         try:
             instance = await self._find_instance(instance_id.strip())
-        except AmbiguousInstanceError:
-            # A name several servers share is matched as the typed key only:
-            # never as the id of one of them.
+        except (AmbiguousInstanceError, UnknownAccountError):
+            # A name several servers share (or a server of an account that
+            # cannot connect) is matched as the typed key only: never as the
+            # id of one of them.
             instance = None
         target_id = _instance_key(instance).lower() if instance else target
         target_name = (
@@ -7575,7 +7597,7 @@ class ServonautTools:
         """
         try:
             instance = await self._find_instance(instance_id)
-        except AmbiguousInstanceError:
+        except (AmbiguousInstanceError, UnknownAccountError):
             return "unknown"
         if not instance:
             return "unknown"

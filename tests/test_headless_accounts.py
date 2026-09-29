@@ -8,6 +8,7 @@ import pytest
 
 from servonaut.services.accounts import UnknownAccountError
 from servonaut.services.accounts.headless import (
+    AccountUnavailableError,
     CachedFleet,
     InstanceDirectory,
     account_labels,
@@ -494,3 +495,51 @@ def test_fetch_provider_rows_reads_only_the_named_account(monkeypatch):
     _run(fetch_provider_rows(registry, "hetzner", "staging", force_refresh=True))
     assert services[("hetzner", "staging")].fetches == 1
     assert services[("hetzner", "hetzner")].fetches == 0
+
+
+# ---------------------------------------------------------------------------
+# A qualifier naming an account that cannot connect
+# ---------------------------------------------------------------------------
+
+STAGING_DOWN = (
+    "Hetzner account 'staging' is not available: No Hetzner Cloud API token configured"
+)
+
+
+@pytest.fixture
+def staging_down(monkeypatch):
+    return build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+        unusable={"staging"},
+    )[0]
+
+
+def test_a_lookup_qualified_with_an_account_that_cannot_connect_says_why(staging_down):
+    # A custom server literally named like the reference is not picked instead.
+    directory = _directory(staging_down, [{"id": "custom-x", "name": "staging/web-1",
+                                            "is_custom": True}])
+    with pytest.raises(AccountUnavailableError) as err:
+        _run(directory.find("staging/web-1"))
+    assert str(err.value) == STAGING_DOWN
+    assert (err.value.provider, err.value.label) == ("hetzner", "staging")
+    assert qualifier_provider(staging_down, "staging/web-1") == "hetzner"
+    # A bare name still resolves among the accounts that connect.
+    assert _run(directory.find("web-1"))["id"] == "1"
+
+
+def test_a_target_qualified_with_an_account_that_cannot_connect_says_why(staging_down):
+    with pytest.raises(AccountUnavailableError, match="not available: No Hetzner"):
+        _run(resolve_provider_target(staging_down, "hetzner", "staging/web-1"))
+    with pytest.raises(UnknownAccountError, match="not available"):
+        _run(resolve_provider_target(staging_down, "hetzner", "web-1", "staging"))
+
+
+def test_cached_fleet_qualified_with_an_account_that_cannot_connect_says_why(staging_down):
+    fleet = CachedFleet.from_registry(staging_down, _custom())
+    for lookup in (fleet.resolve, fleet.matches):
+        with pytest.raises(AccountUnavailableError) as err:
+            lookup("staging/web-1")
+        assert str(err.value) == STAGING_DOWN
+    assert fleet.resolve("hetzner/web-1")["id"] == "1"

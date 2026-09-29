@@ -88,21 +88,86 @@ def unknown_account_error(registry: Optional[AccountRegistry], label: str) -> Un
     return UnknownAccountError(f"No account named {label!r}.{listing}")
 
 
+class AccountUnavailableError(UnknownAccountError):
+    """An account named by a reference or argument is set up but cannot connect.
+
+    The message is the registry's, with the reason (a token that does not
+    resolve, missing credentials).
+    """
+
+    def __init__(self, ref: AccountRef, message: str):
+        super().__init__(message)
+        self.provider = ref.provider
+        self.label = ref.label
+
+
+def qualifier_account(
+    registry: Optional[AccountRegistry], reference: str,
+) -> Optional[AccountRef]:
+    """The account an ``<account>/...`` reference is qualified with, if any.
+
+    Includes an account that cannot connect, so the caller can say why
+    (:func:`usable_account`) instead of reading the reference as a name.
+    None for a bare reference, ``custom/...``, or a prefix that names no
+    account (an OVH Public Cloud id also has a ``/`` in it).
+    """
+    label, sep, rest = (reference or "").strip().partition("/")
+    if not (sep and label and rest) or registry is None:
+        return None
+    if label.lower() == CUSTOM_QUALIFIER:
+        return None
+    return registry.find_account(label, include_unavailable=True)
+
+
+def usable_account(registry: AccountRegistry, ref: AccountRef) -> AccountRef:
+    """*ref* when it can connect.
+
+    Raises:
+        AccountUnavailableError: It cannot, with the registry's reason.
+    """
+    try:
+        return registry.account(ref.provider, ref.label)
+    except UnknownAccountError as exc:
+        raise AccountUnavailableError(ref, str(exc)) from exc
+
+
+def check_qualifier(registry: Optional[AccountRegistry], reference: str) -> None:
+    """Refuse a reference qualified with an account that cannot connect.
+
+    Raises:
+        AccountUnavailableError: The ``<account>/`` prefix names such an
+            account. Its servers are not listed, so the reference would
+            otherwise match nothing, or only a custom server of that name.
+    """
+    ref = qualifier_account(registry, reference)
+    if ref is not None:
+        usable_account(registry, ref)
+
+
+def check_configured_reference(config: Any, reference: str) -> None:
+    """:func:`check_qualifier` for a CLI command that holds only the config.
+
+    Nothing is built for a reference without an ``<account>/`` prefix.
+
+    Raises:
+        AccountUnavailableError: See :func:`check_qualifier`.
+    """
+    if "/" in (reference or ""):
+        check_qualifier(AccountRegistry(config), reference)
+
+
 def qualifier_provider(registry: Optional[AccountRegistry], reference: str) -> Optional[str]:
     """The provider an ``<account>/...`` reference is qualified with, if any.
 
     ``"custom"`` for ``custom/<name>``; None for a bare reference or one
     whose prefix names no account (an OVH Public Cloud id also has a
-    ``/`` in it).
+    ``/`` in it). An account that cannot connect counts: see
+    :func:`check_qualifier`.
     """
     label, sep, rest = (reference or "").strip().partition("/")
-    if not (sep and label and rest):
-        return None
-    if label.lower() == CUSTOM_QUALIFIER:
+    if sep and label and rest and label.lower() == CUSTOM_QUALIFIER:
         return CUSTOM_QUALIFIER
-    if registry is None:
-        return None
-    ref = registry.find_account(label)
+    ref = qualifier_account(registry, reference)
     return ref.provider if ref is not None else None
 
 
@@ -158,15 +223,18 @@ class CachedFleet:
         """Args: one inventory per provider (``get_cached_instances()``), None when unused."""
         self._custom = custom_server_service
         self._inventories = {AWS: aws, OVH: ovh, HETZNER: hetzner}
+        self._registry: Optional[AccountRegistry] = None
 
     @classmethod
     def from_registry(cls, registry: AccountRegistry, custom_server_service: Any) -> "CachedFleet":
-        return cls(
+        fleet = cls(
             custom_server_service,
             aws=registry.fleet(AWS),
             ovh=registry.fleet(OVH),
             hetzner=registry.fleet(HETZNER),
         )
+        fleet._registry = registry
+        return fleet
 
     @classmethod
     def from_config(
@@ -201,7 +269,12 @@ class CachedFleet:
         return rows
 
     def matches(self, reference: str) -> List[dict]:
-        """Every server *reference* could mean."""
+        """Every server *reference* could mean.
+
+        Raises:
+            AccountUnavailableError: See :func:`check_qualifier`.
+        """
+        check_qualifier(self._registry, reference)
         return match_instances(reference, self.instances())
 
     def resolve(self, reference: str) -> Optional[dict]:
@@ -209,7 +282,9 @@ class CachedFleet:
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: See :func:`check_qualifier`.
         """
+        check_qualifier(self._registry, reference)
         return resolve_unique(reference, self.instances())
 
 
@@ -354,6 +429,8 @@ class InstanceDirectory:
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: It is qualified with an account that
+                cannot connect (see :func:`check_qualifier`).
         """
         needle = (reference or "").strip()
         if not needle:
@@ -364,10 +441,12 @@ class InstanceDirectory:
             if match is not None:
                 return match
 
-        qualified = qualifier_provider(self._accounts(), needle)
+        registry = self._accounts()
+        qualified = qualifier_provider(registry, needle)
         if qualified == CUSTOM_QUALIFIER:
             return resolve_unique(needle, custom)
         if qualified is not None:
+            check_qualifier(registry, needle)
             # Custom servers are local and free to check: one literally named
             # "prod/web-1" must be reported next to account prod's web-1.
             return resolve_unique(needle, await self._rows_or_cache(qualified) + custom)
@@ -532,10 +611,7 @@ def _qualifier_account(
     registry: AccountRegistry, provider: str, reference: str,
 ) -> Optional[AccountRef]:
     """The *provider* account an ``<account>/...`` reference names, if any."""
-    label, sep, rest = (reference or "").strip().partition("/")
-    if not (sep and label and rest):
-        return None
-    ref = registry.find_account(label)
+    ref = qualifier_account(registry, reference)
     return ref if ref is not None and ref.provider == provider else None
 
 
@@ -558,7 +634,9 @@ async def resolve_provider_target(
 
     Raises:
         UnknownAccountError: *account* or the qualifier names no account of
-            *provider*, or they name different accounts.
+            *provider*, or they name different accounts; an
+            :class:`AccountUnavailableError` when the qualifier names one
+            that cannot connect.
         AmbiguousInstanceError: The reference matches several servers.
         TargetNotFoundError: Several accounts, none of which lists the
             reference, and none was named.
@@ -587,13 +665,14 @@ async def resolve_provider_target(
                 raise UnknownAccountError(
                     f"{needle!r} names a custom server, which has no {title} account"
                 )
-            ref = registry.find_account(label)
+            ref = registry.find_account(label, include_unavailable=True)
             if ref is not None and ref.provider != provider:
                 raise UnknownAccountError(
                     f"{ref.label!r} is a {PROVIDER_TITLES.get(ref.provider, ref.provider)} "
                     f"account, not a {title} account"
                 )
             if ref is not None:
+                ref = usable_account(registry, ref)
                 if wanted is not None and wanted.key != ref.key:
                     raise UnknownAccountError(
                         f"{needle!r} is in account {ref.label!r}, not {wanted.label!r}"

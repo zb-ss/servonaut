@@ -113,6 +113,8 @@ def _resolve_or_exit(
     Raises:
         AmbiguousInstanceError: The reference names several servers; the
             caller reports it with :func:`_report_ambiguous`.
+        UnknownAccountError: It is qualified with an account that cannot
+            connect; reported with :func:`_report_unavailable_account`.
     """
     instance_arg = getattr(args, "instance", None)
     if not instance_arg:
@@ -141,6 +143,15 @@ def _report_ambiguous(exc: AmbiguousInstanceError, use_json: bool) -> int:
     else:
         print(f"Error: {exc}", file=sys.stderr)
     return _EXIT_USAGE_ERROR
+
+
+def _report_unavailable_account(exc: Exception, use_json: bool) -> int:
+    """Print why an ``<account>/...`` reference cannot be used; return the exit code."""
+    if use_json:
+        print(json.dumps({"error": {"code": "account_unavailable", "message": str(exc)}}))
+    else:
+        print(f"Error: {exc}", file=sys.stderr)
+    return _EXIT_NOT_FOUND
 
 
 def _check_opt_out(
@@ -721,10 +732,14 @@ def run_memory(args: Any) -> int:
 
     # Most subcommands require an instance argument.
     use_json = getattr(args, "json", False)
+    from servonaut.services.accounts.registry import UnknownAccountError
+
     try:
         inst = _resolve_or_exit(args, fleet, use_json)
     except AmbiguousInstanceError as exc:
         return _report_ambiguous(exc, use_json)
+    except UnknownAccountError as exc:
+        return _report_unavailable_account(exc, use_json)
     if inst is None:
         # Only fail if the subcommand actually needs an instance.
         if memory_command not in ("build",):

@@ -107,6 +107,19 @@ def test_unknown_target_is_still_not_found(executors):
     assert (response.status, response.error_message) == ("error", "Instance not found: nope")
 
 
+def test_a_target_in_an_account_that_cannot_connect_says_why(monkeypatch):
+    registry, _ = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [], "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+        unusable={"staging"},
+    )
+    response = _run(_executors(registry).execute(_request("staging/web-1")))
+    assert response.status == "error"
+    assert response.error_message == (
+        "Hetzner account 'staging' is not available: No Hetzner Cloud API token configured"
+    )
+
+
 def test_resolve_webacl_walks_the_instance_in_its_account(monkeypatch):
     registry, _ = build_registry(
         monkeypatch,

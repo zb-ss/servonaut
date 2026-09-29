@@ -251,7 +251,11 @@ def handle_ssh_command(args: Any) -> int:
 
 
 async def _handle_ssh_async(args: Any) -> int:
-    from servonaut.services.accounts.headless import with_ovh_login
+    from servonaut.services.accounts import UnknownAccountError
+    from servonaut.services.accounts.headless import (
+        check_configured_reference,
+        with_ovh_login,
+    )
     from servonaut.services.ssh_ref_resolver import SshRefResolver
     from servonaut.services.bw_resolver import (
         BwResolver,
@@ -285,6 +289,12 @@ async def _handle_ssh_async(args: Any) -> int:
     instances = _load_instances(custom_server_service, config)
 
     # --- Find instance ---
+    try:
+        check_configured_reference(config, args.instance)
+    except UnknownAccountError as exc:
+        # "<account>/<name>" where that account cannot connect: say why.
+        print(str(exc), file=sys.stderr)
+        return _EXIT_NOT_FOUND
     matches = _find_instance(instances, args.instance)
     if not matches:
         print(

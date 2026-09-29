@@ -723,3 +723,48 @@ def test_no_hint_while_another_account_works(monkeypatch):
     registry, _ = build_registry(monkeypatch, ovh={"ovh": [], "backup": []}, unusable={"ovh"})
     assert "Settings" not in _run(make_tools(registry).ovh_list_ips())
 
+
+# ---------------------------------------------------------------------------
+# A reference to an account that cannot connect
+# ---------------------------------------------------------------------------
+
+STAGING_DOWN = (
+    "Error: Hetzner account 'staging' is not available: No Hetzner Cloud API token configured"
+)
+
+
+@pytest.fixture
+def staging_down(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [WEB_PRIMARY], "staging": [WEB_STAGING, WORKER]},
+        unusable={"staging"},
+    )
+    lookalike = {"id": "custom-x", "name": "staging/web-1", "is_custom": True,
+                 "public_ip": "10.0.0.9"}
+    return make_tools(registry, custom=[lookalike]), services
+
+
+def test_a_server_of_an_account_that_cannot_connect_is_refused_with_the_reason(
+    staging_down, monkeypatch,
+):
+    tools, _ = staging_down
+    assert _run(tools.check_status("staging/web-1")) == STAGING_DOWN
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+    ran = MagicMock()
+    monkeypatch.setattr(tools, "_run_command_via_ssh", ran)
+    assert STAGING_DOWN in _run(tools.run_command("staging/web-1", "uptime"))
+    ran.assert_not_called()
+
+
+def test_a_lifecycle_call_in_an_account_that_cannot_connect_says_why(staging_down):
+    tools, services = staging_down
+    assert _run(tools.hetzner_power_off("staging/worker")) == STAGING_DOWN
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+    assert services[("hetzner", "hetzner")].called("power_off") == []
+
+
+def test_listing_an_account_that_cannot_connect_says_why(staging_down):
+    tools, _ = staging_down
+    assert _run(tools.list_instances(account="staging")) == STAGING_DOWN
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
