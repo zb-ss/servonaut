@@ -729,6 +729,72 @@ async def test_panel_hides_the_account_with_one_account(ec2) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Object storage
+# ---------------------------------------------------------------------------
+
+
+class FakeStorage:
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    async def list_buckets(self) -> List[dict]:
+        return [{"name": f"{self.label}-bucket", "creation_date": "2026-01-01"}]
+
+
+@pytest.mark.asyncio
+async def test_object_storage_uses_the_picked_account(ec2, monkeypatch) -> None:
+    from servonaut.screens.object_storage import ObjectStorageScreen
+
+    registry = _registry()
+    extra: Dict[str, Optional[FakeStorage]] = {"staging": None}
+    asked: List[tuple] = []
+
+    def object_storage(provider: str, account: Optional[str] = None):
+        ref = registry.account(provider, account)
+        asked.append((provider, ref.label))
+        return extra[ref.key]
+
+    monkeypatch.setattr(registry, "object_storage", object_storage)
+    app = Host(registry, lambda: ObjectStorageScreen("aws"))
+    # The primary account keeps the app's own service (rebuilt by Settings).
+    app.aws_object_storage_service = FakeStorage("prod")
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1, "prod buckets")
+        assert "prod-bucket" in str(table.get_row_at(0)[1])
+        assert asked == []
+
+        _pick_account(screen, "s3_account", "staging")
+        await _wait_for(pilot, lambda: ("aws", "staging") in asked, "the staging lookup")
+        await pilot.pause()
+        status = str(screen.query_one("#s3_status", Static).render())
+        assert "not configured for account staging" in status
+        assert table.row_count == 0
+
+        extra["staging"] = FakeStorage("staging")
+        screen.action_refresh()
+        await _wait_for(pilot, lambda: table.row_count == 1, "staging buckets")
+        assert "staging-bucket" in str(table.get_row_at(0)[1])
+
+
+@pytest.mark.asyncio
+async def test_object_storage_without_compute_accounts_uses_the_app_service(ec2) -> None:
+    """Hetzner object storage works with S3 keys alone (no API token)."""
+    from servonaut.screens.object_storage import ObjectStorageScreen
+
+    registry = _registry()
+    assert registry.accounts("hetzner") == []
+    app = Host(registry, lambda: ObjectStorageScreen("hetzner"))
+    app.hetzner_object_storage_service = FakeStorage("hetzner")
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1, "the buckets")
+        assert screen.query_one("#s3_account").display is False
+
+
+# ---------------------------------------------------------------------------
 # Screen account helpers
 # ---------------------------------------------------------------------------
 

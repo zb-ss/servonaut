@@ -206,6 +206,11 @@
     text-style: bold;
 }
 
+/* S3 account picker — shown only when the provider has several accounts */
+#s3_account {
+    margin: 0 1 1 1;
+}
+
 /* S3 breadcrumb — slim muted-text path indicator above the table */
 #s3_breadcrumb {
     padding: 0 1 1 1;
