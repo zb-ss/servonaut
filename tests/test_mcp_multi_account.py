@@ -692,25 +692,34 @@ def test_tools_of_a_provider_without_usable_accounts_are_hidden(monkeypatch):
     assert not tools.has_hetzner and not tools.has_ovh
 
 
-@pytest.mark.parametrize("provider, call, hint", [
-    ("hetzner", lambda tools: tools.hetzner_list_ssh_keys(), "$HCLOUD_TOKEN"),
-    ("ovh", lambda tools: tools.ovh_list_ips(), "Settings → OVHcloud"),
-])
-def test_a_single_account_that_cannot_connect_gets_its_reason_and_a_hint(
-    monkeypatch, provider, call, hint,
-):
-    from servonaut.services.accounts import UnknownAccountError
+def test_a_single_hetzner_project_that_cannot_connect_says_why(monkeypatch, tmp_path):
+    """The token error already says where the token is read from: no extra hint."""
+    from servonaut.config.schema import AppConfig, HetznerConfig
+    from servonaut.services.accounts import AccountRegistry
 
-    registry, _ = build_registry(monkeypatch, **{provider: {provider: []}}, unusable={provider})
+    monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE", tmp_path / "missing",
+    )
+    config = AppConfig()
+    config.hetzner = HetznerConfig(enabled=True, api_token="$UNSET_HETZNER_TOKEN")
+    tools = make_tools(AccountRegistry(config))
+    out = _run(tools.hetzner_list_ssh_keys())
+    assert out.startswith("Error: Hetzner is not available: No Hetzner Cloud API token configured")
+    assert out.count("HCLOUD_TOKEN") == 1 and ".." not in out
+    assert audit_rows(tools)[-1][2:] == (False, "hetzner_unavailable")
+
+
+def test_an_ovh_account_without_credentials_gets_a_hint(monkeypatch):
+    registry, _ = build_registry(monkeypatch, ovh={"ovh": []}, unusable={"ovh"})
     tools = make_tools(registry)
-    with pytest.raises(UnknownAccountError) as registry_says:
-        registry.account(provider, None)
-    out = _run(call(tools))
-    assert out.startswith(f"Error: {str(registry_says.value).rstrip('.')}. ")
-    assert hint in out and "a $VARIABLE or file: reference must resolve" in out
-    assert audit_rows(tools)[-1][2:] == (False, f"{provider}_unavailable")
+    out = _run(tools.ovh_list_ips())
+    assert out.startswith("Error: OVH is not available: no OVH credentials configured. ")
+    assert out.endswith("Settings → OVHcloud in the TUI.")
+    assert audit_rows(tools)[-1][2:] == (False, "ovh_unavailable")
 
 
-def test_no_hint_while_another_account_works(primary_down):
-    tools, _ = primary_down
-    assert "$HCLOUD_TOKEN" not in _run(tools.hetzner_list_ssh_keys())
+def test_no_hint_while_another_account_works(monkeypatch):
+    registry, _ = build_registry(monkeypatch, ovh={"ovh": [], "backup": []}, unusable={"ovh"})
+    assert "Settings" not in _run(make_tools(registry).ovh_list_ips())
+

@@ -123,17 +123,13 @@ _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 # The message names the variable, never the URL; no request is made.
 _INVALID_ENDPOINT = "invalid_endpoint"
 
-# How to fix a provider whose configured accounts cannot connect.
+# How to fix a provider none of whose accounts can connect, where the
+# registry's reason does not already say it (a Hetzner token error names
+# where the token is read from).
 _CREDENTIAL_HINTS = {
-    'hetzner': (
-        "Check the token: config.hetzner.api_token (a $VARIABLE or file: "
-        "reference must resolve where Servonaut runs), $HCLOUD_TOKEN, or "
-        "~/.config/hcloud/token."
-    ),
     'ovh': (
-        "Check the OVHcloud credentials in ~/.servonaut/config.json (a "
-        "$VARIABLE or file: reference must resolve where Servonaut runs), "
-        "or in Settings → OVHcloud in the TUI."
+        "Set the OVHcloud credentials in ~/.servonaut/config.json or in "
+        "Settings → OVHcloud in the TUI."
     ),
 }
 
@@ -1217,7 +1213,7 @@ class ServonautTools:
         usable. Otherwise the call acts in the primary account, and when
         that cannot be used the registry says why: another account is never
         used in its place. When no account of the provider can connect, a
-        hint on fixing its credentials follows.
+        hint on fixing its credentials follows where the reason lacks one.
         """
         registry = self._accounts
         if registry is None or not registry.configured_accounts(provider):
