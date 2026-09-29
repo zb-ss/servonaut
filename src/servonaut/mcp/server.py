@@ -12,7 +12,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def build_headless_tools(config_manager=None):
+def build_headless_tools(config_manager=None, accounts=None):
     """Construct a fully wired :class:`ServonautTools` with no TUI.
 
     Single source of truth for headless service construction — shared by
@@ -23,7 +23,8 @@ def build_headless_tools(config_manager=None):
 
     Provider services come from the account registry, like the TUI's: the
     single-service arguments are each provider's default account, and the
-    registry gives the tools every other account.
+    registry gives the tools every other account. A caller that already
+    built the registry (the relay runner) passes it as *accounts*.
     """
     from servonaut.mcp.installer import prune_empty_forwarded_env
     pruned = prune_empty_forwarded_env()
@@ -58,12 +59,15 @@ def build_headless_tools(config_manager=None):
     if config_manager is None:
         config_manager = ConfigManager()
     config = config_manager.get()
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
     # Every provider account; the services below are the default accounts.
-    accounts = AccountRegistry(
-        config, aws_cache_service=cache_service, config_manager=config_manager,
-    )
+    if accounts is None:
+        accounts = AccountRegistry(
+            config,
+            aws_cache_service=CacheService(ttl_seconds=config.cache_ttl_seconds),
+            config_manager=config_manager,
+        )
     aws_service = accounts.default_service('aws')
+    cache_service = getattr(aws_service, 'cache_service', None)
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
