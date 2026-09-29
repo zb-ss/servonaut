@@ -175,6 +175,49 @@ def test_hetzner_single_account_audit_row_is_unchanged(monkeypatch):
     assert audit_rows(tools)[-1][1] == {"identifier": "web-1"}
 
 
+def test_a_power_action_that_drops_a_cache_does_not_hide_its_servers(two_projects):
+    """Hetzner drops a project's cache after a power action; the next call
+    must still see that project's servers, and refuse the shared name."""
+    tools, services = two_projects
+    staging = services[("hetzner", "staging")]
+    staging.invalidates_cache = True
+    _run(tools.hetzner_power_off("staging/web-1"))
+    assert staging.cached is None
+
+    out = _run(tools.hetzner_power_off("worker"))
+    assert out == "Hetzner server 'worker': powered off."
+    refused = _run(tools.hetzner_power_off("web-1"))
+    assert "matches 2 servers" in refused
+    assert services[("hetzner", "hetzner")].called("power_off") == []
+    assert staging.called("power_off") == [("web-1",), ("worker",)]
+
+
+def test_a_project_never_listed_is_read_before_acting(two_projects):
+    tools, services = two_projects
+    services[("hetzner", "staging")].cached = None
+    _run(tools.hetzner_reboot("worker"))
+    assert services[("hetzner", "staging")].called("reboot") == [("worker",)]
+
+
+def test_a_server_no_project_lists_is_refused(two_projects):
+    tools, services = two_projects
+    out = _run(tools.hetzner_delete_server("ghost"))
+    assert out.startswith("Error: No Hetzner server 'ghost' in any account (hetzner, staging).")
+    assert "account=<label>" in out and "'staging/ghost'" in out
+    assert all(not s.called("delete_server") for s in services.values())
+    assert audit_rows(tools)[-1][2:] == (False, "instance_not_found")
+    # Naming the project still passes the reference to it.
+    _run(tools.hetzner_delete_server("ghost", account="staging"))
+    assert services[("hetzner", "staging")].called("delete_server") == [("ghost",)]
+
+
+def test_single_project_unlisted_server_still_goes_to_it(monkeypatch):
+    registry, services = build_registry(monkeypatch, hetzner={"hetzner": [WEB_PRIMARY]})
+    tools = make_tools(registry)
+    _run(tools.hetzner_power_on("ghost"))
+    assert services[("hetzner", "hetzner")].called("power_on") == [("ghost",)]
+
+
 def test_aws_lifecycle_uses_the_account_that_lists_the_instance(monkeypatch):
     registry, services = build_registry(
         monkeypatch,

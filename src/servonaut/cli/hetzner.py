@@ -485,8 +485,9 @@ def _destroy_target(args: argparse.Namespace):
     """``(service, server, project)`` the destroy acts on.
 
     The project is the one ``--account`` or a ``<project>/`` qualifier
-    names, else the one whose cached servers list the identifier (the
-    primary project when none does). *project* is None when only one
+    names, else the one whose servers list the identifier. With several
+    projects, an identifier none of them lists is refused; with one, it
+    goes to that project, as before. *project* is None when only one
     project is configured.
     """
     from servonaut.services.accounts.headless import resolve_provider_target
@@ -495,17 +496,28 @@ def _destroy_target(args: argparse.Namespace):
     registry = _hetzner_registry()
     if registry is None:
         return _build_service(account or None), args.identifier, None
-    target = resolve_provider_target(registry, 'hetzner', args.identifier, account)
+    target = _run_async(
+        resolve_provider_target(registry, 'hetzner', args.identifier, account)
+    )
     project = target.account.label if registry.is_multi('hetzner') else None
     return registry.service('hetzner', target.account.label), target.reference, project
 
 
 def _cmd_destroy(args: argparse.Namespace) -> int:
+    from servonaut.services.accounts.headless import TargetNotFoundError
+
     try:
         svc, server, project = _destroy_target(args)
     except (UnknownAccountError, AmbiguousInstanceError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_VALIDATION
+    except TargetNotFoundError as exc:
+        print(
+            f"Error: {exc} Pass --account LABEL, or name it "
+            f"'{exc.labels[-1]}/{exc.reference}'.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR
 
     if not args.yes:
         in_project = f" (project {project})" if project else ""
