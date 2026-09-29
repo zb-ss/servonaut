@@ -394,7 +394,9 @@ class AccountsSection(Vertical):
     COLUMNS: Tuple[str, ...] = ("Label",)
 
     # Unscoped: the narrow-terminal rule below starts from the Settings
-    # screen's -narrow class. Every rule here names AccountsSection itself.
+    # screen's -narrow class. Every rule names AccountsSection itself or
+    # the section's own classes. Button rules end in a class of their own,
+    # so Textual rejects every other button without walking its ancestors.
     SCOPED_CSS = False
 
     DEFAULT_CSS = """
@@ -423,7 +425,7 @@ class AccountsSection(Vertical):
         height: auto;
         margin: 1 0 0 0;
     }
-    AccountsSection .accounts-actions Button {
+    .accounts-action {
         width: auto;
         margin: 0 1 0 0;
     }
@@ -436,7 +438,7 @@ class AccountsSection(Vertical):
         grid-rows: auto;
         grid-gutter: 0 1;
     }
-    SettingsScreen.-narrow AccountsSection .accounts-actions Button {
+    SettingsScreen.-narrow .accounts-action {
         margin: 0;
     }
     """
@@ -463,9 +465,19 @@ class AccountsSection(Vertical):
         """The Add / Edit / Remove buttons (subclasses may add more)."""
         p = self.PROVIDER
         return [
-            Button(f"Add {self.NOUN}", id=f"btn_{p}_account_add", variant="primary"),
-            Button("Edit", id=f"btn_{p}_account_edit"),
-            Button("Remove", id=f"btn_{p}_account_remove", variant="error"),
+            Button(
+                f"Add {self.NOUN}",
+                id=f"btn_{p}_account_add",
+                variant="primary",
+                classes="accounts-action",
+            ),
+            Button("Edit", id=f"btn_{p}_account_edit", classes="accounts-action"),
+            Button(
+                "Remove",
+                id=f"btn_{p}_account_remove",
+                variant="error",
+                classes="accounts-action",
+            ),
         ]
 
     def form_rows(self) -> ComposeResult:
