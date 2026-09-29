@@ -61,11 +61,30 @@ def tag_rows(
 class AccountFleet:
     """All accounts of one provider behind a single-service-like surface."""
 
-    def __init__(self, provider: str, bindings: Sequence[AccountBinding]):
+    def __init__(
+        self,
+        provider: str,
+        bindings: Sequence[AccountBinding],
+        *,
+        qualified: Optional[bool] = None,
+        unavailable: Optional[Dict[str, str]] = None,
+    ):
+        """Merge *bindings* (the usable accounts) into one inventory.
+
+        Args:
+            qualified: Whether rows name their account (``label/name``).
+                Defaults to "more than one usable account"; the registry
+                passes "more than one configured account", so a second
+                account keeps its servers named while the other one is down.
+            unavailable: Configured accounts that cannot connect, by label,
+                with the reason; every refresh reports them.
+        """
         if not bindings:
             raise ValueError(f"AccountFleet for {provider} needs at least one account")
         self.provider = provider
         self.bindings: List[AccountBinding] = list(bindings)
+        self._qualified = len(self.bindings) > 1 if qualified is None else qualified
+        self.unavailable: Dict[str, str] = dict(unavailable or {})
         # Why the last refresh could not be trusted (per account, labelled
         # when the provider has several accounts), or None after a clean one.
         self.last_fetch_error: Optional[str] = None
@@ -82,8 +101,8 @@ class AccountFleet:
 
     @property
     def multi(self) -> bool:
-        """True when this provider has more than one account."""
-        return len(self.bindings) > 1
+        """True when this provider's servers name their account."""
+        return self._qualified
 
     @property
     def refs(self) -> List[AccountRef]:
@@ -139,7 +158,11 @@ class AccountFleet:
             return_exceptions=True,
         )
         rows: List[dict] = []
-        errors: List[str] = []
+        # A configured account that cannot connect is reported on every
+        # refresh, so a missing primary account never goes unnoticed.
+        errors: List[str] = [
+            f"{label}: not available: {reason}" for label, reason in self.unavailable.items()
+        ]
         partial = False
         clean = 0
         raised: List[BaseException] = []

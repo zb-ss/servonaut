@@ -38,6 +38,11 @@ class FakeProvider:
         self.calls: List[Tuple[str, tuple, dict]] = []
         self.fetches = 0
         self.cache_reads = 0
+        # The on-disk cache; None when it was never written or was dropped.
+        self.cached: Optional[List[dict]] = [dict(r) for r in self.rows]
+        # Drop the cache after every API call, as the Hetzner service does
+        # after a power action or a delete.
+        self.invalidates_cache = False
         self.last_fetch_error: Optional[str] = None
         self.last_fetch_partial = False
         # Return values of recorded API calls, by method name.
@@ -45,11 +50,12 @@ class FakeProvider:
 
     async def fetch_instances_cached(self, force_refresh: bool = False) -> List[dict]:
         self.fetches += 1
+        self.cached = [dict(r) for r in self.rows]
         return [dict(r) for r in self.rows]
 
     def get_cached_instances(self) -> List[dict]:
         self.cache_reads += 1
-        return [dict(r) for r in self.rows]
+        return [dict(r) for r in (self.cached or [])]
 
     def is_cache_fresh(self) -> bool:
         return True
@@ -63,6 +69,8 @@ class FakeProvider:
 
         async def _call(*args, **kwargs):
             self.calls.append((name, args, kwargs))
+            if self.invalidates_cache:
+                self.cached = None
             return self.returns.get(name)
 
         return _call
@@ -106,7 +114,7 @@ def build_registry(
         services[("hetzner", label)] = service
         return service
 
-    def fake_ovh(effective, cache_path=None):
+    def fake_ovh(effective, cache_path=None, allow_ambient_config=True):
         label = effective.label or "ovh"
         service = FakeProvider("ovh", label, (ovh or {}).get(label, ()), effective)
         services[("ovh", label)] = service

@@ -56,7 +56,15 @@ class AccountPicker(Vertical):
         label: str = "Account",
         id: Optional[str] = None,  # noqa: A002 - Textual's widget id
         classes: Optional[str] = None,
+        always_show: bool = False,
     ) -> None:
+        """Build the picker.
+
+        Args:
+            always_show: Show the picker even with a single account to offer:
+                the provider has other accounts that cannot be used right
+                now, so the screen must say which account it works on.
+        """
         super().__init__(id=id, classes=classes)
         self._accounts: List[AccountRef] = list(accounts)
         self._label = label
@@ -65,16 +73,21 @@ class AccountPicker(Vertical):
             (ref.label for ref in self._accounts if ref.key == wanted),
             self._accounts[0].label if self._accounts else "",
         )
-        self.display = len(self._accounts) > 1
+        self.display = len(self._accounts) > 1 or (always_show and bool(self._accounts))
 
     @classmethod
     def for_provider(
         cls, registry, provider: str, *, value: Optional[str] = None,
         id: Optional[str] = None,  # noqa: A002 - Textual's widget id
     ) -> "AccountPicker":
-        """A picker over *provider*'s usable accounts (empty without a registry)."""
+        """A picker over *provider*'s usable accounts (empty without a registry).
+
+        Shown whenever the provider has several configured accounts, even if
+        only one of them can be used right now.
+        """
         accounts = registry.accounts(provider) if registry is not None else []
-        return cls(accounts, value=value, id=id)
+        always_show = registry is not None and registry.is_multi(provider)
+        return cls(accounts, value=value, id=id, always_show=always_show)
 
     @property
     def account(self) -> str:

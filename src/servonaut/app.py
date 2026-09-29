@@ -452,6 +452,17 @@ class ServonautApp(App):
                 fleet.extend(inventory.get_cached_instances())
         return fleet
 
+    def provider_available(self, provider: str) -> bool:
+        """True when *provider* has at least one account that can be used.
+
+        Not the same as the default service being set: with the primary
+        account unavailable, the provider's other accounts still work (and
+        every screen then asks which account to use).
+        """
+        if self.accounts is not None:
+            return bool(self.accounts.accounts(provider))
+        return getattr(self, f"{provider}_service", None) is not None
+
     def provider_inventory(self, provider: str):
         """Every account of *provider* as one inventory, or None when unused.
 
@@ -2342,9 +2353,9 @@ class ServonautApp(App):
 
         yield from super().get_system_commands(screen)
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
-            if target_id.startswith("nav_ovh") and getattr(self, "ovh_service", None) is None:
+            if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
-            if target_id.startswith("nav_hetzner") and getattr(self, "hetzner_service", None) is None:
+            if target_id.startswith("nav_hetzner") and not self.provider_available("hetzner"):
                 continue
             yield SystemCommand(
                 f"Go to {title}",
@@ -2521,7 +2532,7 @@ class ServonautApp(App):
             from servonaut.screens.bug_report import BugReportScreen
             self.push_screen(BugReportScreen())
         elif target_id == "nav_hetzner_manage":
-            if getattr(self, "hetzner_service", None) is None:
+            if not self.provider_available("hetzner"):
                 self.notify(
                     "Hetzner is not configured. Visit Settings → Hetzner Cloud "
                     "to set up a token.",
@@ -2531,7 +2542,7 @@ class ServonautApp(App):
             from servonaut.screens.hetzner_manager import HetznerManagerScreen
             self.switch_screen(HetznerManagerScreen())
         elif target_id == "nav_hetzner_ssh_keys":
-            if getattr(self, "hetzner_service", None) is None:
+            if not self.provider_available("hetzner"):
                 self.notify(
                     "Hetzner is not configured. Visit Settings → Hetzner Cloud "
                     "to set up a token.",
@@ -2541,7 +2552,7 @@ class ServonautApp(App):
             from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
             self.switch_screen(HetznerSSHKeysScreen())
         elif target_id == "nav_ovh_manage":
-            if getattr(self, "ovh_service", None) is None:
+            if not self.provider_available("ovh"):
                 self.notify(
                     "OVHcloud is not configured. Visit Settings → OVHcloud to "
                     "set up credentials.",

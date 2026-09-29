@@ -98,8 +98,9 @@ configured Hetzner projects (the primary project when it is left out).
 With more than one project, `list` shows every project's servers, adds an
 Account column and names each server `<project>/<name>`; `--json` rows
 carry an `account` field. `destroy` acts in the project whose servers
-include the one you name, accepts `<project>/<name>`, and refuses a name
-that several projects use (exit code 4) instead of guessing.
+include the one you name, accepts `<project>/<name>`, and never guesses:
+it refuses a name that several projects use (exit code 4) and one that no
+project has (exit code 1) unless `--account` names the project.
 
 ### Examples
 

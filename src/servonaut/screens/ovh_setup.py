@@ -678,7 +678,8 @@ class OVHSetupScreen(Screen):
             application_key=values['application_key'],
             application_secret=values['application_secret'],
         )
-        svc = OVHService(temp_config)
+        # An extra account is tested with its own credentials only.
+        svc = OVHService(temp_config, allow_ambient_config=not self._account_mode)
         try:
             result = await svc.request_consumer_key()
             ck = result.get('consumerKey') or ''
@@ -769,7 +770,8 @@ class OVHSetupScreen(Screen):
             client_id=values.get('client_id', ''),
             client_secret=values.get('client_secret', ''),
         )
-        svc = OVHService(temp_config)
+        # An extra account is tested with its own credentials only.
+        svc = OVHService(temp_config, allow_ambient_config=not self._account_mode)
         try:
             result = await svc.test_connection()
             if result['success']:

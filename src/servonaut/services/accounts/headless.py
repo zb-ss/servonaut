@@ -301,6 +301,23 @@ async def fetch_provider_rows(
 # ---------------------------------------------------------------------------
 
 
+class TargetNotFoundError(LookupError):
+    """A server reference no account of a multi-account provider lists.
+
+    With several accounts, acting in the default one would be a guess: the
+    server may be in an account whose inventory could not be read.
+    """
+
+    def __init__(self, provider: str, reference: str, labels: List[str]):
+        self.provider = provider
+        self.reference = reference
+        self.labels = list(labels)
+        title = PROVIDER_TITLES.get(provider, provider)
+        super().__init__(
+            f"No {title} server {reference!r} in any account ({', '.join(self.labels)})."
+        )
+
+
 @dataclass(frozen=True)
 class ProviderTarget:
     """A server named for a provider API call, and the account it is in."""
@@ -319,7 +336,26 @@ class ProviderTarget:
         return self.reference
 
 
-def resolve_provider_target(
+async def _target_rows(fleet: Any) -> List[dict]:
+    """The rows a lifecycle target is looked up in.
+
+    A single account keeps the cached rows, as before. With several
+    accounts the inventory is read through its cache (fresh caches as they
+    are, missing or stale ones fetched): a cache a mutation invalidated, or
+    one never written, must not make a server of that account unknown.
+    """
+    if fleet is None:
+        return []
+    if not fleet.multi:
+        return _rows(fleet.get_cached_instances())
+    try:
+        return _rows(await fleet.fetch_instances_cached())
+    except Exception as exc:  # noqa: BLE001 - every account failed: use caches
+        logger.warning("Refreshing the %s inventory failed: %s", fleet.provider, exc)
+        return _rows(fleet.get_cached_instances())
+
+
+async def resolve_provider_target(
     registry: AccountRegistry,
     provider: str,
     reference: str,
@@ -328,20 +364,24 @@ def resolve_provider_target(
     """Which account a start/stop/reboot/delete of *reference* acts in.
 
     The account is, in order: *account*; the ``<account>/`` qualifier of
-    *reference*; the account whose cached inventory lists the server; the
-    provider's default account. An exact id always wins before a qualifier
-    is parsed (OVH Public Cloud ids contain ``/``). Only cached rows are
-    read: nothing waits on a provider API.
+    *reference*; the account whose inventory lists the server. An exact id
+    always wins before a qualifier is parsed (OVH Public Cloud ids contain
+    ``/``). With one account, only cached rows are read and an unlisted
+    reference goes to that account, as before; with several, the inventory
+    is refreshed where its cache is missing or stale, and a reference no
+    account lists is refused rather than sent to the default account.
 
     Raises:
         UnknownAccountError: *account* or the qualifier names no account of
             *provider*, or they name different accounts.
         AmbiguousInstanceError: The reference matches several servers.
+        TargetNotFoundError: Several accounts, none of which lists the
+            reference, and none was named.
     """
     title = PROVIDER_TITLES.get(provider, provider)
     wanted = registry.account(provider, account) if account else None
     fleet = registry.fleet(provider)
-    every_row = _rows(fleet.get_cached_instances()) if fleet is not None else []
+    every_row = await _target_rows(fleet)
 
     def in_scope(rows: List[dict]) -> List[dict]:
         if wanted is None:
@@ -382,5 +422,9 @@ def resolve_provider_target(
     if wanted is None and row is not None:
         wanted = registry.account(provider, row.get(ACCOUNT_KEY) or None)
     if wanted is None:
+        if registry.is_multi(provider):
+            raise TargetNotFoundError(
+                provider, reference, [ref.label for ref in registry.accounts(provider)],
+            )
         wanted = registry.account(provider)
     return ProviderTarget(wanted, needle, row)

@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
@@ -104,18 +106,66 @@ def _first_line(exc: Exception) -> str:
     return lines[0].strip() if lines else type(exc).__name__
 
 
+class _NoAmbientConfig:
+    """A python-ovh configuration source that knows nothing.
+
+    python-ovh builds one of these per client and asks it for every
+    credential the caller left out, reading ``OVH_*`` variables and the
+    ``ovh.conf`` files. An extra account must only ever use its own settings.
+    """
+
+    def get(self, section: str, name: str) -> None:
+        return None
+
+    def read(self, config_file: str) -> None:
+        return None
+
+
+# python-ovh looks its configuration source up at client construction; the
+# swap below must not overlap another client being built.
+_OVH_CONFIG_LOCK = threading.Lock()
+
+
+@contextmanager
+def _ambient_ovh_config(ovh_module, allowed: bool):
+    """Build a python-ovh client with (``allowed``) or without ambient config."""
+    if allowed:
+        with _OVH_CONFIG_LOCK:
+            yield
+        return
+    config_module = ovh_module.client.config
+    with _OVH_CONFIG_LOCK:
+        original = config_module.ConfigurationManager
+        config_module.ConfigurationManager = _NoAmbientConfig
+        try:
+            yield
+        finally:
+            config_module.ConfigurationManager = original
+
+
 class OVHService:
     """Service for fetching OVHcloud instances (dedicated, VPS, Public Cloud)."""
 
-    def __init__(self, config: 'OVHConfig', cache_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        config: 'OVHConfig',
+        cache_path: Optional[Path] = None,
+        allow_ambient_config: bool = True,
+    ) -> None:
         """Initialize OVH service.
 
         Args:
             config: OVHConfig dataclass instance.
             cache_path: Cache file for this account. None uses the primary
                 account's ``~/.servonaut/ovh_cache.json``.
+            allow_ambient_config: Whether python-ovh may fill credentials this
+                config leaves out from ``OVH_*`` variables and ``ovh.conf``.
+                Only the primary account may: they belong to it, and an extra
+                account picking them up would mix two accounts' credentials
+                (python-ovh then refuses the account outright).
         """
         self._config = config
+        self._allow_ambient_config = allow_ambient_config
         self._cache_path_override = (
             Path(cache_path).expanduser() if cache_path is not None else None
         )
@@ -161,21 +211,22 @@ class OVHService:
         client_id = resolve_secret(config.client_id)
         client_secret = resolve_secret(config.client_secret)
 
-        if client_id and client_secret:
-            # OAuth2 service account auth
-            self._client = ovh.Client(
-                endpoint=config.endpoint,
-                client_id=client_id,
-                client_secret=client_secret,
-            )
-        else:
-            # Classic 3-key auth
-            self._client = ovh.Client(
-                endpoint=config.endpoint,
-                application_key=application_key,
-                application_secret=application_secret,
-                consumer_key=consumer_key,
-            )
+        with _ambient_ovh_config(ovh, self._allow_ambient_config):
+            if client_id and client_secret:
+                # OAuth2 service account auth
+                self._client = ovh.Client(
+                    endpoint=config.endpoint,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+            else:
+                # Classic 3-key auth
+                self._client = ovh.Client(
+                    endpoint=config.endpoint,
+                    application_key=application_key,
+                    application_secret=application_secret,
+                    consumer_key=consumer_key,
+                )
 
         return self._client
 
@@ -531,11 +582,12 @@ class OVHService:
 
         application_key = resolve_secret(config.application_key)
 
-        client = ovh.Client(
-            endpoint=config.endpoint,
-            application_key=application_key,
-            application_secret=application_secret,
-        )
+        with _ambient_ovh_config(ovh, self._allow_ambient_config):
+            client = ovh.Client(
+                endpoint=config.endpoint,
+                application_key=application_key,
+                application_secret=application_secret,
+            )
 
         access_rules = [
             # Listing endpoints (/* doesn't match the root list endpoint)
