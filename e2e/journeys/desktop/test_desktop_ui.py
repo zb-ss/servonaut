@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from e2e.harness import fleet
-from e2e.harness.desktop import wait_until
+from e2e.harness.desktop import click_widget, nav, open_session, wait_until
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_browser, pytest.mark.asyncio]
 
@@ -31,67 +31,14 @@ def _seed_fleet(seed) -> None:
     seed.cache(fleet.cache_rows(), fresh=True)
 
 
-async def _open_session(browser, desktop_app):
-    """Load the frontend and start the session, as the desktop window does."""
-    page = await browser.new_page()
-    assert await page.open(desktop_app.origin) == 200
-    assert await page.page.title() == "Servonaut"
-    await page.start_session(desktop_app.token.encoded_value())
-    await page.wait_for_first_output()
-    await desktop_app.wait_for_app("InstanceListScreen")
-    return page
-
-
 def _fleet_rows(desktop_app) -> list[str]:
     return [row[1] for row in desktop_app.tui.table_rows("InstanceTable")]
-
-
-async def _click_widget(page, desktop_app, widget) -> None:
-    """Click the middle of *widget* where the terminal draws it."""
-    assert desktop_app.tui.is_reachable(widget), f"{widget!r} is hidden"
-    region = widget.region
-    assert region.width and region.height, f"{widget!r} is not on screen"
-    await page.click_cell(region.x + region.width // 2, region.y + region.height // 2)
-
-
-async def _scroll_into_view(page, desktop_app, widget, container) -> None:
-    """Scroll *container* with the mouse wheel until all of *widget* shows."""
-    tui = desktop_app.tui
-    for _ in range(20):
-        if widget.region.height and container.region.contains_region(widget.region):
-            return
-        area = container.region
-        await page.hover_cell(area.x + area.width // 2, area.y + area.height // 2)
-        before = container.scroll_y
-        await page.page.mouse.wheel(0, 120)
-        await tui.wait_until(lambda: container.scroll_y != before, desc="the sidebar scrolled")
-        await tui.settle()
-    raise AssertionError(f"{widget!r} never scrolled into view")
-
-
-async def _nav(page, desktop_app, nav_id: str) -> None:
-    """Click a sidebar entry, opening its section first, like a user."""
-    from textual.widgets import Button
-
-    from servonaut.widgets.sidebar_section import SidebarSection
-
-    tui = desktop_app.tui
-    assert tui.nav_reachable(nav_id), f"{nav_id} is not available"
-    button = tui.nav_button(nav_id)
-    section = next((node for node in button.ancestors if isinstance(node, SidebarSection)), None)
-    if section is not None and section.collapsed:
-        await _click_widget(page, desktop_app, section.query_one("Button.section-header", Button))
-        await tui.wait_until(lambda: not section.collapsed, desc=f"section of {nav_id} open")
-        await tui.settle()
-    button = tui.nav_button(nav_id)
-    await _scroll_into_view(page, desktop_app, button, tui.on_screen("#sidebar-scroll"))
-    await _click_widget(page, desktop_app, button)
 
 
 async def test_the_app_renders_in_the_page(desktop, seed):
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         # The fleet the user has cached is drawn in the terminal...
         for name in FLEET_NAMES:
             await page.wait_for_text(name)
@@ -113,7 +60,7 @@ async def test_the_app_renders_in_the_page(desktop, seed):
 async def test_sidebar_navigation_with_the_mouse(desktop, seed):
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tour = [
             ("nav_custom_servers", "CustomServersScreen", "Custom Servers"),
             ("nav_keys", "KeyManagementScreen", "SSH Key Management"),
@@ -123,7 +70,7 @@ async def test_sidebar_navigation_with_the_mouse(desktop, seed):
         ]
         for nav_id, screen, visible_text in tour:
             mark = page.output_mark()
-            await _nav(page, app, nav_id)
+            await nav(page, app, nav_id)
             await app.tui.wait_for_screen(screen)
             await page.wait_for_text(visible_text, since=mark)
             # Every screen keeps the sidebar, so the tour can go on.
@@ -136,7 +83,7 @@ async def test_keys_reach_the_fleet_right_after_the_window_gains_focus(desktop, 
 
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tui = app.tui
         # The window becomes the active one: the fleet table holds the focus,
         # as it does when the terminal app starts.
@@ -159,10 +106,10 @@ async def test_keyboard_search_help_and_command_palette(desktop, seed):
 
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tui = app.tui
         # Click into the search box, then type: the fleet is filtered.
-        await _click_widget(page, app, tui.on_screen("#search_input"))
+        await click_widget(page, app, tui.on_screen("#search_input"))
         await tui.wait_until(lambda: tui.focused_id() == "search_input", desc="search focused")
         await page.type("edge")
         await tui.wait_until(lambda: _fleet_rows(app) == ["edge-1"], desc="fleet filtered")
@@ -222,10 +169,10 @@ async def test_paste_reaches_the_focused_input(desktop, seed):
 
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tui = app.tui
         search = tui.on_screen("#search_input", Input)
-        await _click_widget(page, app, search)
+        await click_widget(page, app, search)
         await tui.wait_until(lambda: search.has_focus, desc="search box focused")
 
         mark = page.output_mark()
@@ -245,7 +192,7 @@ async def test_paste_reaches_the_focused_input(desktop, seed):
 async def test_resizing_the_window_resizes_the_app(desktop, seed):
     _seed_fleet(seed)
     async with desktop.in_process() as app, desktop.browser() as browser:
-        page = await _open_session(browser, app)
+        page = await open_session(browser, app)
         tui = app.tui
 
         def app_size() -> tuple[int, int]:

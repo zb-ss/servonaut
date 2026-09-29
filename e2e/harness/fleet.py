@@ -191,6 +191,14 @@ OVH_SECOND_BATCH_3 = OvhCloudHost("batch-3", "ACTIVE", "GRA7", "208.67.222.220",
 OVH_SECOND_VPS_FLEET = (OVH_SECOND_VPS_WEB_1,)
 OVH_SECOND_CLOUD_FLEET = (OVH_SECOND_BATCH_3,)
 
+# Every region an AWS host above lives in. Seeded configs list instances from
+# these regions only: discovering every region the endpoint offers costs one
+# call per region on each refresh, which is slow on a busy machine.
+AWS_REGIONS = tuple(sorted({
+    host.region
+    for host in (*AWS_FLEET, API_1, WORKER_1, QUEUE_1, AWS_WEB_1, *AWS_SECOND_FLEET)
+}))
+
 
 def seed_second_accounts(
     providers: Any,

@@ -531,6 +531,66 @@ async def in_process_host(artifact_dir: Path) -> AsyncIterator[InProcessDesktop]
 
 
 # ---------------------------------------------------------------------------
+# Using the in-process app through the page
+# ---------------------------------------------------------------------------
+
+
+async def open_session(browser: BrowserSession, desktop_app: InProcessDesktop) -> DesktopPage:
+    """Load the frontend and start the session, as the desktop window does."""
+    page = await browser.new_page()
+    assert await page.open(desktop_app.origin) == 200
+    assert await page.page.title() == "Servonaut"
+    await page.start_session(desktop_app.token.encoded_value())
+    await page.wait_for_first_output()
+    await desktop_app.wait_for_app("InstanceListScreen")
+    return page
+
+
+async def click_widget(page: DesktopPage, desktop_app: InProcessDesktop, widget: Any) -> None:
+    """Click the middle of *widget* where the terminal draws it."""
+    assert desktop_app.tui.is_reachable(widget), f"{widget!r} is hidden"
+    region = widget.region
+    assert region.width and region.height, f"{widget!r} is not on screen"
+    await page.click_cell(region.x + region.width // 2, region.y + region.height // 2)
+
+
+async def scroll_into_view(
+    page: DesktopPage, desktop_app: InProcessDesktop, widget: Any, container: Any
+) -> None:
+    """Scroll *container* with the mouse wheel until all of *widget* shows."""
+    tui = desktop_app.tui
+    for _ in range(20):
+        if widget.region.height and container.region.contains_region(widget.region):
+            return
+        area = container.region
+        await page.hover_cell(area.x + area.width // 2, area.y + area.height // 2)
+        before = container.scroll_y
+        await page.page.mouse.wheel(0, 120)
+        await tui.wait_until(lambda: container.scroll_y != before, desc="the sidebar scrolled")
+        await tui.settle()
+    raise AssertionError(f"{widget!r} never scrolled into view")
+
+
+async def nav(page: DesktopPage, desktop_app: InProcessDesktop, nav_id: str) -> None:
+    """Click a sidebar entry, opening its section first, like a user."""
+    from textual.widgets import Button
+
+    from servonaut.widgets.sidebar_section import SidebarSection
+
+    tui = desktop_app.tui
+    assert tui.nav_reachable(nav_id), f"{nav_id} is not available"
+    button = tui.nav_button(nav_id)
+    section = next((node for node in button.ancestors if isinstance(node, SidebarSection)), None)
+    if section is not None and section.collapsed:
+        await click_widget(page, desktop_app, section.query_one("Button.section-header", Button))
+        await tui.wait_until(lambda: not section.collapsed, desc=f"section of {nav_id} open")
+        await tui.settle()
+    button = tui.nav_button(nav_id)
+    await scroll_into_view(page, desktop_app, button, tui.on_screen("#sidebar-scroll"))
+    await click_widget(page, desktop_app, button)
+
+
+# ---------------------------------------------------------------------------
 # The out-of-process child
 # ---------------------------------------------------------------------------
 

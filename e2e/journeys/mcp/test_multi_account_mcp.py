@@ -284,7 +284,7 @@ async def test_aws_lifecycle_acts_in_the_owning_account(mcp, journey, fake_cloud
 async def test_object_storage_follows_the_account(mcp, journey, fake_cloud, moto):
     role_arn = moto.seed_role(aws.ACCOUNT_ROLE, aws.SECOND_ACCOUNT)
     moto.seed_bucket("e2e-primary-assets")
-    moto.client_as(role_arn, "s3", REGION).create_bucket(Bucket="e2e-prod-assets")
+    moto.seed_bucket("e2e-prod-assets", region=REGION, role_arn=role_arn)
     sandbox = _home(journey, fake_cloud, aws_role_arn=role_arn)
 
     async with mcp(sandbox) as session:

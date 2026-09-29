@@ -428,6 +428,21 @@ When you add a journey:
   Anthropic and Ollama through the provider base-URL setting, and
   `fake_cloud.ai.script(...)` scripts the hosted chat, replaying the recorded
   streams in `tests/fixtures/sse`.
+- For several accounts per provider, `fleet.seed_second_accounts(providers)`
+  adds a second Hetzner project and OVH account, with their servers, to the
+  stand-ins, and `seed.hetzner_account(...)` / `seed.ovh_account(...)` write
+  config entries with the credentials those accounts answer; each stand-in
+  refuses credentials it does not know, as the real service does. A second
+  AWS account is a named profile that assumes a role in another moto
+  account: `moto.seed_account(...)`, then `seed.aws_profile(...)` and
+  `seed.aws_account(...)`. `providers.requests(..., account="staging")`
+  shows which account each call reached.
+- Seeded configs list AWS instances from the fleet's regions only
+  (`fleet.AWS_REGIONS`): discovering every region costs one call per region
+  on each refresh, which is slow on a busy machine. `seed.aws_config(...)`
+  and `seed.aws_account(...)` set that list for you; give an AWS config you
+  build yourself a `regions` list too, unless the journey is about discovery
+  (then pass `regions=[]`).
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - To prove a secret never reached the service, use
