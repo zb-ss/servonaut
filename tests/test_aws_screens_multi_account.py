@@ -437,6 +437,43 @@ async def test_create_hides_the_picker_with_one_account(ec2) -> None:
         assert screen.query_one("#aws_create_account_select", Select).disabled
 
 
+async def _launch(app: Host, pilot, name: str) -> None:
+    """Fill in the wizard's name and launch with everything as preselected."""
+    from unittest.mock import AsyncMock
+
+    screen = app.screen
+    await _wait_for_create_tables(pilot, screen)
+    screen.query_one("#aws_input_name", Input).value = name
+    app.push_screen_wait = AsyncMock(return_value=True)
+    await screen._on_create()
+
+
+@pytest.mark.asyncio
+async def test_create_single_account_audit_row_is_unchanged(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = Host(_registry(_config(extra=False)), AWSCreateScreen)
+    async with app.run_test(size=(160, 80)) as pilot:
+        await _launch(app, pilot, "web-9")
+    details = app.aws_audit.log_action.call_args.kwargs["details"]
+    assert "account" not in details
+    assert details["region"] == "us-east-1" and details["name_tag"] == "web-9"
+
+
+@pytest.mark.asyncio
+async def test_demo_create_audit_row_names_the_real_account(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = _demo(Host(_registry(_config(extra_label="sandbox")), AWSCreateScreen))
+    async with app.run_test(size=(160, 80)) as pilot:
+        await _wait_for_create_tables(pilot, app.screen)
+        _pick_account(app.screen, "aws_create_account", "sandbox")
+        await _wait_for(pilot, lambda: ec2["sandbox"].called("list_security_groups"), "reload")
+        await _launch(app, pilot, "web-9")
+    assert ec2["sandbox"].called("run_instances")
+    assert app.aws_audit.log_action.call_args.kwargs["details"]["account"] == "sandbox"
+
+
 # ---------------------------------------------------------------------------
 # CloudTrail
 # ---------------------------------------------------------------------------
