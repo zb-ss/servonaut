@@ -247,37 +247,22 @@ def _resolve_providers_configured(app: Any) -> List[str]:
     - ``"ovh"``      → an OVH account or ovh_object_storage_service
 
     With an account registry any usable account counts (the primary one
-    may be down while another serves); without one, the provider's service.
-    If ``app`` is None or any attribute is absent the provider is omitted.
+    may be down while another serves), computed exactly as the headless
+    relay does; without one, the provider's service. If ``app`` is None or
+    any attribute is absent the provider is omitted.
     """
-    providers: List[str] = []
-    if app is not None:
-        registry = getattr(app, "accounts", None)
+    if app is None:
+        return []
+    registry = getattr(app, "accounts", None)
+    if registry is not None:
+        from servonaut.services.accounts.headless import usable_providers
 
-        def has_account(provider: str) -> bool:
-            if registry is not None:
-                return bool(registry.accounts(provider))
-            return getattr(app, f"{provider}_service", None) is not None
-
-        aws = (
-            has_account("aws")
-            or getattr(app, "aws_object_storage_service", None) is not None
-        )
-        hetzner = (
-            has_account("hetzner")
-            or getattr(app, "hetzner_object_storage_service", None) is not None
-        )
-        ovh = (
-            has_account("ovh")
-            or getattr(app, "ovh_object_storage_service", None) is not None
-        )
-        if aws:
-            providers.append("aws")
-        if hetzner:
-            providers.append("hetzner")
-        if ovh:
-            providers.append("ovh")
-    return sorted(providers)
+        return usable_providers(registry)
+    return sorted(
+        provider for provider in ("aws", "hetzner", "ovh")
+        if getattr(app, f"{provider}_service", None) is not None
+        or getattr(app, f"{provider}_object_storage_service", None) is not None
+    )
 
 
 # A token source: either a literal string (legacy / headless mode where

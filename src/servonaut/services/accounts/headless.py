@@ -55,10 +55,25 @@ def account_labels(registry: Optional[AccountRegistry]) -> Dict[str, List[str]]:
 
 
 def usable_providers(registry: Optional[AccountRegistry]) -> List[str]:
-    """The providers with at least one usable account, sorted."""
+    """The providers a relay advertises, sorted.
+
+    A provider counts with at least one usable account, or with object
+    storage of its own: a project can have S3 keys and no usable compute
+    credentials. The TUI and the headless relay both answer through here.
+    """
     if registry is None:
         return []
-    return sorted(provider for provider in PROVIDERS if registry.accounts(provider))
+    return sorted(
+        provider for provider in PROVIDERS
+        if registry.accounts(provider) or _has_object_storage(registry, provider)
+    )
+
+
+def _has_object_storage(registry: AccountRegistry, provider: str) -> bool:
+    try:
+        return registry.object_storage(provider) is not None
+    except UnknownAccountError:
+        return False
 
 
 def row_account_key(row: Mapping[str, Any]) -> str:
