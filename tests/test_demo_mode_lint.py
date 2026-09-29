@@ -294,6 +294,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/cloudwatch_browser.py", "_cycle_ip_filter", "update",
                    "Writes 'Filter: <label>' where label is from a hard-coded "
                    "tuple of action names — not user-streaming data."),
+    AllowlistEntry("screens/cloudwatch_browser.py", "on_account_picker_changed", "update",
+                   "Resets the detail pane to its hard-coded placeholder when the "
+                   "account changes — no user data."),
 
     # log_viewer.py — probe/start writes hard-coded status and error strings.
     AllowlistEntry("screens/log_viewer.py", "_probe_and_start", "write",

@@ -74,6 +74,27 @@ CloudWatchBrowserScreen.-narrow #cw_filter_pattern {
     column-span: 2;
 }
 
+/* With several AWS accounts the account picker leads the filters in a
+   column of its own (the grid gets the -with-account class). Narrow, the
+   filter pattern widens so the second row stays full. */
+#cloudwatch_filter_bar.-with-account {
+    grid-size: 7 1;
+    grid-columns: 18 3fr 3fr 22 2fr 10 10;
+}
+
+CloudWatchBrowserScreen.-narrow #cloudwatch_filter_bar.-with-account {
+    grid-size: 5 2;
+    grid-columns: 16 6fr 8fr 9 9;
+}
+
+CloudWatchBrowserScreen.-narrow #cloudwatch_filter_bar.-with-account #cw_filter_pattern {
+    column-span: 3;
+}
+
+#cw_filter_account > Select {
+    width: 100%;
+}
+
 #cloudwatch_main_content {
     height: 1fr;
     margin: 0 1;

@@ -1,4 +1,8 @@
-"""CloudTrail event browser screen for Servonaut."""
+"""CloudTrail event browser screen for Servonaut.
+
+With several AWS accounts configured an account picker leads the filters;
+events are read from the chosen account's trail.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,9 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
+from servonaut.screens._accounts import account_registry, cloudtrail_service
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.widgets.account_picker import AccountPicker
 import re
 
 _EC2_ID_RE = re.compile(r"i-[0-9a-f]{8,17}")
@@ -134,6 +140,9 @@ class CloudTrailBrowserScreen(Screen):
         Binding("p", "prev_page", "Prev", show=True),
     ]
 
+    # Label of the AWS account whose trail is read ("" = default).
+    _account: str = ""
+
     def __init__(self) -> None:
         super().__init__()
         self._events: List[Dict[str, Any]] = []
@@ -177,6 +186,10 @@ class CloudTrailBrowserScreen(Screen):
                     id="cloudtrail_title",
                 ),
             Horizontal(
+                # Shown only when there are several AWS accounts.
+                AccountPicker.for_provider(
+                    account_registry(self.app), "aws", id="ct_filter_account",
+                ),
                 Vertical(
                     Label("Region"),
                     Select(
@@ -254,12 +267,47 @@ class CloudTrailBrowserScreen(Screen):
         table.add_columns("Time", "Event", "User", "Source IP", "Resource", "Region", "Error")
         table.cursor_type = "row"
         self._update_pager()
+        self._account = self.query_one("#ct_filter_account", AccountPicker).account
 
         config = self.app.config_manager.get()
         if config.cloudtrail_default_region:
             self.query_one("#ct_select_region", Select).value = (
                 config.cloudtrail_default_region
             )
+
+    # ------------------------------------------------------------------
+    # Account
+    # ------------------------------------------------------------------
+
+    def _cloudtrail(self):
+        """The chosen account's CloudTrail service.
+
+        Raises:
+            UnknownAccountError: The account was removed in Settings.
+        """
+        return cloudtrail_service(self.app, self._account)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Read the newly chosen account's trail from scratch.
+
+        The event, user and resource pickers only offer values seen in the
+        previous account's events, so they start over too.
+        """
+        self._account = event.account
+        self._next_token = None
+        self._fetch_args = None
+        self._loading_more = False
+        self._cap_reached = False
+        self._selected_event = None
+        self._fleet_names_cache = None
+        self._suppress_filter_events = True
+        try:
+            for widget_id, _field in _FILTER_FIELDS:
+                self.query_one(f"#{widget_id}", Select).set_options([])
+        finally:
+            self._suppress_filter_events = False
+        self._applied_filters = self._filter_values()
+        self.action_fetch()
 
     # ------------------------------------------------------------------
     # Pagination
@@ -474,7 +522,7 @@ class CloudTrailBrowserScreen(Screen):
             self._update_pager()
             return
         try:
-            page = await self.app.cloudtrail_service.lookup_page(
+            page = await self._cloudtrail().lookup_page(
                 resume_from=token, **args,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the operator
@@ -727,7 +775,7 @@ class CloudTrailBrowserScreen(Screen):
                 "resource_type": resource_type,
                 "max_results": max_events,
             }
-            page = await self.app.cloudtrail_service.lookup_page(**self._fetch_args)
+            page = await self._cloudtrail().lookup_page(**self._fetch_args)
             events = page.events
         except Exception as exc:
             self.app.notify(f"CloudTrail fetch failed: {exc}", severity="error", markup=False)

@@ -30,6 +30,11 @@
     width: 2fr;
 }
 
+/* The account picker, shown only with several AWS accounts. */
+#ct_filter_account > Select {
+    width: 1fr;
+}
+
 #cloudtrail_filters Select {
     height: 3;
 }

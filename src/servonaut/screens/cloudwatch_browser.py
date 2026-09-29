@@ -1,4 +1,8 @@
-"""CloudWatch Logs browser screen for Servonaut."""
+"""CloudWatch Logs browser screen for Servonaut.
+
+With several AWS accounts configured an account picker leads the filters;
+log groups and events are read from the chosen account.
+"""
 
 from __future__ import annotations
 
@@ -17,8 +21,11 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
+from servonaut.screens._accounts import account_registry, cloudwatch_service
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.cloudwatch_service import CloudWatchService
 from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
+from servonaut.widgets.account_picker import AccountPicker
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +119,9 @@ class CloudWatchBrowserScreen(Screen):
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
     VERTICAL_BREAKPOINTS = [(0, "-short"), (40, "-tall")]
 
+    # Label of the AWS account whose logs are read ("" = default).
+    _account: str = ""
+
     def __init__(self) -> None:
         super().__init__()
         self._events: List[Dict[str, Any]] = []
@@ -147,6 +157,11 @@ class CloudWatchBrowserScreen(Screen):
             # A grid, so a narrow terminal can wrap the filters onto two rows
             # (see HORIZONTAL_BREAKPOINTS and the stylesheet).
             Container(
+                # Shown only when there are several AWS accounts; the
+                # stylesheet then gives the grid a column for it.
+                AccountPicker.for_provider(
+                    account_registry(self.app), "aws", id="cw_filter_account",
+                ),
                 Vertical(
                     Label("Region"),
                     Select(
@@ -232,6 +247,12 @@ class CloudWatchBrowserScreen(Screen):
 
         self._update_pager()
 
+        picker = self.query_one("#cw_filter_account", AccountPicker)
+        self._account = picker.account
+        self.query_one("#cloudwatch_filter_bar").set_class(
+            picker.display, "-with-account"
+        )
+
         config = self.app.config_manager.get()
         if config.cloudwatch_default_region:
             self.query_one("#cw_select_region", Select).value = (
@@ -313,6 +334,46 @@ class CloudWatchBrowserScreen(Screen):
             self._update_pager()
 
     # ------------------------------------------------------------------
+    # Account
+    # ------------------------------------------------------------------
+
+    def _cloudwatch(self):
+        """The chosen account's CloudWatch Logs service.
+
+        Raises:
+            UnknownAccountError: The account was removed in Settings.
+        """
+        return cloudwatch_service(self.app, self._account)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Start over in the newly chosen account.
+
+        Log groups, events and the addresses in them all belong to the
+        previous account; the region and time range stay.
+        """
+        self._account = event.account
+        for group in ("discover", "fetch"):
+            self.workers.cancel_group(self, group)
+        self._events = []
+        self._top_ips = []
+        self._selected_event_row = None
+        self._selected_ip_row = None
+        self._current_page = 0
+        events_table = self.query_one("#cloudwatch_events_table", DataTable)
+        _reset_columns(events_table, [(label, len(label)) for label in _EVENT_COLUMNS])
+        _reset_columns(
+            self.query_one("#cloudwatch_ips_table", DataTable), self._ip_columns([], [])
+        )
+        self._update_pager()
+        self.query_one("#cw_btn_fetch", Button).disabled = False
+        self.query_one("#cloudwatch_detail_text", Static).update(
+            "Select a log event to view the full message."
+        )
+        region = self.query_one("#cw_select_region", Select).value
+        if region is not Select.NULL:
+            self._discover_groups_for_region(str(region))
+
+    # ------------------------------------------------------------------
     # Region / log group discovery
     # ------------------------------------------------------------------
 
@@ -342,7 +403,7 @@ class CloudWatchBrowserScreen(Screen):
         prefix = config.cloudwatch_log_group_prefix
 
         try:
-            groups = await self.app.cloudwatch_service.list_log_groups(
+            groups = await self._cloudwatch().list_log_groups(
                 prefix=prefix, region=region
             )
         except Exception as exc:
@@ -399,7 +460,7 @@ class CloudWatchBrowserScreen(Screen):
         minutes = int(time_select.value) if time_select.value is not Select.NULL else 60
         # A bare term such as an address or path only matches when quoted;
         # apply the same rule the MCP tool uses.
-        filter_pattern = self.app.cloudwatch_service.normalize_filter_pattern(
+        filter_pattern = CloudWatchService.normalize_filter_pattern(
             self.query_one("#cw_input_filter_pattern", Input).value.strip()
         )
 
@@ -427,7 +488,7 @@ class CloudWatchBrowserScreen(Screen):
         start_time = end_time - timedelta(minutes=minutes)
 
         try:
-            events = await self.app.cloudwatch_service.get_log_events(
+            events = await self._cloudwatch().get_log_events(
                 log_group=log_group,
                 start_time=start_time,
                 end_time=end_time,
@@ -495,8 +556,6 @@ class CloudWatchBrowserScreen(Screen):
 
     def _refresh_ips_table(self) -> None:
         """Re-extract and populate the Top IPs table with current filter."""
-        from servonaut.services.cloudwatch_service import CloudWatchService
-
         filter_label = self._IP_FILTERS[self._ip_filter_index]
         action_filter = None
         if filter_label == "Allowed":

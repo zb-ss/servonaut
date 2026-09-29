@@ -20,6 +20,10 @@ Terminated instances linger in the EC2 console for ~1 h with state
 ``terminated`` or ``shutting-down``; the toolbar disables all actions
 for those rows so the user cannot double-terminate.
 
+With several AWS accounts configured the table lists the instances of
+every account (names shown as ``account/name``) and each action runs in
+the account the selected instance belongs to.
+
 Design intent: :class:`InstanceListScreen` is the unified search-and-SSH
 surface. This screen is the EC2 admin home — the place an operator goes
 to manage EC2 inventory beyond what the instance list offers.
@@ -37,10 +41,13 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
+from servonaut.screens._accounts import aws_service, provider_inventory, row_service
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.services.accounts import UnknownAccountError
 from servonaut.utils.formatting import escape_cell
+from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -177,8 +184,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     def _refresh(self) -> None:
         if self._loading:
             return
-        svc = getattr(self.app, "aws_service", None)
-        if svc is None:
+        if provider_inventory(self.app, "aws") is None:
             self._set_status(
                 "[red]AWS is not configured. "
                 "Ensure boto3 credentials are available (env vars, ~/.aws/, "
@@ -194,9 +200,11 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         )
 
     async def _load_instances(self) -> None:
-        svc = self.app.aws_service  # safe: guard ran in _refresh
+        # Every AWS account's instances: a refresh after acting on one
+        # account must never leave the table showing that account alone.
+        inventory = provider_inventory(self.app, "aws")  # guard ran in _refresh
         try:
-            instances = await svc.fetch_instances_cached(force_refresh=True)
+            instances = await inventory.fetch_instances_cached(force_refresh=True)
             # Keep the fetched rows untouched; what the table draws is
             # derived from them (demo-mode fakes when demo mode is on).
             self._raw_instances = list(instances)
@@ -204,14 +212,13 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             self._render_table()
             n = len(instances)
             if n == 0:
-                self._set_status(
+                status = (
                     "[dim]No EC2 instances found. Press [b]n[/b] to "
                     "launch one.[/dim]"
                 )
             else:
-                self._set_status(
-                    f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
-                )
+                status = f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
+            self._set_status(status + self._incomplete_refresh_note(inventory))
         except Exception as exc:
             logger.error("Failed to load EC2 instances: %s", exc)
             err_msg = self._short_err(exc)
@@ -223,13 +230,26 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         finally:
             self._loading = False
 
+    @staticmethod
+    def _incomplete_refresh_note(inventory) -> str:  # noqa: ANN001
+        """Which accounts failed to refresh, when there are several accounts.
+
+        A failed account lists its cached instances (or none), which would
+        otherwise pass for its current state. A single account keeps the
+        status line it always had.
+        """
+        error = getattr(inventory, "last_fetch_error", None)
+        if getattr(inventory, "multi", False) is not True or not isinstance(error, str):
+            return ""
+        return f" [yellow]Refresh incomplete: {markup_escape(error)}[/yellow]" if error else ""
+
     def _render_table(self) -> None:
         table = self.query_one("#aws_mgr_table", DataTable)
         table.clear()
         for idx, inst in enumerate(self._instances, start=1):
             table.add_row(
                 str(idx),
-                escape_cell(str(inst.get("name", ""))),
+                escape_cell(display_name(inst)),
                 escape_cell(str(inst.get("id", ""))),
                 escape_cell(str(inst.get("type", ""))),
                 self._colorize_state(str(inst.get("state", ""))),
@@ -275,10 +295,28 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     def _row_label(inst: dict) -> str:
         """What to call a row's server: its name, else the id the table shows.
 
-        The fallback is the row's id, never the API id: in demo mode the row
-        carries a placeholder and the real id stays off the screen.
+        ``account/name`` when there are several AWS accounts, as the table
+        shows it. The fallback is the row's id, never the API id: in demo
+        mode the row carries a placeholder and the real id stays off the
+        screen.
         """
-        return str(inst.get("name") or inst.get("id") or "")
+        return display_name(inst) or str(inst.get("id") or "")
+
+    def _row_account(self, inst: dict) -> Optional[str]:
+        """Label of the account a row belongs to; None (reported) when gone.
+
+        Every action runs in the row's own account. An account removed in
+        Settings since the table was loaded is refused rather than guessed.
+        """
+        try:
+            _service, account = row_service(self.app, "aws", inst)
+        except UnknownAccountError as exc:
+            self.notify(
+                f"{exc}. Refresh the list and try again.",
+                severity="error", markup=False,
+            )
+            return None
+        return account
 
     def _display_id(self, api_id: str) -> str:
         """An API id as the table shows it (a placeholder in demo mode)."""
@@ -424,6 +462,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
+        account = self._row_account(inst)
+        if account is None:
+            return
         self.run_worker(
             confirm_and_run_power_action(
                 self.app,
@@ -432,7 +473,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 provider=f"AWS EC2, {region}",
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
-                run=lambda: self._do_lifecycle(method, instance_id, region, done_verb),
+                run=lambda: self._do_lifecycle(
+                    method, instance_id, region, done_verb, account=account,
+                ),
             ),
             exclusive=False,
             name=f"aws_mgr_{method}",
@@ -444,15 +487,17 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         instance_id: str,
         region: str,
         done_verb: str,
+        account: str = "",
     ) -> None:
         """Call the EC2 lifecycle method (start/stop/reboot) with region.
 
         EC2 lifecycle methods on AWSService require BOTH instance_id and
         region — the region-scoped boto3 client cannot be inferred from
         instance_id alone (unlike Hetzner, which uses a global endpoint).
+        The call runs in *account* (its label; "" = the default account).
         """
-        svc = self.app.aws_service
         try:
+            svc = aws_service(self.app, account)
             await getattr(svc, method)(instance_id, region)
         except Exception as exc:
             logger.error(
@@ -475,7 +520,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 audit.log_action(
                     action=method,
                     target=instance_id,
-                    details={"region": region},
+                    details=_audit_details(account, region=region),
                     confirmed=True,
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -493,6 +538,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         instance_id = self._api_id(inst)
         region = str(inst.get("region") or "")
         name = self._row_label(inst)
+        account = self._row_account(inst)
+        if account is None:
+            return
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
@@ -522,7 +570,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 audit.log_action(
                     action="terminate_instance",
                     target=instance_id,
-                    details={"region": region, "name": name},
+                    details=_audit_details(account, region=region, name=name),
                     confirmed=bool(confirmed),
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -532,8 +580,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             return
 
         self._set_status(f"[dim]Terminating {markup_escape(name)}…[/dim]")
-        svc = self.app.aws_service
         try:
+            svc = aws_service(self.app, account)
             await svc.terminate_instance(instance_id, region)
         except Exception as exc:
             logger.error(
@@ -572,3 +620,10 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     def _short_err(exc: Exception) -> str:
         msg = str(exc)
         return msg if len(msg) <= 200 else msg[:197] + "…"
+
+
+def _audit_details(account: str, **details: str) -> dict:
+    """Audit-row details, naming the AWS account the action ran in."""
+    if account:
+        details["account"] = account
+    return details

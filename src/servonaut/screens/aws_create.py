@@ -14,6 +14,10 @@ in shape, but adapts to EC2's region-scoped API surface:
   ``aws_create_subnets``, ``aws_create_sgs``) — cancelling the previous
   request when the region changes.
 
+With several AWS accounts configured an account picker comes first: the
+region list, every dependent table and the launch itself use the chosen
+account, and changing it reloads them all.
+
 Design intent: the wizard collects all required EC2 ``RunInstances``
 parameters up-front so the user can review everything before billing
 starts. The confirm modal shows the selected AMI, type, key pair, subnet,
@@ -36,9 +40,17 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
+from servonaut.screens._accounts import (
+    account_registry,
+    aws_service,
+    is_multi,
+    provider_inventory,
+)
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
+from servonaut.services.accounts import UnknownAccountError
 from servonaut.utils.formatting import escape_cell
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -51,6 +63,15 @@ logger = logging.getLogger(__name__)
 # stops typing in the search field.  Keeps describe-images calls bounded.
 _AMI_SEARCH_DEBOUNCE_S = 0.4
 
+# Worker groups of the region-scoped tables (see _load_region_dependents).
+_DEPENDENT_GROUPS = (
+    "aws_create_amis",
+    "aws_create_types",
+    "aws_create_keys",
+    "aws_create_subnets",
+    "aws_create_sgs",
+)
+
 
 class AWSCreateScreen(Screen):
     """Wizard for launching a new AWS EC2 instance."""
@@ -58,6 +79,9 @@ class AWSCreateScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    # Label of the AWS account to launch in ("" = the default account).
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -86,6 +110,7 @@ class AWSCreateScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        accounts = account_registry(self.app)
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
@@ -103,6 +128,13 @@ class AWSCreateScreen(Screen):
                     classes="note",
                 ),
                 Input(placeholder="e.g. web-prod-01", id="aws_input_name"),
+
+                # Shown only when there are several AWS accounts.
+                AccountPicker(
+                    accounts.accounts("aws") if accounts is not None else [],
+                    label="Select Account",
+                    id="aws_create_account",
+                ),
 
                 Static("[bold]Select Region[/bold]", classes="section_header"),
                 Static(
@@ -178,6 +210,7 @@ class AWSCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
+        self._account = self.query_one("#aws_create_account", AccountPicker).account
 
         svc = getattr(self.app, "aws_service", None)
         if svc is None:
@@ -243,8 +276,15 @@ class AWSCreateScreen(Screen):
     # Loaders
     # ------------------------------------------------------------------
 
+    def _service(self):
+        """The chosen account's AWSService.
+
+        Raises:
+            UnknownAccountError: The account was removed in Settings.
+        """
+        return aws_service(self.app, self._account)
+
     async def _load_regions(self) -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_regions_table", DataTable)
         tbl.clear()
         self._regions = []
@@ -259,6 +299,7 @@ class AWSCreateScreen(Screen):
         except Exception:
             pass
         try:
+            svc = self._service()
             self._regions = await svc.list_regions(
                 bootstrap_region=default_region or "us-east-1"
             )
@@ -322,13 +363,13 @@ class AWSCreateScreen(Screen):
         )
 
     async def _load_amis(self, region: str, name_filter: str = "") -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_amis_table", DataTable)
         tbl.clear()
         self._amis = []
         if not region:
             return
         try:
+            svc = self._service()
             self._amis = await svc.list_amis(region, name_filter=name_filter)
             for ami in self._amis:
                 tbl.add_row(
@@ -352,13 +393,13 @@ class AWSCreateScreen(Screen):
             )
 
     async def _load_instance_types(self, region: str) -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_types_table", DataTable)
         tbl.clear()
         self._instance_types = []
         if not region:
             return
         try:
+            svc = self._service()
             self._instance_types = await svc.list_instance_types(region)
             for it in self._instance_types:
                 tbl.add_row(
@@ -382,13 +423,13 @@ class AWSCreateScreen(Screen):
             )
 
     async def _load_key_pairs(self, region: str) -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_keys_table", DataTable)
         tbl.clear()
         self._key_pairs = []
         if not region:
             return
         try:
+            svc = self._service()
             self._key_pairs = await svc.list_key_pairs(region)
             for kp in self._key_pairs:
                 tbl.add_row(
@@ -412,13 +453,13 @@ class AWSCreateScreen(Screen):
             )
 
     async def _load_subnets(self, region: str) -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_subnets_table", DataTable)
         tbl.clear()
         self._subnets = []
         if not region:
             return
         try:
+            svc = self._service()
             self._subnets = await svc.list_subnets(region)
             for sn in self._subnets:
                 tbl.add_row(
@@ -442,13 +483,13 @@ class AWSCreateScreen(Screen):
             )
 
     async def _load_security_groups(self, region: str) -> None:
-        svc = self.app.aws_service
         tbl = self.query_one("#aws_sg_table", DataTable)
         tbl.clear()
         self._security_groups = []
         if not region:
             return
         try:
+            svc = self._service()
             self._security_groups = await svc.list_security_groups(region)
             for sg in self._security_groups:
                 tbl.add_row(
@@ -475,6 +516,38 @@ class AWSCreateScreen(Screen):
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Reload everything for the newly chosen account.
+
+        Regions, AMIs, key pairs, subnets and security groups all belong to
+        an account; nothing listed for the previous one may stay selectable.
+        """
+        self._account = event.account
+        if self._ami_search_timer is not None:
+            try:
+                self._ami_search_timer.stop()
+            except Exception:
+                pass
+            self._ami_search_timer = None
+        for group in _DEPENDENT_GROUPS:
+            self.workers.cancel_group(self, group)
+        for table_id in (
+            "aws_regions_table", "aws_amis_table", "aws_types_table",
+            "aws_keys_table", "aws_subnets_table", "aws_sg_table",
+        ):
+            self.query_one(f"#{table_id}", DataTable).clear()
+        self._regions = []
+        self._amis = []
+        self._instance_types = []
+        self._key_pairs = []
+        self._subnets = []
+        self._security_groups = []
+        self.run_worker(
+            self._load_regions(),
+            exclusive=True,
+            name="aws_create_load_regions",
+        )
 
     def on_data_table_row_highlighted(
         self, event: DataTable.RowHighlighted,
@@ -641,11 +714,15 @@ class AWSCreateScreen(Screen):
         # ------ confirm modal ------
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
+        # With several accounts, say which one gets billed.
+        where = markup_escape(region)
+        if self._account and is_multi(self.app, "aws"):
+            where = f"{markup_escape(self._account)}[/bold], [bold]{where}"
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Launch EC2 Instance",
                 description=(
-                    f"Launch [bold]{markup_escape(name)}[/bold] in [bold]{markup_escape(region)}[/bold] "
+                    f"Launch [bold]{markup_escape(name)}[/bold] in [bold]{where}[/bold] "
                     f"as [bold]{markup_escape(type_name)}[/bold] with AMI [bold]{markup_escape(ami_id)}[/bold], "
                     f"key [bold]{markup_escape(key_name)}[/bold], subnet [bold]{markup_escape(subnet_id)}[/bold], "
                     f"SG [bold]{markup_escape(sg_id)}[/bold]."
@@ -664,7 +741,11 @@ class AWSCreateScreen(Screen):
         if not confirmed:
             return
 
-        svc = self.app.aws_service
+        try:
+            svc = self._service()
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return
         if svc is None:
             self.notify(
                 "AWS service is not available.",
@@ -708,18 +789,21 @@ class AWSCreateScreen(Screen):
         if audit is not None:
             try:
                 launched_ids = [i.get("id", "") for i in new_instances]
+                details = {
+                    "region": region,
+                    "ami_id": ami_id,
+                    "instance_type": type_name,
+                    "key_name": key_name,
+                    "subnet_id": subnet_id,
+                    "security_group_ids": [sg_id],
+                    "name_tag": name,
+                }
+                if self._account:
+                    details["account"] = self._account
                 audit.log_action(
                     action="run_instances",
                     target=",".join(launched_ids),
-                    details={
-                        "region": region,
-                        "ami_id": ami_id,
-                        "instance_type": type_name,
-                        "key_name": key_name,
-                        "subnet_id": subnet_id,
-                        "security_group_ids": [sg_id],
-                        "name_tag": name,
-                    },
+                    details=details,
                     confirmed=True,
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -748,12 +832,13 @@ class AWSCreateScreen(Screen):
 
         Mirrors the merge pattern used by ``HetznerCreateScreen`` —
         non-AWS rows are preserved, the AWS slice is replaced with a
-        fresh fetch.
+        fresh fetch of every AWS account (the slice holds them all, so
+        one account's rows alone would drop the others).
         """
-        svc = self.app.aws_service
-        if svc is None:
+        inventory = provider_inventory(self.app, "aws")
+        if inventory is None:
             return
-        new_aws = await svc.fetch_instances_cached(force_refresh=True)
+        new_aws = await inventory.fetch_instances_cached(force_refresh=True)
         # Keeps the real rows aside and lists them redacted in demo mode.
         replace_instances(self.app, "aws", new_aws)
 
