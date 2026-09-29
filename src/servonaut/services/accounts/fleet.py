@@ -195,7 +195,9 @@ class AccountFleet:
     async def _fetch_one(self, binding: AccountBinding, force_refresh: bool) -> List[dict]:
         rows = await binding.service.fetch_instances_cached(force_refresh=force_refresh)
         if self.multi and binding.account_id is not None and binding.ref.key not in self._account_ids:
-            self._account_ids[binding.ref.key] = await asyncio.to_thread(binding.account_id)
+            account_id = await asyncio.to_thread(binding.account_id)
+            if account_id:  # a failed lookup (expired SSO, say) is retried next time
+                self._account_ids[binding.ref.key] = account_id
         return self._tag(binding, rows or [])
 
     # ------------------------------------------------------------------
@@ -216,23 +218,34 @@ class AccountFleet:
     def _dedupe(self, rows: List[dict]) -> List[dict]:
         """Drop rows whose id an earlier account already listed.
 
-        Instance ids are unique per provider, so a repeat means the same
-        underlying account is configured twice (for example two AWS profiles
-        for one account). The first (primary-most) account keeps the row.
+        Instance ids are unique per provider, so the first (primary-most)
+        account keeps a repeated row. An account is reported as a duplicate
+        only when EVERY one of its servers was already listed: that is the
+        same account configured twice (two AWS profiles for one account).
+        Two accounts may legitimately share some servers (two OVH accounts
+        with access to one Public Cloud project), which is not reported.
         """
         seen: Dict[str, str] = {}
         kept: List[dict] = []
-        duplicates: Dict[str, str] = {}
+        repeated_from: Dict[str, str] = {}
+        rows_of: Dict[str, int] = {}
+        repeats_of: Dict[str, int] = {}
         for row in rows:
             instance_id = str(row.get("id") or "")
             owner = row.get(ACCOUNT_KEY, "")
+            rows_of[owner] = rows_of.get(owner, 0) + 1
             if instance_id and instance_id in seen:
                 if seen[instance_id] != owner:
-                    duplicates.setdefault(owner, seen[instance_id])
+                    repeats_of[owner] = repeats_of.get(owner, 0) + 1
+                    repeated_from.setdefault(owner, seen[instance_id])
                 continue
             if instance_id:
                 seen[instance_id] = owner
             kept.append(row)
+        duplicates = {
+            owner: earlier for owner, earlier in repeated_from.items()
+            if repeats_of.get(owner) == rows_of.get(owner)
+        }
         if duplicates and duplicates != self.duplicate_accounts:
             for later, earlier in duplicates.items():
                 logger.warning(

@@ -85,9 +85,21 @@ def primary_label(provider: str, provider_config) -> str:
     account keeps the provider slug and the problem is reported instead.
     """
     label = (getattr(provider_config, "label", "") or "").strip()
-    if not label or label_problem(label) is not None:
+    if not label or _primary_label_problem(provider, label) is not None:
         return provider
     return label
+
+
+def _primary_label_problem(provider: str, label: str) -> Optional[str]:
+    """Why *label* cannot name *provider*'s primary account, or None."""
+    problem = label_problem(label)
+    if problem is not None:
+        return problem
+    other = label.lower()
+    if other in PROVIDERS and other != provider:
+        # Another provider's primary account is called that by default.
+        return f"account label {label!r} is the name of another provider"
+    return None
 
 
 def account_cache_path(base_path: str, key: str) -> str:
@@ -304,7 +316,7 @@ def primary_label_problems(config: "AppConfig") -> List[str]:
     seen: Dict[str, str] = {}
     for provider, block in ((AWS, config.aws), (HETZNER, config.hetzner), (OVH, config.ovh)):
         configured = (getattr(block, "label", "") or "").strip()
-        problem = label_problem(configured) if configured else None
+        problem = _primary_label_problem(provider, configured) if configured else None
         if problem is not None:
             problems.append(
                 f"{PROVIDER_TITLES[provider]} primary account: {problem}; "

@@ -321,6 +321,7 @@ class ServonautApp(App):
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
+            self._register_demo_account_labels()
         # Keeps the real records aside and redacts what is listed in demo mode.
         self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
@@ -410,6 +411,12 @@ class ServonautApp(App):
         """
         accounts = self.accounts
         self.aws_service = accounts.default_service("aws") or self.aws_service
+        # Control-plane client factory (STS role / region pinning), CloudTrail
+        # and CloudWatch of the default AWS account.
+        default_aws = accounts.aws_services()
+        self.aws_client_factory = default_aws.client_factory
+        self.cloudtrail_service = default_aws.cloudtrail
+        self.cloudwatch_service = default_aws.cloudwatch
         self.hetzner_service = accounts.default_service("hetzner")
         self.ovh_service = accounts.default_service("ovh")
         # Object storage of the provider blocks (the primary accounts). The
@@ -476,6 +483,13 @@ class ServonautApp(App):
             return None
         return self.accounts.fleet(provider)
 
+    def _register_demo_account_labels(self) -> None:
+        """Tell demo mode which account labels are real (see RedactionService)."""
+        redaction = getattr(self, "redaction_service", None)
+        register = getattr(redaction, "register_account_labels", None)
+        if callable(register):
+            register(_configured_account_labels(self))
+
     def rebuild_accounts(self) -> None:
         """Rebuild every provider account from the saved config.
 
@@ -485,6 +499,7 @@ class ServonautApp(App):
         """
         self.accounts.rebuild(self.config_manager.get())
         self._bind_provider_aliases()
+        self._register_demo_account_labels()
         tools = getattr(self, "servonaut_tools", None)
         if tools is not None and hasattr(tools, "bind_accounts"):
             tools.bind_accounts(self.accounts)
@@ -529,10 +544,6 @@ class ServonautApp(App):
         # AWS audit logger — always constructed.
         from servonaut.services.aws_audit import AWSAuditLogger
         self.aws_audit = AWSAuditLogger(config.aws.audit_path)
-        # Shared boto3 client factory — control-plane STS role / region pinning.
-        # Backs aws_call + CloudWatch reads; defaults to the ambient credential
-        # chain when no control-plane role is configured (no behaviour change).
-        self.aws_client_factory = self.accounts.aws_client_factory()
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -548,9 +559,6 @@ class ServonautApp(App):
         self.command_history = CommandHistoryService(config.command_history_path)
         self.custom_server_service = CustomServerService(self.config_manager)
         self.log_viewer_service = LogViewerService(self.config_manager)
-        default_aws = self.accounts.aws_services()
-        self.cloudtrail_service = default_aws.cloudtrail
-        self.cloudwatch_service = default_aws.cloudwatch
         self.ip_ban_service = IPBanService(self.config_manager, accounts=self.accounts)
         from servonaut.services.memory import MemoryService
         from servonaut.services.memory.store import MemoryStore
@@ -2209,6 +2217,7 @@ class ServonautApp(App):
 
             if self.redaction_service is None:
                 self.redaction_service = RedactionService()
+            self._register_demo_account_labels()
             # The list is real while demo mode is off: it is the copy to map
             # stand-ins back to, whatever changed it since the last snapshot.
             self._instances_pristine = copy.deepcopy(self.instances)
