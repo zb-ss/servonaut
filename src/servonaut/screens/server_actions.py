@@ -30,6 +30,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 from servonaut.screens._provider_accounts import ServerAccountMixin
+from servonaut.utils.instance_resolver import display_name
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -293,8 +294,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         def field(key: str, default: str) -> str:
             return escape(str(self._instance.get(key) or default))
 
-        name = field('name', 'Unnamed')
+        name = escape(display_name(self._instance) or 'Unnamed')
         public_ip = field('public_ip', 'N/A')
+        # With several accounts of this provider, say which one it is in.
+        account_line = (
+            f"[dim]Account:[/dim] {field('account', '-')}\n"
+            if self._instance.get('account_qualified') else ""
+        )
 
         if self._instance.get('is_ovh'):
             provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
@@ -311,6 +317,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             )
             return (
                 f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
+                f"{account_line}"
                 f"[dim]ID:[/dim] {instance_id}\n"
                 f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
                 f"[dim]Public IP:[/dim] {public_ip}\n"
@@ -363,6 +370,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
         return (
             f"[bold cyan]Server: {name}[/bold cyan]\n\n"
+            f"{account_line}"
             f"[dim]Instance ID:[/dim] {instance_id}\n"
             f"[dim]Public IP:[/dim] {public_ip}\n"
             f"[dim]Private IP:[/dim] {private_ip}\n"
