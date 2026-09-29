@@ -21,6 +21,7 @@ from servonaut.screens._provider_accounts import (
     account_settings,
     ovh_services,
     registry_for,
+    show_account_labels,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
@@ -125,7 +126,9 @@ class OVHStorageScreen(Screen):
     def on_mount(self) -> None:
         self._setup_table()
         self._hide_all_forms()
-        self._account = self.query_one("#storage_account", AccountPicker).account
+        picker = self.query_one("#storage_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self.run_worker(self._load_volumes(), exclusive=True)
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:

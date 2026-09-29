@@ -36,6 +36,7 @@ from servonaut.screens._provider_accounts import (
     account_settings,
     ovh_services,
     registry_for,
+    show_account_labels,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
@@ -153,9 +154,9 @@ class OVHSSHKeysScreen(Screen):
         table = self.query_one("#ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "Fingerprint", "Public Key (first 40 chars)")
-        self._account = self.query_one(
-            "#ovh_ssh_keys_account", AccountPicker,
-        ).account
+        picker = self.query_one("#ovh_ssh_keys_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._refresh()
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
@@ -233,6 +234,7 @@ class OVHSSHKeysScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the project label and key rows for the new demo-mode state."""
+        show_account_labels(self.query_one("#ovh_ssh_keys_account", AccountPicker))
         if self._project_id:
             self._render_project_label()
         self._render_keys()

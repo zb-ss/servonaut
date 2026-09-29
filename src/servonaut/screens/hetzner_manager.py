@@ -37,6 +37,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
+    fetched_row,
     inventory,
     row_service,
 )
@@ -285,7 +286,9 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
     def _owning_service(self, inst: dict):
         """The service of the project *inst* belongs to, or None after telling why."""
         try:
-            return row_service(self.app, inst)
+            return row_service(
+                self.app, fetched_row(self._instances, self._raw_instances, inst),
+            )
         except UnknownAccountError as exc:
             self.notify(str(exc), severity="error", markup=False)
             return None

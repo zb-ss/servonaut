@@ -20,6 +20,7 @@ from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     ovh_services,
     registry_for,
+    show_account_labels,
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -132,7 +133,9 @@ class OVHIPManagementScreen(Screen):
         table = self.query_one("#ip_table", DataTable)
         table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
         table.cursor_type = "row"
-        self._account = self.query_one("#ip_mgmt_account", AccountPicker).account
+        picker = self.query_one("#ip_mgmt_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self.run_worker(self._load_ips(), exclusive=True)
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
@@ -236,6 +239,7 @@ class OVHIPManagementScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched IP blocks for the new demo-mode state."""
+        show_account_labels(self.query_one("#ip_mgmt_account", AccountPicker))
         if self._ips:
             self._populate_table()
 

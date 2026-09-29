@@ -41,10 +41,10 @@ OVH_ROWS = {
 class FakeHetzner:
     """One Hetzner project: records every call, serves canned lists."""
 
-    def __init__(self, label: str, config) -> None:
+    def __init__(self, label: str, config, rows: List[dict]) -> None:
         self.label = label
         self._config = config
-        self.rows = [dict(r) for r in HETZNER_ROWS[label]]
+        self.rows = [dict(r) for r in rows]
         self.calls: List[tuple] = []
         self.last_fetch_error: Optional[str] = None
 
@@ -94,10 +94,10 @@ class FakeHetzner:
 class FakeOVH:
     """One OVH account's API service."""
 
-    def __init__(self, label: str, config) -> None:
+    def __init__(self, label: str, config, rows: List[dict]) -> None:
         self.label = label
         self._config = config
-        self.rows = [dict(r) for r in OVH_ROWS[label]]
+        self.rows = [dict(r) for r in rows]
         self.calls: List[tuple] = []
         self.last_fetch_error: Optional[str] = None
         self.last_fetch_partial = False
@@ -175,22 +175,25 @@ def _ovh_bundle(ovh: FakeOVH) -> OVHAccountServices:
 # ---------------------------------------------------------------------------
 
 
-def _config(*, hetzner_extra: bool = True, ovh_extra: bool = True) -> AppConfig:
+def _config(
+    *, hetzner_extra: bool = True, ovh_extra: bool = True,
+    hetzner_label: str = "staging", ovh_label: str = "ca",
+) -> AppConfig:
     config = AppConfig()
     config.hetzner.enabled = True
     config.hetzner.api_token = "primary-token"
     config.hetzner.default_hetzner_ssh_key = "hetzner-key"
     if hetzner_extra:
         config.hetzner.accounts = [HetznerAccount(
-            label="staging", api_token="staging-token",
-            default_hetzner_ssh_key="staging-key",
+            label=hetzner_label, api_token="extra-token",
+            default_hetzner_ssh_key=f"{hetzner_label}-key",
         )]
     config.ovh.enabled = True
     config.ovh.application_key = "k"
     config.ovh.cloud_project_ids = ["proj-eu"]
     if ovh_extra:
         config.ovh.accounts = [OVHAccount(
-            label="ca", client_id="c", client_secret="s", cloud_project_ids=["proj-ca"],
+            label=ovh_label, client_id="c", client_secret="s", cloud_project_ids=["proj-ca"],
         )]
     return config
 
@@ -204,13 +207,15 @@ def _registry(config: AppConfig) -> Accounts:
     hetzner: Dict[str, FakeHetzner] = {}
     for ref in registry.accounts("hetzner"):
         real = registry.service("hetzner", ref.label)
-        hetzner[ref.label] = FakeHetzner(ref.label, real._config)
+        rows = HETZNER_ROWS["hetzner" if ref.primary else "staging"]
+        hetzner[ref.label] = FakeHetzner(ref.label, real._config, rows)
         registry._providers["hetzner"].services[ref.key] = hetzner[ref.label]
     ovh: Dict[str, FakeOVH] = {}
     bundles: Dict[str, OVHAccountServices] = {}
     for ref in registry.accounts("ovh"):
         real = registry.service("ovh", ref.label)
-        ovh[ref.label] = FakeOVH(ref.label, real._config)
+        rows = OVH_ROWS["ovh" if ref.primary else "ca"]
+        ovh[ref.label] = FakeOVH(ref.label, real._config, rows)
         registry._providers["ovh"].services[ref.key] = ovh[ref.label]
         bundles[ref.label] = _ovh_bundle(ovh[ref.label])
         registry._ovh_bundles[ref.key] = bundles[ref.label]
@@ -671,7 +676,8 @@ async def test_manager_refuses_a_row_of_a_removed_account(accounts, config):
         await app.push_screen(screen)
         table = screen.query_one("#hetzner_mgr_table", DataTable)
         await _wait_for(pilot, lambda: table.row_count == 2, "both projects' servers")
-        screen._instances[1]["account"] = "gone"
+        # The project was removed from the settings after the list loaded.
+        screen._raw_instances[1]["account"] = "gone"
         table.focus()
         table.move_cursor(row=1)
         await pilot.pause()
@@ -837,3 +843,100 @@ def test_onbox_ban_detects_the_firewall_of_the_servers_own_id():
     )
     assert _resolve_method({"instance_id": "web-2"}, app) == ("ufw", None)
     tools.detect_onbox_firewall.assert_awaited_once_with("22")
+
+
+# ---------------------------------------------------------------------------
+# Demo mode: drawn rows and labels are stand-ins, actions stay real
+# ---------------------------------------------------------------------------
+
+# Not a generic word, so demo mode swaps it for a stand-in.
+_NAMED = "north"
+
+
+def _demo(app) -> None:
+    from servonaut.services.redaction_service import RedactionService
+
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_manager_shows_stand_ins_and_acts_in_the_real_project():
+    from servonaut.screens.hetzner_manager import HetznerManagerScreen
+
+    config = _config(hetzner_label=_NAMED)
+    accounts = _registry(config)
+    app = Host(accounts, config)
+    _demo(app)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = HetznerManagerScreen()
+        await app.push_screen(screen)
+        table = screen.query_one("#hetzner_mgr_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 2, "both projects' servers")
+        shown = _column(screen, "hetzner_mgr_table", 1)[1]
+        assert _NAMED not in shown and "web-1" not in shown
+
+        table.focus()
+        table.move_cursor(row=1)
+        await pilot.pause()
+        screen.action_power_on()
+        await _wait_for(pilot, lambda: accounts.hetzner[_NAMED].calls, "the start")
+    assert accounts.hetzner[_NAMED].calls == [("power_on", "22")]
+    assert accounts.hetzner["hetzner"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_picker_shows_stand_ins_and_keeps_real_values():
+    from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
+
+    config = _config(hetzner_label=_NAMED)
+    accounts = _registry(config)
+    app = Host(accounts, config)
+    _demo(app)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen = HetznerSSHKeysScreen()
+        await app.push_screen(screen)
+        await pilot.pause()
+        select = screen.query_one("#hetzner_ssh_keys_account_select", Select)
+        shown = [str(prompt) for prompt, _ in select._options]
+        assert _NAMED not in shown
+        assert "hetzner" in shown  # a provider's default label is public
+        assert {value for _, value in select._options} == {"hetzner", _NAMED}
+
+        await _pick(pilot, screen, "hetzner_ssh_keys_account", _NAMED)
+        await _wait_for(
+            pilot, lambda: len(screen._keys) == 2 and screen._keys[0]["name"] == f"{_NAMED}-other",
+            "the other project's keys",
+        )
+
+        # Turning demo mode off draws the real labels again.
+        app.demo_mode = False
+        screen.refresh_after_demo_toggle()
+        assert _NAMED in [str(prompt) for prompt, _ in select._options]
+        assert select.value == _NAMED
+
+
+def test_demo_mode_per_server_screen_uses_the_real_account(accounts):
+    from servonaut.screens.ovh_snapshots import OVHSnapshotsScreen
+
+    real = _ca_row()
+    drawn = dict(real, id="fake-id", name="fake-name", account="stand-in")
+    app = SimpleNamespace(
+        accounts=accounts.registry,
+        connection_instance=lambda row: real if row is drawn else row,
+    )
+    screen = OVHSnapshotsScreen(drawn)
+    with patch.object(OVHSnapshotsScreen, "app", new_callable=PropertyMock, return_value=app):
+        assert screen._ovh_service("snapshot") is accounts.bundles["ca"].snapshot
+
+
+def test_demo_mode_finding_is_matched_against_the_real_records():
+    real = {"id": "i-0abc", "name": "web-1", "account": "prod", "account_qualified": True}
+    drawn = dict(real, id="i-fake", name="fake-name", account="stand-in")
+    app = SimpleNamespace(
+        accounts=_aws_registry(),
+        ip_ban_service=SimpleNamespace(get_configs=_ban_configs),
+        instances=[drawn],
+        connection_instance=lambda row: real if row is drawn else row,
+    )
+    assert _resolve_method({"instance_id": "i-0abc"}, app) == ("security_group", None)

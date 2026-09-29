@@ -33,6 +33,7 @@ from servonaut.screens._provider_accounts import (
     account_service,
     inventory,
     registry_for,
+    show_account_labels,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
@@ -170,9 +171,9 @@ class HetznerSSHKeysScreen(Screen):
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "ID", "Fingerprint")
-        self._account = self.query_one(
-            "#hetzner_ssh_keys_account", AccountPicker,
-        ).account
+        picker = self.query_one("#hetzner_ssh_keys_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._refresh()
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
@@ -223,6 +224,7 @@ class HetznerSSHKeysScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the key rows for the new demo-mode state."""
+        show_account_labels(self.query_one("#hetzner_ssh_keys_account", AccountPicker))
         self._render_keys()
 
     def _render_keys(self) -> None:

@@ -30,6 +30,8 @@ from servonaut.screens._provider_accounts import (
     ovh_services,
     provider_accounts,
     registry_for,
+    show_account_labels,
+    shown_label,
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -144,9 +146,9 @@ class OVHCloudCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
-        self._account = self.query_one(
-            "#cloud_create_account", AccountPicker,
-        ).account
+        picker = self.query_one("#cloud_create_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._load_account()
 
     def _load_account(self) -> None:
@@ -589,7 +591,7 @@ class OVHCloudCreateScreen(Screen):
 
         # With several accounts, say which one is billed.
         account = (
-            f" in account [bold]{escape(self._account)}[/bold]"
+            f" in account [bold]{escape(shown_label(self.app, self._account))}[/bold]"
             if len(provider_accounts(self.app, "ovh")) > 1 else ""
         )
         confirmed = await self.app.push_screen_wait(

@@ -398,12 +398,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         redacted (see ``_display_reverse_dns``). The VPS is looked up in
         the OVH account it belongs to.
         """
-        vps_service = self._ovh_service("vps")
-        if vps_service is None:
-            return
         has_real = getattr(self.app, "has_real_record", None)
         if callable(has_real) and has_real(self._instance) is False:
             return  # a stand-in with no real VPS behind it is never sent to OVH
+        vps_service = self._ovh_service("vps")
+        if vps_service is None:
+            return
         real = connection_instance(self.app, self._instance)
         vps_name = real.get('id', '')
         public_ip = real.get('public_ip', '')

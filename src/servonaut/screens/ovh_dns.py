@@ -23,6 +23,7 @@ from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     ovh_services,
     registry_for,
+    show_account_labels,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker
@@ -163,7 +164,9 @@ class OVHDNSScreen(Screen):
         self._setup_tables()
         self._hide_form()
         self._hide_rdns_form()
-        self._account = self.query_one("#dns_account", AccountPicker).account
+        picker = self.query_one("#dns_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self.run_worker(self._load_domains(), exclusive=False)
         self.run_worker(self._load_rdns(), exclusive=False)
 
@@ -254,6 +257,7 @@ class OVHDNSScreen(Screen):
 
         Open forms hold values rendered for the previous mode, so they close.
         """
+        show_account_labels(self.query_one("#dns_account", AccountPicker))
         self._hide_form()
         self._hide_rdns_form()
         with keep_cursor(self):

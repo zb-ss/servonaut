@@ -22,6 +22,7 @@ from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     ovh_services,
     registry_for,
+    show_account_labels,
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -157,7 +158,9 @@ class OVHBillingScreen(Screen):
         self._all_invoices = []
         self._invoice_page = 0
         self._setup_tables()
-        self._account = self.query_one("#billing_account", AccountPicker).account
+        picker = self.query_one("#billing_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self.run_worker(self._gate_then_load(), group=_LOAD_GROUP, exclusive=False)
 
     def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
@@ -274,6 +277,7 @@ class OVHBillingScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Remove already-rendered private values before asynchronous reloads."""
+        show_account_labels(self.query_one("#billing_account", AccountPicker))
         for selector in ("#current_usage", "#spend_history"):
             self.query_one(selector, Static).update("[dim]Loading...[/dim]")
         self._render_invoice_page()

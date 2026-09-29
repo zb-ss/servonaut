@@ -40,6 +40,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
+    fetched_row,
     inventory,
     ovh_services,
     row_ovh_services,
@@ -330,7 +331,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
     def _owning(self, resolve, inst: dict):
         """*resolve* the row's account (service or bundle), or None after telling why."""
         try:
-            return resolve(self.app, inst)
+            return resolve(self.app, fetched_row(self._instances, self._raw_instances, inst))
         except UnknownAccountError as exc:
             self.notify(str(exc), severity="error", markup=False)
             return None

@@ -45,6 +45,8 @@ from servonaut.screens._provider_accounts import (
     inventory,
     provider_accounts,
     registry_for,
+    show_account_labels,
+    shown_label,
 )
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
@@ -169,9 +171,9 @@ class HetznerCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
-        self._account = self.query_one(
-            "#hetzner_create_account", AccountPicker,
-        ).account
+        picker = self.query_one("#hetzner_create_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
 
         if inventory(self.app, "hetzner") is None:
             self.query_one(
@@ -510,7 +512,7 @@ class HetznerCreateScreen(Screen):
 
         # With several projects, say which one is billed.
         project = (
-            f" in project [bold]{escape(self._account)}[/bold]"
+            f" in project [bold]{escape(shown_label(self.app, self._account))}[/bold]"
             if len(provider_accounts(self.app, "hetzner")) > 1 else ""
         )
         confirmed = await self.app.push_screen_wait(

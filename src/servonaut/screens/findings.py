@@ -1142,7 +1142,9 @@ class FindingDetailScreen(Screen[bool]):
     def _find_finding_instance(self) -> Optional[Dict[str, Any]]:
         """Locate the finding's instance in the merged fleet list.
 
-        An instance id always wins; a name must name exactly one server.
+        The finding names the real server, so it is matched against the
+        real records (the listed rows carry stand-ins in demo mode). An
+        instance id always wins; a name must name exactly one server.
 
         Raises:
             AmbiguousInstanceError: The finding names a server by a name
@@ -1151,7 +1153,10 @@ class FindingDetailScreen(Screen[bool]):
         instance_id = str(self._finding.get("instance_id") or "")
         if not instance_id:
             return None
-        return resolve_unique(instance_id, getattr(self.app, "instances", None) or [])
+        listed = getattr(self.app, "instances", None) or []
+        return resolve_unique(
+            instance_id, [connection_instance(self.app, row) for row in listed],
+        )
 
     def _ban_configs_for(self, instance: Optional[Dict[str, Any]], configs: list) -> tuple:
         """``(configs, account)``: the IP-ban configs that shield *instance*.
@@ -1251,8 +1256,7 @@ class FindingDetailScreen(Screen[bool]):
             )
         # The server's own id: unique even when its name is shared by
         # servers of other accounts.
-        real = connection_instance(self.app, instance)
-        instance_id = str(real.get("id") or self._finding.get("instance_id") or "")
+        instance_id = str(instance.get("id") or self._finding.get("instance_id") or "")
         detected = await tools.detect_onbox_firewall(instance_id)
         if detected in ("nftables", "ufw", "firewalld"):
             return detected, None

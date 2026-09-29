@@ -9,13 +9,20 @@ Hosts that never build the account registry (tests, previews), and a
 provider the registry has no account for, keep using the app's
 single-account service attributes, exactly as these screens did before
 extra accounts existed.
+
+Demo mode redacts the rows a screen draws, account label included, so
+every account lookup starts from the real record behind a drawn row.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from textual.css.query import NoMatches
+from textual.widgets import Select
+
 from servonaut.config.accounts import PROVIDER_TITLES, AccountRef
+from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.accounts.registry import (
     AccountRegistry,
     OVHAccountServices,
@@ -29,6 +36,7 @@ __all__ = [
     "account_ref",
     "account_service",
     "account_settings",
+    "fetched_row",
     "inventory",
     "ovh_services",
     "provider_accounts",
@@ -36,6 +44,8 @@ __all__ = [
     "row_account_label",
     "row_ovh_services",
     "row_service",
+    "show_account_labels",
+    "shown_label",
 ]
 
 # The app attribute holding each provider's default-account service.
@@ -194,9 +204,8 @@ def account_settings(app: Any, provider: str, account: Optional[str] = None) -> 
 class ServerAccountMixin:
     """Per-server screens: act in the account the server belongs to.
 
-    The host screen keeps the server's row in ``_instance``. The row's
-    account tag survives demo-mode redaction, so the displayed row names
-    the same account as the real record.
+    The host screen keeps the server's row, as drawn, in ``_instance``;
+    the account is read from the real record behind it.
     """
 
     _instance: Dict[str, Any]
@@ -207,9 +216,50 @@ class ServerAccountMixin:
         None when OVH is unavailable; an account that no longer exists is
         also reported to the user.
         """
+        row = connection_instance(self.app, self._instance)  # type: ignore[attr-defined]
         try:
-            services = row_ovh_services(self.app, self._instance)  # type: ignore[attr-defined]
+            services = row_ovh_services(self.app, row)  # type: ignore[attr-defined]
         except UnknownAccountError as exc:
             self.notify(str(exc), severity="error", markup=False)  # type: ignore[attr-defined]
             return None
         return getattr(services, kind, None)
+
+
+def fetched_row(shown_rows: List[dict], fetched_rows: List[dict], row: dict) -> dict:
+    """The fetched (real) row behind *row*, one of the rows a table draws.
+
+    Provider managers draw demo-mode copies of what they fetched, in the
+    same order; the account tag of a copy is a stand-in in demo mode.
+    """
+    for shown, fetched in zip(shown_rows, fetched_rows):
+        if shown is row:
+            return fetched
+    return row
+
+
+def shown_label(app: Any, label: str) -> str:
+    """An account label as a screen may show it (a stand-in in demo mode)."""
+    redaction = getattr(app, "redaction_service", None)
+    redact = getattr(redaction, "redact_account_label", None)
+    if not label or not getattr(app, "demo_mode", False) or not callable(redact):
+        return label
+    return redact(label)
+
+
+def show_account_labels(picker: Any) -> None:
+    """Draw *picker*'s accounts as demo mode shows them.
+
+    Only the text changes: each option's value stays the real label, so
+    the chosen account and every lookup made with it are unaffected.
+    """
+    accounts = picker.accounts
+    if len(accounts) <= 1:
+        return  # hidden: nothing to draw
+    try:
+        select = picker.query_one(Select)
+    except NoMatches:
+        return
+    app = picker.app
+    with select.prevent(Select.Changed):
+        select.set_options([(shown_label(app, ref.label), ref.label) for ref in accounts])
+        select.value = picker.account
