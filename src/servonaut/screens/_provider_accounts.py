@@ -353,9 +353,14 @@ def show_account_labels(picker: Any) -> None:
 def with_account(
     app: Any, provider: str, account: Optional[str], details: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """A copy of *details* naming *account* (a real label) when it matters."""
+    """A copy of *details* naming *account* (a real label) when it matters.
+
+    It matters whenever the provider has several configured accounts, usable
+    or not: the same rule that makes a server row show ``label/name``.
+    """
     recorded = dict(details or {})
-    if account and len(provider_accounts(app, provider)) > 1:
+    registry = registry_for(app, provider)
+    if account and registry is not None and registry.is_multi(provider):
         recorded["account"] = account
     return recorded
 

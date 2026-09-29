@@ -425,16 +425,21 @@ class ServonautApp(App):
         self.aws_object_storage_service = accounts.object_storage("aws")
         self.hetzner_object_storage_service = accounts.object_storage("hetzner")
         self.ovh_object_storage_service = accounts.object_storage("ovh")
+        from servonaut.services.ovh_audit import OVHAuditLogger
+
+        # Changes in any OVH account are audited, including while the primary
+        # account cannot connect and only an extra one is in use.
+        self.ovh_audit = (
+            OVHAuditLogger(accounts.config.ovh.ovh_audit_path)
+            if accounts.accounts("ovh") else None
+        )
         if self.ovh_service is None:
             self.ovh_billing_service = None
             self.ovh_vps_service = self.ovh_dedicated_service = None
             self.ovh_cloud_service = self.ovh_ip_service = None
             self.ovh_snapshot_service = self.ovh_storage_service = None
             self.ovh_dns_service = None
-            self.ovh_audit = None
             return
-        from servonaut.services.ovh_audit import OVHAuditLogger
-
         bundle = accounts.ovh_services()
         self.ovh_billing_service = bundle.billing
         self.ovh_vps_service = bundle.vps
@@ -444,7 +449,6 @@ class ServonautApp(App):
         self.ovh_snapshot_service = bundle.snapshot
         self.ovh_storage_service = bundle.storage
         self.ovh_dns_service = bundle.dns
-        self.ovh_audit = OVHAuditLogger(self.accounts.config.ovh.ovh_audit_path)
 
     def _cached_fleet(self) -> List[dict]:
         """Every account's cached rows plus the custom servers, in table order."""
