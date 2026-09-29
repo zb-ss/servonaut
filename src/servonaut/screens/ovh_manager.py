@@ -36,7 +36,6 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from rich.markup import escape
 
-from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
 from servonaut.screens._provider_accounts import (
@@ -46,6 +45,7 @@ from servonaut.screens._provider_accounts import (
     ovh_services,
     row_ovh_services,
     row_service,
+    with_account,
 )
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
