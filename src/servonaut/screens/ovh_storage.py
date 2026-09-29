@@ -15,6 +15,7 @@ from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
+from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
@@ -401,7 +402,9 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_delete",
                         volume_id,
-                        {"name": volume_name, "project_id": project_id},
+                        with_account(self.app, "ovh", self._account, {
+                            "name": volume_name, "project_id": project_id,
+                        }),
                         confirmed=True,
                     )
                 await self._delete_volume(project_id, volume_id, volume_name)
@@ -473,11 +476,11 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_attach",
                         volume_id,
-                        {
+                        with_account(self.app, "ovh", self._account, {
                             "name": volume_name,
                             "project_id": project_id,
                             "instance_id": instance_id,
-                        },
+                        }),
                         confirmed=True,
                     )
                 await self._attach_volume(project_id, volume_id, instance_id, volume_name)
@@ -543,11 +546,11 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_detach",
                         volume_id,
-                        {
+                        with_account(self.app, "ovh", self._account, {
                             "name": volume_name,
                             "project_id": project_id,
                             "instance_id": instance_id,
-                        },
+                        }),
                         confirmed=True,
                     )
                 await self._detach_volume(project_id, volume_id, instance_id, volume_name)

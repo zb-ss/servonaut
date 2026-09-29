@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._account_audit import ServerAuditMixin
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHFirewallScreen(ServerAccountMixin, Screen):
+class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Firewall management for an OVH VPS or dedicated server IP."""
 
     BINDINGS = [
@@ -325,7 +326,7 @@ class OVHFirewallScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="firewall_toggle",
                 target=self._ip,
-                details={"enabled": new_state},
+                details=self._audit_details({"enabled": new_state}),
                 confirmed=bool(confirmed),
             )
 
@@ -413,7 +414,7 @@ class OVHFirewallScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="firewall_add_rule",
                 target=self._ip,
-                details=rule,
+                details=self._audit_details(rule),
                 confirmed=bool(confirmed),
             )
 
@@ -484,7 +485,7 @@ class OVHFirewallScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="firewall_delete_rule",
                 target=self._ip,
-                details={"sequence": sequence},
+                details=self._audit_details({"sequence": sequence}),
                 confirmed=bool(confirmed),
             )
 

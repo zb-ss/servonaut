@@ -13,6 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._account_audit import ServerAuditMixin
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -20,7 +21,7 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 
-class OVHSnapshotsScreen(ServerAccountMixin, Screen):
+class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Screen for managing snapshots of a specific OVH instance.
 
     Supports VPS snapshots, VPS automated backups, and Public Cloud snapshots
@@ -401,10 +402,10 @@ class OVHSnapshotsScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="snapshot_restore",
                 target=real_instance_id(self.app, self._instance.get("id", "")),
-                details={
+                details=self._audit_details({
                     "snapshot_id": snap.get("id", ""),
                     "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
-                },
+                }),
                 confirmed=bool(confirmed),
             )
 
@@ -472,10 +473,10 @@ class OVHSnapshotsScreen(ServerAccountMixin, Screen):
             ovh_audit.log_action(
                 action="snapshot_delete",
                 target=real_instance_id(self.app, self._instance.get("id", "")),
-                details={
+                details=self._audit_details({
                     "snapshot_id": snap.get("id", ""),
                     "snapshot_name": snap.get("name") or snap.get("id") or "snapshot",
-                },
+                }),
                 confirmed=bool(confirmed),
             )
 

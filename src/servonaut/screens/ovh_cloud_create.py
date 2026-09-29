@@ -21,6 +21,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Select, Static,
 )
 
+from servonaut.screens._account_audit import with_account
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens._provider_accounts import (
@@ -617,13 +618,13 @@ class OVHCloudCreateScreen(Screen):
             ovh_audit.log_action(
                 action="cloud_create",
                 target=self._project_id,
-                details={
+                details=with_account(self.app, "ovh", self._account, {
                     "name": name,
                     "flavor_id": flavor.get("id", ""),
                     "image_id": image.get("id", ""),
                     "region": region,
                     "ssh_key_id": ssh_key_id,
-                },
+                }),
                 confirmed=bool(confirmed),
             )
 
