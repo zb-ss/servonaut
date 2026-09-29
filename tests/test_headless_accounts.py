@@ -404,6 +404,38 @@ def test_target_falls_back_to_caches_when_every_refresh_fails(monkeypatch):
     assert _run(resolve_provider_target(registry, "hetzner", "worker")).account.label == "staging"
 
 
+@pytest.mark.parametrize("reference, account", [
+    ("worker", "staging"),         # the account is named
+    ("staging/worker", ""),        # the reference is qualified
+])
+def test_a_named_account_is_the_only_one_refreshed(hetzner_two_projects, monkeypatch,
+                                                   reference, account):
+    registry = hetzner_two_projects
+    fetched = []
+    for binding in registry.fleet("hetzner").bindings:
+        original = binding.service.fetch_instances_cached
+
+        async def counted(force_refresh=False, _label=binding.ref.label, _original=original):
+            fetched.append(_label)
+            return await _original(force_refresh=force_refresh)
+
+        monkeypatch.setattr(binding.service, "fetch_instances_cached", counted)
+    target = _run(resolve_provider_target(registry, "hetzner", reference, account))
+    assert (target.account.label, target.native_id) == ("staging", "4")
+    assert fetched == ["staging"]
+    # A bare name still refreshes every account: which one lists it is the question.
+    fetched.clear()
+    _run(resolve_provider_target(registry, "hetzner", "worker"))
+    assert sorted(fetched) == ["hetzner", "staging"]
+
+
+def test_a_named_account_that_cannot_refresh_keeps_its_cache(hetzner_two_projects):
+    registry = hetzner_two_projects
+    _failing(registry.fleet("hetzner").binding("staging").service)
+    target = _run(resolve_provider_target(registry, "hetzner", "staging/worker"))
+    assert (target.account.label, target.native_id) == ("staging", "4")
+
+
 @pytest.mark.parametrize("reference,account", [
     ("web-1", "nope"),              # unknown account
     ("custom/web-1", ""),           # custom servers have no provider account

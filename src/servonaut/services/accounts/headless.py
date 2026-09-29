@@ -475,23 +475,53 @@ class ProviderTarget:
         return self.reference
 
 
-async def _target_rows(fleet: Any) -> List[dict]:
+async def _target_rows(fleet: Any, owner: Optional[AccountRef] = None) -> List[dict]:
     """The rows a lifecycle target is looked up in.
 
     A single account keeps the cached rows, as before. With several
     accounts the inventory is read through its cache (fresh caches as they
     are, missing or stale ones fetched): a cache a mutation invalidated, or
-    one never written, must not make a server of that account unknown.
+    one never written, must not make a server of that account unknown. When
+    the call already names its account (*owner*), only that account is
+    read; the others keep their cached rows.
     """
     if fleet is None:
         return []
     if not fleet.multi:
         return _rows(fleet.get_cached_instances())
+    if owner is not None:
+        return await _owner_rows(fleet, owner)
     try:
         return _rows(await fleet.fetch_instances_cached())
     except Exception as exc:  # noqa: BLE001 - every account failed: use caches
         logger.warning("Refreshing the %s inventory failed: %s", fleet.provider, exc)
         return _rows(fleet.get_cached_instances())
+
+
+async def _owner_rows(fleet: Any, owner: AccountRef) -> List[dict]:
+    """*owner*'s servers read through its cache, the other accounts' cached."""
+    cached = _rows(fleet.get_cached_instances())
+    others = [row for row in cached if row_account_key(row) != owner.key]
+    binding = fleet.binding(owner.label)
+    if binding is None:  # configured, but it cannot connect
+        return cached
+    try:
+        own = await _read_account(binding, fleet.multi)
+    except Exception as exc:  # noqa: BLE001 - its cached rows still count
+        logger.warning("Refreshing %s failed: %s", owner.title, exc)
+        return cached
+    return others + own
+
+
+def _qualifier_account(
+    registry: AccountRegistry, provider: str, reference: str,
+) -> Optional[AccountRef]:
+    """The *provider* account an ``<account>/...`` reference names, if any."""
+    label, sep, rest = (reference or "").strip().partition("/")
+    if not (sep and label and rest):
+        return None
+    ref = registry.find_account(label)
+    return ref if ref is not None and ref.provider == provider else None
 
 
 async def resolve_provider_target(
@@ -507,7 +537,8 @@ async def resolve_provider_target(
     always wins before a qualifier is parsed (OVH Public Cloud ids contain
     ``/``). With one account, only cached rows are read and an unlisted
     reference goes to that account, as before; with several, the inventory
-    is refreshed where its cache is missing or stale, and a reference no
+    is refreshed where its cache is missing or stale (only the named
+    account's when *account* or a qualifier names one), and a reference no
     account lists is refused rather than sent to the default account.
 
     Raises:
@@ -520,7 +551,11 @@ async def resolve_provider_target(
     title = PROVIDER_TITLES.get(provider, provider)
     wanted = registry.account(provider, account) if account else None
     fleet = registry.fleet(provider)
-    every_row = await _target_rows(fleet)
+    # A bare name or id with several accounts refreshes every account: which
+    # one lists the server is exactly what is being asked.
+    every_row = await _target_rows(
+        fleet, wanted or _qualifier_account(registry, provider, reference),
+    )
 
     def in_scope(rows: List[dict]) -> List[dict]:
         if wanted is None:
