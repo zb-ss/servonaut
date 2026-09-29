@@ -792,6 +792,8 @@ class ConfigManager:
         # Validate cache TTL
         if config.cache_ttl_seconds < 0:
             warnings.append("cache_ttl_seconds is negative, should be >= 0")
+        if config.account_retry_seconds < 0:
+            warnings.append("account_retry_seconds is negative, should be >= 0")
 
         # Validate SSH port in connection profiles
         for profile in config.connection_profiles:

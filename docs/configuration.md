@@ -30,6 +30,7 @@ All configuration is stored in `~/.servonaut/config.json`. The file is created a
 | `instance_keys` | object | `{}` | Instance-specific key mappings `{instance_id: key_path}` |
 | `default_username` | string | `"ec2-user"` | Default SSH username |
 | `cache_ttl_seconds` | int | `3600` | Instance cache TTL in seconds (1 hour) |
+| `account_retry_seconds` | int | `30` | With several accounts of a provider: how long an account that failed to answer a server lookup is left alone before lookups try it again |
 | `terminal_emulator` | string | `"auto"` | Terminal preference (see [Supported Terminals](#supported-terminals)) |
 | `theme` | string | `"dark"` | UI theme: `dark` or `light` |
 | `keyword_store_path` | string | `"~/.servonaut/keywords.json"` | Path to keyword scan results file |

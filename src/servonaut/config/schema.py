@@ -1394,6 +1394,9 @@ class AppConfig:
         instance_keys: Instance-specific SSH key mappings {instance_id: key_path}
         default_username: Default SSH username (default: ec2-user)
         cache_ttl_seconds: Instance cache TTL in seconds (default: 300)
+        account_retry_seconds: With several accounts of a provider, how long
+            an account that failed to answer a server lookup is left alone
+            before it is asked again (default: 30)
         default_scan_paths: Default paths to scan on all instances
         scan_rules: List of conditional scan rules
         connection_profiles: List of SSH connection profiles
@@ -1408,6 +1411,7 @@ class AppConfig:
     instance_keys: Dict[str, str] = field(default_factory=dict)
     default_username: str = "ec2-user"
     cache_ttl_seconds: int = 3600
+    account_retry_seconds: int = 30
     default_scan_paths: List[str] = field(default_factory=lambda: ["~/"])
     scan_rules: List[ScanRule] = field(default_factory=list)
     connection_profiles: List[ConnectionProfile] = field(default_factory=list)

@@ -379,6 +379,14 @@ class InstanceDirectory:
                     known.add(row_id)
         return rows
 
+    def _retry_seconds(self) -> float:
+        """The configured wait before a failed account read is retried."""
+        from servonaut.config.schema import AppConfig
+
+        config = getattr(self._accounts(), "config", None)
+        value = getattr(config, "account_retry_seconds", AppConfig.account_retry_seconds)
+        return max(0.0, float(value))
+
     def _forget_reads(self, provider: str, inventory: Any) -> None:
         """Drop reads made for accounts that were rebuilt since."""
         for slot, read in list(self._account_reads.items()):
@@ -394,7 +402,7 @@ class InstanceDirectory:
         read = self._account_reads.get(slot)
         if read is None or not read.answers_for(inventory):
             future = asyncio.ensure_future(_read_account(binding, inventory.multi))
-            read = _AccountRead(inventory, binding, future)
+            read = _AccountRead(inventory, binding, future, self._retry_seconds())
             future.add_done_callback(partial(_read_done, provider, read))
             self._account_reads[slot] = read
         try:
@@ -462,12 +470,6 @@ class InstanceDirectory:
         return resolve_unique(needle, rows)
 
 
-# A failed read of an account without cached servers is reused this long
-# before the account is asked again, so an unreachable provider slows at
-# most one lookup per window.
-_FAILED_READ_RETRY_SECONDS = 30.0
-
-
 @dataclass
 class _AccountRead:
     """A read of one account that had no cached servers."""
@@ -476,6 +478,10 @@ class _AccountRead:
     inventory: Any
     binding: Any
     future: asyncio.Future
+    # How long a failed read is reused before the account is asked again
+    # (config ``account_retry_seconds``), so an unreachable provider slows
+    # at most one lookup per window.
+    retry_seconds: float
     # Monotonic time after which a failed read is retried.
     retry_at: float = 0.0
 
@@ -525,7 +531,7 @@ async def _read_account(binding: Any, qualified: bool) -> List[dict]:
 def _read_done(provider: str, read: _AccountRead, future: asyncio.Future) -> None:
     if future.cancelled() or future.exception() is None:
         return
-    read.retry_at = time.monotonic() + _FAILED_READ_RETRY_SECONDS
+    read.retry_at = time.monotonic() + read.retry_seconds
     title = PROVIDER_TITLES.get(provider, provider)
     logger.warning(
         "Listing %s account %r failed; its servers are left out of name "

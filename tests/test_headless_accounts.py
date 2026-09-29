@@ -224,6 +224,30 @@ def test_a_failed_read_is_retried_after_a_while(staging_unreachable):
     assert len(attempts) == 2
 
 
+def test_the_retry_window_is_the_configured_one(staging_unreachable, monkeypatch):
+    registry, attempts = staging_unreachable
+    registry.config.account_retry_seconds = 120
+    clock = [1000.0]
+    monkeypatch.setattr("servonaut.services.accounts.headless.time.monotonic", lambda: clock[0])
+    directory = _directory(registry)
+    _run(directory.find("web-1"))
+    clock[0] += 119
+    _run(directory.find("web-1"))
+    assert len(attempts) == 1
+    clock[0] += 2
+    _run(directory.find("web-1"))
+    assert len(attempts) == 2
+
+
+def test_a_zero_retry_window_asks_again_on_the_next_lookup(staging_unreachable):
+    registry, attempts = staging_unreachable
+    registry.config.account_retry_seconds = 0
+    directory = _directory(registry)
+    _run(directory.find("web-1"))
+    _run(directory.find("web-1"))
+    assert len(attempts) == 2
+
+
 def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
     registry, services = build_registry(
         monkeypatch,
