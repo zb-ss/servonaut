@@ -52,6 +52,13 @@ def account_labels(registry: Optional[AccountRegistry]) -> Dict[str, List[str]]:
     return {provider: [ref.label for ref in registry.accounts(provider)] for provider in PROVIDERS}
 
 
+def usable_providers(registry: Optional[AccountRegistry]) -> List[str]:
+    """The providers with at least one usable account, sorted."""
+    if registry is None:
+        return []
+    return sorted(provider for provider in PROVIDERS if registry.accounts(provider))
+
+
 def row_account_key(row: Mapping[str, Any]) -> str:
     """The lower-cased account label a server row is tagged with ("" if none)."""
     return str(row.get(ACCOUNT_KEY) or "").lower()

@@ -707,7 +707,7 @@ class RelayManager:
         executors = _build_executors(
             self._config_manager, accounts=getattr(self._app, "accounts", None),
         )
-        providers = _resolve_providers_configured(self._app)
+        app = self._app
         probe_bridge = self._build_probe_bridge(executors)
         return RelayListener(
             executors=executors,
@@ -732,9 +732,11 @@ class RelayManager:
             # Only a session that is really gone expires the relay; a
             # transient refresh failure leaves it authenticated.
             session_alive=lambda: auth.is_authenticated,
-            providers_configured=providers,
+            # Read on every handshake and heartbeat: accounts changed in
+            # the settings are advertised without restarting the relay.
+            providers_configured=lambda: _resolve_providers_configured(app),
             probe_bridge=probe_bridge,
-            accounts=_resolve_account_labels(self._app),
+            accounts=lambda: _resolve_account_labels(app),
         )
 
     def _build_probe_bridge(self, executors):
