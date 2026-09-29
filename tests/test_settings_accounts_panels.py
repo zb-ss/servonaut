@@ -404,7 +404,8 @@ class TestAwsAccountsDemoMode:
             text = _screen_text(app).lower()
             assert "northwind" not in text and "contoso" not in text
             rows = _table_rows(app.panel, "aws")
-            assert rows[1][0] == app.redaction_service.redact_name("contoso")
+            assert rows[1][0] == app.redaction_service.redact_account_label("contoso")
+            assert rows[1][2] == app.redaction_service.redact_name("contoso-ops")
 
     async def test_editing_and_profile_listing_are_refused(self, tmp_path, monkeypatch) -> None:
         _profiles(monkeypatch, ["fabrikam"])

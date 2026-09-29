@@ -439,12 +439,11 @@ class HetznerPanel(SettingsPanel):
         )
 
         self.app.config_manager.update(hetzner=new_hetzner)
-        # Extra projects inherit these defaults, and the switch decides
-        # whether Hetzner is listed at all.
+        # Extra projects inherit these defaults, the switch decides whether
+        # Hetzner is listed at all, and the reload rebuilds Object Storage.
         if rebuild_accounts(self.app) and new_hetzner.enabled != existing.enabled:
             refresh_provider_fleet(self.app, "hetzner")
         self.query_one(HetznerAccountsSection).refresh_accounts()
-        self._rebuild_object_storage()
         self._update_status_label(new_hetzner)
         self._finish_save("Hetzner settings saved")
 
@@ -502,21 +501,3 @@ class HetznerPanel(SettingsPanel):
                 severity="error",
                 markup=False,
             )
-
-    def _rebuild_object_storage(self) -> None:
-        """Rebuild and reassign the Hetzner Object Storage service after save.
-
-        Mirrors the side-effect performed in the legacy settings screen
-        (``settings.py:2025-2038``) so live sessions pick up credential
-        changes without a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-
-            refreshed_config = self.app.config_manager.get()
-            _aws, hetzner_svc, _ovh = build_object_storage_services(refreshed_config)
-            self.app.hetzner_object_storage_service = hetzner_svc
-        except Exception as exc:
-            logger.warning("Could not rebuild Hetzner Object Storage service: %s", exc)

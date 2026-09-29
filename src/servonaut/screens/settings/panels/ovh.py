@@ -398,15 +398,12 @@ class OvhPanel(SettingsPanel):
         )
 
         self.app.config_manager.update(ovh=new_ovh)
-        # Extra accounts inherit these defaults, and the switch decides
-        # whether OVHcloud is listed at all.
+        # Extra accounts inherit these defaults, the switch decides whether
+        # OVHcloud is listed at all, and the reload rebuilds Object Storage
+        # so new credentials take effect without a restart.
         if rebuild_accounts(self.app) and new_ovh.enabled != existing_ovh.enabled:
             refresh_provider_fleet(self.app, "ovh")
         self.query_one(OvhAccountsSection).refresh_accounts()
-
-        # Rebuild OVH object storage service after saving so the new
-        # credentials take effect without a restart.
-        self._rebuild_ovh_object_storage()
 
         self._set_status(new_ovh)
         self._finish_save("OVHcloud settings saved")
@@ -458,21 +455,3 @@ class OvhPanel(SettingsPanel):
         from servonaut.screens.ovh_setup import OVHSetupScreen
 
         self.app.push_screen(OVHSetupScreen())
-
-    def _rebuild_ovh_object_storage(self) -> None:
-        """Rebuild the OVH object storage service on the app after saving.
-
-        Mirrors the side-effect in the legacy settings save path
-        (settings.py:2025-2038) so the new credentials are live
-        immediately without a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-
-            config = self.app.config_manager.get()
-            _aws, _hetzner, ovh_oss = build_object_storage_services(config)
-            self.app.ovh_object_storage_service = ovh_oss
-        except Exception as exc:
-            logger.warning("Could not rebuild OVH object storage service: %s", exc)

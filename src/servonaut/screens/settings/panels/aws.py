@@ -12,10 +12,9 @@ Covers all fields of :class:`~servonaut.config.schema.AWSConfig`:
 - Accounts: the primary account's label, profile and regions, and the extra
   accounts (named profiles), saved per account (see ``aws_accounts.py``)
 
-On save the panel replicates the legacy S3-rebuild side-effect: it calls
-``build_object_storage_services`` and reassigns the three object-storage
-service attributes on the app so newly saved credentials take effect without
-an app restart.
+On save the panel reloads the provider accounts (``app.rebuild_accounts``),
+which also rebuilds the object-storage services, so newly saved credentials
+take effect without an app restart.
 """
 
 from __future__ import annotations
@@ -385,36 +384,15 @@ class AwsPanel(SettingsPanel):
             control_plane_mutate_role_arns=fields["mutate_arns"],
         )
         self.app.config_manager.update(aws=new_aws)
-        # Every account's services are built from these settings.
+        # Every account's services, S3 included, are built from these settings.
         rebuild_accounts(self.app)
         self.query_one(AwsAccountsSection).refresh_accounts()
-
-        self._rebuild_s3_services()
         self._update_status_label(new_aws)
         self._finish_save("AWS settings saved")
 
     # ------------------------------------------------------------------
     # Side-effect helpers
     # ------------------------------------------------------------------
-
-    def _rebuild_s3_services(self) -> None:
-        """Rebuild object-storage services after save so credentials take effect.
-
-        Mirrors the legacy side-effect at settings.py:2022-2034 so the user
-        does not need to restart the app for new S3 credentials to apply.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-            refreshed = self.app.config_manager.get()
-            (
-                self.app.aws_object_storage_service,
-                self.app.hetzner_object_storage_service,
-                self.app.ovh_object_storage_service,
-            ) = build_object_storage_services(refreshed)
-        except Exception as exc:
-            logger.warning("S3 service rebuild after AWS settings save failed: %s", exc)
 
     def _update_status_label(self, aws_config: Any) -> None:
         """Update the status label based on the provided AWS config."""

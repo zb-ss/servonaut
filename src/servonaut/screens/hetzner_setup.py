@@ -871,9 +871,9 @@ class HetznerSetupScreen(Screen):
             )
             return
 
-        self._rebuild_object_storage(config)
-        # Every surface moves to the saved projects together (disabling
-        # included: the Hetzner services then go away).
+        # Every surface moves to the saved projects together, Object Storage
+        # included (so the sidebar's S3 entry appears at once); disabling
+        # makes the Hetzner services go away.
         rebuild_accounts(self.app)
 
         if enable:
@@ -898,24 +898,6 @@ class HetznerSetupScreen(Screen):
             )
             logger.info("Hetzner configuration saved: enabled=False")
             self.action_back()
-
-    def _rebuild_object_storage(self, config) -> None:
-        """Make freshly saved Object Storage keys live at once.
-
-        The sidebar's nav_hetzner_s3 button gates on the service being
-        non-None — without this rebuild it stays hidden until a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-            (
-                self.app.aws_object_storage_service,
-                self.app.hetzner_object_storage_service,
-                self.app.ovh_object_storage_service,
-            ) = build_object_storage_services(config)
-        except Exception as exc:
-            logger.warning("S3 service rebuild after Hetzner save failed: %s", exc)
 
     def _hetzner_inventory(self):
         """Every Hetzner project as one inventory; None when none is usable."""

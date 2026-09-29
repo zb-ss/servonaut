@@ -123,7 +123,17 @@ class TestShownText:
             "account 'contoso' is not available",
         )
         assert "northwind" not in text.lower() and "contoso" not in text.lower()
-        assert text.startswith(f"{redaction.redact_name('northwind')}: profile ")
+        # The same stand-ins the server list uses for accounts and names.
+        assert text.startswith(
+            f"{redaction.redact_account_label('northwind')}: profile "
+            f"{redaction.redact_name('northwind-admin')} failed; "
+        )
+        assert f"'{redaction.redact_account_label('Contoso')}'" in text
+
+    def test_environment_words_stay_in_demo_mode(self) -> None:
+        # "prod" and "staging" identify nobody (see redact_account_label).
+        assert rules.shown_label(RedactionService(), "prod") == "prod"
+        assert rules.shown_label(RedactionService(), "hetzner") == "hetzner"
 
     def test_provider_names_stay(self) -> None:
         text = rules.shown_text(RedactionService(), _config(), "AWS account 'aws' is fine")

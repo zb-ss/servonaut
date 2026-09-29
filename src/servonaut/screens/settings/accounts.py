@@ -154,19 +154,23 @@ def demo_redaction(app: Any) -> Any:
 def shown_label(redaction: Any, label: str) -> str:
     """*label* as the screen shows it: a stand-in in demo mode.
 
-    A label that is a provider name (the default label of a primary
-    account) is public taxonomy and stays.
+    The same stand-in the server list shows for the account, so a label
+    reads the same on every screen. Provider names (the default labels of
+    primary accounts) are public taxonomy and stay.
     """
-    if redaction is None or not label or label.lower() in PROVIDERS:
+    if redaction is None or not label:
         return label
-    return redaction.redact_name(label)
+    redact = getattr(redaction, "redact_account_label", None)
+    if callable(redact):
+        return redact(label)
+    return label if label.lower() in PROVIDERS else redaction.redact_name(label)
 
 
 def shown_profile(redaction: Any, profile: str) -> str:
     """An AWS profile name as the screen shows it (a stand-in in demo mode)."""
     if redaction is None or not profile:
         return profile
-    return redaction.redact_identifier(profile)
+    return redaction.redact_name(profile)
 
 
 def shown_text(redaction: Any, config: Any, text: str) -> str:

@@ -860,9 +860,9 @@ class OVHSetupScreen(Screen):
             logger.error("Failed to save OVH config: %s", e)
             self.app.notify("Failed to save OVH configuration. Check logs for details.", severity="error")
             return
-        self._rebuild_object_storage(config)
-        # Every surface moves to the saved accounts together (disabling
-        # included: the OVH services then go away).
+        # Every surface moves to the saved accounts together, Object Storage
+        # included (so the sidebar's S3 entry appears at once); disabling
+        # makes the OVH services go away.
         rebuild_accounts(self.app)
         if enable:
             self.app.notify("OVH configuration saved.", severity="information")
@@ -876,24 +876,6 @@ class OVHSetupScreen(Screen):
             self.app.notify("OVH disabled and settings saved.", severity="information")
             logger.info("OVH configuration saved: enabled=False")
             self.action_back()
-
-    def _rebuild_object_storage(self, config) -> None:
-        """Make freshly saved Object Storage keys live at once.
-
-        The sidebar's nav_ovh_s3 gates on the service being non-None —
-        without this rebuild the button stays hidden until a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-            (
-                self.app.aws_object_storage_service,
-                self.app.hetzner_object_storage_service,
-                self.app.ovh_object_storage_service,
-            ) = build_object_storage_services(config)
-        except Exception as exc:
-            logger.warning("S3 service rebuild after OVH save failed: %s", exc)
 
     def _ovh_inventory(self):
         """Every OVH account as one inventory; None when none is usable."""
