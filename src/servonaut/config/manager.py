@@ -18,16 +18,19 @@ import stat
 from .schema import (
     AIProviderConfig,
     AppConfig,
+    AWSAccount,
     AWSConfig,
     AzureConfig,
     CustomServer,
     DBProfile,
     GCPConfig,
+    HetznerAccount,
     HetznerConfig,
     IPBanConfig,
     MCPConfig,
     MemoryConfig,
     ObjectStorageConfig,
+    OVHAccount,
     OVHConfig,
     RelayConfig,
     ScanRule,
@@ -69,6 +72,36 @@ def _coerce(cls: type, data: Any, label: str) -> Any:
         logger.warning("Ignoring unknown %s config keys: %s", label, sorted(unknown))
         data = {k: v for k, v in data.items() if k in valid}
     return cls(**data)
+
+
+def _coerce_provider(cls: type, data: Any, label: str, account_cls: type) -> Any:
+    """Build a provider config block whose ``accounts`` list holds dataclasses.
+
+    The block and each extra account may carry an ``object_storage`` dict;
+    both are converted before the dataclass is built. A malformed account
+    entry (not a dict) is dropped with a warning rather than failing the
+    whole load, for the same reason ``_coerce`` drops unknown keys.
+    """
+    raw = dict(data or {})
+    if 'object_storage' in raw:
+        raw['object_storage'] = _coerce(
+            ObjectStorageConfig, raw['object_storage'], f'{label}.object_storage'
+        )
+    accounts = []
+    for index, entry in enumerate(raw.get('accounts') or []):
+        if not isinstance(entry, dict):
+            logger.warning("Ignoring malformed %s.accounts[%d] entry", label, index)
+            continue
+        entry = dict(entry)
+        if 'object_storage' in entry:
+            entry['object_storage'] = _coerce(
+                ObjectStorageConfig, entry['object_storage'],
+                f'{label}.accounts[{index}].object_storage',
+            )
+        accounts.append(_coerce(account_cls, entry, f'{label}.accounts[{index}]'))
+    if 'accounts' in raw:
+        raw['accounts'] = accounts
+    return _coerce(cls, raw, label)
 
 
 CONFIG_DIR = Path.home() / '.servonaut'
@@ -862,29 +895,13 @@ class ConfigManager:
         mcp = _coerce(MCPConfig, raw_data.get('mcp', {}), 'mcp')
         relay = _coerce(RelayConfig, raw_data.get('relay', {}), 'relay')
 
-        # Coerce nested object_storage blocks BEFORE coercing the parent so
-        # _coerce(OVHConfig/HetznerConfig) receives a dict with the sub-field
-        # already converted to a dataclass instance.
-        raw_ovh = dict(raw_data.get('ovh', {}))
-        if 'object_storage' in raw_ovh:
-            raw_ovh['object_storage'] = _coerce(
-                ObjectStorageConfig, raw_ovh['object_storage'], 'ovh.object_storage'
-            )
-        ovh = _coerce(OVHConfig, raw_ovh, 'ovh')
-
-        raw_hetzner = dict(raw_data.get('hetzner', {}))
-        if 'object_storage' in raw_hetzner:
-            raw_hetzner['object_storage'] = _coerce(
-                ObjectStorageConfig, raw_hetzner['object_storage'], 'hetzner.object_storage'
-            )
-        hetzner = _coerce(HetznerConfig, raw_hetzner, 'hetzner')
-
-        raw_aws = dict(raw_data.get('aws', {}))
-        if 'object_storage' in raw_aws:
-            raw_aws['object_storage'] = _coerce(
-                ObjectStorageConfig, raw_aws['object_storage'], 'aws.object_storage'
-            )
-        aws = _coerce(AWSConfig, raw_aws, 'aws')
+        # Nested object_storage blocks and extra-account lists are converted
+        # before the provider dataclass is built.
+        ovh = _coerce_provider(OVHConfig, raw_data.get('ovh', {}), 'ovh', OVHAccount)
+        hetzner = _coerce_provider(
+            HetznerConfig, raw_data.get('hetzner', {}), 'hetzner', HetznerAccount
+        )
+        aws = _coerce_provider(AWSConfig, raw_data.get('aws', {}), 'aws', AWSAccount)
 
         gcp = _coerce(GCPConfig, raw_data.get('gcp', {}), 'gcp')
         azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
