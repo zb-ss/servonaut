@@ -385,13 +385,14 @@ class FakeOVHService:
     built: List[Dict[str, str]] = []
     succeed = True
 
-    def __init__(self, config, cache_path=None) -> None:
+    def __init__(self, config, cache_path=None, allow_ambient_config=True) -> None:
         FakeOVHService.built.append({
             "application_key": config.application_key,
             "consumer_key": config.consumer_key,
             "client_id": config.client_id,
             "client_secret": config.client_secret,
             "endpoint": config.endpoint,
+            "allow_ambient_config": allow_ambient_config,
         })
 
     async def test_connection(self) -> dict:
@@ -452,6 +453,8 @@ class TestOvhAddAccount:
             screen.query_one("#btn_ovh_save", Button).press()
             await _settle(pilot)
             assert ovh_service.built[-1]["application_key"] == "ak-a"
+            # An extra account is tested with its own credentials only.
+            assert ovh_service.built[-1]["allow_ambient_config"] is False
             assert ovh_service.built[-1]["client_id"] == ""
             assert app.rebuilds == 1 and app.inventory.fetches == 1
             assert not isinstance(app.screen, OVHSetupScreen)

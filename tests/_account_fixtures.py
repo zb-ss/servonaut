@@ -106,7 +106,7 @@ def build_registry(
         services[("hetzner", label)] = service
         return service
 
-    def fake_ovh(effective, cache_path=None):
+    def fake_ovh(effective, cache_path=None, allow_ambient_config=True):
         label = effective.label or "ovh"
         service = FakeProvider("ovh", label, (ovh or {}).get(label, ()), effective)
         services[("ovh", label)] = service
