@@ -406,6 +406,10 @@ class AccountsSection(Vertical):
     HELP: str = ""
     COLUMNS: Tuple[str, ...] = ("Label",)
 
+    # Unscoped: the narrow-terminal rule below starts from the Settings
+    # screen's -narrow class. Every rule here names AccountsSection itself.
+    SCOPED_CSS = False
+
     DEFAULT_CSS = """
     AccountsSection {
         height: auto;
@@ -435,6 +439,18 @@ class AccountsSection(Vertical):
     AccountsSection .accounts-actions Button {
         width: auto;
         margin: 0 1 0 0;
+    }
+    /* A narrow panel cannot hold every action in one row: two per row,
+       each column as wide as its longest label so no label is cut. */
+    SettingsScreen.-narrow AccountsSection .accounts-actions {
+        layout: grid;
+        grid-size: 2;
+        grid-columns: auto 1fr;
+        grid-rows: auto;
+        grid-gutter: 0 1;
+    }
+    SettingsScreen.-narrow AccountsSection .accounts-actions Button {
+        margin: 0;
     }
     """
 
