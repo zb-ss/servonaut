@@ -29,6 +29,17 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Account / profile widgets ----
         "account_info",         # Reason: Static label; inherits global Static styling
         "account_info_header",  # Reason: Static header; inherits global Static styling
+        # ---- Provider account pickers ----
+        # AccountPicker styles itself through its DEFAULT_CSS and is hidden
+        # unless the provider has several accounts.
+        "billing_account",
+        "cloud_create_account",
+        "dns_account",
+        "hetzner_create_account",
+        "hetzner_ssh_keys_account",
+        "ip_mgmt_account",
+        "ovh_ssh_keys_account",
+        "storage_account",
         # ---- Add-rule / add-path inline forms ----
         "add_rule_title",       # Reason: Static title inside inline form; no special styling needed
         # ---- AI screens — empty-state, fallback, picker, topup modals ----

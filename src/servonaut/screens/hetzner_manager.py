@@ -15,9 +15,10 @@ Hetzner instances and their lifecycle actions:
 Design intent: ``InstanceListScreen`` stays the unified "search and
 SSH" surface across every provider. This screen is the per-provider
 admin home — the place an operator goes to manage Hetzner inventory.
-The two screens share no state; this one re-fetches via
-``HetznerService.fetch_instances_cached`` so it always reflects fresh
-truth even when the unified table's cache is stale.
+The two screens share no state; this one re-fetches every Hetzner
+project through the provider inventory so it always reflects fresh
+truth even when the unified table's cache is stale. Each lifecycle
+action goes to the project the server belongs to.
 """
 
 from __future__ import annotations
@@ -34,7 +35,14 @@ from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    fetched_row,
+    inventory,
+    row_service,
+)
 from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -180,8 +188,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
     def _refresh(self) -> None:
         if self._loading:
             return
-        svc = getattr(self.app, "hetzner_service", None)
-        if svc is None:
+        if inventory(self.app, "hetzner") is None:
             self._set_status(
                 "[red]Hetzner Cloud is not configured. "
                 "Visit Settings → Hetzner Cloud to set up a token.[/red]"
@@ -196,7 +203,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         )
 
     async def _load_instances(self) -> None:
-        svc = self.app.hetzner_service
+        # Every project at once: the table lists all of them.
+        svc = inventory(self.app, "hetzner")
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
             # Keep the fetched rows untouched; what the table draws is
@@ -213,6 +221,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             else:
                 self._set_status(
                     f"[dim]{n} server{'s' if n != 1 else ''}.[/dim]"
+                    + self._project_errors(svc)
                 )
         except Exception as exc:
             logger.error("Failed to load Hetzner servers: %s", exc)
@@ -231,7 +240,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         for idx, inst in enumerate(self._instances, start=1):
             table.add_row(
                 str(idx),
-                str(inst.get("name", "")),
+                display_name(inst),
                 str(inst.get("id", "")),
                 str(inst.get("type", "")),
                 self._colorize_state(str(inst.get("state", ""))),
@@ -274,14 +283,38 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         shown = str(inst.get("id") or "")
         return getattr(self, "_api_ids", {}).get(shown, shown)
 
+    def _owning_service(self, inst: dict):
+        """The service of the project *inst* belongs to, or None after telling why."""
+        try:
+            return row_service(
+                self.app, fetched_row(self._instances, self._raw_instances, inst),
+            )
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
+
     @staticmethod
     def _row_label(inst: dict) -> str:
         """What to call a row's server: its name, else the id the table shows.
 
+        The name is project-qualified when several projects are listed.
         The fallback is the row's id, never the API id: in demo mode the row
         carries a placeholder and the real id stays off the screen.
         """
-        return str(inst.get("name") or inst.get("id") or "")
+        return display_name(inst) or str(inst.get("id") or "")
+
+    def _project_errors(self, svc) -> str:
+        """Status suffix naming projects whose servers could not be refreshed.
+
+        Only several projects are reported here: one failing project among
+        others still lists theirs, so the table alone would not show it.
+        """
+        error = getattr(svc, "last_fetch_error", None)
+        if not getattr(svc, "multi", False) or not isinstance(error, str) or not error:
+            return ""
+        if self.app.demo_mode and self.app.redaction_service:
+            error = self.app.redaction_service.scrub_stream(error)
+        return f"\n[yellow]⚠ {escape(error)}[/yellow]"
 
     def _display_id(self, api_id: str) -> str:
         """An API id as the table shows it (a placeholder in demo mode)."""
@@ -344,7 +377,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         self._refresh()
 
     def action_new(self) -> None:
-        if getattr(self.app, "hetzner_service", None) is None:
+        if inventory(self.app, "hetzner") is None:
             self.notify(
                 "Hetzner is not configured. Visit Settings → Hetzner Cloud.",
                 severity="warning", markup=False,
@@ -397,6 +430,9 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
+        svc = self._owning_service(inst)
+        if svc is None:
+            return
         self.run_worker(
             confirm_and_run_power_action(
                 self.app,
@@ -405,16 +441,15 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
                 provider="Hetzner Cloud",
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
-                run=lambda: self._do_lifecycle(method, identifier, done_verb),
+                run=lambda: self._do_lifecycle(svc, method, identifier, done_verb),
             ),
             exclusive=False,
             name=f"hetzner_mgr_{method}",
         )
 
     async def _do_lifecycle(
-        self, method: str, identifier: str, done_verb: str,
+        self, svc, method: str, identifier: str, done_verb: str,
     ) -> None:
-        svc = self.app.hetzner_service
         try:
             await getattr(svc, method)(identifier)
         except Exception as exc:
@@ -442,6 +477,9 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
     async def _do_delete(self, inst: dict) -> None:
         identifier = self._api_id(inst) or str(inst.get("name") or "")
         label = self._row_label(inst)
+        svc = self._owning_service(inst)
+        if svc is None:
+            return
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
@@ -465,7 +503,6 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             return
 
         self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
-        svc = self.app.hetzner_service
         try:
             await svc.delete_server(identifier)
         except Exception as exc:

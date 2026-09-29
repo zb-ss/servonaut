@@ -138,6 +138,38 @@ HETZNER_ROWS: List[dict] = [
     },
 ]
 
+# A second Hetzner project; its "cache-1" shares a name with the first one's.
+HETZNER_ARCHIVE_ROWS: List[dict] = [
+    {
+        "id": "4200002",
+        "name": "cache-1",
+        "type": "cx23",
+        "state": "running",
+        "public_ip": "9.9.9.12",
+        "private_ip": "",
+        "region": "nbg1",
+        "key_name": "",
+        "provider": "hetzner",
+        "is_hetzner": True,
+        "username": "root",
+        "ssh_key": "",
+    },
+    {
+        "id": "4200003",
+        "name": "worker-1",
+        "type": "cx33",
+        "state": "stopped",
+        "public_ip": "",
+        "private_ip": "10.0.4.10",
+        "region": "nbg1",
+        "key_name": "",
+        "provider": "hetzner",
+        "is_hetzner": True,
+        "username": "root",
+        "ssh_key": "",
+    },
+]
+
 # The server whose memory is seeded, and the one the per-server screens open.
 FOCUS_SERVER = AWS_ROWS[0]
 
@@ -306,6 +338,31 @@ class SnapshotApp(ServonautApp):
         return super().provider_inventory(provider)
 
 
+class MultiAccountSnapshotApp(SnapshotApp):
+    """The same fleet with a second Hetzner project ("archive")."""
+
+    def _init_services(self) -> None:
+        from servonaut.config.accounts import AccountRef
+        from servonaut.services.accounts import AccountBinding, AccountFleet
+
+        super()._init_services()
+        self._hetzner_projects = AccountFleet("hetzner", [
+            AccountBinding(AccountRef("hetzner", "hetzner", True), self.hetzner_service),
+            AccountBinding(
+                AccountRef("hetzner", "archive", False),
+                StaticProviderService(HETZNER_ARCHIVE_ROWS),
+            ),
+        ])
+
+    def provider_inventory(self, provider: str):
+        if provider == "hetzner":
+            return self._hetzner_projects
+        return super().provider_inventory(provider)
+
+
+MULTI_ACCOUNT_FLEET_SIZE = len(FLEET_NAMES) + len(HETZNER_ARCHIVE_ROWS)
+
+
 # ---------------------------------------------------------------------------
 # Driving
 # ---------------------------------------------------------------------------
@@ -359,13 +416,14 @@ async def settle_focus(pilot: Any) -> None:
     await pilot.pause()
 
 
-async def wait_for_fleet(pilot: Any) -> None:
-    """Wait until the fleet table lists every seeded server."""
+async def wait_for_fleet(pilot: Any, rows: Optional[int] = None) -> None:
+    """Wait until the fleet table lists every seeded server (or *rows* rows)."""
     from servonaut.widgets.instance_table import InstanceTable
 
     await wait_for_screen(pilot, "InstanceListScreen")
     table = pilot.app.screen.query_one(InstanceTable)
-    await wait_until(pilot, lambda: table.row_count == len(FLEET_NAMES), "the fleet table")
+    expected = len(FLEET_NAMES) if rows is None else rows
+    await wait_until(pilot, lambda: table.row_count == expected, "the fleet table")
 
 
 async def select_fleet_row(pilot: Any, name: str) -> None:

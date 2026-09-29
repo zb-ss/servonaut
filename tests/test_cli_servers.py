@@ -201,8 +201,7 @@ class TestNotLoggedIn:
         svc = _make_services(authenticated=False)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService"), \
-             patch("servonaut.cli.servers.CacheService"):
+        with patch("servonaut.cli.servers._load_all_instances", return_value=[]):
             rc = handle_servers_command(_ns())
 
         assert rc == _EXIT_FATAL
@@ -234,12 +233,11 @@ class TestPersonalProbeVerified:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"), \
+        with patch("servonaut.cli.servers._load_all_instances") as load_all, \
              patch("servonaut.cli.servers.BwResolver") as MockBwR, \
              patch("servonaut.cli.servers.ephemeral_ssh_key") as mock_ek, \
              patch("servonaut.cli.servers._run_ssh_probe", return_value=0):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+            load_all.return_value = [_PERSONAL_INSTANCE]
             MockBwR.return_value.resolve_ssh_key.return_value = "PRIVATE_KEY"
             # ephemeral_ssh_key is a context manager — make it yield a fake path.
             mock_ek.return_value.__enter__ = MagicMock(return_value="/tmp/fake.pem")
@@ -272,16 +270,13 @@ class TestProbePort:
 
     def _probe_port(self, monkeypatch, **ns_overrides):
         svc = _make_services(personal_ref=_PERSONAL_REF)
-        _, _, _, _, _, custom_svc = svc
-        custom_svc.list_as_instances.return_value = [self.CUSTOM]
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"), \
+        with patch("servonaut.cli.servers._load_all_instances") as load_all, \
              patch("servonaut.cli.servers.BwResolver") as MockBwR, \
              patch("servonaut.cli.servers.ephemeral_ssh_key") as mock_ek, \
              patch("servonaut.cli.servers._run_ssh_probe", return_value=0) as probe:
-            MockAws.return_value._cache.load_any.return_value = []
+            load_all.return_value = [self.CUSTOM]
             MockBwR.return_value.resolve_ssh_key.return_value = "PRIVATE_KEY"
             mock_ek.return_value.__enter__ = MagicMock(return_value="/tmp/fake.pem")
             mock_ek.return_value.__exit__ = MagicMock(return_value=False)
@@ -313,9 +308,8 @@ class TestPersonalProbeNotFound:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+        with patch("servonaut.cli.servers._load_all_instances") as load_all:
+            load_all.return_value = [_PERSONAL_INSTANCE]
             with patch("servonaut.cli.servers.BwResolver") as MockBwR:
                 MockBwR.return_value.resolve_ssh_key.side_effect = BwItemNotFoundError(
                     "Not found."
@@ -343,9 +337,8 @@ class TestPersonalProbeAuthFailed:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+        with patch("servonaut.cli.servers._load_all_instances") as load_all:
+            load_all.return_value = [_PERSONAL_INSTANCE]
             with patch("servonaut.cli.servers.BwResolver") as MockBwR, \
                  patch("servonaut.cli.servers._run_ssh_probe", return_value=255):
                 MockBwR.return_value.resolve_ssh_key.return_value = "PRIVATE_KEY"
@@ -389,9 +382,8 @@ class TestBwCliMissing:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+        with patch("servonaut.cli.servers._load_all_instances") as load_all:
+            load_all.return_value = [_PERSONAL_INSTANCE]
             with patch("servonaut.cli.servers.BwResolver") as MockBwR:
                 MockBwR.return_value.resolve_ssh_key.side_effect = BwCliMissingError(
                     "bw not found"
@@ -418,9 +410,8 @@ class TestBwSessionMissing:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+        with patch("servonaut.cli.servers._load_all_instances") as load_all:
+            load_all.return_value = [_PERSONAL_INSTANCE]
             with patch("servonaut.cli.servers.BwResolver") as MockBwR:
                 MockBwR.return_value.resolve_ssh_key.side_effect = BwSessionMissingError(
                     "Vault is locked. Run `bw unlock`."
@@ -446,10 +437,9 @@ class TestNoRefStored:
         svc = _make_services(personal_ref=None)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"), \
+        with patch("servonaut.cli.servers._load_all_instances") as load_all, \
              patch("servonaut.cli.servers.BwResolver"):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+            load_all.return_value = [_PERSONAL_INSTANCE]
             rc = handle_servers_command(_ns())
 
         assert rc == _EXIT_FATAL
@@ -483,10 +473,9 @@ class TestTeamProbe:
         )
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"):
+        with patch("servonaut.cli.servers._load_all_instances") as load_all:
             # No instance in cache matching the UUID
-            MockAws.return_value.get_cached_instances.return_value = []
+            load_all.return_value = []
             with patch("servonaut.cli.servers.BwResolver") as MockBwR, \
                  patch("servonaut.cli.servers._run_ssh_probe", return_value=0):
                 MockBwR.return_value.resolve_ssh_key.return_value = "PRIVATE_KEY"
@@ -556,11 +545,10 @@ class TestCheckedByClient:
         svc = _make_services(personal_ref=_PERSONAL_REF)
         _patch_init(monkeypatch, svc)
 
-        with patch("servonaut.cli.servers.AWSService") as MockAws, \
-             patch("servonaut.cli.servers.CacheService"), \
+        with patch("servonaut.cli.servers._load_all_instances") as load_all, \
              patch("servonaut.cli.servers.BwResolver") as MockBwR, \
              patch("servonaut.cli.servers._run_ssh_probe", return_value=0):
-            MockAws.return_value.get_cached_instances.return_value = [_PERSONAL_INSTANCE]
+            load_all.return_value = [_PERSONAL_INSTANCE]
             MockBwR.return_value.resolve_ssh_key.return_value = "PRIVATE_KEY"
             handle_servers_command(_ns())
 
