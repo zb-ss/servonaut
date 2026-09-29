@@ -116,18 +116,18 @@ def test_ambiguous_reference_is_refused_with_candidates(two_projects):
 
 
 def test_run_command_never_takes_a_name_as_unique_before_listing_it(monkeypatch):
-    """AWS web-1 matches first; Hetzner was never listed and has one too."""
+    """AWS web-1 matches first; project staging was never listed and has one too."""
     registry, services = build_registry(
         monkeypatch,
         aws={"aws": [{"id": "i-1", "name": "web-1", "region": "eu-west-1"}]},
-        hetzner={"hetzner": [WEB_PRIMARY]},
+        hetzner={"hetzner": [WORKER], "staging": [WEB_STAGING]},
     )
-    services[("hetzner", "hetzner")].cached = None
+    services[("hetzner", "staging")].cached = None
     tools = make_tools(registry)
     ran = MagicMock()
     monkeypatch.setattr(tools, "_run_command_via_ssh", ran)
     out = _run(tools.run_command("web-1", "uptime"))
-    assert "matches 2 servers" in out and "hetzner/web-1" in out
+    assert "matches 2 servers" in out and "staging/web-1" in out
     ran.assert_not_called()
 
 
@@ -177,6 +177,19 @@ def test_lookups_of_every_tool_call_share_what_they_learn(monkeypatch):
     tools.bind_accounts(registry)  # accounts rebound: asked again
     _run(tools.check_status("web-1"))
     assert len(attempts) == 2
+
+
+def test_a_single_project_is_not_asked_during_another_servers_lookup(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1", "state": "running", "region": "eu-west-1"}]},
+        hetzner={"hetzner": []},
+    )
+    attempts = _unreachable_listing(services[("hetzner", "hetzner")])
+    tools = make_tools(registry)
+    for _ in range(3):
+        assert "Instance:   i-1" in _run(tools.check_status("web-1"))
+    assert attempts == []
 
 
 def test_ambiguous_reference_on_run_command_never_runs(two_projects, monkeypatch):

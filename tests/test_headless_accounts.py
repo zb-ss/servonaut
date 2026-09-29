@@ -154,16 +154,16 @@ def test_after_a_match_other_providers_are_read_from_cache_only(monkeypatch):
     assert services[("hetzner", "hetzner")].cache_reads == 1
 
 
-def test_a_provider_never_listed_is_read_before_a_name_counts_as_unique(monkeypatch):
+def test_a_single_account_provider_is_looked_up_in_its_cache_only(monkeypatch):
+    """One account keeps the lookup it always had: no API call after a match."""
     registry, services = build_registry(
         monkeypatch,
         aws={"aws": [{"id": "i-1", "name": "web-1"}]},
         hetzner={"hetzner": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
     )
     services[("hetzner", "hetzner")].cached = None  # never listed
-    with pytest.raises(AmbiguousInstanceError):
-        _run(_directory(registry).find("web-1"))
-    assert services[("hetzner", "hetzner")].fetches == 1
+    assert _run(_directory(registry).find("web-1"))["id"] == "i-1"
+    assert services[("hetzner", "hetzner")].fetches == 0
 
 
 def test_one_account_never_listed_makes_its_provider_read(monkeypatch):
@@ -191,19 +191,37 @@ def _failing(service, message="Hetzner API unreachable (401)"):
     return attempts
 
 
-def test_a_failing_provider_never_breaks_another_providers_lookup(monkeypatch, caplog):
+@pytest.fixture
+def staging_unreachable(monkeypatch):
+    """AWS lists web-1; Hetzner project staging was never listed and fails."""
     registry, services = build_registry(
         monkeypatch,
         aws={"aws": [{"id": "i-1", "name": "web-1"}]},
-        hetzner={"hetzner": []},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}], "staging": []},
     )
-    services[("hetzner", "hetzner")].cached = None  # never listed
-    attempts = _failing(services[("hetzner", "hetzner")])
+    services[("hetzner", "staging")].cached = None
+    attempts = _failing(services[("hetzner", "staging")])
+    return registry, attempts
+
+
+def test_a_failing_provider_never_breaks_another_providers_lookup(staging_unreachable,
+                                                                   caplog):
+    registry, attempts = staging_unreachable
     directory = _directory(registry)
     for _ in range(3):
         assert _run(directory.find("web-1"))["id"] == "i-1"
     assert len(attempts) == 1
-    assert "Hetzner API unreachable (401)" in caplog.text
+    assert caplog.text.count("Hetzner API unreachable (401)") == 1
+
+
+def test_a_failed_read_is_retried_after_a_while(staging_unreachable):
+    registry, attempts = staging_unreachable
+    directory = _directory(registry)
+    _run(directory.find("web-1"))
+    for read in directory._account_reads.values():
+        read.retry_at = 0.0  # the retry window has passed
+    _run(directory.find("web-1"))
+    assert len(attempts) == 2
 
 
 def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
@@ -222,35 +240,57 @@ def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
     assert _run(directory.find("staging/cache"))["id"] == "3"
 
 
-def test_an_account_without_servers_is_read_once(monkeypatch):
-    registry, services = build_registry(
+@pytest.fixture
+def empty_project(monkeypatch):
+    return build_registry(
         monkeypatch,
         aws={"aws": [{"id": "i-1", "name": "web-1"}, {"id": "i-2", "name": "api"}]},
         hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}], "empty": []},
     )
+
+
+def test_an_account_without_servers_is_read_once_while_its_cache_is_fresh(empty_project):
+    registry, services = empty_project
     directory = _directory(registry)
     for reference in ("web-1", "api", "web-1"):
         _run(directory.find(reference))
     assert services[("hetzner", "empty")].fetches == 1
     assert services[("hetzner", "hetzner")].fetches == 0
+    services[("hetzner", "empty")].fresh = False  # its cache TTL passed
+    _run(directory.find("web-1"))
+    assert services[("hetzner", "empty")].fetches == 2
 
 
-def test_a_single_service_without_servers_is_read_once():
+def test_rebuilt_accounts_are_read_again(empty_project):
+    registry, services = empty_project
+    directory = _directory(registry)
+    _run(directory.find("web-1"))
+    first = services[("hetzner", "empty")]
+    registry.rebuild(registry.config)
+    _run(directory.find("web-1"))
+    assert services[("hetzner", "empty")] is not first
+    assert services[("hetzner", "empty")].fetches == 1
+    assert all(read.inventory is registry.fleet("hetzner")
+               for read in directory._account_reads.values())
+
+
+def test_a_single_service_is_looked_up_in_its_cache_only():
     aws = FakeProvider("aws", "aws", [{"id": "i-1", "name": "web-1"}])
     hetzner = FakeProvider("hetzner", "hetzner")
     directory = InstanceDirectory(_custom(), lambda: {"aws": aws, "hetzner": hetzner})
     for _ in range(3):
         assert _run(directory.find("web-1"))["id"] == "i-1"
-    assert hetzner.fetches == 1
+    assert hetzner.fetches == 0
 
 
 def test_concurrent_lookups_share_one_read_and_both_see_the_account(monkeypatch):
     registry, services = build_registry(
         monkeypatch,
         aws={"aws": [{"id": "i-1", "name": "web-1"}]},
-        hetzner={"hetzner": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
     )
-    services[("hetzner", "hetzner")].cached = None
+    services[("hetzner", "staging")].cached = None
     directory = _directory(registry)
 
     async def both():
@@ -260,7 +300,7 @@ def test_concurrent_lookups_share_one_read_and_both_see_the_account(monkeypatch)
 
     results = _run(both())
     assert all(isinstance(r, AmbiguousInstanceError) for r in results)
-    assert services[("hetzner", "hetzner")].fetches == 1
+    assert services[("hetzner", "staging")].fetches == 1
 
 
 def test_a_stale_cache_is_used_as_it_is(monkeypatch):

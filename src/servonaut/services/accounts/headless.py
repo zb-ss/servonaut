@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from servonaut.config.accounts import AWS, HETZNER, OVH, PROVIDER_TITLES, AccountRef
 from servonaut.services.accounts.fleet import ACCOUNT_KEY, AccountFleet, tag_rows
@@ -318,9 +319,9 @@ class InstanceDirectory:
         self._custom = custom_server_service
         self._inventories = inventories
         self._accounts = accounts
-        # The one read of each account that had no cached servers, by
+        # The last read of each account that had no cached servers, by
         # (provider, account key): see checked_provider_rows.
-        self._account_reads: Dict[Tuple[str, str], asyncio.Future] = {}
+        self._account_reads: Dict[Tuple[str, str], _AccountRead] = {}
 
     def custom_rows(self) -> List[dict]:
         return _rows(self._custom.list_as_instances())
@@ -365,47 +366,55 @@ class InstanceDirectory:
     async def checked_provider_rows(self, provider: str) -> List[dict]:
         """*provider*'s servers for telling whether a name is unique.
 
-        Cached rows, without an API call, except for an account with no
-        cached servers at all (typically it was never listed): that account
-        is read once, so a server of it cannot be missed. Later lookups reuse
-        that read, so an account without servers is not asked again on every
-        lookup. An account that cannot be read is logged and counts as having
-        no servers: it never breaks the lookup of another provider's server.
-        A stale cache is used as it is.
+        Cached rows, without an API call. With several accounts, an account
+        with no cached servers at all (typically it was never listed) is
+        read, so a server of it cannot be missed; a single account keeps its
+        cached rows only, as before accounts existed. The read is shared by
+        the lookups that follow: a successful one while that account's cache
+        is fresh (an account without servers is not asked again on every
+        lookup), a failed one for a short while before it is retried. An
+        account that cannot be read is logged and counts as having no
+        servers: it never breaks the lookup of another provider's server. A
+        stale cache is used as it is.
         """
         rows = self.cached_provider_rows(provider)
         inventory = self._inventories().get(provider)
         if inventory is None:
             return rows
+        self._forget_reads(provider, inventory)
         known = {str(row.get("id") or "") for row in rows}
-        for key, read in _unlisted_accounts(inventory, rows):
-            for row in await self._read_once(provider, key, read):
+        for binding in _unlisted_accounts(inventory, rows):
+            for row in await self._read(provider, inventory, binding):
                 row_id = str(row.get("id") or "")
                 if not row_id or row_id not in known:
                     rows.append(row)
                     known.add(row_id)
         return rows
 
-    async def _read_once(
-        self, provider: str, key: str, read: Callable[[], Awaitable[List[dict]]],
-    ) -> List[dict]:
-        """The rows of one read of an account, shared by every lookup.
+    def _forget_reads(self, provider: str, inventory: Any) -> None:
+        """Drop reads made for accounts that were rebuilt since."""
+        for slot, read in list(self._account_reads.items()):
+            if slot[0] == provider and read.inventory is not inventory:
+                del self._account_reads[slot]
 
-        Concurrent lookups wait for the same read. A failed read counts as
-        no servers and is logged once.
+    async def _read(self, provider: str, inventory: Any, binding: Any) -> List[dict]:
+        """One account's servers from a read that concurrent lookups share.
+
+        A failed read counts as no servers; it is logged once.
         """
-        slot = (provider, key)
-        future = self._account_reads.get(slot)
-        if future is None or future.cancelled():
-            future = asyncio.ensure_future(read())
-            future.add_done_callback(partial(_log_failed_read, provider, key))
-            self._account_reads[slot] = future
+        slot = (provider, binding.ref.key)
+        read = self._account_reads.get(slot)
+        if read is None or not read.answers_for(inventory):
+            future = asyncio.ensure_future(_read_account(binding, inventory.multi))
+            read = _AccountRead(inventory, binding, future)
+            future.add_done_callback(partial(_read_done, provider, read))
+            self._account_reads[slot] = read
         try:
             # Shielded: a cancelled lookup must not cancel a read others share.
-            return await asyncio.shield(future)
+            return await asyncio.shield(read.future)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - logged by _log_failed_read
+        except Exception:  # noqa: BLE001 - logged by _read_done
             return []
 
     async def all_instances(self) -> List[dict]:
@@ -422,10 +431,10 @@ class InstanceDirectory:
         ``custom-*`` id resolves locally first, an ``<account>/...``
         reference only consults that account's provider, and once a name
         has matched, the remaining providers are checked in their cached
-        rows instead of being fetched. An account with no cached servers at
-        all is still read once (see :meth:`checked_provider_rows`): a name
-        must never pass as unique because another server of that name was
-        never listed.
+        rows instead of being fetched. With several accounts, an account
+        with no cached servers at all is still read (see
+        :meth:`checked_provider_rows`): a name must never pass as unique
+        because another server of that name was never listed.
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
@@ -465,28 +474,58 @@ class InstanceDirectory:
         return resolve_unique(needle, rows)
 
 
-def _unlisted_accounts(
-    inventory: Any, rows: List[dict],
-) -> List[Tuple[str, Callable[[], Awaitable[List[dict]]]]]:
-    """``(account key, read)`` of each account of *inventory* without rows.
+# A failed read of an account without cached servers is reused this long
+# before the account is asked again, so an unreachable provider slows at
+# most one lookup per window.
+_FAILED_READ_RETRY_SECONDS = 30.0
 
-    An account fleet is read one account at a time, so only the accounts
-    without cached servers are asked; a single service is read whole.
+
+@dataclass
+class _AccountRead:
+    """A read of one account that had no cached servers."""
+
+    # The fleet it was made for: rebuilding the accounts makes a new one.
+    inventory: Any
+    binding: Any
+    future: asyncio.Future
+    # Monotonic time after which a failed read is retried.
+    retry_at: float = 0.0
+
+    def answers_for(self, inventory: Any) -> bool:
+        """Whether this read still stands for the account in *inventory*.
+
+        A read in flight does; a successful one while the account's cache
+        is fresh; a failed one until its retry time.
+        """
+        if self.inventory is not inventory or self.future.cancelled():
+            return False
+        if not self.future.done():
+            return True
+        if self.future.exception() is not None:
+            return time.monotonic() < self.retry_at
+        return _cache_fresh(self.binding.service)
+
+
+def _cache_fresh(service: Any) -> bool:
+    check = getattr(service, "is_cache_fresh", None)
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:  # noqa: BLE001 - an unreadable cache is not fresh
+        return False
+
+
+def _unlisted_accounts(inventory: Any, rows: List[dict]) -> List[Any]:
+    """The bindings of *inventory*'s accounts that have no cached rows.
+
+    Only a provider with several accounts is read this way: one account's
+    servers are looked up in its cache alone, as they always were.
     """
-    if not isinstance(inventory, AccountFleet):
-        if rows:
-            return []
-
-        async def read_service() -> List[dict]:
-            return _rows(await inventory.fetch_instances_cached())
-
-        return [("", read_service)]
+    if not isinstance(inventory, AccountFleet) or not inventory.multi:
+        return []
     listed = {row_account_key(row) for row in rows}
-    return [
-        (binding.ref.key, partial(_read_account, binding, inventory.multi))
-        for binding in inventory.bindings
-        if binding.ref.key not in listed
-    ]
+    return [binding for binding in inventory.bindings if binding.ref.key not in listed]
 
 
 async def _read_account(binding: Any, qualified: bool) -> List[dict]:
@@ -495,14 +534,14 @@ async def _read_account(binding: Any, qualified: bool) -> List[dict]:
     return tag_rows(_rows(fetched), binding.ref, qualified=qualified)
 
 
-def _log_failed_read(provider: str, key: str, future: asyncio.Future) -> None:
+def _read_done(provider: str, read: _AccountRead, future: asyncio.Future) -> None:
     if future.cancelled() or future.exception() is None:
         return
+    read.retry_at = time.monotonic() + _FAILED_READ_RETRY_SECONDS
     title = PROVIDER_TITLES.get(provider, provider)
-    where = f"{title} account {key!r}" if key else title
     logger.warning(
-        "Listing %s failed; its servers are left out of name lookups: %s",
-        where, future.exception(),
+        "Listing %s account %r failed; its servers are left out of name "
+        "lookups for now: %s", title, read.binding.ref.label, future.exception(),
     )
 
 
