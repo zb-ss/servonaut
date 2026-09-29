@@ -36,6 +36,19 @@ DESTINATIONS = {
     "nav_bug_report": "BugReportScreen",
 }
 
+# The tour runs in legs, each in its own session. Every screen switch builds
+# and styles a whole screen with its sidebar, which costs seconds of CPU on a
+# busy machine; one session through every destination could outlast the
+# journey's time limit there. Each leg still moves from screen to screen.
+TOUR_LEGS = {
+    "fleet": ("nav_list", "nav_custom_servers", "nav_keys", "nav_memory", "nav_memory_sync"),
+    "account": (
+        "nav_secrets", "nav_bw_vault", "nav_findings", "nav_settings", "nav_login",
+        "nav_bug_report",
+    ),
+    "aws": ("nav_aws_manage", "nav_aws_s3", "nav_cloudwatch", "nav_ip_ban", "nav_cloudtrail"),
+}
+assert {nav for leg in TOUR_LEGS.values() for nav in leg} == set(DESTINATIONS)
 # Hidden from a signed-out user: they need an account (and a plan) first.
 HIDDEN_WHEN_SIGNED_OUT = ("nav_sync_config", "nav_teams", "nav_drift", "nav_memory_export")
 # Provider sections stay hidden until that provider is configured.
@@ -85,14 +98,16 @@ async def test_seeded_home_shows_the_fleet_at_once(tui, seed):
         assert not any("Refreshing" in message for _, message in t.toasts())
 
 
+@pytest.mark.parametrize("leg", TOUR_LEGS)
 @pytest.mark.parametrize("size", [DEFAULT_SIZE, SMALL_SIZE], ids=["160x50", "80x24"])
-async def test_sidebar_tour_reaches_every_destination(tui, seed, size):
+async def test_sidebar_tour_reaches_every_destination(tui, seed, size, leg):
     _seed_fleet(seed)
     async with tui(size=size) as t:
         for nav_id in HIDDEN_WHEN_SIGNED_OUT + HIDDEN_WITHOUT_PROVIDERS:
             assert not t.nav_reachable(nav_id), f"{nav_id} should be hidden"
 
-        for nav_id, screen_name in DESTINATIONS.items():
+        for nav_id in TOUR_LEGS[leg]:
+            screen_name = DESTINATIONS[nav_id]
             await t.nav(nav_id)
             if nav_id == "nav_bug_report":
                 # Reporting a bug starts with a consent prompt; declining it
