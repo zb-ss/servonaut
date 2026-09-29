@@ -11,7 +11,7 @@ import socket
 import time
 from collections import OrderedDict
 from dataclasses import asdict, replace
-from typing import Any, Awaitable, Callable, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 try:
     import httpx
@@ -226,6 +226,18 @@ def _resolve_release_channel() -> str:
     return "stable"
 
 
+def _resolve_account_labels(app: Any) -> Optional[Dict[str, List[str]]]:
+    """Account labels per provider for the handshake, or None without accounts.
+
+    Labels only: never account ids, profile names or credentials.
+    """
+    registry = getattr(app, "accounts", None) if app is not None else None
+    if registry is None:
+        return None
+    from servonaut.services.accounts.headless import account_labels
+    return account_labels(registry)
+
+
 def _resolve_providers_configured(app: Any) -> List[str]:
     """Return sorted list of provider names that have at least one service wired.
 
@@ -332,7 +344,8 @@ class RelayListener:
                  session_alive: Optional[Callable[[], bool]] = None,
                  providers_configured: Optional[List[str]] = None,
                  ai_tool_executor=None,
-                 probe_bridge=None) -> None:
+                 probe_bridge=None,
+                 accounts: Optional[Dict[str, List[str]]] = None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -411,6 +424,11 @@ class RelayListener:
         # Wire format v1.0: providers + release channel resolve once at
         # construction time and are embedded in every handshake/heartbeat.
         self._providers_configured: List[str] = sorted(providers_configured or [])
+        # Account labels per provider ({"aws": [...], ...}); None = not sent.
+        self._accounts: Optional[Dict[str, List[str]]] = (
+            {p: list(labels) for p, labels in accounts.items()}
+            if accounts is not None else None
+        )
         self._release_channel: str = _resolve_release_channel()
         # Tracks whether the server has accepted the initial handshake.
         # Until it has, every heartbeat tick posts the handshake, so one
@@ -447,7 +465,7 @@ class RelayListener:
         """
         import servonaut
 
-        return {
+        handshake = {
             "type": "cli.handshake",
             "version": getattr(servonaut, "__version__", "unknown"),
             "cli_release_channel": self._release_channel,
@@ -458,6 +476,12 @@ class RelayListener:
             "capabilities": {"supports_dynamic_catalog": True},
             "client_id": self._client_id,
         }
+        if self._accounts is not None:
+            # Which accounts servers can be addressed by ("<account>/<name>").
+            handshake["accounts"] = {
+                p: list(labels) for p, labels in self._accounts.items()
+            }
+        return handshake
 
     def _build_heartbeat(self) -> dict:
         """Build the v1.0 ``cli.heartbeat`` payload (minimal shape).
@@ -1431,7 +1455,9 @@ class RelayListener:
             WAFManagementService,
         )
         try:
-            res = await WAFManagementService().set_rate_rule(
+            # Changed in the AWS account the WebACL was found in.
+            waf = WAFManagementService(self._executors.webacl_account(acl))
+            res = await waf.set_rate_rule(
                 acl.get("name"), acl.get("id"), acl.get("scope"),
                 acl.get("region"), rule_name=rule_name, limit=limit,
                 uri_scope=(path or "") if is_path else "",

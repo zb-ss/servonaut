@@ -1,7 +1,7 @@
 """Cross-seam tests for instance resolution (B.5).
 
-Tests the shared ``_resolve_instance`` logic used by both
-``cli/memory.py::_resolve_instance`` and ``ServonautApp.resolve_instance``.
+Tests the shared resolution logic used by both the CLI commands (through
+``CachedFleet``) and ``ServonautApp.resolve_instance``.
 
 The two implementations share the same contract:
 - A name shared by several servers is refused, listing qualified references.
@@ -35,8 +35,21 @@ def _custom(iid: str, name: str) -> Dict[str, Any]:
 # CLI _resolve_instance (direct unit test — no Textual process required)
 # ---------------------------------------------------------------------------
 
+class _Rows:
+    """An inventory / custom-server source serving fixed rows."""
+
+    def __init__(self, rows: List[Dict]) -> None:
+        self._rows = list(rows)
+
+    def get_cached_instances(self) -> List[Dict]:
+        return self._rows
+
+    def list_as_instances(self) -> List[Dict]:
+        return self._rows
+
+
 class TestCLIResolveInstance:
-    """Tests for cli/memory.py::_resolve_instance."""
+    """Tests for the CLI commands' ``CachedFleet.resolve``."""
 
     def _resolve(
         self,
@@ -45,8 +58,9 @@ class TestCLIResolveInstance:
         custom: List[Dict] = (),
         ovh: List[Dict] = (),
     ) -> Optional[Dict]:
-        from servonaut.cli.memory import _resolve_instance
-        return _resolve_instance(needle, list(aws), list(custom), list(ovh))
+        from servonaut.services.accounts.headless import CachedFleet
+        fleet = CachedFleet(_Rows(custom), aws=_Rows(aws), ovh=_Rows(ovh))
+        return fleet.resolve(needle)
 
     def test_finds_aws_by_id(self) -> None:
         result = self._resolve("i-abc", aws=[_aws("i-abc", "prod")])
@@ -119,9 +133,9 @@ class TestCLIResolveInstance:
 class TestAppResolveInstanceLogic:
     """Validate ServonautApp.resolve_instance contract using the real shared function.
 
-    Tests call ``resolve_instance_from_lists`` directly — the same function
-    that ``ServonautApp.resolve_instance`` and ``cli/memory._resolve_instance``
-    delegate to — so changes to the implementation are always caught here.
+    Tests call ``resolve_instance_from_lists`` directly — the function
+    ``ServonautApp.resolve_instance`` delegates to — so changes to the
+    implementation are always caught here.
     """
 
     def _resolve(

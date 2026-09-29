@@ -505,7 +505,7 @@ def _patch_ssh(monkeypatch, *, stdout=b"", stderr=b"", timeout=False):
 def _patch_ssm(monkeypatch, result):
     fake = MagicMock()
     fake.run_command = AsyncMock(return_value=result)
-    monkeypatch.setattr(ssm_mod, "SSMService", lambda: fake)
+    monkeypatch.setattr(ssm_mod, "SSMService", lambda *_account: fake)
     return fake
 
 
@@ -755,7 +755,7 @@ def test_ip_ban_set_via_site(monkeypatch):
     t._resolve_webacl = _async_return(  # type: ignore
         {"name": "am-aws-waf", "id": "acl-id", "scope": "REGIONAL",
          "region": "eu-west-1", "arn": _WEBACL_ARN})
-    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda: _FakeWAF())
+    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda *_account: _FakeWAF())
     out = asyncio.run(t.ip_ban_set(site="shop-ec2", ip_address="1.1.1.1/32"))
     assert "WebACL: am-aws-waf" in out and "Banned (1)" in out
 
@@ -766,7 +766,7 @@ def test_waf_rate_rule_set_apply(monkeypatch):
     t._resolve_webacl = _async_return(  # type: ignore
         {"name": "am-aws-waf", "id": "acl-id", "scope": "REGIONAL",
          "region": "eu-west-1", "arn": _WEBACL_ARN})
-    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda: _FakeWAF())
+    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda *_account: _FakeWAF())
     out = asyncio.run(t.waf_rate_rule_set(
         site="shop-ec2", rule_name="flood", limit=500, uri_scope="/"))
     assert "Created rate rule 'flood'" in out and "500 req/5min" in out
@@ -783,7 +783,7 @@ def test_waf_rate_rule_set_update_surfaces_previous(monkeypatch):
             "created_or_updated": "updated",
             "previous": {"limit": 1000, "uri_scoped": False, "action": "block"}}
     monkeypatch.setattr(waf_mod, "WAFManagementService",
-                        lambda: _FakeWAF(rate=rate))
+                        lambda *_account: _FakeWAF(rate=rate))
     out = asyncio.run(t.waf_rate_rule_set(site="shop-ec2", rule_name="flood", limit=500))
     assert "Updated rate rule 'flood'" in out
     assert "previous: 1000 req/5min" in out
@@ -797,7 +797,7 @@ def test_block_ip_prefers_webacl(monkeypatch):
     t._resolve_webacl = _async_return(  # type: ignore
         {"name": "am-aws-waf", "id": "acl-id", "scope": "REGIONAL",
          "region": "eu-west-1", "arn": _WEBACL_ARN})
-    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda: _FakeWAF())
+    monkeypatch.setattr(waf_mod, "WAFManagementService", lambda *_account: _FakeWAF())
     out = asyncio.run(t.block_ip("1.1.1.1", site="shop-ec2"))
     assert "layer_used: waf" in out and "applied: True" in out
     assert "why:" in out and "real client IP" in out  # layer rationale surfaced
@@ -872,7 +872,7 @@ def test_rds_metrics_tool(monkeypatch):
             return {"db_instance": "db-1", "window_hours": 3,
                     "metrics": {"cpu_pct": {"avg": 40, "max": 95, "min": 10, "latest": 40}},
                     "errors": []}
-    monkeypatch.setattr(rds_mod, "RDSMetricsService", lambda: _FakeRDS())
+    monkeypatch.setattr(rds_mod, "RDSMetricsService", lambda *_account: _FakeRDS())
     out = asyncio.run(_tools().rds_metrics("db-1", region="eu-west-1"))
     assert "RDS metrics for db-1" in out and "95%" in out
 

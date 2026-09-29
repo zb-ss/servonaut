@@ -91,6 +91,7 @@
   ],
   "probe_tool_args": {
     "fleet_health_snapshot": [
+      "account",
       "region",
       "running_only",
       "timeout"
@@ -113,6 +114,7 @@
       "instance_id"
     ],
     "cloudwatch_top_ips": [
+      "account",
       "action_filter",
       "hours_back",
       "limit",
@@ -135,11 +137,13 @@
       "verbose"
     ],
     "rds_metrics": [
+      "account",
       "db_instance",
       "region",
       "window_hours"
     ],
     "cloudwatch_insights": [
+      "account",
       "hours_back",
       "limit",
       "log_group",

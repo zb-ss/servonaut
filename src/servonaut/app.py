@@ -624,6 +624,7 @@ class ServonautApp(App):
             aws_object_storage_service=self.aws_object_storage_service,
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
+            account_registry=self.accounts,
         )
         # Follows chat_tool_guard_level live: bring-your-own providers run
         # tools without per-call prompts, so a lowered level must apply to
@@ -1124,6 +1125,7 @@ class ServonautApp(App):
                     self.ssh_service,
                     self.connection_service,
                     self.scp_service,
+                    accounts=self.accounts,
                 )
                 self.ai_relay_executors = relay
                 cfg = self.config_manager.get()

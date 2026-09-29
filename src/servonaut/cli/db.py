@@ -26,7 +26,10 @@ def add_db_parser(subparsers: argparse._SubParsersAction) -> None:
         "setup",
         help="Discover and store DB credentials for an instance.",
     )
-    setup.add_argument("instance", help="Instance name or ID.")
+    setup.add_argument(
+        "instance",
+        help="Instance name or ID (<account>/<name> picks one account's server).",
+    )
     setup.add_argument(
         "--search-path", default="",
         help="Directory on the box to search (or a local .env path).",
@@ -54,8 +57,7 @@ def _build_tools():
     from dataclasses import replace
 
     from servonaut.config.manager import ConfigManager
-    from servonaut.services.cache_service import CacheService
-    from servonaut.services.aws_service import AWSService
+    from servonaut.services.accounts.headless import build_account_registry
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.custom_server_service import CustomServerService
@@ -66,7 +68,9 @@ def _build_tools():
 
     config_manager = ConfigManager()
     config = config_manager.get()
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
+    # Every provider account, so any server of any account can be set up.
+    accounts = build_account_registry(config_manager)
+    aws_service = accounts.default_service("aws")
 
     # The user is at the keyboard and explicitly ran this command, so the
     # guard must permit the standard-tier setup tools regardless of the MCP
@@ -85,15 +89,18 @@ def _build_tools():
 
     return ServonautTools(
         config_manager=config_manager,
-        aws_service=AWSService(cache_service),
+        aws_service=aws_service,
         custom_server_service=CustomServerService(config_manager),
-        cache_service=cache_service,
+        cache_service=aws_service.cache_service,
         ssh_service=SSHService(config_manager),
         connection_service=ConnectionService(config_manager),
         scp_service=SCPService(ssh_config=config.ssh),
         guard=guard,
         audit=AuditTrail(config.mcp.audit_path),
         secret_provider=secret_provider,
+        hetzner_service=accounts.default_service("hetzner"),
+        ovh_service=accounts.default_service("ovh"),
+        account_registry=accounts,
     ), secret_provider
 
 

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
+from servonaut.services.accounts.headless import InstanceDirectory
+from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
@@ -45,10 +47,17 @@ class RelayExecutors:
     """Routes relay CommandRequests to local service execution."""
 
     def __init__(self, config_manager, aws_service, custom_server_service,
-                 ssh_service, connection_service, scp_service) -> None:
+                 ssh_service, connection_service, scp_service,
+                 accounts=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
+        # Every provider account (AccountRegistry). None: only the AWS
+        # service above and the custom servers can be targeted.
+        self._accounts = accounts
+        self._directory = InstanceDirectory(
+            custom_server_service, self._inventories, lambda: self._accounts,
+        )
         self._ssh_service = ssh_service
         self._connection_service = connection_service
         self._scp_service = scp_service
@@ -203,7 +212,11 @@ class RelayExecutors:
     async def find_instance(self, identifier: str) -> Optional[Dict]:
         """Public instance lookup for callers outside the executor
         dispatch (the remediation path uses it to learn the target's own
-        addresses for the block_ip self-ban refusal)."""
+        addresses for the block_ip self-ban refusal).
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
+        """
         return await self._find_instance(identifier)
 
     @property
@@ -211,10 +224,13 @@ class RelayExecutors:
         """Lazily-built :class:`IPBanService` for local-dispatch
         remediation verbs. Built from this executor's own config manager
         so every construction site (TUI relay manager, headless connect)
-        gets it without wiring churn."""
+        gets it without wiring churn; each ban config acts in its own
+        AWS account."""
         if getattr(self, "_ip_ban_service", None) is None:
             from servonaut.services.ip_ban_service import IPBanService
-            self._ip_ban_service = IPBanService(self._config_manager)
+            self._ip_ban_service = IPBanService(
+                self._config_manager, accounts=self._accounts,
+            )
         return self._ip_ban_service
 
     async def resolve_webacl(self, target: str, region: str = "") -> Dict:
@@ -224,25 +240,71 @@ class RelayExecutors:
         Delegates to the shared resolver, supplying this executor's own
         instance lookup so the instance→ALB→WebACL walk runs with the
         customer's AWS credentials in the customer's context (the SaaS
-        server holds no AWS creds — WebACL resolution is CLI-side)."""
+        server holds no AWS creds — WebACL resolution is CLI-side). An
+        instance is walked in the AWS account it belongs to; the result
+        then names that ``account``, for :meth:`webacl_account`."""
         from servonaut.services.waf_management_service import resolve_webacl
-        return await resolve_webacl(
-            target, region, find_instance=self.find_instance,
-        )
+
+        used: Dict[str, str] = {}
+
+        def _account_for(instance: Dict):
+            used['account'] = instance.get('account') or ''
+            return self._aws_context(instance.get('account') or None)
+
+        try:
+            acl = await resolve_webacl(
+                target, region, find_instance=self.find_instance,
+                account=self._aws_context(None), account_for=_account_for,
+            )
+        except AmbiguousInstanceError as exc:
+            return {"error": str(exc)}
+        if used.get('account'):
+            acl["account"] = used['account']
+        return acl
+
+    def webacl_account(self, acl: Dict):
+        """The AWS account a WebACL from :meth:`resolve_webacl` lives in.
+
+        None means the default credential chain, as before.
+        """
+        return self._aws_context(acl.get("account") or None)
+
+    def _aws_context(self, label: Optional[str]):
+        if self._accounts is None or not self._accounts.accounts('aws'):
+            return None
+        return self._accounts.aws_context(label)
+
+    def _inventories(self) -> Dict:
+        """Each provider's inventory: every account when accounts are known."""
+        if self._accounts is not None:
+            return {p: self._accounts.fleet(p) for p in ('aws', 'ovh', 'hetzner')}
+        return {'aws': self._aws_service}
 
     async def _find_instance(self, identifier: str) -> Optional[Dict]:
-        """Find instance by ID or name across all providers (AWS + custom)."""
-        aws_instances = await self._aws_service.fetch_instances_cached()
-        custom_instances = self._custom_server_service.list_as_instances()
-        all_instances = aws_instances + custom_instances
-        identifier_lower = identifier.lower()
-        for inst in all_instances:
-            if (inst.get('id') == identifier
-                    or inst.get('id', '').lower() == identifier_lower
-                    or inst.get('name') == identifier
-                    or inst.get('name', '').lower() == identifier_lower):
-                return inst
-        return None
+        """Find a server of any provider account, or a custom server.
+
+        Accepts an id, a name or an ``<account>/<name>`` reference.
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
+        """
+        return await self._directory.find(identifier)
+
+    async def _target(self, request: CommandRequest):
+        """``(instance, None)``, or ``(None, error response)`` for the target."""
+        try:
+            instance = await self._find_instance(request.target_server_id)
+        except AmbiguousInstanceError as exc:
+            return None, CommandResponse(
+                request_id=request.id, status="error", error_message=str(exc),
+            )
+        if not instance:
+            return None, CommandResponse(
+                request_id=request.id,
+                status="error",
+                error_message=f"Instance not found: {request.target_server_id}",
+            )
+        return instance, None
 
     def _host_key_policy(self) -> HostKeyPolicy:
         """The host-key policy the SSH/SCP commands were built with."""
@@ -263,7 +325,21 @@ class RelayExecutors:
         proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
         extra_options = self._connection_service.get_extra_options(instance, profile)
 
-        if instance.get('is_custom'):
+        if instance.get('is_ovh'):
+            options = self._connection_service.resolve_ovh_connection(instance)
+            username = options['username']
+            key_path = options['key_path']
+            port = None
+        elif instance.get('is_hetzner'):
+            # Hetzner rows carry their project's SSH defaults.
+            username = (
+                instance.get('username')
+                or self._config_manager.get().default_username
+                or 'root'
+            )
+            key_path = instance.get('ssh_key') or None
+            port = None
+        elif instance.get('is_custom'):
             username = (
                 instance.get('username')
                 or self._config_manager.get().default_username
@@ -322,13 +398,9 @@ class RelayExecutors:
                 error_message=rejection,
             )
 
-        instance = await self._find_instance(request.target_server_id)
-        if not instance:
-            return CommandResponse(
-                request_id=request.id,
-                status="error",
-                error_message=f"Instance not found: {request.target_server_id}",
-            )
+        instance, failure = await self._target(request)
+        if failure is not None:
+            return failure
 
         conn = self._resolve_connection(instance)
         ssh_cmd = self._ssh_service.build_ssh_command(
@@ -454,13 +526,9 @@ class RelayExecutors:
                 error_message="remote_path must not contain '..'",
             )
 
-        instance = await self._find_instance(request.target_server_id)
-        if not instance:
-            return CommandResponse(
-                request_id=request.id,
-                status="error",
-                error_message=f"Instance not found: {request.target_server_id}",
-            )
+        instance, failure = await self._target(request)
+        if failure is not None:
+            return failure
 
         conn = self._resolve_connection(instance)
         host = conn['host']
