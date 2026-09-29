@@ -349,6 +349,70 @@ async def test_manager_refuses_a_row_whose_account_was_removed(ec2) -> None:
 
 
 # ---------------------------------------------------------------------------
+# AWS create
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_create_tables(pilot, screen) -> None:
+    await _wait_for(
+        pilot,
+        lambda: screen.query_one("#aws_sg_table", DataTable).row_count == 1
+        and screen.query_one("#aws_amis_table", DataTable).row_count == 1,
+        "the region's tables",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_loads_and_launches_in_the_picked_account(ec2) -> None:
+    from unittest.mock import AsyncMock
+
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = Host(_registry(), AWSCreateScreen)
+    async with app.run_test(size=(160, 80)) as pilot:
+        screen = app.screen
+        picker = screen.query_one("#aws_create_account")
+        assert picker.display is True
+        await _wait_for_create_tables(pilot, screen)
+        assert {region for _name, region in ec2["prod"].called("list_amis")} == {"us-east-1"}
+        assert not ec2["staging"].calls
+
+        _pick_account(screen, "aws_create_account", "staging")
+        await _wait_for(pilot, lambda: ec2["staging"].called("list_security_groups"), "reload")
+        await _wait_for_create_tables(pilot, screen)
+        assert screen._regions == ["eu-west-1"]
+        assert screen._amis[0]["image_id"] == "ami-staging"
+        assert screen._key_pairs[0]["key_name"] == "staging-key"
+
+        screen.query_one("#aws_input_name", Input).value = "web-9"
+        app.push_screen_wait = AsyncMock(return_value=True)
+        prod_fetches = len(ec2["prod"].called("fetch"))
+        await screen._on_create()
+
+    (launch,) = ec2["staging"].called("run_instances")
+    assert launch[1]["region"] == "eu-west-1"
+    assert launch[1]["subnet_id"] == "subnet-staging"
+    assert launch[1]["security_group_ids"] == ["sg-staging"]
+    assert not ec2["prod"].called("run_instances")
+    assert app.aws_audit.log_action.call_args.kwargs["details"]["account"] == "staging"
+    # The fleet is refreshed across accounts, so both accounts stay listed.
+    assert len(ec2["prod"].called("fetch")) == prod_fetches + 1
+    assert {row.get("account") for row in app.instances} == {"prod", "staging"}
+
+
+@pytest.mark.asyncio
+async def test_create_hides_the_picker_with_one_account(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    app = Host(_registry(_config(extra=False)), AWSCreateScreen)
+    async with app.run_test(size=(160, 80)) as pilot:
+        screen = app.screen
+        await _wait_for_create_tables(pilot, screen)
+        assert screen.query_one("#aws_create_account").display is False
+        assert screen.query_one("#aws_create_account_select", Select).disabled
+
+
+# ---------------------------------------------------------------------------
 # Screen account helpers
 # ---------------------------------------------------------------------------
 
