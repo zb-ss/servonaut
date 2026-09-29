@@ -15,12 +15,14 @@ TUI (see :mod:`servonaut.utils.instance_resolver`).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from functools import partial
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 from servonaut.config.accounts import AWS, HETZNER, OVH, PROVIDER_TITLES, AccountRef
-from servonaut.services.accounts.fleet import ACCOUNT_KEY, tag_rows
+from servonaut.services.accounts.fleet import ACCOUNT_KEY, AccountFleet, tag_rows
 from servonaut.services.accounts.registry import AccountRegistry, UnknownAccountError
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
@@ -226,6 +228,9 @@ class InstanceDirectory:
         self._custom = custom_server_service
         self._inventories = inventories
         self._accounts = accounts
+        # The one read of each account that had no cached servers, by
+        # (provider, account key): see checked_provider_rows.
+        self._account_reads: Dict[Tuple[str, str], asyncio.Future] = {}
 
     def custom_rows(self) -> List[dict]:
         return _rows(self._custom.list_as_instances())
@@ -252,28 +257,66 @@ class InstanceDirectory:
             logger.warning("Reading the %s cache failed: %s", provider, exc)
             return []
 
+    async def _rows_or_cache(self, provider: str) -> List[dict]:
+        """:meth:`provider_rows`, or the cached rows when the provider fails.
+
+        A lookup must not fail because one provider cannot be reached: the
+        server asked for may well be another provider's.
+        """
+        try:
+            return await self.provider_rows(provider)
+        except Exception as exc:  # noqa: BLE001 - an unreachable provider hides no one
+            logger.warning(
+                "Refreshing the %s inventory failed: %s",
+                PROVIDER_TITLES.get(provider, provider), exc,
+            )
+            return self.cached_provider_rows(provider)
+
     async def checked_provider_rows(self, provider: str) -> List[dict]:
         """*provider*'s servers for telling whether a name is unique.
 
-        Cached rows, without an API call, except when an account has no
-        cached servers at all (typically it was never listed): then the
-        provider is read once through its cache (fresh caches stay as they
-        are), so a server of that account cannot be missed. A stale cache is
-        used as it is.
+        Cached rows, without an API call, except for an account with no
+        cached servers at all (typically it was never listed): that account
+        is read once, so a server of it cannot be missed. Later lookups reuse
+        that read, so an account without servers is not asked again on every
+        lookup. An account that cannot be read is logged and counts as having
+        no servers: it never breaks the lookup of another provider's server.
+        A stale cache is used as it is.
         """
         rows = self.cached_provider_rows(provider)
         inventory = self._inventories().get(provider)
         if inventory is None:
             return rows
-        bindings = getattr(inventory, "bindings", None)
-        if bindings:
-            listed = {row_account_key(row) for row in rows}
-            unlisted = any(binding.ref.key not in listed for binding in bindings)
-        else:
-            unlisted = not rows
-        if not unlisted:
-            return rows
-        return await self.provider_rows(provider)
+        known = {str(row.get("id") or "") for row in rows}
+        for key, read in _unlisted_accounts(inventory, rows):
+            for row in await self._read_once(provider, key, read):
+                row_id = str(row.get("id") or "")
+                if not row_id or row_id not in known:
+                    rows.append(row)
+                    known.add(row_id)
+        return rows
+
+    async def _read_once(
+        self, provider: str, key: str, read: Callable[[], Awaitable[List[dict]]],
+    ) -> List[dict]:
+        """The rows of one read of an account, shared by every lookup.
+
+        Concurrent lookups wait for the same read. A failed read counts as
+        no servers and is logged once.
+        """
+        slot = (provider, key)
+        future = self._account_reads.get(slot)
+        if future is None or future.cancelled():
+            future = asyncio.ensure_future(read())
+            future.add_done_callback(partial(_log_failed_read, provider, key))
+            self._account_reads[slot] = future
+        try:
+            # Shielded: a cancelled lookup must not cancel a read others share.
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - logged by _log_failed_read
+            return []
 
     async def all_instances(self) -> List[dict]:
         """AWS, custom, OVH, then Hetzner servers, refreshed when stale."""
@@ -312,7 +355,7 @@ class InstanceDirectory:
         if qualified is not None:
             # Custom servers are local and free to check: one literally named
             # "prod/web-1" must be reported next to account prod's web-1.
-            return resolve_unique(needle, await self.provider_rows(qualified) + custom)
+            return resolve_unique(needle, await self._rows_or_cache(qualified) + custom)
 
         rows: List[dict] = []
         matched = False
@@ -322,10 +365,51 @@ class InstanceDirectory:
             elif matched:
                 batch = await self.checked_provider_rows(provider)
             else:
-                batch = await self.provider_rows(provider)
+                batch = await self._rows_or_cache(provider)
             rows.extend(batch)
             matched = matched or bool(match_instances(needle, batch))
         return resolve_unique(needle, rows)
+
+
+def _unlisted_accounts(
+    inventory: Any, rows: List[dict],
+) -> List[Tuple[str, Callable[[], Awaitable[List[dict]]]]]:
+    """``(account key, read)`` of each account of *inventory* without rows.
+
+    An account fleet is read one account at a time, so only the accounts
+    without cached servers are asked; a single service is read whole.
+    """
+    if not isinstance(inventory, AccountFleet):
+        if rows:
+            return []
+
+        async def read_service() -> List[dict]:
+            return _rows(await inventory.fetch_instances_cached())
+
+        return [("", read_service)]
+    listed = {row_account_key(row) for row in rows}
+    return [
+        (binding.ref.key, partial(_read_account, binding, inventory.multi))
+        for binding in inventory.bindings
+        if binding.ref.key not in listed
+    ]
+
+
+async def _read_account(binding: Any, qualified: bool) -> List[dict]:
+    """One account's servers, tagged as its fleet tags them."""
+    fetched = await binding.service.fetch_instances_cached()
+    return tag_rows(_rows(fetched), binding.ref, qualified=qualified)
+
+
+def _log_failed_read(provider: str, key: str, future: asyncio.Future) -> None:
+    if future.cancelled() or future.exception() is None:
+        return
+    title = PROVIDER_TITLES.get(provider, provider)
+    where = f"{title} account {key!r}" if key else title
+    logger.warning(
+        "Listing %s failed; its servers are left out of name lookups: %s",
+        where, future.exception(),
+    )
 
 
 async def fetch_provider_rows(

@@ -178,6 +178,90 @@ def test_one_account_never_listed_makes_its_provider_read(monkeypatch):
     assert "staging/web-1" in str(err.value)
 
 
+def _failing(service, message="Hetzner API unreachable (401)"):
+    """Make *service*'s listing raise, counting the attempts."""
+    attempts = []
+
+    async def refused(force_refresh=False):
+        attempts.append(1)
+        raise RuntimeError(message)
+
+    service.fetch_instances_cached = refused
+    return attempts
+
+
+def test_a_failing_provider_never_breaks_another_providers_lookup(monkeypatch, caplog):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": []},
+    )
+    services[("hetzner", "hetzner")].cached = None  # never listed
+    attempts = _failing(services[("hetzner", "hetzner")])
+    directory = _directory(registry)
+    for _ in range(3):
+        assert _run(directory.find("web-1"))["id"] == "i-1"
+    assert len(attempts) == 1
+    assert "Hetzner API unreachable (401)" in caplog.text
+
+
+def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "api"}]},
+        hetzner={"hetzner": [{"id": "2", "name": "db", "is_hetzner": True}],
+                 "staging": [{"id": "3", "name": "cache", "is_hetzner": True}]},
+    )
+    _failing(services[("aws", "aws")], "expired token")
+    directory = _directory(registry)
+    assert _run(directory.find("db"))["id"] == "2"
+    # A qualified reference reads only its provider, and falls back the same way.
+    for service in (services[("hetzner", "hetzner")], services[("hetzner", "staging")]):
+        _failing(service)
+    assert _run(directory.find("staging/cache"))["id"] == "3"
+
+
+def test_an_account_without_servers_is_read_once(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}, {"id": "i-2", "name": "api"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}], "empty": []},
+    )
+    directory = _directory(registry)
+    for reference in ("web-1", "api", "web-1"):
+        _run(directory.find(reference))
+    assert services[("hetzner", "empty")].fetches == 1
+    assert services[("hetzner", "hetzner")].fetches == 0
+
+
+def test_a_single_service_without_servers_is_read_once():
+    aws = FakeProvider("aws", "aws", [{"id": "i-1", "name": "web-1"}])
+    hetzner = FakeProvider("hetzner", "hetzner")
+    directory = InstanceDirectory(_custom(), lambda: {"aws": aws, "hetzner": hetzner})
+    for _ in range(3):
+        assert _run(directory.find("web-1"))["id"] == "i-1"
+    assert hetzner.fetches == 1
+
+
+def test_concurrent_lookups_share_one_read_and_both_see_the_account(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    services[("hetzner", "hetzner")].cached = None
+    directory = _directory(registry)
+
+    async def both():
+        return await asyncio.gather(
+            directory.find("web-1"), directory.find("web-1"), return_exceptions=True,
+        )
+
+    results = _run(both())
+    assert all(isinstance(r, AmbiguousInstanceError) for r in results)
+    assert services[("hetzner", "hetzner")].fetches == 1
+
+
 def test_a_stale_cache_is_used_as_it_is(monkeypatch):
     registry, services = build_registry(
         monkeypatch,

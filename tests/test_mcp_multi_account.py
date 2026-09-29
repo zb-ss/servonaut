@@ -131,6 +131,25 @@ def test_run_command_never_takes_a_name_as_unique_before_listing_it(monkeypatch)
     ran.assert_not_called()
 
 
+def test_an_unreachable_provider_never_breaks_a_lookup_of_another(monkeypatch):
+    """Hetzner was never listed and cannot be reached: AWS web-1 still resolves."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1", "state": "running", "region": "eu-west-1"}]},
+        hetzner={"hetzner": []},
+    )
+    hetzner = services[("hetzner", "hetzner")]
+    hetzner.cached = None
+
+    async def unreachable(force_refresh=False):
+        raise RuntimeError("Hetzner API unreachable (401)")
+
+    hetzner.fetch_instances_cached = unreachable
+    tools = make_tools(registry)
+    assert "Instance:   i-1" in _run(tools.check_status("web-1"))
+    assert audit_rows(tools)[-1][2] is True
+
+
 def test_ambiguous_reference_on_run_command_never_runs(two_projects, monkeypatch):
     tools, _ = two_projects
     ran = MagicMock()
