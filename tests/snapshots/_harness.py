@@ -337,6 +337,12 @@ class SnapshotApp(ServonautApp):
             return self.hetzner_service
         return super().provider_inventory(provider)
 
+    def provider_available(self, provider: str) -> bool:
+        # OVH and Hetzner are the pinned stand-ins, not registry accounts.
+        if provider in ("ovh", "hetzner"):
+            return getattr(self, f"{provider}_service", None) is not None
+        return super().provider_available(provider)
+
 
 class MultiAccountSnapshotApp(SnapshotApp):
     """The same fleet with a second Hetzner project ("archive")."""

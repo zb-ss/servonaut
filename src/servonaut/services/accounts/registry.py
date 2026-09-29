@@ -98,6 +98,9 @@ class _ProviderAccounts:
 
     refs: List[AccountRef] = field(default_factory=list)
     services: Dict[str, Any] = field(default_factory=dict)  # key -> service
+    # Every account the config sets up (valid label and settings), whether
+    # or not it can connect right now.
+    configured: List[AccountRef] = field(default_factory=list)
 
 
 class AccountRegistry:
@@ -181,6 +184,7 @@ class AccountRegistry:
                     ),
                 )
             self._aws_contexts[ref.key] = context
+            accounts.configured.append(ref)
             accounts.refs.append(ref)
             accounts.services[ref.key] = AWSService(cache, account=context)
         self._providers[AWS] = accounts
@@ -202,6 +206,7 @@ class AccountRegistry:
         for index, (ref, effective) in enumerate(hetzner_accounts(config.hetzner)):
             if not ref.primary and (HETZNER, index - 1) in skipped:
                 continue
+            accounts.configured.append(ref)
             service = HetznerService(effective, allow_ambient_token=ref.primary)
             try:
                 service.resolve_token()
@@ -220,13 +225,13 @@ class AccountRegistry:
         from servonaut.services.ovh_service import _OVH_CACHE_PATH, OVHService
 
         for index, (ref, effective) in enumerate(ovh_accounts(config.ovh)):
-            if ref.primary:
-                # The primary account was only ever built with at least one
-                # credential set; keep that rule.
-                if not (effective.application_key or effective.client_id):
-                    self._mark_unavailable(ref, "no OVH credentials configured")
-                    continue
-            elif (OVH, index - 1) in skipped:
+            if not ref.primary and (OVH, index - 1) in skipped:
+                continue
+            accounts.configured.append(ref)
+            # The primary account was only ever built with at least one
+            # credential set; keep that rule.
+            if ref.primary and not (effective.application_key or effective.client_id):
+                self._mark_unavailable(ref, "no OVH credentials configured")
                 continue
             cache = None if ref.primary else Path(ovh_cache_path(str(_OVH_CACHE_PATH), ref))
             accounts.refs.append(ref)
@@ -251,20 +256,39 @@ class AccountRegistry:
         """Usable accounts of *provider*, primary first."""
         return list(self._providers.get(provider, _ProviderAccounts()).refs)
 
+    def configured_accounts(self, provider: str) -> List[AccountRef]:
+        """Every account the config sets up for *provider*, usable or not."""
+        return list(self._providers.get(provider, _ProviderAccounts()).configured)
+
+    def unavailable_reason(self, ref: AccountRef) -> Optional[str]:
+        """Why a configured account cannot be used, or None when it can."""
+        return self.unavailable.get(f"{ref.provider}:{ref.key}")
+
     def is_multi(self, provider: str) -> bool:
-        """True when *provider* has more than one usable account."""
-        return len(self.accounts(provider)) > 1
+        """True when the config sets up more than one account of *provider*.
+
+        Counted on configured accounts, usable or not: with a second account
+        configured, every server names its account and every account-level
+        view says which account it works on, even while one of the two
+        cannot connect.
+        """
+        return len(self.configured_accounts(provider)) > 1
 
     def has_multiple_accounts(self) -> bool:
-        """True when any provider has more than one usable account."""
+        """True when any provider has more than one configured account."""
         return any(self.is_multi(p) for p in (AWS, HETZNER, OVH))
 
     def account(self, provider: str, label: Optional[str] = None) -> AccountRef:
         """The account of *provider* named *label* (None = default account).
 
+        The default account is always the primary one. When it cannot be
+        used, there is no default: another account must be named, so nothing
+        ever runs in an account the caller did not choose.
+
         Raises:
-            UnknownAccountError: No usable account has that label, or the
-                provider has no usable account at all.
+            UnknownAccountError: No usable account has that label, the
+                provider has no usable account at all, or no label was given
+                and the primary account cannot be used.
         """
         refs = self.accounts(provider)
         if not refs:
@@ -272,7 +296,19 @@ class AccountRegistry:
                 f"{PROVIDER_TITLES.get(provider, provider)} is not configured"
             )
         if not label:
-            return refs[0]
+            if refs[0].primary:
+                return refs[0]
+            primary = next(
+                (ref for ref in self.configured_accounts(provider) if ref.primary), None
+            )
+            reason = self.unavailable_reason(primary) if primary else None
+            title = PROVIDER_TITLES.get(provider, provider)
+            detail = f": {reason}" if reason else ""
+            raise UnknownAccountError(
+                f"The primary {title} account"
+                f"{' ' + repr(primary.label) if primary else ''} is not available{detail}. "
+                f"Name the account to use: {', '.join(r.label for r in refs)}"
+            )
         wanted = label.strip().lower()
         for ref in refs:
             if ref.key == wanted:
@@ -304,9 +340,13 @@ class AccountRegistry:
         return self._providers[provider].services[ref.key]
 
     def default_service(self, provider: str) -> Any:
-        """The default account's service, or None when the provider has none."""
+        """The primary account's service, or None when it cannot be used.
+
+        Never another account's service: code without an account context
+        must not act in an account nobody chose.
+        """
         refs = self.accounts(provider)
-        if not refs:
+        if not refs or not refs[0].primary:
             return None
         return self._providers[provider].services[refs[0].key]
 
@@ -482,7 +522,14 @@ class AccountRegistry:
             if provider == AWS:
                 account_id = self._aws_contexts[ref.key].account_id
             bindings.append(AccountBinding(ref, services[ref.key], account_id))
-        fleet = AccountFleet(provider, bindings)
+        unavailable = {
+            ref.label: self.unavailable_reason(ref) or "not available"
+            for ref in self.configured_accounts(provider)
+            if ref.key not in services
+        }
+        fleet = AccountFleet(
+            provider, bindings, qualified=self.is_multi(provider), unavailable=unavailable,
+        )
         self._fleets[provider] = fleet
         return fleet
 

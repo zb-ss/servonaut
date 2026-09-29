@@ -349,3 +349,61 @@ class TestOVHAmbientConfig:
         monkeypatch.setenv("OVH_APPLICATION_SECRET", "ambient-as")
         with pytest.raises(InvalidConfiguration):
             AccountRegistry(config).service("ovh").client
+
+
+class TestUnavailablePrimary:
+    """The default account is the primary one; another is never promoted."""
+
+    def _registry(self, monkeypatch):
+        monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE",
+            __import__("pathlib").Path("/nonexistent/hcloud-token"),
+        )
+        config = AppConfig()
+        config.hetzner.enabled = True
+        config.hetzner.api_token = "$SERVONAUT_TEST_UNSET_PRIMARY_TOKEN"
+        config.hetzner.accounts = [HetznerAccount(label="staging", api_token="b")]
+        return AccountRegistry(config)
+
+    def test_no_default_account_while_the_primary_cannot_connect(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        with pytest.raises(UnknownAccountError) as refused:
+            registry.account("hetzner")
+        message = str(refused.value)
+        assert "primary Hetzner account 'hetzner' is not available" in message
+        assert "staging" in message
+        assert registry.default_service("hetzner") is None
+        # Naming the account still works.
+        assert registry.service("hetzner", "staging") is not None
+
+    def test_the_other_account_still_names_its_servers(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        assert registry.is_multi("hetzner")
+        assert [r.label for r in registry.accounts("hetzner")] == ["staging"]
+        assert [r.label for r in registry.configured_accounts("hetzner")] == ["hetzner", "staging"]
+        fleet = registry.fleet("hetzner")
+        assert fleet.multi
+        assert set(fleet.unavailable) == {"hetzner"}
+
+    def test_every_refresh_reports_the_unavailable_primary(self, monkeypatch):
+        registry = self._registry(monkeypatch)
+        fleet = registry.fleet("hetzner")
+        fleet.bindings[0].service = FakeService([{"id": "7", "name": "web-1"}])
+        rows = _run(fleet.fetch_instances_cached(force_refresh=True))
+        assert rows[0]["account"] == "staging" and rows[0]["account_qualified"] is True
+        assert fleet.last_fetch_error.startswith("hetzner: not available: ")
+        assert fleet.last_fetch_partial is True
+
+    def test_a_single_unusable_primary_is_simply_not_configured(self, monkeypatch):
+        monkeypatch.delenv("HCLOUD_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "servonaut.services.hetzner_service._HCLOUD_DEFAULT_TOKEN_FILE",
+            __import__("pathlib").Path("/nonexistent/hcloud-token"),
+        )
+        config = AppConfig()
+        config.hetzner.enabled = True
+        registry = AccountRegistry(config)
+        assert registry.fleet("hetzner") is None and not registry.is_multi("hetzner")
+        with pytest.raises(UnknownAccountError, match="not configured"):
+            registry.account("hetzner")
