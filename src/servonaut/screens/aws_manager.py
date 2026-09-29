@@ -49,6 +49,7 @@ from servonaut.screens._provider_accounts import (
     account_service,
     fetched_row,
     inventory,
+    with_account,
 )
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
@@ -533,7 +534,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 audit.log_action(
                     action=method,
                     target=instance_id,
-                    details=_audit_details(account, region=region),
+                    details=with_account(self.app, "aws", account, {"region": region}),
                     confirmed=True,
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -583,7 +584,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 audit.log_action(
                     action="terminate_instance",
                     target=instance_id,
-                    details=_audit_details(account, region=region, name=name),
+                    details=with_account(
+                        self.app, "aws", account, {"region": region, "name": name},
+                    ),
                     confirmed=bool(confirmed),
                 )
             except Exception as exc:  # pragma: no cover - defensive
@@ -633,10 +636,3 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     def _short_err(exc: Exception) -> str:
         msg = str(exc)
         return msg if len(msg) <= 200 else msg[:197] + "…"
-
-
-def _audit_details(account: str, **details: str) -> dict:
-    """Audit-row details, naming the AWS account the action ran in."""
-    if account:
-        details["account"] = account
-    return details

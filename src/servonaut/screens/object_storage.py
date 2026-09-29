@@ -45,11 +45,12 @@ from textual.widgets import (
     Button, DataTable, Footer, Input, Label, Select, Static,
 )
 
-from servonaut.screens._accounts import object_storage, object_storage_accounts
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     account_service,
+    object_storage,
+    object_storage_accounts,
     show_account_labels,
     shown_label,
 )

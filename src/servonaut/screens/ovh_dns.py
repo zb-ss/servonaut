@@ -18,13 +18,13 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._account_audit import with_account
 from servonaut.screens._demo_resolve import keep_cursor
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     ovh_services,
     registry_for,
     show_account_labels,
+    with_account,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.widgets.account_picker import AccountPicker

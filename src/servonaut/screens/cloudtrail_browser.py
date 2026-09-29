@@ -19,9 +19,12 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
-from servonaut.screens._accounts import cloudtrail_service
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._provider_accounts import provider_accounts, show_account_labels
+from servonaut.screens._provider_accounts import (
+    cloudtrail_service,
+    provider_accounts,
+    show_account_labels,
+)
 from servonaut.widgets.account_picker import AccountPicker
 import re
 
@@ -141,6 +144,10 @@ class CloudTrailBrowserScreen(Screen):
         Binding("p", "prev_page", "Prev", show=True),
     ]
 
+    # The screen gets -narrow / -wide classes by terminal width; the
+    # stylesheet lays the filters out on one row only when they fit.
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (150, "-wide")]
+
     # Label of the AWS account whose trail is read ("" = default).
     _account: str = ""
 
@@ -186,8 +193,11 @@ class CloudTrailBrowserScreen(Screen):
                     "[bold]CloudTrail Event Browser[/bold]",
                     id="cloudtrail_title",
                 ),
-            Horizontal(
-                # Shown only when there are several AWS accounts.
+            # A grid, so a narrow terminal can wrap the filters onto two rows
+            # (see HORIZONTAL_BREAKPOINTS and the stylesheet).
+            Container(
+                # Shown only when there are several AWS accounts; the
+                # stylesheet then gives the grid a column for it.
                 AccountPicker(provider_accounts(self.app, "aws"), id="ct_filter_account"),
                 Vertical(
                     Label("Region"),
@@ -269,6 +279,7 @@ class CloudTrailBrowserScreen(Screen):
         picker = self.query_one("#ct_filter_account", AccountPicker)
         self._account = picker.account
         show_account_labels(picker)
+        self.query_one("#cloudtrail_filters").set_class(picker.display, "-with-account")
 
         config = self.app.config_manager.get()
         if config.cloudtrail_default_region:
