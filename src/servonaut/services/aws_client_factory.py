@@ -116,16 +116,22 @@ class AWSClientFactory:
         for a write would only ever hit AccessDenied. An empty result means
         "use the ambient credential chain".
         """
-        if mutate:
-            if account:
-                mapped = (self._config.control_plane_mutate_role_arns or {}).get(account)
-                if mapped:
-                    return mapped
-            return self._config.control_plane_mutate_role_arn or ""
+        mapping = (
+            self._config.control_plane_mutate_role_arns if mutate
+            else self._config.control_plane_role_arns
+        ) or {}
         if account:
-            mapped = (self._config.control_plane_role_arns or {}).get(account)
+            mapped = mapping.get(account)
             if mapped:
                 return mapped
+        if self._account is not None and not self._account.ref.primary:
+            # The default roles belong to the primary account. Assumed with
+            # an extra account's credentials, one would act in the primary
+            # account (or be refused), so an extra account only ever assumes
+            # a role mapped to it, and otherwise uses its own credentials.
+            return ""
+        if mutate:
+            return self._config.control_plane_mutate_role_arn or ""
         return self._config.control_plane_role_arn or ""
 
     def uses_assumed_role(self, account: str = "", mutate: bool = False) -> bool:

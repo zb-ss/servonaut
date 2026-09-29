@@ -626,6 +626,10 @@ class ServonautApp(App):
             ovh_object_storage_service=self.ovh_object_storage_service,
             account_registry=self.accounts,
         )
+        # Bind every default-account service (OVH IPs, DNS, billing,
+        # snapshots, …) the constructor is not handed, so the chat tools
+        # match the MCP server's.
+        self.servonaut_tools.bind_accounts(self.accounts)
         # Follows chat_tool_guard_level live: bring-your-own providers run
         # tools without per-call prompts, so a lowered level must apply to
         # the next call, not after a restart.
