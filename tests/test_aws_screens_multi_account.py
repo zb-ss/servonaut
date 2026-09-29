@@ -437,6 +437,75 @@ async def test_create_hides_the_picker_with_one_account(ec2) -> None:
         assert screen.query_one("#aws_create_account_select", Select).disabled
 
 
+_REGION_LISTS = (
+    "list_amis", "list_instance_types", "list_key_pairs", "list_subnets",
+    "list_security_groups",
+)
+
+
+def _loads(fake: FakeEC2) -> Dict[str, int]:
+    """How often each region-scoped list was asked for, per region."""
+    counts: Dict[str, int] = {}
+    for name in _REGION_LISTS:
+        for call in fake.called(name):
+            key = f"{name}:{call[1]}"
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+@pytest.mark.asyncio
+async def test_create_loads_each_account_and_region_once(ec2) -> None:
+    from servonaut.screens.aws_create import AWSCreateScreen
+
+    async def two_regions(bootstrap_region: str = "us-east-1") -> List[str]:
+        ec2["prod"].calls.append(("list_regions",))
+        return ["us-east-1", "us-west-2"]
+
+    ec2["prod"].list_regions = two_regions
+    config = _config()
+    config.aws.default_region = "us-east-1"
+    app = Host(_registry(config), AWSCreateScreen)
+    async with app.run_test(size=(160, 80)) as pilot:
+        screen = app.screen
+        await _wait_for_create_tables(pilot, screen)
+        await pilot.pause(0.1)
+        # Listing the regions and preselecting the default one ask for the
+        # same tables: they load once.
+        assert _loads(ec2["prod"]) == {f"{name}:us-east-1": 1 for name in _REGION_LISTS}
+
+        # Another region loads its tables once; coming back loads them again.
+        regions = screen.query_one("#aws_regions_table", DataTable)
+        regions.move_cursor(row=1)
+        await _wait_for(
+            pilot, lambda: ec2["prod"].called("list_security_groups")[-1][1] == "us-west-2",
+            "the second region",
+        )
+        regions.move_cursor(row=0)
+        await _wait_for(
+            pilot, lambda: len(ec2["prod"].called("list_security_groups")) == 3, "back again",
+        )
+        await pilot.pause(0.1)
+        assert _loads(ec2["prod"]) == {
+            **{f"{name}:us-east-1": 2 for name in _REGION_LISTS},
+            **{f"{name}:us-west-2": 1 for name in _REGION_LISTS},
+        }
+
+        # Another account loads its own region once; switching back reloads.
+        _pick_account(screen, "aws_create_account", "staging")
+        await _wait_for(pilot, lambda: ec2["staging"].called("list_security_groups"), "staging")
+        await _wait_for_create_tables(pilot, screen)
+        await pilot.pause(0.1)
+        assert _loads(ec2["staging"]) == {f"{name}:eu-west-1": 1 for name in _REGION_LISTS}
+        _pick_account(screen, "aws_create_account", "prod")
+        await _wait_for(
+            pilot, lambda: len(ec2["prod"].called("list_security_groups")) == 4, "prod again",
+        )
+        await _wait_for_create_tables(pilot, screen)
+        await pilot.pause(0.1)
+        assert _loads(ec2["prod"])["list_amis:us-east-1"] == 3
+        assert _loads(ec2["staging"]) == {f"{name}:eu-west-1": 1 for name in _REGION_LISTS}
+
+
 async def _launch(app: Host, pilot, name: str) -> None:
     """Fill in the wizard's name and launch with everything as preselected."""
     from unittest.mock import AsyncMock
