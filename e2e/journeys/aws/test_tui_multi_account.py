@@ -14,7 +14,6 @@ CloudTrail reads the trail again when the account changes.
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -171,23 +170,12 @@ PRIMARY_GROUP = "/e2e/primary/app"
 SECOND_GROUP = "/e2e/second/app"
 
 
-def _seed_second_log_group(moto, role: str, group: str, lines: list[str]) -> None:
-    """A log group with *lines*, written half a minute ago, in *role*'s account."""
-    logs = moto.client_as(role, "logs", REGION)
-    logs.create_log_group(logGroupName=group)
-    logs.create_log_stream(logGroupName=group, logStreamName="e2e-stream")
-    stamp = int((time.time() - 30) * 1000)
-    logs.put_log_events(
-        logGroupName=group,
-        logStreamName="e2e-stream",
-        logEvents=[{"timestamp": stamp + n, "message": line} for n, line in enumerate(lines)],
-    )
-
-
 async def test_cloudwatch_reads_the_picked_accounts_logs(tui, seed, moto):
     role = _seed_accounts(seed, moto, cloudwatch_default_region=REGION)
     moto.seed_log_events(PRIMARY_GROUP, ["GET /primary 200"])
-    _seed_second_log_group(moto, role, SECOND_GROUP, ["GET /second 200", "GET /second 404"])
+    moto.seed_log_events(
+        SECOND_GROUP, ["GET /second 200", "GET /second 404"], region=REGION, role_arn=role
+    )
 
     async with tui() as t:
         await t.nav("nav_cloudwatch")
@@ -208,26 +196,32 @@ async def test_cloudwatch_reads_the_picked_accounts_logs(tui, seed, moto):
 
 
 async def test_cloudtrail_reads_the_trail_again_for_the_picked_account(tui, seed, moto, cloudtrail):
-    # The local CloudTrail endpoint does not tell accounts apart, so this
-    # checks that switching account reads the trail again, from scratch.
     _seed_accounts(seed, moto, cloudtrail_default_region=REGION)
-    now = datetime.now(timezone.utc)
+    when = datetime.now(timezone.utc) - timedelta(minutes=5)
+    cloudtrail.seed([cloudtrail_event("StopInstances", when, username="e2e-operator")], region=REGION)
     cloudtrail.seed(
-        [cloudtrail_event("StopInstances", now - timedelta(minutes=5), username="e2e-operator")],
+        [cloudtrail_event("RebootInstances", when, username="e2e-operator")],
         region=REGION,
+        account=aws.SECOND_ACCOUNT,
     )
     async with tui() as t:
         await t.nav("nav_cloudtrail")
         await t.wait_for_screen("CloudTrailBrowserScreen")
         await t.click("#ct_btn_fetch")
         await t.wait_for_toast(r"^Loaded 1 CloudTrail events\.$")
+        assert _column(t, "#cloudtrail_table", 1) == ["StopInstances"]
+        assert {lookup["account"] for lookup in cloudtrail.lookups()} == {aws.DEFAULT_ACCOUNT}
         before = len(cloudtrail.lookups())
 
         await choose(t, "#ct_filter_account_select", SECOND)
         await t.wait_until(lambda: len(cloudtrail.lookups()) > before, desc="the trail read again")
         await t.wait_until(
-            lambda: _column(t, "#cloudtrail_table", 1) == ["StopInstances"], desc="events shown"
+            lambda: _column(t, "#cloudtrail_table", 1) == ["RebootInstances"],
+            desc="the second account's events shown",
         )
+        assert {lookup["account"] for lookup in cloudtrail.lookups()[before:]} == {
+            aws.SECOND_ACCOUNT
+        }
         assert t.on_screen("#ct_filter_account").account == SECOND
 
 
@@ -240,11 +234,7 @@ async def test_ip_ban_config_acts_in_its_account(tui, seed, moto):
     from servonaut.config.schema import IPBanConfig
 
     role = _seed_aws(moto)
-    waf = moto.client_as(role, "wafv2", REGION)
-    ip_set = waf.create_ip_set(
-        Name="e2e-second-blocklist", Scope="REGIONAL", IPAddressVersion="IPV4",
-        Addresses=[], Description="e2e ban list",
-    )["Summary"]
+    ip_set = moto.seed_waf_ip_set("e2e-second-blocklist", region=REGION, role_arn=role)
     config = IPBanConfig(
         name="second-waf", method="waf", region=REGION, account=SECOND,
         ip_set_id=ip_set["Id"], ip_set_name=ip_set["Name"],
@@ -260,15 +250,14 @@ async def test_ip_ban_config_acts_in_its_account(tui, seed, moto):
         await t.click("#btn_ban")
         await t.wait_for_toast(f"^Banned {ADDRESS} via WAF IP set$", severity="information")
 
-    addresses = waf.get_ip_set(Name=ip_set["Name"], Scope="REGIONAL", Id=ip_set["Id"])
-    assert addresses["IPSet"]["Addresses"] == [f"{ADDRESS}/32"]
+    assert moto.waf_addresses(ip_set, region=REGION, role_arn=role) == [f"{ADDRESS}/32"]
     assert moto.client("wafv2", REGION).list_ip_sets(Scope="REGIONAL")["IPSets"] == []
 
 
 async def test_object_storage_lists_the_picked_accounts_buckets(tui, seed, moto):
     role = _seed_accounts(seed, moto)
     moto.seed_bucket("e2e-primary-assets")
-    moto.client_as(role, "s3", REGION).create_bucket(Bucket="e2e-second-assets")
+    moto.seed_bucket("e2e-second-assets", region=REGION, role_arn=role)
 
     async with tui() as t:
         await t.nav("nav_aws_s3")

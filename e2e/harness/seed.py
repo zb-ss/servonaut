@@ -79,11 +79,14 @@ class HomeSeeder:
         """Return an ``AppConfig`` with the suite's safe defaults applied.
 
         The terminal is always pinned to the fake terminal, so no code path
-        can fall back to detecting a real terminal emulator on the host.
+        can fall back to detecting a real terminal emulator on the host. The
+        AWS fleet is listed from the fleet's regions only (see
+        :meth:`aws_config`).
         """
         config = AppConfig()
         config.terminal_emulator = TERMINAL
         config.memory.redaction_enabled = True
+        config.aws = self.aws_config()
         if self.api_url:
             from servonaut.services.relay_manager import derive_relay_urls
 
@@ -167,24 +170,28 @@ class HomeSeeder:
 
     @staticmethod
     def aws_config(**overrides: Any) -> Any:
-        """An ``AWSConfig`` (the primary account keeps the ambient credentials).
+        """An ``AWSConfig`` listing instances from the fleet's regions only.
 
-        Extra accounts go in ``accounts=[HomeSeeder.aws_account(...)]``.
+        The primary account keeps the ambient credentials. Pass
+        ``regions=[]`` to have every region the endpoint offers discovered,
+        as the schema's default does. Extra accounts go in
+        ``accounts=[HomeSeeder.aws_account(...)]``.
         """
         from servonaut.config.schema import AWSConfig
 
-        return _with_overrides(AWSConfig(), overrides)
+        return _with_overrides(AWSConfig(regions=list(fleet.AWS_REGIONS)), overrides)
 
     @staticmethod
     def aws_account(label: str, profile: Optional[str] = None, **overrides: Any) -> Any:
         """An ``AWSAccount`` reached through the named profile *profile* (default: *label*).
 
-        Write the profile with :meth:`aws_profile`. ``regions`` is empty by
-        default, so the account lists every region, as the schema's default.
+        Write the profile with :meth:`aws_profile`. Like :meth:`aws_config`
+        it lists the fleet's regions only; ``regions=[]`` discovers them all.
         """
         from servonaut.config.schema import AWSAccount
 
-        return _with_overrides(AWSAccount(label=label, profile=profile or label), overrides)
+        account = AWSAccount(label=label, profile=profile or label, regions=list(fleet.AWS_REGIONS))
+        return _with_overrides(account, overrides)
 
     def previous_version_config(self, **overrides: Any) -> dict:
         """Save the config as the release before the current schema wrote it.
@@ -196,6 +203,8 @@ class HomeSeeder:
             raise NotImplementedError(
                 f"add the rewind step for schema v{CONFIG_VERSION - 1}"
             )
+        # The previous release had no AWS region allowlist.
+        overrides.setdefault("aws", self.aws_config(regions=[]))
         self.config(**overrides)
         data = self.read_config()
         data["version"] = CONFIG_VERSION - 1

@@ -9,9 +9,10 @@ endpoint, as a real one does: a classic application key with its consumer
 key, and an OAuth2 client whose client-credentials tokens the fake issues.
 The primary account answers :data:`PRIMARY_CREDENTIALS` (what
 ``HomeSeeder.ovh_config`` writes) on ``ovh-eu``; :meth:`OvhAccounts.add`
-creates further accounts. Unknown credentials are refused with the API's
-errors. The fake accepts any request signature and answers ``/auth/time``
-so the client can compute its clock delta.
+creates further accounts. Unknown credentials, and classic requests whose
+signature was not made with the account's application secret, are refused
+with the API's errors. The fake answers ``/auth/time`` so the client can
+compute its clock delta; it does not check how old a request's timestamp is.
 
 An account holds VPS (with their IP details, snapshot and backup options),
 dedicated servers, Public Cloud projects (instances, flavors, images,
@@ -28,6 +29,7 @@ with the endpoint and the label of the account each one reached.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import re
@@ -111,6 +113,17 @@ def credentials_for(label: str) -> OvhCredentials:
     if label == PRIMARY_LABEL:
         return PRIMARY_CREDENTIALS
     return OvhCredentials(*(f"{value}-{label}" for value in astuple(PRIMARY_CREDENTIALS)))
+
+
+def signature(
+    credentials: OvhCredentials, method: str, url: str, body: str, timestamp: str
+) -> str:
+    """The ``X-Ovh-Signature`` python-ovh sends for one request of *credentials*."""
+    signed = "+".join([
+        credentials.application_secret, credentials.consumer_key, method.upper(), url, body,
+        timestamp,
+    ])
+    return "$1$" + hashlib.sha1(signed.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -691,7 +704,9 @@ def _not_found() -> web.Response:
 def add_routes(app: web.Application, accounts: OvhAccounts) -> None:  # noqa: C901 - a route table
     """Register the OVH routes on *app*, for every endpoint name."""
 
-    def authenticate(request: web.Request, endpoint: str) -> Union[OvhState, web.Response]:
+    def authenticate(
+        request: web.Request, endpoint: str, body: bytes
+    ) -> Union[OvhState, web.Response]:
         """The account the request's credentials belong to, or the API's refusal."""
         token = bearer_token(request)
         if token is not None:
@@ -699,18 +714,28 @@ def add_routes(app: web.Application, accounts: OvhAccounts) -> None:  # noqa: C9
             if account is None or account.endpoint != endpoint:
                 return error_response(401, "Invalid or expired access token")
             return account
-        account = accounts.by_application_key(request.headers.get("X-Ovh-Application"), endpoint)
+        headers = request.headers
+        account = accounts.by_application_key(headers.get("X-Ovh-Application"), endpoint)
         if account is None:
             return error_response(403, "Invalid application key", "INVALID_KEY")
-        if request.headers.get("X-Ovh-Consumer") != account.credentials.consumer_key:
+        if headers.get("X-Ovh-Consumer") != account.credentials.consumer_key:
             return error_response(403, "This credential does not exist", "INVALID_CREDENTIAL")
+        # python-ovh signs the URL exactly as it sends it.
+        url = f"{request.scheme}://{request.host}{request.raw_path}"
+        expected = signature(
+            account.credentials, request.method, url, body.decode("utf-8", "replace"),
+            headers.get("X-Ovh-Timestamp", ""),
+        )
+        if headers.get("X-Ovh-Signature") != expected:
+            return error_response(400, "Invalid signature", "INVALID_SIGNATURE")
         return account
 
     def guarded(handler: Any) -> Any:
         """Run *handler* for the request's account; refuse it while ``fail_with`` is set."""
 
         async def wrapper(request: web.Request) -> web.StreamResponse:
-            account = authenticate(request, request.match_info.get(_ENDPOINT, DEFAULT_ENDPOINT))
+            endpoint = request.match_info.get(_ENDPOINT, DEFAULT_ENDPOINT)
+            account = authenticate(request, endpoint, await request.read())
             if isinstance(account, web.Response):
                 return account
             request[ACCOUNT] = account.label
