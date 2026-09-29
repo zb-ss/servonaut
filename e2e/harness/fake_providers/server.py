@@ -2,9 +2,13 @@
 
 One instance per test process (session scope); journeys call :meth:`reset`
 between tests. It serves stand-ins for the Hetzner Cloud API under
-``/hetzner/v1`` and the OVHcloud API under ``/ovh/1.0``. Every request is
-logged with credentials redacted, and an unknown route answers 404 and is
-logged too, so a journey can assert exactly which calls a user action made.
+``/hetzner/v1`` and the OVHcloud API under ``/ovh`` (``/ovh/1.0`` for
+``ovh-eu``). Each provider has a primary account and can have more, each
+answering its own credentials (:meth:`add_hetzner_project`,
+:meth:`add_ovh_account`). Every request is logged with credentials redacted
+and with the label of the account it reached, and an unknown route answers
+404 and is logged too, so a journey can assert exactly which calls a user
+action made, and for which account.
 
 Plain HTTP is enough: both client libraries accept an ``http://`` base URL,
 and the socket guard keeps every connection on loopback.
@@ -24,6 +28,7 @@ from aiohttp import web
 
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_providers import hetzner, ovh
+from e2e.harness.fake_providers.accounts import ACCOUNT
 
 _START_TIMEOUT_SECONDS = 15
 
@@ -32,8 +37,11 @@ class FakeProviders:
     """Local stand-in for the Hetzner Cloud and OVHcloud APIs."""
 
     def __init__(self) -> None:
-        self.hetzner = hetzner.HetznerState()
-        self.ovh = ovh.OvhState()
+        self.hetzner_projects = hetzner.HetznerProjects()
+        self.ovh_accounts = ovh.OvhAccounts()
+        # The primary accounts, which single-account journeys seed directly.
+        self.hetzner = self.hetzner_projects.primary
+        self.ovh = self.ovh_accounts.primary
         self._log = RequestLog()
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -56,13 +64,44 @@ class FakeProviders:
 
     @property
     def ovh_url(self) -> str:
-        """Base URL in the form python-ovh's endpoint table holds."""
+        """Base URL in the form python-ovh's endpoint table holds (``ovh-eu``)."""
         return f"{self.url}{ovh.PREFIX}"
 
+    def ovh_endpoint_url(self, endpoint: str) -> str:
+        """Base URL of the python-ovh endpoint name *endpoint* (``ovh-ca``, ...)."""
+        return f"{self.url}{ovh.endpoint_prefix(endpoint)}"
+
+    def ovh_endpoint_urls(self) -> dict[str, str]:
+        """A base URL of its own for every endpoint name python-ovh knows."""
+        from ovh import client as ovh_client
+
+        return {name: self.ovh_endpoint_url(name) for name in ovh_client.ENDPOINTS}
+
+    def add_hetzner_project(self, label: str, token: Optional[str] = None) -> hetzner.HetznerState:
+        """A further, empty Hetzner project answering *token*.
+
+        The token defaults to ``hetzner.token_for(label)``, which is also what
+        ``HomeSeeder.hetzner_account(label)`` writes.
+        """
+        return self.hetzner_projects.add(label, token)
+
+    def add_ovh_account(
+        self,
+        label: str,
+        endpoint: str = ovh.DEFAULT_ENDPOINT,
+        credentials: Optional[ovh.OvhCredentials] = None,
+    ) -> ovh.OvhState:
+        """A further, empty OVH account on *endpoint*, answering *credentials*.
+
+        The credentials default to ``ovh.credentials_for(label)``, which is
+        also what ``HomeSeeder.ovh_account(label)`` writes.
+        """
+        return self.ovh_accounts.add(label, endpoint, credentials)
+
     def reset(self) -> None:
-        """Restore both providers to empty accounts and forget logged requests."""
-        self.hetzner.reset()
-        self.ovh.reset()
+        """Back to one empty account per provider; forget logged requests."""
+        self.hetzner_projects.reset()
+        self.ovh_accounts.reset()
         self._log.clear()
 
     def requests(
@@ -71,12 +110,15 @@ class FakeProviders:
         *,
         method: Optional[str] = None,
         path: Optional[str] = None,
+        account: Optional[str] = None,
     ) -> list[dict]:
         """Logged requests, oldest first.
 
         *provider* is ``"hetzner"`` or ``"ovh"``; *path* is a regular
         expression matched in full against the path below the provider's
-        base URL (``/servers/42/actions/reboot``, ``/vps``).
+        base URL (``/servers/42/actions/reboot``, ``/vps``); *account* is the
+        label of the account a request reached (a refused request has none).
+        Each entry also names the OVH ``endpoint`` it was sent to.
         """
         pattern = re.compile(path) if path else None
         out = []
@@ -84,6 +126,8 @@ class FakeProviders:
             if provider is not None and entry["provider"] != provider:
                 continue
             if pattern is not None and not pattern.fullmatch(entry["api_path"]):
+                continue
+            if account is not None and entry["account"] != account:
                 continue
             out.append(entry)
         return out
@@ -116,16 +160,19 @@ class FakeProviders:
 
     def _build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._log_middleware])
-        hetzner.add_routes(app, self.hetzner)
-        ovh.add_routes(app, self.ovh)
+        hetzner.add_routes(app, self.hetzner_projects)
+        ovh.add_routes(app, self.ovh_accounts)
         return app
 
     @staticmethod
-    def _classify(path: str) -> tuple[str, str]:
-        for provider, prefix in (("hetzner", hetzner.PREFIX), ("ovh", ovh.PREFIX)):
-            if path == prefix or path.startswith(prefix + "/"):
-                return provider, path[len(prefix):] or "/"
-        return "unknown", path
+    def _classify(path: str) -> tuple[str, Optional[str], str]:
+        """``(provider, OVH endpoint name, API path)`` of a request path."""
+        if path == hetzner.PREFIX or path.startswith(hetzner.PREFIX + "/"):
+            return "hetzner", None, path[len(hetzner.PREFIX):] or "/"
+        ovh_path = ovh.split_path(path)
+        if ovh_path is not None:
+            return "ovh", *ovh_path
+        return "unknown", None, path
 
     @web.middleware
     async def _log_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
@@ -136,7 +183,7 @@ class FakeProviders:
                 body = redact(json.loads(raw)) if raw else None
             except ValueError:
                 body = f"<{len(raw)} bytes>"
-        provider, api_path = self._classify(request.path)
+        provider, endpoint, api_path = self._classify(request.path)
         try:
             response = await handler(request)
         except web.HTTPNotFound:
@@ -148,6 +195,8 @@ class FakeProviders:
         self._log.add(
             {
                 "provider": provider,
+                "endpoint": endpoint,
+                "account": request.get(ACCOUNT),
                 "method": request.method,
                 "path": request.path,
                 "api_path": api_path,
