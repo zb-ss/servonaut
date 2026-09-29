@@ -9,6 +9,9 @@ Hetzner's side.
 Mirrors :class:`servonaut.screens.ovh_ssh_keys.OVHSSHKeysScreen` in
 shape (table + add form + bottom-docked Save/Cancel + confirm-on-
 delete) so the OVH and Hetzner SSH-key surfaces feel like one app.
+
+Each API token is one project with its own key registry: with several
+projects configured, a picker chooses the project listed and changed.
 """
 
 from __future__ import annotations
@@ -25,7 +28,15 @@ from textual.widgets import (
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_service,
+    inventory,
+    registry_for,
+    show_account_labels,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -45,6 +56,9 @@ class HetznerSSHKeysScreen(Screen):
         Binding("d", "delete_key", "Delete", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    # Label of the chosen project; "" is the default project.
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -76,6 +90,11 @@ class HetznerSSHKeysScreen(Screen):
                     "this list at provision time — they do NOT touch "
                     "your local ~/.ssh.[/dim]",
                     id="hetzner_ssh_keys_hint",
+                ),
+                # Hidden unless several Hetzner projects are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "hetzner"), "hetzner",
+                    id="hetzner_ssh_keys_account",
                 ),
 
                 DataTable(id="hetzner_ssh_keys_table"),
@@ -152,14 +171,33 @@ class HetznerSSHKeysScreen(Screen):
         table = self.query_one("#hetzner_ssh_keys_table", DataTable)
         table.cursor_type = "row"
         table.add_columns("Name", "ID", "Fingerprint")
+        picker = self.query_one("#hetzner_ssh_keys_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._refresh()
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another project was picked: list its keys instead."""
+        self._account = event.account
+        self._hide_form()
+        self._keys = []
+        self._render_keys()
+        self._refresh()
+
+    def _project_service(self):
+        """The chosen project's service, or None after telling the user why."""
+        try:
+            return account_service(self.app, "hetzner", self._account)
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
 
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
 
     def _refresh(self) -> None:
-        if getattr(self.app, "hetzner_service", None) is None:
+        if inventory(self.app, "hetzner") is None:
             self._set_status(
                 "[red]Hetzner Cloud is not configured. "
                 "Visit Settings → Hetzner Cloud first.[/red]"
@@ -171,7 +209,9 @@ class HetznerSSHKeysScreen(Screen):
         )
 
     async def _load_keys(self) -> None:
-        svc = self.app.hetzner_service
+        svc = self._project_service()
+        if svc is None:
+            return
         try:
             self._keys = list(await svc.list_ssh_keys())
         except Exception as exc:
@@ -184,6 +224,7 @@ class HetznerSSHKeysScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the key rows for the new demo-mode state."""
+        show_account_labels(self.query_one("#hetzner_ssh_keys_account", AccountPicker))
         self._render_keys()
 
     def _render_keys(self) -> None:
@@ -284,7 +325,7 @@ class HetznerSSHKeysScreen(Screen):
         self._refresh()
 
     def action_add_key(self) -> None:
-        if getattr(self.app, "hetzner_service", None) is None:
+        if inventory(self.app, "hetzner") is None:
             self.notify(
                 "Hetzner Cloud is not configured.",
                 severity="warning", markup=False,
@@ -298,10 +339,13 @@ class HetznerSSHKeysScreen(Screen):
             self.notify("No key selected.", severity="warning",
                         markup=False)
             return
+        svc = self._project_service()
+        if svc is None:
+            return
         # ``push_screen_wait`` requires a worker context in Textual 8.x —
         # spawn the confirm + delete chain explicitly.
         self.run_worker(
-            self._do_delete(key),
+            self._do_delete(svc, key),
             exclusive=True, name="hetzner_ssh_delete",
         )
 
@@ -326,9 +370,12 @@ class HetznerSSHKeysScreen(Screen):
             ).focus()
             return
 
+        svc = self._project_service()
+        if svc is None:
+            return
         self._hide_form()
         self.run_worker(
-            self._do_add(name, public_key),
+            self._do_add(svc, name, public_key),
             exclusive=True, name="hetzner_ssh_add",
         )
 
@@ -336,9 +383,8 @@ class HetznerSSHKeysScreen(Screen):
     # Workers
     # ------------------------------------------------------------------
 
-    async def _do_add(self, name: str, public_key: str) -> None:
+    async def _do_add(self, svc, name: str, public_key: str) -> None:
         self._set_status(f"[dim]Adding key {name}…[/dim]")
-        svc = self.app.hetzner_service
         try:
             await svc.create_ssh_key(name, public_key)
         except Exception as exc:
@@ -356,7 +402,7 @@ class HetznerSSHKeysScreen(Screen):
         )
         await self._load_keys()
 
-    async def _do_delete(self, key: dict) -> None:
+    async def _do_delete(self, svc, key: dict) -> None:
         identifier = str(key.get("id") or key.get("name") or "")
         if not identifier:
             return
@@ -384,7 +430,6 @@ class HetznerSSHKeysScreen(Screen):
         self._set_status(
             f"[dim]Deleting key {key.get('name', identifier)}…[/dim]"
         )
-        svc = self.app.hetzner_service
         try:
             await svc.delete_ssh_key(identifier)
         except Exception as exc:

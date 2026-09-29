@@ -14,6 +14,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OVHFirewallScreen(Screen):
+class OVHFirewallScreen(ServerAccountMixin, Screen):
     """Firewall management for an OVH VPS or dedicated server IP."""
 
     BINDINGS = [
@@ -229,7 +230,7 @@ class OVHFirewallScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_firewall(self) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ovh_service("ip")
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -337,7 +338,7 @@ class OVHFirewallScreen(Screen):
         )
 
     async def _do_toggle_firewall(self, enabled: bool) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ovh_service("ip")
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -425,7 +426,7 @@ class OVHFirewallScreen(Screen):
         )
 
     async def _do_add_rule(self, rule: dict) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ovh_service("ip")
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -496,7 +497,7 @@ class OVHFirewallScreen(Screen):
         )
 
     async def _do_delete_rule(self, sequence: int) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ovh_service("ip")
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return

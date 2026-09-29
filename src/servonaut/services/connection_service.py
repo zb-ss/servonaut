@@ -31,6 +31,18 @@ def _int_setting(value: object, default: int) -> int:
         return default
 
 
+def _ovh_account_config(config, instance: dict):
+    """The OVH settings of the account *instance* belongs to (primary if unknown)."""
+    from servonaut.config.accounts import ovh_accounts
+
+    label = str(instance.get("account") or "").lower()
+    if label:
+        for ref, effective in ovh_accounts(config.ovh):
+            if ref.key == label:
+                return effective
+    return config.ovh
+
+
 class ConnectionService(ConnectionServiceInterface):
     """Connection service for resolving connection profiles and bastion configuration.
 
@@ -48,18 +60,23 @@ class ConnectionService(ConnectionServiceInterface):
     def resolve_ovh_connection(
         self, instance: dict, fallback_key: Optional[str] = None,
     ) -> SSHConnectionOptions:
-        """Use the same OVH defaults for interactive SSH and background reads."""
+        """Use the same OVH defaults for interactive SSH and background reads.
+
+        The defaults come from the OVH account the server belongs to, so an
+        extra account's key and username apply to its own servers.
+        """
         from servonaut.services.ovh_service import OVHService
 
         config = self._config_manager.get()
+        ovh = _ovh_account_config(config, instance)
         return {
             "host": instance.get("public_ip") or instance.get("private_ip") or "",
-            "username": config.ovh.default_username or OVHService.default_username(
+            "username": ovh.default_username or OVHService.default_username(
                 instance.get("provider_type", "vps"),
             ),
             "key_path": (
                 config.instance_keys.get(instance.get("id", ""))
-                or config.ovh.default_ssh_key or config.default_key or fallback_key
+                or ovh.default_ssh_key or config.default_key or fallback_key
             ),
             "proxy_args": [],
             "port": None,

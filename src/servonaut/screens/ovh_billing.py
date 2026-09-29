@@ -1,4 +1,8 @@
-"""OVH Billing Dashboard screen for Servonaut."""
+"""OVH Billing Dashboard screen for Servonaut.
+
+Billing is per OVH account: with several accounts configured, a picker
+chooses whose usage, invoices and services are shown.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,13 @@ from textual.widgets import Button, DataTable, Footer, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    ovh_services,
+    registry_for,
+    show_account_labels,
+)
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -77,6 +88,10 @@ def _format_spend_history(history: List[dict], *, redact: bool = False) -> str:
 
 _PAGE_SIZE = 15
 
+# Every worker that loads billing data, so an account switch can cancel
+# the loads still running for the previous account.
+_LOAD_GROUP = "ovh_billing_load"
+
 
 class OVHBillingScreen(Screen):
     """OVH Billing Dashboard — shows usage, history, invoices, and services."""
@@ -87,6 +102,8 @@ class OVHBillingScreen(Screen):
 
     _all_invoices: List[dict]
     _invoice_page: int
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":
@@ -105,6 +122,10 @@ class OVHBillingScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static("[bold cyan]OVH Billing Dashboard[/bold cyan]", id="billing_title"),
+                # Hidden unless several OVH accounts are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh", id="billing_account",
+                ),
 
                 Static("[bold]Current Month[/bold]", classes="section_header"),
                 Static("[dim]Loading...[/dim]", id="current_usage"),
@@ -137,7 +158,38 @@ class OVHBillingScreen(Screen):
         self._all_invoices = []
         self._invoice_page = 0
         self._setup_tables()
-        self.run_worker(self._gate_then_load(), exclusive=False)
+        picker = self.query_one("#billing_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
+        self.run_worker(self._gate_then_load(), group=_LOAD_GROUP, exclusive=False)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: show its billing instead."""
+        self._account = event.account
+        self._reload()
+
+    def _reload(self) -> None:
+        """Clear every panel and load it again for the chosen account."""
+        self.workers.cancel_group(self, _LOAD_GROUP)
+        for selector in ("#current_usage", "#spend_history"):
+            self.query_one(selector, Static).update("[dim]Loading...[/dim]")
+        self._all_invoices = []
+        self._invoice_page = 0
+        self._render_invoice_page()
+        self.query_one("#services_table", DataTable).clear()
+        self.run_worker(self._gate_then_load(), group=_LOAD_GROUP, exclusive=False)
+
+    def _services(self):
+        """The chosen account's services, or None after telling the user why."""
+        try:
+            return ovh_services(self.app, self._account)
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
+
+    def _billing_service(self):
+        services = self._services()
+        return services.billing if services is not None else None
 
     async def _gate_then_load(self) -> None:
         """Verify OVH credentials once, then load every billing section.
@@ -146,16 +198,20 @@ class OVHBillingScreen(Screen):
         without this gate the screen would render four misleading "no data"
         panels. The one extra ``GET /me`` runs only at screen open.
         """
-        ovh_svc = getattr(self.app, "ovh_service", None)
+        services = self._services()
+        if services is None:
+            return
+        ovh_svc = services.ovh
         if ovh_svc is not None:
             cred_error = await ovh_svc.check_credentials()
             if cred_error:
                 self._show_credential_error(cred_error)
                 return
-        self.run_worker(self._load_current_usage(), exclusive=False)
-        self.run_worker(self._load_spend_history(), exclusive=False)
-        self.run_worker(self._load_invoices(), exclusive=False)
-        self.run_worker(self._load_services(), exclusive=False)
+        for loader in (
+            self._load_current_usage, self._load_spend_history,
+            self._load_invoices, self._load_services,
+        ):
+            self.run_worker(loader(), group=_LOAD_GROUP, exclusive=False)
 
     def _show_credential_error(self, message: str) -> None:
         """Render an OVH credential failure across the billing panels.
@@ -221,18 +277,19 @@ class OVHBillingScreen(Screen):
 
     def refresh_after_demo_toggle(self) -> None:
         """Remove already-rendered private values before asynchronous reloads."""
+        show_account_labels(self.query_one("#billing_account", AccountPicker))
         for selector in ("#current_usage", "#spend_history"):
             self.query_one(selector, Static).update("[dim]Loading...[/dim]")
         self._render_invoice_page()
         self.query_one("#services_table", DataTable).clear()
-        self.run_worker(self._gate_then_load(), exclusive=False)
+        self.run_worker(self._gate_then_load(), group=_LOAD_GROUP, exclusive=False)
 
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
 
     async def _load_current_usage(self) -> None:
-        svc = getattr(self.app, "ovh_billing_service", None)
+        svc = self._billing_service()
         widget = self.query_one("#current_usage", Static)
         if svc is None:
             widget.update("[red]OVH billing service not available.[/red]")
@@ -245,7 +302,7 @@ class OVHBillingScreen(Screen):
             widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
 
     async def _load_spend_history(self) -> None:
-        svc = getattr(self.app, "ovh_billing_service", None)
+        svc = self._billing_service()
         widget = self.query_one("#spend_history", Static)
         if svc is None:
             widget.update("[red]OVH billing service not available.[/red]")
@@ -258,7 +315,7 @@ class OVHBillingScreen(Screen):
             widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
 
     async def _load_invoices(self) -> None:
-        svc = getattr(self.app, "ovh_billing_service", None)
+        svc = self._billing_service()
         if svc is None:
             return
         try:
@@ -303,7 +360,7 @@ class OVHBillingScreen(Screen):
         self.query_one("#btn_next_page", Button).disabled = self._invoice_page >= max_page
 
     async def _load_services(self) -> None:
-        svc = getattr(self.app, "ovh_billing_service", None)
+        svc = self._billing_service()
         tbl = self.query_one("#services_table", DataTable)
         if svc is None:
             return

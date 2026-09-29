@@ -275,6 +275,31 @@ Instances are cached to `~/.servonaut/cache.json` for fast startup.
 
 Default TTL is **1 hour** (`cache_ttl_seconds: 3600` in config).
 
+## Multiple Accounts
+
+A provider can have several accounts: AWS named profiles, Hetzner Cloud
+projects (one API token each) and OVH accounts. The provider's own settings
+are its first account; add more in Settings or in `config.json` under the
+provider's `accounts` list:
+
+```json
+{
+  "aws": {"accounts": [{"label": "prod", "profile": "prod", "regions": ["eu-west-1"]}]},
+  "hetzner": {
+    "enabled": true,
+    "api_token": "$HCLOUD_TOKEN",
+    "accounts": [{"label": "staging", "api_token": "$HCLOUD_TOKEN_STAGING"}]
+  }
+}
+```
+
+Every account has a short label, unique across providers; the first account
+is named after the provider unless you rename it. When a provider has more
+than one account, its servers are listed as `label/name` (for example
+`prod/web-1`) and search matches the label. The CLI, MCP tools and AI chat
+accept `label/name` too; a name shared by several servers is refused with the
+choices. Custom servers are `custom/name`.
+
 ## Connection Profiles (Bastion Support)
 
 For instances behind a bastion host, add to `~/.servonaut/config.json`:
@@ -300,7 +325,9 @@ For instances behind a bastion host, add to `~/.servonaut/config.json`:
 }
 ```
 
-**Match conditions:** `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `group`, `tag:<key>`
+**Match conditions:** `name_contains`, `name_regex`, `region`, `id`, `type_contains`, `has_public_ip`, `provider`, `account`, `group`, `tag:<key>`
+
+`account` matches a provider account label, so one account's servers can use their own bastion.
 
 ## SSH Key Management
 

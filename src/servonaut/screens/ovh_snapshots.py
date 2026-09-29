@@ -13,13 +13,14 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import connection_instance, real_instance_id
+from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
 
 
-class OVHSnapshotsScreen(Screen):
+class OVHSnapshotsScreen(ServerAccountMixin, Screen):
     """Screen for managing snapshots of a specific OVH instance.
 
     Supports VPS snapshots, VPS automated backups, and Public Cloud snapshots
@@ -152,7 +153,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _load_vps_snapshots(self) -> None:
         """Fetch VPS snapshots and populate the table."""
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return
@@ -173,7 +174,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _load_cloud_snapshots(self) -> None:
         """Fetch Public Cloud snapshots and populate the table."""
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return
@@ -199,7 +200,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _load_vps_backup_status(self) -> None:
         """Fetch and display VPS automated backup options."""
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             return
 
@@ -287,7 +288,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _on_create_snapshot(self) -> None:
         """Prompt for description and create a snapshot."""
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return
@@ -410,7 +411,7 @@ class OVHSnapshotsScreen(Screen):
         if not confirmed:
             return
 
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return
@@ -481,7 +482,7 @@ class OVHSnapshotsScreen(Screen):
         if not confirmed:
             return
 
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return
@@ -526,7 +527,7 @@ class OVHSnapshotsScreen(Screen):
 
     async def _on_configure_backup(self) -> None:
         """Prompt and configure automated backup schedule (VPS only)."""
-        svc = getattr(self.app, "ovh_snapshot_service", None)
+        svc = self._ovh_service("snapshot")
         if svc is None:
             self.notify("OVH snapshot service is not available.", severity="error")
             return

@@ -89,15 +89,19 @@ class AccountPicker(Vertical):
         yield Label(self._label)
         yield Select(
             [(ref.label, ref.label) for ref in self._accounts],
-            value=self._value if self._accounts else Select.BLANK,
+            value=self._value if self._accounts else Select.NULL,
             allow_blank=not self._accounts,
             id=f"{self.id}_select" if self.id else None,
+            # A hidden widget still counts as focusable (Textual checks
+            # visibility, not display), so a picker with nothing to choose
+            # would take the screen's first focus from its real controls.
+            disabled=len(self._accounts) <= 1,
         )
 
     def on_select_changed(self, event: Select.Changed) -> None:
         event.stop()
         value = event.value
-        if value is Select.BLANK or not isinstance(value, str) or value == self._value:
+        if value is Select.NULL or not isinstance(value, str) or value == self._value:
             return
         self._value = value
         self.post_message(self.Changed(self, value))
