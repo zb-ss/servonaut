@@ -54,6 +54,33 @@ def test_ssh_shared_name_lists_qualified_candidates(monkeypatch, capsys):
     assert "hetzner/web-1 (1, Hetzner)" in err and "staging/web-1 (2, Hetzner)" in err
 
 
+# Two servers of one project sharing a name (an image rolled out twice).
+TWIN_WORKERS = {
+    "hetzner": [_hetzner("1", "web-1")],
+    "staging": [_hetzner("4", "worker"), _hetzner("5", "worker")],
+}
+
+
+def test_ssh_suggests_ids_for_servers_of_one_account_sharing_a_name(monkeypatch, capsys):
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, _ = build_registry(monkeypatch, hetzner=TWIN_WORKERS)
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    rows = CachedFleet.from_registry(registry, custom).instances()
+    headless = (MagicMock(), MagicMock(is_authenticated=False), None, None, None,
+                MagicMock(), MagicMock())
+    with patch.object(ssh_mod, "_init_headless_services", return_value=headless), \
+         patch.object(ssh_mod, "_load_instances", return_value=rows):
+        rc = ssh_mod.handle_ssh_command(
+            argparse.Namespace(instance="staging/worker", user=None, port=None, remote_command=[]),
+        )
+    err = capsys.readouterr().err
+    assert rc == ssh_mod._EXIT_AMBIGUOUS
+    assert "1. 4 (Hetzner)" in err and "2. 5 (Hetzner)" in err
+    assert "staging/worker (" not in err
+
+
 def test_ssh_finds_a_qualified_reference(monkeypatch):
     from servonaut.cli import ssh as ssh_mod
 
@@ -203,6 +230,24 @@ def test_memory_shared_name_exits_with_candidates(monkeypatch, capsys, use_json)
         assert error["candidates"] == ["hetzner/web-1", "staging/web-1"]
     else:
         assert "staging/web-1" in out.err
+
+
+def test_memory_json_candidates_are_distinct_references(monkeypatch, capsys):
+    from servonaut.cli import memory as mem_mod
+
+    registry, _ = build_registry(monkeypatch, hetzner=TWIN_WORKERS)
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    fleet = CachedFleet.from_registry(registry, custom)
+    monkeypatch.setattr(
+        mem_mod, "_init_headless_services", lambda: (registry.config, MagicMock(), fleet),
+    )
+    monkeypatch.setattr(mem_mod, "_init_headless_sync_services", lambda *a: (None, None))
+    rc = mem_mod.run_memory(
+        argparse.Namespace(memory_command="show", instance="worker", json=True),
+    )
+    assert rc == mem_mod._EXIT_USAGE_ERROR
+    assert json.loads(capsys.readouterr().out)["error"]["candidates"] == ["4", "5"]
 
 
 # ---------------------------------------------------------------------------

@@ -300,7 +300,7 @@ async def _handle_ssh_async(args: Any) -> int:
             file=sys.stderr,
         )
         for i, inst in enumerate(matches, 1):
-            print(f"  {i}. {describe_candidate(inst)}", file=sys.stderr)
+            print(f"  {i}. {describe_candidate(inst, matches)}", file=sys.stderr)
         return _EXIT_AMBIGUOUS
 
     instance = with_ovh_login(matches[0], config)

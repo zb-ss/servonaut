@@ -221,6 +221,21 @@ def test_providers_count_any_usable_account(monkeypatch):
     assert _resolve_account_labels(app)["hetzner"] == ["staging"]
 
 
+def test_tui_and_headless_relays_advertise_the_same_providers(monkeypatch):
+    """An OVH account with S3 keys only still counts, on both surfaces."""
+    from servonaut.config.schema import ObjectStorageConfig
+    from servonaut.services.accounts.headless import usable_providers
+    from servonaut.services.relay_listener import _resolve_providers_configured
+
+    registry, _ = build_registry(monkeypatch, ovh={"ovh": []}, unusable={"ovh"})
+    registry.config.ovh.object_storage = ObjectStorageConfig(
+        access_key="key", secret_key="secret", region="gra",
+    )
+    app = SimpleNamespace(accounts=registry)
+    assert usable_providers(registry) == ["aws", "ovh"]
+    assert _resolve_providers_configured(app) == usable_providers(registry)
+
+
 def test_app_without_a_registry_sends_no_accounts():
     assert _resolve_account_labels(None) is None
     app = MagicMock(spec=[])

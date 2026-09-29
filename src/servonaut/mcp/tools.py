@@ -123,6 +123,20 @@ _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 # The message names the variable, never the URL; no request is made.
 _INVALID_ENDPOINT = "invalid_endpoint"
 
+# How to fix a provider whose configured accounts cannot connect.
+_CREDENTIAL_HINTS = {
+    'hetzner': (
+        "Check the token: config.hetzner.api_token (a $VARIABLE or file: "
+        "reference must resolve where Servonaut runs), $HCLOUD_TOKEN, or "
+        "~/.config/hcloud/token."
+    ),
+    'ovh': (
+        "Check the OVHcloud credentials in ~/.servonaut/config.json (a "
+        "$VARIABLE or file: reference must resolve where Servonaut runs), "
+        "or in Settings → OVHcloud in the TUI."
+    ),
+}
+
 def _run_capturing_stdout(func) -> str:
     """Run *func* and return what it printed.
 
@@ -284,11 +298,21 @@ class ServonautTools:
 
     @property
     def has_ovh(self) -> bool:
-        return self._ovh_service is not None
+        return self._has_provider('ovh', self._ovh_service)
 
     @property
     def has_hetzner(self) -> bool:
-        return self._hetzner_service is not None
+        return self._has_provider('hetzner', self._hetzner_service)
+
+    def _has_provider(self, provider: str, default: Any) -> bool:
+        """Whether *provider* can serve calls: any usable account.
+
+        The primary account's service (*default*) is None when that account
+        cannot connect, while another account of the provider still works.
+        """
+        if self._accounts is not None:
+            return bool(self._accounts.accounts(provider))
+        return default is not None
 
     @property
     def has_ip_ban(self) -> bool:
@@ -1192,7 +1216,8 @@ class ServonautTools:
         account itself, or lists every account) while any account is
         usable. Otherwise the call acts in the primary account, and when
         that cannot be used the registry says why: another account is never
-        used in its place.
+        used in its place. When no account of the provider can connect, a
+        hint on fixing its credentials follows.
         """
         registry = self._accounts
         if registry is None or not registry.configured_accounts(provider):
@@ -1203,7 +1228,9 @@ class ServonautTools:
             registry.account(provider, None)
         except UnknownAccountError as exc:
             self._audit.log(tool_name, payload, '', False, f'{provider}_unavailable')
-            return f"Error: {exc}"
+            hint = '' if registry.accounts(provider) else _CREDENTIAL_HINTS.get(provider, '')
+            message = str(exc).rstrip('.')
+            return f"Error: {message}. {hint}" if hint else f"Error: {message}"
         return None
 
     def _hetzner_refusal(

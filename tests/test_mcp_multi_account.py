@@ -131,6 +131,25 @@ def test_run_command_never_takes_a_name_as_unique_before_listing_it(monkeypatch)
     ran.assert_not_called()
 
 
+def test_an_unreachable_provider_never_breaks_a_lookup_of_another(monkeypatch):
+    """Hetzner was never listed and cannot be reached: AWS web-1 still resolves."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1", "state": "running", "region": "eu-west-1"}]},
+        hetzner={"hetzner": []},
+    )
+    hetzner = services[("hetzner", "hetzner")]
+    hetzner.cached = None
+
+    async def unreachable(force_refresh=False):
+        raise RuntimeError("Hetzner API unreachable (401)")
+
+    hetzner.fetch_instances_cached = unreachable
+    tools = make_tools(registry)
+    assert "Instance:   i-1" in _run(tools.check_status("web-1"))
+    assert audit_rows(tools)[-1][2] is True
+
+
 def test_ambiguous_reference_on_run_command_never_runs(two_projects, monkeypatch):
     tools, _ = two_projects
     ran = MagicMock()
@@ -651,3 +670,47 @@ def test_ovh_snapshots_of_a_server_that_is_not_an_ovh_one(monkeypatch):
     out = _run(tools.ovh_snapshots("api"))
     assert out.startswith("Error: Cannot determine project_id for instance api")
     assert audit_rows(tools)[-1][3] == "missing_project_id"
+
+
+def test_tools_of_a_provider_are_listed_while_only_an_extra_account_works(primary_down):
+    from servonaut.mcp.tool_schemas import mcp_tool_list
+
+    tools, services = primary_down
+    assert tools._hetzner_service is None  # the primary account's service
+    assert tools.has_hetzner
+    names = {tool.name for tool in mcp_tool_list(have_hetzner=tools.has_hetzner)}
+    assert {"hetzner_power_off", "hetzner_list_servers"} <= names
+    assert _run(tools.hetzner_power_off("worker")) == "Hetzner server 'worker': powered off."
+    assert services[("hetzner", "staging")].called("power_off") == [("worker",)]
+
+
+def test_tools_of_a_provider_without_usable_accounts_are_hidden(monkeypatch):
+    registry, _ = build_registry(
+        monkeypatch, hetzner={"hetzner": []}, ovh={"ovh": []}, unusable={"hetzner", "ovh"},
+    )
+    tools = make_tools(registry)
+    assert not tools.has_hetzner and not tools.has_ovh
+
+
+@pytest.mark.parametrize("provider, call, hint", [
+    ("hetzner", lambda tools: tools.hetzner_list_ssh_keys(), "$HCLOUD_TOKEN"),
+    ("ovh", lambda tools: tools.ovh_list_ips(), "Settings → OVHcloud"),
+])
+def test_a_single_account_that_cannot_connect_gets_its_reason_and_a_hint(
+    monkeypatch, provider, call, hint,
+):
+    from servonaut.services.accounts import UnknownAccountError
+
+    registry, _ = build_registry(monkeypatch, **{provider: {provider: []}}, unusable={provider})
+    tools = make_tools(registry)
+    with pytest.raises(UnknownAccountError) as registry_says:
+        registry.account(provider, None)
+    out = _run(call(tools))
+    assert out.startswith(f"Error: {str(registry_says.value).rstrip('.')}. ")
+    assert hint in out and "a $VARIABLE or file: reference must resolve" in out
+    assert audit_rows(tools)[-1][2:] == (False, f"{provider}_unavailable")
+
+
+def test_no_hint_while_another_account_works(primary_down):
+    tools, _ = primary_down
+    assert "$HCLOUD_TOKEN" not in _run(tools.hetzner_list_ssh_keys())
