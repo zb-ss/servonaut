@@ -19,9 +19,12 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
-from servonaut.screens._accounts import cloudtrail_service
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._provider_accounts import provider_accounts, show_account_labels
+from servonaut.screens._provider_accounts import (
+    cloudtrail_service,
+    provider_accounts,
+    show_account_labels,
+)
 from servonaut.widgets.account_picker import AccountPicker
 import re
 

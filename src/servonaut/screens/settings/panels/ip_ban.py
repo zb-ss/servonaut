@@ -25,10 +25,10 @@ from textual.containers import Container, Horizontal
 from textual.widgets import Button, DataTable, Input, Select, Static
 
 from servonaut.config.schema import IPBanConfig
-from servonaut.screens._accounts import aws_context
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     account_ref,
+    aws_context,
     provider_accounts,
     shown_label,
 )

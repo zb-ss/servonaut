@@ -21,9 +21,12 @@ from servonaut.widgets.sidebar import Sidebar
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Select, Static
 
-from servonaut.screens._accounts import cloudwatch_service
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._provider_accounts import provider_accounts, show_account_labels
+from servonaut.screens._provider_accounts import (
+    cloudwatch_service,
+    provider_accounts,
+    show_account_labels,
+)
 from servonaut.services.cloudwatch_service import CloudWatchService
 from servonaut.services.ip_enrichment_service import abuseipdb_base_url, ip_api_base_url
 from servonaut.widgets.account_picker import AccountPicker

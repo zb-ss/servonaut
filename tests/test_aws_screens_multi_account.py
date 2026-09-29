@@ -913,52 +913,52 @@ async def test_demo_ip_ban_and_settings_show_stand_in_accounts(ec2) -> None:
 def test_helpers_use_the_registry_of_the_app(ec2) -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     registry = _registry()
     app = SimpleNamespace(accounts=registry, provider_inventory=registry.fleet)
     staging = registry.aws_services("staging")
-    assert _accounts.aws_services(app, "staging") is staging
-    assert _accounts.cloudtrail_service(app, "staging") is staging.cloudtrail
-    assert _accounts.cloudwatch_service(app, "staging") is staging.cloudwatch
-    assert _accounts.cloudtrail_service(app) is registry.aws_services("prod").cloudtrail
-    assert _accounts.aws_context(app, "staging") is registry.aws_context("staging")
-    assert [ref.label for ref in _accounts.object_storage_accounts(app, "aws")] == [
+    assert accounts.aws_services(app, "staging") is staging
+    assert accounts.cloudtrail_service(app, "staging") is staging.cloudtrail
+    assert accounts.cloudwatch_service(app, "staging") is staging.cloudwatch
+    assert accounts.cloudtrail_service(app) is registry.aws_services("prod").cloudtrail
+    assert accounts.aws_context(app, "staging") is registry.aws_context("staging")
+    assert [ref.label for ref in accounts.object_storage_accounts(app, "aws")] == [
         "prod", "staging",
     ]
     with pytest.raises(UnknownAccountError):
-        _accounts.cloudtrail_service(app, "retired")
+        accounts.cloudtrail_service(app, "retired")
 
 
 def test_object_storage_needs_s3_keys_not_api_credentials(ec2) -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     registry = _registry(_hetzner_config())
     app = SimpleNamespace(accounts=registry)
-    assert [ref.label for ref in _accounts.object_storage_accounts(app, "hetzner")] == [
+    assert [ref.label for ref in accounts.object_storage_accounts(app, "hetzner")] == [
         "hetzner", "eu-project",
     ]
-    assert _accounts.object_storage(app, "hetzner") is not None
-    assert _accounts.object_storage(app, "hetzner", "eu-project") is None  # no S3 keys
+    assert accounts.object_storage(app, "hetzner") is not None
+    assert accounts.object_storage(app, "hetzner", "eu-project") is None  # no S3 keys
     with pytest.raises(UnknownAccountError):
-        _accounts.object_storage(app, "hetzner", "retired")
+        accounts.object_storage(app, "hetzner", "retired")
 
 
 def test_helpers_fall_back_to_the_default_services_on_a_stand_in_app() -> None:
     from types import SimpleNamespace
 
-    from servonaut.screens import _accounts
+    from servonaut.screens import _provider_accounts as accounts
 
     services = {name: object() for name in (
         "aws_service", "cloudtrail_service", "cloudwatch_service",
         "aws_object_storage_service",
     )}
     for app in (SimpleNamespace(**services), MagicMock(**services)):
-        assert _accounts.aws_services(app) is None
-        assert _accounts.cloudtrail_service(app) is services["cloudtrail_service"]
-        assert _accounts.cloudwatch_service(app) is services["cloudwatch_service"]
-        assert _accounts.aws_context(app) is None
-        assert _accounts.object_storage_accounts(app, "aws") == []
-        assert _accounts.object_storage(app, "aws") is services["aws_object_storage_service"]
+        assert accounts.aws_services(app) is None
+        assert accounts.cloudtrail_service(app) is services["cloudtrail_service"]
+        assert accounts.cloudwatch_service(app) is services["cloudwatch_service"]
+        assert accounts.aws_context(app) is None
+        assert accounts.object_storage_accounts(app, "aws") == []
+        assert accounts.object_storage(app, "aws") is services["aws_object_storage_service"]
