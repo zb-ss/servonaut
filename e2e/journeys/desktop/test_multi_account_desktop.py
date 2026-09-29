@@ -10,8 +10,6 @@ account's log groups.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from e2e.harness import aws, fleet
@@ -40,14 +38,7 @@ def _seed_accounts(seed, moto) -> str:
     seed.cache(fleet.cache_rows(*fleet.AWS_SECOND_FLEET), fresh=True, account=SECOND)
 
     moto.seed_log_events(PRIMARY_GROUP, ["GET /primary 200"])
-    logs = moto.client_as(role, "logs", REGION)
-    logs.create_log_group(logGroupName=SECOND_GROUP)
-    logs.create_log_stream(logGroupName=SECOND_GROUP, logStreamName="e2e-stream")
-    logs.put_log_events(
-        logGroupName=SECOND_GROUP,
-        logStreamName="e2e-stream",
-        logEvents=[{"timestamp": int((time.time() - 30) * 1000), "message": "GET /second 200"}],
-    )
+    moto.seed_log_events(SECOND_GROUP, ["GET /second 200"], role_arn=role)
     return role
 
 

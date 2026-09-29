@@ -13,6 +13,8 @@ Further AWS accounts are reached the way users reach them: a named profile
 that assumes a role in the other account (:meth:`MotoAws.seed_account` plus
 ``HomeSeeder.aws_profile``). moto runs every request made with the role's
 credentials in the role's account, so each account has its own instances.
+Every seeder and reader below takes the role's ARN as ``role_arn`` to act
+in that account.
 """
 
 from __future__ import annotations
@@ -187,16 +189,18 @@ class MotoAws:
         region: str = "us-east-1",
         stream: str = "e2e-stream",
         spacing_seconds: int = 5,
+        role_arn: Optional[str] = None,
     ) -> int:
         """Create *group* and write *messages* as its most recent events.
 
         Events are *spacing_seconds* apart, oldest first, the newest half a
         minute ago. Dict messages are JSON-encoded, as WAF and load balancers
         write them, and a ``timestamp`` key set to None becomes the event's
-        own time in milliseconds (see :func:`waf_log_record`). Returns the
+        own time in milliseconds (see :func:`waf_log_record`). With
+        *role_arn* the group is created in that role's account. Returns the
         number of events written.
         """
-        logs = self.client("logs", region)
+        logs = self._client_for(role_arn, "logs", region)
         logs.create_log_group(logGroupName=group)
         messages = list(messages)
         if not messages:
@@ -220,10 +224,15 @@ class MotoAws:
     # ------------------------------------------------------------------
 
     def seed_waf_ip_set(
-        self, name: str, *, region: str = "us-east-1", addresses: Iterable[str] = ()
+        self,
+        name: str,
+        *,
+        region: str = "us-east-1",
+        addresses: Iterable[str] = (),
+        role_arn: Optional[str] = None,
     ) -> dict[str, str]:
-        """A regional WAFv2 IP set; returns its ``Id`` and ``Name``."""
-        summary = self.client("wafv2", region).create_ip_set(
+        """A regional WAFv2 IP set (in *role_arn*'s account); returns its ``Id`` and ``Name``."""
+        summary = self._client_for(role_arn, "wafv2", region).create_ip_set(
             Name=name,
             Scope="REGIONAL",
             IPAddressVersion="IPV4",
@@ -232,31 +241,47 @@ class MotoAws:
         )["Summary"]
         return {"Id": summary["Id"], "Name": summary["Name"]}
 
-    def waf_addresses(self, ip_set: Mapping[str, str], *, region: str = "us-east-1") -> list[str]:
-        response = self.client("wafv2", region).get_ip_set(
+    def waf_addresses(
+        self,
+        ip_set: Mapping[str, str],
+        *,
+        region: str = "us-east-1",
+        role_arn: Optional[str] = None,
+    ) -> list[str]:
+        response = self._client_for(role_arn, "wafv2", region).get_ip_set(
             Name=ip_set["Name"], Scope="REGIONAL", Id=ip_set["Id"]
         )
         return sorted(response["IPSet"]["Addresses"])
 
     def seed_security_group(
-        self, name: str, *, region: str = "us-east-1", ec2: Any = None
+        self,
+        name: str,
+        *,
+        region: str = "us-east-1",
+        ec2: Any = None,
+        role_arn: Optional[str] = None,
     ) -> str:
         """A security group in a fresh VPC; returns its id.
 
-        Pass *ec2* to create it with another client, for example one acting
-        in a role's account (see :meth:`client_as`).
+        With *role_arn* it is created in that role's account; *ec2* passes
+        any other client to create it with.
         """
-        ec2 = ec2 or self.client("ec2", region)
+        ec2 = ec2 or self._client_for(role_arn, "ec2", region)
         vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
         return ec2.create_security_group(
             GroupName=name, Description="e2e security group", VpcId=vpc_id
         )["GroupId"]
 
     def ingress_ranges(
-        self, group_id: str, *, region: str = "us-east-1", ec2: Any = None
+        self,
+        group_id: str,
+        *,
+        region: str = "us-east-1",
+        ec2: Any = None,
+        role_arn: Optional[str] = None,
     ) -> list[dict]:
         """Every ingress CIDR range of a security group, with its description."""
-        ec2 = ec2 or self.client("ec2", region)
+        ec2 = ec2 or self._client_for(role_arn, "ec2", region)
         group = ec2.describe_security_groups(GroupIds=[group_id])["SecurityGroups"][0]
         return [
             {"CidrIp": r.get("CidrIp"), "Description": r.get("Description", "")}
@@ -264,15 +289,20 @@ class MotoAws:
             for r in permission.get("IpRanges", [])
         ]
 
-    def seed_network_acl(self, *, region: str = "us-east-1") -> str:
-        """An empty network ACL in a fresh VPC; returns its id."""
-        ec2 = self.client("ec2", region)
+    def seed_network_acl(
+        self, *, region: str = "us-east-1", role_arn: Optional[str] = None
+    ) -> str:
+        """An empty network ACL in a fresh VPC (in *role_arn*'s account); returns its id."""
+        ec2 = self._client_for(role_arn, "ec2", region)
         vpc_id = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
         return ec2.create_network_acl(VpcId=vpc_id)["NetworkAcl"]["NetworkAclId"]
 
-    def nacl_denies(self, nacl_id: str, *, region: str = "us-east-1") -> dict[int, str]:
+    def nacl_denies(
+        self, nacl_id: str, *, region: str = "us-east-1", role_arn: Optional[str] = None
+    ) -> dict[int, str]:
         """Inbound deny entries of a network ACL: rule number → CIDR."""
-        acl = self.client("ec2", region).describe_network_acls(NetworkAclIds=[nacl_id])
+        ec2 = self._client_for(role_arn, "ec2", region)
+        acl = ec2.describe_network_acls(NetworkAclIds=[nacl_id])
         return {
             entry["RuleNumber"]: entry["CidrBlock"]
             for entry in acl["NetworkAcls"][0].get("Entries", [])
@@ -284,16 +314,24 @@ class MotoAws:
     # ------------------------------------------------------------------
 
     def seed_bucket(
-        self, name: str, objects: Optional[Mapping[str, bytes]] = None, *, region: str = "us-east-1"
+        self,
+        name: str,
+        objects: Optional[Mapping[str, bytes]] = None,
+        *,
+        region: str = "us-east-1",
+        role_arn: Optional[str] = None,
     ) -> None:
-        """A bucket holding *objects* (key → content)."""
-        s3 = self.client("s3", region)
+        """A bucket holding *objects* (key → content), in *role_arn*'s account if given."""
+        s3 = self._client_for(role_arn, "s3", region)
         s3.create_bucket(Bucket=name)
         for key, body in (objects or {}).items():
             s3.put_object(Bucket=name, Key=key, Body=body)
 
-    def object_bytes(self, bucket: str, key: str, *, region: str = "us-east-1") -> bytes:
-        return self.client("s3", region).get_object(Bucket=bucket, Key=key)["Body"].read()
+    def object_bytes(
+        self, bucket: str, key: str, *, region: str = "us-east-1", role_arn: Optional[str] = None
+    ) -> bytes:
+        s3 = self._client_for(role_arn, "s3", region)
+        return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
 
     # ------------------------------------------------------------------
     # IAM roles assumed through STS
