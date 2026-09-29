@@ -152,6 +152,10 @@ def test_ovh_accounts_answer_their_own_credentials(providers):
         _ovh_client("ovh-eu", keys, oauth2=False).get("/vps")
     with pytest.raises(ovh.exceptions.InvalidCredential):
         _ovh_client("ovh-ca", replace(keys, consumer_key="ck-unknown"), oauth2=False).get("/vps")
+    with pytest.raises(ovh.exceptions.BadParametersError, match="Invalid signature"):
+        _ovh_client("ovh-ca", replace(keys, application_secret="as-unknown"), oauth2=False).get(
+            "/vps"
+        )
     with pytest.raises(ovh.exceptions.OAuth2FailureError):
         _ovh_client("ovh-ca", replace(keys, client_secret="cs-unknown"), oauth2=True).get("/vps")
 
@@ -168,6 +172,7 @@ def test_ovh_accounts_answer_their_own_credentials(providers):
         ("ovh-ca", fleet.OVH_SECOND_ACCOUNT, 200),
         ("ovh-eu", None, 403),
         ("ovh-ca", None, 403),
+        ("ovh-ca", None, 400),
         ("ovh-ca", fleet.OVH_SECOND_ACCOUNT, 403),
         ("ovh-eu", fake_ovh.PRIMARY_LABEL, 200),
     ]
