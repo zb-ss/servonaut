@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
+
+if TYPE_CHECKING:
+    from servonaut.services.accounts.aws_account import AWSAccountContext
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +56,21 @@ _NAME_TAG_RE = re.compile(r'^[^\x00-\x1f\x7f]{1,255}$')
 class AWSService(InstanceServiceInterface):
     """Service for fetching EC2 instances from AWS with caching."""
 
-    def __init__(self, cache_service: CacheService):
+    def __init__(
+        self,
+        cache_service: CacheService,
+        account: Optional["AWSAccountContext"] = None,
+    ):
         """Initialize AWS service.
 
         Args:
             cache_service: Cache service instance for instance data.
+            account: The AWS account this service talks to. None keeps the
+                process-wide default credential chain, as before extra
+                accounts existed.
         """
         self.cache_service = cache_service
+        self.account = account
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Surfaces (TUI notify, MCP list_instances) read it
         # to tell the operator they are looking at cached data.
@@ -79,6 +90,32 @@ class AWSService(InstanceServiceInterface):
         """
         cached = self.cache_service.load_any()
         return cached if cached is not None else []
+
+    def is_cache_fresh(self) -> bool:
+        """Whether this account's instance cache is within its TTL."""
+        return self.cache_service.is_fresh()
+
+    def _uses_profile(self) -> bool:
+        """True when this service's account has credentials of its own.
+
+        The ambient-chain account calls this module's ``boto3`` directly,
+        exactly as every AWS call did before extra accounts existed.
+        """
+        return self.account is not None and not self.account.uses_ambient_credentials
+
+    def _client(self, service: str, region: Optional[str] = None) -> Any:
+        """A boto3 client for this service's account."""
+        if self._uses_profile():
+            return self.account.client(service, region)
+        if region:
+            return boto3.client(service, region_name=region)
+        return boto3.client(service)
+
+    def _resource(self, service: str, region: str) -> Any:
+        """A boto3 resource for this service's account."""
+        if self._uses_profile():
+            return self.account.resource(service, region)
+        return boto3.resource(service, region_name=region)
 
     async def fetch_instances(self) -> List[dict]:
         """Fetch instances from AWS across all regions.
@@ -151,12 +188,16 @@ class AWSService(InstanceServiceInterface):
             List of instance dictionaries.
         """
         self._failed_regions = []
-        try:
-            ec2_client = boto3.client('ec2')
-            regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
-        except Exception as e:
-            logger.error(f"Error fetching AWS regions: {e}")
-            raise AWSFetchError(f"could not list AWS regions: {e}") from e
+        configured = list(self.account.regions) if self.account is not None else []
+        if configured:
+            regions = configured
+        else:
+            try:
+                ec2_client = self._client('ec2')
+                regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+            except Exception as e:
+                logger.error(f"Error fetching AWS regions: {e}")
+                raise AWSFetchError(f"could not list AWS regions: {e}") from e
 
         instances: List[dict] = []
         last_error: Optional[Exception] = None
@@ -184,7 +225,7 @@ class AWSService(InstanceServiceInterface):
         Returns:
             List of instance dictionaries for this region.
         """
-        ec2 = boto3.resource('ec2', region_name=region)
+        ec2 = self._resource('ec2', region)
         region_instances = []
 
         for instance in ec2.instances.all():
@@ -391,7 +432,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._start_instance_sync, instance_id, region)
 
     def _start_instance_sync(self, instance_id: str, region: str) -> dict:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         return ec2.start_instances(InstanceIds=[instance_id])
 
     async def stop_instance(self, instance_id: str, region: str) -> dict:
@@ -412,7 +453,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._stop_instance_sync, instance_id, region)
 
     def _stop_instance_sync(self, instance_id: str, region: str) -> dict:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         return ec2.stop_instances(InstanceIds=[instance_id])
 
     async def reboot_instance(self, instance_id: str, region: str) -> dict:
@@ -433,7 +474,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._reboot_instance_sync, instance_id, region)
 
     def _reboot_instance_sync(self, instance_id: str, region: str) -> dict:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         return ec2.reboot_instances(InstanceIds=[instance_id])
 
     async def terminate_instance(self, instance_id: str, region: str) -> dict:
@@ -454,7 +495,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._terminate_instance_sync, instance_id, region)
 
     def _terminate_instance_sync(self, instance_id: str, region: str) -> dict:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         return ec2.terminate_instances(InstanceIds=[instance_id])
 
     async def run_instances(
@@ -523,7 +564,7 @@ class AWSService(InstanceServiceInterface):
         name_tag: str,
         count: int,
     ) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         response = ec2.run_instances(
             ImageId=ami_id,
             InstanceType=instance_type,
@@ -573,7 +614,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._list_regions_sync, bootstrap_region)
 
     def _list_regions_sync(self, bootstrap_region: str = "us-east-1") -> List[str]:
-        ec2 = boto3.client('ec2', region_name=bootstrap_region or "us-east-1")
+        ec2 = self._client('ec2', bootstrap_region or "us-east-1")
         response = ec2.describe_regions(AllRegions=False)
         return sorted(r['RegionName'] for r in response.get('Regions', []))
 
@@ -614,7 +655,7 @@ class AWSService(InstanceServiceInterface):
         owners: List[str],
         max_results: int,
     ) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         filters = [{'Name': 'state', 'Values': ['available']}]
         if name_filter:
             filters.append({'Name': 'name', 'Values': [f'*{name_filter}*']})
@@ -655,7 +696,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._list_instance_types_sync, region, max_results)
 
     def _list_instance_types_sync(self, region: str, max_results: int) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         response = ec2.describe_instance_types(MaxResults=max_results)
         return [
             {
@@ -683,7 +724,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._list_key_pairs_sync, region)
 
     def _list_key_pairs_sync(self, region: str) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         response = ec2.describe_key_pairs()
         return [
             {
@@ -711,7 +752,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._list_subnets_sync, region)
 
     def _list_subnets_sync(self, region: str) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         response = ec2.describe_subnets()
         return [
             {
@@ -741,7 +782,7 @@ class AWSService(InstanceServiceInterface):
         return await asyncio.to_thread(self._list_security_groups_sync, region)
 
     def _list_security_groups_sync(self, region: str) -> List[dict]:
-        ec2 = boto3.client('ec2', region_name=region)
+        ec2 = self._client('ec2', region)
         response = ec2.describe_security_groups()
         return [
             {

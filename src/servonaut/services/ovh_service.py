@@ -107,13 +107,18 @@ def _first_line(exc: Exception) -> str:
 class OVHService:
     """Service for fetching OVHcloud instances (dedicated, VPS, Public Cloud)."""
 
-    def __init__(self, config: 'OVHConfig') -> None:
+    def __init__(self, config: 'OVHConfig', cache_path: Optional[Path] = None) -> None:
         """Initialize OVH service.
 
         Args:
             config: OVHConfig dataclass instance.
+            cache_path: Cache file for this account. None uses the primary
+                account's ``~/.servonaut/ovh_cache.json``.
         """
         self._config = config
+        self._cache_path_override = (
+            Path(cache_path).expanduser() if cache_path is not None else None
+        )
         self._client = None  # lazy-initialized
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Read by the instance list and MCP list_instances.
@@ -123,6 +128,11 @@ class OVHService:
         self.last_fetch_partial: bool = False
         self._failed_sources: List[str] = []
         self._source_errors: Dict[str, str] = {}
+
+    @property
+    def _cache_path(self) -> Path:
+        """This account's cache file (read at call time so tests can patch it)."""
+        return self._cache_path_override or _OVH_CACHE_PATH
 
     def _get_client(self):
         """Lazy-initialize the OVH API client.
@@ -326,10 +336,10 @@ class OVHService:
         Returns:
             True if cache exists and has not expired.
         """
-        if not _OVH_CACHE_PATH.exists():
+        if not self._cache_path.exists():
             return False
         try:
-            with open(_OVH_CACHE_PATH, 'r') as f:
+            with open(self._cache_path, 'r') as f:
                 data = json.load(f)
             ts = data.get('timestamp')
             if not ts:
@@ -972,11 +982,11 @@ class OVHService:
         Returns:
             List of instance dicts or None if cache invalid/expired.
         """
-        if not _OVH_CACHE_PATH.exists():
+        if not self._cache_path.exists():
             return None
 
         try:
-            with open(_OVH_CACHE_PATH, 'r') as f:
+            with open(self._cache_path, 'r') as f:
                 data = json.load(f)
 
             ts = data.get('timestamp')
@@ -1005,14 +1015,14 @@ class OVHService:
             instances: List of instance dicts to cache.
         """
         try:
-            _OVH_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
             # Write with 0o600 permissions so only the owner can read the cache
             fd = os.open(
-                str(_OVH_CACHE_PATH),
+                str(self._cache_path),
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
                 0o600,
             )

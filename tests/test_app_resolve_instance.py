@@ -4,7 +4,8 @@ Tests the shared ``_resolve_instance`` logic used by both
 ``cli/memory.py::_resolve_instance`` and ``ServonautApp.resolve_instance``.
 
 The two implementations share the same contract:
-- AWS instances take precedence over custom/OVH on name collision.
+- A name shared by several servers is refused, listing qualified references.
+- ``custom/<name>`` and ``<account>/<name>`` pick one server.
 - Matching is case-insensitive on both ``id`` and ``name`` fields.
 - Returns None when no match is found.
 """
@@ -13,13 +14,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import pytest
+
+from servonaut.utils.instance_resolver import AmbiguousInstanceError
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _aws(iid: str, name: str) -> Dict[str, Any]:
-    return {"id": iid, "name": name, "provider": "aws"}
+    return {"id": iid, "name": name, "provider": "aws", "account": "aws"}
 
 
 def _custom(iid: str, name: str) -> Dict[str, Any]:
@@ -58,13 +63,20 @@ class TestCLIResolveInstance:
         assert result is not None
         assert result["id"] == "custom-prod"
 
-    def test_aws_wins_on_name_collision(self) -> None:
-        """When AWS and custom share a name, AWS instance must be returned."""
+    def test_shared_name_is_refused_with_qualified_candidates(self) -> None:
+        """A name two servers share never silently picks one of them."""
         aws_inst = _aws("i-aws", "prod")
         custom_inst = _custom("custom-prod", "prod")
-        result = self._resolve("prod", aws=[aws_inst], custom=[custom_inst])
-        assert result is not None
-        assert result["id"] == "i-aws"  # AWS wins
+        with pytest.raises(AmbiguousInstanceError) as caught:
+            self._resolve("prod", aws=[aws_inst], custom=[custom_inst])
+        message = str(caught.value)
+        assert "aws/prod" in message and "custom/prod" in message
+
+    def test_qualified_references_pick_one_of_a_shared_name(self) -> None:
+        aws_inst = _aws("i-aws", "prod")
+        custom_inst = _custom("custom-prod", "prod")
+        assert self._resolve("aws/prod", aws=[aws_inst], custom=[custom_inst]) is aws_inst
+        assert self._resolve("Custom/PROD", aws=[aws_inst], custom=[custom_inst]) is custom_inst
 
     def test_case_insensitive_id(self) -> None:
         result = self._resolve("I-ABC", aws=[_aws("i-abc", "prod")])
@@ -91,13 +103,13 @@ class TestCLIResolveInstance:
         assert result is not None
         assert result["id"] == "ovh-1"
 
-    def test_custom_searched_before_ovh(self) -> None:
-        """Custom takes precedence over OVH on id collision."""
+    def test_id_shared_across_providers_is_refused(self) -> None:
+        """Ids are unique per provider only, so a cross-provider clash is refused."""
         custom_inst = _custom("box-1", "shared-name")
-        ovh_inst = {"id": "box-1", "name": "shared-name", "provider": "ovh"}
-        result = self._resolve("box-1", custom=[custom_inst], ovh=[ovh_inst])
-        assert result is not None
-        assert result["provider"] == "custom"
+        ovh_inst = {"id": "box-1", "name": "shared-name", "is_ovh": True, "account": "ovh"}
+        with pytest.raises(AmbiguousInstanceError):
+            self._resolve("box-1", custom=[custom_inst], ovh=[ovh_inst])
+        assert self._resolve("ovh/box-1", custom=[custom_inst], ovh=[ovh_inst]) is ovh_inst
 
 
 # ---------------------------------------------------------------------------
@@ -123,12 +135,12 @@ class TestAppResolveInstanceLogic:
         other = [i for i in instances if i.get("is_custom")]
         return resolve_instance_from_lists(id_or_name, aws, other)
 
-    def test_aws_first_on_name_collision(self) -> None:
+    def test_shared_name_is_refused(self) -> None:
         aws_inst = _aws("i-abc", "prod")
         custom_inst = _custom("custom-prod", "prod")
-        result = self._resolve("prod", [aws_inst, custom_inst])
-        assert result is not None
-        assert result["id"] == "i-abc"
+        with pytest.raises(AmbiguousInstanceError):
+            self._resolve("prod", [aws_inst, custom_inst])
+        assert self._resolve("i-abc", [aws_inst, custom_inst]) is aws_inst
 
     def test_custom_found_when_no_aws_match(self) -> None:
         custom_inst = _custom("custom-prod", "prod")

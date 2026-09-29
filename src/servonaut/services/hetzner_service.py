@@ -128,13 +128,18 @@ def _validate_resource_name(name: str, kind: str = 'resource') -> str:
 class HetznerService:
     """Service for Hetzner Cloud instances + lifecycle (create / destroy)."""
 
-    def __init__(self, config: 'HetznerConfig') -> None:
+    def __init__(self, config: 'HetznerConfig', allow_ambient_token: bool = True) -> None:
         """Initialise the Hetzner service.
 
         Args:
             config: HetznerConfig dataclass instance.
+            allow_ambient_token: Whether an empty ``api_token`` may fall back
+                to ``$HCLOUD_TOKEN`` and the hcloud CLI token file. Only the
+                primary project may: those belong to it, and an extra project
+                reusing them would silently list the primary project twice.
         """
         self._config = config
+        self._allow_ambient_token = allow_ambient_token
         self._client = None  # lazy
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
@@ -174,6 +179,13 @@ class HetznerService:
         from_config = resolve_secret(self._config.api_token)
         if from_config:
             return from_config
+
+        if not self._allow_ambient_token:
+            raise HetznerNotConfiguredError(
+                "No API token resolved for this Hetzner project. Check its "
+                "api_token setting (a $VARIABLE must be set, a file: path "
+                "must be readable)."
+            )
 
         from_env = os.environ.get('HCLOUD_TOKEN', '')
         if from_env:

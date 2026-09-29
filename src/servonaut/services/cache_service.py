@@ -60,13 +60,17 @@ class CacheService:
 
     CACHE_PATH = Path.home() / '.servonaut' / 'cache.json'
 
-    def __init__(self, ttl_seconds: int = 300):
+    def __init__(self, ttl_seconds: int = 300, cache_path: Optional[Path] = None):
         """Initialize cache service.
 
         Args:
             ttl_seconds: Time-to-live for cached data (default: 300 = 5 minutes).
+            cache_path: File for this cache. None uses ``CACHE_PATH`` (the
+                primary AWS account's cache); extra accounts get their own.
         """
         self.ttl_seconds = ttl_seconds
+        if cache_path is not None:
+            self.CACHE_PATH = Path(cache_path).expanduser()
 
     def load(self) -> Optional[List[dict]]:
         """Load instances from cache if valid.
