@@ -80,6 +80,8 @@ def _seed(seed, providers, moto, *, ovh: bool = True) -> None:
     moto.seed_fleet([fleet.APP_1])
     seed.cache(fleet.cache_rows(fleet.APP_1), fresh=False)
     overrides = {
+        # One region to scan keeps the AWS refresh short on a busy machine.
+        "aws": seed.aws_config(regions=[fleet.APP_1.region]),
         "hetzner": seed.hetzner_config(accounts=[seed.hetzner_account(STAGING)]),
     }
     if ovh:
@@ -157,7 +159,10 @@ async def test_demo_mode_shows_stand_ins_for_account_labels(
     project.seed_servers(fleet.HETZNER_SECOND_FLEET)
     moto.seed_fleet([fleet.APP_1])
     seed.cache(fleet.cache_rows(fleet.APP_1), fresh=False)
-    seed.config(hetzner=seed.hetzner_config(accounts=[seed.hetzner_account(NAMED_PROJECT)]))
+    seed.config(
+        aws=seed.aws_config(regions=[fleet.APP_1.region]),
+        hetzner=seed.hetzner_config(accounts=[seed.hetzner_account(NAMED_PROJECT)]),
+    )
     # What `--demo` sets before the app starts.
     monkeypatch.setattr(ServonautApp, "demo_mode", True)
     hetzner_count = len(fleet.HETZNER_FLEET) + 1 + len(fleet.HETZNER_SECOND_FLEET)
