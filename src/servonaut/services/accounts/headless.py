@@ -223,6 +223,29 @@ class InstanceDirectory:
             logger.warning("Reading the %s cache failed: %s", provider, exc)
             return []
 
+    async def checked_provider_rows(self, provider: str) -> List[dict]:
+        """*provider*'s servers for telling whether a name is unique.
+
+        Cached rows, without an API call, except when an account has no
+        cached servers at all (typically it was never listed): then the
+        provider is read once through its cache (fresh caches stay as they
+        are), so a server of that account cannot be missed. A stale cache is
+        used as it is.
+        """
+        rows = self.cached_provider_rows(provider)
+        inventory = self._inventories().get(provider)
+        if inventory is None:
+            return rows
+        bindings = getattr(inventory, "bindings", None)
+        if bindings:
+            listed = {row_account_key(row) for row in rows}
+            unlisted = any(binding.ref.key not in listed for binding in bindings)
+        else:
+            unlisted = not rows
+        if not unlisted:
+            return rows
+        return await self.provider_rows(provider)
+
     async def all_instances(self) -> List[dict]:
         """AWS, custom, OVH, then Hetzner servers, refreshed when stale."""
         rows: List[dict] = []
@@ -237,7 +260,10 @@ class InstanceDirectory:
         ``custom-*`` id resolves locally first, an ``<account>/...``
         reference only consults that account's provider, and once a name
         has matched, the remaining providers are checked in their cached
-        rows instead of being fetched.
+        rows instead of being fetched. An account with no cached servers at
+        all is still read once (see :meth:`checked_provider_rows`): a name
+        must never pass as unique because another server of that name was
+        never listed.
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
@@ -265,7 +291,7 @@ class InstanceDirectory:
             if provider == CUSTOM_QUALIFIER:
                 batch = custom
             elif matched:
-                batch = self.cached_provider_rows(provider)
+                batch = await self.checked_provider_rows(provider)
             else:
                 batch = await self.provider_rows(provider)
             rows.extend(batch)

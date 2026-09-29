@@ -153,6 +153,42 @@ def test_after_a_match_other_providers_are_read_from_cache_only(monkeypatch):
     assert services[("hetzner", "hetzner")].cache_reads == 1
 
 
+def test_a_provider_never_listed_is_read_before_a_name_counts_as_unique(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    services[("hetzner", "hetzner")].cached = None  # never listed
+    with pytest.raises(AmbiguousInstanceError):
+        _run(_directory(registry).find("web-1"))
+    assert services[("hetzner", "hetzner")].fetches == 1
+
+
+def test_one_account_never_listed_makes_its_provider_read(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    services[("hetzner", "staging")].cached = None
+    with pytest.raises(AmbiguousInstanceError) as err:
+        _run(_directory(registry).find("web-1"))
+    assert "staging/web-1" in str(err.value)
+
+
+def test_a_stale_cache_is_used_as_it_is(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "2", "name": "db", "is_hetzner": True}]},
+    )
+    services[("hetzner", "hetzner")].fresh = False
+    assert _run(_directory(registry).find("web-1"))["id"] == "i-1"
+    assert services[("hetzner", "hetzner")].fetches == 0
+
+
 def test_a_name_on_two_providers_is_refused_with_candidates(monkeypatch):
     registry, _ = build_registry(
         monkeypatch,

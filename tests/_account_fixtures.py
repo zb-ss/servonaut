@@ -57,8 +57,10 @@ class FakeProvider:
         self.cache_reads += 1
         return [dict(r) for r in (self.cached or [])]
 
+    fresh = True
+
     def is_cache_fresh(self) -> bool:
-        return True
+        return self.fresh
 
     def resolve_token(self) -> str:
         return "token"

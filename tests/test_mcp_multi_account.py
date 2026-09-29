@@ -115,6 +115,22 @@ def test_ambiguous_reference_is_refused_with_candidates(two_projects):
     )
 
 
+def test_run_command_never_takes_a_name_as_unique_before_listing_it(monkeypatch):
+    """AWS web-1 matches first; Hetzner was never listed and has one too."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1", "region": "eu-west-1"}]},
+        hetzner={"hetzner": [WEB_PRIMARY]},
+    )
+    services[("hetzner", "hetzner")].cached = None
+    tools = make_tools(registry)
+    ran = MagicMock()
+    monkeypatch.setattr(tools, "_run_command_via_ssh", ran)
+    out = _run(tools.run_command("web-1", "uptime"))
+    assert "matches 2 servers" in out and "hetzner/web-1" in out
+    ran.assert_not_called()
+
+
 def test_ambiguous_reference_on_run_command_never_runs(two_projects, monkeypatch):
     tools, _ = two_projects
     ran = MagicMock()
