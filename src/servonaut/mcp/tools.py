@@ -4100,55 +4100,12 @@ class ServonautTools:
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        extra_options = self._connection_service.get_extra_options(instance, profile)
+        from servonaut.services.connection_service import server_connection
 
-        if instance.get('is_ovh'):
-            options = self._connection_service.resolve_ovh_connection(instance)
-            username = options['username']
-            key_path = options['key_path']
-            port = None
-        elif instance.get('is_hetzner'):
-            # Hetzner cloud-init does not seed a non-root user on the
-            # standard images; fall back to the per-provider default
-            # configured by the operator (typically ``root``).
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            # The instance dict carries the operator-configured default
-            # SSH key (resolved via $ENV_VAR/file: at probe time) so the
-            # local SSH command can authenticate without re-querying
-            # config here.
-            key_path = instance.get('ssh_key') or None
-            port = None
-        elif instance.get('is_custom'):
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            key_path = instance.get('ssh_key') or instance.get('key_name') or None
-            port = instance.get('port') or None
-        else:
-            username = (
-                (profile.username if profile else None)
-                or self._config_manager.get().default_username
-            )
-            instance_id = instance.get('id', '')
-            key_path = self._ssh_service.get_key_path(instance_id)
-            if not key_path and instance.get('key_name'):
-                key_path = self._ssh_service.discover_key(instance['key_name'])
-            port = None
-
-        return {
-            'host': host, 'username': username, 'key_path': key_path,
-            'proxy_args': proxy_args, 'profile': profile, 'port': port,
-            'extra_options': extra_options,
-        }
+        return server_connection(
+            instance, self._connection_service, self._ssh_service,
+            self._config_manager.get().default_username,
+        )
 
     async def _resolve_connection_with_vault(self, instance: Dict):
         """Resolve connection params, preferring a stored Bitwarden ref.
