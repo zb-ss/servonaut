@@ -496,7 +496,13 @@ class TuiDriver:
         return table
 
     async def select_instance(self, name: str) -> dict:
-        """Move the fleet table's cursor to the row named *name* with the keyboard."""
+        """Move the fleet table's cursor to the row named *name* with the keyboard.
+
+        *name* is what the Name column shows: the plain name, or
+        ``label/name`` for a server whose provider has several accounts.
+        """
+        from servonaut.utils.instance_resolver import display_name
+
         table = await self.focus_instance_table()
         rows = [row[1] for row in self.table_rows(type(table))]
         if name not in rows:
@@ -507,13 +513,17 @@ class TuiDriver:
                 break
             await self.press("down" if table.cursor_row < target else "up")
         selected = table.get_selected_instance()
-        assert selected is not None and selected.get("name") == name, selected
+        assert selected is not None and display_name(selected) == name, selected
         return selected
 
     async def wait_and_select_instance(
         self, name: str, *, timeout: float = DEFAULT_TIMEOUT
     ) -> dict:
-        """Wait until the fleet table lists *name*, then select it (see select_instance)."""
+        """Wait until the fleet table lists *name*, then select it (see select_instance).
+
+        *name* is the plain name, or ``label/name`` for a server whose provider
+        has several accounts.
+        """
         from servonaut.widgets.instance_table import InstanceTable
 
         await self.wait_until(

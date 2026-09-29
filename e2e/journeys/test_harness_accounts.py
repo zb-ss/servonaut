@@ -308,3 +308,27 @@ async def test_seeded_accounts_load_through_the_product(seed, providers, moto):
     ovh_calls = providers.requests("ovh", account=fleet.OVH_SECOND_ACCOUNT)
     assert {e["endpoint"] for e in ovh_calls} == {"ovh-ca"}
     assert ovh_calls[0]["api_path"] == fake_ovh.OVH_OAUTH2_TOKEN_PATH
+
+
+@pytest.mark.asyncio
+async def test_fleet_rows_are_selected_by_what_the_table_shows(tui, seed, providers):
+    fleet.seed_provider_fleet(providers, ovh=False)
+    fleet.seed_second_accounts(providers, ovh=False)
+    seed.config(
+        hetzner=seed.hetzner_config(accounts=[seed.hetzner_account(fleet.HETZNER_SECOND_ACCOUNT)])
+    )
+    seed.cache(fleet.cache_rows(fleet.APP_1), fresh=True)
+    second = f"{fleet.HETZNER_SECOND_ACCOUNT}/{fleet.SHARED_NAME}"
+    primary = f"{fake_hetzner.PRIMARY_LABEL}/{fleet.SHARED_NAME}"
+
+    async with tui() as t:
+        selected = await t.wait_and_select_instance(second)
+        assert (selected["account"], selected["name"]) == (
+            fleet.HETZNER_SECOND_ACCOUNT, fleet.SHARED_NAME
+        )
+        selected = await t.select_instance(primary)
+        assert selected["id"] == str(fleet.HZ_WEB_1.server_id)
+        # A provider with one account keeps showing, and selecting, plain names.
+        assert (await t.select_instance(fleet.APP_1.name))["id"] == fleet.APP_1.instance_id
+        with pytest.raises(AssertionError, match="is not in the fleet table"):
+            await t.select_instance(fleet.SHARED_NAME)
