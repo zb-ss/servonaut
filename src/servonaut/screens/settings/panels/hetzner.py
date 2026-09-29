@@ -7,7 +7,9 @@ the ``HetznerSetupScreen`` wizard — this panel preserves it via
 ``dataclasses.replace`` but never displays or stores it.
 
 A status row shows whether Hetzner is configured (token set) or needs setup,
-and a "Setup Hetzner" launcher opens the wizard for credential entry.
+and a "Setup Hetzner" launcher opens the wizard for credential entry. The
+Projects section lists the primary project and any extra ones; adding or
+editing a project opens the same wizard for that project.
 """
 
 from __future__ import annotations
@@ -18,8 +20,14 @@ from typing import Any, Dict
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Static, Switch
 
+from servonaut.screens.settings.accounts import (
+    HetznerAccountsSection,
+    rebuild_accounts,
+    refresh_provider_fleet,
+)
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import EnvVarInput
 
@@ -210,6 +218,9 @@ class HetznerPanel(SettingsPanel):
             classes="setting_row",
         )
 
+        # Projects (saved per project by the setup wizard)
+        yield HetznerAccountsSection(heading_classes="section-heading")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -246,7 +257,32 @@ class HetznerPanel(SettingsPanel):
         self.query_one("#hetzner_s3_region", Input).value = s3.region
         self._show_field("hetzner_s3_endpoint_url", s3.endpoint_url)
 
+        self.query_one(HetznerAccountsSection).refresh_accounts()
         self._snapshot_now()
+
+    def refresh_external_state(self) -> None:
+        """Show what the setup wizard saved.
+
+        The wizard can enable Hetzner and add, edit or rename projects. An
+        untouched form reloads, so a later Save never writes back the values
+        from before the wizard; unsaved edits are kept and only the status
+        and the projects are redrawn.
+        """
+        try:
+            if not self.is_dirty():
+                self.load()
+                return
+            self._update_status_label(self.app.config_manager.get().hetzner)
+            self.query_one(HetznerAccountsSection).refresh_accounts()
+        except NoMatches:
+            # Settings resumes while this panel is still being built; its
+            # own mount loads it.
+            return
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-show the redacted fields and redraw the projects table."""
+        super().refresh_after_demo_toggle()
+        self.query_one(HetznerAccountsSection).refresh_after_demo_toggle()
 
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
@@ -403,6 +439,11 @@ class HetznerPanel(SettingsPanel):
         )
 
         self.app.config_manager.update(hetzner=new_hetzner)
+        # Extra projects inherit these defaults, and the switch decides
+        # whether Hetzner is listed at all.
+        if rebuild_accounts(self.app) and new_hetzner.enabled != existing.enabled:
+            refresh_provider_fleet(self.app, "hetzner")
+        self.query_one(HetznerAccountsSection).refresh_accounts()
         self._rebuild_object_storage()
         self._update_status_label(new_hetzner)
         self._finish_save("Hetzner settings saved")
