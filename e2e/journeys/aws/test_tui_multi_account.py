@@ -196,26 +196,32 @@ async def test_cloudwatch_reads_the_picked_accounts_logs(tui, seed, moto):
 
 
 async def test_cloudtrail_reads_the_trail_again_for_the_picked_account(tui, seed, moto, cloudtrail):
-    # The local CloudTrail endpoint does not tell accounts apart, so this
-    # checks that switching account reads the trail again, from scratch.
     _seed_accounts(seed, moto, cloudtrail_default_region=REGION)
-    now = datetime.now(timezone.utc)
+    when = datetime.now(timezone.utc) - timedelta(minutes=5)
+    cloudtrail.seed([cloudtrail_event("StopInstances", when, username="e2e-operator")], region=REGION)
     cloudtrail.seed(
-        [cloudtrail_event("StopInstances", now - timedelta(minutes=5), username="e2e-operator")],
+        [cloudtrail_event("RebootInstances", when, username="e2e-operator")],
         region=REGION,
+        account=aws.SECOND_ACCOUNT,
     )
     async with tui() as t:
         await t.nav("nav_cloudtrail")
         await t.wait_for_screen("CloudTrailBrowserScreen")
         await t.click("#ct_btn_fetch")
         await t.wait_for_toast(r"^Loaded 1 CloudTrail events\.$")
+        assert _column(t, "#cloudtrail_table", 1) == ["StopInstances"]
+        assert {lookup["account"] for lookup in cloudtrail.lookups()} == {aws.DEFAULT_ACCOUNT}
         before = len(cloudtrail.lookups())
 
         await choose(t, "#ct_filter_account_select", SECOND)
         await t.wait_until(lambda: len(cloudtrail.lookups()) > before, desc="the trail read again")
         await t.wait_until(
-            lambda: _column(t, "#cloudtrail_table", 1) == ["StopInstances"], desc="events shown"
+            lambda: _column(t, "#cloudtrail_table", 1) == ["RebootInstances"],
+            desc="the second account's events shown",
         )
+        assert {lookup["account"] for lookup in cloudtrail.lookups()[before:]} == {
+            aws.SECOND_ACCOUNT
+        }
         assert t.on_screen("#ct_filter_account").account == SECOND
 
 
