@@ -12,13 +12,14 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
 
 
-class OVHResizeScreen(Screen):
+class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Screen for upgrading/resizing a VPS to a larger plan.
 
     Fetches available upgrade models from OVHcloud, shows them in a DataTable,
@@ -84,7 +85,7 @@ class OVHResizeScreen(Screen):
             self.notify("No VPS ID found in instance data.", severity="error")
             return
 
-        ovh_vps_service = getattr(self.app, 'ovh_vps_service', None)
+        ovh_vps_service = self._ovh_service("vps")
         if ovh_vps_service is None:
             self.notify("OVH VPS service is not available.", severity="error")
             return
@@ -169,14 +170,14 @@ class OVHResizeScreen(Screen):
             ovh_audit.log_action(
                 action="vps_upgrade",
                 target=vps_name,
-                details={"model": model_name},
+                details=self._audit_details({"model": model_name}),
                 confirmed=bool(confirmed),
             )
 
         if not confirmed:
             return
 
-        ovh_vps_service = getattr(self.app, 'ovh_vps_service', None)
+        ovh_vps_service = self._ovh_service("vps")
         if ovh_vps_service is None:
             self.notify("OVH VPS service is not available.", severity="error")
             return

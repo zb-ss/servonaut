@@ -18,6 +18,9 @@ Why not a single all-providers manager? OVH's lifecycle surface is
 genuinely different per resource type (no one-size endpoint), and the
 ``cloud`` subset is what most users churn day-to-day. A dedicated
 screen keeps the per-row eligibility logic readable.
+
+The table lists every configured OVH account; each action goes to the
+account the selected row belongs to.
 """
 
 from __future__ import annotations
@@ -35,7 +38,19 @@ from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    fetched_row,
+    inventory,
+    ovh_services,
+    provider_accounts,
+    row_ovh_services,
+    row_service,
+    with_account,
+)
 from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.services.accounts import AccountFleet
+from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -173,8 +188,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
     def _refresh(self) -> None:
         if self._loading:
             return
-        svc = getattr(self.app, "ovh_service", None)
-        if svc is None:
+        if inventory(self.app, "ovh") is None:
             self._set_status(
                 "[red]OVHcloud is not configured. "
                 "Visit Settings → OVHcloud to set up credentials.[/red]"
@@ -189,7 +203,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         )
 
     async def _load_instances(self) -> None:
-        svc = self.app.ovh_service
+        # Every account at once: the table lists all of them.
+        svc = inventory(self.app, "ovh")
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
             # Keep the fetched rows untouched; what the table draws is
@@ -202,7 +217,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 # fetch_instances() swallows API errors and returns [], so an
                 # empty list can't tell "no instances" from "credentials
                 # revoked" — a /me check disambiguates the two.
-                cred_error = await svc.check_credentials()
+                cred_error = await self._credential_error(svc)
                 if cred_error:
                     if self.app.demo_mode and self.app.redaction_service:
                         cred_error = self.app.redaction_service.scrub_stream(
@@ -217,6 +232,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             else:
                 self._set_status(
                     f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
+                    + self._account_errors(svc)
                 )
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
@@ -227,13 +243,41 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         finally:
             self._loading = False
 
+    @staticmethod
+    async def _credential_error(svc) -> Optional[str]:
+        """Why the listed accounts' credentials fail, or None when they work.
+
+        With several accounts, each one is checked and named in the message.
+        """
+        if not isinstance(svc, AccountFleet):
+            return await svc.check_credentials()
+        errors = []
+        for binding in svc.bindings:
+            error = await binding.service.check_credentials()
+            if error:
+                errors.append(f"{binding.ref.label}: {error}" if svc.multi else error)
+        return "; ".join(errors) or None
+
+    def _account_errors(self, svc) -> str:
+        """Status suffix naming accounts whose instances could not be refreshed.
+
+        Only several accounts are reported here: one failing account among
+        others still lists theirs, so the table alone would not show it.
+        """
+        error = getattr(svc, "last_fetch_error", None)
+        if not getattr(svc, "multi", False) or not isinstance(error, str) or not error:
+            return ""
+        if self.app.demo_mode and self.app.redaction_service:
+            error = self.app.redaction_service.scrub_stream(error)
+        return f"\n[yellow]⚠ {escape(error)}[/yellow]"
+
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
         table.clear()
         for idx, inst in enumerate(self._instances, start=1):
             table.add_row(
                 str(idx),
-                str(inst.get("name", "")),
+                display_name(inst),
                 str(inst.get("type", "")),
                 str(inst.get("provider_type", "—")),
                 self._colorize_state(str(inst.get("state", ""))),
@@ -280,10 +324,24 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
     def _row_label(inst: dict) -> str:
         """What to call a row's server: its name, else the id the table shows.
 
+        The name is account-qualified when several accounts are listed.
         The fallback is the row's id, never the API id: in demo mode the row
         carries a placeholder and the real id stays off the screen.
         """
-        return str(inst.get("name") or inst.get("id") or "")
+        return display_name(inst) or str(inst.get("id") or "")
+
+    def _row_account(self, inst: dict) -> str:
+        """The real account label of a drawn row (the fetched row keeps it)."""
+        fetched = fetched_row(self._instances, self._raw_instances, inst)
+        return str(fetched.get("account") or "")
+
+    def _owning(self, resolve, inst: dict):
+        """*resolve* the row's account (service or bundle), or None after telling why."""
+        try:
+            return resolve(self.app, fetched_row(self._instances, self._raw_instances, inst))
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
 
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state per row's provider_type + state.
@@ -341,14 +399,30 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         self._refresh()
 
     def action_new(self) -> None:
-        if getattr(self.app, "ovh_cloud_service", None) is None:
+        # The wizard picks the account itself; it starts on the first usable
+        # one, which is not the primary account when that one cannot connect.
+        usable = provider_accounts(self.app, "ovh")
+        account = usable[0].label if usable else None
+        try:
+            cloud = ovh_services(self.app, account).cloud
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return
+        if cloud is None:
             self.notify(
                 "OVH Cloud service is not available.",
                 severity="warning", markup=False,
             )
             return
         from servonaut.screens.ovh_cloud_create import OVHCloudCreateScreen
-        self.app.push_screen(OVHCloudCreateScreen())
+        self.app.push_screen(
+            OVHCloudCreateScreen(account=account), callback=self._on_create_closed,
+        )
+
+    def _on_create_closed(self, created: Optional[bool]) -> None:
+        """Reload the list once the wizard has created an instance."""
+        if created:
+            self._refresh()
 
     def action_start(self) -> None:
         self._run_lifecycle("start_instance", "Starting", "started")
@@ -410,6 +484,10 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
+        svc = self._owning(row_service, inst)
+        if svc is None:
+            return
+        account = self._row_account(inst)
 
         self.run_worker(
             confirm_and_run_power_action(
@@ -419,11 +497,14 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
                 in_progress_verb=in_progress_verb,
                 set_status=self._set_status,
-                run=lambda: self._do_lifecycle(method, identifier, ptype, done_verb),
+                run=lambda: self._do_lifecycle(
+                    svc, method, identifier, ptype, done_verb, account=account,
+                ),
                 # Declined stops and reboots are recorded like declined
                 # deletes, so the audit log shows every answered question.
                 on_declined=lambda: self._audit_action(
                     method, identifier, ptype, success=False, confirmed=False,
+                    account=account,
                 ),
             ),
             exclusive=False,
@@ -431,9 +512,9 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         )
 
     async def _do_lifecycle(
-        self, method: str, identifier: str, ptype: str, done_verb: str,
+        self, svc, method: str, identifier: str, ptype: str, done_verb: str,
+        *, account: str = "",
     ) -> None:
-        svc = self.app.ovh_service
         try:
             await getattr(svc, method)(identifier, ptype)
         except Exception as exc:
@@ -451,7 +532,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             )
             return
 
-        self._audit_action(method, identifier, ptype, success=True)
+        self._audit_action(method, identifier, ptype, success=True, account=account)
         self.notify(
             f"OVH {ptype} {self._display_id(identifier)}: {done_verb}.",
             severity="information", markup=False,
@@ -472,6 +553,10 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 severity="error", markup=False,
             )
             return
+        services = self._owning(row_ovh_services, inst)
+        if services is None:
+            return
+        account = self._row_account(inst)
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
         confirmed = await self.app.push_screen_wait(
@@ -494,12 +579,12 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             )
         )
         self._audit_action("cloud_delete", composite_id, ptype,
-                           success=False, confirmed=bool(confirmed))
+                           success=False, confirmed=bool(confirmed), account=account)
         if not confirmed:
             return
 
         self._set_status(f"[dim]Deleting {escape(label)}…[/dim]")
-        cloud_svc = getattr(self.app, "ovh_cloud_service", None)
+        cloud_svc = services.cloud
         if cloud_svc is None:
             self.notify(
                 "OVH Cloud service is not available.",
@@ -512,7 +597,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             logger.error("OVH delete failed for %s: %s", composite_id, exc)
             self._audit_action("cloud_delete", composite_id, ptype,
                                success=False, confirmed=True,
-                               error=str(exc)[:200])
+                               error=str(exc)[:200], account=account)
             err_msg = escape(self._provider_error(exc))
             self._set_status(
                 f"[red]Delete failed: {err_msg}[/red]"
@@ -524,7 +609,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return
 
         self._audit_action("cloud_delete", composite_id, ptype,
-                           success=True, confirmed=True)
+                           success=True, confirmed=True, account=account)
         self.notify(
             f"OVH instance {self._display_id(composite_id)} deleted.",
             severity="information", markup=False,
@@ -544,12 +629,15 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         success: bool,
         confirmed: bool = True,
         error: str = "",
+        account: str = "",
     ) -> None:
         """Forward to the app's :class:`OVHAuditLogger` if present.
 
         Mirrors the pattern :class:`OVHCloudCreateScreen` already uses
         for ``cloud_create`` so the OVH audit trail captures the full
         lifecycle (create → start/stop/reboot/delete) in one log file.
+        *account* (the row's real account label) is recorded when OVH has
+        several accounts.
         """
         ovh_audit = getattr(self.app, "ovh_audit", None)
         if ovh_audit is None:
@@ -564,7 +652,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             ovh_audit.log_action(
                 action=action,
                 target=target,
-                details=details,
+                details=with_account(self.app, "ovh", account, details),
                 confirmed=confirmed,
             )
         except Exception as exc:  # pragma: no cover - defensive

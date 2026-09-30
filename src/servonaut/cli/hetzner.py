@@ -9,7 +9,8 @@ Mirrors the shape of :mod:`servonaut.cli.memory` and :mod:`servonaut.cli.ai`:
   by ``main.py``; it dispatches on ``args.hetzner_command`` and returns
   an integer exit code.
 
-Subcommand tree::
+Subcommand tree (every subcommand also takes ``--account LABEL`` to act in
+one configured project; ``list`` shows every project without it)::
 
     servonaut hetzner list                       [--json] [--state STATE]
     servonaut hetzner create NAME                [--type cx23]
@@ -31,7 +32,8 @@ Exit codes:
     3 — confirmation declined (create's y/N, destroy's typed name), or
         create run without a terminal to ask on and without --yes
     4 — argparse / validation error (argparse already exits 2 for usage,
-        we use 4 to differentiate semantic input-validation failures)
+        we use 4 to differentiate semantic input-validation failures), an
+        unknown ``--account``, or a server name several projects use
 """
 
 from __future__ import annotations
@@ -45,6 +47,9 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Coroutine, Iterator, List, Optional
+
+from servonaut.services.accounts import QUALIFIED_KEY, UnknownAccountError
+from servonaut.utils.instance_resolver import AmbiguousInstanceError, display_name
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +89,25 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
     )
     sub = p.add_subparsers(dest='hetzner_command')
     sub.required = True
+    # Every subcommand can act in one configured project.
+    account = argparse.ArgumentParser(add_help=False)
+    account.add_argument(
+        '--account', metavar='LABEL',
+        help='Hetzner project (account label) to act in. Defaults to the '
+             'primary project; list shows every project.',
+    )
 
     # hetzner list
-    p_list = sub.add_parser('list', help='List Hetzner Cloud servers.')
+    p_list = sub.add_parser('list', parents=[account], help='List Hetzner Cloud servers.')
     p_list.add_argument('--json', action='store_true',
                         help='Emit JSON instead of a table.')
     p_list.add_argument('--state', metavar='STATE',
                         help='Filter by state (running, stopped, ...).')
 
     # hetzner create
-    p_create = sub.add_parser('create', help='Create a Hetzner Cloud server.')
+    p_create = sub.add_parser(
+        'create', parents=[account], help='Create a Hetzner Cloud server.',
+    )
     p_create.add_argument('name', help='Server name (1-253 chars, [a-zA-Z0-9._-]).')
     p_create.add_argument('--type', dest='server_type', metavar='TYPE',
                           help='Server type (cx23, cpx22, ...). '
@@ -119,8 +133,13 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
                           help='Emit the new instance dict as JSON.')
 
     # hetzner destroy
-    p_destroy = sub.add_parser('destroy', help='Delete a Hetzner Cloud server.')
-    p_destroy.add_argument('identifier', help='Server name or numeric ID.')
+    p_destroy = sub.add_parser(
+        'destroy', parents=[account], help='Delete a Hetzner Cloud server.',
+    )
+    p_destroy.add_argument(
+        'identifier',
+        help="Server name or numeric ID ('<project>/<name>' picks one project's server).",
+    )
     p_destroy.add_argument('--yes', '-y', action='store_true',
                            help='Skip the typed-confirmation prompt (non-interactive).')
     p_destroy.add_argument('--json', action='store_true',
@@ -131,11 +150,15 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
     keys_sub = p_keys.add_subparsers(dest='ssh_keys_command')
     keys_sub.required = True
 
-    p_keys_list = keys_sub.add_parser('list', help='List registered SSH keys.')
+    p_keys_list = keys_sub.add_parser(
+        'list', parents=[account], help='List registered SSH keys.',
+    )
     p_keys_list.add_argument('--json', action='store_true',
                              help='Emit JSON instead of a table.')
 
-    p_keys_add = keys_sub.add_parser('add', help='Register a new SSH public key.')
+    p_keys_add = keys_sub.add_parser(
+        'add', parents=[account], help='Register a new SSH public key.',
+    )
     p_keys_add.add_argument('name', help='Display name for the key.')
     src_group = p_keys_add.add_mutually_exclusive_group(required=True)
     src_group.add_argument('--public-key-file', metavar='PATH',
@@ -146,13 +169,13 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
                             help='Emit JSON.')
 
     # hetzner server-types
-    p_types = sub.add_parser('server-types',
+    p_types = sub.add_parser('server-types', parents=[account],
                              help='List available server types and prices.')
     p_types.add_argument('--json', action='store_true',
                          help='Emit JSON instead of a table.')
 
     # hetzner test-connection
-    p_test = sub.add_parser('test-connection',
+    p_test = sub.add_parser('test-connection', parents=[account],
                             help='Validate the configured token by calling Hetzner.')
     p_test.add_argument('--json', action='store_true', help='Emit JSON.')
 
@@ -163,8 +186,25 @@ def add_hetzner_parser(subparsers: argparse._SubParsersAction) -> argparse.Argum
 # Headless service initialisation
 # ---------------------------------------------------------------------------
 
-def _build_service():
+def _hetzner_registry():
+    """The account registry when Hetzner projects are configured, else None."""
+    from servonaut.config.manager import ConfigManager
+    from servonaut.services.accounts.headless import build_account_registry
+
+    registry = build_account_registry(ConfigManager())
+    return registry if registry.accounts('hetzner') else None
+
+
+def _unknown_account(exc: Exception) -> SystemExit:
+    print(f"Error: {exc}", file=sys.stderr)
+    return SystemExit(_EXIT_VALIDATION)
+
+
+def _build_service(account: Optional[str] = None):
     """Construct a HetznerService outside of the TUI app context.
+
+    Args:
+        account: Project (account label) to act in; None for the primary one.
 
     Returns:
         HetznerService instance ready to call.
@@ -172,15 +212,28 @@ def _build_service():
     Raises:
         SystemExit: With code 2 if Hetzner is not configured at all
             (``config.hetzner.enabled`` is False AND no token is
-            resolvable through the chain).
+            resolvable through the chain), 4 for an unknown ``account``.
     """
+    from servonaut.config.accounts import primary_label
     from servonaut.config.manager import ConfigManager
     from servonaut.services.hetzner_service import (
         HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
     )
 
+    registry = _hetzner_registry()
+    if registry is not None:
+        try:
+            return registry.service('hetzner', account)
+        except UnknownAccountError as exc:
+            raise _unknown_account(exc) from exc
+
     cm = ConfigManager()
     cfg = cm.get()
+    primary = primary_label('hetzner', cfg)
+    if account and account.strip().lower() != primary.lower():
+        raise _unknown_account(UnknownAccountError(
+            f"No Hetzner account named {account!r}. Accounts: {primary}"
+        ))
     if not getattr(cfg, 'hetzner', None) or not cfg.hetzner.enabled:
         # The CLI is intentionally lenient here: even if ``enabled=False``,
         # if the token chain resolves we let the user run reads. This
@@ -227,14 +280,18 @@ def _print_servers_table(servers: List[dict]) -> None:
     if not servers:
         print("No Hetzner Cloud servers in project.")
         return
+    # Several projects: say which one each server is in.
+    by_account = any(s.get(QUALIFIED_KEY) for s in servers)
+    account_header = f"{'Account':<16} " if by_account else ""
     print(f"Hetzner Cloud servers ({len(servers)} total):\n")
-    header = (f"  {'Name':<24} {'ID':<10} {'Type':<10} "
+    header = (f"  {account_header}{'Name':<24} {'ID':<10} {'Type':<10} "
               f"{'State':<10} {'Public IP':<16} {'Location':<8}")
     print(header)
     print('  ' + '-' * (len(header) - 2))
     for s in servers:
+        account = f"{str(s.get('account') or '')[:16]:<16} " if by_account else ""
         print(
-            f"  {(s.get('name') or '')[:24]:<24} "
+            f"  {account}{display_name(s)[:24]:<24} "
             f"{s.get('id', ''):<10} "
             f"{(s.get('type') or ''):<10} "
             f"{(s.get('state') or ''):<10} "
@@ -281,19 +338,43 @@ def _print_server_types_table(types: List[dict]) -> None:
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
+async def _list_servers(account: Optional[str]) -> tuple:
+    """``(rows, warning)``: every project's servers, or those of *account*.
+
+    Rows of configured projects carry their ``account``. *warning* says
+    which projects could not be listed (one that cannot connect, a refresh
+    that failed), or is None.
+    """
+    from servonaut.services.accounts.headless import fetch_provider_rows
+
+    registry = _hetzner_registry()
+    if registry is None:
+        rows = await _build_service(account).fetch_instances_cached(force_refresh=True)
+        return rows, None
+    rows = await fetch_provider_rows(
+        registry, 'hetzner', account or '', force_refresh=True,
+    )
+    return rows, None if account else registry.fleet('hetzner').last_fetch_error
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
-    svc = _build_service()
     try:
-        instances = _run_async(svc.fetch_instances_cached(force_refresh=True))
+        instances, warning = _run_async(_list_servers(getattr(args, 'account', None)))
+    except UnknownAccountError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_VALIDATION
     except Exception as exc:
         print(f"Error listing servers: {exc}", file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
+    if warning:
+        print(f"Warning: some projects were not listed: {warning}", file=sys.stderr)
     if args.state:
         instances = [i for i in instances if i.get('state') == args.state]
 
     if args.json:
-        print(json.dumps(instances, indent=2, default=str))
+        rows = [{k: v for k, v in i.items() if k != QUALIFIED_KEY} for i in instances]
+        print(json.dumps(rows, indent=2, default=str))
     else:
         _print_servers_table(instances)
     return _EXIT_SUCCESS
@@ -370,7 +451,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         )
         return _EXIT_DECLINED
 
-    svc = _build_service()
+    svc = _build_service(getattr(args, 'account', None))
     prompt_out = sys.stderr if args.json else sys.stdout
     confirm = None if args.yes else (lambda summary: _confirm_create(summary, prompt_out))
     try:
@@ -406,11 +487,49 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return _EXIT_SUCCESS
 
 
+def _destroy_target(args: argparse.Namespace):
+    """``(service, server, project)`` the destroy acts on.
+
+    The project is the one ``--account`` or a ``<project>/`` qualifier
+    names, else the one whose servers list the identifier. With several
+    projects, an identifier none of them lists is refused; with one, it
+    goes to that project, as before. *project* is None when only one
+    project is configured.
+    """
+    from servonaut.services.accounts.headless import resolve_provider_target
+
+    account = getattr(args, 'account', None) or ''
+    registry = _hetzner_registry()
+    if registry is None:
+        return _build_service(account or None), args.identifier, None
+    target = _run_async(
+        resolve_provider_target(registry, 'hetzner', args.identifier, account)
+    )
+    project = target.account.label if registry.is_multi('hetzner') else None
+    return registry.service('hetzner', target.account.label), target.reference, project
+
+
 def _cmd_destroy(args: argparse.Namespace) -> int:
-    svc = _build_service()
+    from servonaut.services.accounts.headless import TargetNotFoundError
+
+    try:
+        svc, server, project = _destroy_target(args)
+    except (UnknownAccountError, AmbiguousInstanceError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_VALIDATION
+    except TargetNotFoundError as exc:
+        print(
+            f"Error: {exc} Pass --account LABEL, or name it "
+            f"'{exc.labels[-1]}/{exc.reference}'.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR
 
     if not args.yes:
-        print(f"About to PERMANENTLY DELETE Hetzner server: {args.identifier!r}")
+        in_project = f" (project {project})" if project else ""
+        print(
+            f"About to PERMANENTLY DELETE Hetzner server: {args.identifier!r}{in_project}"
+        )
         try:
             confirm = input("Type the server identifier to confirm: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -425,7 +544,7 @@ def _cmd_destroy(args: argparse.Namespace) -> int:
             return _EXIT_DECLINED
 
     try:
-        _run_async(svc.delete_server(args.identifier))
+        _run_async(svc.delete_server(server))
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_VALIDATION
@@ -444,7 +563,7 @@ def _cmd_destroy(args: argparse.Namespace) -> int:
 
 
 def _cmd_ssh_keys_list(args: argparse.Namespace) -> int:
-    svc = _build_service()
+    svc = _build_service(getattr(args, 'account', None))
     try:
         keys = _run_async(svc.list_ssh_keys())
     except Exception as exc:
@@ -459,7 +578,7 @@ def _cmd_ssh_keys_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_ssh_keys_add(args: argparse.Namespace) -> int:
-    svc = _build_service()
+    svc = _build_service(getattr(args, 'account', None))
     public_key: Optional[str] = None
     if args.public_key_file:
         try:
@@ -502,7 +621,7 @@ def _cmd_ssh_keys_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_server_types(args: argparse.Namespace) -> int:
-    svc = _build_service()
+    svc = _build_service(getattr(args, 'account', None))
     try:
         types = _run_async(svc.list_server_types())
     except Exception as exc:
@@ -517,7 +636,7 @@ def _cmd_server_types(args: argparse.Namespace) -> int:
 
 
 def _cmd_test_connection(args: argparse.Namespace) -> int:
-    svc = _build_service()
+    svc = _build_service(getattr(args, 'account', None))
     try:
         result = _run_async(svc.test_connection())
     except Exception as exc:

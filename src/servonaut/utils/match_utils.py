@@ -20,6 +20,9 @@ def matches_conditions(instance: dict, conditions: Dict[str, str]) -> bool:
     - type_contains: substring match on instance type
     - has_public_ip: "true" or "false"
     - provider: exact match on provider field (e.g. "AWS", "DigitalOcean")
+    - account: case-insensitive match on the provider account label (e.g.
+      "prod"; a provider's primary account is named after the provider unless
+      renamed). Custom servers belong to no account and never match.
     - group: exact match on group field
     - tag:<key>: exact match on tags[<key>]
 
@@ -53,6 +56,9 @@ def matches_conditions(instance: dict, conditions: Dict[str, str]) -> bool:
                 return False
         elif key == 'provider':
             if instance.get('provider', 'AWS') != value:
+                return False
+        elif key == 'account':
+            if str(instance.get('account') or '').lower() != value.strip().lower():
                 return False
         elif key == 'group':
             if instance.get('group', '') != value:

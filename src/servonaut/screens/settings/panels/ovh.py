@@ -12,7 +12,9 @@ intentionally NOT shown here.  The panel uses ``dataclasses.replace`` when
 saving so those wizard-owned secrets are always preserved.
 
 A "Setup OVHcloud" button opens :class:`~servonaut.screens.ovh_setup.OVHSetupScreen`
-for credential entry, mirroring the legacy behaviour.
+for credential entry, mirroring the legacy behaviour. The Accounts section
+lists the primary account and any extra ones; adding or editing an account
+opens the same wizard for that account.
 """
 
 from __future__ import annotations
@@ -23,8 +25,14 @@ from typing import Any, Dict
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Button, Input, Select, Static, Switch
 
+from servonaut.screens.settings.accounts import (
+    OvhAccountsSection,
+    rebuild_accounts,
+    refresh_provider_fleet,
+)
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import EnvVarInput, StringListEditor
 
@@ -219,6 +227,9 @@ class OvhPanel(SettingsPanel):
             classes="setting_row",
         )
 
+        # Accounts (saved per account by the setup wizard)
+        yield OvhAccountsSection(heading_classes="ovh-section-header")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -255,7 +266,32 @@ class OvhPanel(SettingsPanel):
         self.query_one("#ovh_s3_region", Input).value = s3.region
         self._show_field("ovh_s3_endpoint_url", s3.endpoint_url)
 
+        self.query_one(OvhAccountsSection).refresh_accounts()
         self._snapshot_now()
+
+    def refresh_external_state(self) -> None:
+        """Show what the setup wizard saved.
+
+        The wizard can enable OVHcloud and add, edit or rename accounts. An
+        untouched form reloads, so a later Save never writes back the values
+        from before the wizard; unsaved edits are kept and only the status
+        and the accounts are redrawn.
+        """
+        try:
+            if not self.is_dirty():
+                self.load()
+                return
+            self._set_status(self.app.config_manager.get().ovh)
+            self.query_one(OvhAccountsSection).refresh_accounts()
+        except NoMatches:
+            # Settings resumes while this panel is still being built; its
+            # own mount loads it.
+            return
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-show the redacted fields and redraw the accounts table."""
+        super().refresh_after_demo_toggle()
+        self.query_one(OvhAccountsSection).refresh_after_demo_toggle()
 
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
@@ -362,10 +398,12 @@ class OvhPanel(SettingsPanel):
         )
 
         self.app.config_manager.update(ovh=new_ovh)
-
-        # Rebuild OVH object storage service after saving so the new
-        # credentials take effect without a restart.
-        self._rebuild_ovh_object_storage()
+        # Extra accounts inherit these defaults, the switch decides whether
+        # OVHcloud is listed at all, and the reload rebuilds Object Storage
+        # so new credentials take effect without a restart.
+        if rebuild_accounts(self.app) and new_ovh.enabled != existing_ovh.enabled:
+            refresh_provider_fleet(self.app, "ovh")
+        self.query_one(OvhAccountsSection).refresh_accounts()
 
         self._set_status(new_ovh)
         self._finish_save("OVHcloud settings saved")
@@ -417,21 +455,3 @@ class OvhPanel(SettingsPanel):
         from servonaut.screens.ovh_setup import OVHSetupScreen
 
         self.app.push_screen(OVHSetupScreen())
-
-    def _rebuild_ovh_object_storage(self) -> None:
-        """Rebuild the OVH object storage service on the app after saving.
-
-        Mirrors the side-effect in the legacy settings save path
-        (settings.py:2025-2038) so the new credentials are live
-        immediately without a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-
-            config = self.app.config_manager.get()
-            _aws, _hetzner, ovh_oss = build_object_storage_services(config)
-            self.app.ovh_object_storage_service = ovh_oss
-        except Exception as exc:
-            logger.warning("Could not rebuild OVH object storage service: %s", exc)

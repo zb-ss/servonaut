@@ -44,7 +44,22 @@ SENSITIVE_FIELDS = {
     "ovh.object_storage.secret_key",
     "hetzner.object_storage.access_key",
     "hetzner.object_storage.secret_key",
+    # Extra provider accounts. "[]" means "in every entry of this list"; on
+    # pull, entries are matched to local ones by label.
+    "ovh.accounts[].application_key",
+    "ovh.accounts[].application_secret",
+    "ovh.accounts[].consumer_key",
+    "ovh.accounts[].client_id",
+    "ovh.accounts[].client_secret",
+    "ovh.accounts[].object_storage.access_key",
+    "ovh.accounts[].object_storage.secret_key",
+    "hetzner.accounts[].api_token",
+    "hetzner.accounts[].object_storage.access_key",
+    "hetzner.accounts[].object_storage.secret_key",
 }
+
+# Key that identifies an entry of a list-scoped secret path across devices.
+_LIST_ENTRY_IDENTITY = "label"
 
 # Machine-specific fields that shouldn't sync (always kept from local).
 LOCAL_ONLY_FIELDS = {
@@ -64,7 +79,64 @@ PRESERVE_ON_EMPTY_FIELDS = {
     "connection_profiles",
     "connection_rules",
     "ip_ban_configs",
+    # A snapshot pushed by a release without extra accounts has none; pulling
+    # it must not delete the accounts configured on this device.
+    "aws.accounts",
+    "hetzner.accounts",
+    "ovh.accounts",
 }
+
+
+def _get_path(data: Any, parts: List[str]) -> Any:
+    """Value at a dotted path of plain dict keys, or None."""
+    for part in parts:
+        if not isinstance(data, dict):
+            return None
+        data = data.get(part)
+    return data
+
+
+def _parents(data: Any, parts: List[str]):
+    """Every dict that holds the leaf of *parts* (the path minus its leaf).
+
+    A segment ending in ``[]`` fans out over each dict in that list.
+    """
+    if not parts:
+        if isinstance(data, dict):
+            yield data
+        return
+    head, rest = parts[0], parts[1:]
+    if not isinstance(data, dict):
+        return
+    if head.endswith("[]"):
+        items = data.get(head[:-2])
+        if isinstance(items, list):
+            for item in items:
+                yield from _parents(item, rest)
+        return
+    yield from _parents(data.get(head), rest)
+
+
+def _materialise(data: dict, parts: List[str]) -> dict:
+    """The dict at *parts* inside *data*, creating empty dicts on the way."""
+    cursor = data
+    for part in parts:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cursor[part] = nxt
+        cursor = nxt
+    return cursor
+
+
+def _identity(entry: Any) -> Optional[str]:
+    """Case-insensitive identity of a list entry, or None without one."""
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get(_LIST_ENTRY_IDENTITY)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower()
 
 PROBE_FILE = Path.home() / ".servonaut" / "sync_key_probe.json"
 DEFAULT_SNAPSHOT_NAME = "servonaut-cli"
@@ -215,6 +287,9 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         # `.get(part, {})` chain produced orphaned dicts whose leaf assignment
         # was never reflected back into remote_data.
         for field_path in SENSITIVE_FIELDS:
+            if "[]" in field_path:
+                self._preserve_list_secret(current, remote_data, field_path)
+                continue
             parts = field_path.split(".")
             # Walk local config to find the value to preserve.
             local_val: Any = current
@@ -241,18 +316,51 @@ class ConfigSyncService(ConfigSyncServiceInterface):
             if not cursor.get(leaf):
                 cursor[leaf] = local_val
 
-        # Preserve top-level user-data lists that are empty in remote
+        # Preserve user-data lists that are empty in remote. A preserved list
+        # is the local copy, so it keeps its local secrets as well.
         for field_name in PRESERVE_ON_EMPTY_FIELDS:
-            remote_val = remote_data.get(field_name)
-            current_val = current.get(field_name)
+            parts = field_name.split(".")
+            remote_val = _get_path(remote_data, parts)
+            current_val = _get_path(current, parts)
             # Treat missing/None/empty-list/empty-dict as "empty"
             if not remote_val and current_val:
-                remote_data[field_name] = current_val
+                _materialise(remote_data, parts[:-1])[parts[-1]] = copy.deepcopy(current_val)
 
         # Reload via config manager's deserialize
         new_config = self._config_manager._deserialize(remote_data)
         self._config_manager.save(new_config)
         logger.info("Remote config applied")
+
+    @staticmethod
+    def _preserve_list_secret(current: dict, remote_data: dict, field_path: str) -> None:
+        """Keep a local secret of a list entry the remote copy has empty.
+
+        ``hetzner.accounts[].api_token``: every remote account whose label
+        matches a local account gets the local token when its own is empty.
+        Entries without a label, or only present on one side, are left alone.
+        """
+        list_path, _, leaf_path = field_path.partition("[].")
+        list_parts = list_path.split(".")
+        leaf_parts = leaf_path.split(".")
+        local_items = _get_path(current, list_parts)
+        remote_items = _get_path(remote_data, list_parts)
+        if not isinstance(local_items, list) or not isinstance(remote_items, list):
+            return
+        local_by_id = {}
+        for item in local_items:
+            key = _identity(item)
+            if key is not None:
+                local_by_id.setdefault(key, item)
+        for remote_item in remote_items:
+            local_item = local_by_id.get(_identity(remote_item) or "")
+            if local_item is None:
+                continue
+            local_val = _get_path(local_item, leaf_parts)
+            if not local_val:
+                continue
+            parent = _materialise(remote_item, leaf_parts[:-1])
+            if not parent.get(leaf_parts[-1]):
+                parent[leaf_parts[-1]] = local_val
 
     def compute_local_hash(self) -> str:
         """Compute hash of current local config for conflict detection."""
@@ -340,14 +448,11 @@ class ConfigSyncService(ConfigSyncServiceInterface):
         for field_name in LOCAL_ONLY_FIELDS:
             data.pop(field_name, None)
 
-        # Mask sensitive fields
+        # Mask sensitive fields, including those inside list entries.
         for field_path in SENSITIVE_FIELDS:
             parts = field_path.split(".")
-            obj = data
-            for part in parts[:-1]:
-                obj = obj.get(part, {})
-            if isinstance(obj, dict):
-                obj.pop(parts[-1], None)
+            for parent in list(_parents(data, parts[:-1])):
+                parent.pop(parts[-1], None)
 
         return data
 

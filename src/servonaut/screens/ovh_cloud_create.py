@@ -1,10 +1,17 @@
-"""Wizard screen for creating a new OVH Public Cloud instance."""
+"""Wizard screen for creating a new OVH Public Cloud instance.
+
+With several OVH accounts configured, an account picker comes first: the
+project, regions, flavors, images and SSH keys are the chosen account's,
+and the instance is created there.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
+
+from rich.markup import escape
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -15,6 +22,19 @@ from textual.widgets import (
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import replace_instances
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_settings,
+    inventory,
+    ovh_services,
+    provider_accounts,
+    registry_for,
+    show_account_labels,
+    shown_label,
+    with_account,
+)
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -35,6 +55,9 @@ class OVHCloudCreateScreen(Screen):
         Binding("escape", "back", "Back", show=True),
     ]
 
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
+
     @property
     def app(self) -> "ServonautApp":
         return super().app  # type: ignore
@@ -46,8 +69,9 @@ class OVHCloudCreateScreen(Screen):
     # State
     # ------------------------------------------------------------------
 
-    def __init__(self) -> None:
+    def __init__(self, account: Optional[str] = None) -> None:
         super().__init__()
+        self._account = account or ""
         self._project_id: str = ""
         self._flavors: List[dict] = []
         self._images: List[dict] = []
@@ -65,6 +89,11 @@ class OVHCloudCreateScreen(Screen):
                 Static(
                     "[bold cyan]Create Cloud Instance[/bold cyan]",
                     id="cloud_create_title",
+                ),
+                # Hidden unless several OVH accounts are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh",
+                    value=self._account or None, id="cloud_create_account",
                 ),
 
                 Static("[bold]Instance Name[/bold]", classes="section_header"),
@@ -118,11 +147,25 @@ class OVHCloudCreateScreen(Screen):
 
     def on_mount(self) -> None:
         self._setup_tables()
+        picker = self.query_one("#cloud_create_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
+        self._load_account()
 
-        config = self.app.config_manager.get()
-        project_ids: List[str] = getattr(config.ovh, "cloud_project_ids", [])
+    def _load_account(self) -> None:
+        """Load the chosen account's first project into the wizard."""
+        try:
+            settings = account_settings(self.app, "ovh", self._account)
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return
+        project_ids: List[str] = getattr(settings, "cloud_project_ids", [])
+        # Shown once, and gone when another account has a project.
+        shown_errors = list(self.query("#no_project_error"))
 
         if not project_ids:
+            if shown_errors:
+                return
             self.query_one("#cloud_create_container", ScrollableContainer).mount(
                 Static(
                     "[red]No OVH cloud project IDs configured. "
@@ -132,15 +175,42 @@ class OVHCloudCreateScreen(Screen):
             )
             return
 
+        for error in shown_errors:
+            error.remove()
         # Use the first configured project for the wizard.
         self._project_id = project_ids[0]
 
         # Region first — once it resolves, the on_select_changed
         # handler kicks off the flavors / images loaders filtered to
         # the picked region. SSH keys are project-scoped (no region
-        # binding) so they can load in parallel.
-        self.run_worker(self._load_regions(), exclusive=False)
-        self.run_worker(self._load_keys(), exclusive=False)
+        # binding) so they can load in parallel. A group per loader lets
+        # an account switch cancel the loads of the previous account.
+        self.run_worker(self._load_regions(), group="ovh_create_regions", exclusive=True)
+        self.run_worker(self._load_keys(), group="ovh_create_keys", exclusive=True)
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: the wizard starts over in its project."""
+        self._account = event.account
+        self._project_id = ""
+        for group in (
+            "ovh_create_regions", "ovh_create_keys",
+            "ovh_create_flavors", "ovh_create_images",
+        ):
+            self.workers.cancel_group(self, group)
+        self._flavors, self._images, self._keys = [], [], []
+        for selector in ("#flavors_table", "#images_table", "#keys_table"):
+            self.query_one(selector, DataTable).clear()
+        self.query_one("#keys_hint", Static).display = False
+        region = self.query_one("#input_region", Select)
+        region.set_options([])
+        self._load_account()
+
+    def _cloud_service(self):
+        """The chosen account's Public Cloud service (None when unavailable)."""
+        try:
+            return ovh_services(self.app, self._account).cloud
+        except UnknownAccountError:
+            return None
 
     # ------------------------------------------------------------------
     # Table setup
@@ -167,7 +237,7 @@ class OVHCloudCreateScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_regions(self) -> None:
-        svc = getattr(self.app, "ovh_cloud_service", None)
+        svc = self._cloud_service()
         sel = self.query_one("#input_region", Select)
         if svc is None:
             self.notify("OVH Cloud service not available.", severity="error")
@@ -235,7 +305,7 @@ class OVHCloudCreateScreen(Screen):
         sel.value = filtered[0]
 
     async def _load_flavors(self, region: str) -> None:
-        svc = getattr(self.app, "ovh_cloud_service", None)
+        svc = self._cloud_service()
         tbl = self.query_one("#flavors_table", DataTable)
         tbl.clear()
         self._flavors = []
@@ -293,7 +363,7 @@ class OVHCloudCreateScreen(Screen):
             self.notify(f"Error loading flavors: {exc}", severity="error", markup=False)
 
     async def _load_images(self, region: str) -> None:
-        svc = getattr(self.app, "ovh_cloud_service", None)
+        svc = self._cloud_service()
         tbl = self.query_one("#images_table", DataTable)
         tbl.clear()
         self._images = []
@@ -325,7 +395,7 @@ class OVHCloudCreateScreen(Screen):
             self.notify(f"Error loading images: {exc}", severity="error", markup=False)
 
     async def _load_keys(self) -> None:
-        svc = getattr(self.app, "ovh_cloud_service", None)
+        svc = self._cloud_service()
         tbl = self.query_one("#keys_table", DataTable)
         hint = self.query_one("#keys_hint", Static)
         if svc is None:
@@ -520,12 +590,18 @@ class OVHCloudCreateScreen(Screen):
 
         from servonaut.screens.confirm_action import ConfirmActionScreen
 
+        # With several accounts, say which one is billed.
+        account = (
+            f" in account [bold]{escape(shown_label(self.app, self._account))}[/bold]"
+            if len(provider_accounts(self.app, "ovh")) > 1 else ""
+        )
         confirmed = await self.app.push_screen_wait(
             ConfirmActionScreen(
                 title="Create Cloud Instance",
                 description=(
                     f"Create instance [bold]{name}[/bold] in [bold]{region}[/bold] "
-                    f"using [bold]{flavor_name}[/bold] / [bold]{image_name}[/bold]."
+                    f"using [bold]{flavor_name}[/bold] / [bold]{image_name}[/bold]"
+                    f"{account}."
                 ),
                 consequences=[
                     cost_line,
@@ -542,20 +618,20 @@ class OVHCloudCreateScreen(Screen):
             ovh_audit.log_action(
                 action="cloud_create",
                 target=self._project_id,
-                details={
+                details=with_account(self.app, "ovh", self._account, {
                     "name": name,
                     "flavor_id": flavor.get("id", ""),
                     "image_id": image.get("id", ""),
                     "region": region,
                     "ssh_key_id": ssh_key_id,
-                },
+                }),
                 confirmed=bool(confirmed),
             )
 
         if not confirmed:
             return
 
-        svc = getattr(self.app, "ovh_cloud_service", None)
+        svc = self._cloud_service()
         if svc is None:
             self.notify("OVH Cloud service not available.", severity="error")
             return
@@ -577,8 +653,31 @@ class OVHCloudCreateScreen(Screen):
                 f"Instance '{name}' created successfully (ID: {instance_id}).",
                 severity="information",
             )
-            self.app.pop_screen()
         except Exception as exc:
             logger.error("Cloud instance creation failed: %s", exc)
             error = "Provider request failed. See logs for details." if self.app.demo_mode else str(exc)
             self.notify(f"Creation failed: {error}", severity="error", markup=False)
+            return
+
+        # List the new instance without the user having to refresh.
+        # Best-effort: a failure here does not undo the create.
+        try:
+            await self._refresh_instances_after_create()
+        except Exception as exc:
+            logger.warning("Post-create instance refresh failed: %s", exc)
+        # True tells the screen that opened the wizard (the OVH Manager)
+        # that an instance was created, so it reloads its list.
+        self.dismiss(True)
+
+    async def _refresh_instances_after_create(self) -> None:
+        """Replace the OVH slice of ``app.instances`` with a fresh fetch.
+
+        Every account is fetched, so the new instance is listed under its
+        own account and no other account's servers drop out.
+        """
+        svc = inventory(self.app, "ovh")
+        if svc is None:
+            return
+        rows = await svc.fetch_instances_cached(force_refresh=True)
+        # Keeps the real rows aside and lists them redacted in demo mode.
+        replace_instances(self.app, "ovh", rows)

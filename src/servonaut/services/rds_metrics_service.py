@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 
+from servonaut.services.accounts.aws_account import aws_client
+
 logger = logging.getLogger(__name__)
 
 _NAMESPACE = "AWS/RDS"
@@ -34,6 +36,10 @@ _METRICS = [
 
 class RDSMetricsService:
     """Fetch a snapshot of an RDS instance's CloudWatch metrics."""
+
+    def __init__(self, account: Optional[Any] = None) -> None:
+        """Args: account: the AWS account the database lives in (None = default)."""
+        self._account = account
 
     async def fetch(
         self, db_instance: str, region: str = "", window_hours: int = 3,
@@ -56,7 +62,7 @@ class RDSMetricsService:
         }
         kwargs = {"region_name": region} if region else {}
         try:
-            cw = boto3.client("cloudwatch", **kwargs)
+            cw = aws_client(self._account, boto3, "cloudwatch", **kwargs)
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"cloudwatch client: {exc}")
             return result

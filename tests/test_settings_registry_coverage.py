@@ -42,6 +42,7 @@ _FIELD_TO_PANEL = {
     "instance_keys": "ssh_keys",
     "default_username": "general",
     "cache_ttl_seconds": "general",
+    "account_retry_seconds": "_no_ui",  # advanced lookup tuning for several accounts; editable via config.json, not surfaced in the Settings TUI
     "default_scan_paths": "scan",
     "scan_rules": "scan",
     "connection_profiles": "connections",

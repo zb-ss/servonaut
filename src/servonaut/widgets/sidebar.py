@@ -68,6 +68,15 @@ _SCREEN_TO_NAV: dict[str, str] = {
 }
 
 
+def _provider_available(app, provider: str) -> bool:
+    """Whether *provider* has a usable account (any account, not only the
+    primary one). Hosts without the check fall back to the default service."""
+    check = getattr(app, "provider_available", None)
+    if callable(check):
+        return bool(check(provider))
+    return getattr(app, f"{provider}_service", None) is not None
+
+
 class Sidebar(Widget):
     """Top-level navigation widget mounted on every screen."""
 
@@ -257,7 +266,7 @@ class Sidebar(Widget):
         #
         # AWS is always visible (D6); only its S3 button may be hidden if
         # boto3 default-chain fails to produce a usable client.
-        ovh_compute = getattr(self.app, "ovh_service", None) is not None
+        ovh_compute = _provider_available(self.app, "ovh")
         ovh_s3 = (
             getattr(self.app, "ovh_object_storage_service", None) is not None
         )
@@ -279,7 +288,7 @@ class Sidebar(Widget):
             if not ovh_s3:
                 self._hide_button("nav_ovh_s3")
 
-        hetzner_compute = getattr(self.app, "hetzner_service", None) is not None
+        hetzner_compute = _provider_available(self.app, "hetzner")
         hetzner_s3 = (
             getattr(self.app, "hetzner_object_storage_service", None) is not None
         )

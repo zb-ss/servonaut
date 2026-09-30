@@ -103,12 +103,17 @@ def normalize_config_paths(data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Provider-level local key paths. ``default_hetzner_ssh_key`` is a
     # Hetzner-side identifier (NOT a local path) and is intentionally skipped.
+    # Extra accounts carry the same local key fields as their provider block.
     hetzner = data.get("hetzner")
-    if isinstance(hetzner, dict) and isinstance(hetzner.get("default_local_ssh_key"), str):
-        hetzner["default_local_ssh_key"] = tildify(hetzner["default_local_ssh_key"])
+    if isinstance(hetzner, dict):
+        for block in [hetzner, *(hetzner.get("accounts") or [])]:
+            if isinstance(block, dict) and isinstance(block.get("default_local_ssh_key"), str):
+                block["default_local_ssh_key"] = tildify(block["default_local_ssh_key"])
 
     ovh = data.get("ovh")
-    if isinstance(ovh, dict) and isinstance(ovh.get("default_ssh_key"), str):
-        ovh["default_ssh_key"] = tildify(ovh["default_ssh_key"])
+    if isinstance(ovh, dict):
+        for block in [ovh, *(ovh.get("accounts") or [])]:
+            if isinstance(block, dict) and isinstance(block.get("default_ssh_key"), str):
+                block["default_ssh_key"] = tildify(block["default_ssh_key"])
 
     return data

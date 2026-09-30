@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from servonaut.services.interfaces import CloudTrailServiceInterface
 
@@ -35,8 +35,20 @@ _POST_FILTER_SCAN_CEILING = 5000
 class CloudTrailService(CloudTrailServiceInterface):
     """Fetches and parses CloudTrail events via boto3."""
 
-    def __init__(self, config_manager: object) -> None:
+    def __init__(self, config_manager: object, account: Optional[Any] = None) -> None:
+        """Build the service.
+
+        Args:
+            config_manager: Source of the CloudTrail defaults.
+            account: The AWS account whose trail is read (None = default).
+        """
         self._config_manager = config_manager
+        self._account = account
+
+    def _client(self, boto3_module: Any, service: str, region: str) -> Any:
+        from servonaut.services.accounts.aws_account import aws_client
+
+        return aws_client(self._account, boto3_module, service, region_name=region)
 
     async def lookup_events(
         self,
@@ -138,7 +150,7 @@ class CloudTrailService(CloudTrailServiceInterface):
             resume_tokens: Dict[str, str] = {}
 
             for r in regions_to_query:
-                client = boto3.client("cloudtrail", region_name=r)
+                client = self._client(boto3, "cloudtrail", r)
                 kwargs: dict = {
                     "StartTime": start_time,
                     "EndTime": end_time,
@@ -235,7 +247,7 @@ class CloudTrailService(CloudTrailServiceInterface):
         def _get() -> List[str]:
             import boto3
 
-            client = boto3.client("ec2", region_name="us-east-1")
+            client = self._client(boto3, "ec2", "us-east-1")
             response = client.describe_regions()
             return [r["RegionName"] for r in response["Regions"]]
 
@@ -246,7 +258,7 @@ class CloudTrailService(CloudTrailServiceInterface):
         try:
             import boto3
 
-            client = boto3.client("ec2", region_name="us-east-1")
+            client = self._client(boto3, "ec2", "us-east-1")
             response = client.describe_regions()
             return [r["RegionName"] for r in response["Regions"]]
         except Exception:

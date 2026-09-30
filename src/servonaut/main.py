@@ -485,8 +485,9 @@ def _relay_run_foreground() -> None:
 
     from servonaut.config.manager import ConfigManager
     from servonaut.runtime import detect_runtime
-    from servonaut.services.cache_service import CacheService
-    from servonaut.services.aws_service import AWSService
+    from servonaut.services.accounts.headless import (
+        account_labels, build_account_registry, usable_providers,
+    )
     from servonaut.services.ssh_service import SSHService
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.scp_service import SCPService
@@ -602,8 +603,9 @@ def _relay_run_foreground() -> None:
         )
         sys.exit(1)
 
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
+    # Every provider account: relay commands and AI tool calls can target
+    # the servers of any of them.
+    accounts = build_account_registry(config_manager)
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
@@ -613,8 +615,8 @@ def _relay_run_foreground() -> None:
     )
 
     executors = RelayExecutors(
-        config_manager, aws_service, custom_server_service,
-        ssh_service, connection_service, scp_service,
+        config_manager, accounts.default_service('aws'), custom_server_service,
+        ssh_service, connection_service, scp_service, accounts=accounts,
     )
 
     # AI chat tool executor — lets headless sessions answer tool calls the
@@ -638,8 +640,8 @@ def _relay_run_foreground() -> None:
 
             api_client = APIClient(auth_service)
             mcp_audit = AuditTrail(config.mcp.audit_path)
-            headless_tools = build_headless_tools(config_manager)
-            ip_ban_service = IPBanService(config_manager)
+            headless_tools = build_headless_tools(config_manager, accounts=accounts)
+            ip_ban_service = IPBanService(config_manager, accounts=accounts)
 
             bridge = AIToolBridge(
                 api_client=api_client,
@@ -701,6 +703,9 @@ def _relay_run_foreground() -> None:
         session_alive=session_alive,
         ai_tool_executor=ai_tool_executor,
         probe_bridge=probe_bridge,
+        # Read on every handshake and heartbeat.
+        providers_configured=lambda: usable_providers(accounts),
+        accounts=lambda: account_labels(accounts),
     )
 
     print(f"Starting Servonaut relay listener (user: {user_id})")

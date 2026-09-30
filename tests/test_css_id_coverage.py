@@ -29,6 +29,17 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Account / profile widgets ----
         "account_info",         # Reason: Static label; inherits global Static styling
         "account_info_header",  # Reason: Static header; inherits global Static styling
+        # ---- Provider account pickers ----
+        # AccountPicker styles itself through its DEFAULT_CSS and is hidden
+        # unless the provider has several accounts.
+        "billing_account",
+        "cloud_create_account",
+        "dns_account",
+        "hetzner_create_account",
+        "hetzner_ssh_keys_account",
+        "ip_mgmt_account",
+        "ovh_ssh_keys_account",
+        "storage_account",
         # ---- Add-rule / add-path inline forms ----
         "add_rule_title",       # Reason: Static title inside inline form; no special styling needed
         # ---- AI screens — empty-state, fallback, picker, topup modals ----
@@ -392,7 +403,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "ct_btn_fetch",
         "ct_btn_next",
         "ct_btn_prev",
+        "ct_filter_account",      # Reason: Filter grid cell; styled via #cloudtrail_filters
         "ct_filter_event_name",   # Reason: Filter row; inherits layout
+        "ct_filter_region",
         "ct_filter_resource_type",
         "ct_filter_time_range",
         "ct_filter_username",
@@ -545,12 +558,14 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Invite form ----
         "invite_form",          # Reason: Form container; inherits layout
         # ---- IP ban form fields ----
+        "ipban_account_row",    # Reason: .setting_row Horizontal; shown only with several AWS accounts
         "ipban_input_ip_set_id",
         "ipban_input_ip_set_name",
         "ipban_input_nacl_id",
         "ipban_input_name",
         "ipban_input_rule_number_start",
         "ipban_input_sg_id",
+        "ipban_select_account",
         "ipban_select_ip_set",
         "ipban_select_method",
         "ipban_select_nacl",

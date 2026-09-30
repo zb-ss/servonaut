@@ -16,19 +16,27 @@ from e2e.harness import fleet
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
+# A refresh that discovers every region makes one call per region.
+ALL_REGIONS_TIMEOUT = 60
+
 
 def _names(t) -> list[str]:
     return sorted(row[1] for row in t.table_rows("InstanceTable"))
 
 
 async def test_stale_cache_refreshes_from_aws(tui, seed, moto):
-    seed.config()
+    # The one journey that discovers every region the endpoint offers, as a
+    # config without a region allowlist does.
+    seed.config(aws=seed.aws_config(regions=[]))
     seed.cache(fleet.cache_rows(fleet.APP_1), fresh=False)
     moto.seed_fleet([fleet.APP_1, fleet.DB_1, fleet.API_1])
 
     async with tui() as t:
         await t.wait_for_toast("Refreshing instances in background")
-        await t.wait_for_toast(r"Refreshed: 3 instances \(2 more\)", timeout=30)
+        # One call per region, one after the other: slow on a busy machine.
+        await t.wait_for_toast(
+            r"Refreshed: 3 instances \(2 more\)", timeout=ALL_REGIONS_TIMEOUT
+        )
         assert _names(t) == ["api-1", "app-1", "db-1"]
 
         cache = json.loads(seed.cache_path.read_text())
@@ -51,7 +59,9 @@ async def test_stale_cache_refreshes_from_aws(tui, seed, moto):
         moto.seed_fleet([fleet.WORKER_1])
         await t.focus_instance_table()
         await t.press("r")
-        await t.wait_until(lambda: "worker-1" in _names(t), timeout=30, desc="worker-1 row")
+        await t.wait_until(
+            lambda: "worker-1" in _names(t), timeout=ALL_REGIONS_TIMEOUT, desc="worker-1 row"
+        )
         assert _names(t) == ["api-1", "app-1", "db-1", "worker-1"]
 
 

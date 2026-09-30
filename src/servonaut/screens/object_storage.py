@@ -20,6 +20,11 @@ Inline forms (hidden by default, shown one at a time):
     - Copy/Move form
     - Presigned-URL display (read-only)
 
+Accounts: with several accounts of the provider an account picker sits
+under the title and every call goes to the chosen account's storage. An
+extra Hetzner project or OVH account needs S3 keys of its own; without
+them the screen says so instead of using another account's storage.
+
 Design follows ``ovh_storage.py``: ``round`` borders, inline show/hide
 form mechanism, ``run_worker`` wrapper around every ``push_screen_wait``
 call so Textual 8.x's ``NoActiveWorker`` constraint is respected.
@@ -41,7 +46,16 @@ from textual.widgets import (
 )
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_service,
+    object_storage,
+    object_storage_accounts,
+    show_account_labels,
+    shown_label,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -74,8 +88,8 @@ class ObjectStorageScreen(Screen):
 
     Args:
         provider: One of ``"aws"``, ``"hetzner"``, ``"ovh"``.  Drives which
-            service instance is resolved via
-            ``getattr(app, f"{provider}_object_storage_service", None)``.
+            provider's object storage the screen manages; the account
+            picker chooses among that provider's accounts.
     """
 
     BINDINGS = [
@@ -85,6 +99,9 @@ class ObjectStorageScreen(Screen):
         Binding("o",      "open",   "Open",  show=True),
         Binding("d",      "delete", "Delete", show=True),
     ]
+
+    # Label of the provider account whose storage is shown ("" = default).
+    _account: str = ""
 
     @property
     def app(self) -> "ServonautApp":  # type: ignore[override]
@@ -123,6 +140,10 @@ class ObjectStorageScreen(Screen):
                 Static(
                     f"[bold cyan]{label}[/bold cyan]",
                     id="s3_title",
+                ),
+                # Shown only when the provider has several accounts.
+                AccountPicker(
+                    object_storage_accounts(self.app, self._provider), id="s3_account",
                 ),
                 Static("", id="s3_breadcrumb"),
                 DataTable(id="s3_table", cursor_type="row", zebra_stripes=True),
@@ -238,6 +259,9 @@ class ObjectStorageScreen(Screen):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
+        picker = self.query_one("#s3_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
         self._setup_table()
         self._hide_all_forms()
         self._refresh()
@@ -263,8 +287,32 @@ class ObjectStorageScreen(Screen):
     # ------------------------------------------------------------------
 
     def _get_storage_service(self):
-        """Return the provider's ObjectStorageService, or None if unconfigured."""
-        return getattr(self.app, f"{self._provider}_object_storage_service", None)
+        """The chosen account's ObjectStorageService, or None if unconfigured.
+
+        An account removed in Settings since the screen opened counts as
+        not configured.
+        """
+        try:
+            return object_storage(self.app, self._provider, self._account)
+        except UnknownAccountError:
+            return None
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Show the newly chosen account's buckets, from the top."""
+        self._account = event.account
+        self._hide_all_forms()
+        self._view = _VIEW_BUCKETS
+        self._current_bucket = ""
+        self._prefix = ""
+        self._buckets = []
+        self._folders = []
+        self._objects = []
+        # Enabled regions differ between AWS accounts.
+        self._regions = []
+        self._regions_loaded = False
+        self._setup_table()
+        self._update_breadcrumb()
+        self._refresh()
 
     # ------------------------------------------------------------------
     # Redaction helper
@@ -319,10 +367,18 @@ class ObjectStorageScreen(Screen):
         svc = self._get_storage_service()
         if svc is None:
             label = _PROVIDER_LABELS.get(self._provider, self._provider)
-            self._set_status(
-                f"[yellow]{markup_escape(label)} is not configured. "
-                "Add S3 credentials in Settings.[/yellow]"
-            )
+            if len(object_storage_accounts(self.app, self._provider)) > 1:
+                account = shown_label(self.app, self._account)
+                self._set_status(
+                    f"[yellow]{markup_escape(label)} is not configured for "
+                    f"account {markup_escape(account)}. Add S3 "
+                    "credentials for this account in Settings.[/yellow]"
+                )
+            else:
+                self._set_status(
+                    f"[yellow]{markup_escape(label)} is not configured. "
+                    "Add S3 credentials in Settings.[/yellow]"
+                )
             return
         if self._view == _VIEW_BUCKETS:
             self.run_worker(
@@ -661,7 +717,10 @@ class ObjectStorageScreen(Screen):
     async def _load_regions(self) -> None:
         """Populate the region picker from the live EC2 region list."""
         select = self.query_one("#s3_select_bucket_region", Select)
-        svc = getattr(self.app, "aws_service", None)
+        try:
+            svc = account_service(self.app, "aws", self._account)
+        except UnknownAccountError:
+            svc = None
         if svc is None:
             return
         # The configured default doubles as the bootstrap region for the

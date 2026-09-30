@@ -93,6 +93,15 @@ servonaut hetzner server-types              [--json]
 servonaut hetzner test-connection           [--json]
 ```
 
+Every subcommand also takes `--account LABEL` to act in one of several
+configured Hetzner projects (the primary project when it is left out).
+With more than one project, `list` shows every project's servers, adds an
+Account column and names each server `<project>/<name>`; `--json` rows
+carry an `account` field. `destroy` acts in the project whose servers
+include the one you name, accepts `<project>/<name>`, and never guesses:
+it refuses a name that several projects use (exit code 4) and one that no
+project has (exit code 1) unless `--account` names the project.
+
 ### Examples
 
 ```bash
@@ -112,6 +121,10 @@ servonaut hetzner list --state running
 # Destroy without typed confirmation (CI / scripts).
 servonaut hetzner destroy my-demo --yes
 
+# With several projects: list one, or destroy in a named one.
+servonaut hetzner list --account staging
+servonaut hetzner destroy staging/my-demo
+
 # Register a new SSH key from a file.
 servonaut hetzner ssh-keys add laptop --public-key-file ~/.ssh/id_ed25519.pub
 
@@ -127,7 +140,15 @@ servonaut hetzner server-types
 | 1    | generic error (API failure, network)                              |
 | 2    | not configured (no token resolvable)                              |
 | 3    | confirmation declined (`create`'s y/N, `destroy`'s typed name), or `create` without `--yes` when input is not a terminal |
-| 4    | input validation error                                            |
+| 4    | input validation error, unknown `--account`, or a server name several projects use |
+
+## Several projects
+
+Each Hetzner Cloud project has its own API token. Add further projects as
+extra accounts (Settings → Hetzner, or `hetzner.accounts` in the config); their
+servers join the fleet as `label/name`, and `servonaut hetzner … --account
+<label>` runs a command in one project. See
+[Multiple accounts per provider](multiple-accounts.md).
 
 ## TUI integration
 

@@ -30,11 +30,17 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 
+from servonaut.services.accounts.aws_account import aws_client
+
 logger = logging.getLogger(__name__)
 
 
 class IngressPathService:
     """Resolve the ALB/WAF ingress topology fronting an EC2 instance."""
+
+    def __init__(self, account: Optional[Any] = None) -> None:
+        """Args: account: the AWS account the instance lives in (None = default)."""
+        self._account = account
 
     async def describe(
         self, instance_id: str, private_ip: str = "", region: str = "",
@@ -62,7 +68,7 @@ class IngressPathService:
         kwargs = {"region_name": region} if region else {}
 
         try:
-            elbv2 = boto3.client("elbv2", **kwargs)
+            elbv2 = aws_client(self._account, boto3, "elbv2", **kwargs)
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"elbv2 client: {exc}")
             return result
@@ -99,7 +105,7 @@ class IngressPathService:
         # --- WebACL per (application) LB ------------------------------
         wafv2 = None
         try:
-            wafv2 = boto3.client("wafv2", **kwargs)
+            wafv2 = aws_client(self._account, boto3, "wafv2", **kwargs)
         except Exception as exc:  # noqa: BLE001
             result["errors"].append(f"wafv2 client: {exc}")
         if wafv2 is not None:

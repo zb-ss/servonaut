@@ -11,9 +11,16 @@
     margin: 0 1 0 1;
 }
 
+/* The filters sit on one grid row when the terminal is wide enough (the
+   screen's -wide class) and wrap onto two rows otherwise (-narrow, below).
+   The time range column is as wide as its longest option. */
 #cloudtrail_filters {
+    layout: grid;
+    grid-size: 7 1;
+    grid-columns: 3fr 19 2fr 2fr 2fr 10 10;
+    grid-rows: auto;
+    grid-gutter: 0 1;
     height: auto;
-    max-height: 7;
     padding: 0 1;
     background: $boost;
     border: round $primary;
@@ -21,28 +28,74 @@
 }
 
 #cloudtrail_filters Vertical {
-    width: 1fr;
+    width: 100%;
     height: auto;
-    margin: 0 1;
 }
 
-#ct_filter_region {
-    width: 2fr;
+/* A label or a chosen value too long for its column ends in an ellipsis
+   instead of wrapping: a wrapped value pushes the control's bottom border
+   out of its row. */
+#cloudtrail_filters Label {
+    width: 100%;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #cloudtrail_filters Select {
+    width: 100%;
     height: 3;
+}
+
+#cloudtrail_filters SelectCurrent {
+    padding: 0 1;
+}
+
+#cloudtrail_filters SelectCurrent Static#label {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 /* Event names run long ("UpdateInstanceInformation"); let the open list
    size to its content instead of wrapping inside a narrow column. */
 #cloudtrail_filters Select SelectOverlay {
     width: auto;
+    min-width: 100%;
     max-width: 46;
 }
 
 #cloudtrail_filters Button {
-    margin: 1 0 0 1;
+    width: 100%;
+    min-width: 0;
+    margin: 1 0 0 0;
+}
+
+/* Narrow: three filters per row, each two columns wide, and the buttons
+   one column each after the last two filters. */
+CloudTrailBrowserScreen.-narrow #cloudtrail_filters {
+    grid-size: 6 2;
+    grid-columns: 1fr;
+}
+
+CloudTrailBrowserScreen.-narrow #cloudtrail_filters Vertical {
+    column-span: 2;
+}
+
+/* With several AWS accounts the account picker leads the filters in a
+   column of its own (the grid gets the -with-account class); wide, the
+   region column is as wide as its prompt so the others keep theirs;
+   narrow, the eight controls fill two rows of four. */
+#cloudtrail_filters.-with-account {
+    grid-size: 8 1;
+    grid-columns: 1fr 17 19 1fr 1fr 1fr 10 10;
+}
+
+CloudTrailBrowserScreen.-narrow #cloudtrail_filters.-with-account {
+    grid-size: 4 2;
+    grid-columns: 1fr 1fr 19 1fr;
+}
+
+CloudTrailBrowserScreen.-narrow #cloudtrail_filters.-with-account Vertical {
+    column-span: 1;
 }
 
 #cloudtrail_table {

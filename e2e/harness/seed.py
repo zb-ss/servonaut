@@ -4,23 +4,47 @@ Configs are never hand-written JSON: :meth:`HomeSeeder.config` builds an
 ``AppConfig`` and saves it with ``ConfigManager.save``, so a fixture can only
 contain what the application itself would write. The instance cache uses the
 same format ``CacheService`` writes.
+
+Extra provider accounts are config entries too (:meth:`HomeSeeder.aws_account`,
+:meth:`~HomeSeeder.hetzner_account`, :meth:`~HomeSeeder.ovh_account`), with
+the placeholder credentials the provider fakes answer for the same label.
+AWS accounts are named profiles in the sandbox's shared AWS files
+(:meth:`HomeSeeder.aws_profile`).
 """
 
 from __future__ import annotations
 
+import configparser
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from servonaut.config.accounts import AWS, AccountRef, account_cache_path
 from servonaut.config.manager import ConfigManager
 from servonaut.config.schema import CONFIG_VERSION, AppConfig
 
 from e2e.harness import fleet
+from e2e.harness.fake_providers import hetzner as fake_hetzner
+from e2e.harness.fake_providers import ovh as fake_ovh
 from e2e.harness.shims import TERMINAL
 
 # The v5 → v6 migration raises this one value (and only this value).
 _V5_CLOUDTRAIL_MAX_EVENTS = 100
+
+
+def _with_overrides(config: Any, overrides: dict[str, Any]) -> Any:
+    """*config* with each override set; an unknown field is an error."""
+    for name, value in overrides.items():
+        if not hasattr(config, name):
+            raise AttributeError(f"{type(config).__name__} has no field {name!r}")
+        setattr(config, name, value)
+    return config
+
+
+def aws_access_key(profile: str) -> str:
+    """The placeholder access key id a static profile written by the seeder holds."""
+    return f"e2e-{profile}-access-key"
 
 
 class HomeSeeder:
@@ -55,11 +79,14 @@ class HomeSeeder:
         """Return an ``AppConfig`` with the suite's safe defaults applied.
 
         The terminal is always pinned to the fake terminal, so no code path
-        can fall back to detecting a real terminal emulator on the host.
+        can fall back to detecting a real terminal emulator on the host. The
+        AWS fleet is listed from the fleet's regions only (see
+        :meth:`aws_config`).
         """
         config = AppConfig()
         config.terminal_emulator = TERMINAL
         config.memory.redaction_enabled = True
+        config.aws = self.aws_config()
         if self.api_url:
             from servonaut.services.relay_manager import derive_relay_urls
 
@@ -81,38 +108,90 @@ class HomeSeeder:
 
     @staticmethod
     def hetzner_config(**overrides: Any) -> Any:
-        """An enabled ``HetznerConfig`` with a placeholder token.
+        """An enabled ``HetznerConfig`` with the primary project's placeholder token.
 
         Pass it as ``seed.config(hetzner=...)``; the ``providers`` fixture
-        points the client at the local stand-in.
+        points the client at the local stand-in. Extra projects go in
+        ``accounts=[HomeSeeder.hetzner_account(...)]``.
         """
         from servonaut.config.schema import HetznerConfig
 
-        config = HetznerConfig(enabled=True, api_token="hz-fake-token")
-        for name, value in overrides.items():
-            if not hasattr(config, name):
-                raise AttributeError(f"HetznerConfig has no field {name!r}")
-            setattr(config, name, value)
-        return config
+        config = HetznerConfig(enabled=True, api_token=fake_hetzner.PRIMARY_TOKEN)
+        return _with_overrides(config, overrides)
 
     @staticmethod
-    def ovh_config(**overrides: Any) -> Any:
-        """An enabled ``OVHConfig`` (classic keys) covering the fleet's cloud project."""
+    def hetzner_account(label: str, **overrides: Any) -> Any:
+        """A ``HetznerAccount`` with the token the fake's project *label* answers.
+
+        The project itself comes from ``providers.add_hetzner_project(label)``
+        (or ``fleet.seed_second_accounts``).
+        """
+        from servonaut.config.schema import HetznerAccount
+
+        account = HetznerAccount(label=label, api_token=fake_hetzner.token_for(label))
+        return _with_overrides(account, overrides)
+
+    @staticmethod
+    def ovh_config(*, oauth2: bool = False, **overrides: Any) -> Any:
+        """An enabled ``OVHConfig`` covering the fleet's cloud project.
+
+        Classic keys by default; *oauth2* uses the primary account's OAuth2
+        client instead. Extra accounts go in
+        ``accounts=[HomeSeeder.ovh_account(...)]``.
+        """
         from servonaut.config.schema import OVHConfig
 
         config = OVHConfig(
             enabled=True,
-            endpoint="ovh-eu",
-            application_key="ak-fake",
-            application_secret="as-fake",
-            consumer_key="ck-fake",
+            endpoint=fake_ovh.DEFAULT_ENDPOINT,
             cloud_project_ids=[fleet.OVH_PROJECT_ID],
+            **_ovh_credentials(fake_ovh.PRIMARY_CREDENTIALS, oauth2),
         )
-        for name, value in overrides.items():
-            if not hasattr(config, name):
-                raise AttributeError(f"OVHConfig has no field {name!r}")
-            setattr(config, name, value)
-        return config
+        return _with_overrides(config, overrides)
+
+    @staticmethod
+    def ovh_account(label: str, *, oauth2: bool = False, **overrides: Any) -> Any:
+        """An ``OVHAccount`` with the credentials the fake's account *label* answers.
+
+        Classic keys by default, its OAuth2 client with *oauth2*. It covers
+        the second inventory's cloud project; the account itself comes from
+        ``providers.add_ovh_account(label, endpoint)`` (or
+        ``fleet.seed_second_accounts``), so pass the same ``endpoint`` here.
+        """
+        from servonaut.config.schema import OVHAccount
+
+        account = OVHAccount(
+            label=label,
+            endpoint=fake_ovh.DEFAULT_ENDPOINT,
+            cloud_project_ids=[fleet.OVH_SECOND_PROJECT_ID],
+            **_ovh_credentials(fake_ovh.credentials_for(label), oauth2),
+        )
+        return _with_overrides(account, overrides)
+
+    @staticmethod
+    def aws_config(**overrides: Any) -> Any:
+        """An ``AWSConfig`` listing instances from the fleet's regions only.
+
+        The primary account keeps the ambient credentials. Pass
+        ``regions=[]`` to have every region the endpoint offers discovered,
+        as the schema's default does. Extra accounts go in
+        ``accounts=[HomeSeeder.aws_account(...)]``.
+        """
+        from servonaut.config.schema import AWSConfig
+
+        return _with_overrides(AWSConfig(regions=list(fleet.AWS_REGIONS)), overrides)
+
+    @staticmethod
+    def aws_account(label: str, profile: Optional[str] = None, **overrides: Any) -> Any:
+        """An ``AWSAccount`` reached through the named profile *profile* (default: *label*).
+
+        Write the profile with :meth:`aws_profile`. Like :meth:`aws_config`
+        it lists the fleet's regions only; ``regions=[]`` discovers them all.
+        """
+        from servonaut.config.schema import AWSAccount
+
+        account = AWSAccount(label=label, profile=profile or label, regions=list(fleet.AWS_REGIONS))
+        return _with_overrides(account, overrides)
 
     def previous_version_config(self, **overrides: Any) -> dict:
         """Save the config as the release before the current schema wrote it.
@@ -124,6 +203,8 @@ class HomeSeeder:
             raise NotImplementedError(
                 f"add the rewind step for schema v{CONFIG_VERSION - 1}"
             )
+        # The previous release had no AWS region allowlist.
+        overrides.setdefault("aws", self.aws_config(regions=[]))
         self.config(**overrides)
         data = self.read_config()
         data["version"] = CONFIG_VERSION - 1
@@ -142,6 +223,57 @@ class HomeSeeder:
         return json.loads(self.config_path.read_text(encoding="utf-8"))
 
     # ------------------------------------------------------------------
+    # AWS shared config and credentials files
+    # ------------------------------------------------------------------
+
+    @property
+    def aws_config_path(self) -> Path:
+        """The shared config file (``AWS_CONFIG_FILE`` points here)."""
+        return self.home / ".aws" / "config"
+
+    @property
+    def aws_credentials_path(self) -> Path:
+        """The shared credentials file (``AWS_SHARED_CREDENTIALS_FILE`` points here)."""
+        return self.home / ".aws" / "credentials"
+
+    def aws_profile(
+        self,
+        name: str,
+        *,
+        role_arn: Optional[str] = None,
+        source_profile: Optional[str] = None,
+        region: str = "us-east-1",
+    ) -> None:
+        """Add the named profile *name* to the sandbox's shared AWS files.
+
+        Without *role_arn* the profile holds static placeholder keys of its
+        own (:func:`aws_access_key`), which moto runs in its default account.
+        With *role_arn* it assumes that role with the keys of
+        *source_profile*, a static profile added before, so its requests run
+        in the role's account (see ``MotoAws.seed_account``). A profile named
+        explicitly wins over the suite's environment credentials, as it does
+        for a user.
+        """
+        config = _read_ini(self.aws_config_path)
+        credentials = _read_ini(self.aws_credentials_path)
+        settings = {"region": region}
+        if role_arn:
+            if source_profile is None or not credentials.has_section(source_profile):
+                raise ValueError(
+                    f"profile {name!r} needs a static source profile added first, "
+                    f"not {source_profile!r}"
+                )
+            settings.update(role_arn=role_arn, source_profile=source_profile)
+        else:
+            credentials[name] = {
+                "aws_access_key_id": aws_access_key(name),
+                "aws_secret_access_key": f"e2e-{name}-secret-key",
+            }
+            _write_ini(self.aws_credentials_path, credentials)
+        config[name if name == "default" else f"profile {name}"] = settings
+        _write_ini(self.aws_config_path, config)
+
+    # ------------------------------------------------------------------
     # Instance cache
     # ------------------------------------------------------------------
 
@@ -151,18 +283,26 @@ class HomeSeeder:
         *,
         fresh: bool = True,
         ttl_seconds: int = AppConfig().cache_ttl_seconds,
+        account: Optional[str] = None,
     ) -> Path:
-        """Write the AWS instance cache; *fresh* False makes it older than the TTL."""
+        """Write the AWS instance cache; *fresh* False makes it older than the TTL.
+
+        *account* names an extra AWS account, whose cache is a file of its own.
+        """
         rows = list(rows) if rows is not None else fleet.cache_rows()
         stamp = datetime.now()
         if not fresh:
             stamp -= timedelta(seconds=ttl_seconds + 600)
+        path = self.cache_path
+        if account is not None:
+            key = AccountRef(AWS, account, primary=False).key
+            path = Path(account_cache_path(str(self.cache_path), key))
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(
+        path.write_text(
             json.dumps({"timestamp": stamp.isoformat(), "instances": rows}, indent=2),
             encoding="utf-8",
         )
-        return self.cache_path
+        return path
 
     # ------------------------------------------------------------------
     # Files
@@ -176,3 +316,27 @@ class HomeSeeder:
         path.write_text("placeholder key for the e2e suite\n", encoding="utf-8")
         path.chmod(0o600)
         return path
+
+
+def _ovh_credentials(credentials: fake_ovh.OvhCredentials, oauth2: bool) -> dict[str, str]:
+    """The config fields for one of an OVH account's credential sets."""
+    if oauth2:
+        return {"client_id": credentials.client_id, "client_secret": credentials.client_secret}
+    return {
+        "application_key": credentials.application_key,
+        "application_secret": credentials.application_secret,
+        "consumer_key": credentials.consumer_key,
+    }
+
+
+def _read_ini(path: Path) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(path, encoding="utf-8")
+    return parser
+
+
+def _write_ini(path: Path, parser: configparser.ConfigParser) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
+    path.chmod(0o600)

@@ -49,6 +49,10 @@ class _FleetHost(App):
         self.ovh_service = None
         self.hetzner_service = None
 
+    def provider_inventory(self, provider: str):
+        # No provider accounts: the two seeded rows are the whole fleet.
+        return None
+
     def on_mount(self) -> None:
         self.push_screen(InstanceListScreen())
 

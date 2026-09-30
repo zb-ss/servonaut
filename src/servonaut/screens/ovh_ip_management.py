@@ -1,4 +1,8 @@
-"""OVH IP management screen — list IPs, move failover IPs, manage reverse DNS."""
+"""OVH IP management screen — list IPs, move failover IPs, manage reverse DNS.
+
+IP blocks belong to one OVH account: with several accounts configured, a
+picker chooses the account listed and changed.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,14 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    ovh_services,
+    registry_for,
+    show_account_labels,
+    with_account,
+)
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -27,6 +39,11 @@ class OVHIPManagementScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
     ]
+
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
+    # Counts list loads; see _load_ips.
+    _loads: int = 0
 
     @property
     def app(self) -> "ServonautApp":
@@ -56,6 +73,10 @@ class OVHIPManagementScreen(Screen):
                 yield Static(
                     "[bold cyan]OVH IP Management[/bold cyan]",
                     id="ip_mgmt_title",
+                )
+                # Hidden unless several OVH accounts are configured.
+                yield AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh", id="ip_mgmt_account",
                 )
                 yield DataTable(id="ip_table")
                 with Horizontal(id="ip_actions"):
@@ -115,7 +136,36 @@ class OVHIPManagementScreen(Screen):
         table = self.query_one("#ip_table", DataTable)
         table.add_columns("IP", "Type", "Routed To", "Reverse DNS")
         table.cursor_type = "row"
-        self.run_worker(self._load_ips(), exclusive=True)
+        picker = self.query_one("#ip_mgmt_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
+        self._start_load()
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: list its IPs instead."""
+        self._account = event.account
+        self._ips = []
+        self._selected_ip = None
+        self._hide_move_form()
+        self._hide_rdns_form()
+        self.query_one("#ip_table", DataTable).clear()
+        self._start_load()
+
+    def _start_load(self) -> None:
+        """Load the IPs in a group of their own.
+
+        A reload cancels an older load, never an IP move or a reverse DNS
+        change that is still running.
+        """
+        self.run_worker(self._load_ips(), group="ovh_ip_load", exclusive=True)
+
+    def _ip_service(self):
+        """The chosen account's IP service (None when unavailable)."""
+        try:
+            return ovh_services(self.app, self._account).ip
+        except UnknownAccountError as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return None
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -184,22 +234,30 @@ class OVHIPManagementScreen(Screen):
     # ------------------------------------------------------------------
 
     async def _load_ips(self) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
 
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         try:
-            self._ips = await svc.list_ips()
+            ips = await svc.list_ips()
         except Exception as exc:
             logger.error("Error loading OVH IPs: %s", exc)
-            self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
+            if load == self._loads:
+                self.notify(f"Failed to load IPs: {exc}", severity="error", markup=False)
             return
-
+        if load != self._loads:
+            return
+        self._ips = ips
         self._populate_table()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the fetched IP blocks for the new demo-mode state."""
+        show_account_labels(self.query_one("#ip_mgmt_account", AccountPicker))
         if self._ips:
             self._populate_table()
 
@@ -276,7 +334,7 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_move",
                 target=ip_addr,
-                details={"target_service": target},
+                details=with_account(self.app, "ovh", self._account, {"target_service": target}),
                 confirmed=bool(confirmed),
             )
 
@@ -289,7 +347,7 @@ class OVHIPManagementScreen(Screen):
         )
 
     async def _do_move_ip(self, ip: str, target: str) -> None:
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -333,7 +391,7 @@ class OVHIPManagementScreen(Screen):
             self.notify("Please enter a reverse DNS hostname.", severity="warning")
             return
 
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return
@@ -343,7 +401,9 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_set_reverse_dns",
                 target=ip,
-                details={"ip_block": ip_block, "reverse": reverse},
+                details=with_account(
+                    self.app, "ovh", self._account, {"ip_block": ip_block, "reverse": reverse},
+                ),
                 confirmed=True,
             )
 
@@ -391,14 +451,14 @@ class OVHIPManagementScreen(Screen):
             ovh_audit.log_action(
                 action="ip_delete_reverse_dns",
                 target=ip,
-                details={"ip_block": ip_block},
+                details=with_account(self.app, "ovh", self._account, {"ip_block": ip_block}),
                 confirmed=bool(confirmed),
             )
 
         if not confirmed:
             return
 
-        svc = getattr(self.app, "ovh_ip_service", None)
+        svc = self._ip_service()
         if svc is None:
             self.notify("OVH IP service is not available.", severity="error")
             return

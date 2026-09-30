@@ -17,14 +17,24 @@ HETZNER_ROW = {"id": "7", "name": "cache-1", "is_hetzner": True}
 
 
 def _app(*, aws_fresh: bool, hetzner_fresh: bool = False, ovh_fresh: bool = True):
+    """A stub app whose provider inventories are the ``*_service`` mocks.
+
+    The screen reads each provider through ``app.provider_inventory(name)``
+    (every account of the provider as one inventory). The lookup reads the
+    attribute at call time, so a test sets ``app.ovh_service = None`` for a
+    provider that is not configured.
+    """
     app = MagicMock()
     app.demo_mode = False
     app.redaction_service = None
     app.instances = [dict(AWS_ROW)]
-    app.cache_service.is_fresh.return_value = aws_fresh
+    app.provider_inventory.side_effect = lambda provider: getattr(app, f"{provider}_service")
+    app.aws_service.is_cache_fresh.return_value = aws_fresh
     app.ovh_service.is_cache_fresh.return_value = ovh_fresh
     app.hetzner_service.is_cache_fresh.return_value = hetzner_fresh
     app.aws_service.last_fetch_error = None
+    app.aws_service.last_fetch_partial = False
+    app.hetzner_service.last_fetch_partial = False
     return app
 
 

@@ -438,14 +438,20 @@ def providers(
 
     Applies to this process (TUI journeys) and to every child the journey
     starts. Seed accounts with ``fleet.seed_provider_fleet(providers)`` or the
-    ``providers.hetzner`` / ``providers.ovh`` state objects.
+    ``providers.hetzner`` / ``providers.ovh`` state objects; add further
+    accounts with ``providers.add_hetzner_project`` / ``add_ovh_account``
+    (``fleet.seed_second_accounts`` adds and fills one of each).
     """
     from e2e.harness import provider_redirects as redirects
 
     server = _fake_providers_server
     server.reset()
-    wanted = {"ovh": server.ovh_url}
-    redirects.redirect_ovh(server.ovh_url, setitem=monkeypatch.setitem)
+    endpoints = server.ovh_endpoint_urls()
+    wanted: dict[str, Any] = {"ovh": server.ovh_url, "ovh_endpoints": endpoints}
+    redirects.redirect_ovh(server.ovh_url, setitem=monkeypatch.setitem, endpoints=endpoints)
+    # OVH service accounts fetch OAuth2 tokens from the fake over plain HTTP.
+    monkeypatch.setenv(redirects.OAUTH_INSECURE_TRANSPORT_ENV, "1")
+    journey.env_overrides[redirects.OAUTH_INSECURE_TRANSPORT_ENV] = "1"
     # The product's own switch, where it has one; the library default otherwise.
     monkeypatch.setenv(redirects.HETZNER_URL_ENV, server.hetzner_url)
     journey.env_overrides[redirects.HETZNER_URL_ENV] = server.hetzner_url

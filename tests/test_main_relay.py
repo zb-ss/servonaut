@@ -247,7 +247,8 @@ def foreground_relay(relay_runtime, monkeypatch, tmp_path) -> Path:
     config_manager.get.return_value = config
     monkeypatch.setattr("servonaut.config.manager.ConfigManager", lambda: config_manager)
     monkeypatch.setattr(
-        "servonaut.mcp.server.build_headless_tools", lambda _config_manager: MagicMock(),
+        "servonaut.mcp.server.build_headless_tools",
+        lambda _config_manager, **_accounts: MagicMock(),
     )
     relay_log = tmp_path / "relay.log"
     monkeypatch.setattr("servonaut.utils.relay_log._DEFAULT_LOG_PATH", relay_log)

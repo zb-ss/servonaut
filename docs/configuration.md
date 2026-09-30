@@ -30,6 +30,7 @@ All configuration is stored in `~/.servonaut/config.json`. The file is created a
 | `instance_keys` | object | `{}` | Instance-specific key mappings `{instance_id: key_path}` |
 | `default_username` | string | `"ec2-user"` | Default SSH username |
 | `cache_ttl_seconds` | int | `3600` | Instance cache TTL in seconds (1 hour) |
+| `account_retry_seconds` | int | `30` | With several accounts of a provider: how long an account that failed to answer a server lookup is left alone before lookups try it again |
 | `terminal_emulator` | string | `"auto"` | Terminal preference (see [Supported Terminals](#supported-terminals)) |
 | `theme` | string | `"dark"` | UI theme: `dark` or `light` |
 | `keyword_store_path` | string | `"~/.servonaut/keywords.json"` | Path to keyword scan results file |
@@ -50,6 +51,26 @@ Match conditions are used by both scan rules and connection rules to target spec
 | `id` | string | Exact instance ID match |
 | `type_contains` | string | Substring match on instance type (e.g., `t3`) |
 | `has_public_ip` | string | `"true"` or `"false"` — whether instance has a public IP |
+| `provider` | string | Exact provider label (e.g., `AWS`, `OVH`, `hetzner`, a custom server's provider) |
+| `account` | string | Provider account label, any letter case (see [Multiple accounts](multiple-accounts.md)) |
+| `group` | string | Exact group match (custom servers) |
+| `tag:<key>` | string | Exact match on a tag's value |
+
+## Provider Accounts
+
+Each provider block (`aws`, `hetzner`, `ovh`) is that provider's first account.
+An `accounts` list inside the block adds more — several AWS profiles, Hetzner
+projects or OVH accounts — whose servers join the fleet as `label/name`:
+
+```json
+{
+  "aws": {"accounts": [{"label": "prod", "profile": "prod-admin"}]},
+  "hetzner": {"accounts": [{"label": "staging", "api_token": "$HCLOUD_TOKEN_STAGING"}]}
+}
+```
+
+Every field, the label rules and how servers are referenced are described in
+[Multiple accounts per provider](multiple-accounts.md).
 
 ## Scan Rules
 

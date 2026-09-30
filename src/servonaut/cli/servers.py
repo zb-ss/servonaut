@@ -22,13 +22,11 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from servonaut.services.aws_service import AWSService
 from servonaut.services.bw_resolver import (
     BwResolver,
     BwCliMissingError,
     BwSessionMissingError,
 )
-from servonaut.services.cache_service import CacheService
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_ACCEPT_NEW,
     HostKeyPolicy,
@@ -37,6 +35,7 @@ from servonaut.services.ssh_host_keys import (
     host_key_alias_options,
     identity_file_args,
 )
+from servonaut.utils.instance_resolver import AmbiguousInstanceError, resolve_unique
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
@@ -114,32 +113,25 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any]:
 # ---------------------------------------------------------------------------
 
 def _load_all_instances(
-    aws_service: Any,
+    config: Any,
     custom_server_service: Any,
 ) -> List[Dict[str, Any]]:
-    """Return combined list of cached AWS + custom server instances."""
-    # No try/except: the cache layer already absorbs a missing or corrupt
-    # file, so anything raised here is a bug that must surface loudly.
-    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
-    try:
-        instances.extend(custom_server_service.list_as_instances())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-    return instances
+    """Return every account's cached servers (AWS, OVH, Hetzner) + custom ones."""
+    from servonaut.services.accounts.headless import CachedFleet
+
+    return CachedFleet.from_config(config, custom_server_service).instances()
 
 
 def _find_instance(
     id_or_name: str,
     instances: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Case-insensitive match on ``id`` or ``name`` across the instance list."""
-    needle = id_or_name.lower()
-    for inst in instances:
-        if str(inst.get("id", "")).lower() == needle:
-            return inst
-        if str(inst.get("name", "")).lower() == needle:
-            return inst
-    return None
+    """The instance *id_or_name* names (id, name or ``<account>/<name>``).
+
+    Raises:
+        AmbiguousInstanceError: The reference names several servers.
+    """
+    return resolve_unique(id_or_name, instances)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +335,11 @@ def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Opt
 async def _cmd_verify(args: Any) -> int:
     """Async body of ``servers verify``."""
     from servonaut import __version__
+    from servonaut.services.accounts import UnknownAccountError
+    from servonaut.services.accounts.headless import (
+        check_configured_reference,
+        with_ovh_login,
+    )
     from servonaut.services.bw_ssh_config_service import STATUS_VERIFIED
 
     checked_by_client = f"servonaut-cli/{__version__}"
@@ -364,8 +361,6 @@ async def _cmd_verify(args: Any) -> int:
         return _EXIT_FATAL
 
     config = config_manager.get()
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
     host_key_policy = HostKeyPolicy.from_ssh_config(config.ssh)
 
     instance_arg: str = args.instance
@@ -387,10 +382,16 @@ async def _cmd_verify(args: Any) -> int:
     team_slug: Optional[str] = None
     team_server_id: Optional[str] = None
 
+    all_instances = _load_all_instances(config, custom_server_service)
+    try:
+        check_configured_reference(config, instance_arg)
+        personal_instance = _find_instance(instance_arg, all_instances)
+    except (AmbiguousInstanceError, UnknownAccountError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_FATAL
+
     if not is_uuid:
         # Must be a personal instance id/name — look it up in cached lists.
-        all_instances = _load_all_instances(aws_service, custom_server_service)
-        personal_instance = _find_instance(instance_arg, all_instances)
         if personal_instance is None:
             print(
                 f"Instance not found: {instance_arg!r}",
@@ -399,10 +400,7 @@ async def _cmd_verify(args: Any) -> int:
             return _EXIT_FATAL
     else:
         # UUID: try personal first (provider unknown — try each allowed provider).
-        # Walk the instance list to find a matching entry; if found use its provider.
-        all_instances = _load_all_instances(aws_service, custom_server_service)
-        personal_instance = _find_instance(instance_arg, all_instances)
-
+        # The instance list was searched above; if found use its provider.
         if personal_instance is None:
             # Not in local cache by uuid — try team lookup.
             try:
@@ -426,6 +424,7 @@ async def _cmd_verify(args: Any) -> int:
     # ------------------------------------------------------------------
 
     if personal_instance is not None:
+        personal_instance = with_ovh_login(personal_instance, config)
         host = _resolve_host(personal_instance, host_override)
         user = _resolve_user(personal_instance, user_override)
         port = _resolve_port(personal_instance, port_override)

@@ -15,13 +15,32 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
+from servonaut.config.accounts import PROVIDER_TITLES, primary_label
 from servonaut.utils.endpoints import EndpointOverrideError
 from servonaut.mcp.db_staging import (
     DEFAULT_MAX_TOKENS as DEFAULT_STAGING_MAX_TOKENS,
     DEFAULT_TTL_SECONDS as DEFAULT_STAGING_TTL_SECONDS,
     DBCredentialStaging,
 )
+from servonaut.services.accounts.headless import (
+    AccountUnavailableError,
+    InstanceDirectory,
+    ProviderTarget,
+    TargetNotFoundError,
+    fetch_provider_rows,
+    qualifier_provider,
+    resolve_provider_target,
+    row_account_key,
+    unknown_account_error,
+    usable_account,
+)
+from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.instance_resolver import (
+    CUSTOM_QUALIFIER,
+    AmbiguousInstanceError,
+    display_name,
+)
 from servonaut.utils.ssh_utils import (
     SSHOutput,
     run_ssh_subprocess,
@@ -94,6 +113,8 @@ _AWS_NEVER_DESTRUCTIVE = frozenset({
 _AWS_CONFIRM_TTL_SECONDS = 300
 _AWS_SERVICE_RE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 _AWS_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
+# aws_call's ``account`` is a 12-digit account id or an account label.
+_AWS_ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
 # Cap a single aws_call result so an over-broad Describe can't flood the model
 # context. Reads auto-paginate up to this many items when no max_items is given.
 _AWS_CALL_MAX_RESULT_CHARS = 200_000
@@ -103,6 +124,16 @@ _AWS_CALL_DEFAULT_MAX_ITEMS = 1000
 # Error code when SERVONAUT_API_URL / SERVONAUT_MCP_URL holds a refused URL.
 # The message names the variable, never the URL; no request is made.
 _INVALID_ENDPOINT = "invalid_endpoint"
+
+# How to fix a provider none of whose accounts can connect, where the
+# registry's reason does not already say it (a Hetzner token error names
+# where the token is read from).
+_CREDENTIAL_HINTS = {
+    'ovh': (
+        "Set the OVHcloud credentials in ~/.servonaut/config.json or in "
+        "Settings → OVHcloud in the TUI."
+    ),
+}
 
 def _run_capturing_stdout(func) -> str:
     """Run *func* and return what it printed.
@@ -178,7 +209,8 @@ class ServonautTools:
                  ovh_object_storage_service=None,
                  secret_provider=None,
                  ip_enrichment_service=None,
-                 bw_ssh_config_service=None) -> None:
+                 bw_ssh_config_service=None,
+                 account_registry=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -220,6 +252,11 @@ class ServonautTools:
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
+        # Every provider account (AccountRegistry). The single-service
+        # attributes above are each provider's default account; None keeps
+        # them the only account (surfaces that never build the registry).
+        self._accounts = account_registry
+        self._directory = self._new_directory()
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
         # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
@@ -260,11 +297,21 @@ class ServonautTools:
 
     @property
     def has_ovh(self) -> bool:
-        return self._ovh_service is not None
+        return self._has_provider('ovh', self._ovh_service)
 
     @property
     def has_hetzner(self) -> bool:
-        return self._hetzner_service is not None
+        return self._has_provider('hetzner', self._hetzner_service)
+
+    def _has_provider(self, provider: str, default: Any) -> bool:
+        """Whether *provider* can serve calls: any usable account.
+
+        The primary account's service (*default*) is None when that account
+        cannot connect, while another account of the provider still works.
+        """
+        if self._accounts is not None:
+            return bool(self._accounts.accounts(provider))
+        return default is not None
 
     @property
     def has_ip_ban(self) -> bool:
@@ -315,39 +362,307 @@ class ServonautTools:
         self._bw_ssh_config_service = service
         self._bw_ref_memo.clear()
 
-    async def list_instances(self, region: str = "", state: str = "") -> str:
-        """List all managed instances (AWS EC2 + custom servers), optionally filtered."""
+    # ------------------------------------------------------------------
+    # Provider accounts
+    # ------------------------------------------------------------------
+
+    @property
+    def account_registry(self):
+        """The provider account registry these tools serve, or None."""
+        return self._accounts
+
+    def bind_accounts(self, registry) -> None:
+        """Serve every account of *registry* and rebind the default services.
+
+        Called after provider settings or a setup wizard change accounts or
+        credentials. The single-service attributes keep meaning each
+        provider's default account (tools called without ``account`` behave
+        as before); rebinding them here keeps any tool from acting with a
+        service built from the old credentials.
+        """
+        self._accounts = registry
+        # A new directory: reads made for the previous accounts are dropped.
+        self._directory = self._new_directory()
+        self._aws_service = registry.default_service('aws') or self._aws_service
+        self._hetzner_service = registry.default_service('hetzner')
+        self._ovh_service = registry.default_service('ovh')
+        ovh = registry.ovh_services() if self._ovh_service is not None else None
+        self._ovh_ip_service = ovh.ip if ovh else None
+        self._ovh_snapshot_service = ovh.snapshot if ovh else None
+        self._ovh_dns_service = ovh.dns if ovh else None
+        self._ovh_billing_service = ovh.billing if ovh else None
+        self._ovh_cloud_service = ovh.cloud if ovh else None
+        if registry.accounts('aws'):
+            aws = registry.aws_services()
+            self._cloudtrail_service = aws.cloudtrail
+            self._cloudwatch_service = aws.cloudwatch
+            self._aws_client_factory = aws.client_factory
+        for provider in sorted(_S3_PROVIDERS):
+            setattr(
+                self, f'_{provider}_object_storage_service',
+                registry.object_storage(provider),
+            )
+        if self._ip_ban_service is not None:
+            from servonaut.services.ip_ban_service import IPBanService
+            self._ip_ban_service = IPBanService(self._config_manager, accounts=registry)
+
+    def _provider_inventories(self) -> Dict[str, Any]:
+        """Each provider's inventory: every account when a registry is bound."""
+        if self._accounts is not None:
+            return {p: self._accounts.fleet(p) for p in ('aws', 'ovh', 'hetzner')}
+        return {
+            'aws': self._aws_service,
+            'ovh': self._ovh_service,
+            'hetzner': self._hetzner_service,
+        }
+
+    def _new_directory(self) -> InstanceDirectory:
+        """The lookups of every tool call; one per bound set of accounts.
+
+        Shared by all calls, so what it learns about an account without
+        cached servers (see ``InstanceDirectory.checked_provider_rows``)
+        outlives a single lookup.
+        """
+        return InstanceDirectory(
+            self._custom_server_service, self._provider_inventories,
+            lambda: self._accounts,
+        )
+
+    def _names_account(self, provider: str, account: str) -> bool:
+        """True when *account* selects an account through the registry.
+
+        False means "use the default account's service". Without a registry
+        the provider's primary account is the only one, so only its label
+        (or none) is accepted.
+
+        Raises:
+            UnknownAccountError: No account of *provider* has that label.
+        """
+        label = (account or "").strip()
+        if not label:
+            return False
+        if self._accounts is None:
+            primary = primary_label(provider, self._config_manager.get())
+            if label.lower() == primary.lower():
+                return False
+            raise UnknownAccountError(
+                f"No {PROVIDER_TITLES.get(provider, provider)} account named "
+                f"{label!r}. Accounts: {primary}"
+            )
+        self._accounts.account(provider, label)
+        return True
+
+    def _account_service(self, provider: str, account: str, default: Any) -> Any:
+        """*provider*'s service for *account*; *default* for the default account."""
+        if self._names_account(provider, account):
+            return self._accounts.service(provider, account)
+        return default
+
+    def _aws_context(self, account: str = ""):
+        """Credentials of an AWS account (None: the ambient chain, as before)."""
+        named = self._names_account('aws', account)
+        if self._accounts is None:
+            return None
+        return self._accounts.aws_context(account if named else None)
+
+    def _aws_part(self, account: str, part: str, default: Any) -> Any:
+        """One AWS service (``cloudwatch``, ``cloudtrail``) of *account*, or *default*."""
+        if self._names_account('aws', account):
+            return getattr(self._accounts.aws_services(account), part)
+        return default
+
+    def _aws_context_for(self, instance: Dict[str, Any]):
+        """Credentials of the AWS account *instance* belongs to."""
+        if self._accounts is None:
+            return None
+        return self._accounts.aws_context(instance.get('account') or None)
+
+    def _ovh_part(self, account: str, part: str) -> Any:
+        """One OVH service (``ip``, ``dns``, ...) of *account* or the default."""
+        if self._names_account('ovh', account):
+            return getattr(self._accounts.ovh_services(account), part)
+        if part == 'ovh':
+            return self._ovh_service
+        return getattr(self, f'_ovh_{part}_service', None)
+
+    def _ovh_part_for(self, instance: Dict[str, Any], part: str) -> Any:
+        """One OVH service of the account *instance* belongs to."""
+        if self._accounts is None or not instance.get('account'):
+            return self._ovh_part('', part)
+        return getattr(self._accounts.ovh_services(instance['account']), part)
+
+    @staticmethod
+    def _with_account(args: Dict[str, Any], account: str) -> Dict[str, Any]:
+        """*args* plus ``account`` when one was given.
+
+        Calls without an account keep the audit rows they always had.
+        """
+        if account:
+            args['account'] = account
+        return args
+
+    def _account_refused(
+        self, tool_name: str, args: Dict[str, Any], exc: Exception,
+    ) -> str:
+        """Audit row + error for an ``account`` that names no account.
+
+        An account that is set up but cannot connect is audited as its
+        provider being unavailable, like a call without ``account``.
+        """
+        if isinstance(exc, AccountUnavailableError):
+            reason = f"{exc.provider}_unavailable"
+        else:
+            reason = f"validation: unknown account: {exc}"
+        self._audit.log(tool_name, args, '', False, reason)
+        return f"Error: {exc}"
+
+    def _ambiguous(
+        self, tool_name: str, args: Dict[str, Any], exc: AmbiguousInstanceError,
+    ) -> str:
+        """Audit row + error listing the servers an ambiguous reference names."""
+        self._audit.log(tool_name, args, '', False, 'ambiguous_instance')
+        return f"Error: {exc}"
+
+    async def _lookup_instance(
+        self, tool_name: str, args: Dict[str, Any], instance_id: str,
+        *, audit_result: str = '',
+    ):
+        """Resolve *instance_id* for a tool call.
+
+        Returns ``(instance, None)``, or ``(None, message)`` once the refusal
+        is audited: ``instance_not_found``, ``ambiguous_instance`` for a
+        name several servers share (the message lists their references), or
+        ``<provider>_unavailable`` for an ``<account>/...`` reference to an
+        account that cannot connect (the message says why).
+        """
+        try:
+            instance = await self._find_instance(instance_id)
+        except AmbiguousInstanceError as exc:
+            return None, self._ambiguous(tool_name, args, exc)
+        except UnknownAccountError as exc:
+            return None, self._account_refused(tool_name, args, exc)
+        if not instance:
+            self._audit.log(
+                tool_name, args, audit_result, False, 'instance_not_found',
+            )
+            return None, f"Instance not found: {instance_id}"
+        return instance, None
+
+    async def _provider_target(
+        self, provider: str, reference: str, account: str,
+    ) -> Optional[ProviderTarget]:
+        """The account a lifecycle call on *reference* acts in.
+
+        None when no registry is bound: the call goes to the provider's
+        single service with *reference* unchanged.
+
+        Raises:
+            UnknownAccountError: *account* or the reference's qualifier names
+                no account of *provider*.
+            AmbiguousInstanceError: The reference names several servers.
+            TargetNotFoundError: Several accounts, none of which lists it.
+        """
+        if self._accounts is None:
+            self._names_account(provider, account)
+            return None
+        return await resolve_provider_target(
+            self._accounts, provider, reference, account,
+        )
+
+    def _target_not_found(
+        self, tool_name: str, args: Dict[str, Any], exc: TargetNotFoundError,
+    ) -> str:
+        """Audit row + error for a server no account of the provider lists."""
+        self._audit.log(tool_name, args, '', False, 'instance_not_found')
+        example = exc.labels[-1] if exc.labels else '<account>'
+        return (
+            f"Error: {exc} Pass account=<label> to act in one account, "
+            f"or name it '{example}/{exc.reference}'."
+        )
+
+    def _target_args(
+        self, provider: str, args: Dict[str, Any], account: str,
+        target: Optional[ProviderTarget],
+    ) -> Dict[str, Any]:
+        """Audit args naming the account a lifecycle call acts in.
+
+        Recorded when an account was asked for or the provider has several;
+        single-account rows keep the shape they always had.
+        """
+        if target is not None and (account or self._accounts.is_multi(provider)):
+            args['account'] = target.account.label
+        return args
+
+    def _listing_provider(self, account: str) -> str:
+        """The provider whose servers ``list_instances(account=...)`` shows.
+
+        ``"custom"`` selects the custom servers.
+
+        Raises:
+            UnknownAccountError: No account has that label, or (an
+                :class:`AccountUnavailableError`) it cannot connect.
+        """
+        label = account.strip()
+        if label.lower() == CUSTOM_QUALIFIER:
+            return CUSTOM_QUALIFIER
+        if self._accounts is None:
+            for provider in ('aws', 'ovh', 'hetzner'):
+                try:
+                    if not self._names_account(provider, label):
+                        return provider
+                except UnknownAccountError:
+                    continue
+            raise unknown_account_error(None, label)
+        ref = self._accounts.find_account(label, include_unavailable=True)
+        if ref is None:
+            raise unknown_account_error(self._accounts, label)
+        return usable_account(self._accounts, ref).provider
+
+    async def _account_rows(self, account: str) -> List[Dict]:
+        """The servers of one account (``"custom"``: the custom servers).
+
+        Only that account's provider is read.
+
+        Raises:
+            UnknownAccountError: No account has that label.
+        """
+        provider = self._listing_provider(account)
+        rows = await self._directory.provider_rows(provider)
+        if provider == CUSTOM_QUALIFIER or self._accounts is None:
+            return rows
+        key = account.strip().lower()
+        return [row for row in rows if row_account_key(row) == key]
+
+    async def list_instances(
+        self, region: str = "", state: str = "", account: str = "",
+    ) -> str:
+        """List all managed instances (every provider account + custom servers)."""
+        args = self._with_account({'region': region, 'state': state}, account)
         allowed, reason = self._guard.check_tool('list_instances')
         if not allowed:
-            self._audit.log('list_instances', {'region': region, 'state': state}, '', False, reason)
+            self._audit.log('list_instances', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        aws_instances = await self._aws_service.fetch_instances_cached()
-        custom_instances = self._custom_server_service.list_as_instances()
-        ovh_instances = (
-            await self._ovh_service.fetch_instances_cached()
-            if self._ovh_service is not None
-            else []
-        )
-        hetzner_instances = (
-            await self._hetzner_service.fetch_instances_cached()
-            if self._hetzner_service is not None
-            else []
-        )
-        instances = (
-            aws_instances + custom_instances + ovh_instances + hetzner_instances
-        )
+        only_provider = None
+        if account:
+            try:
+                only_provider = self._listing_provider(account)
+                instances = await self._account_rows(account)
+            except UnknownAccountError as exc:
+                return self._account_refused('list_instances', args, exc)
+        else:
+            instances = await self._directory.all_instances()
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
             instances = [i for i in instances if i.get('state') == state]
 
         result = self._format_instances(instances)
-        for label, service in (
-            ("AWS", self._aws_service),
-            ("OVH", self._ovh_service),
-            ("Hetzner", self._hetzner_service),
-        ):
+        inventories = self._provider_inventories()
+        for provider, label in (("aws", "AWS"), ("ovh", "OVH"), ("hetzner", "Hetzner")):
+            if only_provider is not None and provider != only_provider:
+                continue
+            service = inventories.get(provider)
             fetch_error = getattr(service, "last_fetch_error", None)
             if getattr(service, "last_fetch_partial", False) is True and fetch_error:
                 # Only the named sources are stale; the other rows are fresh.
@@ -360,7 +675,7 @@ class ServonautTools:
                     f"\n\nWarning: the {label} inventory could not be refreshed "
                     f"({fetch_error}); {label} rows come from the last successful fetch."
                 )
-        self._audit.log('list_instances', {'region': region, 'state': state}, result, True)
+        self._audit.log('list_instances', args, result, True)
         return result
 
     async def run_command(
@@ -390,10 +705,11 @@ class ServonautTools:
             return f"Blocked: {cmd_reason}"
         command = self._guard.command_for_execution(command)
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('run_command', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'run_command', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         transport = (transport or "auto").strip().lower()
         if transport not in ("auto", "ssh", "ssm"):
@@ -655,7 +971,9 @@ class ServonautTools:
         region = instance.get('region') or ''
         aws_id = instance.get('id', '')
         try:
-            res = await SSMService().run_command(
+            # Systems Manager runs in the account the instance belongs to.
+            ssm = SSMService(self._aws_context_for(instance))
+            res = await ssm.run_command(
                 aws_id, command, region=region, timeout=60,
             )
         except Exception as e:  # noqa: BLE001
@@ -699,10 +1017,11 @@ class ServonautTools:
             self._audit.log('check_status', {'instance_id': instance_id}, '', False, reason)
             return f"Blocked: {reason}"
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('check_status', {'instance_id': instance_id}, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'check_status', {'instance_id': instance_id}, instance_id,
+        )
+        if error is not None:
+            return error
 
         lines = [
             f"Instance:   {instance.get('id', '')}",
@@ -730,10 +1049,11 @@ class ServonautTools:
         # the standard-mode allowlist. We call run_command directly but need to
         # temporarily allow compound commands in dangerous-equivalent mode.
         # Instead, execute via SSH directly to avoid double guard checking.
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('get_server_info', {'instance_id': instance_id}, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'get_server_info', {'instance_id': instance_id}, instance_id,
+        )
+        if error is not None:
+            return error
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
         key_extras = (
@@ -811,13 +1131,14 @@ class ServonautTools:
             }, '', False, reason)
             return f"Blocked: {reason}"
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('transfer_file', {
+        instance, error = await self._lookup_instance(
+            'transfer_file', {
                 'instance_id': instance_id, 'local_path': local_path,
                 'remote_path': remote_path, 'direction': direction,
-            }, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+            }, instance_id,
+        )
+        if error is not None:
+            return error
 
         conn, cleanup = await self._resolve_connection_with_vault(instance)
         # Everything after the vault key hits disk runs INSIDE the try so the
@@ -896,6 +1217,62 @@ class ServonautTools:
         }, result, returncode == 0, **key_extras)
         return result
 
+    def _provider_refusal(
+        self, tool_name: str, payload: Dict[str, Any], provider: str,
+        account: str, default: Any, unavailable, *, any_account: bool = False,
+    ) -> Optional[str]:
+        """Why *provider* cannot serve this call, already audited, or None.
+
+        Without a registry, or when the config sets up no account of the
+        provider, the provider's own service (*default*) must exist; else
+        *unavailable()* answers. With accounts configured, a call naming an
+        account goes ahead (that account is checked when it is resolved),
+        and so does an *any_account* call (one that finds the server's
+        account itself, or lists every account) while any account is
+        usable. Otherwise the call acts in the primary account, and when
+        that cannot be used the registry says why: another account is never
+        used in its place. When no account of the provider can connect, a
+        hint on fixing its credentials follows where the reason lacks one.
+        """
+        registry = self._accounts
+        if registry is None or not registry.configured_accounts(provider):
+            return unavailable() if default is None else None
+        if account or (any_account and registry.accounts(provider)):
+            return None
+        try:
+            registry.account(provider, None)
+        except UnknownAccountError as exc:
+            self._audit.log(tool_name, payload, '', False, f'{provider}_unavailable')
+            hint = '' if registry.accounts(provider) else _CREDENTIAL_HINTS.get(provider, '')
+            message = str(exc).rstrip('.')
+            return f"Error: {message}. {hint}" if hint else f"Error: {message}"
+        return None
+
+    def _hetzner_refusal(
+        self, tool_name: str, payload: Dict[str, Any], account: str,
+        *, any_account: bool = False,
+    ) -> Optional[str]:
+        return self._provider_refusal(
+            tool_name, payload, 'hetzner', account, self._hetzner_service,
+            lambda: self._hetzner_unavailable(tool_name, payload),
+            any_account=any_account,
+        )
+
+    def _ovh_refusal(
+        self, tool_name: str, payload: Dict[str, Any], account: str, default: Any,
+        *, read: str = "", any_account: bool = False,
+    ) -> Optional[str]:
+        """:meth:`_provider_refusal` for OVH; *read* names the read service."""
+        def unavailable() -> str:
+            if read:
+                return self._ovh_read_unavailable(tool_name, payload, read)
+            return self._ovh_unavailable(tool_name, payload)
+
+        return self._provider_refusal(
+            tool_name, payload, 'ovh', account, default, unavailable,
+            any_account=any_account,
+        )
+
     def _ovh_read_unavailable(
         self, tool_name: str, args: Dict[str, Any], service_label: str,
     ) -> str:
@@ -906,19 +1283,26 @@ class ServonautTools:
             "Ensure OVH is configured and enabled."
         )
 
-    async def ovh_list_ips(self) -> str:
+    async def ovh_list_ips(self, account: str = "") -> str:
         """List all IPs on the OVH account with type and routing info."""
-        args: Dict[str, Any] = {}
+        args: Dict[str, Any] = self._with_account({}, account)
         allowed, reason = self._guard.check_tool('ovh_list_ips')
         if not allowed:
             self._audit.log('ovh_list_ips', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_ip_service is None:
-            return self._ovh_read_unavailable('ovh_list_ips', args, 'IP service')
+        refusal = self._ovh_refusal(
+            'ovh_list_ips', args, account, self._ovh_ip_service, read='IP service',
+        )
+        if refusal:
+            return refusal
+        try:
+            ip_service = self._ovh_part(account, 'ip')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_list_ips', args, e)
 
         try:
-            ips = await self._ovh_ip_service.list_ips()
+            ips = await ip_service.list_ips()
         except Exception as e:
             self._audit.log('ovh_list_ips', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH IPs: {e}"
@@ -950,19 +1334,26 @@ class ServonautTools:
         self._audit.log('ovh_list_ips', args, result, True)
         return result
 
-    async def ovh_firewall_rules(self, ip: str) -> str:
+    async def ovh_firewall_rules(self, ip: str, account: str = "") -> str:
         """List firewall rules for an OVH IP address."""
-        args = {'ip': ip}
+        args = self._with_account({'ip': ip}, account)
         allowed, reason = self._guard.check_tool('ovh_firewall_rules')
         if not allowed:
             self._audit.log('ovh_firewall_rules', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_ip_service is None:
-            return self._ovh_read_unavailable('ovh_firewall_rules', args, 'IP service')
+        refusal = self._ovh_refusal(
+            'ovh_firewall_rules', args, account, self._ovh_ip_service, read='IP service',
+        )
+        if refusal:
+            return refusal
+        try:
+            ip_service = self._ovh_part(account, 'ip')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_firewall_rules', args, e)
 
         try:
-            rules = await self._ovh_ip_service.list_firewall_rules(ip)
+            rules = await ip_service.list_firewall_rules(ip)
         except ValueError as e:
             self._audit.log('ovh_firewall_rules', args, '', False, f"validation: {e}")
             return f"Error: {e}"
@@ -990,22 +1381,29 @@ class ServonautTools:
         self._audit.log('ovh_firewall_rules', args, result, True)
         return result
 
-    async def ovh_ssh_keys(self) -> str:
+    async def ovh_ssh_keys(self, account: str = "") -> str:
         """List SSH keys on the OVH account."""
-        args: Dict[str, Any] = {}
+        args: Dict[str, Any] = self._with_account({}, account)
         allowed, reason = self._guard.check_tool('ovh_ssh_keys')
         if not allowed:
             self._audit.log('ovh_ssh_keys', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_service is None:
-            return self._ovh_read_unavailable('ovh_ssh_keys', args, 'service')
+        refusal = self._ovh_refusal(
+            'ovh_ssh_keys', args, account, self._ovh_service, read='service',
+        )
+        if refusal:
+            return refusal
+        try:
+            ovh_service = self._ovh_part(account, 'ovh')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_ssh_keys', args, e)
 
         import asyncio as _asyncio
         try:
             # Client construction sits inside the try: it raises when the
             # python-ovh dependency is missing, which is an API failure too.
-            client = self._ovh_service.client
+            client = ovh_service.client
             key_names = await _asyncio.to_thread(client.get, "/me/sshKey")
         except Exception as e:
             self._audit.log('ovh_ssh_keys', args, '', False, f"api_error: {e}")
@@ -1043,13 +1441,28 @@ class ServonautTools:
             self._audit.log('ovh_snapshots', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_snapshot_service is None:
-            return self._ovh_read_unavailable('ovh_snapshots', args, 'snapshot service')
+        # The instance's own account serves its snapshots.
+        refusal = self._ovh_refusal(
+            'ovh_snapshots', args, '', self._ovh_snapshot_service,
+            read='snapshot service', any_account=True,
+        )
+        if refusal:
+            return refusal
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('ovh_snapshots', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'ovh_snapshots', args, instance_id,
+        )
+        if error is not None:
+            return error
+
+        # Snapshots belong to the OVH account the instance is in. Any other
+        # instance keeps the answer it always had (no project to list).
+        snapshot_service = self._ovh_snapshot_service
+        if instance.get('is_ovh'):
+            try:
+                snapshot_service = self._ovh_part_for(instance, 'snapshot')
+            except UnknownAccountError as e:
+                return self._account_refused('ovh_snapshots', args, e)
 
         provider_type = instance.get('provider_type', '')
         name = instance.get('id', '') or instance.get('name', '')
@@ -1061,10 +1474,10 @@ class ServonautTools:
 
         try:
             if provider_type == 'vps':
-                snapshots = await self._ovh_snapshot_service.list_vps_snapshots(name)
+                snapshots = await snapshot_service.list_vps_snapshots(name)
                 label = f"VPS snapshots for {name}"
             else:
-                snapshots = await self._ovh_snapshot_service.list_cloud_snapshots(project_id)
+                snapshots = await snapshot_service.list_cloud_snapshots(project_id)
                 label = f"Cloud snapshots for project {project_id}"
         except ValueError as e:
             self._audit.log('ovh_snapshots', args, '', False, f"validation: {e}")
@@ -1095,19 +1508,28 @@ class ServonautTools:
         self._audit.log('ovh_snapshots', args, result, True)
         return result
 
-    async def ovh_dns_records(self, zone: str, record_type: str = "") -> str:
+    async def ovh_dns_records(
+        self, zone: str, record_type: str = "", account: str = "",
+    ) -> str:
         """List DNS records for an OVH zone."""
-        args = {'zone': zone, 'record_type': record_type}
+        args = self._with_account({'zone': zone, 'record_type': record_type}, account)
         allowed, reason = self._guard.check_tool('ovh_dns_records')
         if not allowed:
             self._audit.log('ovh_dns_records', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_dns_service is None:
-            return self._ovh_read_unavailable('ovh_dns_records', args, 'DNS service')
+        refusal = self._ovh_refusal(
+            'ovh_dns_records', args, account, self._ovh_dns_service, read='DNS service',
+        )
+        if refusal:
+            return refusal
+        try:
+            dns_service = self._ovh_part(account, 'dns')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_dns_records', args, e)
 
         try:
-            records = await self._ovh_dns_service.list_records(zone, field_type=record_type)
+            records = await dns_service.list_records(zone, field_type=record_type)
         except ValueError as e:
             self._audit.log('ovh_dns_records', args, '', False, f"validation: {e}")
             return f"Error: {e}"
@@ -1136,19 +1558,26 @@ class ServonautTools:
         self._audit.log('ovh_dns_records', args, result, True)
         return result
 
-    async def ovh_billing(self) -> str:
+    async def ovh_billing(self, account: str = "") -> str:
         """Get current OVH billing summary (spend, forecast)."""
-        args: Dict[str, Any] = {}
+        args: Dict[str, Any] = self._with_account({}, account)
         allowed, reason = self._guard.check_tool('ovh_billing')
         if not allowed:
             self._audit.log('ovh_billing', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_billing_service is None:
-            return self._ovh_read_unavailable('ovh_billing', args, 'billing service')
+        refusal = self._ovh_refusal(
+            'ovh_billing', args, account, self._ovh_billing_service, read='billing service',
+        )
+        if refusal:
+            return refusal
+        try:
+            billing_service = self._ovh_part(account, 'billing')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_billing', args, e)
 
         try:
-            usage = await self._ovh_billing_service.get_current_usage()
+            usage = await billing_service.get_current_usage()
         except Exception as e:
             self._audit.log('ovh_billing', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH billing data: {e}"
@@ -1176,19 +1605,26 @@ class ServonautTools:
         self._audit.log('ovh_billing', args, result, True)
         return result
 
-    async def ovh_invoices(self, limit: int = 5) -> str:
+    async def ovh_invoices(self, limit: int = 5, account: str = "") -> str:
         """List recent OVH invoices."""
-        args = {'limit': limit}
+        args = self._with_account({'limit': limit}, account)
         allowed, reason = self._guard.check_tool('ovh_invoices')
         if not allowed:
             self._audit.log('ovh_invoices', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        if self._ovh_billing_service is None:
-            return self._ovh_read_unavailable('ovh_invoices', args, 'billing service')
+        refusal = self._ovh_refusal(
+            'ovh_invoices', args, account, self._ovh_billing_service, read='billing service',
+        )
+        if refusal:
+            return refusal
+        try:
+            billing_service = self._ovh_part(account, 'billing')
+        except UnknownAccountError as e:
+            return self._account_refused('ovh_invoices', args, e)
 
         try:
-            invoices = await self._ovh_billing_service.get_invoices(limit=limit)
+            invoices = await billing_service.get_invoices(limit=limit)
         except Exception as e:
             self._audit.log('ovh_invoices', args, '', False, f"api_error: {e}")
             return f"Error fetching OVH invoices: {e}"
@@ -1681,13 +2117,12 @@ class ServonautTools:
             )
             return "Error: memory subsystem not wired."
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(
-                'get_server_memory', {'instance_id': instance_id, 'format': format},
-                'instance_not_found', False, 'instance_not_found',
-            )
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'get_server_memory', {'instance_id': instance_id, 'format': format},
+            instance_id, audit_result='instance_not_found',
+        )
+        if error is not None:
+            return error
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
@@ -1839,12 +2274,11 @@ class ServonautTools:
             )
             return "Error: memory subsystem not wired."
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(
-                tool_name, audit_args, 'instance_not_found', False, 'instance_not_found',
-            )
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            tool_name, audit_args, instance_id, audit_result='instance_not_found',
+        )
+        if error is not None:
+            return error
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
@@ -2033,12 +2467,11 @@ class ServonautTools:
             )
             return "Error: memory subsystem not wired."
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(
-                'remember_server_finding', args, '', False, 'instance_not_found',
-            )
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'remember_server_finding', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         try:
             result = self._memory_service.remember_finding(
@@ -2117,12 +2550,11 @@ class ServonautTools:
             )
             return "Error: memory subsystem not wired."
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(
-                'recall_server_findings', args, '', False, 'instance_not_found',
-            )
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'recall_server_findings', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
         provider = instance_provider(instance)
@@ -2175,28 +2607,38 @@ class ServonautTools:
         self._audit.log(tool_name, payload, '', False, 'hetzner_unavailable')
         return msg
 
-    async def hetzner_list_servers(self) -> str:
-        """List Hetzner Cloud servers in the configured project."""
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_servers', {})
+    async def hetzner_list_servers(self, account: str = "") -> str:
+        """List Hetzner Cloud servers: one project's, or every project's."""
+        args = self._with_account({}, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_servers', args, account, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_servers')
         if not allowed:
-            self._audit.log('hetzner_list_servers', {}, '', False, reason)
+            self._audit.log('hetzner_list_servers', args, '', False, reason)
             return f"Blocked: {reason}"
 
         try:
-            instances = await self._hetzner_service.fetch_instances_cached(
-                force_refresh=True,
-            )
+            if self._accounts is None:
+                service = self._account_service('hetzner', account, self._hetzner_service)
+                instances = await service.fetch_instances_cached(force_refresh=True)
+            else:
+                instances = await fetch_provider_rows(
+                    self._accounts, 'hetzner', account, force_refresh=True,
+                )
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_list_servers', args, exc)
         except Exception as exc:
             self._audit.log(
-                'hetzner_list_servers', {}, '', False, f"api_error: {exc}",
+                'hetzner_list_servers', args, '', False, f"api_error: {exc}",
             )
             return f"Error listing Hetzner servers: {exc}"
 
         if not instances:
-            self._audit.log('hetzner_list_servers', {}, '0 servers', True)
+            self._audit.log('hetzner_list_servers', args, '0 servers', True)
             return "No Hetzner Cloud servers in project."
 
         lines = [
@@ -2207,7 +2649,7 @@ class ServonautTools:
         ]
         for inst in instances:
             lines.append(
-                f"  {(inst.get('name') or '')[:24]:<24} "
+                f"  {display_name(inst)[:24]:<24} "
                 f"{inst.get('id', ''):<10} "
                 f"{(inst.get('type') or ''):<10} "
                 f"{(inst.get('state') or ''):<10} "
@@ -2216,24 +2658,33 @@ class ServonautTools:
             )
 
         result = '\n'.join(lines)
-        self._audit.log('hetzner_list_servers', {}, result, True)
+        self._audit.log('hetzner_list_servers', args, result, True)
         return result
 
-    async def hetzner_list_server_types(self) -> str:
+    async def hetzner_list_server_types(self, account: str = "") -> str:
         """List Hetzner Cloud server types with their EUR prices."""
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_server_types', {})
+        args = self._with_account({}, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_server_types', args, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_server_types')
         if not allowed:
-            self._audit.log('hetzner_list_server_types', {}, '', False, reason)
+            self._audit.log('hetzner_list_server_types', args, '', False, reason)
             return f"Blocked: {reason}"
 
         try:
-            types = await self._hetzner_service.list_server_types()
+            service = self._account_service('hetzner', account, self._hetzner_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_list_server_types', args, exc)
+
+        try:
+            types = await service.list_server_types()
         except Exception as exc:
             self._audit.log(
-                'hetzner_list_server_types', {}, '', False, f"api_error: {exc}",
+                'hetzner_list_server_types', args, '', False, f"api_error: {exc}",
             )
             return f"Error listing server types: {exc}"
 
@@ -2257,29 +2708,38 @@ class ServonautTools:
             )
 
         result = '\n'.join(lines)
-        self._audit.log('hetzner_list_server_types', {}, result, True)
+        self._audit.log('hetzner_list_server_types', args, result, True)
         return result
 
-    async def hetzner_list_ssh_keys(self) -> str:
+    async def hetzner_list_ssh_keys(self, account: str = "") -> str:
         """List SSH keys registered on the Hetzner Cloud project."""
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_list_ssh_keys', {})
+        args = self._with_account({}, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_list_ssh_keys', args, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_list_ssh_keys')
         if not allowed:
-            self._audit.log('hetzner_list_ssh_keys', {}, '', False, reason)
+            self._audit.log('hetzner_list_ssh_keys', args, '', False, reason)
             return f"Blocked: {reason}"
 
         try:
-            keys = await self._hetzner_service.list_ssh_keys()
+            service = self._account_service('hetzner', account, self._hetzner_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_list_ssh_keys', args, exc)
+
+        try:
+            keys = await service.list_ssh_keys()
         except Exception as exc:
             self._audit.log(
-                'hetzner_list_ssh_keys', {}, '', False, f"api_error: {exc}",
+                'hetzner_list_ssh_keys', args, '', False, f"api_error: {exc}",
             )
             return f"Error listing SSH keys: {exc}"
 
         if not keys:
-            self._audit.log('hetzner_list_ssh_keys', {}, '0 keys', True)
+            self._audit.log('hetzner_list_ssh_keys', args, '0 keys', True)
             return "No SSH keys registered on the Hetzner project."
 
         lines = [f"Hetzner Cloud SSH keys ({len(keys)} total):"]
@@ -2291,14 +2751,20 @@ class ServonautTools:
             )
 
         result = '\n'.join(lines)
-        self._audit.log('hetzner_list_ssh_keys', {}, result, True)
+        self._audit.log('hetzner_list_ssh_keys', args, result, True)
         return result
 
-    async def hetzner_create_ssh_key(self, name: str, public_key: str) -> str:
+    async def hetzner_create_ssh_key(
+        self, name: str, public_key: str, account: str = "",
+    ) -> str:
         """Register a new SSH public key with Hetzner Cloud."""
-        payload = {'name': name}  # public_key intentionally not logged
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_create_ssh_key', payload)
+        # public_key intentionally not logged
+        payload = self._with_account({'name': name}, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_create_ssh_key', payload, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_create_ssh_key')
         if not allowed:
@@ -2306,7 +2772,12 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            key = await self._hetzner_service.create_ssh_key(name, public_key)
+            service = self._account_service('hetzner', account, self._hetzner_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_create_ssh_key', payload, exc)
+
+        try:
+            key = await service.create_ssh_key(name, public_key)
         except ValueError as exc:
             self._audit.log(
                 'hetzner_create_ssh_key', payload, '', False, f"validation: {exc}",
@@ -2325,13 +2796,12 @@ class ServonautTools:
         self._audit.log('hetzner_create_ssh_key', payload, result, True)
         return result
 
-    async def hetzner_delete_ssh_key(self, identifier: str) -> str:
+    async def hetzner_delete_ssh_key(self, identifier: str, account: str = "") -> str:
         """Delete a Hetzner Cloud SSH key by name or numeric ID."""
-        payload = {'identifier': identifier}
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable(
-                'hetzner_delete_ssh_key', payload,
-            )
+        payload = self._with_account({'identifier': identifier}, account)
+        refusal = self._hetzner_refusal('hetzner_delete_ssh_key', payload, account)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_delete_ssh_key')
         if not allowed:
@@ -2341,7 +2811,12 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            await self._hetzner_service.delete_ssh_key(identifier)
+            service = self._account_service('hetzner', account, self._hetzner_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_delete_ssh_key', payload, exc)
+
+        try:
+            await service.delete_ssh_key(identifier)
         except ValueError as exc:
             self._audit.log(
                 'hetzner_delete_ssh_key', payload, '', False,
@@ -2367,15 +2842,19 @@ class ServonautTools:
         location: Optional[str] = None,
         ssh_keys: Optional[List[str]] = None,
         wait_until_running: bool = True,
+        account: str = "",
     ) -> str:
         """Create a Hetzner Cloud server (auto-registers in the fleet)."""
-        payload = {
+        payload = self._with_account({
             'name': name, 'server_type': server_type, 'image': image,
             'location': location, 'ssh_keys': ssh_keys,
             'wait_until_running': wait_until_running,
-        }
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_create_server', payload)
+        }, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_create_server', payload, account,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_create_server')
         if not allowed:
@@ -2383,7 +2862,12 @@ class ServonautTools:
             return f"Blocked: {reason}"
 
         try:
-            instance = await self._hetzner_service.create_server(
+            service = self._account_service('hetzner', account, self._hetzner_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('hetzner_create_server', payload, exc)
+
+        try:
+            instance = await service.create_server(
                 name=name,
                 server_type=server_type,
                 image=image,
@@ -2416,19 +2900,27 @@ class ServonautTools:
         self._audit.log('hetzner_create_server', payload, result, True)
         return result
 
-    async def hetzner_delete_server(self, identifier: str) -> str:
+    async def hetzner_delete_server(self, identifier: str, account: str = "") -> str:
         """Delete a Hetzner Cloud server by ID or name."""
-        payload = {'identifier': identifier}
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable('hetzner_delete_server', payload)
+        payload = self._with_account({'identifier': identifier}, account)
+        refusal = self._hetzner_refusal(
+            'hetzner_delete_server', payload, account, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('hetzner_delete_server')
         if not allowed:
             self._audit.log('hetzner_delete_server', payload, '', False, reason)
             return f"Blocked: {reason}"
 
+        resolved = await self._hetzner_target('hetzner_delete_server', payload, identifier, account)
+        if isinstance(resolved, str):
+            return resolved
+        service, server = resolved
+
         try:
-            await self._hetzner_service.delete_server(identifier)
+            await service.delete_server(server)
         except ValueError as exc:
             self._audit.log(
                 'hetzner_delete_server', payload, '', False, f"validation: {exc}",
@@ -2448,8 +2940,34 @@ class ServonautTools:
     # Hetzner power management — boot / halt / reboot
     # ------------------------------------------------------------------
 
+    async def _hetzner_target(
+        self, tool_name: str, payload: Dict[str, Any], identifier: str, account: str,
+    ):
+        """``(service, identifier)`` for a call on one Hetzner server.
+
+        The server's project is the ``account`` asked for, the project a
+        ``<account>/`` qualifier names, or the project whose servers list
+        it. A name that several projects use, or one no project lists, is
+        refused (with one project, an unlisted name goes to it, as before).
+        Returns the refusal message (already audited) instead of a pair
+        when it cannot tell.
+        """
+        try:
+            target = await self._provider_target('hetzner', identifier, account)
+        except UnknownAccountError as exc:
+            return self._account_refused(tool_name, payload, exc)
+        except AmbiguousInstanceError as exc:
+            return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
+        if target is None:
+            return self._hetzner_service, identifier
+        self._target_args('hetzner', payload, account, target)
+        return self._accounts.service('hetzner', target.account.label), target.reference
+
     async def _hetzner_lifecycle(
         self, tool_name: str, method: str, identifier: str, verb: str,
+        account: str = "",
     ) -> str:
         """Shared handler for the four Hetzner power tools.
 
@@ -2458,17 +2976,23 @@ class ServonautTools:
         public tool method is a one-liner that picks the underlying
         ``HetznerService`` method and the human-readable verb.
         """
-        payload = {'identifier': identifier}
-        if self._hetzner_service is None:
-            return self._hetzner_unavailable(tool_name, payload)
+        payload = self._with_account({'identifier': identifier}, account)
+        refusal = self._hetzner_refusal(tool_name, payload, account, any_account=True)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool(tool_name)
         if not allowed:
             self._audit.log(tool_name, payload, '', False, reason)
             return f"Blocked: {reason}"
 
+        resolved = await self._hetzner_target(tool_name, payload, identifier, account)
+        if isinstance(resolved, str):
+            return resolved
+        service, server = resolved
+
         try:
-            await getattr(self._hetzner_service, method)(identifier)
+            await getattr(service, method)(server)
         except ValueError as exc:
             self._audit.log(
                 tool_name, payload, '', False, f"validation: {exc}",
@@ -2484,24 +3008,24 @@ class ServonautTools:
         self._audit.log(tool_name, payload, result, True)
         return result
 
-    async def hetzner_power_on(self, identifier: str) -> str:
+    async def hetzner_power_on(self, identifier: str, account: str = "") -> str:
         return await self._hetzner_lifecycle(
-            'hetzner_power_on', 'power_on', identifier, 'started',
+            'hetzner_power_on', 'power_on', identifier, 'started', account,
         )
 
-    async def hetzner_power_off(self, identifier: str) -> str:
+    async def hetzner_power_off(self, identifier: str, account: str = "") -> str:
         return await self._hetzner_lifecycle(
-            'hetzner_power_off', 'power_off', identifier, 'powered off',
+            'hetzner_power_off', 'power_off', identifier, 'powered off', account,
         )
 
-    async def hetzner_shutdown(self, identifier: str) -> str:
+    async def hetzner_shutdown(self, identifier: str, account: str = "") -> str:
         return await self._hetzner_lifecycle(
-            'hetzner_shutdown', 'shutdown', identifier, 'shutdown sent',
+            'hetzner_shutdown', 'shutdown', identifier, 'shutdown sent', account,
         )
 
-    async def hetzner_reboot(self, identifier: str) -> str:
+    async def hetzner_reboot(self, identifier: str, account: str = "") -> str:
         return await self._hetzner_lifecycle(
-            'hetzner_reboot', 'reboot', identifier, 'reboot sent',
+            'hetzner_reboot', 'reboot', identifier, 'reboot sent', account,
         )
 
     # ------------------------------------------------------------------
@@ -2530,21 +3054,28 @@ class ServonautTools:
         image_id: str,
         region: str,
         ssh_key_id: Optional[str] = None,
+        account: str = "",
     ) -> str:
         """Create an OVH Public Cloud instance."""
-        payload = {
+        payload = self._with_account({
             'project_id': project_id, 'name': name,
             'flavor_id': flavor_id, 'image_id': image_id,
             'region': region, 'ssh_key_id': ssh_key_id,
-        }
+        }, account)
         cloud_svc = getattr(self, '_ovh_cloud_service', None)
-        if cloud_svc is None:
-            return self._ovh_unavailable('ovh_create_instance', payload)
+        refusal = self._ovh_refusal('ovh_create_instance', payload, account, cloud_svc)
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('ovh_create_instance')
         if not allowed:
             self._audit.log('ovh_create_instance', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            if self._names_account('ovh', account):
+                cloud_svc = self._accounts.ovh_services(account).cloud
+        except UnknownAccountError as exc:
+            return self._account_refused('ovh_create_instance', payload, exc)
 
         try:
             result = await cloud_svc.create_instance(
@@ -2575,18 +3106,35 @@ class ServonautTools:
         return text
 
     async def ovh_delete_instance(
-        self, project_id: str, instance_id: str,
+        self, project_id: str, instance_id: str, account: str = "",
     ) -> str:
         """Delete an OVH Public Cloud instance."""
-        payload = {'project_id': project_id, 'instance_id': instance_id}
+        payload = self._with_account(
+            {'project_id': project_id, 'instance_id': instance_id}, account,
+        )
         cloud_svc = getattr(self, '_ovh_cloud_service', None)
-        if cloud_svc is None:
-            return self._ovh_unavailable('ovh_delete_instance', payload)
+        refusal = self._ovh_refusal(
+            'ovh_delete_instance', payload, account, cloud_svc, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool('ovh_delete_instance')
         if not allowed:
             self._audit.log('ovh_delete_instance', payload, '', False, reason)
             return f"Blocked: {reason}"
+
+        # The instance's account: the one asked for, a "<account>/"
+        # qualifier on project_id, or the account whose inventory lists it.
+        resolved = await self._ovh_target(
+            'ovh_delete_instance', payload, f"{project_id}/{instance_id}", account,
+        )
+        if isinstance(resolved, str):
+            return resolved
+        ovh_account, cloud_id = resolved
+        if ovh_account is not None:
+            cloud_svc = self._accounts.ovh_services(ovh_account).cloud
+            project_id, _, instance_id = cloud_id.partition('/')
 
         try:
             await cloud_svc.delete_instance(project_id, instance_id)
@@ -2605,9 +3153,34 @@ class ServonautTools:
         self._audit.log('ovh_delete_instance', payload, text, True)
         return text
 
+    async def _ovh_target(
+        self, tool_name: str, payload: Dict[str, Any], instance_id: str, account: str,
+    ):
+        """``(account label, instance id)`` for a call on one OVH instance.
+
+        The label is None when no registry is bound (the default service
+        and *instance_id* are used unchanged). Returns the refusal message
+        (already audited) instead of a pair when the account is unknown, or
+        the reference names several instances or, with several accounts,
+        none.
+        """
+        try:
+            target = await self._provider_target('ovh', instance_id, account)
+        except UnknownAccountError as exc:
+            return self._account_refused(tool_name, payload, exc)
+        except AmbiguousInstanceError as exc:
+            return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
+        if target is None:
+            return None, instance_id
+        self._target_args('ovh', payload, account, target)
+        return target.account.label, target.native_id
+
     async def _ovh_lifecycle(
         self, tool_name: str, method: str,
         instance_id: str, provider_type: str, verb: str,
+        account: str = "",
     ) -> str:
         """Shared handler for OVH start/stop/reboot.
 
@@ -2617,17 +3190,31 @@ class ServonautTools:
         provider_type so post-mortem queries can see which resource path
         was taken.
         """
-        payload = {'instance_id': instance_id, 'provider_type': provider_type}
-        if self._ovh_service is None:
-            return self._ovh_unavailable(tool_name, payload)
+        payload = self._with_account(
+            {'instance_id': instance_id, 'provider_type': provider_type}, account,
+        )
+        refusal = self._ovh_refusal(
+            tool_name, payload, account, self._ovh_service, any_account=True,
+        )
+        if refusal:
+            return refusal
 
         allowed, reason = self._guard.check_tool(tool_name)
         if not allowed:
             self._audit.log(tool_name, payload, '', False, reason)
             return f"Blocked: {reason}"
 
+        resolved = await self._ovh_target(tool_name, payload, instance_id, account)
+        if isinstance(resolved, str):
+            return resolved
+        ovh_account, native_id = resolved
+        service = (
+            self._ovh_service if ovh_account is None
+            else self._accounts.service('ovh', ovh_account)
+        )
+
         try:
-            await getattr(self._ovh_service, method)(instance_id, provider_type)
+            await getattr(service, method)(native_id, provider_type)
         except ValueError as exc:
             self._audit.log(
                 tool_name, payload, '', False, f"validation: {exc}",
@@ -2644,27 +3231,27 @@ class ServonautTools:
         return text
 
     async def ovh_start_instance(
-        self, instance_id: str, provider_type: str,
+        self, instance_id: str, provider_type: str, account: str = "",
     ) -> str:
         return await self._ovh_lifecycle(
             'ovh_start_instance', 'start_instance',
-            instance_id, provider_type, 'started',
+            instance_id, provider_type, 'started', account,
         )
 
     async def ovh_stop_instance(
-        self, instance_id: str, provider_type: str,
+        self, instance_id: str, provider_type: str, account: str = "",
     ) -> str:
         return await self._ovh_lifecycle(
             'ovh_stop_instance', 'stop_instance',
-            instance_id, provider_type, 'stop sent',
+            instance_id, provider_type, 'stop sent', account,
         )
 
     async def ovh_reboot_instance(
-        self, instance_id: str, provider_type: str,
+        self, instance_id: str, provider_type: str, account: str = "",
     ) -> str:
         return await self._ovh_lifecycle(
             'ovh_reboot_instance', 'reboot_instance',
-            instance_id, provider_type, 'reboot sent',
+            instance_id, provider_type, 'reboot sent', account,
         )
 
     # ------------------------------------------------------------------
@@ -2672,10 +3259,10 @@ class ServonautTools:
     # ------------------------------------------------------------------
 
     async def cloudwatch_list_log_groups(
-        self, prefix: str = "", region: str = ""
+        self, prefix: str = "", region: str = "", account: str = "",
     ) -> str:
         """List CloudWatch log groups, optionally filtered by name prefix."""
-        args = {'prefix': prefix, 'region': region}
+        args = self._with_account({'prefix': prefix, 'region': region}, account)
         allowed, reason = self._guard.check_tool('cloudwatch_list_log_groups')
         if not allowed:
             self._audit.log('cloudwatch_list_log_groups', args, '', False, reason)
@@ -2685,9 +3272,13 @@ class ServonautTools:
                 'cloudwatch_list_log_groups', args, '', False, 'service_unavailable',
             )
             return "Error: CloudWatch service is not available."
+        try:
+            cloudwatch = self._aws_part(account, 'cloudwatch', self._cloudwatch_service)
+        except UnknownAccountError as e:
+            return self._account_refused('cloudwatch_list_log_groups', args, e)
 
         try:
-            groups = await self._cloudwatch_service.list_log_groups(prefix, region)
+            groups = await cloudwatch.list_log_groups(prefix, region)
         except Exception as e:
             self._audit.log(
                 'cloudwatch_list_log_groups', args, '', False, f"api_error: {e}",
@@ -2719,7 +3310,7 @@ class ServonautTools:
         self, log_group: str, hours_back: int = 1,
         filter_pattern: str = "", region: str = "", max_events: int = 100,
         group_by: str = "", top_n: int = 0, summary_only: bool = False,
-        client_ip: str = "",
+        client_ip: str = "", account: str = "",
     ) -> str:
         """Get recent log events from a CloudWatch log group.
 
@@ -2735,13 +3326,13 @@ class ServonautTools:
         server-side. An empty result is reported as "0 matched filter X",
         never conflated with "the group is empty".
         """
-        args = {
+        args = self._with_account({
             'log_group': log_group, 'hours_back': hours_back,
             'filter_pattern': filter_pattern, 'region': region,
             'max_events': max_events, 'group_by': group_by,
             'top_n': top_n, 'summary_only': summary_only,
             'client_ip': client_ip,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('cloudwatch_get_log_events')
         if not allowed:
             self._audit.log('cloudwatch_get_log_events', args, '', False, reason)
@@ -2751,6 +3342,10 @@ class ServonautTools:
                 'cloudwatch_get_log_events', args, '', False, 'service_unavailable',
             )
             return "Error: CloudWatch service is not available."
+        try:
+            cloudwatch = self._aws_part(account, 'cloudwatch', self._cloudwatch_service)
+        except UnknownAccountError as e:
+            return self._account_refused('cloudwatch_get_log_events', args, e)
 
         group = (group_by or "").strip()
         if group and group not in ("clientIp", "status", "uri"):
@@ -2775,9 +3370,7 @@ class ServonautTools:
                 return f"Error: client_ip {client_ip!r} is not a valid IP address."
             effective_filter = '{ $.httpRequest.clientIp = "%s" }' % ip_arg
         else:
-            effective_filter = self._cloudwatch_service.normalize_filter_pattern(
-                raw_filter
-            )
+            effective_filter = cloudwatch.normalize_filter_pattern(raw_filter)
         filter_rewritten = bool(effective_filter) and effective_filter != raw_filter
 
         from datetime import datetime, timedelta
@@ -2785,7 +3378,7 @@ class ServonautTools:
         start_time = end_time - timedelta(hours=max(int(hours_back), 1))
 
         try:
-            events = await self._cloudwatch_service.get_log_events(
+            events = await cloudwatch.get_log_events(
                 log_group, start_time, end_time,
                 effective_filter, region, max_events,
             )
@@ -2812,7 +3405,7 @@ class ServonautTools:
         # --- aggregation mode --------------------------------------------
         if group:
             limit = top_n if top_n and top_n > 0 else 20
-            agg = self._cloudwatch_service.aggregate_events(events, group, limit)
+            agg = cloudwatch.aggregate_events(events, group, limit)
             sampled = len(events) >= max_events
             out = [
                 f"CloudWatch {log_group} (last {hours_back}h) — top {group} "
@@ -2872,7 +3465,7 @@ class ServonautTools:
     async def cloudwatch_top_ips(
         self, log_group: str, hours_back: int = 24,
         action_filter: str = "", region: str = "",
-        limit: int = 20, max_events: int = 0,
+        limit: int = 20, max_events: int = 0, account: str = "",
     ) -> str:
         """Rank the top client IPs seen in a CloudWatch log group.
 
@@ -2880,11 +3473,11 @@ class ServonautTools:
         WAF ``action``, returning per-IP allowed/blocked counts. Use this to
         spot abusive IPs before banning them with ``ip_ban_set``.
         """
-        args = {
+        args = self._with_account({
             'log_group': log_group, 'hours_back': hours_back,
             'action_filter': action_filter, 'region': region,
             'limit': limit, 'max_events': max_events,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('cloudwatch_top_ips')
         if not allowed:
             self._audit.log('cloudwatch_top_ips', args, '', False, reason)
@@ -2894,6 +3487,10 @@ class ServonautTools:
                 'cloudwatch_top_ips', args, '', False, 'service_unavailable',
             )
             return "Error: CloudWatch service is not available."
+        try:
+            cloudwatch = self._aws_part(account, 'cloudwatch', self._cloudwatch_service)
+        except UnknownAccountError as e:
+            return self._account_refused('cloudwatch_top_ips', args, e)
 
         action = (action_filter or "").strip().upper()
         if action and action not in ('ALLOW', 'BLOCK'):
@@ -2910,7 +3507,7 @@ class ServonautTools:
         start_time = end_time - timedelta(hours=max(int(hours_back), 1))
 
         try:
-            events = await self._cloudwatch_service.get_log_events(
+            events = await cloudwatch.get_log_events(
                 log_group, start_time, end_time, "", region, max_events,
             )
         except Exception as e:
@@ -2919,7 +3516,7 @@ class ServonautTools:
             )
             return f"Error fetching CloudWatch log events: {e}"
 
-        top = self._cloudwatch_service.extract_top_ips(
+        top = cloudwatch.extract_top_ips(
             events, limit, action or None,
         )
         if not top:
@@ -2951,7 +3548,7 @@ class ServonautTools:
     async def cloudwatch_insights(
         self, query: str, log_groups: Optional[List[str]] = None,
         log_group: str = "", hours_back: int = 1, region: str = "",
-        limit: int = 1000, timeout_seconds: int = 60,
+        limit: int = 1000, timeout_seconds: int = 60, account: str = "",
     ) -> str:
         """Run a CloudWatch Logs Insights query over one or more log groups.
 
@@ -2967,10 +3564,10 @@ class ServonautTools:
         if log_group:
             groups.append(log_group)
         groups = [g for g in (g.strip() for g in groups) if g]
-        args = {
+        args = self._with_account({
             'query': query, 'log_groups': groups, 'hours_back': hours_back,
             'region': region, 'limit': limit, 'timeout_seconds': timeout_seconds,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('cloudwatch_insights')
         if not allowed:
             self._audit.log('cloudwatch_insights', args, '', False, reason)
@@ -2980,6 +3577,10 @@ class ServonautTools:
                 'cloudwatch_insights', args, '', False, 'service_unavailable',
             )
             return "Error: CloudWatch service is not available."
+        try:
+            cloudwatch = self._aws_part(account, 'cloudwatch', self._cloudwatch_service)
+        except UnknownAccountError as e:
+            return self._account_refused('cloudwatch_insights', args, e)
         if not groups:
             self._audit.log('cloudwatch_insights', args, '', False, 'no_log_group')
             return "Error: provide a log_group or a non-empty log_groups list."
@@ -2992,7 +3593,7 @@ class ServonautTools:
         start_time = end_time - timedelta(hours=max(int(hours_back), 1))
 
         try:
-            res = await self._cloudwatch_service.run_insights_query(
+            res = await cloudwatch.run_insights_query(
                 groups, query, start_time, end_time, region,
                 max(1, int(limit)), max(5, int(timeout_seconds)),
             )
@@ -3105,6 +3706,12 @@ class ServonautTools:
         if not isinstance(params, dict):
             self._audit.log('aws_call', args, '', False, 'validation: bad_params')
             return "Error: params must be an object (mapping of boto3 arguments)."
+        if not _AWS_ACCOUNT_ID_RE.match((account or "").strip()):
+            try:
+                self._names_account('aws', account)
+            except UnknownAccountError as e:
+                if not self._is_role_alias(account):
+                    return self._account_refused('aws_call', args, e)
 
         is_read = op.startswith(_AWS_READ_PREFIXES)
         is_destructive = op.startswith(_AWS_DESTRUCTIVE_PREFIXES)
@@ -3233,16 +3840,62 @@ class ServonautTools:
                     "was confirmed. Re-run without confirm to get a fresh token.")
         return None  # valid → proceed to execute
 
+    def _is_role_alias(self, account: str) -> bool:
+        """True when *account* keys a control-plane role map (read or write)."""
+        aws_config = self._config_manager.get().aws
+        key = (account or "").strip()
+        return bool(key) and (
+            key in (aws_config.control_plane_role_arns or {})
+            or key in (aws_config.control_plane_mutate_role_arns or {})
+        )
+
+    def _aws_call_factory(self, account: str):
+        """The client factory and role-map key ``aws_call(account=...)`` uses.
+
+        A 12-digit id keeps selecting the control-plane role mapped to it;
+        with several AWS accounts it also selects the credentials of the
+        configured account with that id (the default account when none has
+        it). A label selects that account's credentials, plus the role
+        mapped to its id when roles are mapped per account. Any other key
+        of a role map (an alias) keeps selecting that role on the default
+        account, as it always did. Blocking (may call STS once per
+        account): runs in the worker thread.
+        """
+        account = (account or "").strip()
+        if _AWS_ACCOUNT_ID_RE.match(account):
+            if self._accounts is not None and self._accounts.is_multi('aws'):
+                ref = self._accounts.aws_account_for_id(account)
+                if ref is not None:
+                    return self._accounts.aws_client_factory(ref.label), account
+            return self._get_aws_factory(), account
+        try:
+            named = self._names_account('aws', account)
+        except UnknownAccountError:
+            if self._is_role_alias(account):
+                return self._get_aws_factory(), account
+            raise
+        if not named:
+            return self._get_aws_factory(), ""
+        ref = self._accounts.account('aws', account)
+        role_key = ""
+        aws_config = self._config_manager.get().aws
+        if not ref.primary and (
+            aws_config.control_plane_role_arns
+            or aws_config.control_plane_mutate_role_arns
+        ):
+            role_key = self._accounts.aws_context(ref.label).account_id()
+        return self._accounts.aws_client_factory(ref.label), role_key
+
     def _aws_call_sync(
         self, service: str, operation: str, params: Dict[str, Any],
         region: str, account: str, is_read: bool, max_items: int,
     ) -> Any:
         """Build the client (via factory) and invoke the boto3 operation."""
-        factory = self._get_aws_factory()
+        factory, role_key = self._aws_call_factory(account)
         # Write calls use the separate mutate role (or ambient creds) — never
         # the read-only control-plane role, which would only AccessDenied.
         client = factory.client(
-            service, region=region, account=account, mutate=not is_read,
+            service, region=region, account=role_key, mutate=not is_read,
         )
         method = getattr(client, operation, None)
         if method is None or not callable(method):
@@ -3282,14 +3935,14 @@ class ServonautTools:
     async def cloudtrail_lookup_events(
         self, region: str = "", hours_back: int = 0,
         event_name: str = "", username: str = "",
-        resource_type: str = "", max_results: int = 50,
+        resource_type: str = "", max_results: int = 50, account: str = "",
     ) -> str:
         """Look up AWS CloudTrail management events with optional filters."""
-        args = {
+        args = self._with_account({
             'region': region, 'hours_back': hours_back,
             'event_name': event_name, 'username': username,
             'resource_type': resource_type, 'max_results': max_results,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('cloudtrail_lookup_events')
         if not allowed:
             self._audit.log('cloudtrail_lookup_events', args, '', False, reason)
@@ -3299,6 +3952,10 @@ class ServonautTools:
                 'cloudtrail_lookup_events', args, '', False, 'service_unavailable',
             )
             return "Error: CloudTrail service is not available."
+        try:
+            cloudtrail = self._aws_part(account, 'cloudtrail', self._cloudtrail_service)
+        except UnknownAccountError as e:
+            return self._account_refused('cloudtrail_lookup_events', args, e)
 
         start_time = None
         if hours_back and int(hours_back) > 0:
@@ -3306,7 +3963,7 @@ class ServonautTools:
             start_time = datetime.utcnow() - timedelta(hours=int(hours_back))
 
         try:
-            events = await self._cloudtrail_service.lookup_events(
+            events = await cloudtrail.lookup_events(
                 region=region, start_time=start_time,
                 event_name=event_name, username=username,
                 resource_type=resource_type, max_results=max_results,
@@ -3350,30 +4007,69 @@ class ServonautTools:
     # IP ban tools (WAF / Security Group / NACL)
     # ------------------------------------------------------------------
 
-    async def ip_ban_list_configs(self) -> str:
+    def _ban_configs(self, account: Optional[str] = None) -> List[Any]:
+        """The IP-ban configs; only those acting in *account* unless it is None.
+
+        ``""`` means the default AWS account.
+        """
+        if account is None:
+            return list(self._ip_ban_service.get_configs())
+        return self._ip_ban_service.configs_for_account(account)
+
+    def _ban_config_mismatch(self, config_name: str, account: str) -> Optional[str]:
+        """Why *config_name* cannot be used for *account*, or None.
+
+        A ban config acts in the AWS account it names; an ``account``
+        argument only confirms that account, it never redirects the config.
+        """
+        if not account or self._ip_ban_service is None:
+            return None
+        config = next(
+            (c for c in self._ip_ban_service.get_configs()
+             if getattr(c, 'name', None) == config_name),
+            None,
+        )
+        if config is None:
+            return None  # the service reports the unknown config itself
+        if config in self._ip_ban_service.configs_for_account(account):
+            return None
+        return (
+            f"IP ban config {config_name!r} acts in AWS account "
+            f"{self._ip_ban_service.account_of(config)!r}, not {account!r}."
+        )
+
+    async def ip_ban_list_configs(self, account: str = "") -> str:
         """List the configured IP-ban targets (WAF IP sets, SGs, NACLs)."""
+        args = self._with_account({}, account)
         allowed, reason = self._guard.check_tool('ip_ban_list_configs')
         if not allowed:
-            self._audit.log('ip_ban_list_configs', {}, '', False, reason)
+            self._audit.log('ip_ban_list_configs', args, '', False, reason)
             return f"Blocked: {reason}"
         if self._ip_ban_service is None:
             self._audit.log(
-                'ip_ban_list_configs', {}, '', False, 'service_unavailable',
+                'ip_ban_list_configs', args, '', False, 'service_unavailable',
             )
             return "Error: IP ban service is not available."
+        try:
+            self._names_account('aws', account)
+        except UnknownAccountError as e:
+            return self._account_refused('ip_ban_list_configs', args, e)
 
-        configs = self._ip_ban_service.get_configs()
+        configs = self._ban_configs(account or None)
         if not configs:
-            self._audit.log('ip_ban_list_configs', {}, '0 configs', True)
+            self._audit.log('ip_ban_list_configs', args, '0 configs', True)
             return (
                 "No IP ban configurations defined. Add one in Settings "
                 "(WAF IP set, Security Group, or NACL) before banning."
             )
 
+        # The account each config acts in matters once AWS has several.
+        show_account = self._accounts is not None and self._accounts.is_multi('aws')
         lines = [
             f"IP ban configurations ({len(configs)} total):",
-            f"  {'Name':<24} {'Method':<16} {'Region':<14} Target",
-            '  ' + '-' * 80,
+            f"  {'Name':<24} {'Method':<16} {'Region':<14} "
+            + (f"{'Account':<16} " if show_account else "") + "Target",
+            '  ' + '-' * (97 if show_account else 80),
         ]
         for c in configs:
             method = getattr(c, 'method', '')
@@ -3385,20 +4081,24 @@ class ServonautTools:
                 target = getattr(c, 'nacl_id', '')
             else:
                 target = ''
+            acts_in = (
+                f"{self._ip_ban_service.account_of(c)[:16]:<16} "
+                if show_account else ""
+            )
             lines.append(
                 f"  {str(getattr(c, 'name', ''))[:24]:<24} "
                 f"{str(method)[:16]:<16} "
                 f"{str(getattr(c, 'region', '') or '-')[:14]:<14} "
-                f"{target}"
+                f"{acts_in}{target}"
             )
 
         result = '\n'.join(lines)
-        self._audit.log('ip_ban_list_configs', {}, result, True)
+        self._audit.log('ip_ban_list_configs', args, result, True)
         return result
 
-    async def ip_ban_list_banned(self, config_name: str) -> str:
+    async def ip_ban_list_banned(self, config_name: str, account: str = "") -> str:
         """List the IP addresses currently banned under a named config."""
-        args = {'config_name': config_name}
+        args = self._with_account({'config_name': config_name}, account)
         allowed, reason = self._guard.check_tool('ip_ban_list_banned')
         if not allowed:
             self._audit.log('ip_ban_list_banned', args, '', False, reason)
@@ -3408,6 +4108,16 @@ class ServonautTools:
                 'ip_ban_list_banned', args, '', False, 'service_unavailable',
             )
             return "Error: IP ban service is not available."
+        try:
+            self._names_account('aws', account)
+        except UnknownAccountError as e:
+            return self._account_refused('ip_ban_list_banned', args, e)
+        mismatch = self._ban_config_mismatch(config_name, account)
+        if mismatch:
+            self._audit.log(
+                'ip_ban_list_banned', args, '', False, 'validation: account_mismatch',
+            )
+            return f"Error: {mismatch}"
 
         try:
             banned = await self._ip_ban_service.list_banned(config_name)
@@ -3432,55 +4142,12 @@ class ServonautTools:
 
     def _resolve_connection(self, instance: Dict) -> Dict:
         """Resolve SSH connection parameters for an instance."""
-        profile = self._connection_service.resolve_profile(instance)
-        host = self._connection_service.get_target_host(instance, profile)
-        proxy_args = self._connection_service.get_proxy_args(profile) if profile else []
-        extra_options = self._connection_service.get_extra_options(instance, profile)
+        from servonaut.services.connection_service import server_connection
 
-        if instance.get('is_ovh'):
-            options = self._connection_service.resolve_ovh_connection(instance)
-            username = options['username']
-            key_path = options['key_path']
-            port = None
-        elif instance.get('is_hetzner'):
-            # Hetzner cloud-init does not seed a non-root user on the
-            # standard images; fall back to the per-provider default
-            # configured by the operator (typically ``root``).
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            # The instance dict carries the operator-configured default
-            # SSH key (resolved via $ENV_VAR/file: at probe time) so the
-            # local SSH command can authenticate without re-querying
-            # config here.
-            key_path = instance.get('ssh_key') or None
-            port = None
-        elif instance.get('is_custom'):
-            username = (
-                instance.get('username')
-                or self._config_manager.get().default_username
-                or 'root'
-            )
-            key_path = instance.get('ssh_key') or instance.get('key_name') or None
-            port = instance.get('port') or None
-        else:
-            username = (
-                (profile.username if profile else None)
-                or self._config_manager.get().default_username
-            )
-            instance_id = instance.get('id', '')
-            key_path = self._ssh_service.get_key_path(instance_id)
-            if not key_path and instance.get('key_name'):
-                key_path = self._ssh_service.discover_key(instance['key_name'])
-            port = None
-
-        return {
-            'host': host, 'username': username, 'key_path': key_path,
-            'proxy_args': proxy_args, 'profile': profile, 'port': port,
-            'extra_options': extra_options,
-        }
+        return server_connection(
+            instance, self._connection_service, self._ssh_service,
+            self._config_manager.get().default_username,
+        )
 
     async def _resolve_connection_with_vault(self, instance: Dict):
         """Resolve connection params, preferring a stored Bitwarden ref.
@@ -3593,66 +4260,30 @@ class ServonautTools:
         return conn, _cleanup
 
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
-        """Find an instance without querying providers after a match is known.
+        """Find an instance of any provider account, or a custom server.
 
-        AWS keeps precedence for ambiguous names. An explicit ``custom-*`` ID
-        is resolved locally before any cloud API call, and a custom-server name
-        is returned immediately after the AWS check. This prevents a degraded
-        OVH or Hetzner API from delaying an unrelated custom-server SSH command.
+        Accepts an id, a name, or an ``<account>/<name>`` reference. A
+        degraded provider never delays an unrelated lookup: an explicit
+        ``custom-*`` id resolves locally before any cloud API call, and once
+        a name has matched, the remaining providers are checked in their
+        cached rows instead of being fetched.
 
         An empty or whitespace-only needle resolves to nothing: unnamed
         instances carry an empty name, and "" must never select one of them.
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
+            AccountUnavailableError: It is qualified with an account that
+                cannot connect.
         """
-        if not (instance_id or "").strip():
-            return None
-        instance_id_lower = instance_id.lower()
-
-        def _match(instances: List[Dict]) -> Optional[Dict]:
-            for instance in instances:
-                candidate_id = str(instance.get('id', ''))
-                candidate_name = str(instance.get('name', ''))
-                if (
-                    candidate_id.lower() == instance_id_lower
-                    or candidate_name.lower() == instance_id_lower
-                ):
-                    return instance
-            return None
-
-        custom_instances = self._custom_server_service.list_as_instances()
-        if instance_id_lower.startswith('custom-'):
-            match = _match(custom_instances)
-            if match is not None:
-                return match
-
-        aws_instances = await self._aws_service.fetch_instances_cached()
-        match = _match(aws_instances)
-        if match is not None:
-            return match
-
-        match = _match(custom_instances)
-        if match is not None:
-            return match
-
-        if self._ovh_service is not None:
-            ovh_instances = await self._ovh_service.fetch_instances_cached()
-            match = _match(ovh_instances)
-            if match is not None:
-                return match
-
-        if self._hetzner_service is not None:
-            hetzner_instances = await self._hetzner_service.fetch_instances_cached()
-            match = _match(hetzner_instances)
-            if match is not None:
-                return match
-
-        return None
+        return await self._directory.find(instance_id)
 
     def _format_instances(self, instances: List[Dict]) -> str:
         lines = [f"{'Name':<30} {'ID':<20} {'State':<10} {'Public IP':<16} {'Region':<14}"]
         lines.append('-' * 90)
         for i in instances:
             lines.append(
-                f"{(i.get('name') or ''):<30} "
+                f"{display_name(i):<30} "
                 f"{i.get('id', ''):<20} "
                 f"{i.get('state', ''):<10} "
                 f"{(i.get('public_ip') or '-'):<16} "
@@ -3676,7 +4307,7 @@ class ServonautTools:
 
     async def _aws_ec2_lifecycle(
         self, tool_name: str, method: str,
-        instance_id: str, region: str, verb: str,
+        instance_id: str, region: str, verb: str, account: str = "",
     ) -> str:
         """Shared handler for AWS EC2 start/stop/reboot/terminate.
 
@@ -3685,7 +4316,9 @@ class ServonautTools:
         instance_id and region so post-mortem queries know which endpoint
         was targeted.
         """
-        payload = {'instance_id': instance_id, 'region': region}
+        payload = self._with_account(
+            {'instance_id': instance_id, 'region': region}, account,
+        )
         if self._aws_service is None:
             return self._aws_unavailable(tool_name, payload)
 
@@ -3694,8 +4327,24 @@ class ServonautTools:
             self._audit.log(tool_name, payload, '', False, reason)
             return f"Blocked: {reason}"
 
+        # The instance's account: the one asked for, an "<account>/"
+        # qualifier, or the account whose inventory lists it.
         try:
-            await getattr(self._aws_service, method)(instance_id, region)
+            target = await self._provider_target('aws', instance_id, account)
+        except UnknownAccountError as exc:
+            return self._account_refused(tool_name, payload, exc)
+        except AmbiguousInstanceError as exc:
+            return self._ambiguous(tool_name, payload, exc)
+        except TargetNotFoundError as exc:
+            return self._target_not_found(tool_name, payload, exc)
+        service = self._aws_service
+        if target is not None:
+            self._target_args('aws', payload, account, target)
+            service = self._accounts.service('aws', target.account.label)
+            instance_id = target.native_id
+
+        try:
+            await getattr(service, method)(instance_id, region)
         except ValueError as exc:
             self._audit.log(tool_name, payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3707,29 +4356,37 @@ class ServonautTools:
         self._audit.log(tool_name, payload, text, True)
         return text
 
-    async def aws_start_instance(self, instance_id: str, region: str) -> str:
+    async def aws_start_instance(
+        self, instance_id: str, region: str, account: str = "",
+    ) -> str:
         """Start a stopped AWS EC2 instance."""
         return await self._aws_ec2_lifecycle(
-            'aws_start_instance', 'start_instance', instance_id, region, 'start sent',
+            'aws_start_instance', 'start_instance', instance_id, region, 'start sent', account,
         )
 
-    async def aws_stop_instance(self, instance_id: str, region: str) -> str:
+    async def aws_stop_instance(
+        self, instance_id: str, region: str, account: str = "",
+    ) -> str:
         """Stop a running AWS EC2 instance."""
         return await self._aws_ec2_lifecycle(
-            'aws_stop_instance', 'stop_instance', instance_id, region, 'stop sent',
+            'aws_stop_instance', 'stop_instance', instance_id, region, 'stop sent', account,
         )
 
-    async def aws_reboot_instance(self, instance_id: str, region: str) -> str:
+    async def aws_reboot_instance(
+        self, instance_id: str, region: str, account: str = "",
+    ) -> str:
         """Reboot a running AWS EC2 instance."""
         return await self._aws_ec2_lifecycle(
-            'aws_reboot_instance', 'reboot_instance', instance_id, region, 'reboot sent',
+            'aws_reboot_instance', 'reboot_instance', instance_id, region, 'reboot sent', account,
         )
 
-    async def aws_terminate_instance(self, instance_id: str, region: str) -> str:
+    async def aws_terminate_instance(
+        self, instance_id: str, region: str, account: str = "",
+    ) -> str:
         """Permanently terminate an AWS EC2 instance."""
         return await self._aws_ec2_lifecycle(
             'aws_terminate_instance', 'terminate_instance',
-            instance_id, region, 'terminate sent — irreversible',
+            instance_id, region, 'terminate sent — irreversible', account,
         )
 
     async def aws_run_instances(
@@ -3742,14 +4399,15 @@ class ServonautTools:
         security_group_ids: List[str],
         name_tag: str,
         count: int = 1,
+        account: str = "",
     ) -> str:
         """Launch one or more new AWS EC2 instances."""
-        payload = {
+        payload = self._with_account({
             'region': region, 'ami_id': ami_id, 'instance_type': instance_type,
             'key_name': key_name, 'subnet_id': subnet_id,
             'security_group_ids': security_group_ids, 'name_tag': name_tag,
             'count': count,
-        }
+        }, account)
         if self._aws_service is None:
             return self._aws_unavailable('aws_run_instances', payload)
 
@@ -3757,9 +4415,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_run_instances', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_run_instances', payload, exc)
 
         try:
-            instances = await self._aws_service.run_instances(
+            instances = await ec2.run_instances(
                 region=region,
                 ami_id=ami_id,
                 instance_type=instance_type,
@@ -3797,9 +4459,13 @@ class ServonautTools:
     # AWS EC2 describe helpers — read-only catalogue queries
     # ------------------------------------------------------------------
 
-    async def aws_list_regions(self, bootstrap_region: str = 'us-east-1') -> str:
+    async def aws_list_regions(
+        self, bootstrap_region: str = 'us-east-1', account: str = "",
+    ) -> str:
         """List all AWS regions enabled on the account."""
-        payload: Dict[str, Any] = {'bootstrap_region': bootstrap_region}
+        payload: Dict[str, Any] = self._with_account(
+            {'bootstrap_region': bootstrap_region}, account,
+        )
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_regions', payload)
 
@@ -3807,9 +4473,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_regions', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_regions', payload, exc)
 
         try:
-            regions = await self._aws_service.list_regions(
+            regions = await ec2.list_regions(
                 bootstrap_region or 'us-east-1',
             )
         except Exception as exc:
@@ -3833,12 +4503,13 @@ class ServonautTools:
         name_filter: str = '',
         owners: Optional[List[str]] = None,
         max_results: int = 50,
+        account: str = "",
     ) -> str:
         """List AMIs in the given region, sorted newest-first."""
-        payload: Dict[str, Any] = {
+        payload: Dict[str, Any] = self._with_account({
             'region': region, 'name_filter': name_filter,
             'owners': owners or ['amazon'], 'max_results': max_results,
-        }
+        }, account)
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_amis', payload)
 
@@ -3846,9 +4517,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_amis', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_amis', payload, exc)
 
         try:
-            amis = await self._aws_service.list_amis(
+            amis = await ec2.list_amis(
                 region,
                 name_filter,
                 tuple(owners) if owners else ('amazon',),
@@ -3879,10 +4554,12 @@ class ServonautTools:
         return result
 
     async def aws_list_instance_types(
-        self, region: str, max_results: int = 100,
+        self, region: str, max_results: int = 100, account: str = "",
     ) -> str:
         """List EC2 instance types available in the given region."""
-        payload: Dict[str, Any] = {'region': region, 'max_results': max_results}
+        payload: Dict[str, Any] = self._with_account(
+            {'region': region, 'max_results': max_results}, account,
+        )
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_instance_types', payload)
 
@@ -3890,9 +4567,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_instance_types', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_instance_types', payload, exc)
 
         try:
-            types = await self._aws_service.list_instance_types(region, max_results)
+            types = await ec2.list_instance_types(region, max_results)
         except ValueError as exc:
             self._audit.log('aws_list_instance_types', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3915,9 +4596,9 @@ class ServonautTools:
         self._audit.log('aws_list_instance_types', payload, result, True)
         return result
 
-    async def aws_list_key_pairs(self, region: str) -> str:
+    async def aws_list_key_pairs(self, region: str, account: str = "") -> str:
         """List EC2 key pairs registered in the given region."""
-        payload: Dict[str, Any] = {'region': region}
+        payload: Dict[str, Any] = self._with_account({'region': region}, account)
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_key_pairs', payload)
 
@@ -3925,9 +4606,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_key_pairs', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_key_pairs', payload, exc)
 
         try:
-            keys = await self._aws_service.list_key_pairs(region)
+            keys = await ec2.list_key_pairs(region)
         except ValueError as exc:
             self._audit.log('aws_list_key_pairs', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3950,9 +4635,9 @@ class ServonautTools:
         self._audit.log('aws_list_key_pairs', payload, result, True)
         return result
 
-    async def aws_list_subnets(self, region: str) -> str:
+    async def aws_list_subnets(self, region: str, account: str = "") -> str:
         """List VPC subnets in the given region."""
-        payload: Dict[str, Any] = {'region': region}
+        payload: Dict[str, Any] = self._with_account({'region': region}, account)
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_subnets', payload)
 
@@ -3960,9 +4645,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_subnets', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_subnets', payload, exc)
 
         try:
-            subnets = await self._aws_service.list_subnets(region)
+            subnets = await ec2.list_subnets(region)
         except ValueError as exc:
             self._audit.log('aws_list_subnets', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -3987,9 +4676,9 @@ class ServonautTools:
         self._audit.log('aws_list_subnets', payload, result, True)
         return result
 
-    async def aws_list_security_groups(self, region: str) -> str:
+    async def aws_list_security_groups(self, region: str, account: str = "") -> str:
         """List EC2 security groups in the given region."""
-        payload: Dict[str, Any] = {'region': region}
+        payload: Dict[str, Any] = self._with_account({'region': region}, account)
         if self._aws_service is None:
             return self._aws_unavailable('aws_list_security_groups', payload)
 
@@ -3997,9 +4686,13 @@ class ServonautTools:
         if not allowed:
             self._audit.log('aws_list_security_groups', payload, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            ec2 = self._account_service('aws', account, self._aws_service)
+        except UnknownAccountError as exc:
+            return self._account_refused('aws_list_security_groups', payload, exc)
 
         try:
-            groups = await self._aws_service.list_security_groups(region)
+            groups = await ec2.list_security_groups(region)
         except ValueError as exc:
             self._audit.log('aws_list_security_groups', payload, '', False, f"validation: {exc}")
             return f"Error: {exc}"
@@ -4051,27 +4744,44 @@ class ServonautTools:
 
     def _validate_s3_provider(
         self, provider: str, tool_name: str, payload: Dict[str, Any],
+        account: str = "",
     ):
         """Validate the provider string and check service availability.
+
+        *account* picks one of the provider's accounts (default account when
+        empty); it is added to *payload*, so every audit row of the call
+        names it.
 
         Returns:
             (svc, None) on success, or (None, error_string) on failure.
             The audit row is already logged on failure.
         """
+        self._with_account(payload, account)
         if provider not in _S3_PROVIDERS:
             providers_list = ', '.join(f"'{p}'" for p in sorted(_S3_PROVIDERS))
             msg = f"Error: provider must be one of {providers_list}; got {provider!r}."
             self._audit.log(tool_name, payload, '', False, 'validation: invalid_provider')
             return None, msg
-        svc = self._get_object_storage(provider)
+        try:
+            if account and self._accounts is not None:
+                # Object storage has keys of its own: an account's storage
+                # works even without usable compute credentials.
+                svc = self._accounts.object_storage(provider, account)
+            else:
+                self._names_account(provider, account)
+                svc = self._get_object_storage(provider)
+        except UnknownAccountError as exc:
+            return None, self._account_refused(tool_name, payload, exc)
         if svc is None:
             return None, self._s3_unavailable(tool_name, provider, payload)
         return svc, None
 
-    async def s3_list_buckets(self, provider: str) -> str:
+    async def s3_list_buckets(self, provider: str, account: str = '') -> str:
         """List S3 buckets for the given provider."""
         payload: Dict[str, Any] = {'provider': provider}
-        svc, err = self._validate_s3_provider(provider, 's3_list_buckets', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_list_buckets', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4107,13 +4817,16 @@ class ServonautTools:
         prefix: str = '',
         delimiter: str = '/',
         region: str = '',
+        account: str = '',
     ) -> str:
         """List objects and virtual-folder prefixes in an S3 bucket."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
             'prefix': prefix, 'delimiter': delimiter, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_list_objects', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_list_objects', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4144,13 +4857,16 @@ class ServonautTools:
     async def s3_download_object(
         self, provider: str, bucket: str, key: str, local_path: str,
         region: str = '',
+        account: str = '',
     ) -> str:
         """Download an S3 object to a local file."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
             'key': key, 'local_path': local_path, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_download_object', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_download_object', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4176,12 +4892,15 @@ class ServonautTools:
 
     async def s3_create_bucket(
         self, provider: str, bucket: str, region: str = "",
+        account: str = '',
     ) -> str:
         """Create a new S3 bucket on the given provider."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_create_bucket', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_create_bucket', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4213,12 +4932,15 @@ class ServonautTools:
 
     async def s3_delete_bucket(
         self, provider: str, bucket: str, region: str = '',
+        account: str = '',
     ) -> str:
         """Delete an empty S3 bucket."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_delete_bucket', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_delete_bucket', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4243,13 +4965,16 @@ class ServonautTools:
     async def s3_upload_object(
         self, provider: str, bucket: str, key: str, local_path: str,
         region: str = '',
+        account: str = '',
     ) -> str:
         """Upload a local file to an S3 bucket."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket,
             'key': key, 'local_path': local_path, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_upload_object', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_upload_object', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4280,12 +5005,15 @@ class ServonautTools:
 
     async def s3_delete_object(
         self, provider: str, bucket: str, key: str, region: str = '',
+        account: str = '',
     ) -> str:
         """Delete a single object from S3."""
         payload: Dict[str, Any] = {
             'provider': provider, 'bucket': bucket, 'key': key, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_delete_object', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_delete_object', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4315,13 +5043,16 @@ class ServonautTools:
         dst_bucket: str,
         dst_key: str,
         region: str = '',
+        account: str = '',
     ) -> str:
         """Server-side copy of an S3 object within the same provider."""
         payload: Dict[str, Any] = {
             'provider': provider, 'src_bucket': src_bucket, 'src_key': src_key,
             'dst_bucket': dst_bucket, 'dst_key': dst_key, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_copy_object', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_copy_object', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4358,6 +5089,7 @@ class ServonautTools:
         dst_key: str,
         region: str = '',
         src_region: str = '',
+        account: str = '',
     ) -> str:
         """Move an S3 object (server-side copy then delete source)."""
         payload: Dict[str, Any] = {
@@ -4365,7 +5097,9 @@ class ServonautTools:
             'dst_bucket': dst_bucket, 'dst_key': dst_key,
             'region': region, 'src_region': src_region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_move_object', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_move_object', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4402,6 +5136,7 @@ class ServonautTools:
         key: str,
         expires_in: int = 3600,
         region: str = '',
+        account: str = '',
     ) -> str:
         """Generate a time-limited pre-signed URL granting read access to an S3 object.
 
@@ -4415,7 +5150,9 @@ class ServonautTools:
             'provider': provider, 'bucket': bucket,
             'key': key, 'expires_in': expires_in, 'region': region,
         }
-        svc, err = self._validate_s3_provider(provider, 's3_generate_presigned_url', payload)
+        svc, err = self._validate_s3_provider(
+            provider, 's3_generate_presigned_url', payload, account,
+        )
         if err is not None:
             return err
 
@@ -4496,18 +5233,8 @@ class ServonautTools:
         )
 
     async def _gather_all_instances(self) -> List[Dict]:
-        """Merge instances across every wired provider (AWS + custom + OVH + Hetzner)."""
-        aws_instances = await self._aws_service.fetch_instances_cached()
-        custom_instances = self._custom_server_service.list_as_instances()
-        ovh_instances = (
-            await self._ovh_service.fetch_instances_cached()
-            if self._ovh_service is not None else []
-        )
-        hetzner_instances = (
-            await self._hetzner_service.fetch_instances_cached()
-            if self._hetzner_service is not None else []
-        )
-        return aws_instances + custom_instances + ovh_instances + hetzner_instances
+        """Merge instances across every provider account (AWS + custom + OVH + Hetzner)."""
+        return await self._directory.all_instances()
 
     async def web_traffic_summary(
         self, instance_id: str, log_path: str = "",
@@ -4544,10 +5271,11 @@ class ServonautTools:
                 )
                 return "validation: hours_back must be an integer (1-168)"
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('web_traffic_summary', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'web_traffic_summary', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         n = max(100, min(int(lines or 10000), 200000))
         top = max(1, min(int(top_n or 15), 100))
@@ -4634,6 +5362,7 @@ class ServonautTools:
 
     async def fleet_health_snapshot(
         self, region: str = "", running_only: bool = True, timeout: int = 15,
+        account: str = "",
     ) -> str:
         """Triage the whole fleet in one table: load, CPU, mem, FPM, web stack.
 
@@ -4641,13 +5370,22 @@ class ServonautTools:
         load / saturated php-fpm pool) without SSH'ing into each one by hand.
         Unreachable hosts are listed separately rather than failing the call.
         """
-        args = {'region': region, 'running_only': running_only, 'timeout': timeout}
+        args = self._with_account(
+            {'region': region, 'running_only': running_only, 'timeout': timeout},
+            account,
+        )
         allowed, reason = self._guard.check_tool('fleet_health_snapshot')
         if not allowed:
             self._audit.log('fleet_health_snapshot', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        instances = await self._gather_all_instances()
+        if account:
+            try:
+                instances = await self._account_rows(account)
+            except UnknownAccountError as e:
+                return self._account_refused('fleet_health_snapshot', args, e)
+        else:
+            instances = await self._gather_all_instances()
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if running_only:
@@ -4762,10 +5500,9 @@ class ServonautTools:
         stored under its own label). Omitted + a single DB → that one; omitted
         + several → an error listing the sites to name.
         """
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(tool_name, args, '', False, 'instance_not_found')
-            return None, None, None, f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(tool_name, args, instance_id)
+        if error is not None:
+            return None, None, None, error
 
         config = self._config_manager.get()
         inst_id, inst_name = instance.get('id', ''), instance.get('name', '')
@@ -5125,10 +5862,11 @@ class ServonautTools:
             self._audit.log('describe_ingress_path', args, '', False, reason)
             return f"Blocked: {reason}"
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('describe_ingress_path', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'describe_ingress_path', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         if instance.get('is_custom') or instance.get('is_ovh') or instance.get('is_hetzner'):
             self._audit.log('describe_ingress_path', args, '', False, 'not_aws')
@@ -5145,9 +5883,9 @@ class ServonautTools:
             IngressPathService, format_ingress_path,
         )
         try:
-            topo = await IngressPathService().describe(
-                aws_id, private_ip, eff_region,
-            )
+            # The ALB/WAF walk runs in the account the instance belongs to.
+            ingress = IngressPathService(self._aws_context_for(instance))
+            topo = await ingress.describe(aws_id, private_ip, eff_region)
         except Exception as e:  # noqa: BLE001
             self._audit.log('describe_ingress_path', args, '', False, f"aws_error: {e}")
             return f"Error walking ingress path: {e}"
@@ -5164,17 +5902,69 @@ class ServonautTools:
     # Incident-response tools (Group C): WAF mitigation (dangerous tier)
     # ------------------------------------------------------------------
 
-    async def _resolve_webacl(self, target: str, region: str = "") -> Dict[str, Any]:
+    async def _resolve_webacl(
+        self, target: str, region: str = "", account: str = "",
+    ) -> Dict[str, Any]:
         """Resolve a WebACL from a WebACL ARN, an ALB ARN, or an instance.
 
         Thin wrapper over the shared :func:`resolve_webacl` (in
         ``waf_management_service``) so the instance→ALB→WebACL walk has one
         implementation, reused by the ``rate_limit`` remediation executor.
+
+        An ARN is looked up in *account* (with several AWS accounts and no
+        *account*, in the configured account the ARN names); an instance in
+        the account it belongs to. When a registry is bound and the site's
+        account is known, the result carries that ``account`` label, so the
+        WebACL (or a ban config of that account) is changed with the right
+        credentials. An instance reference that names several servers
+        returns ``error`` with ``ambiguous`` set.
         """
         from servonaut.services.waf_management_service import resolve_webacl
-        return await resolve_webacl(
-            target, region, find_instance=self._find_instance,
-        )
+        label = account or await self._arn_account(target)
+        used = {'account': label, 'known': bool(label)}
+
+        def _account_for(instance: Dict[str, Any]):
+            used['account'] = instance.get('account') or ''
+            used['known'] = True
+            return self._aws_context_for(instance)
+
+        try:
+            acl = await resolve_webacl(
+                target, region, find_instance=self._find_instance,
+                account=self._aws_context(label), account_for=_account_for,
+            )
+        except AmbiguousInstanceError as exc:
+            return {"error": str(exc), "ambiguous": True}
+        except UnknownAccountError as exc:
+            return {"error": str(exc)}
+        if self._accounts is not None and used['known']:
+            acl["account"] = used['account']
+        return acl
+
+    async def _arn_account(self, target: str) -> str:
+        """The configured AWS account an ARN names ("" = the default account).
+
+        Only looked up when AWS has several accounts: the id lookup may call
+        STS once per account.
+        """
+        if self._accounts is None or not self._accounts.is_multi('aws'):
+            return ""
+        parts = (target or "").split(":")
+        if len(parts) < 5 or parts[0] != "arn" or not _AWS_ACCOUNT_ID_RE.match(parts[4]):
+            return ""
+        ref = await asyncio.to_thread(self._accounts.aws_account_for_id, parts[4])
+        return ref.label if ref is not None else ""
+
+    def _webacl_refused(self, tool_name: str, args: Dict[str, Any], acl: Dict) -> str:
+        """Audit row + error for a WebACL that could not be resolved."""
+        reason = 'ambiguous_instance' if acl.get("ambiguous") else f"webacl: {acl['error']}"
+        self._audit.log(tool_name, args, '', False, reason)
+        return f"Error: {acl['error']}"
+
+    def _waf_service(self, acl: Dict[str, Any]):
+        """A WAF service acting in the account *acl* was resolved in."""
+        from servonaut.services.waf_management_service import WAFManagementService
+        return WAFManagementService(self._aws_context(acl.get("account", "")))
 
     def _collect_ban_targets(self, ip_address, cidr, ip_addresses) -> List[str]:
         """Union ip_address + cidr + ip_addresses[], deduped, order-preserving."""
@@ -5190,7 +5980,7 @@ class ServonautTools:
     async def ip_ban_set(
         self, ip_address: str = "", config_name: str = "", action: str = "ban",
         ip_addresses: Optional[List[str]] = None, cidr: str = "",
-        site: str = "", region: str = "",
+        site: str = "", region: str = "", account: str = "",
     ) -> str:
         """Ban/unban IP(s) or CIDR(s) via a named config OR a site's WebACL.
 
@@ -5200,14 +5990,18 @@ class ServonautTools:
         WebACL fronting it — so you can ban into the WebACL that actually fronts
         the box without a pre-defined config. Returns an applied/failed split.
         """
-        args = {
+        args = self._with_account({
             'ip_address': ip_address, 'config_name': config_name, 'action': action,
             'ip_addresses': ip_addresses, 'cidr': cidr, 'site': site, 'region': region,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('ip_ban_set')
         if not allowed:
             self._audit.log('ip_ban_set', args, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            self._names_account('aws', account)
+        except UnknownAccountError as e:
+            return self._account_refused('ip_ban_set', args, e)
 
         action_norm = (action or "").strip().lower()
         if action_norm not in ('ban', 'unban'):
@@ -5221,7 +6015,9 @@ class ServonautTools:
 
         # --- site path: resolve the WebACL fronting the site/instance ---
         if site and not config_name:
-            return await self._ip_ban_via_site(site, targets, action_norm, region, args)
+            return await self._ip_ban_via_site(
+                site, targets, action_norm, region, args, account,
+            )
 
         # --- named-config path (existing behaviour, now CIDR + bulk aware) ---
         if not config_name:
@@ -5230,6 +6026,10 @@ class ServonautTools:
         if self._ip_ban_service is None:
             self._audit.log('ip_ban_set', args, '', False, 'service_unavailable')
             return "Error: IP ban service is not available."
+        mismatch = self._ban_config_mismatch(config_name, account)
+        if mismatch:
+            self._audit.log('ip_ban_set', args, '', False, 'validation: account_mismatch')
+            return f"Error: {mismatch}"
 
         applied: List[str] = []
         failed: List[Dict[str, str]] = []
@@ -5256,14 +6056,12 @@ class ServonautTools:
 
     async def _ip_ban_via_site(
         self, site: str, targets: List[str], action_norm: str,
-        region: str, args: Dict,
+        region: str, args: Dict, account: str = "",
     ) -> str:
-        acl = await self._resolve_webacl(site, region)
+        acl = await self._resolve_webacl(site, region, account)
         if acl.get("error"):
-            self._audit.log('ip_ban_set', args, '', False, f"webacl: {acl['error']}")
-            return f"Error: {acl['error']}"
-        from servonaut.services.waf_management_service import WAFManagementService
-        res = await WAFManagementService().add_ip_to_block_ipset(
+            return self._webacl_refused('ip_ban_set', args, acl)
+        res = await self._waf_service(acl).add_ip_to_block_ipset(
             acl["name"], acl["id"], acl["scope"], acl["region"],
             cidrs=targets, remove=(action_norm == 'unban'),
         )
@@ -5300,7 +6098,7 @@ class ServonautTools:
     async def waf_rate_rule_set(
         self, site: str, rule_name: str = "servonaut-rate", limit: int = 2000,
         uri_scope: str = "", action: str = "block", remove: bool = False,
-        region: str = "",
+        region: str = "", account: str = "",
     ) -> str:
         """Create/attach (or remove) a WAF rate-based rule on a site's WebACL.
 
@@ -5309,27 +6107,29 @@ class ServonautTools:
         restricts the rule to a URI path prefix (e.g. ``/``). This is the durable
         fix for a flood — applied reversibly (``remove=true`` undoes it).
         """
-        args = {
+        args = self._with_account({
             'site': site, 'rule_name': rule_name, 'limit': limit,
             'uri_scope': uri_scope, 'action': action, 'remove': remove,
             'region': region,
-        }
+        }, account)
         allowed, reason = self._guard.check_tool('waf_rate_rule_set')
         if not allowed:
             self._audit.log('waf_rate_rule_set', args, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            self._names_account('aws', account)
+        except UnknownAccountError as e:
+            return self._account_refused('waf_rate_rule_set', args, e)
         act = (action or "block").strip().lower()
         if act not in ('block', 'count'):
             self._audit.log('waf_rate_rule_set', args, '', False, 'bad_action')
             return f"Error: action must be 'block' or 'count', got {action!r}."
 
-        acl = await self._resolve_webacl(site, region)
+        acl = await self._resolve_webacl(site, region, account)
         if acl.get("error"):
-            self._audit.log('waf_rate_rule_set', args, '', False, f"webacl: {acl['error']}")
-            return f"Error: {acl['error']}"
+            return self._webacl_refused('waf_rate_rule_set', args, acl)
 
-        from servonaut.services.waf_management_service import WAFManagementService
-        res = await WAFManagementService().set_rate_rule(
+        res = await self._waf_service(acl).set_rate_rule(
             acl["name"], acl["id"], acl["scope"], acl["region"],
             rule_name=rule_name, limit=int(limit), uri_scope=uri_scope,
             action=act, remove=remove,
@@ -5382,6 +6182,7 @@ class ServonautTools:
 
     async def block_ip(
         self, ip: str, site: str = "", action: str = "block", region: str = "",
+        account: str = "",
     ) -> str:
         """Block (or unblock) an IP/CIDR at the layer that actually works.
 
@@ -5391,11 +6192,17 @@ class ServonautTools:
         recommends the host layer rather than silently editing the firewall.
         Always reversible. ``action`` is ``block`` or ``unblock``.
         """
-        args = {'ip': ip, 'site': site, 'action': action, 'region': region}
+        args = self._with_account(
+            {'ip': ip, 'site': site, 'action': action, 'region': region}, account,
+        )
         allowed, reason = self._guard.check_tool('block_ip')
         if not allowed:
             self._audit.log('block_ip', args, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            self._names_account('aws', account)
+        except UnknownAccountError as e:
+            return self._account_refused('block_ip', args, e)
         act = (action or "block").strip().lower()
         if act not in ('block', 'unblock'):
             self._audit.log('block_ip', args, '', False, 'bad_action')
@@ -5410,10 +6217,12 @@ class ServonautTools:
         ban_action = 'ban' if act == 'block' else 'unban'
 
         # --- layer 1: WebACL (sees the real client IP behind an ALB) ---
-        acl = await self._resolve_webacl(site, region)
+        acl = await self._resolve_webacl(site, region, account)
+        if acl.get("ambiguous"):
+            # Blocking on the wrong server's edge is worse than not at all.
+            return self._webacl_refused('block_ip', args, acl)
         if not acl.get("error"):
-            from servonaut.services.waf_management_service import WAFManagementService
-            res = await WAFManagementService().add_ip_to_block_ipset(
+            res = await self._waf_service(acl).add_ip_to_block_ipset(
                 acl["name"], acl["id"], acl["scope"], acl["region"],
                 cidrs=[ip], remove=(ban_action == 'unban'),
             )
@@ -5435,8 +6244,16 @@ class ServonautTools:
             webacl_note = acl["error"]
 
         # --- layer 2: a configured SG/NACL/WAF ip_ban config ---
-        if self._ip_ban_service is not None:
-            configs = self._ip_ban_service.get_configs()
+        # Only a config in the site's own AWS account can protect it; with
+        # several accounts and the site's unknown, no config is guessed.
+        site_account = acl.get("account")
+        if (
+            site_account is None and self._accounts is not None
+            and self._accounts.is_multi('aws')
+        ):
+            webacl_note += "; the site's AWS account is unknown, so no ban config applies"
+        elif self._ip_ban_service is not None:
+            configs = self._ban_configs(site_account or "")
             if configs:
                 cfg = configs[0]
                 try:
@@ -5502,6 +6319,7 @@ class ServonautTools:
 
     async def rds_metrics(
         self, db_instance: str, region: str = "", window_hours: int = 3,
+        account: str = "",
     ) -> str:
         """Snapshot an RDS instance's health: CPU, connections, credit, latency.
 
@@ -5510,12 +6328,16 @@ class ServonautTools:
         instance. The first thing to check for the shared-RDS noisy-neighbour
         case. ``db_instance`` is the RDS DB instance identifier. Read-only.
         """
-        args = {'db_instance': db_instance, 'region': region,
-                'window_hours': window_hours}
+        args = self._with_account({'db_instance': db_instance, 'region': region,
+                                   'window_hours': window_hours}, account)
         allowed, reason = self._guard.check_tool('rds_metrics')
         if not allowed:
             self._audit.log('rds_metrics', args, '', False, reason)
             return f"Blocked: {reason}"
+        try:
+            aws_account = self._aws_context(account)
+        except UnknownAccountError as e:
+            return self._account_refused('rds_metrics', args, e)
         if not db_instance.strip():
             self._audit.log('rds_metrics', args, '', False, 'no_db_instance')
             return "Error: provide a db_instance (the RDS DB instance identifier)."
@@ -5524,7 +6346,7 @@ class ServonautTools:
             RDSMetricsService, format_rds_metrics,
         )
         try:
-            data = await RDSMetricsService().fetch(
+            data = await RDSMetricsService(aws_account).fetch(
                 db_instance, region=region, window_hours=max(1, int(window_hours or 3)),
             )
         except Exception as e:  # noqa: BLE001
@@ -5664,10 +6486,11 @@ class ServonautTools:
             self._audit.log('db_setup_scan', args, '', False, f"validation: {e}")
             return f"validation: {e}"
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('db_setup_scan', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'db_setup_scan', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         from servonaut.services.db_credential_scanner import redact
         # key_extras carries key_source (e.g. "bw_personal") when the on-box
@@ -5753,11 +6576,11 @@ class ServonautTools:
             return {"error": f"Blocked: {reason}", "instance": instance_id,
                     "candidates": []}
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('db_setup_scan', args, '', False, 'instance_not_found')
-            return {"error": f"Instance not found: {instance_id}",
-                    "instance": instance_id, "candidates": []}
+        instance, error = await self._lookup_instance(
+            'db_setup_scan', args, instance_id,
+        )
+        if error is not None:
+            return {"error": error, "instance": instance_id, "candidates": []}
 
         from servonaut.services.db_credential_scanner import redact
         staged, err = await self._scan_db_and_stage(
@@ -5819,7 +6642,12 @@ class ServonautTools:
         )
         # The profile belongs to an instance, keyed by its canonical id;
         # cand.host stays only the connection target below.
-        target = await self._db_profile_target(instance_id, staged)
+        try:
+            target = await self._db_profile_target(instance_id, staged)
+        except AmbiguousInstanceError as exc:
+            return self._ambiguous('db_setup_save', args, exc)
+        except UnknownAccountError as exc:
+            return self._account_refused('db_setup_save', args, exc)
         if isinstance(target, str):
             self._audit.log('db_setup_save', args, '', False, target)
             return self._db_profile_target_error(target, instance_id)
@@ -5939,6 +6767,11 @@ class ServonautTools:
         a name; without one, the scanned instance is used. ``scanned_on``
         describes the scanned instance when it differs from the target, and
         is ``None`` otherwise.
+
+        Raises:
+            AmbiguousInstanceError: ``instance_id`` names several servers.
+            UnknownAccountError: It is qualified with an account that
+                cannot connect.
         """
         explicit = instance_id.strip()
         if not explicit:
@@ -5968,15 +6801,8 @@ class ServonautTools:
         needle = (key or "").strip().lower()
         if not needle:
             return []
-        fleets = [
-            self._custom_server_service.list_as_instances(),
-            await self._aws_service.fetch_instances_cached(),
-        ]
-        for service in (self._ovh_service, self._hetzner_service):
-            if service is not None:
-                fleets.append(await service.fetch_instances_cached())
         return [
-            inst for fleet in fleets for inst in fleet
+            inst for inst in await self._directory.all_instances()
             if needle in (str(inst.get('id', '')).lower(),
                           str(inst.get('name', '')).lower())
         ]
@@ -6045,7 +6871,13 @@ class ServonautTools:
         # instance alone. An instance that no longer resolves is matched on
         # the typed key alone, so its leftover profile can still be removed.
         target = instance_id.strip().lower()
-        instance = await self._find_instance(instance_id.strip())
+        try:
+            instance = await self._find_instance(instance_id.strip())
+        except (AmbiguousInstanceError, UnknownAccountError):
+            # A name several servers share (or a server of an account that
+            # cannot connect) is matched as the typed key only: never as the
+            # id of one of them.
+            instance = None
         target_id = _instance_key(instance).lower() if instance else target
         target_name = (
             await self._legacy_name_key(str(instance.get('name') or ''), target_id)
@@ -6177,10 +7009,9 @@ class ServonautTools:
             self._audit.log(tool, args, '', False, reason)
             return f"Blocked: {reason}", None
 
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log(tool, args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}", None
+        instance, error = await self._lookup_instance(tool, args, instance_id)
+        if error is not None:
+            return error, None
 
         remote = self._DOCKER_PRELUDE + docker_command
         try:
@@ -6322,10 +7153,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('journal_errors', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('journal_errors', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'journal_errors', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         minutes = max(1, min(int(since_minutes or 1440), 10080))
         remote = (
@@ -6386,10 +7218,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('disk_usage', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('disk_usage', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'disk_usage', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         remote = (
             'X="-x tmpfs -x devtmpfs -x squashfs -x overlay"; '
@@ -6438,11 +7271,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('pending_updates', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('pending_updates', args, '', False,
-                            'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'pending_updates', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         remote = (
             'if command -v apt-get >/dev/null 2>&1; then '
@@ -6510,11 +7343,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('security_audit', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('security_audit', args, '', False,
-                            'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'security_audit', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         # sshd -T needs root (sudo -n fallback to a root ssh session); the
         # stat loop reads inode metadata only (no content), so it works for
@@ -6566,11 +7399,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('service_state', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('service_state', args, '', False,
-                            'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'service_state', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         # Enabled service units only (bounded); per unit report is-enabled /
         # is-active / NeedDaemonReload as a pipe-delimited row.
@@ -6612,10 +7445,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('tls_cert_check', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('tls_cert_check', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'tls_cert_check', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         remote = (
             'if ! command -v openssl >/dev/null 2>&1; then '
@@ -6678,10 +7512,11 @@ class ServonautTools:
         if not allowed:
             self._audit.log('auth_log_summary', args, '', False, reason)
             return f"Blocked: {reason}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('auth_log_summary', args, '', False, 'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'auth_log_summary', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         minutes = max(1, min(int(since_minutes or 1440), 10080))
         remote = (
@@ -6766,7 +7601,10 @@ class ServonautTools:
         findings screen calls to parameterise a block_ip preview on a
         non-AWS instance.
         """
-        instance = await self._find_instance(instance_id)
+        try:
+            instance = await self._find_instance(instance_id)
+        except (AmbiguousInstanceError, UnknownAccountError):
+            return "unknown"
         if not instance:
             return "unknown"
         remote = (
@@ -6813,11 +7651,11 @@ class ServonautTools:
             self._audit.log('docker_log_summary', args, '', False,
                             'validation: invalid_container_name')
             return f"validation: invalid container name: {container!r}"
-        instance = await self._find_instance(instance_id)
-        if not instance:
-            self._audit.log('docker_log_summary', args, '', False,
-                            'instance_not_found')
-            return f"Instance not found: {instance_id}"
+        instance, error = await self._lookup_instance(
+            'docker_log_summary', args, instance_id,
+        )
+        if error is not None:
+            return error
 
         minutes = max(1, min(int(since_minutes or 1440), 10080))
         quoted = shlex.quote(container)

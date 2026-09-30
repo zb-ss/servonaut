@@ -197,6 +197,8 @@ class TestFindInstance:
 
     def test_custom_name_preserves_aws_precedence_but_skips_other_clouds(self):
         tools = make_tools(custom_instances=SAMPLE_CUSTOM_INSTANCES)
+        # OVH was listed before (it has a cache): checked there, not fetched.
+        tools._ovh_service.get_cached_instances.return_value = [SAMPLE_OVH_VPS_INSTANCE]
 
         result = run(tools._find_instance("ovh-web"))
 

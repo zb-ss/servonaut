@@ -656,8 +656,9 @@ class TestExecuteDispatch:
 
     def test_unexpected_exception_returns_error(self):
         ex = make_executors()
-        # Force an unexpected exception in _run_command by making find_instance raise
-        ex._aws_service.fetch_instances_cached = AsyncMock(side_effect=RuntimeError("boom"))
+        # Force an unexpected exception in _run_command by making find_instance
+        # raise (a provider that cannot be listed is tolerated by the lookup).
+        ex._find_instance = AsyncMock(side_effect=RuntimeError("boom"))
         request = make_request(payload={"command": "ls"})
         resp = run(ex.execute(request))
         assert resp.status == "error"

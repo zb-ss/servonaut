@@ -151,7 +151,15 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         secret_key: str = "",
         region: str = "",
         endpoint_url: str = "",
+        account: Optional[Any] = None,
     ) -> None:
+        """Build an S3-compatible storage service.
+
+        Args:
+            account: For AWS, the account (``AWSAccountContext``) whose
+                credentials sign requests when no access key is configured.
+                None keeps the process-wide default credential chain.
+        """
         if provider not in _VALID_PROVIDERS:
             raise ValueError(
                 f"Invalid provider {provider!r}. Must be one of: "
@@ -169,6 +177,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         self._secret_key = secret_key
         self._region = region
         self._endpoint_url = endpoint_url
+        self._account = account
         self._client: Optional[Any] = None
         # bucket name → home region, populated lazily by _discover_bucket_region.
         self._bucket_regions: Dict[str, str] = {}
@@ -196,8 +205,19 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             kwargs["aws_access_key_id"] = self._access_key
             kwargs["aws_secret_access_key"] = self._secret_key
 
-        self._client = boto3.client("s3", **kwargs)
+        self._client = self._new_client(kwargs)
         return self._client
+
+    def _new_client(self, kwargs: Dict[str, Any]) -> Any:
+        """An S3 client; explicit keys win, then the account's credentials."""
+        account = self._account
+        if (
+            account is not None
+            and not account.uses_ambient_credentials
+            and "aws_access_key_id" not in kwargs
+        ):
+            return account.client("s3", **kwargs)
+        return boto3.client("s3", **kwargs)
 
     def _region_for_bucket(
         self, bucket: str, override: str = "", *, discover: bool = False,
@@ -315,7 +335,7 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         if self._access_key and self._secret_key:
             kwargs["aws_access_key_id"] = self._access_key
             kwargs["aws_secret_access_key"] = self._secret_key
-        return boto3.client("s3", **kwargs)
+        return self._new_client(kwargs)
 
     @property
     def region(self) -> str:

@@ -45,6 +45,19 @@ if TYPE_CHECKING:
     from servonaut.widgets.sidebar import Sidebar
 
 
+def _configured_account_labels(app) -> List[str]:
+    """Every account label in *app*'s config, usable or not (demo scrubbing)."""
+    from servonaut.config.accounts import all_account_refs
+
+    manager = getattr(app, "config_manager", None)
+    if manager is None:
+        return []
+    try:
+        return [ref.label for ref in all_account_refs(manager.get())]
+    except Exception:  # a display helper never breaks a notification
+        return []
+
+
 class ServonautApp(App):
     """Servonaut TUI application."""
 
@@ -94,6 +107,8 @@ class ServonautApp(App):
     redaction_service = None
     ovh_service = None
     hetzner_service = None
+    # Every provider account (AccountRegistry); built in _init_services.
+    accounts = None
     ovh_billing_service = None
     ovh_vps_service = None
     ovh_dedicated_service = None
@@ -260,7 +275,8 @@ class ServonautApp(App):
         cached = self._demo_known_cache
         if cached is None or cached[0] != key:
             known = InventoryScrubber.for_fleet(
-                redaction, self._instances_pristine or [], redaction.real_ids_seen()
+                redaction, self._instances_pristine or [], redaction.real_ids_seen(),
+                accounts=_configured_account_labels(self),
             )
             # Building may hand out stand-ins itself; key on the count after.
             key = (id(redaction), self._fleet_generation, redaction.stand_in_count())
@@ -299,20 +315,13 @@ class ServonautApp(App):
             cleanup_stale_bw_keys()
         except Exception as e:  # noqa: BLE001 — sweep must never break startup
             logger.warning("Stale BW key sweep failed: %s", e)
-        # Eagerly load cached instances so all screens have data
-        fleet = list(self.cache_service.load_any() or [])
-        # Merge custom servers into instance list
-        fleet.extend(self.custom_server_service.list_as_instances())
-        # Merge OVH cached instances (stale-while-revalidate — loaded from disk)
-        if self.ovh_service is not None:
-            fleet.extend(self.ovh_service.get_cached_instances())
-        # Merge Hetzner Cloud cached instances (same stale-while-revalidate
-        # contract as OVH — provider-agnostic instant render at startup).
-        if self.hetzner_service is not None:
-            fleet.extend(self.hetzner_service.get_cached_instances())
+        # Eagerly load every account's cached instances so all screens have
+        # data (stale-while-revalidate: the instance list refreshes them).
+        fleet = self._cached_fleet()
         if self.demo_mode:
             from servonaut.services.redaction_service import RedactionService
             self.redaction_service = RedactionService()
+            self._register_demo_account_labels()
         # Keeps the real records aside and redacts what is listed in demo mode.
         self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
@@ -392,11 +401,117 @@ class ServonautApp(App):
                 markup=False,
             )
 
+    def _bind_provider_aliases(self) -> None:
+        """Point the per-provider service attributes at the default accounts.
+
+        ``aws_service``, ``ovh_*`` and ``hetzner_service`` predate extra
+        accounts; they keep meaning "the provider's default account" so code
+        that has no account context keeps working. Anything that acts on a
+        specific account resolves it through ``self.accounts``.
+        """
+        accounts = self.accounts
+        self.aws_service = accounts.default_service("aws") or self.aws_service
+        # Control-plane client factory (STS role / region pinning), CloudTrail
+        # and CloudWatch of the default AWS account.
+        default_aws = accounts.aws_services()
+        self.aws_client_factory = default_aws.client_factory
+        self.cloudtrail_service = default_aws.cloudtrail
+        self.cloudwatch_service = default_aws.cloudwatch
+        self.hetzner_service = accounts.default_service("hetzner")
+        self.ovh_service = accounts.default_service("ovh")
+        # Object storage of the provider blocks (the primary accounts). The
+        # default AWS account signs with its own credentials (its profile
+        # when aws.profile is set); Hetzner and OVH need their S3 keys.
+        self.aws_object_storage_service = accounts.object_storage("aws")
+        self.hetzner_object_storage_service = accounts.object_storage("hetzner")
+        self.ovh_object_storage_service = accounts.object_storage("ovh")
+        from servonaut.services.ovh_audit import OVHAuditLogger
+
+        # Changes in any OVH account are audited, including while the primary
+        # account cannot connect and only an extra one is in use.
+        self.ovh_audit = (
+            OVHAuditLogger(accounts.config.ovh.ovh_audit_path)
+            if accounts.accounts("ovh") else None
+        )
+        if self.ovh_service is None:
+            self.ovh_billing_service = None
+            self.ovh_vps_service = self.ovh_dedicated_service = None
+            self.ovh_cloud_service = self.ovh_ip_service = None
+            self.ovh_snapshot_service = self.ovh_storage_service = None
+            self.ovh_dns_service = None
+            return
+        bundle = accounts.ovh_services()
+        self.ovh_billing_service = bundle.billing
+        self.ovh_vps_service = bundle.vps
+        self.ovh_dedicated_service = bundle.dedicated
+        self.ovh_cloud_service = bundle.cloud
+        self.ovh_ip_service = bundle.ip
+        self.ovh_snapshot_service = bundle.snapshot
+        self.ovh_storage_service = bundle.storage
+        self.ovh_dns_service = bundle.dns
+
+    def _cached_fleet(self) -> List[dict]:
+        """Every account's cached rows plus the custom servers, in table order."""
+        fleet: List[dict] = []
+        aws = self.provider_inventory("aws")
+        if aws is not None:
+            fleet.extend(aws.get_cached_instances())
+        fleet.extend(self.custom_server_service.list_as_instances())
+        for provider in ("ovh", "hetzner"):
+            inventory = self.provider_inventory(provider)
+            if inventory is not None:
+                fleet.extend(inventory.get_cached_instances())
+        return fleet
+
+    def provider_available(self, provider: str) -> bool:
+        """True when *provider* has at least one account that can be used.
+
+        Not the same as the default service being set: with the primary
+        account unavailable, the provider's other accounts still work (and
+        every screen then asks which account to use).
+        """
+        if self.accounts is not None:
+            return bool(self.accounts.accounts(provider))
+        return getattr(self, f"{provider}_service", None) is not None
+
+    def provider_inventory(self, provider: str):
+        """Every account of *provider* as one inventory, or None when unused.
+
+        The inventory has the refresh surface of a single-account service
+        (``fetch_instances_cached``, ``get_cached_instances``,
+        ``is_cache_fresh``, ``last_fetch_error``, ``last_fetch_partial``) and
+        returns rows tagged with their account. Hosts that never build the
+        registry (renderer probes, test hosts) have no inventories.
+        """
+        if self.accounts is None:
+            return None
+        return self.accounts.fleet(provider)
+
+    def _register_demo_account_labels(self) -> None:
+        """Tell demo mode which account labels are real (see RedactionService)."""
+        redaction = getattr(self, "redaction_service", None)
+        register = getattr(redaction, "register_account_labels", None)
+        if callable(register):
+            register(_configured_account_labels(self))
+
+    def rebuild_accounts(self) -> None:
+        """Rebuild every provider account from the saved config.
+
+        Called after provider settings or a setup wizard change credentials
+        or accounts, so every surface (screens, chat tools, relay) moves to
+        the new accounts together instead of some keeping stale services.
+        """
+        self.accounts.rebuild(self.config_manager.get())
+        self._bind_provider_aliases()
+        self._register_demo_account_labels()
+        tools = getattr(self, "servonaut_tools", None)
+        if tools is not None and hasattr(tools, "bind_accounts"):
+            tools.bind_accounts(self.accounts)
+
     def _init_services(self) -> None:
         """Create all service instances."""
         from servonaut.config.manager import ConfigManager
         from servonaut.services.cache_service import CacheService
-        from servonaut.services.aws_service import AWSService
         from servonaut.services.ssh_service import SSHService
         from servonaut.services.connection_service import ConnectionService
         from servonaut.services.scan_service import ScanService
@@ -406,8 +521,6 @@ class ServonautApp(App):
         from servonaut.services.command_history import CommandHistoryService
         from servonaut.services.custom_server_service import CustomServerService
         from servonaut.services.log_viewer_service import LogViewerService
-        from servonaut.services.cloudtrail_service import CloudTrailService
-        from servonaut.services.cloudwatch_service import CloudWatchService
         from servonaut.services.ip_ban_service import IPBanService
         from servonaut.services.ai_analysis_service import AIAnalysisService
         from servonaut.services.chat_service import ChatService
@@ -420,24 +533,21 @@ class ServonautApp(App):
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-        self.aws_service = AWSService(self.cache_service)
-        # AWS audit logger and S3 object storage — always constructed;
-        # boto3 default credential chain is used when keys are empty.
+        # Every provider account and its services. The ``*_service``
+        # attributes below stay the default (primary) account of each
+        # provider; per-account work goes through ``self.accounts``.
+        from servonaut.services.accounts import AccountRegistry
+        self.accounts = AccountRegistry(
+            config, aws_cache_service=self.cache_service, config_manager=self.config_manager,
+        )
+        # OVH and Hetzner Cloud are optional: the registry builds an account
+        # only when it can connect (OVH: credentials configured; Hetzner: a
+        # token resolves), so a provider without one stays None and the rest
+        # of the app stays blind to it.
+        self._bind_provider_aliases()
+        # AWS audit logger — always constructed.
         from servonaut.services.aws_audit import AWSAuditLogger
-        from servonaut.services.object_storage_factory import build_object_storage_services
         self.aws_audit = AWSAuditLogger(config.aws.audit_path)
-        # Shared boto3 client factory — control-plane STS role / region pinning.
-        # Backs aws_call + CloudWatch reads; defaults to the ambient credential
-        # chain when no control-plane role is configured (no behaviour change).
-        from servonaut.services.aws_client_factory import build_aws_client_factory
-        self.aws_client_factory = build_aws_client_factory(config)
-        # Delegate object-storage construction to the shared factory so that
-        # the headless MCP server (mcp/server.py) reuses the same logic.
-        (
-            self.aws_object_storage_service,
-            self.hetzner_object_storage_service,
-            self.ovh_object_storage_service,
-        ) = build_object_storage_services(config)
         self.ssh_service = SSHService(self.config_manager)
         self.connection_service = ConnectionService(self.config_manager)
         self.scan_service = ScanService(self.config_manager)
@@ -453,11 +563,7 @@ class ServonautApp(App):
         self.command_history = CommandHistoryService(config.command_history_path)
         self.custom_server_service = CustomServerService(self.config_manager)
         self.log_viewer_service = LogViewerService(self.config_manager)
-        self.cloudtrail_service = CloudTrailService(self.config_manager)
-        self.cloudwatch_service = CloudWatchService(
-            client_factory=self.aws_client_factory
-        )
-        self.ip_ban_service = IPBanService(self.config_manager)
+        self.ip_ban_service = IPBanService(self.config_manager, accounts=self.accounts)
         from servonaut.services.memory import MemoryService
         from servonaut.services.memory.store import MemoryStore
         from servonaut.services.memory.redaction import default_redactor, noop_redactor
@@ -495,76 +601,6 @@ class ServonautApp(App):
         )
         self.ai_analysis_service = AIAnalysisService(self.config_manager)
         self._init_voice_services(config.voice)
-        # OVH — optional, requires python-ovh and enabled config
-        try:
-            ovh_config = config.ovh
-            if ovh_config.enabled and (ovh_config.application_key or ovh_config.client_id):
-                from servonaut.services.ovh_service import OVHService
-                from servonaut.services.ovh_billing_service import OVHBillingService
-                self.ovh_service = OVHService(ovh_config)
-                self.ovh_billing_service = OVHBillingService(self.ovh_service)
-                logger.info("OVH service initialized")
-        except ImportError:
-            logger.warning("python-ovh not installed; OVH provider unavailable. Install with: pip install 'servonaut[ovh]'")
-        except Exception as e:
-            logger.error("Failed to initialize OVH service: %s", e)
-
-        # Initialize OVH sub-services if OVH is enabled
-        if self.ovh_service is not None:
-            from servonaut.services.ovh_vps_service import OVHVPSService
-            from servonaut.services.ovh_dedicated_service import OVHDedicatedService
-            from servonaut.services.ovh_cloud_service import OVHCloudService
-            from servonaut.services.ovh_ip_service import OVHIPService
-            from servonaut.services.ovh_snapshot_service import OVHSnapshotService
-            from servonaut.services.ovh_storage_service import OVHStorageService
-            from servonaut.services.ovh_dns_service import OVHDNSService
-            from servonaut.services.ovh_audit import OVHAuditLogger
-
-            self.ovh_vps_service = OVHVPSService(self.ovh_service)
-            self.ovh_dedicated_service = OVHDedicatedService(self.ovh_service)
-            self.ovh_cloud_service = OVHCloudService(self.ovh_service)
-            self.ovh_ip_service = OVHIPService(self.ovh_service)
-            self.ovh_snapshot_service = OVHSnapshotService(self.ovh_service)
-            self.ovh_storage_service = OVHStorageService(self.ovh_service)
-            self.ovh_dns_service = OVHDNSService(self.ovh_service)
-            self.ovh_audit = OVHAuditLogger(config.ovh.ovh_audit_path)
-
-        # Hetzner Cloud — optional, requires hcloud SDK and a resolvable
-        # API token. Always-attempt init when ``enabled=True`` AND a
-        # token can be located via the resolution chain (config →
-        # $HCLOUD_TOKEN → ~/.config/hcloud/token); otherwise leave the
-        # service None so the rest of the app stays Hetzner-blind.
-        try:
-            hetzner_config = config.hetzner if hasattr(config, 'hetzner') else None
-            if hetzner_config and hetzner_config.enabled:
-                from servonaut.services.hetzner_service import (
-                    HetznerService, HetznerNotConfiguredError, HetznerSDKMissingError,
-                )
-                provisional = HetznerService(hetzner_config)
-                # Force token resolution up front so we don't initialise a
-                # provider that will only fail on first user action.
-                try:
-                    provisional.resolve_token()
-                except HetznerNotConfiguredError as exc:
-                    logger.info(
-                        "Hetzner enabled but no token resolved: %s", exc,
-                    )
-                    raise
-                self.hetzner_service = provisional
-                logger.info("Hetzner service initialized")
-        except ImportError:
-            logger.warning(
-                "hcloud SDK not installed; Hetzner provider unavailable. "
-                "Install with: pip install 'servonaut[hetzner]'"
-            )
-        except HetznerNotConfiguredError:
-            # Already logged above; swallow so the TUI launches normally.
-            pass
-        except HetznerSDKMissingError as exc:
-            logger.warning("Hetzner SDK missing: %s", exc)
-        except Exception as exc:
-            logger.error("Failed to initialise Hetzner service: %s", exc)
-
         # Initialize GCP/Azure if configured
         try:
             gcp_config = config.gcp if hasattr(config, 'gcp') else None
@@ -611,7 +647,12 @@ class ServonautApp(App):
             aws_object_storage_service=self.aws_object_storage_service,
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
+            account_registry=self.accounts,
         )
+        # Bind every default-account service (OVH IPs, DNS, billing,
+        # snapshots, …) the constructor is not handed, so the chat tools
+        # match the MCP server's.
+        self.servonaut_tools.bind_accounts(self.accounts)
         # Follows chat_tool_guard_level live: bring-your-own providers run
         # tools without per-call prompts, so a lowered level must apply to
         # the next call, not after a restart.
@@ -1111,6 +1152,7 @@ class ServonautApp(App):
                     self.ssh_service,
                     self.connection_service,
                     self.scp_service,
+                    accounts=self.accounts,
                 )
                 self.ai_relay_executors = relay
                 cfg = self.config_manager.get()
@@ -2179,6 +2221,7 @@ class ServonautApp(App):
 
             if self.redaction_service is None:
                 self.redaction_service = RedactionService()
+            self._register_demo_account_labels()
             # The list is real while demo mode is off: it is the copy to map
             # stand-ins back to, whatever changed it since the last snapshot.
             self._instances_pristine = copy.deepcopy(self.instances)
@@ -2263,14 +2306,17 @@ class ServonautApp(App):
     def resolve_instance(self, id_or_name: str) -> Optional[dict]:
         """Case-insensitive instance lookup across all providers.
 
-        AWS instances are checked before custom/OVH instances so AWS wins on
-        name collisions (matches the rule in ServonautTools._find_instance).
+        Accepts an id, a name, or an ``account/name`` reference (see
+        :mod:`servonaut.utils.instance_resolver`).
 
         Args:
-            id_or_name: Instance ID or display name to search for.
+            id_or_name: Instance reference to search for.
 
         Returns:
             Matching instance dict, or None if not found.
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
         """
         aws_instances = [i for i in self.instances if not i.get("is_custom")]
         other_instances = [i for i in self.instances if i.get("is_custom")]
@@ -2320,9 +2366,9 @@ class ServonautApp(App):
 
         yield from super().get_system_commands(screen)
         for title, target_id, help_text in self._PALETTE_NAVIGATION:
-            if target_id.startswith("nav_ovh") and getattr(self, "ovh_service", None) is None:
+            if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
-            if target_id.startswith("nav_hetzner") and getattr(self, "hetzner_service", None) is None:
+            if target_id.startswith("nav_hetzner") and not self.provider_available("hetzner"):
                 continue
             yield SystemCommand(
                 f"Go to {title}",
@@ -2499,7 +2545,7 @@ class ServonautApp(App):
             from servonaut.screens.bug_report import BugReportScreen
             self.push_screen(BugReportScreen())
         elif target_id == "nav_hetzner_manage":
-            if getattr(self, "hetzner_service", None) is None:
+            if not self.provider_available("hetzner"):
                 self.notify(
                     "Hetzner is not configured. Visit Settings → Hetzner Cloud "
                     "to set up a token.",
@@ -2509,7 +2555,7 @@ class ServonautApp(App):
             from servonaut.screens.hetzner_manager import HetznerManagerScreen
             self.switch_screen(HetznerManagerScreen())
         elif target_id == "nav_hetzner_ssh_keys":
-            if getattr(self, "hetzner_service", None) is None:
+            if not self.provider_available("hetzner"):
                 self.notify(
                     "Hetzner is not configured. Visit Settings → Hetzner Cloud "
                     "to set up a token.",
@@ -2519,7 +2565,7 @@ class ServonautApp(App):
             from servonaut.screens.hetzner_ssh_keys import HetznerSSHKeysScreen
             self.switch_screen(HetznerSSHKeysScreen())
         elif target_id == "nav_ovh_manage":
-            if getattr(self, "ovh_service", None) is None:
+            if not self.provider_available("ovh"):
                 self.notify(
                     "OVHcloud is not configured. Visit Settings → OVHcloud to "
                     "set up credentials.",

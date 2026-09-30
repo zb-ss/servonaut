@@ -12,6 +12,8 @@ import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from servonaut.config.schema import AppConfig, MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
@@ -360,3 +362,36 @@ def test_cloudwatch_insights_reports_timeout():
     tools = _make_tools(cloudwatch_service=cw)
     out = _run(tools.cloudwatch_insights(query="q", log_group="/g"))
     assert "Timeout" in out
+
+
+# --- aws_call: role-map aliases keep working ---
+
+
+def _describe_client():
+    client = MagicMock()
+    client.can_paginate.return_value = False
+    client.describe_vpcs.return_value = {"Vpcs": []}
+    return client
+
+
+@pytest.mark.parametrize("roles_field", [
+    "control_plane_role_arns", "control_plane_mutate_role_arns",
+])
+def test_aws_call_account_alias_of_a_role_map_is_passed_through(roles_field):
+    factory = _FakeFactory(_describe_client())
+    tools = _make_tools(aws_factory=factory)
+    setattr(
+        tools._config_manager.get().aws, roles_field,
+        {"billing": "arn:aws:iam::111:role/read"},
+    )
+    out = _run(tools.aws_call("ec2", "describe_vpcs", account="billing"))
+    assert out.startswith("aws_call ec2.describe_vpcs")
+    assert factory.calls == [("ec2", "", "billing", False)]
+
+
+def test_aws_call_account_that_is_neither_label_nor_alias_is_refused():
+    factory = _FakeFactory(_describe_client())
+    tools = _make_tools(aws_factory=factory)
+    out = _run(tools.aws_call("ec2", "describe_vpcs", account="billing"))
+    assert out.startswith("Error: No AWS account named 'billing'")
+    assert factory.calls == []

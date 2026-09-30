@@ -27,6 +27,7 @@ from servonaut.screens._demo_resolve import (
     replace_instances,
 )
 from servonaut.services.memory.provider import instance_provider
+from servonaut.utils.instance_resolver import display_name
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
@@ -157,6 +158,8 @@ class InstanceListScreen(Screen):
         self._instances: List[dict] = []
         self._search_debounce_timer: Optional[Timer] = None
         self._initial_search = initial_search
+        # (provider, account) pairs already reported as configured twice.
+        self._reported_duplicate_accounts: set = set()
 
     def compose(self) -> ComposeResult:
         """Compose the instance list UI."""
@@ -230,7 +233,8 @@ class InstanceListScreen(Screen):
             logger.info("Loaded %d instances from app cache (age: %s)",
                         len(self._instances), self.app.cache_service.get_age())
         else:
-            stale_data = self.app.cache_service.load_any()
+            aws = self.app.provider_inventory("aws")
+            stale_data = aws.get_cached_instances() if aws is not None else []
             if stale_data:
                 self._instances = replace_instances(self.app, None, stale_data)
                 self._update_table()
@@ -239,15 +243,17 @@ class InstanceListScreen(Screen):
                             len(stale_data), self.app.cache_service.get_age())
 
         # A fresh AWS cache skips the AWS fetch only: OVH and Hetzner keep
-        # their own caches and are refreshed when theirs have expired.
-        if self.app.cache_service.is_fresh():
+        # their own caches and are refreshed when theirs have expired. With
+        # several accounts, a provider counts as fresh only when every one of
+        # its accounts is.
+        aws = self.app.provider_inventory("aws")
+        if aws is None or aws.is_cache_fresh():
             logger.info("Cache is fresh, skipping AWS fetch")
-            if self.app.ovh_service is not None and not self.app.ovh_service.is_cache_fresh():
+            ovh = self.app.provider_inventory("ovh")
+            if ovh is not None and not ovh.is_cache_fresh():
                 self._fetch_ovh_instances()
-            if (
-                self.app.hetzner_service is not None
-                and not self.app.hetzner_service.is_cache_fresh()
-            ):
+            hetzner = self.app.provider_inventory("hetzner")
+            if hetzner is not None and not hetzner.is_cache_fresh():
                 self._fetch_hetzner_instances()
             return
 
@@ -265,11 +271,14 @@ class InstanceListScreen(Screen):
         Args:
             force_refresh: If True, bypass cache.
         """
+        inventory = self.app.provider_inventory("aws")
+        if inventory is None:
+            return
         progress = self.query_one(ProgressIndicator)
         progress.start("Loading instances...")
 
         self.run_worker(
-            self.app.aws_service.fetch_instances_cached(force_refresh=force_refresh),
+            inventory.fetch_instances_cached(force_refresh=force_refresh),
             name="fetch_instances",
             exclusive=True,
             # Errors are reported by on_worker_state_changed; a failed fetch
@@ -287,25 +296,28 @@ class InstanceListScreen(Screen):
         logger.info("Starting background refresh of instances")
         self.app.notify("Refreshing instances in background...", severity="information")
 
-        self.run_worker(
-            self.app.aws_service.fetch_instances_cached(force_refresh=True),
-            name="background_refresh",
-            exclusive=True,
-            exit_on_error=False,
-        )
+        inventory = self.app.provider_inventory("aws")
+        if inventory is not None:
+            self.run_worker(
+                inventory.fetch_instances_cached(force_refresh=True),
+                name="background_refresh",
+                exclusive=True,
+                exit_on_error=False,
+            )
         # Also refresh OVH + Hetzner instances if those providers are enabled
         self._fetch_ovh_instances()
         self._fetch_hetzner_instances()
 
     def _fetch_ovh_instances(self) -> None:
-        """Refresh OVH instances in background via worker."""
-        if self.app.ovh_service is None:
+        """Refresh every OVH account's instances in background via worker."""
+        inventory = self.app.provider_inventory("ovh")
+        if inventory is None:
             return
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting OVH instance refresh")
         self.run_worker(
-            self.app.ovh_service.fetch_instances_cached(force_refresh=True),
+            inventory.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
             exclusive=False,
             exit_on_error=False,
@@ -318,13 +330,14 @@ class InstanceListScreen(Screen):
         ``_background_refresh`` trigger and the foreground fetch path so
         Hetzner servers appear at app startup and survive AWS refreshes.
         """
-        if self.app.hetzner_service is None:
+        inventory = self.app.provider_inventory("hetzner")
+        if inventory is None:
             return
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting Hetzner instance refresh")
         self.run_worker(
-            self.app.hetzner_service.fetch_instances_cached(force_refresh=True),
+            inventory.fetch_instances_cached(force_refresh=True),
             name="hetzner_refresh",
             exclusive=False,
             # A refused token with no cache raises; the handler reports it.
@@ -357,7 +370,10 @@ class InstanceListScreen(Screen):
                 self._instances = replace_instances(self.app, "ovh", new_ovh)
                 self._update_table()
                 self._update_status_bar()
-                fetch_error = getattr(self.app.ovh_service, "last_fetch_error", None)
+                self._report_duplicate_accounts("ovh")
+                fetch_error = getattr(
+                    self.app.provider_inventory("ovh"), "last_fetch_error", None
+                )
                 if isinstance(fetch_error, str) and fetch_error:
                     self.app.notify(
                         self._ovh_refresh_warning(fetch_error),
@@ -388,15 +404,20 @@ class InstanceListScreen(Screen):
                 self._instances = replace_instances(self.app, "hetzner", new_hetzner)
                 self._update_table()
                 self._update_status_bar()
-                fetch_error = getattr(self.app.hetzner_service, "last_fetch_error", None)
+                self._report_duplicate_accounts("hetzner")
+                inventory = self.app.provider_inventory("hetzner")
+                fetch_error = getattr(inventory, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:
-                    # The service returned its cache in place of the failed
-                    # fetch. markup=False: the text carries an API error.
-                    self.app.notify(
-                        f"Hetzner refresh failed: {fetch_error}. Showing cached instances.",
-                        severity="warning",
-                        markup=False,
-                    )
+                    # The failed account(s) returned their cache in place of
+                    # the fetch. markup=False: the text carries an API error.
+                    if getattr(inventory, "last_fetch_partial", False) is True:
+                        message = f"Hetzner refresh incomplete. {fetch_error}"
+                    else:
+                        message = (
+                            f"Hetzner refresh failed: {fetch_error}. "
+                            "Showing cached instances."
+                        )
+                    self.app.notify(message, severity="warning", markup=False)
                 elif new_hetzner:
                     self.app.notify(
                         f"Hetzner refreshed: {len(new_hetzner)} instances",
@@ -424,15 +445,11 @@ class InstanceListScreen(Screen):
                     # Re-merge custom servers, OVH and Hetzner instances
                     # with the fresh AWS instances.
                     custom = self.app.custom_server_service.list_as_instances()
-                    ovh_instances = (
-                        self.app.ovh_service.get_cached_instances()
-                        if self.app.ovh_service is not None
-                        else []
-                    )
+                    ovh = self.app.provider_inventory("ovh")
+                    ovh_instances = ovh.get_cached_instances() if ovh is not None else []
+                    hetzner = self.app.provider_inventory("hetzner")
                     hetzner_instances = (
-                        self.app.hetzner_service.get_cached_instances()
-                        if self.app.hetzner_service is not None
-                        else []
+                        hetzner.get_cached_instances() if hetzner is not None else []
                     )
                     # Keeps the real rows aside; lists them redacted in demo mode.
                     self._instances = replace_instances(
@@ -441,17 +458,22 @@ class InstanceListScreen(Screen):
                     )
                     self._update_table()
                     self._update_status_bar()
+                    self._report_duplicate_accounts("aws")
 
-                    fetch_error = getattr(self.app.aws_service, "last_fetch_error", None)
+                    aws = self.app.provider_inventory("aws")
+                    fetch_error = getattr(aws, "last_fetch_error", None)
                     if isinstance(fetch_error, str) and fetch_error:
-                        # The service kept the previous cache; the rows on
-                        # screen are stale, not the truth. markup=False:
-                        # the text carries an SDK error string.
-                        self.app.notify(
-                            f"AWS refresh failed: {fetch_error}. Showing cached instances.",
-                            severity="warning",
-                            markup=False,
-                        )
+                        # The failed account(s) kept their previous cache; the
+                        # rows on screen are stale, not the truth.
+                        # markup=False: the text carries an SDK error string.
+                        if getattr(aws, "last_fetch_partial", False) is True:
+                            message = f"AWS refresh incomplete. {fetch_error}"
+                        else:
+                            message = (
+                                f"AWS refresh failed: {fetch_error}. "
+                                "Showing cached instances."
+                            )
+                        self.app.notify(message, severity="warning", markup=False)
                     elif not new_instances:
                         self.app.notify(
                             "No EC2 instances found in any region.",
@@ -471,9 +493,32 @@ class InstanceListScreen(Screen):
                                 severity="information"
                             )
 
+    def _report_duplicate_accounts(self, provider: str) -> None:
+        """Say once per session when two accounts list the same servers.
+
+        The fleet already lists each server once; the notice tells the user
+        why an account shows no servers of its own (it is the same account
+        configured twice, e.g. two AWS profiles for one account).
+        """
+        from servonaut.config.accounts import PROVIDER_TITLES
+
+        inventory = self.app.provider_inventory(provider)
+        duplicates = getattr(inventory, "duplicate_accounts", None) or {}
+        for later, earlier in duplicates.items():
+            if (provider, later) in self._reported_duplicate_accounts:
+                continue
+            self._reported_duplicate_accounts.add((provider, later))
+            self.app.notify(
+                f"{PROVIDER_TITLES.get(provider, provider)} accounts '{later}' and "
+                f"'{earlier}' list the same servers; they look like the same "
+                "account configured twice.",
+                severity="warning",
+                markup=False,
+            )
+
     def _ovh_refresh_warning(self, fetch_error: str) -> str:
         """Wording for an OVH refresh that failed in full or in part."""
-        if getattr(self.app.ovh_service, "last_fetch_partial", False) is not True:
+        if getattr(self.app.provider_inventory("ovh"), "last_fetch_partial", False) is not True:
             return f"OVH refresh failed: {fetch_error}. Showing cached instances."
         if self.app.demo_mode:
             # The details name Public Cloud project ids.
@@ -616,6 +661,11 @@ class InstanceListScreen(Screen):
             return
 
         parts = []
+        if instance.get("account_qualified") and instance.get("account"):
+            # Several accounts of this provider: say which one the server is in.
+            parts.append(f"Account: {instance['account']}")
+            if instance.get("account_id"):
+                parts.append(f"Account ID: {instance['account_id']}")
         for key, label in [
             ("name", "Name"),
             ("id", "ID"),
@@ -863,14 +913,12 @@ class InstanceListScreen(Screen):
                 port = instance.get('port') or 22
                 key_path = instance.get('ssh_key') or instance.get('key_name') or None
             elif instance.get('is_ovh'):
-                from servonaut.services.ovh_service import OVHService
-                provider_type = instance.get('provider_type', '')
-                username = (
-                    (profile.username if profile else None)
-                    or OVHService.default_username(provider_type)
-                )
+                # The OVH account's own default key and username, the same
+                # ones the server actions and background reads use.
+                ovh_options = self.app.connection_service.resolve_ovh_connection(instance)
+                username = (profile.username if profile else None) or ovh_options["username"]
                 port = None
-                key_path = self.app.config_manager.get().default_key or None
+                key_path = ovh_options["key_path"] or None
             elif instance.get('is_hetzner'):
                 username = (
                     (profile.username if profile else None)
@@ -1090,7 +1138,7 @@ class InstanceListScreen(Screen):
             return
 
         fields = [
-            ("Name", instance.get('name', '')),
+            ("Name", display_name(instance)),
             ("ID", instance.get('id', '')),
             ("Type", instance.get('type', '')),
             ("State", instance.get('state', '')),
