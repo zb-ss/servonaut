@@ -423,8 +423,13 @@ def _apply_environment(ctx: E2EContext, original_env: Mapping[str, str], base: s
     sys.dont_write_bytecode = True
 
 
-def bootstrap() -> E2EContext:
-    """Create the test root, apply the hermetic environment, arm the guards."""
+def bootstrap(root: Optional[Path] = None) -> E2EContext:
+    """Create the test root, apply the hermetic environment, arm the guards.
+
+    *root* names the test root instead of a new temporary directory; it must
+    not exist yet. The local QA sandbox (``e2e/sandbox``) keeps a fixed root
+    so the processes that drive it can find it again.
+    """
     global _CONTEXT
     if _CONTEXT is not None:
         return _CONTEXT
@@ -435,13 +440,18 @@ def bootstrap() -> E2EContext:
     # Validate the settings before anything is created on disk.
     protected = _real_home_dirs(original_env)
     artifacts_dir = _artifacts_dir(original_env, protected)
-    base = (
-        original_env.get(ENV_ROOT_BASE)
-        or original_env.get(_ENV_BASE_TMP)
-        or tempfile.gettempdir()
-    )
-    Path(base).mkdir(parents=True, exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix=f"servonaut-e2e-{worker}-", dir=base)).resolve()
+    if root is None:
+        base = (
+            original_env.get(ENV_ROOT_BASE)
+            or original_env.get(_ENV_BASE_TMP)
+            or tempfile.gettempdir()
+        )
+        Path(base).mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=f"servonaut-e2e-{worker}-", dir=base)).resolve()
+    else:
+        Path(root).mkdir(mode=0o700, parents=True)
+        root = Path(root).resolve()
+        base = str(root.parent)
     _CONTEXT = _make_context(root, worker, original_env, protected, artifacts_dir)
     _apply_environment(_CONTEXT, original_env, base)
     load_guard().install(

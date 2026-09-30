@@ -13,7 +13,6 @@ CTX = _bootstrap.bootstrap()
 # Everything below may import servonaut: the sandbox is in place.
 import importlib.util  # noqa: E402
 import itertools  # noqa: E402
-import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
 import shlex  # noqa: E402
@@ -24,7 +23,7 @@ from typing import Any, Callable, Optional  # noqa: E402
 
 import pytest  # noqa: E402
 
-from e2e.harness import artifacts, canary, lifecycle  # noqa: E402
+from e2e.harness import artifacts, canary, endpoints, lifecycle  # noqa: E402
 from e2e.harness.bootstrap import E2EContext, Sandbox, build_env  # noqa: E402
 from e2e.harness.processes import ChildLog  # noqa: E402
 from e2e.harness.shims import ShimSet  # noqa: E402
@@ -44,8 +43,6 @@ TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
 BROWSER_MARKER = "needs_browser"
 # The provider SDKs are needed for the Hetzner and OVH journeys.
 _REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright", "hcloud", "ovh")
-# Read by child_site/sitecustomize.py (module constants pointed at the fakes).
-REDIRECTS_ENV = "SERVONAUT_E2E_REDIRECTS"
 _SEQUENCE = itertools.count(1)
 # Escape reports name the offending command; a long ``python -c`` script is cut.
 _MAX_COMMAND_CHARS = 300
@@ -365,24 +362,16 @@ def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.Mo
 
     _fake_cloud_server.reset()
     journey.fake_cloud = _fake_cloud_server
-    urls = {
-        "SERVONAUT_API_URL": _fake_cloud_server.url,
-        "SERVONAUT_MCP_URL": _fake_cloud_server.url,
-        # The update check's package-index document.
-        "SERVONAUT_PYPI_URL": _fake_cloud_server.pypi_json_url,
-    }
+    # The Servonaut API, the hosted MCP endpoint and the update check's
+    # package-index document, for this process and every child (children
+    # started with this process's own environment included).
+    urls = endpoints.fake_cloud_env(_fake_cloud_server)
     for key, value in urls.items():
         monkeypatch.setenv(key, value)
     journey.env_overrides.update(urls)
     # The update check reads the package index URL from a module constant:
-    # patched here, and redirected in children by child_site/sitecustomize.py.
+    # patched here, and redirected in children by child_guard.py.
     monkeypatch.setattr(update_service, "PYPI_URL", _fake_cloud_server.pypi_json_url)
-    redirects = json.dumps(
-        {update_service.__name__: {"PYPI_URL": _fake_cloud_server.pypi_json_url}}
-    )
-    # Children started with this process's own environment get it too.
-    monkeypatch.setenv(REDIRECTS_ENV, redirects)
-    journey.env_overrides[REDIRECTS_ENV] = redirects
     return _fake_cloud_server
 
 
@@ -405,8 +394,9 @@ def moto(_moto_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -
     from e2e.harness import aws_logs_filter
 
     _moto_server.reset()
-    monkeypatch.setenv("AWS_ENDPOINT_URL", _moto_server.url)
-    journey.env_overrides["AWS_ENDPOINT_URL"] = _moto_server.url
+    for key, value in endpoints.moto_env(_moto_server).items():
+        monkeypatch.setenv(key, value)
+        journey.env_overrides[key] = value
     aws_logs_filter.install(monkeypatch)
     yield _moto_server
     refused = aws_logs_filter.take_refused()
@@ -421,13 +411,6 @@ def _fake_providers_server() -> Any:
     server = FakeProviders().start()
     yield server
     server.stop()
-
-
-def product_reads_hetzner_endpoint_override() -> bool:
-    """True once Servonaut passes ``SERVONAUT_HETZNER_API_URL`` to hcloud."""
-    from servonaut.services import hetzner_service
-
-    return hasattr(hetzner_service, "HETZNER_API_URL_ENV")
 
 
 @pytest.fixture
@@ -446,19 +429,17 @@ def providers(
 
     server = _fake_providers_server
     server.reset()
-    endpoints = server.ovh_endpoint_urls()
-    wanted: dict[str, Any] = {"ovh": server.ovh_url, "ovh_endpoints": endpoints}
-    redirects.redirect_ovh(server.ovh_url, setitem=monkeypatch.setitem, endpoints=endpoints)
-    # OVH service accounts fetch OAuth2 tokens from the fake over plain HTTP.
-    monkeypatch.setenv(redirects.OAUTH_INSECURE_TRANSPORT_ENV, "1")
-    journey.env_overrides[redirects.OAUTH_INSECURE_TRANSPORT_ENV] = "1"
-    # The product's own switch, where it has one; the library default otherwise.
-    monkeypatch.setenv(redirects.HETZNER_URL_ENV, server.hetzner_url)
-    journey.env_overrides[redirects.HETZNER_URL_ENV] = server.hetzner_url
-    if not product_reads_hetzner_endpoint_override():
+    redirects.redirect_ovh(
+        server.ovh_url, setitem=monkeypatch.setitem, endpoints=server.ovh_endpoint_urls()
+    )
+    # Children get the same redirects (see endpoints.providers_env); this
+    # process gets the variables the libraries read at call time.
+    child_env = endpoints.providers_env(server)
+    journey.env_overrides.update(child_env)
+    for key in (redirects.OAUTH_INSECURE_TRANSPORT_ENV, redirects.HETZNER_URL_ENV):
+        monkeypatch.setenv(key, child_env[key])
+    if not endpoints.product_reads_hetzner_endpoint_override():
         redirects.redirect_hcloud(server.hetzner_url, setter=monkeypatch.setattr)
-        wanted["hetzner"] = server.hetzner_url
-    journey.env_overrides[redirects.ENV_REDIRECTS] = json.dumps(wanted)
     yield server
     server.write_log(journey.staging / "fake_providers_requests.jsonl")
 
