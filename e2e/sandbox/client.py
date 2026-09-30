@@ -12,7 +12,6 @@ import asyncio
 import difflib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -99,15 +98,17 @@ START_SESSION_JS = """async () => {
       };
     }
   };
-  window.startServonaut(TOKEN);
-  const deadline = Date.now() + 30000;
-  while (!document.body.classList.contains('-first-byte')) {
-    if (Date.now() > deadline) break;
-    await pause();
-  }
-  delete Object.prototype._addonManager;
-  if (!document.body.classList.contains('-first-byte')) {
-    throw new Error('no terminal output after 30 s: see the page console');
+  try {
+    window.startServonaut(TOKEN);
+    const deadline = Date.now() + 30000;
+    while (!document.body.classList.contains('-first-byte')) {
+      if (Date.now() > deadline) throw new Error('no terminal output after 30 s: see the page console');
+      await pause();
+    }
+  } finally {
+    // The session's socket exists by now; nothing else is left patched.
+    delete Object.prototype._addonManager;
+    window.WebSocket = NativeWebSocket;
   }
   qa.focus();
   return {columns: qa.columns, rows: qa.rows, text: qa.terminal !== null};
@@ -186,17 +187,13 @@ def format_fleet(rows: Iterable[dict]) -> str:
 
 
 def status(*, as_json: bool) -> int:
-    try:
-        current = live_state()
-    except ClientError as exc:
-        print(str(exc))
-        return 1
+    current = live_state()
     if as_json:
         print(json.dumps(current, indent=2, sort_keys=True))
         return 0
     desktop = current.get("desktop") or {}
     if desktop.get("pid"):
-        running = state.is_alive(desktop["pid"], state.process_identity(desktop["pid"]))
+        running = state.process_alive(desktop["pid"], desktop.get("identity"))
         desktop_line = f"{desktop['origin']} (desktop child pid {desktop['pid']}, " + (
             "running)" if running else "exited: run `desktop` again for a new one)"
         )
@@ -326,23 +323,31 @@ def desktop(*, new: bool, as_json: bool) -> int:
     """Have the owner start (or reuse) the desktop child; print how to open it."""
     current = live_state()
     root = Path(current["root"])
-    request = {"id": uuid.uuid4().hex, "new": new}
-    state.write_json(root / state.DESKTOP_REQUEST, request)
-    os.kill(current["owner_pid"], signal.SIGUSR1)
+    control = root / state.CONTROL_DIR
+    request_id = uuid.uuid4().hex
+    request_file = control / f"desktop-{request_id}.request.json"
+    answer_file = control / f"desktop-{request_id}.answer.json"
+    # The owner looks for requests about twice a second; no signal needed.
+    state.write_json(request_file, {"id": request_id, "new": new})
     answered: dict = {}
 
     def answer() -> bool:
-        latest = state.read_json(root / state.STATE_FILE) or {}
-        info = latest.get("desktop") or {}
-        if info.get("request") == request["id"]:
+        info = state.read_json(answer_file)
+        if info is not None:
             answered.update(info)
             return True
-        if not state.owner_alive(current):
-            raise ClientError("the sandbox stopped while starting the desktop child")
+        if not state.owner_alive(root):
+            raise ClientError("the sandbox stopped before it answered the desktop request")
         return False
 
-    if not _wait(answer, DESKTOP_WAIT_SECONDS):
-        raise ClientError(f"no desktop child after {DESKTOP_WAIT_SECONDS:.0f}s; see {root / 'logs'}")
+    try:
+        if not _wait(answer, DESKTOP_WAIT_SECONDS):
+            raise ClientError(
+                f"no desktop child after {DESKTOP_WAIT_SECONDS:.0f}s; see {root / 'logs'}"
+            )
+    finally:
+        request_file.unlink(missing_ok=True)
+        answer_file.unlink(missing_ok=True)
     if answered.get("error"):
         raise ClientError(f"the desktop child did not start: {answered['error']}")
     if as_json:
@@ -382,61 +387,97 @@ def desktop(*, new: bool, as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _known_pids(record: dict) -> list[int]:
-    desktop = record.get("desktop") or {}
-    return [pid for pid in (desktop.get("pid"), desktop.get("keeper_pid")) if isinstance(pid, int)]
+# The processes a sandbox records, and what their command lines contain:
+# without /proc, a survivor is only signalled while its command still says
+# it is that process.
+_RECORDED_COMMANDS = {"pid": "servonaut.desktop.child", "keeper_pid": "desktop_parent.py"}
 
 
-def _survivors(root: Path, record: dict) -> list[int]:
-    if state.can_list_processes():
-        return state.sandbox_pids(root)
-    # Without /proc only the processes the sandbox recorded can be checked.
-    return [pid for pid in _known_pids(record) if _pid_exists(pid)]
-
-
-def _pid_exists(pid: int) -> bool:
+def _signal_owner(pointer: dict, signum: int) -> bool:
+    """Signal the owner only while its lock proves the recorded pid is still it."""
+    pid = pointer.get("owner_pid")
+    if not state.owner_alive(pointer.get("root", "")) or not state.process_alive(
+        pid, pointer.get("owner_identity")
+    ):
+        return False
     try:
-        os.kill(pid, 0)
+        os.kill(pid, signum)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        raise ClientError(f"not allowed to stop the owner (pid {pid})") from None
     return True
+
+
+def _runs(pid: int, command: str) -> bool:
+    found = state.process_command(pid)
+    return found is not None and command in found
+
+
+def _survivors(root: Path, record: dict) -> list[tuple[int, Optional[str]]]:
+    """Sandbox processes still running: (pid, the command to verify, or None)."""
+    if state.can_list_processes():
+        return [(pid, None) for pid in state.sandbox_pids(root)]
+    # Without /proc only the processes the sandbox recorded can be checked.
+    desktop = record.get("desktop") or {}
+    return [
+        (desktop[key], command) for key, command in _RECORDED_COMMANDS.items()
+        if isinstance(desktop.get(key), int) and _runs(desktop[key], command)
+    ]
+
+
+def _stop_survivor(root: Path, pid: int, command: Optional[str]) -> str:
+    from e2e.harness.processes import stop_sandbox_pid
+
+    if command is None:  # found through /proc, which stop_sandbox_pid checks again
+        return stop_sandbox_pid(pid, sandbox_root=root)
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        if not _runs(pid, command):
+            return f"pid {pid} is gone"
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            return f"pid {pid} is gone"
+        except PermissionError:
+            return f"not allowed to stop pid {pid}"
+        if _wait(lambda: not _runs(pid, command), CHILDREN_STOP_SECONDS):
+            return f"stopped pid {pid}"
+    return f"pid {pid} did not stop"
 
 
 def down(*, timeout: float) -> int:
     """Stop the live sandbox and wait until every one of its processes is gone."""
-    from e2e.harness.processes import stop_sandbox_pid
-
     pointer_file = state.pointer_path()
     pointer = state.read_json(pointer_file)
     if pointer is None:
         print("No QA sandbox is running.")
         return 0
-    root = Path(pointer["root"])
+    if pointer.get("schema") != state.SCHEMA and state.legacy_owner_alive(pointer):
+        raise ClientError(state.legacy_message(pointer))
+    root = Path(str(pointer.get("root", "")))
     record = state.read_json(root / state.STATE_FILE) or pointer
-    was_running = state.owner_alive(pointer)
-    if was_running:
-        os.kill(pointer["owner_pid"], signal.SIGTERM)
-        if not _wait(lambda: not state.owner_alive(pointer), timeout):
-            _say(f"the owner (pid {pointer['owner_pid']}) did not stop within {timeout:.0f}s; "
-                 "killing it")
-            os.kill(pointer["owner_pid"], signal.SIGKILL)
-            _wait(lambda: not state.owner_alive(pointer), CHILDREN_STOP_SECONDS)
-    # Children stop by themselves once the owner is gone.
+    was_running = _signal_owner(pointer, signal.SIGTERM)
+    if was_running and not _wait(lambda: not state.owner_alive(root), timeout):
+        _say(f"the owner (pid {pointer['owner_pid']}) did not stop within {timeout:.0f}s; "
+             "killing it")
+        if _signal_owner(pointer, signal.SIGKILL):
+            _wait(lambda: not state.owner_alive(root), CHILDREN_STOP_SECONDS)
+    # Children stop by themselves once the owner or the root is gone.
     _wait(lambda: not _survivors(root, record), CHILDREN_STOP_SECONDS)
     survivors = _survivors(root, record)
-    for pid in survivors:
-        _say(f"survived the owner: {pid}; {stop_sandbox_pid(pid, sandbox_root=root)}")
+    for pid, command in survivors:
+        _say(f"survived the owner: {pid}; {_stop_survivor(root, pid, command)}")
     # An owner that could not clean up leaves its pointer and root behind.
     if state.read_json(pointer_file) == pointer:
         pointer_file.unlink(missing_ok=True)
-    marker = state.read_json(root / state.MARKER)
-    if marker is not None and marker.get("owner_pid") == pointer["owner_pid"] and not record.get("keep"):
-        shutil.rmtree(root, ignore_errors=True)
+    if not record.get("keep"):
+        state.remove_stale_root(root)
     if survivors:
         _say(f"{len(survivors)} process(es) outlived the sandbox; see {root / 'logs'}")
         return 1
+    if not state.can_list_processes():
+        _say("this system has no /proc: only the desktop processes the sandbox recorded "
+             "were checked; its other processes stop by themselves once its directory is gone")
     if was_running:
         print(f"QA sandbox stopped (owner pid {pointer['owner_pid']}).")
     else:

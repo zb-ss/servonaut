@@ -1,10 +1,12 @@
 """``python -m e2e.sandbox up``: start the fakes, seed a home, wait for ``down``.
 
-The owner is one foreground process. It claims the per-user pointer,
-bootstraps a hermetic environment rooted at a fixed directory (by default
-``<checkout>/.qa-sandbox``), starts the same fakes the end-to-end suite
-uses, seeds one home for the scenario and records everything a driver needs
-in ``<root>/state.json``:
+The owner is one foreground process. Under a lock on the per-user pointer's
+directory it creates its root (by default ``<checkout>/.qa-sandbox``) with
+the marker, takes the owner lock on that marker for its whole life (see
+``state.py``) and writes the pointer. It then bootstraps a hermetic
+environment in that root, starts the same fakes the end-to-end suite uses,
+seeds one home for the scenario and records everything a driver needs in
+``<root>/state.json``:
 
 ``schema``, ``scenario``, ``signed_in``, ``keep``, ``started_at``,
 ``owner_pid``, ``owner_identity``, ``root``, ``pointer``
@@ -21,12 +23,15 @@ in ``<root>/state.json``:
 ``urls``, ``logs``, ``fleet``, ``notes``
     the fakes, where their request logs are, and the seeded servers;
 ``desktop``
-    the desktop child started on request (``python -m e2e.sandbox desktop``).
+    the desktop child last started on request (``python -m e2e.sandbox desktop``).
 
-Then it prints ``SANDBOX READY <state.json>`` and serves until SIGINT or
-SIGTERM, when it stops everything, removes the root and releases the
-pointer. Every child it starts also stops by itself once the owner or the
-root is gone (``child_guard.py``).
+Then it prints ``SANDBOX READY <state.json>`` and serves: it writes the
+fakes' request logs to disk and answers desktop requests, which arrive as
+files in ``<root>/control`` (no signal is ever needed to reach it). SIGINT,
+SIGTERM or SIGHUP stop it, also during start-up: it stops everything,
+removes the root (unless ``--keep``) and releases the pointer. Every child it
+starts also stops by itself once the owner or the root is gone
+(``child_guard.py``).
 """
 
 from __future__ import annotations
@@ -36,6 +41,8 @@ import importlib.metadata
 import json
 import logging
 import os
+import queue
+import re
 import select
 import shutil
 import signal
@@ -46,15 +53,18 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from e2e.harness import bootstrap
 from e2e.sandbox import state
 
 READY_PREFIX = "SANDBOX READY"
-# How often the owner writes the fakes' request logs to disk.
-_FLUSH_SECONDS = 1.0
+# How often the owner looks for desktop requests and writes the request logs.
+_POLL_SECONDS = 0.5
 _STOP_TIMEOUT_SECONDS = 15.0
+_REQUEST_FILE = re.compile(r"^desktop-([0-9a-f]{32})\.request\.json$")
+# Modules `up` needs beyond the suite's own list (bootstrap.REQUIRED_MODULES).
+_EXTRA_MODULES = ("asyncssh", "pytest")
 
 
 class Refused(RuntimeError):
@@ -87,41 +97,69 @@ def _pointer_lock(pointer: Path) -> Iterator[None]:
         os.close(directory)
 
 
-def _describe_owner(record: dict) -> str:
-    return (
-        f"owner pid {record.get('owner_pid')}, started from {record.get('repo_root')}, "
-        f"state {record.get('state')}"
-    )
+def _refuse_if_running(current: dict) -> None:
+    """Refuse while the sandbox the pointer names is still running."""
+    if current.get("schema") != state.SCHEMA:
+        if state.legacy_owner_alive(current):
+            raise Refused(state.legacy_message(current))
+        return
+    if state.owner_alive(current.get("root", "")):
+        raise Refused(
+            "a QA sandbox is already running for this user (owner pid "
+            f"{current.get('owner_pid')}, started from {current.get('repo_root')}, state "
+            f"{current.get('state')}); stop it with `python -m e2e.sandbox down` from any "
+            "checkout, or use that one"
+        )
 
 
-def _clear_stale_root(root: Path) -> None:
+def _clean_after_stale_pointer(current: dict, root: Path) -> None:
+    """The pointer names a sandbox that stopped without cleaning up elsewhere."""
+    stale = Path(str(current.get("root", "")))
+    if not current.get("root") or stale == root or not stale.exists():
+        return
+    if state.remove_stale_root(stale):
+        _say(f"removed {stale}, left behind by a sandbox that stopped without cleaning up")
+    else:
+        _say(
+            f"the sandbox this pointer named (started from {current.get('repo_root')}) may "
+            f"have left {stale} behind; remove it with `rm -r {stale}` if you do not need it"
+        )
+
+
+def _clear_root(root: Path) -> None:
+    """Make way for a new sandbox at *root*, or refuse and say why."""
     if not root.exists():
         return
-    marker = state.read_json(root / state.MARKER)
-    if marker is None:
+    found = state.marker(root)
+    if state.owner_alive(root):
+        pid = (found or {}).get("owner_pid")
         raise Refused(
-            f"{root} exists and is not a QA sandbox root; remove it or choose another --root"
+            f"a QA sandbox is running in {root} (owner pid {pid}); stop it with "
+            f"`kill -TERM {pid}` or choose another --root"
         )
-    if state.owner_alive(marker):
+    if found is None:
         raise Refused(
-            f"the QA sandbox at {root} is still running (owner pid {marker.get('owner_pid')}); "
-            "stop it with `python -m e2e.sandbox down`"
+            f"{root} exists but has no sandbox marker. It may hold files something wrote "
+            "after a sandbox there stopped (for example an MCP server that still had the "
+            "TUI open), or it is not a sandbox directory at all. Remove it with "
+            f"`rm -r {root}` if it is yours to delete, or choose another --root"
         )
-    _say(f"removing the stale sandbox root {root}")
+    if found.get("schema") != state.SCHEMA and state.legacy_owner_alive(found):
+        raise Refused(state.legacy_message(found))
+    _say(f"removing {root}, left behind by a sandbox that stopped")
     shutil.rmtree(root)
 
 
-def claim(pointer: Path, root: Path, repo_root: Path, scenario: str) -> dict:
+def claim(pointer: Path, root: Path, repo_root: Path,
+          scenario: str) -> tuple[dict, state.OwnerLock]:
     """Make this process the owner of the per-user pointer and of *root*."""
     with _pointer_lock(pointer):
         current = state.read_json(pointer)
-        if current is not None and state.owner_alive(current):
-            raise Refused(
-                "a QA sandbox is already running for this user "
-                f"({_describe_owner(current)}); stop it with `python -m e2e.sandbox down` "
-                "from any checkout, or use that one"
-            )
-        _clear_stale_root(root)
+        if current is not None:
+            _refuse_if_running(current)
+            _clean_after_stale_pointer(current, root)
+        _clear_root(root)
+        root.mkdir(mode=0o700, parents=True)
         record = {
             "schema": state.SCHEMA,
             "state": str(root / state.STATE_FILE),
@@ -132,8 +170,11 @@ def claim(pointer: Path, root: Path, repo_root: Path, scenario: str) -> dict:
             "owner_identity": state.process_identity(os.getpid()),
             "started_at": _now(),
         }
+        lock = state.OwnerLock(root)
+        if not lock.acquire({**record, "phase": state.STARTING}):
+            raise Refused(f"another process is starting a QA sandbox in {root}")
         state.write_json(pointer, record)
-    return record
+    return record, lock
 
 
 def release(pointer: Path, record: dict) -> None:
@@ -147,6 +188,54 @@ def release(pointer: Path, record: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stop requests
+# ---------------------------------------------------------------------------
+
+
+class StopRequest:
+    """SIGINT, SIGTERM and SIGHUP: interrupt the start-up, or end serving.
+
+    Installed before anything else happens, so a signal at any moment leads
+    to the same clean stop.
+    """
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        # While true a signal raises KeyboardInterrupt into the running code.
+        self.interrupts = True
+        for signum in self.SIGNALS:
+            signal.signal(signum, self)
+
+    def __call__(self, signum: int, _frame: Any) -> None:
+        self.event.set()
+        if self.interrupts:
+            self.interrupts = False
+            raise KeyboardInterrupt(f"signal {signum}")
+
+    @contextmanager
+    def deferred(self) -> Iterator[None]:
+        """Hold a stop request back until the block is done.
+
+        For steps that must not stop half-way: taking the claim, and
+        installing the guard (an interrupt between its settings would leave
+        this process refusing its own checkout).
+        """
+        interrupts, self.interrupts = self.interrupts, False
+        try:
+            yield
+        finally:
+            self.interrupts = interrupts
+
+    def raise_if_requested(self) -> None:
+        """Act on a stop request that arrived while it was held back."""
+        if self.interrupts and self.event.is_set():
+            self.interrupts = False
+            raise KeyboardInterrupt("stop requested")
+
+
+# ---------------------------------------------------------------------------
 # The running sandbox
 # ---------------------------------------------------------------------------
 
@@ -154,40 +243,55 @@ def release(pointer: Path, record: dict) -> None:
 class Owner:
     """Everything one ``up`` started, and how to stop it."""
 
-    def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict, *,
+    def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict,
+                 lock: state.OwnerLock, stop_request: StopRequest, *,
                  signed_in: bool, keep: bool) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
         self.claim_record = claim_record
+        self.lock = lock
+        self.stop_request = stop_request
         self.signed_in = signed_in
         self.keep = keep
         self.logs = root / "logs"
+        self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
-        self._stop = threading.Event()
-        self._wake = threading.Event()
-        self._desktop_wanted = False
+        self.ctx: Any = None
+        self.fake_cloud: Any = None
+        self.moto: Any = None
+        self.cloudtrail: Any = None
+        self.providers: Any = None
+        self.world: Any = None
+        self.shims: Any = None
+        self.user: Any = None
+        self.child_env: Optional[dict] = None
         self._state_lock = threading.Lock()
         self._state: dict = {}
         self._started: list[Any] = []  # things with .stop(), in start order
+        self._monkeypatch: Any = None
         self._keeper: Optional[subprocess.Popen] = None
         self._desktop_count = 0
+        self._requests: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._seen_requests: set[str] = set()
+        self._desktop_worker: Optional[threading.Thread] = None
         self._flushed: dict[str, int] = {}
-        self._monkeypatch: Any = None
-        self.ctx: Any = None
+
+    def _set_phase(self, phase: str) -> None:
+        self.lock.write({**self.claim_record, "phase": phase})
 
     # -- start -------------------------------------------------------------
 
     def start(self) -> None:
-        self.ctx = bootstrap.bootstrap(self.root)
-        state.write_json(self.root / state.MARKER, {
-            "owner_pid": self.claim_record["owner_pid"],
-            "owner_identity": self.claim_record["owner_identity"],
-        })
-        self.logs.mkdir()
-        self._arm_owner_guard()
+        with self.stop_request.deferred():
+            self.ctx = bootstrap.bootstrap(self.root)
+            self.logs.mkdir()
+            self.control.mkdir()
+            self._arm_owner_guard()
+        self.stop_request.raise_if_requested()
         self._start_fakes()
         self._seed_and_record()
+        self._set_phase(state.RUNNING)
 
     def _arm_owner_guard(self) -> None:
         """This process's refusals go to the sandbox guard log, like its children's."""
@@ -331,34 +435,27 @@ class Owner:
     # -- serve ---------------------------------------------------------------
 
     def serve(self) -> None:
-        """Wait for a stop signal; start the desktop child when asked."""
-        def stop(signum: int, _frame: Any) -> None:
-            self._stop.set()
-            self._wake.set()
-
-        def desktop(signum: int, _frame: Any) -> None:
-            self._desktop_wanted = True
-            self._wake.set()
-
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(signum, stop)
-        signal.signal(signal.SIGUSR1, desktop)
-        while not self._stop.is_set():
-            self._wake.wait(_FLUSH_SECONDS)
-            self._wake.clear()
-            if self._desktop_wanted and not self._stop.is_set():
-                self._desktop_wanted = False
-                threading.Thread(target=self._desktop_request, name="qa-desktop", daemon=True).start()
+        """Answer desktop requests and write the request logs until asked to stop."""
+        self.stop_request.interrupts = False
+        self._desktop_worker = threading.Thread(
+            target=self._answer_desktop_requests, name="qa-desktop", daemon=True
+        )
+        self._desktop_worker.start()
+        while not self.stop_request.event.wait(_POLL_SECONDS):
+            self._queue_desktop_requests()
             self._flush_logs()
 
     def _flush_logs(self) -> None:
         from e2e.harness import aws_logs_filter
 
-        sources = {
-            "fake-cloud-requests.jsonl": self.fake_cloud.requests,
-            "provider-requests.jsonl": self.providers.requests,
-            "cloudtrail-lookups.jsonl": self.cloudtrail.lookups,
-        }
+        sources: dict[str, Callable[[], list]] = {}
+        for name, server, read in (
+            ("fake-cloud-requests.jsonl", self.fake_cloud, "requests"),
+            ("provider-requests.jsonl", self.providers, "requests"),
+            ("cloudtrail-lookups.jsonl", self.cloudtrail, "lookups"),
+        ):
+            if server is not None:
+                sources[name] = getattr(server, read)
         for name, read in sources.items():
             entries = read()
             if self._flushed.get(name) != len(entries):
@@ -371,26 +468,45 @@ class Owner:
 
     # -- desktop ---------------------------------------------------------------
 
-    def _desktop_request(self) -> None:
-        request = state.read_json(self.root / state.DESKTOP_REQUEST) or {}
-        try:
-            info = self._desktop(fresh=bool(request.get("new")))
-        except Exception as exc:  # noqa: BLE001 - reported to the requester
-            info = {"error": f"{type(exc).__name__}: {exc}"}
-        info["request"] = request.get("id")
-        with self._state_lock:
-            self._state["desktop"] = info
-        self._write_state()
+    def _queue_desktop_requests(self) -> None:
+        for path in sorted(self.control.iterdir()):
+            match = _REQUEST_FILE.match(path.name)
+            if match and match.group(1) not in self._seen_requests:
+                self._seen_requests.add(match.group(1))
+                self._requests.put(match.group(1))
+
+    def _answer_desktop_requests(self) -> None:
+        """One request at a time, in the order they arrived."""
+        while True:
+            request_id = self._requests.get()
+            if request_id is None:
+                return
+            request_file = self.control / f"desktop-{request_id}.request.json"
+            request = state.read_json(request_file) or {}
+            try:
+                info = self._desktop(fresh=bool(request.get("new")))
+            except Exception as exc:  # noqa: BLE001 - reported to the requester
+                info = {"error": f"{type(exc).__name__}: {exc}"}
+            state.write_json(self.control / f"desktop-{request_id}.answer.json", info)
+            request_file.unlink(missing_ok=True)
+            if "error" not in info:
+                with self._state_lock:
+                    self._state["desktop"] = {k: v for k, v in info.items() if k != "reused"}
+                self._write_state()
 
     def _desktop(self, *, fresh: bool) -> dict:
+        current = self._state.get("desktop") or {}
+        keeper = self._keeper
+        if (not fresh and keeper is not None and keeper.poll() is None
+                and state.process_alive(current.get("pid"), current.get("identity"))):
+            return {**current, "reused": True}
+        self._stop_keeper()
+        return self._start_desktop()
+
+    def _start_desktop(self) -> dict:
         from e2e.harness.desktop import CHILD_STARTUP_TIMEOUT, WINDOW_STAND_IN
         from e2e.harness.processes import require_armed
 
-        current = self._state.get("desktop") or {}
-        if (not fresh and self._keeper is not None and self._keeper.poll() is None
-                and current.get("pid") and _running(current["pid"])):
-            return {**current, "reused": True}
-        self._stop_keeper()
         self._desktop_count += 1
         stderr_path = self.logs / f"desktop-{self._desktop_count}.stderr.log"
         with stderr_path.open("wb") as stderr:
@@ -407,20 +523,25 @@ class Owner:
                 start_new_session=True,
             )
         self._keeper = keeper
-        assert keeper.stdout is not None
-        ready, _, _ = select.select([keeper.stdout], [], [], CHILD_STARTUP_TIMEOUT + 10)
-        line = keeper.stdout.readline() if ready else b""
-        if not line:
+        try:
+            assert keeper.stdout is not None
+            ready, _, _ = select.select([keeper.stdout], [], [], CHILD_STARTUP_TIMEOUT + 10)
+            line = keeper.stdout.readline() if ready else b""
+            if not line:
+                raise RuntimeError(f"the desktop child did not start; see {stderr_path}")
+            started = json.loads(line)
+            require_armed(self.logs / "armed.jsonl", pid=keeper.pid)
+            require_armed(self.logs / "armed.jsonl", pid=started["pid"])
+        except BaseException:
             self._stop_keeper()
-            raise RuntimeError(f"the desktop child did not start; see {stderr_path}")
-        started = json.loads(line)
-        require_armed(self.logs / "armed.jsonl", pid=keeper.pid)
-        require_armed(self.logs / "armed.jsonl", pid=started["pid"])
+            raise
         return {
             "origin": started["origin"],
             "token": started["token"],
             "pid": started["pid"],
+            "identity": state.process_identity(started["pid"]),
             "keeper_pid": keeper.pid,
+            "keeper_identity": state.process_identity(keeper.pid),
             "started_at": _now(),
             "stderr": str(stderr_path),
             "reused": False,
@@ -443,46 +564,57 @@ class Owner:
     # -- stop ------------------------------------------------------------------
 
     def stop(self) -> None:
-        """Stop every process and server, then remove the root and the pointer."""
+        """Stop every process and server, then remove the root and the pointer.
+
+        Each step runs whatever happened before it; one that fails is
+        reported and the rest still run.
+        """
+        self.stop_request.interrupts = False
+        steps: list[tuple[str, Callable[[], Any]]] = [
+            ("mark the sandbox as stopping", lambda: self._set_phase(state.STOPPING)),
+            ("stop answering desktop requests", self._end_desktop_worker),
+            ("stop the desktop child", self._stop_keeper),
+            *((f"stop {type(s).__name__}", s.stop) for s in reversed(self._started)),
+            ("restore the CloudWatch filter emulation", self._undo_patches),
+            ("write the request logs", self._flush_kept_logs),
+            ("stop the sandbox's remaining processes", self._stop_remaining),
+            ("remove the sandbox directory", self._remove_root),
+            ("release the pointer", self._release_pointer),
+        ]
+        for description, step in steps:
+            try:
+                step()
+            except Exception as exc:  # noqa: BLE001 - stopping must finish
+                _say(f"could not {description}: {type(exc).__name__}: {exc}")
+        self.lock.release()
+
+    def _flush_kept_logs(self) -> None:
+        if self.keep and self.logs.is_dir():
+            self._flush_logs()
+
+    def _end_desktop_worker(self) -> None:
+        self._requests.put(None)
+
+    def _undo_patches(self) -> None:
+        if self._monkeypatch is not None:
+            self._monkeypatch.undo()
+
+    def _stop_remaining(self) -> None:
         from e2e.harness.processes import stop_sandbox_pid
 
-        try:
-            self._stop_keeper()
-        finally:
-            for server in reversed(self._started):
-                try:
-                    server.stop()
-                except Exception as exc:  # noqa: BLE001 - stopping must finish
-                    _say(f"could not stop {type(server).__name__}: {exc}")
-            if self._monkeypatch is not None:
-                self._monkeypatch.undo()
-            if self.keep and self.logs.exists():
-                self._flush_logs()
-            for pid in state.sandbox_pids(self.root):
-                _say(stop_sandbox_pid(pid, sandbox_root=self.root))
-            if not self.keep and self._owns_root():
-                shutil.rmtree(self.root, ignore_errors=True)
-            # Nothing of the sandbox runs any more; the pointer, outside the
-            # root, is the last thing to clean up.
-            bootstrap.load_guard().disarm_filesystem_and_spawns()
-            release(self.pointer, self.claim_record)
+        for pid in state.sandbox_pids(self.root):
+            _say(stop_sandbox_pid(pid, sandbox_root=self.root))
 
-    def _owns_root(self) -> bool:
-        """True when the root carries this process's marker (never remove another's)."""
-        marker = state.read_json(self.root / state.MARKER)
-        return marker is not None and marker.get("owner_pid") == self.claim_record["owner_pid"]
+    def _remove_root(self) -> None:
+        # This process created the root and holds its lock: it is ours.
+        if not self.keep:
+            shutil.rmtree(self.root, ignore_errors=True)
 
-
-def _running(pid: int) -> bool:
-    """True while *pid* exists and has not exited (a zombie has)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    identity = state.process_identity(pid)
-    return identity is None or identity[0] not in ("Z", "X")
+    def _release_pointer(self) -> None:
+        # Nothing of the sandbox runs any more; the pointer, outside the
+        # root, is the last thing to clean up.
+        bootstrap.load_guard().disarm_filesystem_and_spawns()
+        release(self.pointer, self.claim_record)
 
 
 def _distribution_dir() -> Optional[str]:
@@ -505,32 +637,37 @@ def _write_jsonl(path: Path, entries: list) -> None:
     tmp.replace(path)
 
 
-def _interrupt(signum: int, _frame: Any) -> None:
-    raise KeyboardInterrupt(f"signal {signum}")
-
-
 def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> int:
-    # Until the sandbox serves, a stop request interrupts the start-up, which
-    # then cleans up after itself like a normal stop.
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, _interrupt)
+    stop_request = StopRequest()
+    missing = bootstrap.missing_modules(_EXTRA_MODULES)
+    if missing:
+        _say(
+            f"not starting: the sandbox needs the e2e and provider extras "
+            f"({', '.join(missing)} not installed): {bootstrap.INSTALL_HINT}"
+        )
+        return 2
     repo_root = bootstrap.REPO_ROOT
     # Resolved: children carry this exact path, and `down` finds them by it.
     root = (root or state.default_root(repo_root)).resolve()
     pointer = state.pointer_path()
+    with stop_request.deferred():
+        try:
+            record, lock = claim(pointer, root, repo_root, scenario)
+        except Refused as exc:
+            _say(f"not starting: {exc}")
+            return 2
+        owner = Owner(root, scenario, pointer, record, lock, stop_request,
+                      signed_in=signed_in, keep=keep)
     try:
-        record = claim(pointer, root, repo_root, scenario)
-    except Refused as exc:
-        _say(f"not starting: {exc}")
-        return 2
-    owner = Owner(root, scenario, pointer, record, signed_in=signed_in, keep=keep)
-    try:
+        stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()
         owner.start()
         _say(f"ready after {time.monotonic() - started:.1f}s")
         print(f"{READY_PREFIX} {owner.state_path}", flush=True)
         owner.serve()
+    except KeyboardInterrupt:
+        _say("interrupted")
     finally:
         _say("stopping")
         owner.stop()

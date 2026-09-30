@@ -2,12 +2,17 @@
 
 The sandbox runs as a child of the test with its root inside the journey's
 folder, and a person's environment of its own (home, state directory with
-the per-user pointer). The test drives it as a person does: ``status``, the
+the per-user pointer). The tests drive it as a person does: ``status``, the
 CLI through ``run``, one MCP tool through ``mcp-call``, the desktop child in
 headless Chromium with the printed start snippet, then ``down``. Afterwards
 none of the sandbox's processes runs, its root is gone, and nothing was left
 outside it: the pointer was the only file written there, and ``down``
 removed it again.
+
+The others cover what can go wrong around it: a pointer naming a process
+that is no longer the owner (never signalled), a stop request during
+start-up, and a long-lived host (the TUI inside an MCP server) that outlives
+``down`` and must not bring the sandbox directory back.
 """
 
 from __future__ import annotations
@@ -52,14 +57,19 @@ class QaSandbox:
     def argv(self, *args: str) -> list[str]:
         return [sys.executable, "-m", "e2e.sandbox", *args]
 
-    async def up(self, *args: str) -> dict:
+    def start(self, *args: str) -> subprocess.Popen:
+        """``up`` in the background, without waiting for it to be ready."""
         self.stderr.parent.mkdir(parents=True, exist_ok=True)
         with self.stderr.open("w", encoding="utf-8") as stderr:
             self.owner = subprocess.Popen(
                 self.argv("up", "--root", str(self.root), *args),
                 cwd=REPO_ROOT, env=self.env, stdout=subprocess.PIPE, stderr=stderr, text=True,
             )
-        assert self.owner.stdout is not None
+        return self.owner
+
+    async def up(self, *args: str) -> dict:
+        self.start(*args)
+        assert self.owner is not None and self.owner.stdout is not None
         line = await asyncio.wait_for(asyncio.to_thread(self.owner.stdout.readline), READY_TIMEOUT)
         assert line.startswith(f"SANDBOX READY {self.root / state.STATE_FILE}"), (
             line or self.stderr.read_text(encoding="utf-8")
@@ -151,9 +161,14 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
     for name in ("app-1", "cache-1", "mail-1", "web-1"):
         assert name in called.stdout
 
-    started = await qa_sandbox.command("desktop", "--json")
-    assert started.returncode == 0, started.stderr
-    info = json.loads(started.stdout)
+    # Two requests at once share one desktop child: one starts it, one reuses it.
+    answers = await asyncio.gather(*(qa_sandbox.command("desktop", "--json") for _ in range(2)))
+    assert [answer.returncode for answer in answers] == [0, 0], [a.stderr for a in answers]
+    infos = [json.loads(answer.stdout) for answer in answers]
+    assert infos[0]["pid"] == infos[1]["pid"]
+    assert sorted(info["reused"] for info in infos) == [False, True]
+    assert list((qa_sandbox.root / state.CONTROL_DIR).iterdir()) == []
+    info = infos[0]
     async with desktop.browser() as browser:
         page = await browser.new_page()
         assert await page.open(info["origin"]) == 200
@@ -215,3 +230,141 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)
+
+
+def _write_stale_sandbox(qa_sandbox: QaSandbox, root: Path, pid: int) -> None:
+    """A pointer and root left by an owner that died, naming a pid now used by *pid*."""
+    record = {
+        "schema": state.SCHEMA, "root": str(root), "state": str(root / state.STATE_FILE),
+        "repo_root": str(REPO_ROOT), "owner_pid": pid,
+        "owner_identity": state.process_identity(pid), "started_at": "2026-01-01T00:00:00+00:00",
+    }
+    root.mkdir(parents=True)
+    state.write_json(root / state.MARKER, {**record, "phase": state.RUNNING})
+    state.write_json(root / state.STATE_FILE, {**record, "keep": False})
+    state.write_json(qa_sandbox.pointer, record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_a_stale_pointer_never_gets_its_pid_signalled(qa_sandbox, journey):
+    # A live process that is not a sandbox owner, under the number a dead owner had.
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        env=qa_sandbox.env, stdin=subprocess.PIPE,
+    )
+    try:
+        stale = journey.directory / "stale-root"
+        _write_stale_sandbox(qa_sandbox, stale, stranger.pid)
+
+        status = await qa_sandbox.command("status")
+        assert status.returncode == 1 and "no longer running" in status.stderr
+        refused = await qa_sandbox.command("desktop")
+        assert refused.returncode == 1 and "no longer running" in refused.stderr
+        cleaned = await qa_sandbox.command("down")
+        assert cleaned.returncode == 0, cleaned.stderr
+        assert "had already stopped" in cleaned.stdout
+        assert not stale.exists() and not qa_sandbox.pointer.exists()
+        assert stranger.poll() is None
+
+        # A directory without the marker is left alone, with advice.
+        leftover = journey.directory / "leftover"
+        (leftover / "user").mkdir(parents=True)
+        blocked = await qa_sandbox.command("up", "--root", str(leftover))
+        assert blocked.returncode == 2 and "no sandbox marker" in blocked.stderr
+        assert f"rm -r {leftover}" in blocked.stderr and (leftover / "user").is_dir()
+
+        # A new sandbox replaces a stale pointer and removes the root it named.
+        _write_stale_sandbox(qa_sandbox, stale, stranger.pid)
+        await qa_sandbox.up()
+        assert not stale.exists()
+        assert f"removed {stale}" in qa_sandbox.stderr.read_text(encoding="utf-8")
+        await qa_sandbox.down()
+        assert stranger.poll() is None
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+async def _until(predicate, desc: str, timeout: float = READY_TIMEOUT) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        assert loop.time() < deadline, f"timed out waiting for {desc}"
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+@pytest.mark.parametrize("keep", [False, True], ids=["removed", "kept"])
+async def test_a_stop_during_start_up_cleans_up(qa_sandbox, keep):
+    owner = qa_sandbox.start(*(["--keep"] if keep else []))
+    # The pointer is written as soon as the sandbox is claimed, well before it is ready.
+    await _until(qa_sandbox.pointer.exists, "the pointer")
+    owner.terminate()
+    assert await asyncio.to_thread(owner.wait, COMMAND_TIMEOUT) == 0
+    log = qa_sandbox.stderr.read_text(encoding="utf-8")
+    assert "Traceback" not in log and "could not" not in log, log
+    assert not qa_sandbox.pointer.exists()
+    assert qa_sandbox.root.exists() == keep
+    assert state.sandbox_pids(qa_sandbox.root) == []
+    # A kept root is provably the sandbox's own: the next start clears it.
+    if keep:
+        await qa_sandbox.up()
+        await qa_sandbox.down()
+
+
+# Stands in for the TUI host inside an MCP server: it outlives `down`, with
+# the sandbox's environment and guard but without the owner watchdog.
+_HOST_STAND_IN = """
+import os, sys
+from pathlib import Path
+from e2e.harness import child_guard
+from e2e.sandbox import state
+
+current = state.load_live_state()
+os.environ.clear()
+os.environ.update(current["env"])
+child_guard.arm(watch_owner=False)
+state.confine_after(Path(current["root"]), [sys.argv[1]], lambda: print("confined", flush=True))
+print("armed", flush=True)
+for line in sys.stdin:
+    target = Path(line.strip())
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("written")
+        print("wrote", flush=True)
+    except PermissionError:
+        print("refused", flush=True)
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_a_host_that_outlives_the_sandbox_cannot_bring_it_back(qa_sandbox, journey):
+    current = await qa_sandbox.up()
+    home = Path(current["sandbox"]["home"])
+    captures = journey.directory / "captures"
+    host = subprocess.Popen(
+        [sys.executable, "-c", _HOST_STAND_IN, str(captures)],
+        cwd=REPO_ROOT, env=qa_sandbox.env, text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    )
+    assert host.stdin is not None and host.stdout is not None
+
+    async def ask(path: Path) -> str:
+        host.stdin.write(f"{path}\n")
+        host.stdin.flush()
+        return (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip()
+
+    try:
+        assert (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip() == "armed"
+        assert await ask(home / "early.txt") == "wrote"
+        await qa_sandbox.down()
+        assert (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip() == "confined"
+        assert await ask(home / "late.txt") == "refused"
+        assert not qa_sandbox.root.exists()
+        assert await ask(captures / "snapshot.svg") == "wrote"
+    finally:
+        host.kill()
+        host.wait()
