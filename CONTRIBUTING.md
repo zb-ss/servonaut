@@ -500,9 +500,13 @@ signed in to the local API.
   client libraries; for a pipx install run
   `pipx inject textual-pilot-mcp -e "<checkout>[hetzner,ovh]" --force` (again
   after a dependency changes). Snapshots go to
-  `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/captures/`. A server keeps
-  the checkout and sandbox directory of its first `launch`; restart it after
-  starting a sandbox from another checkout.
+  `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/captures/`. Start the server
+  from the checkout root, and without an empty entry in `PYTHONPATH` (an
+  empty entry means the working directory): a directory inside
+  `src/servonaut` on the import path puts Servonaut's own modules (such as
+  `secrets.py`) in place of the standard library's, and the server fails at
+  start-up. A server keeps the checkout and sandbox directory of its first
+  `launch`; restart it after starting a sandbox from another checkout.
 - Desktop: `python -m e2e.sandbox desktop` starts the desktop child without a
   window and prints its URL, a single-use session token, a snippet that
   starts the session in a browser page (it waits for the first output and
