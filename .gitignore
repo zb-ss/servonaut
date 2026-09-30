@@ -5,6 +5,9 @@
 # (regenerated from fake-service walkthroughs) is intended for commit.
 ux_capture/captures/
 
+# Local QA sandbox root (python -m e2e.sandbox up).
+.qa-sandbox/
+
 # Python
 __pycache__/
 *.pyc
