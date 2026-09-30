@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -505,3 +506,76 @@ def test_only_the_package_itself_counts_as_inside_it(journey, monkeypatch):
     monkeypatch.setattr(sys, "path", [*kept, *dropped])
     assert import_path.drop_package_dirs() == dropped
     assert sys.path == kept
+
+
+# A sandbox process without /proc (as on macOS): its PATH holds only fake
+# tools and its guard refuses other programs, yet `ps` must still answer.
+_WITHOUT_PROC = """
+import json, os, sys
+from e2e.sandbox import state
+
+state.can_list_processes = lambda: False
+target = int(sys.argv[1])
+identity = state.process_identity(target)
+print(json.dumps({
+    "identity": identity,
+    "alive": state.process_alive(target, identity),
+    "command": state.process_command(target),
+}))
+"""
+
+
+def _without_proc(journey, pid: int, **env: str) -> dict:
+    child_env = journey.child_env(journey.new_sandbox("no-proc"))
+    child_env["PYTHONPATH"] = os.pathsep.join([child_env["PYTHONPATH"], str(REPO_ROOT)])
+    result = subprocess.run(
+        [sys.executable, "-c", _WITHOUT_PROC, str(pid)], cwd=REPO_ROOT,
+        env={**child_env, **env}, capture_output=True, text=True, timeout=COMMAND_TIMEOUT,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_process_identity_without_proc_works_inside_a_sandbox(journey):
+    if shutil.which("ps", path="/bin:/usr/bin") is None:
+        pytest.skip("needs the system ps")
+    subject = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+        env=journey.child_env(journey.new_sandbox("subject")),
+    )
+    try:
+        # Asked from two time zones, the same process has the same identity.
+        east = _without_proc(journey, subject.pid, TZ="Pacific/Auckland")
+        west = _without_proc(journey, subject.pid, TZ="America/New_York")
+        assert east["identity"] and east["identity"] == west["identity"]
+        assert east["alive"] and west["alive"]
+        assert "sys.stdin.read()" in east["command"]
+    finally:
+        subject.kill()
+        subject.wait()
+    # Once it is gone, it is gone.
+    assert _without_proc(journey, subject.pid)["identity"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_up_waits_for_a_down_that_holds_the_pointer(qa_sandbox):
+    def said(text: str) -> bool:
+        return text in qa_sandbox.stderr.read_text(encoding="utf-8")
+
+    # The pointer lock, as a `down` holds it while it stops survivors.
+    with state.pointer_lock(qa_sandbox.pointer):
+        # A stop while waiting ends the wait at once.
+        waiting = qa_sandbox.start()
+        await _until(lambda: said("waiting for another QA sandbox command"), "the wait")
+        waiting.terminate()
+        assert await asyncio.to_thread(waiting.wait, COMMAND_TIMEOUT) == 2
+        assert said("stopped while waiting")
+        assert not qa_sandbox.root.exists() and not qa_sandbox.pointer.exists()
+
+        owner = qa_sandbox.start()
+        await _until(lambda: said("waiting for another QA sandbox command"), "the wait")
+    assert owner.stdout is not None
+    line = await asyncio.wait_for(asyncio.to_thread(owner.stdout.readline), READY_TIMEOUT)
+    assert line.startswith("SANDBOX READY"), qa_sandbox.stderr.read_text(encoding="utf-8")
+    await qa_sandbox.down()

@@ -409,13 +409,14 @@ _RECORDED = (
 
 
 def _is_owner(pointer: dict) -> bool:
-    """True while the lock, the marker and the process all say the pointer's owner runs."""
+    """True while the pointer's owner holds its lock.
+
+    Only the lock holder writes the marker, and a live holder's pid cannot
+    be reused: a held lock with a marker naming the pointer's owner proves
+    that pid is the owner.
+    """
     root = pointer.get("root", "")
-    return (
-        state.owner_alive(root)
-        and state.same_owner(state.marker(root), pointer)
-        and state.process_alive(pointer.get("owner_pid"), pointer.get("owner_identity"))
-    )
+    return state.owner_alive(root) and state.same_owner(state.marker(root), pointer)
 
 
 def _signal_owner(pointer: dict, signum: int) -> bool:
@@ -477,19 +478,39 @@ def _stop_survivor(root: Path, pid: int, recorded: Optional[tuple]) -> str:
     return f"pid {pid} did not stop"
 
 
-def _clean_up(pointer_file: Path, pointer: dict, record: dict) -> Optional[int]:
+class _Untouched(Exception):
+    """Cleaning up is not this command's to do (the message says why)."""
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _clean_up(pointer_file: Path, pointer: dict, record: dict) -> int:
     """Stop survivors and remove what the stopped sandbox left; the number of survivors.
 
     Runs under the pointer lock, so no new sandbox can claim this root
-    meanwhile; None when one already had (then nothing is touched).
+    meanwhile. Touches nothing while any owner holds the root's lock, or
+    when that cannot be told (raises _Untouched).
     """
     root = Path(str(pointer.get("root", "")))
     with state.pointer_lock(pointer_file):
         current = state.read_json(pointer_file)
-        if (current is not None and not state.same_owner(current, pointer)) or (
-            state.owner_alive(root) and not state.same_owner(state.marker(root), pointer)
-        ):
-            return None
+        if current is not None and not state.same_owner(current, pointer):
+            raise _Untouched("A new QA sandbox took over meanwhile; left it alone.", 0)
+        liveness = state.owner_state(root)
+        if liveness == state.ALIVE:
+            if state.same_owner(state.marker(root), pointer):
+                raise _Untouched(
+                    f"The QA sandbox (owner pid {pointer['owner_pid']}) still runs; left its "
+                    "pointer and directory alone.", 1,
+                )
+            raise _Untouched("A new QA sandbox took over meanwhile; left it alone.", 0)
+        if liveness == state.UNKNOWN:
+            raise _Untouched(
+                f"Cannot tell whether the QA sandbox in {root} still runs (its filesystem does "
+                "not support flock); left it alone.", 1,
+            )
         # Children stop by themselves once the owner or the root is gone.
         _wait(lambda: not _survivors(root, record), CHILDREN_STOP_SECONDS)
         survivors = _survivors(root, record)
@@ -520,10 +541,13 @@ def down(*, timeout: float) -> int:
              "killing it")
         if _signal_owner(pointer, signal.SIGKILL):
             _wait(lambda: _owner_gone(pointer), CHILDREN_STOP_SECONDS)
-    survivors = _clean_up(pointer_file, pointer, record)
-    if survivors is None:
-        print("A new QA sandbox took over meanwhile; left it alone.")
-        return 0
+    try:
+        survivors = _clean_up(pointer_file, pointer, record)
+    except _Untouched as exc:
+        print(str(exc))
+        return exc.code
+    except state.LockUnsupported as exc:
+        raise ClientError(str(exc)) from None
     if survivors:
         _say(f"{survivors} process(es) outlived the sandbox; see {root / 'logs'}")
         return 1

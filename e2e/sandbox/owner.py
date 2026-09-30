@@ -88,7 +88,13 @@ def _refuse_if_running(current: dict, pointer: Path) -> None:
     """Refuse while the sandbox the pointer names is still running."""
     if current.get("schema") != state.SCHEMA:
         raise Refused(state.unknown_schema(current, pointer))
-    if state.owner_alive(current.get("root", "")):
+    liveness = state.owner_state(current.get("root", ""))
+    if liveness == state.UNKNOWN:
+        raise Refused(
+            f"cannot tell whether the QA sandbox in {current.get('root')} still runs: its "
+            "filesystem does not support flock"
+        )
+    if liveness == state.ALIVE:
         raise Refused(
             "a QA sandbox is already running for this user (owner pid "
             f"{current.get('owner_pid')}, started from {current.get('repo_root')}, state "
@@ -116,7 +122,13 @@ def _clear_root(root: Path) -> None:
     if not root.exists():
         return
     found = state.marker(root)
-    if state.owner_alive(root):
+    liveness = state.owner_state(root)
+    if liveness == state.UNKNOWN:
+        raise Refused(
+            f"cannot tell whether a QA sandbox still runs in {root}: its filesystem does not "
+            "support flock; choose another --root"
+        )
+    if liveness == state.ALIVE:
         pid = (found or {}).get("owner_pid")
         raise Refused(
             f"a QA sandbox is running in {root} (owner pid {pid}); stop it with "
@@ -135,35 +147,51 @@ def _clear_root(root: Path) -> None:
     shutil.rmtree(root)
 
 
-def claim(pointer: Path, root: Path, repo_root: Path,
-          scenario: str) -> tuple[dict, state.OwnerLock]:
-    """Make this process the owner of the per-user pointer and of *root*."""
-    with state.pointer_lock(pointer):
-        current = state.read_json(pointer)
-        if current is not None:
-            _refuse_if_running(current, pointer)
-            _clean_after_stale_pointer(current, root)
-        _clear_root(root)
-        root.mkdir(mode=0o700, parents=True)
-        record = {
-            "schema": state.SCHEMA,
-            "state": str(root / state.STATE_FILE),
-            "root": str(root),
-            "repo_root": str(repo_root),
-            "scenario": scenario,
-            "owner_pid": os.getpid(),
-            "owner_identity": state.process_identity(os.getpid()),
-            "started_at": _now(),
-        }
-        lock = state.OwnerLock(root)
-        try:
-            locked = lock.acquire({**record, "phase": state.STARTING})
-        except state.LockUnsupported as exc:
-            shutil.rmtree(root, ignore_errors=True)  # created just above, holding nothing else
-            raise Refused(str(exc)) from None
-        if not locked:
-            raise Refused(f"another process is starting a QA sandbox in {root}")
-        state.write_json(pointer, record)
+def claim(pointer: Path, root: Path, repo_root: Path, scenario: str,
+          cancelled: Callable[[], bool] = lambda: False) -> tuple[dict, state.OwnerLock]:
+    """Make this process the owner of the per-user pointer and of *root*.
+
+    Waits while another command (a `down` stopping survivors) holds the
+    pointer lock; *cancelled()* ends that wait.
+    """
+    def waiting() -> None:
+        _say("waiting for another QA sandbox command (a `down`) to finish")
+
+    try:
+        with state.pointer_lock(pointer, waiting=waiting, cancelled=cancelled):
+            return _claim(pointer, root, repo_root, scenario)
+    except (state.LockUnsupported, state.LockWaitCancelled) as exc:
+        raise Refused(str(exc)) from None
+
+
+def _claim(pointer: Path, root: Path, repo_root: Path,
+           scenario: str) -> tuple[dict, state.OwnerLock]:
+    """The claim itself, under the pointer lock."""
+    current = state.read_json(pointer)
+    if current is not None:
+        _refuse_if_running(current, pointer)
+        _clean_after_stale_pointer(current, root)
+    _clear_root(root)
+    root.mkdir(mode=0o700, parents=True)
+    record = {
+        "schema": state.SCHEMA,
+        "state": str(root / state.STATE_FILE),
+        "root": str(root),
+        "repo_root": str(repo_root),
+        "scenario": scenario,
+        "owner_pid": os.getpid(),
+        "owner_identity": state.process_identity(os.getpid()),
+        "started_at": _now(),
+    }
+    lock = state.OwnerLock(root)
+    try:
+        locked = lock.acquire({**record, "phase": state.STARTING})
+    except state.LockUnsupported as exc:
+        shutil.rmtree(root, ignore_errors=True)  # created just above, holding nothing else
+        raise Refused(str(exc)) from None
+    if not locked:
+        raise Refused(f"another process is starting a QA sandbox in {root}")
+    state.write_json(pointer, record)
     return record, lock
 
 
@@ -265,6 +293,7 @@ class Owner:
         self._requests: "queue.Queue[Optional[str]]" = queue.Queue()
         self._seen_requests: set[str] = set()
         self._desktop_worker: Optional[threading.Thread] = None
+        self._closing = False  # set once stopping: no new desktop starts
         self._flushed: dict[str, int] = {}
 
     def _set_phase(self, phase: str) -> None:
@@ -469,7 +498,7 @@ class Owner:
         """One request at a time, in the order they arrived."""
         while True:
             request_id = self._requests.get()
-            if request_id is None:
+            if request_id is None or self._closing:
                 return
             request_file = self.control / f"desktop-{request_id}.request.json"
             request = state.read_json(request_file) or {}
@@ -514,6 +543,8 @@ class Owner:
             )
         self._keeper = keeper
         try:
+            if self._closing:  # the stop began while this one started
+                raise RuntimeError("the sandbox is stopping")
             assert keeper.stdout is not None
             ready, _, _ = select.select([keeper.stdout], [], [], CHILD_STARTUP_TIMEOUT + 10)
             line = keeper.stdout.readline() if ready else b""
@@ -561,10 +592,12 @@ class Owner:
         lock is still held: until then the owner counts as alive.
         """
         self.stop_request.interrupts = False
+        self._closing = True
         steps: list[tuple[str, Callable[[], Any]]] = [
             ("mark the sandbox as stopping", lambda: self._set_phase(state.STOPPING)),
-            ("stop answering desktop requests", self._end_desktop_worker),
+            # The keeper first: a desktop start in progress waits on it.
             ("stop the desktop child", self._stop_keeper),
+            ("stop answering desktop requests", self._end_desktop_worker),
             *((f"stop {type(s).__name__}", s.stop) for s in reversed(self._started)),
             ("restore the CloudWatch filter emulation", self._undo_patches),
             ("write the request logs", self._flush_kept_logs),
@@ -620,7 +653,9 @@ class Owner:
         """Rename a kept root, so the next sandbox here starts fresh and leaves it alone."""
         if not self.keep:
             return
-        kept = self.root.with_name(f"{self.root.name}.kept-{time.strftime('%Y%m%d-%H%M%S')}")
+        kept = self.root.with_name(
+            f"{self.root.name}.kept-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        )
         self.root.rename(kept)
         _say(f"kept the sandbox directory as {kept}; delete it yourself when done")
 
@@ -674,7 +709,8 @@ def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> i
         # A signal during the claim takes effect once the owner exists.
         with stop_request.deferred():
             try:
-                record, lock = claim(pointer, root, repo_root, scenario)
+                record, lock = claim(pointer, root, repo_root, scenario,
+                                     cancelled=stop_request.event.is_set)
             except Refused as exc:
                 _say(f"not starting: {exc}")
                 return 2

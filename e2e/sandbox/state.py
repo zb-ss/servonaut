@@ -22,14 +22,15 @@ the textual-pilot-mcp host imports this module in its own interpreter.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional
 
@@ -58,6 +59,14 @@ _START = "Start one with `python -m e2e.sandbox up` in a Servonaut checkout."
 # How long an owner tries to take its lock while another process probes it.
 _LOCK_ATTEMPTS = 20
 _LOCK_RETRY_SECONDS = 0.05
+# What an owner's lock tells about it (see owner_state).
+ALIVE = "alive"
+GONE = "gone"
+UNKNOWN = "unknown"
+# ``ps`` runs from the system directories with a pinned environment: the
+# same start time reads the same whichever time zone or locale asks.
+_PS_DIRS = "/bin:/usr/bin"
+_PS_ENV = {"PATH": _PS_DIRS, "LC_ALL": "C", "TZ": "UTC"}
 
 
 class SandboxUnavailable(RuntimeError):
@@ -66,6 +75,10 @@ class SandboxUnavailable(RuntimeError):
 
 class LockUnsupported(RuntimeError):
     """The filesystem holding a sandbox root does not support ``flock``."""
+
+
+class LockWaitCancelled(RuntimeError):
+    """A stop was requested while waiting for the pointer lock."""
 
 
 def sentence(text: str) -> str:
@@ -122,13 +135,34 @@ def write_json(path: Path, data: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-@contextmanager
-def pointer_lock(pointer: Path) -> Iterator[None]:
-    """Serialise claims on the pointer (the lock is its directory: no extra file)."""
+@contextlib.contextmanager
+def pointer_lock(pointer: Path, *, waiting: Callable[[], None] = lambda: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Iterator[None]:
+    """Serialise claims on the pointer (the lock is its directory: no extra file).
+
+    While another command holds it, *waiting()* is called once and the wait
+    ends early with LockWaitCancelled when *cancelled()* turns true.
+    """
     pointer.parent.mkdir(parents=True, exist_ok=True)
     directory = os.open(pointer.parent, os.O_RDONLY | os.O_CLOEXEC)
     try:
-        fcntl.flock(directory, fcntl.LOCK_EX)
+        told = False
+        while True:
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not told:
+                    waiting()
+                    told = True
+                if cancelled():
+                    raise LockWaitCancelled("stopped while waiting for the pointer lock") from None
+                time.sleep(_LOCK_RETRY_SECONDS)
+            except OSError as exc:
+                raise LockUnsupported(
+                    f"cannot lock {pointer.parent} ({exc.strerror}): the per-user state "
+                    "directory must be on a filesystem that supports flock"
+                ) from None
         yield
     finally:
         os.close(directory)
@@ -209,21 +243,29 @@ class OwnerLock:
             self._fd = None
 
 
-def owner_alive(root: Any) -> bool:
-    """True while an owner holds the lock of the sandbox at *root*."""
+def owner_state(root: Any) -> str:
+    """ALIVE while an owner holds the lock of the sandbox at *root*, GONE when
+    nobody does (or there is no marker), UNKNOWN when the lock cannot be tried."""
     try:
         fd = os.open(Path(root) / MARKER, os.O_RDONLY | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return GONE
     except (OSError, TypeError):
-        return False
+        return UNKNOWN
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
-        return True
+        return ALIVE
     except OSError:
-        return False  # no flock here: no owner could have locked it either
+        return UNKNOWN
     finally:
         os.close(fd)
-    return False
+    return GONE
+
+
+def owner_alive(root: Any) -> bool:
+    """True while an owner holds the lock of the sandbox at *root*."""
+    return owner_state(root) == ALIVE
 
 
 def marker(root: Any) -> Optional[dict]:
@@ -245,7 +287,7 @@ def remove_stale_root(root: Path) -> bool:
     lock, is provably a finished sandbox; anything else is left alone.
     """
     found = marker(root)
-    if found is None or found.get("schema") != SCHEMA or owner_alive(root):
+    if found is None or found.get("schema") != SCHEMA or owner_state(root) != GONE:
         return False
     shutil.rmtree(root, ignore_errors=True)
     return not root.exists()
@@ -263,14 +305,17 @@ def can_list_processes() -> bool:
 def process_identity(pid: int) -> Optional[list[str]]:
     """What tells *pid* apart from a later process reusing the number.
 
-    ``[state, start time]`` from /proc; elsewhere ``["", <ps lstart>]``, the
-    start time to the second. None when the process is gone.
+    ``[state, start time]``: from /proc, or elsewhere from ``ps`` (``stat``
+    and ``lstart``, the start time to the second). None when it is gone.
     """
     if can_list_processes():
         identity = child_guard.process_identity(pid)
         return list(identity) if identity is not None else None
-    started = _ps(pid, "lstart")
-    return ["", started] if started else None
+    found = _ps(pid, "stat", "lstart")
+    if not found or " " not in found:
+        return None
+    status, started = found.split(None, 1)
+    return [status[0], started]
 
 
 def process_alive(pid: Any, identity: Any = None) -> bool:
@@ -297,13 +342,23 @@ def process_command(pid: int) -> Optional[str]:
     return _ps(pid, "command")
 
 
-def _ps(pid: int, field: str) -> Optional[str]:
-    """One ``ps`` field of *pid* (systems without /proc), or None."""
+def _ps(pid: int, *fields: str) -> Optional[str]:
+    """``ps -o <field>= ... -p <pid>`` (systems without /proc), or None.
+
+    Runs the system's ``ps`` by path with a pinned environment, and outside
+    the sandbox guard of this process (a sandbox's own PATH holds only fake
+    tools, and its guard refuses other programs).
+    """
+    program = shutil.which("ps", path=_PS_DIRS)
+    if program is None:
+        return None
+    guard = sys.modules.get(child_guard.GUARD_MODULE)
     try:
-        output = subprocess.run(
-            ["ps", "-o", f"{field}=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=10, check=False,
-        ).stdout.strip()
+        with guard.suspended() if guard is not None else contextlib.nullcontext():
+            output = subprocess.run(
+                [program, *(f"-o{field}=" for field in fields), "-p", str(pid)], env=_PS_ENV,
+                capture_output=True, text=True, timeout=10, check=False,
+            ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return None
     return output or None
