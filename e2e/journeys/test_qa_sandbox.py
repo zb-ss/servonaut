@@ -482,3 +482,26 @@ def test_a_directory_inside_the_package_stays_off_the_import_path(journey, when)
         assert result.stdout.startswith("secrets:") and "servonaut" not in result.stdout
     else:
         assert result.stdout.startswith("refused:") and "from the checkout root" in result.stdout
+
+
+def test_only_the_package_itself_counts_as_inside_it(journey, monkeypatch):
+    from e2e.sandbox import import_path
+
+    def checkout(root: Path) -> Path:
+        (root / "src" / "servonaut" / "config").mkdir(parents=True)
+        (root / "src" / "servonaut" / "__init__.py").write_text("")
+        return root
+
+    # One checkout in an ordinary folder, one that lives at .../src/servonaut.
+    plain = checkout(journey.directory / "work" / "servonaut-checkout")
+    nested = checkout(journey.directory / "home" / "src" / "servonaut")
+    for root in (plain, nested):
+        assert not import_path.inside_package(str(root))
+        assert not import_path.inside_package(str(root / "src"))
+        assert import_path.inside_package(str(root / "src" / "servonaut"))
+        assert import_path.inside_package(str(root / "src" / "servonaut" / "config"))
+    kept = [str(nested), str(nested / "src"), str(plain / "src")]
+    dropped = [str(nested / "src" / "servonaut" / "config"), str(plain / "src" / "servonaut")]
+    monkeypatch.setattr(sys, "path", [*kept, *dropped])
+    assert import_path.drop_package_dirs() == dropped
+    assert sys.path == kept

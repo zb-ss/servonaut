@@ -13,14 +13,26 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
-_PACKAGE = ("src", "servonaut")
+
+def _is_package(directory: Path) -> bool:
+    """A checkout's ``src/servonaut`` package: named so, and a package.
+
+    A checkout that itself lives at ``.../src/servonaut`` is not one: its
+    root holds no ``__init__.py``.
+    """
+    return (
+        directory.name == "servonaut"
+        and directory.parent.name == "src"
+        and (directory / "__init__.py").is_file()
+    )
 
 
 def inside_package(path: str) -> bool:
-    """True when *path* is ``src/servonaut`` of some checkout, or below it."""
-    parts = os.path.realpath(path).split(os.sep)
-    return any(parts[i:i + 2] == list(_PACKAGE) for i in range(len(parts) - 1))
+    """True when *path* is a checkout's ``src/servonaut`` package, or below it."""
+    resolved = Path(os.path.realpath(path))
+    return any(_is_package(candidate) for candidate in (resolved, *resolved.parents))
 
 
 def drop_package_dirs() -> list[str]:
