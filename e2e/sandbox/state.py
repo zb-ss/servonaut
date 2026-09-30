@@ -243,24 +243,31 @@ class OwnerLock:
             self._fd = None
 
 
-def owner_state(root: Any) -> str:
-    """ALIVE while an owner holds the lock of the sandbox at *root*, GONE when
-    nobody does (or there is no marker), UNKNOWN when the lock cannot be tried."""
+def owner_status(root: Any) -> tuple[str, str]:
+    """``(ALIVE, "")`` while an owner holds the lock of the sandbox at *root*,
+    ``(GONE, "")`` when nobody does (or there is no marker), and
+    ``(UNKNOWN, why)`` when the marker cannot be opened or locked."""
+    path = Path(str(root)) / MARKER
     try:
-        fd = os.open(Path(root) / MARKER, os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     except FileNotFoundError:
-        return GONE
-    except (OSError, TypeError):
-        return UNKNOWN
+        return GONE, ""
+    except OSError as exc:
+        return UNKNOWN, f"cannot open {path}: {exc.strerror}"
     try:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
-        return ALIVE
-    except OSError:
-        return UNKNOWN
+        return ALIVE, ""
+    except OSError as exc:
+        return UNKNOWN, f"cannot lock {path}: {exc.strerror}"
     finally:
         os.close(fd)
-    return GONE
+    return GONE, ""
+
+
+def owner_state(root: Any) -> str:
+    """ALIVE, GONE or UNKNOWN (see :func:`owner_status`)."""
+    return owner_status(root)[0]
 
 
 def owner_alive(root: Any) -> bool:
@@ -406,7 +413,12 @@ def load_live_state(env: Optional[Mapping[str, str]] = None) -> dict:
     if pointer.get("schema") != SCHEMA:
         raise SandboxUnavailable(sentence(unknown_schema(pointer, pointer_file)) + ".")
     root = Path(str(pointer.get("root", "")))
-    if not owner_alive(root):
+    liveness, why = owner_status(root)
+    if liveness == UNKNOWN:
+        raise SandboxUnavailable(
+            f"Cannot tell whether the QA sandbox named in {pointer_file} still runs ({why})."
+        )
+    if liveness == GONE:
         raise SandboxUnavailable(
             f"The QA sandbox named in {pointer_file} is no longer running. {_START}"
         )

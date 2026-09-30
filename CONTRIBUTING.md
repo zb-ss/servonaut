@@ -476,7 +476,10 @@ python -m e2e.sandbox status        # seeded servers, stand-ins, request logs
 
 `up` stays in the foreground until it is stopped; wait for the line
 `SANDBOX READY <path to state.json>`. Everything lives in `.qa-sandbox/` in
-the checkout. One sandbox runs per user at a time: every command finds it
+the checkout. Another directory given with `--root` belongs outside the
+checkout, or at `.qa-sandbox-<name>` in its top level: git ignores only
+those, and a sandbox holds private keys and tokens (`up` refuses anything
+else inside the checkout). One sandbox runs per user at a time: every command finds it
 through `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/current.json`, the
 only file the sandbox writes outside its directory. `--signed-in` starts
 signed in to the local API.

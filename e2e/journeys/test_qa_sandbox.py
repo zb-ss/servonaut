@@ -579,3 +579,27 @@ async def test_up_waits_for_a_down_that_holds_the_pointer(qa_sandbox):
     line = await asyncio.wait_for(asyncio.to_thread(owner.stdout.readline), READY_TIMEOUT)
     assert line.startswith("SANDBOX READY"), qa_sandbox.stderr.read_text(encoding="utf-8")
     await qa_sandbox.down()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_unusable_roots_are_refused_with_the_reason(qa_sandbox, journey):
+    # A regular file where the root should be: its marker cannot even be opened.
+    not_a_directory = journey.directory / "not-a-directory"
+    not_a_directory.write_text("")
+    refused = await qa_sandbox.command("up", "--root", str(not_a_directory))
+    assert refused.returncode == 2 and "Not a directory" in refused.stderr, refused.stderr
+    assert "flock" not in refused.stderr
+
+    record = {"schema": state.SCHEMA, "root": str(not_a_directory), "owner_pid": os.getpid()}
+    state.write_json(qa_sandbox.pointer, record)
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 1 and "Cannot tell whether" in status.stderr, status.stderr
+    assert "Not a directory" in status.stderr
+    qa_sandbox.pointer.unlink()
+
+    # Inside the checkout only the ignored top-level .qa-sandbox* names are allowed.
+    for inside in (REPO_ROOT / "qa-root", REPO_ROOT / "e2e" / ".qa-sandbox"):
+        refused = await qa_sandbox.command("up", "--root", str(inside))
+        assert refused.returncode == 2 and "is inside the checkout" in refused.stderr
+        assert not inside.exists()

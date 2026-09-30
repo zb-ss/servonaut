@@ -43,7 +43,9 @@ def _parser() -> argparse.ArgumentParser:
     up.add_argument("--scenario", choices=state.SCENARIOS, default=state.SINGLE,
                     help="what to seed (default: %(default)s)")
     up.add_argument("--root", type=Path, default=None,
-                    help=f"sandbox directory (default: <checkout>/{state.DEFAULT_ROOT_NAME})")
+                    help=f"sandbox directory (default: <checkout>/{state.DEFAULT_ROOT_NAME}); "
+                         "put another one outside the checkout, or at "
+                         f"<checkout>/{state.DEFAULT_ROOT_NAME}-<name>: git ignores only those")
     up.add_argument("--signed-in", action="store_true",
                     help="start signed in to the local Servonaut API")
     up.add_argument("--keep", action="store_true",

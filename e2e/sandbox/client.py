@@ -498,7 +498,7 @@ def _clean_up(pointer_file: Path, pointer: dict, record: dict) -> int:
         current = state.read_json(pointer_file)
         if current is not None and not state.same_owner(current, pointer):
             raise _Untouched("A new QA sandbox took over meanwhile; left it alone.", 0)
-        liveness = state.owner_state(root)
+        liveness, why = state.owner_status(root)
         if liveness == state.ALIVE:
             if state.same_owner(state.marker(root), pointer):
                 raise _Untouched(
@@ -508,8 +508,8 @@ def _clean_up(pointer_file: Path, pointer: dict, record: dict) -> int:
             raise _Untouched("A new QA sandbox took over meanwhile; left it alone.", 0)
         if liveness == state.UNKNOWN:
             raise _Untouched(
-                f"Cannot tell whether the QA sandbox in {root} still runs (its filesystem does "
-                "not support flock); left it alone.", 1,
+                f"Cannot tell whether the QA sandbox in {root} still runs ({why}); left it alone.",
+                1,
             )
         # Children stop by themselves once the owner or the root is gone.
         _wait(lambda: not _survivors(root, record), CHILDREN_STOP_SECONDS)

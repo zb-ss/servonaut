@@ -88,11 +88,10 @@ def _refuse_if_running(current: dict, pointer: Path) -> None:
     """Refuse while the sandbox the pointer names is still running."""
     if current.get("schema") != state.SCHEMA:
         raise Refused(state.unknown_schema(current, pointer))
-    liveness = state.owner_state(current.get("root", ""))
+    liveness, why = state.owner_status(current.get("root", ""))
     if liveness == state.UNKNOWN:
         raise Refused(
-            f"cannot tell whether the QA sandbox in {current.get('root')} still runs: its "
-            "filesystem does not support flock"
+            f"cannot tell whether the QA sandbox in {current.get('root')} still runs ({why})"
         )
     if liveness == state.ALIVE:
         raise Refused(
@@ -122,11 +121,10 @@ def _clear_root(root: Path) -> None:
     if not root.exists():
         return
     found = state.marker(root)
-    liveness = state.owner_state(root)
+    liveness, why = state.owner_status(root)
     if liveness == state.UNKNOWN:
         raise Refused(
-            f"cannot tell whether a QA sandbox still runs in {root}: its filesystem does not "
-            "support flock; choose another --root"
+            f"cannot tell whether a QA sandbox still runs in {root} ({why}); choose another --root"
         )
     if liveness == state.ALIVE:
         pid = (found or {}).get("owner_pid")
@@ -691,6 +689,23 @@ def _write_jsonl(path: Path, entries: list) -> None:
     tmp.replace(path)
 
 
+def root_problem(root: Path, repo_root: Path) -> Optional[str]:
+    """Why *root* is no place for a sandbox, or None.
+
+    Inside the checkout, git ignores only top-level ``.qa-sandbox*``
+    directories, and a sandbox holds private keys and tokens.
+    """
+    if root != repo_root and repo_root not in root.parents:
+        return None
+    if root.parent == repo_root and root.name.startswith(state.DEFAULT_ROOT_NAME):
+        return None
+    return (
+        f"{root} is inside the checkout, where git ignores only "
+        f"{repo_root / state.DEFAULT_ROOT_NAME}* (a sandbox holds private keys and tokens); "
+        f"choose a --root outside the checkout, or {repo_root / state.DEFAULT_ROOT_NAME}-<name>"
+    )
+
+
 def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -703,6 +718,10 @@ def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> i
     repo_root = bootstrap.REPO_ROOT
     # Resolved: children carry this exact path, and `down` finds them by it.
     root = (root or state.default_root(repo_root)).resolve()
+    problem = root_problem(root, repo_root)
+    if problem:
+        _say(f"not starting: {problem}")
+        return 2
     pointer = state.pointer_path()
     owner: Optional[Owner] = None
     try:

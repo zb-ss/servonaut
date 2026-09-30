@@ -28,5 +28,9 @@ def test_qa_sandbox_directories_are_ignored(path: str) -> None:
     git = shutil.which("git")
     if git is None or not (REPO / ".git").exists():
         pytest.skip("needs a git checkout")
-    ignored = subprocess.run([git, "check-ignore", "-q", path], cwd=REPO, check=False)
+    ignored = subprocess.run(
+        [git, "check-ignore", "-q", path], cwd=REPO, capture_output=True, text=True, check=False
+    )
+    if ignored.returncode not in (0, 1):  # git itself failed (e.g. "dubious ownership")
+        pytest.skip(f"git check-ignore could not run: {ignored.stderr.strip()}")
     assert ignored.returncode == 0, f"{path} is not ignored by git"
