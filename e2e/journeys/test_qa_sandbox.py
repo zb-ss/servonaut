@@ -22,7 +22,6 @@ from typing import Optional
 import pytest
 
 from e2e.harness.bootstrap import REPO_ROOT, Sandbox
-from e2e.harness.desktop import wait_until
 from e2e.sandbox import client, state
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
@@ -103,6 +102,22 @@ def qa_sandbox(journey):
     sandbox.close()
 
 
+async def _screen(page) -> str:
+    """The visible terminal text, as the printed ``text()`` helper reads it."""
+    return await page.page.evaluate("() => window.servonautQa.text()")
+
+
+async def _screen_until(page, predicate, desc: str, timeout: float = 20.0) -> str:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        screen = await _screen(page)
+        if predicate(screen):
+            return screen
+        assert loop.time() < deadline, f"timed out waiting for {desc}:\n{screen}"
+        await asyncio.sleep(0.05)
+
+
 def _references(current: dict) -> dict[str, dict]:
     return {entry["reference"]: entry for entry in current["fleet"]}
 
@@ -142,13 +157,29 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
     async with desktop.browser() as browser:
         page = await browser.new_page()
         assert await page.open(info["origin"]) == 200
-        await page.page.evaluate(client.start_session_js(info["token"]))
-        await page.wait_for_first_output()
-        await page.wait_for_text("app-1")
+        # The printed start snippet returns once the terminal painted, focused.
+        started = await page.page.evaluate(client.start_session_js(info["token"]))
+        assert started == {
+            "columns": page.dimensions["width"], "rows": page.dimensions["height"], "text": True,
+        }
+        assert await page.page.evaluate(
+            "() => document.activeElement.classList.contains('xterm-helper-textarea')"
+        )
+        await page.page.evaluate("() => window.servonautQa.waitForText('app-1')")
+        screen = await _screen(page)
+        assert len(screen.splitlines()) == started["rows"] and "cache-1" in screen
+
+        # Keys typed straight into the page reach the app: "/" focuses the fleet
+        # search (the footer then lists the search box's keys), typing narrows.
+        footer = screen.splitlines()[-1]
+        await page.page.keyboard.press("/")
+        await _screen_until(page, lambda text: text.splitlines()[-1] != footer, "search focused")
+        await page.page.keyboard.type("cache")
+        narrowed = await _screen_until(page, lambda text: "app-1" not in text, "search applied")
+        assert "cache-1" in narrowed
+
         # The printed click helper aims where the harness's own click_cell does.
-        await wait_until(lambda: page.dimensions, desc="the terminal size")
-        size = await page.page.evaluate("() => window.servonautQa")
-        assert size == {"columns": page.dimensions["width"], "rows": page.dimensions["height"]}
+        size = {"columns": started["columns"], "rows": started["rows"]}
         box = await page.page.locator(".xterm-screen").bounding_box()
         center = await page.page.evaluate(client.cell_center_js(3, 2))
         assert center["x"] == pytest.approx(box["x"] + 3.5 * box["width"] / size["columns"])

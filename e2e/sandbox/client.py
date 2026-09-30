@@ -31,12 +31,57 @@ DESKTOP_WAIT_SECONDS = 60.0
 CHILDREN_STOP_SECONDS = 15.0
 _POLL_SECONDS = 0.1
 
-# The terminal is drawn on a canvas, so its size in cells is not in the page.
-# The page sends it with the session (``/ws?width=..&height=..``, then
-# ``["resize", ...]`` messages); this start snippet records it in
-# ``window.servonautQa`` before it starts the session.
-START_SESSION_JS = """() => {
-  const qa = window.servonautQa = {columns: 0, rows: 0};
+# The terminal is drawn on a canvas: the page holds neither its text nor its
+# size in cells, so text waits never match and a cell has no element. This
+# start snippet sets up ``window.servonautQa`` before it starts the session:
+#
+# - ``columns``/``rows``: the size the page sends with the session
+#   (``/ws?width=..&height=..``, then ``["resize", ...]`` messages);
+# - ``text()``/``waitForText(text)``: the visible screen, read from the
+#   terminal's own buffer. The frontend keeps its xterm instance to itself,
+#   so a one-shot hook catches it while it is built (the constructor assigns
+#   ``_addonManager``) and removes itself; ``text()`` is null if a frontend
+#   update ever stops that;
+# - ``focus()``: keys reach the app only while the terminal has focus.
+#
+# It then waits for the first output and focuses the terminal.
+START_SESSION_JS = """async () => {
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
+  const qa = window.servonautQa = {
+    columns: 0,
+    rows: 0,
+    terminal: null,
+    focus() { document.querySelector('.xterm-helper-textarea').focus(); },
+    text() {
+      const terminal = qa.terminal;
+      if (!terminal) return null;
+      const buffer = terminal.buffer.active;
+      const lines = [];
+      for (let row = 0; row < terminal.rows; row++) {
+        const line = buffer.getLine(buffer.viewportY + row);
+        lines.push(line ? line.translateToString(true) : '');
+      }
+      return lines.join('\\n');
+    },
+    async waitForText(text, timeoutMs = 20000) {
+      const deadline = Date.now() + timeoutMs;
+      while (!(qa.text() || '').includes(text)) {
+        if (Date.now() > deadline) throw new Error(`${text} not on the terminal after ${timeoutMs} ms`);
+        await pause();
+      }
+      return true;
+    },
+  };
+  Object.defineProperty(Object.prototype, '_addonManager', {
+    configurable: true,
+    set(value) {
+      delete Object.prototype._addonManager;
+      Object.defineProperty(this, '_addonManager', {
+        value, writable: true, enumerable: true, configurable: true,
+      });
+      qa.terminal = this;
+    },
+  });
   const note = (columns, rows) => { qa.columns = Number(columns); qa.rows = Number(rows); };
   const NativeWebSocket = window.WebSocket;
   window.WebSocket = class extends NativeWebSocket {
@@ -55,6 +100,17 @@ START_SESSION_JS = """() => {
     }
   };
   window.startServonaut(TOKEN);
+  const deadline = Date.now() + 30000;
+  while (!document.body.classList.contains('-first-byte')) {
+    if (Date.now() > deadline) break;
+    await pause();
+  }
+  delete Object.prototype._addonManager;
+  if (!document.body.classList.contains('-first-byte')) {
+    throw new Error('no terminal output after 30 s: see the page console');
+  }
+  qa.focus();
+  return {columns: qa.columns, rows: qa.rows, text: qa.terminal !== null};
 }"""
 # The middle of terminal cell (COLUMN, ROW), 0-based, in page coordinates:
 # what the end-to-end harness clicks (DesktopPage.click_cell).
@@ -301,10 +357,18 @@ def desktop(*, new: bool, as_json: bool) -> int:
         f"pid:    {answered['pid']} (desktop child)",
         "",
         "1. Open the URL in a browser page.",
-        "2. Start the session (page JavaScript, e.g. browser_evaluate). It is single use: a",
-        "   reload ends it, and `desktop` then starts a new desktop child.",
+        "2. Start the session (page JavaScript, e.g. browser_evaluate). It waits for the",
+        "   first output (the page body gets the class -first-byte) and focuses the",
+        "   terminal. The session is single use: a reload ends it, and `desktop` then",
+        "   starts a new desktop child.",
         start_session_js(answered["token"]),
-        "3. Wait until the page body has the class -first-byte; type and press keys as usual.",
+        "3. Type and press keys as usual. Keys reach the app only while the terminal has",
+        "   focus: after a click outside the terminal, run",
+        "     () => window.servonautQa.focus()",
+        "   The terminal is drawn on a canvas, so text waits (browser_wait_for) never",
+        "   match. Judge states from screenshots, or read the visible screen as text:",
+        "     () => window.servonautQa.text()",
+        "     () => window.servonautQa.waitForText('app-1')      // rejects after 20 s",
         "4. Click terminal cell (COLUMN, ROW), 0-based (Playwright code, e.g. browser_run_code):",
         CLICK_CELL_PLAYWRIGHT,
         "   or get the cell's page coordinates for another click tool (browser_evaluate):",
