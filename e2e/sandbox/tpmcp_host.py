@@ -1,22 +1,24 @@
 """Run the QA sandbox's TUI inside a textual-pilot-mcp server.
 
-``tpmcp_spec.py`` (160x50) and ``tpmcp_spec_narrow.py`` (100x30) load this
-file by path and call :func:`make_spec`. textual-pilot-mcp imports a spec
-once, when its server starts, in its own interpreter and virtual
-environment, and runs the app in that process at every ``launch``. So at
-import time nothing here touches a Servonaut checkout (only the standard
-library, textual-pilot-mcp and the sibling ``state.py``); everything else
-happens at ``launch``:
+``tpmcp_spec.py`` (160x50) and ``tpmcp_spec_narrow.py`` (100x30) call
+:func:`make_spec`. textual-pilot-mcp imports a spec once, when its server
+starts, in its own interpreter and virtual environment, and runs the app in
+that process at every ``launch``. So at import time nothing here loads
+Servonaut: only the standard library, textual-pilot-mcp and this package's
+standard-library helpers. Everything else happens at ``launch``:
 
 1. ``HOME`` resolves through the per-user pointer to the live sandbox's
    ``state.json`` (a clear error when no sandbox runs).
 2. The process environment is REPLACED by the sandbox's child environment,
    so nothing of the server's own environment (cloud credentials, tokens,
-   proxies) reaches the app.
+   proxies) reaches the app; only ``HOME`` and ``XDG_STATE_HOME`` are kept
+   aside, to find the pointer again.
 3. The harness's own ``child_guard.arm()`` from the checkout that started the
    sandbox installs the network, filesystem and program guards and the
-   module redirects every sandbox child gets (without the owner watchdog:
-   ending this process would end the MCP server).
+   module redirects every sandbox child gets. Its owner watchdog would end
+   this process, and with it the MCP server; instead a watcher narrows the
+   guard's writes to the snapshot directory once the sandbox is gone, so a
+   late write cannot bring the sandbox directory back, and tells the app.
 4. Package metadata for ``servonaut`` (the version the app shows and its
    install details) is answered from the sandbox's interpreter, as its
    children read it, not from this server's own install.
@@ -34,6 +36,7 @@ Snapshots go to ``${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/captures/``
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import importlib.util
 import os
@@ -42,73 +45,67 @@ import tempfile
 import time
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 from textual_pilot_mcp import AppSpec
 
-_HERE = Path(__file__).resolve().parent
-_STATE_MODULE = "_servonaut_qa_state"
+from e2e.harness import child_guard as local_child_guard
+from e2e.sandbox import state
+
 _CHILD_GUARD_MODULE = "_servonaut_e2e_child_guard"
-_GUARD_MODULE = "_servonaut_e2e_netguard"
-_SERVER_ENV_MODULE = "_servonaut_qa_server_env"
+# Survives a spec `reload`: the first launch replaces os.environ.
+_HOST_MODULE = "_servonaut_qa_host"
 # The checkout holding this spec: the install the fix for missing SDKs names.
-_CHECKOUT = _HERE.parent.parent
+_CHECKOUT = Path(__file__).resolve().parent.parent.parent
 # Client libraries the sandbox's fakes stand in for; the app lists no Hetzner
 # or OVH servers without them.
 _PROVIDER_SDKS = ("hcloud", "ovh")
 # Import-time locations that must lie in the sandbox home (see
 # e2e/harness/canary.py for the full list the suite checks).
 _HOME_BOUND = ("servonaut.config.manager", "CONFIG_DIR")
+_GONE_NOTICE = (
+    "The QA sandbox stopped: this app can no longer write to it. Tear down, start a "
+    "sandbox and launch again."
+)
 
 
-def _load(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _server_env() -> dict:
-    """The environment the server was started with (for the per-user paths).
-
-    Kept in a module of its own: the first launch replaces ``os.environ``,
-    and a ``reload`` of the spec runs this file again.
-    """
-    holder = sys.modules.get(_SERVER_ENV_MODULE)
+def _host_state() -> Any:
+    """What must outlive a spec ``reload``: the server's own HOME and
+    XDG_STATE_HOME (nothing else of its environment is kept) and the watch
+    of the current launch."""
+    holder = sys.modules.get(_HOST_MODULE)
     if holder is None:
-        holder = types.ModuleType(_SERVER_ENV_MODULE)
-        holder.env = dict(os.environ)
-        sys.modules[_SERVER_ENV_MODULE] = holder
-    return holder.env
+        holder = types.ModuleType(_HOST_MODULE)
+        holder.env = {key: os.environ[key] for key in ("HOME", "XDG_STATE_HOME")
+                      if key in os.environ}
+        holder.watch = None
+        sys.modules[_HOST_MODULE] = holder
+    return holder
 
 
-_state = _load(_STATE_MODULE, _HERE / "state.py")
-_SERVER_ENV = _server_env()
+_SERVER_ENV = _host_state().env
 
 
 class SandboxLaunchError(RuntimeError):
     """The app cannot be launched in the sandbox (the message says what to do)."""
 
 
-def _disarm_guard() -> None:
-    """Lift the filesystem and program guards a previous launch installed.
+def _unguarded() -> ContextManager[None]:
+    """Read outside the sandbox (the pointer) in this thread only.
 
-    The pointer lives outside the sandbox; the next launch arms them again.
+    After a launch this process stays guarded; the guard's own suspension
+    lets the next launch find the pointer without lifting the guard.
     """
-    guard = sys.modules.get(_GUARD_MODULE)
-    if guard is not None:
-        guard.disarm_filesystem_and_spawns()
+    guard = sys.modules.get(local_child_guard.GUARD_MODULE)
+    return guard.suspended() if guard is not None else contextlib.nullcontext()
 
 
 def _live_state() -> dict:
-    _disarm_guard()
-    try:
-        return _state.load_live_state(_SERVER_ENV)
-    except _state.SandboxUnavailable as exc:
-        raise SandboxLaunchError(str(exc)) from None
+    with _unguarded():
+        try:
+            return state.load_live_state(_SERVER_ENV)
+        except state.SandboxUnavailable as exc:
+            raise SandboxLaunchError(str(exc)) from None
 
 
 class SandboxHome(os.PathLike):
@@ -127,7 +124,7 @@ class SandboxHome(os.PathLike):
         return hash("qa-sandbox-home")
 
     def __repr__(self) -> str:
-        return f"<the live QA sandbox's home, read at launch from {_state.pointer_path(_SERVER_ENV)}>"
+        return f"<the live QA sandbox's home, read at launch from {state.pointer_path(_SERVER_ENV)}>"
 
 
 def _check_provider_sdks() -> None:
@@ -195,7 +192,6 @@ def _use_sandbox_distribution(current: dict) -> None:
 def _enter_sandbox(current: dict, captures: Path) -> None:
     """Replace the environment, arm the guards, put the checkout's src first."""
     env = dict(current["env"])
-    captures.mkdir(parents=True, exist_ok=True)
     readable = [str(captures), current.get("distribution") or ""]
     env["SERVONAUT_E2E_ALLOWED_DIRS"] = os.pathsep.join(
         filter(None, [env.get("SERVONAUT_E2E_ALLOWED_DIRS", ""), *readable])
@@ -203,16 +199,18 @@ def _enter_sandbox(current: dict, captures: Path) -> None:
     env["SERVONAUT_E2E_WRITE_ROOTS"] = os.pathsep.join(
         filter(None, [env.get("SERVONAUT_E2E_WRITE_ROOTS", ""), str(captures)])
     )
+    guard_file = Path(current["repo_root"]) / "e2e" / "harness" / "child_guard.py"
+    with _unguarded():
+        captures.mkdir(parents=True, exist_ok=True)
+        child_guard = sys.modules.get(_CHILD_GUARD_MODULE)
+        if child_guard is None or Path(child_guard.__file__).resolve() != guard_file.resolve():
+            child_guard = local_child_guard.load_module(_CHILD_GUARD_MODULE, guard_file)
     os.environ.clear()
     os.environ.update(env)
     os.chdir(current["sandbox"]["base"])  # where the sandbox's children start
     tempfile.tempdir = None  # re-read TMPDIR
     if hasattr(time, "tzset"):
         time.tzset()
-    guard_file = Path(current["repo_root"]) / "e2e" / "harness" / "child_guard.py"
-    child_guard = sys.modules.get(_CHILD_GUARD_MODULE)
-    if child_guard is None or Path(child_guard.__file__).resolve() != guard_file.resolve():
-        child_guard = _load(_CHILD_GUARD_MODULE, guard_file)
     child_guard.arm(watch_owner=False)
     _use_sandbox_distribution(current)
     src = current["src_dir"]
@@ -232,9 +230,22 @@ def _verify_source(current: dict) -> None:
         )
 
 
+def _watch_sandbox(current: dict, captures: Path, app: Any) -> None:
+    """Once the sandbox ends, allow writes to the snapshots only and tell the app."""
+    host = _host_state()
+    if host.watch is not None:
+        host.watch.set()  # the previous launch's watch
+
+    def tell_the_app() -> None:
+        with contextlib.suppress(Exception):  # the app may already be gone
+            app.call_from_thread(app.notify, _GONE_NOTICE, severity="warning", timeout=30)
+
+    host.watch = state.confine_after(Path(current["root"]), [captures], tell_the_app)
+
+
 def make_spec(size: tuple[int, int]) -> AppSpec:
     """The AppSpec of the sandbox's TUI at *size* (columns, rows)."""
-    captures = _state.captures_dir(_SERVER_ENV) / f"{size[0]}x{size[1]}"
+    captures = state.captures_dir(_SERVER_ENV) / f"{size[0]}x{size[1]}"
 
     def build_app() -> Any:
         current = _live_state()
@@ -245,7 +256,9 @@ def make_spec(size: tuple[int, int]) -> AppSpec:
         from servonaut.app import ServonautApp
         from servonaut.runtime import detect_runtime
 
-        return ServonautApp(runtime_layout=detect_runtime())
+        app = ServonautApp(runtime_layout=detect_runtime())
+        _watch_sandbox(current, captures, app)
+        return app
 
     return AppSpec(
         factory=build_app,

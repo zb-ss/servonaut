@@ -5,22 +5,19 @@ app of the checkout that started it, in that sandbox. See tpmcp_host.py for
 how, and CONTRIBUTING.md ("Local QA sandbox") for registering the server::
 
     textual-pilot-mcp validate --spec e2e/sandbox/tpmcp_spec.py
+
+textual-pilot-mcp imports this file as ``e2e.sandbox.tpmcp_spec``; the host
+beside it loads nothing from Servonaut until ``launch``.
 """
 
-import importlib.util
+import importlib
 import sys
-from pathlib import Path
 
-_HOST = "_servonaut_qa_tpmcp_host"
+_RELOADING = "e2e.sandbox.tpmcp_host" in sys.modules
 
+from e2e.sandbox import tpmcp_host  # noqa: E402
 
-def _load_host():
-    path = Path(__file__).resolve().with_name("tpmcp_host.py")
-    module_spec = importlib.util.spec_from_file_location(_HOST, path)
-    module = importlib.util.module_from_spec(module_spec)
-    sys.modules[_HOST] = module
-    module_spec.loader.exec_module(module)
-    return module
+if _RELOADING:  # the server's `reload` picks up changes to the host too
+    tpmcp_host = importlib.reload(tpmcp_host)
 
-
-spec = _load_host().make_spec((160, 50))
+spec = tpmcp_host.make_spec((160, 50))
