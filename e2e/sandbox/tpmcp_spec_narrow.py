@@ -10,8 +10,15 @@ textual-pilot-mcp imports this file as ``e2e.sandbox.tpmcp_spec_narrow``; the ho
 beside it loads nothing from Servonaut until ``launch``.
 """
 
-import importlib
-import sys
+from e2e.sandbox import import_path
+
+# Before anything else is imported: a directory inside src/servonaut on the
+# import path would put Servonaut's secrets.py in place of the standard
+# library's.
+import_path.require_clean()
+
+import importlib  # noqa: E402
+import sys  # noqa: E402
 
 _RELOADING = "e2e.sandbox.tpmcp_host" in sys.modules
 

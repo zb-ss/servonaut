@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -368,3 +369,39 @@ async def test_a_host_that_outlives_the_sandbox_cannot_bring_it_back(qa_sandbox,
     finally:
         host.kill()
         host.wait()
+
+
+# What the textual-pilot-mcp specs run first (import_path.require_clean), in a
+# process whose import path holds a directory inside src/servonaut.
+_PATH_CHECK = """
+import sys
+from e2e.sandbox import import_path
+
+if sys.argv[1] == "late":
+    import secrets  # before the check: Servonaut's own secrets.py stands in
+try:
+    import_path.require_clean()
+except ImportError as exc:
+    print("refused:", exc)
+    raise SystemExit(0)
+import secrets
+print("secrets:", secrets.__file__)
+"""
+
+
+@pytest.mark.parametrize("when", ["early", "late"])
+def test_a_directory_inside_the_package_stays_off_the_import_path(journey, when):
+    env = journey.child_env(journey.new_sandbox("path-check"))
+    # An empty entry is the working directory, as for a shell whose
+    # PYTHONPATH starts with ":".
+    env["PYTHONPATH"] = os.pathsep.join([env["PYTHONPATH"], str(REPO_ROOT), ""])
+    result = subprocess.run(
+        [sys.executable, "-c", _PATH_CHECK, when],
+        cwd=REPO_ROOT / "src" / "servonaut" / "config", env=env,
+        capture_output=True, text=True, timeout=COMMAND_TIMEOUT,
+    )
+    assert result.returncode == 0, result.stderr
+    if when == "early":
+        assert result.stdout.startswith("secrets:") and "servonaut" not in result.stdout
+    else:
+        assert result.stdout.startswith("refused:") and "from the checkout root" in result.stdout
