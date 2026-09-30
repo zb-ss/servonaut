@@ -505,7 +505,13 @@ signed in to the local API.
   starting a sandbox from another checkout.
 - Desktop: `python -m e2e.sandbox desktop` starts the desktop child without a
   window and prints its URL, a single-use session token, a snippet that
-  starts the session in a browser page, and one that clicks a terminal cell.
+  starts the session in a browser page (it waits for the first output and
+  focuses the terminal), and one that clicks a terminal cell. Keys reach the
+  app only while the terminal has focus; `window.servonautQa.focus()` gives
+  it back after a click elsewhere. The terminal is drawn on a canvas, so a
+  browser's text waits never match: judge states from screenshots, or read
+  the visible screen with `window.servonautQa.text()` and
+  `window.servonautQa.waitForText(...)`.
 
 `python -m e2e.sandbox down` stops everything and deletes `.qa-sandbox/`
 (`up --keep` keeps it for inspection). It exits non-zero if a sandbox process
