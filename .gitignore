@@ -5,8 +5,9 @@
 # (regenerated from fake-service walkthroughs) is intended for commit.
 ux_capture/captures/
 
-# Local QA sandbox root (python -m e2e.sandbox up).
-.qa-sandbox/
+# Local QA sandbox roots (python -m e2e.sandbox up), kept ones included: they
+# hold private keys, tokens and the full child environment.
+/.qa-sandbox*/
 
 # Python
 __pycache__/
