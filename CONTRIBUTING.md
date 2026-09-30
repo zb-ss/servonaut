@@ -517,13 +517,15 @@ signed in to the local API.
   the visible screen with `window.servonautQa.text()` and
   `window.servonautQa.waitForText(...)`.
 
-`python -m e2e.sandbox down` stops everything and deletes `.qa-sandbox/`
-(`up --keep` keeps it for inspection). It exits non-zero if a sandbox process
-survived. Where there is no `/proc` (macOS), it can only check the desktop
-processes the sandbox recorded; the others stop by themselves once the
-sandbox directory is gone. The sandbox's owner holds a lock on a marker file
-in that directory for as long as it runs; only a directory with that marker
-and nobody holding its lock is ever removed automatically.
+`python -m e2e.sandbox down` stops everything and deletes `.qa-sandbox/`;
+with `up --keep` the directory is kept for inspection, renamed to
+`.qa-sandbox.kept-<time>` (delete it yourself). `down` exits non-zero if a
+sandbox process survived. Where there is no `/proc` (macOS), it can only
+check the desktop processes the sandbox recorded, by their start time and
+command; the others stop by themselves once the sandbox directory is gone.
+The sandbox's owner holds a lock on a marker file in that directory for as
+long as it runs; only a directory with that marker and nobody holding its
+lock is ever removed automatically.
 
 ## Code of Conduct
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.
