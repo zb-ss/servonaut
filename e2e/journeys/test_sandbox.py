@@ -153,7 +153,7 @@ def test_a_link_in_the_root_can_be_removed_but_not_written_through(journey):
     assert [entry["target"] for entry in recorded] == [f"open {target}"]
 
 
-def test_a_suspended_guard_lets_only_its_own_thread_through():
+def test_a_suspended_guard_lets_only_its_own_thread_through(journey):
     outside = Path("/tmp") / f"servonaut-e2e-suspended-{uuid.uuid4().hex}"
     other_thread: list[str] = []
 
@@ -165,6 +165,8 @@ def test_a_suspended_guard_lets_only_its_own_thread_through():
             other_thread.append("refused")
 
     with GUARD.suspended():
+        # Recording something (the guard's own log write) keeps the suspension.
+        GUARD._append(str(journey.directory / "record.jsonl"), {"kind": "self-test"})
         outside.write_text("the harness's own bookkeeping")
         worker = threading.Thread(target=write_elsewhere)
         worker.start()

@@ -193,6 +193,7 @@ def read_log(path: str | os.PathLike[str]) -> list[dict[str, Any]]:
 
 
 def _append(path: str, entry: dict[str, Any]) -> None:
+    previous = getattr(_local, "busy", False)
     _local.busy = True
     try:
         with open(path, "a", encoding="utf-8") as handle:
@@ -200,7 +201,7 @@ def _append(path: str, entry: dict[str, Any]) -> None:
     except OSError:
         pass
     finally:
-        _local.busy = False
+        _local.busy = previous
 
 
 def _record(kind: str, target: str) -> None:
