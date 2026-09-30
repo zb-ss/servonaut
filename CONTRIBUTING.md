@@ -460,6 +460,57 @@ When you add a journey:
   fix makes it fail as "unexpectedly passing", so remove the marker in the
   same change as the fix.
 
+## Local QA sandbox
+
+Before you open a pull request, use what you changed the way a user would:
+open the screen, run the command, try the wrong input and a narrow terminal.
+The QA sandbox makes that safe. It runs the stand-ins of the end-to-end suite
+(Servonaut API, package index, AWS, CloudTrail, Hetzner, OVH and the loopback
+SSH servers) with a seeded home, under the same guards, and never touches
+your own config, credentials or servers.
+
+```bash
+python -m e2e.sandbox up &          # or: up --scenario multi-account
+python -m e2e.sandbox status        # seeded servers, stand-ins, request logs
+```
+
+`up` stays in the foreground until it is stopped; wait for the line
+`SANDBOX READY <path to state.json>`. Everything lives in `.qa-sandbox/` in
+the checkout. One sandbox runs per user at a time: every command finds it
+through `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/current.json`, the
+only file the sandbox writes outside its directory. `--signed-in` starts
+signed in to the local API.
+
+- `single` is the typical user: one account per provider, the AWS, Hetzner
+  and OVH fleets of `e2e/harness/fleet.py` and the custom server `web-1`.
+  `multi-account` adds a second account per provider, each with a server
+  named `web-1`. `status` lists every server with the reference that picks
+  it and whether it accepts SSH (`web-1`, and `app-1` through `bastion-1`).
+- CLI: `python -m e2e.sandbox run -- ssh web-1 -- uptime` runs the
+  checkout's `servonaut` in the sandbox and exits with its status.
+- MCP: `python -m e2e.sandbox mcp-call list_instances '{"account": "prod"}'`
+  calls one tool of the real MCP server and prints the result;
+  `python -m e2e.sandbox mcp` serves it over stdio for an MCP client.
+- TUI: `e2e/sandbox/tpmcp_spec.py` (160x50) and `tpmcp_spec_narrow.py`
+  (100x30) are specs for [textual-pilot-mcp](https://github.com/zb-ss/textual-pilot-mcp),
+  which drives the TUI over MCP. Its `launch` runs the TUI of the checkout
+  that started the sandbox, inside the sandbox. Register each spec once with
+  `textual-pilot-mcp install --client <client> --spec <absolute path>`. The
+  server's Python needs Servonaut's dependencies with the Hetzner and OVH
+  client libraries; for a pipx install run
+  `pipx inject textual-pilot-mcp -e "<checkout>[hetzner,ovh]" --force` (again
+  after a dependency changes). Snapshots go to
+  `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/captures/`. A server keeps
+  the checkout and sandbox directory of its first `launch`; restart it after
+  starting a sandbox from another checkout.
+- Desktop: `python -m e2e.sandbox desktop` starts the desktop child without a
+  window and prints its URL, a single-use session token, a snippet that
+  starts the session in a browser page, and one that clicks a terminal cell.
+
+`python -m e2e.sandbox down` stops everything and deletes `.qa-sandbox/`
+(`up --keep` keeps it for inspection). It exits non-zero if a sandbox process
+survived.
+
 ## Code of Conduct
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.
 
