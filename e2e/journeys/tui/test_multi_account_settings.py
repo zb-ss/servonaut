@@ -72,8 +72,37 @@ async def _focus(t: Any, selector: str) -> Any:
     assert t.is_reachable(widget), f"{selector} is hidden"
     widget.focus()
     await t.wait_until(lambda: widget.has_focus, desc=f"focus on {selector}")
+    # Focusing scrolls to where the widget was last laid out. A panel that has
+    # only just been shown may not be laid out yet, so the scroll can fall
+    # short: ask again until the screen really draws the widget.
+    await t.wait_until(lambda: _drawn(widget), desc=f"{selector} scrolled into view")
     await t.settle(1)
     return widget
+
+
+def _drawn(widget: Any) -> bool:
+    """Whether *widget* is on screen; scrolls it into view again when not.
+
+    A scroll that ran before the layout caught up is repeated on the next check.
+    """
+    if _on_screen(widget):
+        return True
+    widget.scroll_visible(animate=False)
+    return False
+
+
+def _on_screen(widget: Any) -> bool:
+    """Whether the screen draws *widget* at its own top-left cell."""
+    from textual.errors import NoWidget
+
+    region = widget.region
+    if not (region.height and region.width):
+        return False
+    try:
+        hit, _ = widget.screen.get_widget_at(region.x, region.y)
+    except NoWidget:
+        return False
+    return hit is widget or widget in hit.ancestors
 
 
 async def _activate(t: Any, selector: str) -> None:
@@ -446,3 +475,24 @@ async def test_account_tables_stay_readable_on_a_narrow_terminal(tui, seed, prov
                     desc=f"{provider} {action} button fully on screen",
                 )
                 await t.wait_for_text(str(button.label))
+
+
+async def test_the_accounts_table_is_brought_into_view_after_a_short_scroll(
+    tui, seed, providers, moto
+):
+    """A focus whose scroll fell short (the panel was not laid out yet) is caught up.
+
+    Focusing without scrolling leaves the table where a stale layout would,
+    below the fold; the step still brings it into view before reading it.
+    """
+    _seed_named_accounts(seed, providers, moto)
+
+    async with tui() as t:
+        await _open_settings_panel(t, "aws")
+        await _loaded_accounts(t, "aws")
+        table = t.on_screen("#aws_accounts_table")
+        table.focus(scroll_visible=False)
+        await t.settle(1)
+        assert not _on_screen(table), "the accounts table should start below the fold"
+        await _show_accounts(t, "aws")
+        await t.wait_for_text(AWS_LABEL, "active")
