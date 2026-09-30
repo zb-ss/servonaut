@@ -72,12 +72,17 @@ _GONE_NOTICE = (
 def _host_state() -> Any:
     """What must outlive a spec ``reload``: the server's own HOME and
     XDG_STATE_HOME (nothing else of its environment is kept) and the watch
-    of the current launch."""
+    of the current launch.
+
+    HOME is taken now, while it is still the server's: after a launch it is
+    the sandbox's home.
+    """
     holder = sys.modules.get(_HOST_MODULE)
     if holder is None:
         holder = types.ModuleType(_HOST_MODULE)
-        holder.env = {key: os.environ[key] for key in ("HOME", "XDG_STATE_HOME")
-                      if key in os.environ}
+        holder.env = {"HOME": os.environ.get("HOME") or str(Path.home())}
+        if os.environ.get("XDG_STATE_HOME"):
+            holder.env["XDG_STATE_HOME"] = os.environ["XDG_STATE_HOME"]
         holder.watch = None
         sys.modules[_HOST_MODULE] = holder
     return holder
@@ -231,7 +236,11 @@ def _verify_source(current: dict) -> None:
 
 
 def _watch_sandbox(current: dict, captures: Path, app: Any) -> None:
-    """Once the sandbox ends, allow writes to the snapshots only and tell the app."""
+    """Once this launch's sandbox ends, allow writes to the snapshots only and tell the app.
+
+    A new sandbox started at the same root counts as the end too: the app
+    would otherwise write into its fresh home and call the old fakes.
+    """
     host = _host_state()
     if host.watch is not None:
         host.watch.set()  # the previous launch's watch
@@ -240,7 +249,8 @@ def _watch_sandbox(current: dict, captures: Path, app: Any) -> None:
         with contextlib.suppress(Exception):  # the app may already be gone
             app.call_from_thread(app.notify, _GONE_NOTICE, severity="warning", timeout=30)
 
-    host.watch = state.confine_after(Path(current["root"]), [captures], tell_the_app)
+    owner = {"owner_pid": current["owner_pid"], "started_at": current["started_at"]}
+    host.watch = state.confine_after(Path(current["root"]), [captures], tell_the_app, owner=owner)
 
 
 def make_spec(size: tuple[int, int]) -> AppSpec:
