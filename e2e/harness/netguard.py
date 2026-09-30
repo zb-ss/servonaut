@@ -43,7 +43,8 @@ import socket
 import sys
 import threading
 import time
-from typing import Any, Iterable, Optional
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator, Optional
 
 ENV_LOG = "SERVONAUT_E2E_GUARD_LOG"
 ENV_ARMED_LOG = "SERVONAUT_E2E_ARMED_LOG"
@@ -638,6 +639,31 @@ def disarm_filesystem_and_spawns() -> None:
     _protected = _allowed = _write_roots = _spawn_dirs = ()
     _spawn_programs = frozenset()
     allow_ssh_clients({}, None)
+
+
+def restrict_writes(write_roots: Iterable[str]) -> None:
+    """Allow writes below *write_roots* only, from now on (reads are unchanged).
+
+    A long-lived process calls this when the sandbox it wrote into is gone,
+    so a late write cannot bring that directory back.
+    """
+    global _write_roots
+    _write_roots = _expand([*write_roots, os.devnull])
+
+
+@contextmanager
+def suspended() -> Iterator[None]:
+    """Skip the filesystem and program checks in this thread only.
+
+    For the harness's own bookkeeping outside a sandbox (reading which
+    sandbox is live); other threads stay guarded.
+    """
+    previous = getattr(_local, "busy", False)
+    _local.busy = True
+    try:
+        yield
+    finally:
+        _local.busy = previous
 
 
 # ---------------------------------------------------------------------------

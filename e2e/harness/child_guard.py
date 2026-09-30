@@ -82,10 +82,15 @@ def owner_alive(pid, identity, root=""):
     )
 
 
-def _load_by_path(name, filename):
+def load_module(name, path):
+    """Import the file *path* as module *name* (registered in ``sys.modules``).
+
+    The harness loads its standard-library-only helpers this way wherever
+    the ``e2e`` package cannot be imported, or must not be: in children, and
+    from another checkout.
+    """
     import importlib.util
 
-    path = os.path.join(_HARNESS_DIR, filename)
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
@@ -95,11 +100,16 @@ def _load_by_path(name, filename):
     return module
 
 
-def _install_guard():
+def guard_module():
+    """The network, filesystem and program guard (``netguard.py``), loaded once."""
     module = sys.modules.get(GUARD_MODULE)
     if module is None:
-        module = _load_by_path(GUARD_MODULE, "netguard.py")
-    module.install_from_environment()
+        module = load_module(GUARD_MODULE, os.path.join(_HARNESS_DIR, "netguard.py"))
+    return module
+
+
+def _install_guard():
+    guard_module().install_from_environment()
 
 
 def _start_owner_watchdog():
@@ -126,7 +136,9 @@ def _redirect_providers():
     """Point the Hetzner/OVH client libraries at the fakes, when asked to."""
     if not os.environ.get(ENV_PROVIDER_REDIRECTS):
         return
-    module = _load_by_path("_servonaut_e2e_provider_redirects", "provider_redirects.py")
+    module = load_module(
+        "_servonaut_e2e_provider_redirects", os.path.join(_HARNESS_DIR, "provider_redirects.py")
+    )
     module.apply_from_environment()
 
 

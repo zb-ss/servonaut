@@ -11,7 +11,6 @@ from e2e.harness import bootstrap as _bootstrap
 CTX = _bootstrap.bootstrap()
 
 # Everything below may import servonaut: the sandbox is in place.
-import importlib.util  # noqa: E402
 import itertools  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
@@ -41,8 +40,6 @@ JOURNEY_TIMEOUT_SECONDS = 90
 TIER_MARKERS = ("e2e_pr", "e2e_quarantine")
 # Journeys that drive a headless browser (the desktop frontend).
 BROWSER_MARKER = "needs_browser"
-# The provider SDKs are needed for the Hetzner and OVH journeys.
-_REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright", "hcloud", "ovh")
 _SEQUENCE = itertools.count(1)
 # Escape reports name the offending command; a long ``python -c`` script is cut.
 _MAX_COMMAND_CHARS = 300
@@ -55,11 +52,11 @@ _MAX_COMMAND_CHARS = 300
 
 def pytest_configure(config: pytest.Config) -> None:
     lifecycle.interrupt_on_sigterm()
-    missing = [name for name in _REQUIRED_MODULES if importlib.util.find_spec(name) is None]
+    missing = _bootstrap.missing_modules()
     if missing:
         raise pytest.UsageError(
             f"the end-to-end suite needs the e2e and provider extras ({', '.join(missing)} "
-            "not installed): pip install -e '.[test,e2e,hetzner,ovh]'"
+            f"not installed): {_bootstrap.INSTALL_HINT}"
         )
 
 
