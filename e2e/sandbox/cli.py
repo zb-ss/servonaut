@@ -47,7 +47,8 @@ def _parser() -> argparse.ArgumentParser:
     up.add_argument("--signed-in", action="store_true",
                     help="start signed in to the local Servonaut API")
     up.add_argument("--keep", action="store_true",
-                    help="keep the sandbox directory after it stops (for inspection)")
+                    help="keep the sandbox directory after it stops, renamed to "
+                         "<root>.kept-<time> (for inspection; delete it yourself)")
 
     status = commands.add_parser("status", help="describe the running sandbox")
     status.add_argument("--json", action="store_true", help="print state.json")

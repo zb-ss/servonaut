@@ -5,14 +5,16 @@ a *marker* file, and one per-user *pointer*,
 ``${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/current.json``, naming that
 state file. The pointer is the only file a sandbox writes outside its root;
 it makes "the live sandbox" unambiguous for every tool that drives it,
-whichever checkout the tool runs from.
+whichever checkout the tool runs from. Claims on it are serialised by a lock
+on its directory (:func:`pointer_lock`).
 
 The marker is also the owner's lock: the process that owns the sandbox holds
 an exclusive ``flock`` on it for its whole life (:class:`OwnerLock`). "The
 owner is alive" means exactly that the lock is held (:func:`owner_alive`):
 the answer is the same on every OS and cannot be fooled by a process that
 reused the owner's PID. Nothing signals a recorded PID unless that lock
-proves it still belongs to the owner.
+proves it still belongs to the owner. The owner removes the marker last,
+just before it exits.
 
 Standard library only (with the harness's side-effect-free ``child_guard``):
 the textual-pilot-mcp host imports this module in its own interpreter.
@@ -27,8 +29,9 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterator, Mapping, Optional
 
 from e2e.harness import child_guard
 
@@ -59,6 +62,10 @@ _LOCK_RETRY_SECONDS = 0.05
 
 class SandboxUnavailable(RuntimeError):
     """There is no live sandbox to use (the message says what to do)."""
+
+
+class LockUnsupported(RuntimeError):
+    """The filesystem holding a sandbox root does not support ``flock``."""
 
 
 def sentence(text: str) -> str:
@@ -115,6 +122,28 @@ def write_json(path: Path, data: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+@contextmanager
+def pointer_lock(pointer: Path) -> Iterator[None]:
+    """Serialise claims on the pointer (the lock is its directory: no extra file)."""
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    directory = os.open(pointer.parent, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(directory)
+
+
+def unknown_schema(record: Mapping[str, Any], where: Path) -> str:
+    """Why a pointer or marker from another version of this tool is not touched."""
+    return (
+        f"{where} was written by another version of this tool (schema "
+        f"{record.get('schema')!r}; this one reads {SCHEMA}). Stop that sandbox with the "
+        f"checkout that started it ({record.get('repo_root', 'unknown')}), or remove {where} "
+        "if it no longer runs"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The owner's lock
 # ---------------------------------------------------------------------------
@@ -123,8 +152,9 @@ def write_json(path: Path, data: Mapping[str, Any]) -> None:
 class OwnerLock:
     """The exclusive lock the owner holds on its sandbox's marker file.
 
-    The descriptor is not inherited by children, so the lock is released
-    exactly when the owner closes it or exits, however it exits.
+    The descriptor is closed on ``exec`` and in any child forked without
+    one, so the lock is released exactly when the owner closes it or exits,
+    however it exits.
     """
 
     def __init__(self, root: Path) -> None:
@@ -132,7 +162,10 @@ class OwnerLock:
         self._fd: Optional[int] = None
 
     def acquire(self, record: Mapping[str, Any]) -> bool:
-        """Take the lock and write *record* into the marker; False if another owner holds it."""
+        """Take the lock and write *record* into the marker; False if another owner holds it.
+
+        Raises LockUnsupported where the filesystem cannot lock at all.
+        """
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
         for _ in range(_LOCK_ATTEMPTS):
             try:
@@ -141,11 +174,23 @@ class OwnerLock:
                 # Held by an owner, or for an instant by a process probing it.
                 time.sleep(_LOCK_RETRY_SECONDS)
                 continue
+            except OSError as exc:
+                os.close(fd)
+                raise LockUnsupported(
+                    f"cannot lock {self.path} ({exc.strerror}): the sandbox root must be on "
+                    "a filesystem that supports flock; choose another with --root"
+                ) from None
             self._fd = fd
+            os.register_at_fork(after_in_child=self._close_in_child)
             self.write(record)
             return True
         os.close(fd)
         return False
+
+    def _close_in_child(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
     def write(self, record: Mapping[str, Any]) -> None:
         """Replace the marker's contents (it keeps its inode, and so the lock)."""
@@ -153,6 +198,10 @@ class OwnerLock:
         data = (json.dumps(dict(record), sort_keys=True) + "\n").encode()
         os.ftruncate(self._fd, 0)
         os.pwrite(self._fd, data, 0)
+
+    def remove(self) -> None:
+        """Delete the marker while the lock is still held (the owner's last act)."""
+        self.path.unlink(missing_ok=True)
 
     def release(self) -> None:
         if self._fd is not None:
@@ -170,6 +219,8 @@ def owner_alive(root: Any) -> bool:
         fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except BlockingIOError:
         return True
+    except OSError:
+        return False  # no flock here: no owner could have locked it either
     finally:
         os.close(fd)
     return False
@@ -180,36 +231,24 @@ def marker(root: Any) -> Optional[dict]:
     return read_json(Path(root) / MARKER)
 
 
+def same_owner(record: Optional[Mapping[str, Any]], owner: Mapping[str, Any]) -> bool:
+    """True when *record* (a marker or pointer) names the owner *owner* names."""
+    return record is not None and all(
+        record.get(key) == owner.get(key) for key in ("owner_pid", "started_at")
+    )
+
+
 def remove_stale_root(root: Path) -> bool:
     """Remove *root* if it is a sandbox root whose owner is gone; True if removed.
 
-    Only a directory carrying the marker, with nobody holding its lock, is
-    provably a finished sandbox; anything else is left alone.
+    Only a directory carrying this version's marker, with nobody holding its
+    lock, is provably a finished sandbox; anything else is left alone.
     """
-    if marker(root) is None or owner_alive(root):
+    found = marker(root)
+    if found is None or found.get("schema") != SCHEMA or owner_alive(root):
         return False
     shutil.rmtree(root, ignore_errors=True)
     return not root.exists()
-
-
-def legacy_owner_alive(record: Mapping[str, Any]) -> bool:
-    """For a pointer written before the owner lock existed (schema 1).
-
-    Only decides whether to refuse: such an owner is never signalled.
-    """
-    pid, identity = record.get("owner_pid"), record.get("owner_identity")
-    return isinstance(pid, int) and bool(identity) and bool(
-        child_guard.owner_alive(pid, tuple(identity))
-    )
-
-
-def legacy_message(record: Mapping[str, Any]) -> str:
-    return (
-        "the QA sandbox named in the pointer was started by an older version of this tool "
-        f"(owner pid {record.get('owner_pid')}, checkout {record.get('repo_root')}); stop "
-        f"it with `kill -TERM {record.get('owner_pid')}` (it cleans up after itself), then "
-        "start a new one"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,28 +256,33 @@ def legacy_message(record: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def can_list_processes() -> bool:
+    return os.path.isdir("/proc/self")
+
+
 def process_identity(pid: int) -> Optional[list[str]]:
-    """What tells *pid* apart from a later process reusing the number (needs /proc)."""
-    identity = child_guard.process_identity(pid)
-    return list(identity) if identity is not None else None
+    """What tells *pid* apart from a later process reusing the number.
+
+    ``[state, start time]`` from /proc; elsewhere ``["", <ps lstart>]``, the
+    start time to the second. None when the process is gone.
+    """
+    if can_list_processes():
+        identity = child_guard.process_identity(pid)
+        return list(identity) if identity is not None else None
+    started = _ps(pid, "lstart")
+    return ["", started] if started else None
 
 
 def process_alive(pid: Any, identity: Any = None) -> bool:
-    """True while *pid* runs; with *identity* (and /proc), only while it is that process."""
+    """True while *pid* runs; with *identity*, only while it is still that process."""
     if not isinstance(pid, int) or pid <= 0:
         return False
-    current = child_guard.process_identity(pid)
-    if current is not None:
-        return current[0] not in ("Z", "X") and (not identity or current[1] == identity[1])
-    if can_list_processes():
-        return False  # no /proc entry: gone
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    current = process_identity(pid)
+    if current is None:
         return False
-    except PermissionError:
-        return True
-    return True
+    if current[0] in ("Z", "X"):
+        return False
+    return not identity or current[1] == identity[1]
 
 
 def process_command(pid: int) -> Optional[str]:
@@ -250,23 +294,19 @@ def process_command(pid: int) -> Optional[str]:
         except OSError:
             return None
         return b" ".join(part for part in parts if part).decode("utf-8", "replace")
-    return ps_command(pid)
+    return _ps(pid, "command")
 
 
-def ps_command(pid: int) -> Optional[str]:
-    """The command line of *pid* as ``ps`` reports it (systems without /proc)."""
+def _ps(pid: int, field: str) -> Optional[str]:
+    """One ``ps`` field of *pid* (systems without /proc), or None."""
     try:
         output = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+            ["ps", "-o", f"{field}=", "-p", str(pid)],
             capture_output=True, text=True, timeout=10, check=False,
         ).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return None
     return output or None
-
-
-def can_list_processes() -> bool:
-    return os.path.isdir("/proc/self")
 
 
 def sandbox_pids(root: Path) -> list[int]:
@@ -308,14 +348,13 @@ def load_live_state(env: Optional[Mapping[str, str]] = None) -> dict:
     pointer = read_json(pointer_file)
     if pointer is None:
         raise SandboxUnavailable(f"No QA sandbox is running ({pointer_file} is missing). {_START}")
-    gone = f"The QA sandbox named in {pointer_file} is no longer running. {_START}"
     if pointer.get("schema") != SCHEMA:
-        if legacy_owner_alive(pointer):
-            raise SandboxUnavailable(sentence(legacy_message(pointer)) + ".")
-        raise SandboxUnavailable(gone)
+        raise SandboxUnavailable(sentence(unknown_schema(pointer, pointer_file)) + ".")
     root = Path(str(pointer.get("root", "")))
     if not owner_alive(root):
-        raise SandboxUnavailable(gone)
+        raise SandboxUnavailable(
+            f"The QA sandbox named in {pointer_file} is no longer running. {_START}"
+        )
     phase = (marker(root) or {}).get("phase")
     owner = f"The QA sandbox (owner pid {pointer.get('owner_pid')})"
     if phase == STOPPING:
@@ -324,38 +363,50 @@ def load_live_state(env: Optional[Mapping[str, str]] = None) -> dict:
     if state is None or phase != RUNNING:
         raise SandboxUnavailable(f"{owner} is still starting; wait for its SANDBOX READY line.")
     if state.get("schema") != SCHEMA:
-        raise SandboxUnavailable(
-            f"{root / STATE_FILE} has schema {state.get('schema')!r}; this checkout reads "
-            f"schema {SCHEMA}. Use the checkout that started the sandbox "
-            f"({state.get('repo_root')}), or restart the sandbox from this one."
-        )
+        raise SandboxUnavailable(sentence(unknown_schema(state, root / STATE_FILE)) + ".")
     return state
 
 
-def watch_owner(root: Path, on_gone: Callable[[], None], *, interval: float = 0.5) -> Any:
+def watch_owner(root: Path, on_gone: Callable[[], None], *,
+                owner: Optional[Mapping[str, Any]] = None, interval: float = 0.5) -> Any:
     """Call *on_gone()* once, from a daemon thread, when the sandbox at *root* ends.
 
-    Returns an event; setting it stops the watch without calling *on_gone*.
+    With *owner* (its ``owner_pid`` and ``started_at``), a new sandbox that
+    claimed the same root in the meantime counts as the end too. A failure
+    while watching counts as the end: the watch fails closed. Returns an
+    event; setting it stops the watch without calling *on_gone*.
     """
     cancelled = threading.Event()
 
+    def ended() -> bool:
+        if not owner_alive(root):
+            return True
+        found = marker(root)  # None for an instant while the owner rewrites it
+        return owner is not None and found is not None and not same_owner(found, owner)
+
     def watch() -> None:
         while not cancelled.wait(interval):
-            if not owner_alive(root):
-                on_gone()
-                return
+            try:
+                if not ended():
+                    continue
+            except Exception:  # noqa: BLE001 - cannot tell: treat as ended
+                pass
+            on_gone()
+            return
 
     threading.Thread(target=watch, name="qa-sandbox-watch", daemon=True).start()
     return cancelled
 
 
-def confine_after(root: Path, write_roots: list, on_confined: Callable[[], None] = lambda: None) -> Any:
+def confine_after(root: Path, write_roots: list, on_confined: Callable[[], None] = lambda: None,
+                  *, owner: Optional[Mapping[str, Any]] = None) -> Any:
     """Once the sandbox at *root* ends, let this process write below *write_roots* only.
 
     For a long-lived process that hosts sandbox code without the owner
     watchdog (the TUI inside a textual-pilot-mcp server): a late write would
-    otherwise bring the sandbox directory back. Calls *on_confined()* after
-    narrowing. Returns the watch's cancel event (see :func:`watch_owner`).
+    otherwise bring the sandbox directory back, or land in the next sandbox
+    started at the same root. Calls *on_confined()* after narrowing. Returns
+    the watch's cancel event (see :func:`watch_owner`).
     """
 
     def confine() -> None:
@@ -363,4 +414,4 @@ def confine_after(root: Path, write_roots: list, on_confined: Callable[[], None]
         guard.restrict_writes([str(path) for path in write_roots])
         on_confined()
 
-    return watch_owner(root, confine)
+    return watch_owner(root, confine, owner=owner)

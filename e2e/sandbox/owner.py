@@ -36,7 +36,6 @@ starts also stops by itself once the owner or the root is gone
 
 from __future__ import annotations
 
-import fcntl
 import importlib.metadata
 import json
 import logging
@@ -85,24 +84,10 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 
-@contextmanager
-def _pointer_lock(pointer: Path) -> Iterator[None]:
-    """Serialise claims on the pointer (the lock is its directory: no extra file)."""
-    pointer.parent.mkdir(parents=True, exist_ok=True)
-    directory = os.open(pointer.parent, os.O_RDONLY)
-    try:
-        fcntl.flock(directory, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(directory)
-
-
-def _refuse_if_running(current: dict) -> None:
+def _refuse_if_running(current: dict, pointer: Path) -> None:
     """Refuse while the sandbox the pointer names is still running."""
     if current.get("schema") != state.SCHEMA:
-        if state.legacy_owner_alive(current):
-            raise Refused(state.legacy_message(current))
-        return
+        raise Refused(state.unknown_schema(current, pointer))
     if state.owner_alive(current.get("root", "")):
         raise Refused(
             "a QA sandbox is already running for this user (owner pid "
@@ -144,8 +129,8 @@ def _clear_root(root: Path) -> None:
             "TUI open), or it is not a sandbox directory at all. Remove it with "
             f"`rm -r {root}` if it is yours to delete, or choose another --root"
         )
-    if found.get("schema") != state.SCHEMA and state.legacy_owner_alive(found):
-        raise Refused(state.legacy_message(found))
+    if found.get("schema") != state.SCHEMA:
+        raise Refused(state.unknown_schema(found, root / state.MARKER))
     _say(f"removing {root}, left behind by a sandbox that stopped")
     shutil.rmtree(root)
 
@@ -153,10 +138,10 @@ def _clear_root(root: Path) -> None:
 def claim(pointer: Path, root: Path, repo_root: Path,
           scenario: str) -> tuple[dict, state.OwnerLock]:
     """Make this process the owner of the per-user pointer and of *root*."""
-    with _pointer_lock(pointer):
+    with state.pointer_lock(pointer):
         current = state.read_json(pointer)
         if current is not None:
-            _refuse_if_running(current)
+            _refuse_if_running(current, pointer)
             _clean_after_stale_pointer(current, root)
         _clear_root(root)
         root.mkdir(mode=0o700, parents=True)
@@ -171,7 +156,12 @@ def claim(pointer: Path, root: Path, repo_root: Path,
             "started_at": _now(),
         }
         lock = state.OwnerLock(root)
-        if not lock.acquire({**record, "phase": state.STARTING}):
+        try:
+            locked = lock.acquire({**record, "phase": state.STARTING})
+        except state.LockUnsupported as exc:
+            shutil.rmtree(root, ignore_errors=True)  # created just above, holding nothing else
+            raise Refused(str(exc)) from None
+        if not locked:
             raise Refused(f"another process is starting a QA sandbox in {root}")
         state.write_json(pointer, record)
     return record, lock
@@ -179,7 +169,7 @@ def claim(pointer: Path, root: Path, repo_root: Path,
 
 def release(pointer: Path, record: dict) -> None:
     """Remove the pointer if it still names this sandbox."""
-    with _pointer_lock(pointer):
+    with state.pointer_lock(pointer):
         current = state.read_json(pointer)
         if current is not None and current.get("state") == record["state"] and (
             current.get("owner_pid") == record["owner_pid"]
@@ -564,10 +554,11 @@ class Owner:
     # -- stop ------------------------------------------------------------------
 
     def stop(self) -> None:
-        """Stop every process and server, then remove the root and the pointer.
+        """Stop every process and server, release the pointer, remove the root.
 
         Each step runs whatever happened before it; one that fails is
-        reported and the rest still run.
+        reported and the rest still run. The marker goes last, while the
+        lock is still held: until then the owner counts as alive.
         """
         self.stop_request.interrupts = False
         steps: list[tuple[str, Callable[[], Any]]] = [
@@ -578,8 +569,13 @@ class Owner:
             ("restore the CloudWatch filter emulation", self._undo_patches),
             ("write the request logs", self._flush_kept_logs),
             ("stop the sandbox's remaining processes", self._stop_remaining),
+            ("empty the sandbox directory", self._empty_root),
+            # Nothing of the sandbox runs any more; what is left lies
+            # outside the root: the pointer, and a kept root's new name.
+            ("lift this process's guard", bootstrap.load_guard().disarm_filesystem_and_spawns),
+            ("release the pointer", lambda: release(self.pointer, self.claim_record)),
+            ("put the kept sandbox directory aside", self._set_kept_root_aside),
             ("remove the sandbox directory", self._remove_root),
-            ("release the pointer", self._release_pointer),
         ]
         for description, step in steps:
             try:
@@ -594,6 +590,9 @@ class Owner:
 
     def _end_desktop_worker(self) -> None:
         self._requests.put(None)
+        worker = self._desktop_worker
+        if worker is not None:
+            worker.join(_STOP_TIMEOUT_SECONDS)
 
     def _undo_patches(self) -> None:
         if self._monkeypatch is not None:
@@ -605,16 +604,36 @@ class Owner:
         for pid in state.sandbox_pids(self.root):
             _say(stop_sandbox_pid(pid, sandbox_root=self.root))
 
-    def _remove_root(self) -> None:
-        # This process created the root and holds its lock: it is ours.
-        if not self.keep:
-            shutil.rmtree(self.root, ignore_errors=True)
+    def _empty_root(self) -> None:
+        """Remove everything but the marker (this process created the root and holds its lock)."""
+        if self.keep:
+            return
+        for entry in self.root.iterdir():
+            if entry.name == state.MARKER:
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
 
-    def _release_pointer(self) -> None:
-        # Nothing of the sandbox runs any more; the pointer, outside the
-        # root, is the last thing to clean up.
-        bootstrap.load_guard().disarm_filesystem_and_spawns()
-        release(self.pointer, self.claim_record)
+    def _set_kept_root_aside(self) -> None:
+        """Rename a kept root, so the next sandbox here starts fresh and leaves it alone."""
+        if not self.keep:
+            return
+        kept = self.root.with_name(f"{self.root.name}.kept-{time.strftime('%Y%m%d-%H%M%S')}")
+        self.root.rename(kept)
+        _say(f"kept the sandbox directory as {kept}; delete it yourself when done")
+
+    def _remove_root(self) -> None:
+        if self.keep:
+            return
+        left = [entry.name for entry in self.root.iterdir() if entry.name != state.MARKER]
+        if left:
+            # The marker stays: the next `up` or `down` here can still tell
+            # the directory is a finished sandbox and remove it.
+            raise RuntimeError(f"{self.root} still holds {', '.join(sorted(left))}")
+        self.lock.remove()
+        self.root.rmdir()
 
 
 def _distribution_dir() -> Optional[str]:
@@ -650,15 +669,17 @@ def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> i
     # Resolved: children carry this exact path, and `down` finds them by it.
     root = (root or state.default_root(repo_root)).resolve()
     pointer = state.pointer_path()
-    with stop_request.deferred():
-        try:
-            record, lock = claim(pointer, root, repo_root, scenario)
-        except Refused as exc:
-            _say(f"not starting: {exc}")
-            return 2
-        owner = Owner(root, scenario, pointer, record, lock, stop_request,
-                      signed_in=signed_in, keep=keep)
+    owner: Optional[Owner] = None
     try:
+        # A signal during the claim takes effect once the owner exists.
+        with stop_request.deferred():
+            try:
+                record, lock = claim(pointer, root, repo_root, scenario)
+            except Refused as exc:
+                _say(f"not starting: {exc}")
+                return 2
+            owner = Owner(root, scenario, pointer, record, lock, stop_request,
+                          signed_in=signed_in, keep=keep)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()
@@ -669,6 +690,7 @@ def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> i
     except KeyboardInterrupt:
         _say("interrupted")
     finally:
-        _say("stopping")
-        owner.stop()
+        if owner is not None:
+            _say("stopping")
+            owner.stop()
     return 0

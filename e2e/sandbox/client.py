@@ -43,8 +43,14 @@ _POLL_SECONDS = 0.1
 #   update ever stops that;
 # - ``focus()``: keys reach the app only while the terminal has focus.
 #
-# It then waits for the first output and focuses the terminal.
+# It then waits for the first output and focuses the terminal. The page's
+# own start function exists until its first call, so a second run (or a run
+# in another page) stops before changing anything.
 START_SESSION_JS = """async () => {
+  if (typeof window.startServonaut !== 'function') {
+    throw new Error('this page already started its session (or is not the desktop page): '
+      + 'reload it and run `desktop` again');
+  }
   const pause = () => new Promise((resolve) => setTimeout(resolve, 100));
   const qa = window.servonautQa = {
     columns: 0,
@@ -63,6 +69,7 @@ START_SESSION_JS = """async () => {
       return lines.join('\\n');
     },
     async waitForText(text, timeoutMs = 20000) {
+      if (!qa.terminal) throw new Error('screen text unavailable: judge from screenshots');
       const deadline = Date.now() + timeoutMs;
       while (!(qa.text() || '').includes(text)) {
         if (Date.now() > deadline) throw new Error(`${text} not on the terminal after ${timeoutMs} ms`);
@@ -71,34 +78,39 @@ START_SESSION_JS = """async () => {
       return true;
     },
   };
-  Object.defineProperty(Object.prototype, '_addonManager', {
-    configurable: true,
-    set(value) {
-      delete Object.prototype._addonManager;
-      Object.defineProperty(this, '_addonManager', {
-        value, writable: true, enumerable: true, configurable: true,
-      });
-      qa.terminal = this;
-    },
-  });
   const note = (columns, rows) => { qa.columns = Number(columns); qa.rows = Number(rows); };
   const NativeWebSocket = window.WebSocket;
-  window.WebSocket = class extends NativeWebSocket {
-    constructor(url, protocols) {
-      super(url, protocols);
-      const query = new URL(url).searchParams;
-      note(query.get('width'), query.get('height'));
-      const send = this.send.bind(this);
-      this.send = (data) => {
-        try {
-          const message = JSON.parse(data);
-          if (message[0] === 'resize') note(message[1].width, message[1].height);
-        } catch (error) { /* terminal input, not JSON */ }
-        return send(data);
-      };
-    }
-  };
   try {
+    Object.defineProperty(Object.prototype, '_addonManager', {
+      configurable: true,
+      set(value) {
+        delete Object.prototype._addonManager;
+        Object.defineProperty(this, '_addonManager', {
+          value, writable: true, enumerable: true, configurable: true,
+        });
+        qa.terminal = this;
+      },
+    });
+    // The page's start function wraps whatever window.WebSocket is, and puts
+    // it back once the session's socket exists; the finally below then
+    // restores the browser's own. Until then this wrapper only records the
+    // size: the session token passes straight through it and is kept
+    // nowhere, and the page's own class still checks the destination.
+    window.WebSocket = class extends NativeWebSocket {
+      constructor(url, protocols) {
+        super(url, protocols);
+        const query = new URL(url).searchParams;
+        note(query.get('width'), query.get('height'));
+        const send = this.send.bind(this);
+        this.send = (data) => {
+          try {
+            const message = JSON.parse(data);
+            if (message[0] === 'resize') note(message[1].width, message[1].height);
+          } catch (error) { /* terminal input, not JSON */ }
+          return send(data);
+        };
+      }
+    };
     window.startServonaut(TOKEN);
     const deadline = Date.now() + 30000;
     while (!document.body.classList.contains('-first-byte')) {
@@ -387,52 +399,72 @@ def desktop(*, new: bool, as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
-# The processes a sandbox records, and what their command lines contain:
-# without /proc, a survivor is only signalled while its command still says
-# it is that process.
-_RECORDED_COMMANDS = {"pid": "servonaut.desktop.child", "keeper_pid": "desktop_parent.py"}
+# The processes a sandbox records: where their pid and identity are kept,
+# and what their command lines contain. Without /proc, a survivor is only
+# signalled while its start time and command still say it is that process.
+_RECORDED = (
+    ("pid", "identity", "servonaut.desktop.child"),
+    ("keeper_pid", "keeper_identity", "desktop_parent.py"),
+)
+
+
+def _is_owner(pointer: dict) -> bool:
+    """True while the lock, the marker and the process all say the pointer's owner runs."""
+    root = pointer.get("root", "")
+    return (
+        state.owner_alive(root)
+        and state.same_owner(state.marker(root), pointer)
+        and state.process_alive(pointer.get("owner_pid"), pointer.get("owner_identity"))
+    )
 
 
 def _signal_owner(pointer: dict, signum: int) -> bool:
-    """Signal the owner only while its lock proves the recorded pid is still it."""
-    pid = pointer.get("owner_pid")
-    if not state.owner_alive(pointer.get("root", "")) or not state.process_alive(
-        pid, pointer.get("owner_identity")
-    ):
+    """Signal the pointer's owner, only while :func:`_is_owner` proves it is that process."""
+    if not _is_owner(pointer):
         return False
     try:
-        os.kill(pid, signum)
+        os.kill(pointer["owner_pid"], signum)
     except ProcessLookupError:
         return False
     except PermissionError:
-        raise ClientError(f"not allowed to stop the owner (pid {pid})") from None
+        raise ClientError(f"not allowed to stop the owner (pid {pointer['owner_pid']})") from None
     return True
 
 
-def _runs(pid: int, command: str) -> bool:
+def _owner_gone(pointer: dict) -> bool:
+    """The owner released its lock and its process has exited."""
+    return not state.owner_alive(pointer.get("root", "")) and not state.process_alive(
+        pointer.get("owner_pid"), pointer.get("owner_identity")
+    )
+
+
+def _recorded_alive(pid: int, identity: Any, command: str) -> bool:
     found = state.process_command(pid)
-    return found is not None and command in found
+    return state.process_alive(pid, identity) and found is not None and command in found
 
 
-def _survivors(root: Path, record: dict) -> list[tuple[int, Optional[str]]]:
-    """Sandbox processes still running: (pid, the command to verify, or None)."""
+def _survivors(root: Path, record: dict) -> list[tuple[int, Optional[tuple]]]:
+    """Sandbox processes still running: (pid, (identity, command) to verify, or None)."""
     if state.can_list_processes():
         return [(pid, None) for pid in state.sandbox_pids(root)]
     # Without /proc only the processes the sandbox recorded can be checked.
     desktop = record.get("desktop") or {}
-    return [
-        (desktop[key], command) for key, command in _RECORDED_COMMANDS.items()
-        if isinstance(desktop.get(key), int) and _runs(desktop[key], command)
-    ]
+    found = []
+    for pid_key, identity_key, command in _RECORDED:
+        pid, identity = desktop.get(pid_key), desktop.get(identity_key)
+        if isinstance(pid, int) and identity and _recorded_alive(pid, identity, command):
+            found.append((pid, (identity, command)))
+    return found
 
 
-def _stop_survivor(root: Path, pid: int, command: Optional[str]) -> str:
+def _stop_survivor(root: Path, pid: int, recorded: Optional[tuple]) -> str:
     from e2e.harness.processes import stop_sandbox_pid
 
-    if command is None:  # found through /proc, which stop_sandbox_pid checks again
+    if recorded is None:  # found through /proc, which stop_sandbox_pid checks again
         return stop_sandbox_pid(pid, sandbox_root=root)
+    identity, command = recorded
     for signum in (signal.SIGTERM, signal.SIGKILL):
-        if not _runs(pid, command):
+        if not _recorded_alive(pid, identity, command):
             return f"pid {pid} is gone"
         try:
             os.kill(pid, signum)
@@ -440,9 +472,35 @@ def _stop_survivor(root: Path, pid: int, command: Optional[str]) -> str:
             return f"pid {pid} is gone"
         except PermissionError:
             return f"not allowed to stop pid {pid}"
-        if _wait(lambda: not _runs(pid, command), CHILDREN_STOP_SECONDS):
+        if _wait(lambda: not _recorded_alive(pid, identity, command), CHILDREN_STOP_SECONDS):
             return f"stopped pid {pid}"
     return f"pid {pid} did not stop"
+
+
+def _clean_up(pointer_file: Path, pointer: dict, record: dict) -> Optional[int]:
+    """Stop survivors and remove what the stopped sandbox left; the number of survivors.
+
+    Runs under the pointer lock, so no new sandbox can claim this root
+    meanwhile; None when one already had (then nothing is touched).
+    """
+    root = Path(str(pointer.get("root", "")))
+    with state.pointer_lock(pointer_file):
+        current = state.read_json(pointer_file)
+        if (current is not None and not state.same_owner(current, pointer)) or (
+            state.owner_alive(root) and not state.same_owner(state.marker(root), pointer)
+        ):
+            return None
+        # Children stop by themselves once the owner or the root is gone.
+        _wait(lambda: not _survivors(root, record), CHILDREN_STOP_SECONDS)
+        survivors = _survivors(root, record)
+        for pid, recorded in survivors:
+            _say(f"survived the owner: {pid}; {_stop_survivor(root, pid, recorded)}")
+        # An owner that could not clean up leaves its pointer and root behind.
+        if current is not None:
+            pointer_file.unlink(missing_ok=True)
+        if not record.get("keep"):
+            state.remove_stale_root(root)
+    return len(survivors)
 
 
 def down(*, timeout: float) -> int:
@@ -452,28 +510,22 @@ def down(*, timeout: float) -> int:
     if pointer is None:
         print("No QA sandbox is running.")
         return 0
-    if pointer.get("schema") != state.SCHEMA and state.legacy_owner_alive(pointer):
-        raise ClientError(state.legacy_message(pointer))
+    if pointer.get("schema") != state.SCHEMA:
+        raise ClientError(state.unknown_schema(pointer, pointer_file))
     root = Path(str(pointer.get("root", "")))
     record = state.read_json(root / state.STATE_FILE) or pointer
     was_running = _signal_owner(pointer, signal.SIGTERM)
-    if was_running and not _wait(lambda: not state.owner_alive(root), timeout):
+    if was_running and not _wait(lambda: _owner_gone(pointer), timeout):
         _say(f"the owner (pid {pointer['owner_pid']}) did not stop within {timeout:.0f}s; "
              "killing it")
         if _signal_owner(pointer, signal.SIGKILL):
-            _wait(lambda: not state.owner_alive(root), CHILDREN_STOP_SECONDS)
-    # Children stop by themselves once the owner or the root is gone.
-    _wait(lambda: not _survivors(root, record), CHILDREN_STOP_SECONDS)
-    survivors = _survivors(root, record)
-    for pid, command in survivors:
-        _say(f"survived the owner: {pid}; {_stop_survivor(root, pid, command)}")
-    # An owner that could not clean up leaves its pointer and root behind.
-    if state.read_json(pointer_file) == pointer:
-        pointer_file.unlink(missing_ok=True)
-    if not record.get("keep"):
-        state.remove_stale_root(root)
+            _wait(lambda: _owner_gone(pointer), CHILDREN_STOP_SECONDS)
+    survivors = _clean_up(pointer_file, pointer, record)
+    if survivors is None:
+        print("A new QA sandbox took over meanwhile; left it alone.")
+        return 0
     if survivors:
-        _say(f"{len(survivors)} process(es) outlived the sandbox; see {root / 'logs'}")
+        _say(f"{survivors} process(es) outlived the sandbox; see {root / 'logs'}")
         return 1
     if not state.can_list_processes():
         _say("this system has no /proc: only the desktop processes the sandbox recorded "

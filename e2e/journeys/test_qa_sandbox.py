@@ -87,7 +87,8 @@ class QaSandbox:
         stopped = await self.command("down")
         assert stopped.returncode == 0, stopped.stdout + stopped.stderr
         assert self.owner is not None
-        assert await asyncio.to_thread(self.owner.wait, COMMAND_TIMEOUT) == 0
+        # `down` returns only once the owner itself has exited.
+        assert self.owner.poll() == 0, "the owner still ran when down returned"
 
     def close(self) -> None:
         """Stop an owner a failed journey left running."""
@@ -184,6 +185,26 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
         await page.page.evaluate("() => window.servonautQa.waitForText('app-1')")
         screen = await _screen(page)
         assert len(screen.splitlines()) == started["rows"] and "cache-1" in screen
+
+        # Running the snippet again changes nothing and says why.
+        rerun = await page.page.evaluate(
+            f"async () => {{ try {{ await ({client.start_session_js(info['token'])})(); }}"
+            " catch (error) { return error.message; } }"
+        )
+        assert rerun.startswith("this page already started its session")
+        assert await _screen(page) == screen
+        # Without a captured terminal, waitForText says so at once.
+        unavailable = await page.page.evaluate(
+            """async () => {
+              const qa = window.servonautQa, terminal = qa.terminal, started = Date.now();
+              qa.terminal = null;
+              try { await qa.waitForText('app-1'); return null; }
+              catch (error) { return [error.message, Date.now() - started]; }
+              finally { qa.terminal = terminal; }
+            }"""
+        )
+        assert unavailable[0] == "screen text unavailable: judge from screenshots"
+        assert unavailable[1] < 1000
 
         # Keys typed straight into the page reach the app: "/" focuses the fleet
         # search (the footer then lists the search box's keys), typing narrows.
@@ -307,12 +328,15 @@ async def test_a_stop_during_start_up_cleans_up(qa_sandbox, keep):
     log = qa_sandbox.stderr.read_text(encoding="utf-8")
     assert "Traceback" not in log and "could not" not in log, log
     assert not qa_sandbox.pointer.exists()
-    assert qa_sandbox.root.exists() == keep
+    assert not qa_sandbox.root.exists()
     assert state.sandbox_pids(qa_sandbox.root) == []
-    # A kept root is provably the sandbox's own: the next start clears it.
+    kept = list(qa_sandbox.root.parent.glob(f"{qa_sandbox.root.name}.kept-*"))
+    assert len(kept) == int(keep)
+    # A kept root is set aside: the next sandbox here starts fresh and leaves it alone.
     if keep:
         await qa_sandbox.up()
         await qa_sandbox.down()
+        assert kept[0].is_dir()
 
 
 # Stands in for the TUI host inside an MCP server: it outlives `down`, with
@@ -327,7 +351,13 @@ current = state.load_live_state()
 os.environ.clear()
 os.environ.update(current["env"])
 child_guard.arm(watch_owner=False)
-state.confine_after(Path(current["root"]), [sys.argv[1]], lambda: print("confined", flush=True))
+owner = {"owner_pid": current["owner_pid"], "started_at": current["started_at"]}
+state.watch_owner(
+    Path(current["root"]),
+    lambda: (child_guard.guard_module().restrict_writes([sys.argv[1]]),
+             print("confined", flush=True)),
+    owner=owner, interval=float(sys.argv[2]),
+)
 print("armed", flush=True)
 for line in sys.stdin:
     target = Path(line.strip())
@@ -340,35 +370,82 @@ for line in sys.stdin:
 """
 
 
+class HostStandIn:
+    """The stand-in above, as a child of the test."""
+
+    def __init__(self, qa_sandbox: QaSandbox, captures: Path, interval: float) -> None:
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _HOST_STAND_IN, str(captures), str(interval)],
+            cwd=REPO_ROOT, env=qa_sandbox.env, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        )
+
+    async def line(self, timeout: float = 30) -> str:
+        assert self.process.stdout is not None
+        return (await asyncio.wait_for(asyncio.to_thread(self.process.stdout.readline), timeout)).strip()
+
+    async def write(self, path: Path) -> str:
+        assert self.process.stdin is not None
+        self.process.stdin.write(f"{path}\n")
+        self.process.stdin.flush()
+        return await self.line()
+
+    def close(self) -> None:
+        self.process.kill()
+        self.process.wait()
+
+
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
 async def test_a_host_that_outlives_the_sandbox_cannot_bring_it_back(qa_sandbox, journey):
     current = await qa_sandbox.up()
     home = Path(current["sandbox"]["home"])
     captures = journey.directory / "captures"
-    host = subprocess.Popen(
-        [sys.executable, "-c", _HOST_STAND_IN, str(captures)],
-        cwd=REPO_ROOT, env=qa_sandbox.env, text=True,
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-    )
-    assert host.stdin is not None and host.stdout is not None
-
-    async def ask(path: Path) -> str:
-        host.stdin.write(f"{path}\n")
-        host.stdin.flush()
-        return (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip()
-
+    host = HostStandIn(qa_sandbox, captures, interval=0.5)
     try:
-        assert (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip() == "armed"
-        assert await ask(home / "early.txt") == "wrote"
+        assert await host.line() == "armed"
+        assert await host.write(home / "early.txt") == "wrote"
         await qa_sandbox.down()
-        assert (await asyncio.wait_for(asyncio.to_thread(host.stdout.readline), 30)).strip() == "confined"
-        assert await ask(home / "late.txt") == "refused"
+        assert await host.line() == "confined"
+        assert await host.write(home / "late.txt") == "refused"
         assert not qa_sandbox.root.exists()
-        assert await ask(captures / "snapshot.svg") == "wrote"
+        assert await host.write(captures / "snapshot.svg") == "wrote"
     finally:
-        host.kill()
-        host.wait()
+        host.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_a_host_notices_a_restart_at_the_same_root(qa_sandbox, journey):
+    await qa_sandbox.up()
+    # A long watch interval: the restart completes between two looks, so the
+    # lock is held again when the host next checks, by a new owner.
+    host = HostStandIn(qa_sandbox, journey.directory / "captures", interval=8.0)
+    try:
+        assert await host.line() == "armed"
+        await qa_sandbox.down()
+        restarted = await qa_sandbox.up()
+        assert await host.line(timeout=20) == "confined"
+        fresh_home = Path(restarted["sandbox"]["home"])
+        assert await host.write(fresh_home / "late.txt") == "refused"
+        assert not (fresh_home / "late.txt").exists()
+        await qa_sandbox.down()
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_a_pointer_from_another_version_is_left_alone(qa_sandbox, journey):
+    root = journey.directory / "other-version"
+    root.mkdir()
+    record = {"schema": 99, "root": str(root), "owner_pid": os.getpid(), "repo_root": "elsewhere"}
+    state.write_json(qa_sandbox.pointer, record)
+    for args, code in ((("status",), 1), (("down",), 1), (("up", "--root", str(root)), 2)):
+        answer = await qa_sandbox.command(*args)
+        assert answer.returncode == code, (args, answer.stdout, answer.stderr)
+        assert "another version of this tool" in answer.stderr, (args, answer.stderr)
+    assert state.read_json(qa_sandbox.pointer) == record and root.is_dir()
 
 
 # What the textual-pilot-mcp specs run first (import_path.require_clean), in a
