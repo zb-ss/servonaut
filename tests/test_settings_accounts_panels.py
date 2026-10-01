@@ -716,3 +716,31 @@ class TestOnePlacePerSetting:
                              "hetzner_audit_path", "hetzner_cost_alert_threshold",
                              "btn_hetzner_setup"):
                 assert app.panel.query(f"#{field_id}"), field_id
+
+
+# ---------------------------------------------------------------------------
+# One Save, one save: panels that extend on_button_pressed call the base
+# handler through super(), and Textual must not run it a second time.
+# ---------------------------------------------------------------------------
+
+
+class TestSaveRunsOnce:
+    @pytest.mark.parametrize("panel_cls, config, field_id, value", [
+        (OvhPanel, _ovh_config, "ovh_cost_currency", "USD"),
+        (HetznerPanel, _hetzner_config, "hetzner_cache_ttl", "600"),
+    ])
+    async def test_one_click_persists_once(
+        self, tmp_path, panel_cls, config, field_id, value
+    ) -> None:
+        app = Host(panel_cls, _manager(tmp_path, config()))
+        async with app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            panel = app.panel
+            saves = []
+            real_persist = panel.persist
+            panel.persist = lambda: (saves.append(1), real_persist())
+            panel.query_one(f"#{field_id}", Input).value = value
+            await pilot.click(f"#save_{panel.PANEL_ID}")
+            await pilot.pause()
+            await pilot.pause()
+            assert len(saves) == 1

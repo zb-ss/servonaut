@@ -439,6 +439,10 @@ class SettingsPanel(Vertical):
         if event.button.id != f"save_{self.PANEL_ID}":
             return
         event.stop()
+        # Textual also runs this base handler after a subclass's own
+        # on_button_pressed, which already called it through super():
+        # without this, every Save persisted (and reloaded accounts) twice.
+        event.prevent_default()
         self.clear_field_errors()
         try:
             self.persist()
