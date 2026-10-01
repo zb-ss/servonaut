@@ -408,9 +408,10 @@ def test_never_listed_accounts_are_read_within_the_time_allowed(monkeypatch):
         "Note: Hetzner project 'staging' could not be listed (timed out after 0.2 s); "
         "its servers were not checked for 'web-1'"
     ]
-    # The project that answered is in; both got the time limit for their requests.
+    # The project that answered is in; both had half the time to start
+    # requests and half for the last one to answer.
     assert fleet.resolve("web-1", rows=checked.rows)["id"] == "1"
-    assert staging.request_time_limit == primary.request_time_limit == 0.2
+    assert staging.listing_time_limit == primary.listing_time_limit == (0.1, 0.1)
     # The timeout is remembered: the next command does not wait for it again.
     begin = time.monotonic()
     again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))

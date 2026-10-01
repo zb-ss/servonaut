@@ -82,9 +82,11 @@ class AWSService(InstanceServiceInterface):
         # to tell the operator they are looking at cached data.
         self.last_fetch_error: Optional[str] = None
         self._failed_regions: List[str] = []
-        # Set by limit_request_time: botocore timeouts, and when to stop listing.
+        # Set by limit_listing_time: botocore timeouts, and when to stop listing.
         self._client_config: Any = None
         self._listing_deadline: Optional[float] = None
+        # Regions of the last listing skipped because its time was up.
+        self._late_regions: List[str] = []
 
     def get_cached_instances(self) -> List[dict]:
         """Return the cached AWS instances synchronously, regardless of TTL.
@@ -138,19 +140,22 @@ class AWSService(InstanceServiceInterface):
         """
         return self.account is not None and not self.account.uses_ambient_credentials
 
-    def limit_request_time(self, seconds: float) -> None:
-        """Bound the listing for a caller that will not wait longer than *seconds*.
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
 
-        Every request gets *seconds* to connect and *seconds* to answer, with
-        no retry, and no region is listed once *seconds* have passed (those
-        regions count as failed).
+        Every request gets *request_seconds* to connect and to answer, with
+        no retry, and no region is listed once *start_by_seconds* have
+        passed: the regions listed by then come back as a partial listing
+        (never saved as the cache). The CLI builds its services for one
+        command, so the limits reach no other surface.
         """
         from botocore.config import Config
 
         self._client_config = Config(
-            connect_timeout=seconds, read_timeout=seconds, retries={"total_max_attempts": 1},
+            connect_timeout=request_seconds, read_timeout=request_seconds,
+            retries={"total_max_attempts": 1},
         )
-        self._listing_deadline = time.monotonic() + seconds
+        self._listing_deadline = time.monotonic() + start_by_seconds
 
     def _client_kwargs(self) -> dict:
         return {"config": self._client_config} if self._client_config is not None else {}
@@ -224,16 +229,24 @@ class AWSService(InstanceServiceInterface):
         if self._failed_regions:
             # A partial inventory is shown but never persisted: writing it
             # would silently drop every instance in the failed regions.
-            self.last_fetch_error = (
-                f"{len(self._failed_regions)} region(s) failed: "
-                + ", ".join(self._failed_regions)
-            )
+            self.last_fetch_error = self._incomplete_listing()
             logger.warning("AWS fetch incomplete (%s); cache left untouched", self.last_fetch_error)
             return instances
 
         self.last_fetch_error = None
         self.cache_service.save(instances)
         return instances
+
+    def _incomplete_listing(self) -> str:
+        """Why the last listing is partial: the regions that failed, and the late ones."""
+        late = set(self._late_regions)
+        failed = [region for region in self._failed_regions if region not in late]
+        parts = []
+        if failed:
+            parts.append(f"{len(failed)} region(s) failed: " + ", ".join(failed))
+        if late:
+            parts.append(f"{len(late)} region(s) not listed in the time allowed")
+        return "; ".join(parts)
 
     def _fetch_all_regions(self) -> List[dict]:
         """Blocking fetch of instances across all AWS regions.
@@ -242,6 +255,7 @@ class AWSService(InstanceServiceInterface):
             List of instance dictionaries.
         """
         self._failed_regions = []
+        self._late_regions = []
         configured = list(self.account.regions) if self.account is not None else []
         if configured:
             regions = configured
@@ -258,7 +272,8 @@ class AWSService(InstanceServiceInterface):
         for region in regions:
             if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
                 self._failed_regions.append(region)
-                last_error = TimeoutError("not listed within the time allowed")
+                self._late_regions.append(region)
+                last_error = TimeoutError("not listed in the time allowed")
                 continue
             try:
                 logger.debug(f"Fetching instances from region: {region}")

@@ -157,6 +157,11 @@ class HetznerService:
         self._client = None  # lazy
         # Seconds per API request (connect and read); None is the SDK default.
         self._request_timeout: Optional[float] = None
+        # No page is requested after this (time.monotonic); None: no limit.
+        self._listing_deadline: Optional[float] = None
+        # Servers the last listing found before its time was up; None when
+        # it was complete.
+        self._listed_in_time: Optional[int] = None
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
         # Why the last refresh failed while cached servers were returned in
@@ -278,13 +283,18 @@ class HetznerService:
             _without_sdk_retries(self._client)
         return self._client
 
-    def limit_request_time(self, seconds: float) -> None:
-        """Give every API request *seconds* to connect and *seconds* to answer, once.
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
 
-        hcloud's own retries (up to five, with up to about 30 s of backoff)
-        are turned off: a caller with a time limit cannot wait them out.
+        Every API request gets *request_seconds* to connect and to answer,
+        once: hcloud's own retries (up to five, with up to about 30 s of
+        backoff) are turned off. No page is requested once *start_by_seconds*
+        have passed: the servers listed by then come back as a partial
+        listing (never saved as the cache). The CLI builds its services for
+        one command, so the limits reach no other surface.
         """
-        self._request_timeout = seconds
+        self._request_timeout = request_seconds
+        self._listing_deadline = time.monotonic() + start_by_seconds
         self._client = None
 
     # Public access for callers (tests, MCP tools) that want the raw
@@ -354,6 +364,15 @@ class HetznerService:
                 )
                 return stale
             raise
+
+        if self._listed_in_time is not None:
+            # A partial listing is returned but never saved: the cache would
+            # lose every server not listed in time.
+            self.last_fetch_error = (
+                f"listed {self._listed_in_time} server(s); "
+                "the rest was not listed in the time allowed"
+            )
+            return instances
 
         self.last_fetch_error = None
         self._save_cache(instances)
@@ -1101,7 +1120,24 @@ class HetznerService:
 
     def _fetch_servers_blocking(self) -> List[Any]:
         client = self._get_client()
-        return client.servers.get_all()
+        self._listed_in_time = None
+        deadline = self._listing_deadline
+        if deadline is None:
+            return client.servers.get_all()
+        # Page by page, as get_all does, but no page after the deadline.
+        servers: List[Any] = []
+        page: Optional[int] = 1
+        while page:
+            if time.monotonic() >= deadline:
+                self._listed_in_time = len(servers)
+                break
+            result, meta = client.servers.get_list(
+                page=page, per_page=client.servers.max_per_page,
+            )
+            servers.extend(result or [])
+            pagination = getattr(meta, "pagination", None)
+            page = getattr(pagination, "next_page", None)
+        return servers
 
     def _lookup_server_blocking(self, client, identifier: str):
         # Numeric → ID lookup; string → name lookup. Hetzner server

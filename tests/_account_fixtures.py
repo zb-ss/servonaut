@@ -78,11 +78,12 @@ class FakeProvider:
     def listing_record(self) -> ListingRecord:
         return self.record
 
-    # The seconds a caller allowed each API request (limit_request_time).
-    request_time_limit: Optional[float] = None
+    # What a caller allowed the listing: (seconds per request, seconds to
+    # start requests in), see limit_listing_time.
+    listing_time_limit: Optional[Tuple[float, float]] = None
 
-    def limit_request_time(self, seconds: float) -> None:
-        self.request_time_limit = seconds
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        self.listing_time_limit = (request_seconds, start_by_seconds)
 
     def resolve_token(self) -> str:
         return "token"

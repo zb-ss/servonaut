@@ -1,6 +1,7 @@
 """A caller that will not wait long bounds each provider's API requests."""
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import MagicMock, patch
 
@@ -22,7 +23,7 @@ def _aws(tmp_path, regions=()):
 
 def test_aws_requests_get_the_time_and_no_retry(tmp_path):
     service = _aws(tmp_path)
-    service.limit_request_time(4)
+    service.limit_listing_time(4, 2)
 
     with patch("servonaut.services.aws_service.boto3.client") as client:
         service._client("ec2", "eu-west-1")
@@ -40,7 +41,7 @@ def test_aws_clients_are_unchanged_without_a_limit(tmp_path):
 
 def test_aws_lists_no_region_once_the_time_is_up(tmp_path, monkeypatch):
     service = _aws(tmp_path, regions=("eu-west-1", "us-east-1", "ap-south-1"))
-    service.limit_request_time(5)
+    service.limit_listing_time(5, 5)
     listed = []
 
     def one_region(region):
@@ -54,15 +55,36 @@ def test_aws_lists_no_region_once_the_time_is_up(tmp_path, monkeypatch):
     rows = service._fetch_all_regions()
 
     assert listed == ["eu-west-1"] and [r["id"] for r in rows] == ["i-1"]
-    assert service._failed_regions == ["us-east-1", "ap-south-1"]
+    assert service._failed_regions == service._late_regions == ["us-east-1", "ap-south-1"]
+
+
+def test_aws_says_which_regions_failed_and_which_were_late(tmp_path, monkeypatch):
+    service = _aws(tmp_path, regions=("eu-west-1", "us-east-1", "ap-south-1"))
+    service.limit_listing_time(5, 5)
+
+    def one_region(region):
+        if region == "eu-west-1":
+            return [{"id": "i-1", "region": region}]
+        service._listing_deadline = time.monotonic() - 1
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(service, "_fetch_region", one_region)
+
+    rows = asyncio.run(service.fetch_instances_cached(force_refresh=True))
+
+    assert [r["id"] for r in rows] == ["i-1"]
+    assert service.last_fetch_error == (
+        "1 region(s) failed: us-east-1; 1 region(s) not listed in the time allowed"
+    )
+    assert service.cache_service.load_any() is None
 
 
 def test_aws_with_no_region_listed_in_time_is_a_failed_listing(tmp_path):
     service = _aws(tmp_path, regions=("eu-west-1",))
-    service.limit_request_time(5)
+    service.limit_listing_time(5, 5)
     service._listing_deadline = time.monotonic() - 1
 
-    with pytest.raises(AWSFetchError, match="not listed within the time allowed"):
+    with pytest.raises(AWSFetchError, match="not listed in the time allowed"):
         service._fetch_all_regions()
 
 
@@ -73,7 +95,7 @@ def test_hetzner_requests_get_the_time(tmp_path, limit, expected):
         enabled=True, api_token="token", cache_path=str(tmp_path / "hetzner_cache.json"),
     ))
     if limit is not None:
-        service.limit_request_time(limit)
+        service.limit_listing_time(limit, limit)
 
     with patch.object(hcloud, "Client", autospec=True) as client:
         service._get_client()
@@ -89,7 +111,7 @@ def test_ovh_requests_get_the_time(tmp_path, limit, expected):
         cache_path=tmp_path / "ovh_cache.json",
     )
     if limit is not None:
-        service.limit_request_time(limit)
+        service.limit_listing_time(limit, limit)
 
     with patch.object(ovh, "Client", return_value=MagicMock()) as client:
         service._get_client()
@@ -104,7 +126,7 @@ def test_hetzner_turns_hcloud_retries_off_under_a_limit(tmp_path):
                            cache_path=str(tmp_path / "hetzner_cache.json"))
     unlimited = HetznerService(config)._get_client()
     limited_service = HetznerService(config)
-    limited_service.limit_request_time(3)
+    limited_service.limit_listing_time(3, 3)
     limited = limited_service._get_client()
 
     assert unlimited._client._retry_max_retries > 0

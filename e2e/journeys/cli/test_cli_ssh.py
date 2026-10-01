@@ -147,13 +147,15 @@ def test_an_api_that_never_answers_holds_ssh_up_only_briefly(journey, fake_cloud
 
     assert result.returncode == 0, result.describe()
     assert result.stdout.strip() == WEB_1.name
-    note = ("Note: Hetzner project 'hetzner' could not be listed (timed out after 2 s); "
-            f"its servers were not checked for '{WEB_1.name}'")
-    assert note in result.stderr
-    # Two seconds to list; the request still open gets as long to give up
-    # before the process can exit; the rest is start-up and the SSH session.
-    assert first < 2 + 2 + 4, result.describe()
-    # The timeout is remembered: the next command does not wait for it again.
+    # The request gets half the budget to answer, then gives up.
+    (note,) = [line for line in result.stderr.splitlines() if line.startswith("Note:")]
+    assert note.startswith("Note: Hetzner project 'hetzner' could not be listed (")
+    assert "timed out" in note
+    assert note.endswith(f"its servers were not checked for '{WEB_1.name}'")
+    # Two seconds at most for the lookup; nothing waits for the silent API
+    # after that; the rest is start-up and the SSH session.
+    assert first < 2 + 4, result.describe()
+    # The failure is remembered: the next command does not wait for it again.
     assert again.returncode == 0, again.describe()
-    assert "timed out after 2 s; at " in again.stderr
+    assert "; at " in again.stderr and "tried again after" in again.stderr
     assert again.duration < first

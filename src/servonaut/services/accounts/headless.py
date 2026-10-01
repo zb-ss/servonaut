@@ -769,17 +769,20 @@ async def _listings_within(
 ) -> List[Tuple[List[dict], Optional[str]]]:
     """The listings of :func:`_checked_listings`, on its own loop.
 
-    Each account's API requests get *seconds* as well (see the services'
-    ``limit_request_time``). A listing still running when the time is up is
+    Each account's listing starts requests only in the first half of
+    *seconds* and gives each one the second half to answer (the services'
+    ``limit_listing_time``), so what it listed by then comes back as a
+    partial listing. A listing still running when the time is up is
     abandoned: its account gets a note, and the timeout is remembered like
     any failure, so the next commands do not wait for it again.
     """
     from servonaut.services.accounts.listing_record import FAILED
 
+    request_seconds = seconds / 2
     for binding, _ in listings:
-        limit = getattr(binding.service, "limit_request_time", None)
+        limit = getattr(binding.service, "limit_listing_time", None)
         if callable(limit):
-            limit(seconds)
+            limit(request_seconds, seconds - request_seconds)
     tasks = [
         asyncio.ensure_future(_checked_listing(binding, qualified, reference))
         for binding, qualified in listings

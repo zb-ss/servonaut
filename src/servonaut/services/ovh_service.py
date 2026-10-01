@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -180,6 +181,10 @@ class OVHService:
         self.last_fetch_partial: bool = False
         self._failed_sources: List[str] = []
         self._source_errors: Dict[str, str] = {}
+        # No request starts after this (time.monotonic); None: no limit.
+        self._listing_deadline: Optional[float] = None
+        # Sources of the last listing cut short because its time was up.
+        self._late_sources: List[str] = []
 
     @property
     def _cache_path(self) -> Path:
@@ -237,10 +242,21 @@ class OVHService:
 
         return self._client
 
-    def limit_request_time(self, seconds: float) -> None:
-        """Give every API request *seconds* to answer (python-ovh's ``timeout``)."""
-        self._request_timeout = seconds
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
+
+        Every API request gets *request_seconds* (python-ovh's ``timeout``),
+        and no request starts once *start_by_seconds* have passed: what was
+        listed by then comes back as a partial listing (never saved as the
+        cache). The CLI builds its services for one command, so the limits
+        reach no other surface.
+        """
+        self._request_timeout = request_seconds
+        self._listing_deadline = time.monotonic() + start_by_seconds
         self._client = None
+
+    def _out_of_time(self) -> bool:
+        return self._listing_deadline is not None and time.monotonic() >= self._listing_deadline
 
     # ------------------------------------------------------------------
     # Public async API
@@ -256,10 +272,11 @@ class OVHService:
         instances: List[dict] = []
         self._failed_sources = []
         self._source_errors = {}
+        self._late_sources = []
         attempted = 0
         last_error: Optional[Exception] = None
 
-        if self._config.include_dedicated:
+        if self._config.include_dedicated and self._started_in_time("dedicated"):
             attempted += 1
             try:
                 dedicated = await asyncio.to_thread(self._fetch_dedicated)
@@ -270,7 +287,7 @@ class OVHService:
                 self._record_failed_source("dedicated", e)
                 last_error = e
 
-        if self._config.include_vps:
+        if self._config.include_vps and self._started_in_time("vps"):
             attempted += 1
             try:
                 vps = await asyncio.to_thread(self._fetch_vps)
@@ -283,6 +300,8 @@ class OVHService:
 
         if self._config.include_cloud:
             for project_id in self._config.cloud_project_ids:
+                if not self._started_in_time(f"cloud:{project_id}"):
+                    continue
                 attempted += 1
                 try:
                     cloud = await asyncio.to_thread(self._fetch_cloud, project_id)
@@ -299,6 +318,8 @@ class OVHService:
                     self._record_failed_source(f"cloud:{project_id}", e)
                     last_error = e
 
+        if self._late_sources and not instances:
+            raise OVHFetchError("nothing was listed in the time allowed")
         if attempted and len(self._failed_sources) == attempted:
             raise OVHFetchError(
                 f"all {attempted} OVH source(s) failed: {last_error}"
@@ -306,6 +327,13 @@ class OVHService:
 
         logger.info("Fetched %d total OVH instances", len(instances))
         return instances
+
+    def _started_in_time(self, source: str) -> bool:
+        """False, and *source* counts as cut short, once the listing's time is up."""
+        if self._out_of_time():
+            self._late_sources.append(source)
+            return False
+        return True
 
     def _record_failed_source(self, source: str, exc: Exception) -> None:
         self._failed_sources.append(source)
@@ -341,6 +369,16 @@ class OVHService:
                 return stale
             logger.warning("OVH fetch failed (%s); no cached instances to fall back on", exc)
             return []
+
+        if self._late_sources:
+            # Cut short by its time limit: returned, never saved (the cache
+            # would lose every server not listed in time).
+            self.last_fetch_error = "; ".join(
+                f"OVH {_describe_source(source)} not fully listed in the time allowed"
+                for source in self._late_sources
+            )
+            self.last_fetch_partial = True
+            return instances
 
         if self._failed_sources:
             # Save what did refresh and keep the cached rows of the sources
@@ -731,6 +769,9 @@ class OVHService:
 
         instances = []
         for name in server_names:
+            if self._out_of_time():
+                self._late_sources.append("dedicated")
+                break
             try:
                 instance = self._fetch_dedicated_server(name)
                 if instance:
@@ -804,6 +845,9 @@ class OVHService:
 
         instances = []
         for name in vps_names:
+            if self._out_of_time():
+                self._late_sources.append("vps")
+                break
             try:
                 details = client.get(f"/vps/{name}")
                 model = details.get('model') or {}
