@@ -174,16 +174,21 @@ class InstanceListScreen(Screen):
                 )
                 # Memory discoverability banner — only visible when no
                 # instance has memory yet, so it stops nagging once the user
-                # has engaged with the feature.
-                yield Static(
-                    "[bold]🧠 New:[/bold] Build a fact cache for every server "
-                    "so the [b]chat panel[/b] and [b]MCP clients[/b] can "
-                    "answer OS / runtime / service questions without an SSH "
-                    "round-trip. [dim]Open [b]Fleet Memory[/b] in the "
-                    "sidebar or press [b]m[/b] on a row to start.[/dim]",
+                # has engaged with the feature. One line, action first: on a
+                # short terminal every row it takes is a row of servers less.
+                banner = Static(
+                    "[bold]🧠 New:[/bold] press [b]m[/b] on a row, or open "
+                    "[b]Fleet Memory[/b] in the sidebar, to cache each server's "
+                    "facts for the chat panel and MCP clients.",
                     id="memory_discover_banner",
                     classes="hidden",
                 )
+                banner.tooltip = (
+                    "Build a fact cache for every server so the chat panel and "
+                    "MCP clients can answer OS / runtime / service questions "
+                    "without an SSH round-trip."
+                )
+                yield banner
                 yield ProgressIndicator()
                 yield InstanceTable()
                 yield TextArea("", id="instance_detail", read_only=True, soft_wrap=True)
