@@ -351,6 +351,42 @@ def _stalling(service):
     return started
 
 
+def _slow_requests(service, count=5, seconds=1.0):
+    """Make *service*'s listing *count* blocking requests of *seconds* each.
+
+    Like an SDK's paging or AWS's region loop, all of them run in one call
+    in the loop's default executor: a thread that cancelling cannot stop.
+    """
+    made = []
+
+    def requests():
+        for _ in range(count):
+            time.sleep(seconds)
+            made.append(1)
+
+    async def listing(force_refresh=False):
+        await asyncio.to_thread(requests)
+        return [dict(row) for row in service.rows]
+
+    service.fetch_instances_cached = listing
+    return made
+
+
+def test_an_abandoned_listing_does_not_hold_the_command_up(staging_never_listed):
+    """The whole asyncio.run returns with the budget, not when the requests end."""
+    registry, services = staging_never_listed
+    made = _slow_requests(services[("hetzner", "staging")])
+    registry.config.account_check_timeout_seconds = 1.5
+
+    begin = time.monotonic()
+    checked = asyncio.run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    elapsed = time.monotonic() - begin
+
+    assert elapsed < 1.5 + 0.7, elapsed
+    assert len(made) < 5
+    assert "timed out after 1.5 s" in checked.notes[0]
+
+
 def test_never_listed_accounts_are_read_within_the_time_allowed(monkeypatch):
     registry, services = build_registry(
         monkeypatch,

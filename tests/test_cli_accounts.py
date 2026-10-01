@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import io
 import json
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -233,6 +234,57 @@ def test_memory_notes_a_project_that_cannot_be_listed(staging_never_listed, caps
     assert inst["id"] == "1"
     out = capsys.readouterr()
     assert out.err.strip() == STAGING_NOT_LISTED and out.out == ""
+
+
+def _slow_staging(services, count=5, seconds=1.0):
+    """staging's listing: *count* blocking requests of *seconds* each (threads)."""
+    staging = services[("hetzner", "staging")]
+
+    def requests():
+        for _ in range(count):
+            time.sleep(seconds)
+
+    async def listing(force_refresh=False):
+        # One blocking call, as an SDK pages: cancelling cannot stop it.
+        await asyncio.to_thread(requests)
+        return [dict(row) for row in staging.rows]
+
+    staging.fetch_instances_cached = listing
+
+
+def _within_budget(run) -> float:
+    begin = time.monotonic()
+    run()
+    return time.monotonic() - begin
+
+
+@pytest.mark.parametrize("command", ["ssh", "servers verify", "memory"])
+def test_each_command_returns_within_the_budget(staging_never_listed, monkeypatch, capsys,
+                                                command):
+    """A project whose API answers slowly, request after request, costs the budget only."""
+    from servonaut.cli import memory as mem_mod
+    from servonaut.cli import servers as cli_servers
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, services = staging_never_listed
+    _slow_staging(services)
+    registry.config.account_check_timeout_seconds = 1.5
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    runs = {
+        "ssh": lambda: asyncio.run(ssh_mod._load_instances(custom, registry.config, "web-1")),
+        "servers verify": lambda: asyncio.run(
+            cli_servers._load_all_instances(registry.config, custom, "web-1"),
+        ),
+        "memory": lambda: mem_mod._resolve_or_exit(
+            argparse.Namespace(instance="worker"), CachedFleet.from_registry(registry, custom),
+        ),
+    }
+
+    elapsed = _within_budget(runs[command])
+
+    assert elapsed < 1.5 + 0.7, elapsed
+    assert "could not be listed (timed out after 1.5 s)" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

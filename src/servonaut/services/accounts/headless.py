@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -41,6 +43,10 @@ from servonaut.utils.instance_resolver import (
 logger = logging.getLogger(__name__)
 
 PROVIDERS = (AWS, HETZNER, OVH)
+# Seconds a CLI lookup allows, past its listing budget, for the listings to
+# be cancelled and their outcome written (a safety net; it is normally
+# instant).
+_WIND_DOWN_SECONDS = 2.0
 # What a CLI note calls one account of each provider (default "account").
 _ACCOUNT_NOUNS = {HETZNER: "project"}
 # Custom servers are listed after AWS and before the other clouds, as in the
@@ -683,15 +689,45 @@ def _names_instance_id(provider: str, reference: str) -> bool:
     return is_instance_id(reference)
 
 
+class _DaemonExecutor(ThreadPoolExecutor):
+    """Runs each call in a daemon thread of its own; never waits for one.
+
+    asyncio takes only a ThreadPoolExecutor as a loop's default executor, so
+    this one is of that type, but :meth:`submit` starts a daemon thread
+    instead of a pool worker (pool workers are joined when the interpreter
+    exits) and :meth:`shutdown` returns at once. A call that is abandoned
+    therefore never holds up the command.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):  # noqa: D102 - see the class
+        future: Future = Future()
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - handed to the waiter
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+        threading.Thread(target=run, name="servonaut-listing", daemon=True).start()
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None
+
+
 async def _checked_listings(
     listings: List[Tuple[Any, bool]], reference: str, seconds: float,
 ) -> List[Tuple[List[dict], Optional[str]]]:
     """:func:`_checked_listing` of every ``(binding, qualified)``, together, in *seconds*.
 
-    Each account's API requests get *seconds* as well (see the services'
-    ``limit_request_time``). A listing still running when the time is up is
-    abandoned: its account gets a note, and the timeout is remembered like
-    any failure, so the next commands do not wait for it again.
+    The listings run on an event loop of their own, in a daemon thread, whose
+    blocking calls (the provider SDKs) run in daemon threads too: a listing
+    abandoned when the time is up keeps no thread the command waits for,
+    either now or when the process exits.
     """
     if not listings:
         return []
@@ -701,6 +737,43 @@ async def _checked_listings(
             ([], _not_checked(binding.ref, "was not listed (no time allowed)", reference))
             for binding, _ in listings
         ]
+    done: Future = Future()
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        loop.set_default_executor(_DaemonExecutor())
+        try:
+            done.set_result(loop.run_until_complete(
+                _listings_within(listings, reference, seconds),
+            ))
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiter
+            done.set_exception(exc)
+        finally:
+            loop.close()
+
+    threading.Thread(target=run, name="servonaut-listings", daemon=True).start()
+    try:
+        # The listings end themselves after *seconds*; the margin covers
+        # cancelling them and writing what was learned.
+        return await asyncio.wait_for(asyncio.wrap_future(done), seconds + _WIND_DOWN_SECONDS)
+    except asyncio.TimeoutError:
+        return [
+            ([], _not_checked(binding.ref, f"could not be listed (timed out after {seconds:g} s)",
+                              reference))
+            for binding, _ in listings
+        ]
+
+
+async def _listings_within(
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float,
+) -> List[Tuple[List[dict], Optional[str]]]:
+    """The listings of :func:`_checked_listings`, on its own loop.
+
+    Each account's API requests get *seconds* as well (see the services'
+    ``limit_request_time``). A listing still running when the time is up is
+    abandoned: its account gets a note, and the timeout is remembered like
+    any failure, so the next commands do not wait for it again.
+    """
     from servonaut.services.accounts.listing_record import FAILED
 
     for binding, _ in listings:
