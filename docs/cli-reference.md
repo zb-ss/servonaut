@@ -444,6 +444,15 @@ its servers count too, within `account_check_timeout_seconds` (see
 one listed only in part counts as listed until its cache TTL ends. The same
 applies to `servonaut servers verify` and `servonaut memory`.
 
+The AWS account without a profile is listed only when AWS is set up on this
+machine: credentials in the environment, a `default` profile with
+credentials in `~/.aws/credentials` or `~/.aws/config`, or an EC2 instance
+(its instance role). Credentials are not resolved just to decide that. An
+account that is set up is listed with the credentials it is configured
+with, so a `credential_process` helper of the profile runs then, as it does
+for any AWS listing (once, and again only after `account_retry_seconds` if
+it fails).
+
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like
 `ssh host <command>`. Put the command after `--` whenever it has flags of its

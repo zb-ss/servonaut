@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.config.schema import AppConfig
+from servonaut.services.accounts import aws_account
 from servonaut.services.accounts.headless import CachedFleet
 from servonaut.services.aws_service import AWSService
 from servonaut.services.cache_service import CacheService
@@ -113,9 +114,12 @@ def offline_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamesp
     for name in list(os.environ):
         if name.startswith("AWS_"):
             monkeypatch.delenv(name)
-    files = SimpleNamespace(credentials=tmp_path / "credentials", config=tmp_path / "config")
+    files = SimpleNamespace(credentials=tmp_path / "credentials", config=tmp_path / "config",
+                            sysfs=tmp_path / "sysfs")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(files.credentials))
     monkeypatch.setenv("AWS_CONFIG_FILE", str(files.config))
+    # Not an EC2 instance, whatever machine runs the tests.
+    monkeypatch.setattr(aws_account, "_SYSFS_ROOT", files.sysfs)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("the presence check must stay offline")
@@ -171,6 +175,57 @@ class TestAWSCredentialsCheckedOffline:
         # Listing then says what is wrong with it.
         offline_aws.config.write_text("[default\nregion = eu-west-1\n")
         assert _aws_service().has_credentials()
+
+    def test_a_file_that_is_not_utf8_counts_as_set_up(self, offline_aws, monkeypatch) -> None:
+        def undecodable(path, *args, **kwargs):
+            raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+
+        offline_aws.credentials.write_bytes(b"[default]\naws_access_key_id = caf\xe9\n")
+        monkeypatch.setattr(aws_account, "raw_config_parse", undecodable)
+        assert _aws_service().has_credentials()
+
+    @pytest.mark.parametrize("relative, content", [
+        ("sys/devices/virtual/dmi/id/sys_vendor", "Amazon EC2\n"),
+        ("sys/devices/virtual/dmi/id/board_asset_tag", "i-0123456789abcdef0\n"),
+        ("sys/hypervisor/uuid", "ec2-fake-hypervisor-id\n"),
+        ("sys/hypervisor/uuid", "EC2-FAKE-HYPERVISOR-ID\n"),
+    ])
+    def test_an_ec2_instance_is_set_up(self, offline_aws, monkeypatch, relative, content) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        marker = offline_aws.sysfs / relative
+        marker.parent.mkdir(parents=True)
+        marker.write_text(content)
+
+        assert aws_account.runs_on_ec2()
+        assert _aws_service().has_credentials()
+
+    @pytest.mark.parametrize("relative, content", [
+        ("sys/devices/virtual/dmi/id/sys_vendor", "Microsoft Corporation\n"),
+        ("sys/devices/virtual/dmi/id/board_asset_tag", "Default string\n"),
+        ("sys/hypervisor/uuid", "xen-fake-hypervisor-id\n"),
+    ])
+    def test_another_machine_is_not(self, offline_aws, monkeypatch, relative, content) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        marker = offline_aws.sysfs / relative
+        marker.parent.mkdir(parents=True)
+        marker.write_text(content)
+
+        assert not aws_account.runs_on_ec2()
+
+    def test_the_ec2_check_is_linux_only(self, offline_aws, monkeypatch) -> None:
+        marker = offline_aws.sysfs / "sys/devices/virtual/dmi/id/sys_vendor"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("Amazon EC2\n")
+        monkeypatch.setattr(aws_account.sys, "platform", "darwin")
+
+        assert not aws_account.runs_on_ec2()
+
+    def test_an_unreadable_marker_is_ignored(self, offline_aws, monkeypatch) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        # A directory where the file should be: reading it fails.
+        (offline_aws.sysfs / "sys/devices/virtual/dmi/id/sys_vendor").mkdir(parents=True)
+
+        assert not aws_account.runs_on_ec2()
 
     def test_an_account_with_a_profile_is_set_up(self, offline_aws) -> None:
         from servonaut.config.accounts import AccountRef

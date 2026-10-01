@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
@@ -36,16 +37,27 @@ _CREDENTIAL_KEYS = frozenset({
     "login_session",
 })
 
+# Where an EC2 instance names itself (relative to _SYSFS_ROOT; tests move it).
+_SYSFS_ROOT = Path("/")
+_EC2_MARKERS = (
+    ("sys/devices/virtual/dmi/id/sys_vendor", lambda text: text == "Amazon EC2"),
+    ("sys/devices/virtual/dmi/id/board_asset_tag", lambda text: text.startswith("i-")),
+    ("sys/hypervisor/uuid", lambda text: text.lower().startswith("ec2")),
+)
+
 
 def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> bool:
     """Whether the ambient credential chain has anything to work with, checked offline.
 
     True for a credential environment variable, a profile named in
     ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE`` (using it says what is wrong
-    with it), or a ``default`` profile in the shared credentials or config
-    file with a key that gives credentials. Nothing is resolved: no instance
-    metadata request, no ``credential_process`` run, no SSO token read. A
-    machine that has only an instance role therefore counts as not set up.
+    with it), a ``default`` profile in the shared credentials or config file
+    with a key that gives credentials, or an EC2 instance (its instance role;
+    see :func:`runs_on_ec2`). Credentials are not resolved just to decide
+    whether AWS is set up: no instance metadata request, no
+    ``credential_process`` run, no SSO token read. An account that is set up
+    is then listed with the credentials it is configured with, which may run
+    such a helper.
     """
     if any(environ.get(name) for name in _CREDENTIAL_ENV_VARS):
         return True
@@ -58,9 +70,29 @@ def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> b
             _parsed(lambda: raw_config_parse(credentials)).get("default", {}),
             _parsed(lambda: load_config(config)).get("profiles", {}).get("default", {}),
         ]
-    except (BotoCoreError, OSError):
+    except (BotoCoreError, OSError, UnicodeDecodeError):
         return True  # a file botocore cannot read: listing says what is wrong
-    return any(_CREDENTIAL_KEYS.intersection(section) for section in sections)
+    return any(_CREDENTIAL_KEYS.intersection(section) for section in sections) or runs_on_ec2()
+
+
+def runs_on_ec2() -> bool:
+    """Whether this machine is an EC2 instance, from files Linux exposes (offline).
+
+    The firmware vendor is ``Amazon EC2``, a Nitro instance's asset tag is its
+    instance id, and a Xen instance's hypervisor UUID starts with ``ec2``.
+    Read only, errors ignored; always False off Linux. On EC2 the instance
+    role answers from the instance itself, so listing is cheap there.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    for relative, is_ec2 in _EC2_MARKERS:
+        try:
+            text = (_SYSFS_ROOT / relative).read_text(encoding="ascii", errors="replace").strip()
+        except OSError:
+            continue
+        if is_ec2(text):
+            return True
+    return False
 
 
 def _shared_file(environ: Mapping[str, str], variable: str, name: str) -> str:
