@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 
 
@@ -2860,7 +2861,11 @@ class TestObjectStorageDemoMode:
         async def _fake_list_buckets():
             return list(fake_buckets)
 
+        async def _fake_search_buckets():
+            return BucketListing(buckets=list(fake_buckets))
+
         mock_storage_svc.list_buckets = _fake_list_buckets
+        mock_storage_svc.search_buckets = _fake_search_buckets
         # Wire via the provider attribute pattern
         setattr(mock_app, "aws_object_storage_service", mock_storage_svc)
 
@@ -2921,7 +2926,11 @@ class TestObjectStorageDemoMode:
         async def _fake_list_buckets():
             return list(fake_buckets)
 
+        async def _fake_search_buckets():
+            return BucketListing(buckets=list(fake_buckets))
+
         mock_storage_svc.list_buckets = _fake_list_buckets
+        mock_storage_svc.search_buckets = _fake_search_buckets
         setattr(mock_app, "aws_object_storage_service", mock_storage_svc)
 
         rows: list = []

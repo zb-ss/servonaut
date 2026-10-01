@@ -17,6 +17,7 @@ from servonaut.screens.object_storage import (
 )
 from textual.widgets import Input
 
+from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 
 
@@ -40,6 +41,12 @@ def _mock_storage_service(*, buckets=None, objects=None):
     svc.delete_object = AsyncMock()
     svc.create_bucket = AsyncMock()
     svc.generate_presigned_url = AsyncMock(return_value="https://presigned.example.com/url")
+
+    # The interface's default: one listing at one endpoint.
+    async def _search_buckets():
+        return BucketListing(buckets=await svc.list_buckets())
+
+    svc.search_buckets = AsyncMock(side_effect=_search_buckets)
     return svc
 
 
@@ -241,7 +248,8 @@ class TestDeleteRoutesThroughConfirm:
         screen._buckets = [{"name": "my-bucket", "creation_date": ""}]
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value="my-bucket"), \
+             patch.object(screen, "_get_selected_bucket",
+                          return_value={"name": "my-bucket", "creation_date": ""}), \
              patch.object(screen, "run_worker") as mock_rw:
             screen._action_delete_bucket()
 
@@ -540,3 +548,208 @@ async def test_new_bucket_form_hides_region_for_endpoint_pinned_provider() -> No
         screen._submit_new_bucket()
         await pilot.pause(0.3)
         svc.create_bucket.assert_awaited_once_with("new-bucket", "")
+
+
+# ---------------------------------------------------------------------------
+# Buckets of several regions, and what an empty listing says
+# ---------------------------------------------------------------------------
+
+def _listing_harness(provider: str, listing: BucketListing):
+    """A pilot App whose *provider* storage answers with *listing*."""
+    from textual.app import App, ComposeResult
+    from servonaut.config.schema import AppConfig
+
+    svc = _mock_storage_service()
+    svc.search_buckets = AsyncMock(return_value=listing)
+    svc.upload_object = AsyncMock()
+    svc.download_object = AsyncMock()
+
+    class _Harness(App):
+        def __init__(self):
+            super().__init__()
+            for p in ("aws", "hetzner", "ovh"):
+                setattr(self, f"{p}_object_storage_service", svc if p == provider else None)
+            self.demo_mode = False
+            self.redaction_service = None
+            cfg_mgr = MagicMock()
+            cfg_mgr.get.return_value = AppConfig()
+            self.config_manager = cfg_mgr
+
+        def compose(self) -> ComposeResult:
+            yield ObjectStorageScreen(provider)
+
+    return _Harness(), svc
+
+
+async def _wait_for(pilot, condition, timeout: float = 5.0) -> None:
+    """Pause until *condition()* holds (fails the test at *timeout*)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "condition not met in time"
+        await pilot.pause(0.02)
+
+
+def _status_text(screen) -> str:
+    from textual.widgets import Static
+    return str(screen.query_one("#s3_status", Static).render())
+
+
+_TWO_REGIONS = BucketListing(
+    buckets=[
+        {"name": "shared", "creation_date": "2026-01-01", "region": "gra"},
+        {"name": "shared", "creation_date": "2026-02-01", "region": "uk"},
+        {"name": "media-assets", "creation_date": "2026-03-01", "region": "uk"},
+    ],
+    region="gra",
+    searched_regions=("gra", "uk", "sgp"),
+    failed_regions={"sgp": "SignatureDoesNotMatch"},
+)
+
+
+@pytest.mark.asyncio
+async def test_buckets_of_several_regions_show_their_region() -> None:
+    from textual.widgets import DataTable
+
+    app, svc = _listing_harness("ovh", _TWO_REGIONS)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 3)
+
+        labels = [str(column.label) for column in table.columns.values()]
+        assert labels[:4] == ["Type", "Bucket Name", "Region", "Created"]
+        # The same name in two regions is two rows, not a DuplicateKey crash.
+        assert [table.get_row_at(i)[1:3] for i in range(3)] == [
+            ["shared", "gra"], ["shared", "uk"], ["media-assets", "uk"],
+        ]
+        status = _status_text(screen)
+        assert "3 buckets" in status
+        assert "searched 3 regions" in status
+        assert "1 could not be searched: sgp" in status
+
+
+@pytest.mark.asyncio
+async def test_opening_a_bucket_works_in_its_listed_region() -> None:
+    from textual.widgets import DataTable
+
+    app, svc = _listing_harness("ovh", _TWO_REGIONS)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 3)
+
+        table.move_cursor(row=1)  # "shared" in uk, not the gra one
+        screen._open_bucket()
+        await _wait_for(pilot, lambda: svc.list_objects.await_count == 1)
+        svc.list_objects.assert_awaited_once_with(
+            "shared", prefix="", delimiter="/", region="uk",
+        )
+        # Which of the two "shared" buckets is open is visible.
+        from textual.widgets import Static
+        await _wait_for(
+            pilot,
+            lambda: "shared (uk)" in str(screen.query_one("#s3_breadcrumb", Static).render()),
+        )
+
+        # Object operations in the open bucket keep its region.
+        await screen._delete_object("shared", "readme.txt", "readme.txt")
+        svc.delete_object.assert_awaited_once_with("shared", "readme.txt", "uk")
+        await screen._generate_presigned_url("shared", "readme.txt")
+        svc.generate_presigned_url.assert_awaited_once_with(
+            "shared", "readme.txt", region="uk",
+        )
+
+        # Back at the list, the region is forgotten with the bucket.
+        screen._navigate_to_buckets()
+        assert screen._current_bucket_region == ""
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_bucket_targets_its_listed_region() -> None:
+    from textual.widgets import DataTable
+
+    app, svc = _listing_harness("ovh", _TWO_REGIONS)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 3)
+
+        table.move_cursor(row=2)
+        selected = screen._get_selected_bucket()
+        assert selected["name"] == "media-assets"
+        await screen._delete_bucket("media-assets", "media-assets", selected["region"])
+        svc.delete_bucket.assert_awaited_once_with("media-assets", "uk")
+
+
+@pytest.mark.asyncio
+async def test_empty_search_of_every_region_says_so() -> None:
+    listing = BucketListing(
+        buckets=[], region="gra", searched_regions=("gra", "uk"),
+    )
+    app, _ = _listing_harness("ovh", listing)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        await _wait_for(pilot, lambda: "0 buckets" in _status_text(screen))
+        status = _status_text(screen)
+        assert "searched 2 regions" in status
+        assert "No buckets in any region these keys can list" in status
+
+
+@pytest.mark.asyncio
+async def test_empty_single_endpoint_listing_names_the_endpoint() -> None:
+    """A region-pinned endpoint shows nothing for buckets kept elsewhere."""
+    listing = BucketListing(
+        buckets=[], endpoint="https://nbg1.your-objectstorage.com", region="nbg1",
+    )
+    app, _ = _listing_harness("hetzner", listing)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        await _wait_for(pilot, lambda: "0 buckets" in _status_text(screen))
+        status = _status_text(screen)
+        assert "No buckets at https://nbg1.your-objectstorage.com (region nbg1)" in status
+        assert "change the region in Settings" in status
+
+
+@pytest.mark.asyncio
+async def test_empty_aws_listing_adds_no_region_hint() -> None:
+    """AWS lists every region's buckets at once — there is nothing to add."""
+    app, _ = _listing_harness("aws", BucketListing(buckets=[]))
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        await _wait_for(pilot, lambda: "0 buckets" in _status_text(screen))
+        assert _status_text(screen).strip() == "0 buckets"
+
+
+@pytest.mark.asyncio
+async def test_single_region_listing_keeps_the_plain_columns() -> None:
+    from textual.widgets import DataTable
+
+    app, _ = _listing_harness("aws", BucketListing(buckets=[
+        {"name": "my-bucket", "creation_date": "2026-01-01"},
+    ]))
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        table = screen.query_one("#s3_table", DataTable)
+        await _wait_for(pilot, lambda: table.row_count == 1)
+        labels = [str(column.label) for column in table.columns.values()]
+        assert "Region" not in labels
+        assert screen._get_selected_bucket() == {"name": "my-bucket", "creation_date": "2026-01-01"}
+
+
+@pytest.mark.asyncio
+async def test_breadcrumb_shows_object_keys_literally() -> None:
+    """A key segment like "[bold]" is text, not Rich markup."""
+    from textual.widgets import Static
+
+    app, _ = _listing_harness("ovh", _TWO_REGIONS)
+    async with app.run_test(headless=True) as pilot:
+        screen = pilot.app.query_one(ObjectStorageScreen)
+        screen._view = _VIEW_OBJECTS
+        screen._current_bucket = "media-assets"
+        screen._current_bucket_region = "uk"
+        screen._prefix = "[bold]odd/"
+        screen._update_breadcrumb()
+        await pilot.pause()
+        text = str(screen.query_one("#s3_breadcrumb", Static).render())
+        assert text == "media-assets (uk) / [bold]odd"

@@ -24,6 +24,7 @@ from servonaut.config.schema import (
     ObjectStorageConfig,
 )
 from servonaut.services.accounts import AccountRegistry, UnknownAccountError
+from servonaut.services.interfaces import BucketListing
 from servonaut.services.redaction_service import RedactionService
 from servonaut.services.accounts.aws_account import AWSAccountContext
 from servonaut.services.cloudtrail_service import LookupPage
@@ -870,6 +871,9 @@ class FakeStorage:
 
     async def list_buckets(self) -> List[dict]:
         return [{"name": f"{self.label}-bucket", "creation_date": "2026-01-01"}]
+
+    async def search_buckets(self) -> BucketListing:
+        return BucketListing(buckets=await self.list_buckets())
 
 
 def _record_object_storage(monkeypatch, registry: AccountRegistry, stores: Dict[str, Any]):
