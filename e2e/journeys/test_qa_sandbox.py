@@ -208,10 +208,15 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
         assert unavailable[1] < 1000
 
         # Keys typed straight into the page reach the app: "/" focuses the fleet
-        # search (the footer then lists the search box's keys), typing narrows.
-        footer = screen.splitlines()[-1]
+        # search, typing narrows. The box takes "q" as text, so "Quit" leaving
+        # the footer shows it has focus; the footer also changes without it
+        # ("⏎" replaces "o" for Actions when nothing is focused), and typing
+        # then would run the fleet's one-key shortcuts instead.
+        assert "Quit" in screen.splitlines()[-1]
         await page.page.keyboard.press("/")
-        await _screen_until(page, lambda text: text.splitlines()[-1] != footer, "search focused")
+        await _screen_until(
+            page, lambda text: "Quit" not in text.splitlines()[-1], "search box focus"
+        )
         await page.page.keyboard.type("cache")
         narrowed = await _screen_until(page, lambda text: "app-1" not in text, "search applied")
         assert "cache-1" in narrowed
