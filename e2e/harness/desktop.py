@@ -46,6 +46,8 @@ T = TypeVar("T")
 GUARD = load_guard()
 
 DEFAULT_TIMEOUT = 20.0
+# How long a pause may wait for the app to catch up, as Textual's own pilot allows.
+_PAUSE_TIMEOUT = 30.0
 # The child imports the whole app and verifies the frontend bundle before it
 # reports ready; a loaded CI runner needs more than the launcher's default.
 CHILD_STARTUP_TIMEOUT = 30.0
@@ -444,12 +446,42 @@ async def chromium(
 class _LoopPilot:
     """Just enough of Textual's Pilot for TuiDriver's waiting helpers.
 
-    The app runs under the desktop host, not ``run_test``, so there is no
-    real pilot; input only ever arrives through the browser.
+    The app runs under the desktop host, not ``run_test``, and input only
+    ever arrives through the browser, so nothing here sends input. A pause
+    waits until the app and the widgets on its screen have handled the
+    messages already queued, and the screen has laid out any pending change,
+    so a widget's region is where it is drawn. The layout itself runs in the
+    app's own task: drawing from the journey's task would run outside the
+    app's context.
     """
 
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
     async def pause(self, delay: Optional[float] = None) -> None:
+        app = self._app
+        if app.screen_stack:  # else the session has ended: nothing to wait for
+            screen = app.screen
+            nodes = (app, *screen.walk_children(with_self=True))
+            await _callbacks_ran([node.call_later for node in nodes], "queued messages")
+            await _callbacks_ran([screen.call_after_refresh], "the screen's layout")
         await asyncio.sleep(delay or 0)
+
+
+async def _callbacks_ran(schedulers: Sequence[Callable[[Callable[[], None]], bool]], desc: str) -> None:
+    """Queue a callback with each scheduler and wait until all have run.
+
+    A scheduler of a closed message pump queues nothing and is not waited for.
+    """
+    events = []
+    for schedule in schedulers:
+        done = asyncio.Event()
+        if schedule(done.set):
+            events.append(done)
+    try:
+        await asyncio.wait_for(asyncio.gather(*(e.wait() for e in events)), _PAUSE_TIMEOUT)
+    except asyncio.TimeoutError as exc:
+        raise DesktopTimeout(f"the app did not get through {desc} in {_PAUSE_TIMEOUT:.0f}s") from exc
 
 
 @dataclass
@@ -474,7 +506,9 @@ class InProcessDesktop:
 
         if self._tui is None or self._tui.app is not self.app:
             assert self.app is not None, "no desktop session has started yet"
-            self._tui = TuiDriver(self.app, _LoopPilot(), self.notifications, self.artifact_dir)
+            self._tui = TuiDriver(
+                self.app, _LoopPilot(self.app), self.notifications, self.artifact_dir
+            )
         return self._tui
 
     async def wait_for_app(self, screen: str = "InstanceListScreen") -> Any:
@@ -546,28 +580,78 @@ async def open_session(browser: BrowserSession, desktop_app: InProcessDesktop) -
     return page
 
 
+async def input_fence(page: DesktopPage, desktop_app: InProcessDesktop) -> None:
+    """Wait until the app has handled every input the page sent before now.
+
+    Input reaches the app in the order the page sends it, so moving the
+    pointer to a cell it is not on is a fence: once the app reports the
+    pointer there, a wheel scroll or click sent earlier has been handled.
+    The fence cell is on the top row, in the header's title.
+    """
+    app = desktop_app.app
+    column = page.dimensions["width"] // 2
+    if tuple(app.mouse_position) == (column, 0):
+        column += 1
+    await page.hover_cell(column, 0)
+    await desktop_app.tui.wait_until(
+        lambda: tuple(app.mouse_position) == (column, 0),
+        desc="the app to handle the page's input",
+    )
+
+
+async def settled_region(
+    desktop_app: InProcessDesktop, widget: Any, *, timeout: float = DEFAULT_TIMEOUT
+) -> Any:
+    """*widget*'s region once layout is done moving it.
+
+    A region is where the screen last laid the widget out, which trails a
+    scroll or a section opening until the screen's next update. It counts
+    as settled when two consecutive settles leave it unchanged.
+    """
+    tui = desktop_app.tui
+    deadline = asyncio.get_running_loop().time() + timeout
+    region, unchanged = widget.region, 0
+    while unchanged < 2:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise DesktopTimeout(f"{widget!r} kept moving for {timeout:.0f}s")
+        await tui.settle(frames=1)
+        current = widget.region
+        unchanged = unchanged + 1 if current == region else 0
+        region = current
+    return region
+
+
 async def click_widget(page: DesktopPage, desktop_app: InProcessDesktop, widget: Any) -> None:
-    """Click the middle of *widget* where the terminal draws it."""
+    """Click the middle of *widget* where the terminal draws it.
+
+    The click waits for the app to handle the input already sent and for
+    the widget to stop moving, then checks the cell is the widget's, so it
+    never lands on a neighbour that has taken the widget's old place.
+    """
     assert desktop_app.tui.is_reachable(widget), f"{widget!r} is hidden"
-    region = widget.region
+    await input_fence(page, desktop_app)
+    region = await settled_region(desktop_app, widget)
     assert region.width and region.height, f"{widget!r} is not on screen"
-    await page.click_cell(region.x + region.width // 2, region.y + region.height // 2)
+    column, row = region.x + region.width // 2, region.y + region.height // 2
+    hit, _ = desktop_app.app.get_widget_at(column, row)
+    assert hit is widget or widget in hit.ancestors, f"{widget!r} is covered by {hit!r}"
+    await page.click_cell(column, row)
 
 
 async def scroll_into_view(
     page: DesktopPage, desktop_app: InProcessDesktop, widget: Any, container: Any
 ) -> None:
     """Scroll *container* with the mouse wheel until all of *widget* shows."""
-    tui = desktop_app.tui
     for _ in range(20):
-        if widget.region.height and container.region.contains_region(widget.region):
+        region = await settled_region(desktop_app, widget)
+        if region.height and container.region.contains_region(region):
             return
         area = container.region
         await page.hover_cell(area.x + area.width // 2, area.y + area.height // 2)
         before = container.scroll_y
         await page.page.mouse.wheel(0, 120)
-        await tui.wait_until(lambda: container.scroll_y != before, desc="the sidebar scrolled")
-        await tui.settle()
+        await input_fence(page, desktop_app)
+        assert container.scroll_y != before, f"the wheel did not scroll towards {widget!r}"
     raise AssertionError(f"{widget!r} never scrolled into view")
 
 
