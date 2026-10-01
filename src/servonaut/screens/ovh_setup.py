@@ -30,6 +30,7 @@ from servonaut.screens.settings.accounts import (
 from servonaut.services.object_storage_regions import (
     OVH_S3_DEFAULT_REGION,
     OVH_S3_REGIONS,
+    canonical_ovh_s3_region,
 )
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.safe_header import SafeHeader
@@ -455,8 +456,9 @@ class OVHSetupScreen(Screen):
         self.query_one("#ovh_input_s3_secret_key", Input).value = s3.secret_key
         s3_region_sel = self.query_one("#ovh_input_s3_region", Select)
         known_regions = {code for _, code in OVH_S3_REGIONS}
+        s3_region = canonical_ovh_s3_region(s3.region)
         s3_region_sel.value = (
-            s3.region if s3.region in known_regions else OVH_S3_DEFAULT_REGION
+            s3_region if s3_region in known_regions else OVH_S3_DEFAULT_REGION
         )
         self.query_one("#ovh_input_s3_endpoint_url", Input).value = s3.endpoint_url
 

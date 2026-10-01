@@ -21,7 +21,7 @@ existing configurations.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 # (label, code) tuples consumed by Textual's Select widget.
 
@@ -64,17 +64,35 @@ HETZNER_S3_DEFAULT_REGION = "nbg1"
 
 # OVHcloud Object Storage (Standard + High Performance both use the same
 # region codes for the S3 endpoint):
-# https://help.ovhcloud.com/csm/en-public-cloud-storage-s3-getting-started
+# https://docs.ovhcloud.com/en/guides/storage-and-backup/object-storage/s3-location
 # Endpoint format: https://s3.<region>.io.cloud.ovh.net
+#
+# Each region answers ListBuckets with its own buckets only, so this list is
+# also the set of regions searched for buckets when the endpoint is derived
+# from the region (see ObjectStorageService ``search_regions``).
 OVH_S3_REGIONS: List[Tuple[str, str]] = [
     ("gra — Gravelines (France)", "gra"),
     ("sbg — Strasbourg (France)", "sbg"),
     ("rbx — Roubaix (France)", "rbx"),
+    ("eu-west-par — Paris (France, 3-AZ)", "eu-west-par"),
+    ("eu-south-mil — Milan (Italy, 3-AZ)", "eu-south-mil"),
     ("de — Frankfurt (Germany)", "de"),
     ("uk — London (United Kingdom)", "uk"),
     ("waw — Warsaw (Poland)", "waw"),
     ("bhs — Beauharnois (Canada)", "bhs"),
+    ("ca-east-tor — Toronto (Canada)", "ca-east-tor"),
     ("sgp — Singapore", "sgp"),
-    ("syd — Sydney (Australia)", "syd"),
+    ("ap-southeast-syd — Sydney (Australia)", "ap-southeast-syd"),
+    ("ap-south-mum — Mumbai (India)", "ap-south-mum"),
 ]
 OVH_S3_DEFAULT_REGION = "gra"
+
+# Codes earlier releases offered that OVHcloud never served, mapped to the
+# real one.  ``syd`` was in the Sydney dropdown entry; its endpoint does not
+# resolve, so a saved ``syd`` is read as ``ap-southeast-syd``.
+_OVH_S3_REGION_ALIASES: Dict[str, str] = {"syd": "ap-southeast-syd"}
+
+
+def canonical_ovh_s3_region(region: str) -> str:
+    """Return the OVH S3 region code *region* stands for (unchanged if unknown)."""
+    return _OVH_S3_REGION_ALIASES.get(region, region)

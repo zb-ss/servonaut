@@ -6,7 +6,9 @@ storage from, so they all see the same availability under identical config.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
+
+from servonaut.services.object_storage_regions import OVH_S3_REGIONS, canonical_ovh_s3_region
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,11 @@ logger = logging.getLogger(__name__)
 _DERIVED_ENDPOINTS = {
     "hetzner": "https://{region}.your-objectstorage.com",
     "ovh": "https://s3.{region}.io.cloud.ovh.net",
+}
+# Providers whose ListBuckets answers for the endpoint's region only. With a
+# derived endpoint, buckets are looked for in each of these regions.
+_SEARCH_REGIONS: Dict[str, Tuple[str, ...]] = {
+    "ovh": tuple(code for _, code in OVH_S3_REGIONS),
 }
 _TITLES = {"aws": "AWS", "hetzner": "Hetzner", "ovh": "OVH"}
 
@@ -59,6 +66,9 @@ def build_keyed_object_storage(provider: str, storage_config) -> Optional[object
     products). Only built when an access key is set and either a region or an
     endpoint URL is; otherwise the derived endpoint URL would be malformed
     (e.g. ``https://.your-objectstorage.com``).
+
+    An OVH endpoint derived from the region also searches the other OVH
+    regions for buckets; an endpoint set by hand is the only one asked.
     """
     from servonaut.config.secrets import resolve_secret
     from servonaut.services.object_storage_service import ObjectStorageService, S3_REGION_RE
@@ -67,6 +77,8 @@ def build_keyed_object_storage(provider: str, storage_config) -> Optional[object
     if not storage_config.access_key:
         return None
     region = storage_config.region
+    if provider == "ovh":
+        region = canonical_ovh_s3_region(region)
     endpoint = storage_config.endpoint_url
     if not endpoint and not region:
         logger.warning(
@@ -79,8 +91,13 @@ def build_keyed_object_storage(provider: str, storage_config) -> Optional[object
             "%s Object Storage: invalid region %r — service not initialised", title, region,
         )
         return None
+    template = ""
+    search_regions: Tuple[str, ...] = ()
     if not endpoint:
         endpoint = _DERIVED_ENDPOINTS[provider].format(region=region)
+        search_regions = _SEARCH_REGIONS.get(provider, ())
+        if search_regions:
+            template = _DERIVED_ENDPOINTS[provider]
     try:
         return ObjectStorageService(
             provider=provider,
@@ -88,6 +105,8 @@ def build_keyed_object_storage(provider: str, storage_config) -> Optional[object
             secret_key=resolve_secret(storage_config.secret_key),
             region=region,
             endpoint_url=endpoint,
+            endpoint_template=template,
+            search_regions=search_regions,
         )
     except ValueError as exc:
         logger.warning(

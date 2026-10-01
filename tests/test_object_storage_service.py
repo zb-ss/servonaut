@@ -772,3 +772,253 @@ class TestGeneratePresignedUrl:
     def test_validates_expires_in_max(self, aws_svc) -> None:
         with pytest.raises(ValueError, match="expires_in"):
             asyncio.run(aws_svc.generate_presigned_url("my-bucket", "file.txt", expires_in=700000))
+
+
+# ---------------------------------------------------------------------------
+# Region search (OVH: ListBuckets answers for the endpoint's region only)
+# ---------------------------------------------------------------------------
+
+_OVH_TEMPLATE = "https://s3.{region}.io.cloud.ovh.net"
+
+
+def _searching_svc(region="gra", search_regions=("gra", "uk", "de")):
+    return ObjectStorageService(
+        provider="ovh",
+        access_key="AKID",
+        secret_key="SECRET",
+        region=region,
+        endpoint_url=_OVH_TEMPLATE.format(region=region),
+        endpoint_template=_OVH_TEMPLATE,
+        search_regions=search_regions,
+    )
+
+
+def _client_error(code):
+    from botocore.exceptions import ClientError
+    return ClientError({"Error": {"Code": code, "Message": code}}, "ListBuckets")
+
+
+class _RegionalClients:
+    """Stands in for boto3.client: one mock client per region, made on demand.
+
+    *buckets* maps region → bucket names (or an exception to raise).
+    """
+
+    def __init__(self, buckets):
+        self._buckets = buckets
+        self.clients = {}
+        self.made = []
+
+    def __call__(self, service, **kwargs):
+        region = kwargs["region_name"]
+        self.made.append((region, kwargs.get("endpoint_url")))
+        client = MagicMock(name=f"s3-{region}")
+        answer = self._buckets.get(region, [])
+        if isinstance(answer, Exception):
+            client.list_buckets.side_effect = answer
+        else:
+            client.list_buckets.return_value = {"Buckets": [{"Name": n} for n in answer]}
+        client.list_objects_v2.return_value = {}
+        self.clients[region] = client
+        return client
+
+
+class TestRegionSearchConstruction:
+
+    def test_search_regions_need_a_template(self) -> None:
+        with pytest.raises(ValueError, match="endpoint_template"):
+            ObjectStorageService(
+                provider="ovh", region="gra",
+                endpoint_url="https://s3.gra.io.cloud.ovh.net",
+                search_regions=("gra", "uk"),
+            )
+
+    def test_template_needs_a_region_placeholder(self) -> None:
+        with pytest.raises(ValueError, match="placeholder"):
+            ObjectStorageService(
+                provider="ovh", region="gra",
+                endpoint_template="https://s3.io.cloud.ovh.net",
+                search_regions=("gra",),
+            )
+
+    def test_template_must_derive_https_endpoints(self) -> None:
+        with pytest.raises(ValueError, match="https"):
+            ObjectStorageService(
+                provider="ovh", region="gra",
+                endpoint_template="http://s3.{region}.io.cloud.ovh.net",
+                search_regions=("gra",),
+            )
+
+    def test_malformed_search_region_rejected(self) -> None:
+        """Search regions are interpolated into endpoint URLs — same check as the region."""
+        with pytest.raises(ValueError, match="region"):
+            _searching_svc(search_regions=("gra", "evil.example.com/x"))
+
+    def test_configured_region_searched_first(self) -> None:
+        svc = _searching_svc(region="uk", search_regions=("gra", "uk", "de"))
+        assert svc._search_regions == ("uk", "gra", "de")
+
+
+class TestRegionSearch:
+
+    def test_lists_the_buckets_of_every_region(self) -> None:
+        clients = _RegionalClients({"uk": ["media-assets"], "de": ["backups"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            listing = asyncio.run(svc.search_buckets())
+
+        assert [(b["name"], b["region"]) for b in listing.buckets] == [
+            ("media-assets", "uk"), ("backups", "de"),
+        ]
+        assert listing.searched_regions == ("gra", "uk", "de")
+        assert listing.failed_regions == {}
+        # Each region is asked at its own endpoint.
+        assert dict(clients.made) == {
+            "gra": "https://s3.gra.io.cloud.ovh.net",
+            "uk": "https://s3.uk.io.cloud.ovh.net",
+            "de": "https://s3.de.io.cloud.ovh.net",
+        }
+
+    def test_list_buckets_returns_the_search_results(self) -> None:
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            buckets = asyncio.run(svc.list_buckets())
+        assert buckets == [{"name": "media-assets", "creation_date": "", "region": "uk"}]
+
+    def test_a_region_that_does_not_answer_is_reported_not_fatal(self) -> None:
+        clients = _RegionalClients({
+            "uk": ["media-assets"],
+            "de": _client_error("SignatureDoesNotMatch"),
+        })
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            listing = asyncio.run(svc.search_buckets())
+
+        assert [b["name"] for b in listing.buckets] == ["media-assets"]
+        assert listing.failed_regions == {"de": "SignatureDoesNotMatch"}
+
+    def test_unreachable_region_reported_by_error_type(self) -> None:
+        from botocore.exceptions import EndpointConnectionError
+        clients = _RegionalClients({
+            "de": EndpointConnectionError(endpoint_url="https://s3.de.io.cloud.ovh.net"),
+        })
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            listing = asyncio.run(svc.search_buckets())
+        assert listing.failed_regions == {"de": "EndpointConnectionError"}
+
+    def test_no_region_answering_raises_the_configured_regions_error(self) -> None:
+        clients = _RegionalClients({
+            "gra": _client_error("InvalidAccessKeyId"),
+            "uk": _client_error("AccessDenied"),
+            "de": _client_error("AccessDenied"),
+        })
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            with pytest.raises(Exception, match="InvalidAccessKeyId"):
+                asyncio.run(svc.search_buckets())
+
+    def test_same_name_in_two_regions_lists_both(self) -> None:
+        """Rows stay apart; an unqualified request goes to the first region listed."""
+        clients = _RegionalClients({"gra": ["shared"], "uk": ["shared"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            listing = asyncio.run(svc.search_buckets())
+        assert [(b["name"], b["region"]) for b in listing.buckets] == [
+            ("shared", "gra"), ("shared", "uk"),
+        ]
+        assert svc._bucket_regions["shared"] == "gra"
+
+    def test_regional_clients_are_made_once(self) -> None:
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.search_buckets())
+            asyncio.run(svc.search_buckets())
+        assert sorted(region for region, _ in clients.made) == ["de", "gra", "uk"]
+
+
+class TestRegionSearchRouting:
+
+    def test_listed_bucket_is_reached_in_its_region(self) -> None:
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.search_buckets())
+            asyncio.run(svc.list_objects("media-assets"))
+        clients.clients["uk"].list_objects_v2.assert_called_once()
+        clients.clients["gra"].list_objects_v2.assert_not_called()
+
+    def test_unseen_bucket_is_looked_for_before_the_request(self) -> None:
+        """No redirect exists between regional endpoints — search first."""
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.delete_object("media-assets", "a.txt"))
+        clients.clients["uk"].delete_object.assert_called_once_with(
+            Bucket="media-assets", Key="a.txt",
+        )
+
+    def test_bucket_found_nowhere_goes_to_the_configured_region(self) -> None:
+        clients = _RegionalClients({})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.delete_object("missing", "a.txt"))
+        clients.clients["gra"].delete_object.assert_called_once()
+
+    def test_explicit_region_skips_the_search(self) -> None:
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.list_objects("media-assets", region="uk"))
+        assert [region for region, _ in clients.made] == ["uk"]
+        clients.clients["uk"].list_buckets.assert_not_called()
+
+    def test_region_override_is_honoured_not_rejected(self) -> None:
+        """Unlike an endpoint set by hand, a template reaches every region."""
+        clients = _RegionalClients({})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.create_bucket("new-bucket", "waw"))
+        waw = clients.clients["waw"]
+        waw.create_bucket.assert_called_once_with(Bucket="new-bucket")
+        assert ("waw", "https://s3.waw.io.cloud.ovh.net") in clients.made
+        assert svc._bucket_regions["new-bucket"] == "waw"
+
+    def test_presigned_url_is_signed_in_the_buckets_region(self) -> None:
+        """SigV4 binds the region: a URL signed elsewhere would never open."""
+        clients = _RegionalClients({"uk": ["media-assets"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.generate_presigned_url("media-assets", "a.txt"))
+        clients.clients["uk"].generate_presigned_url.assert_called_once()
+
+    def test_move_deletes_from_the_source_region(self) -> None:
+        clients = _RegionalClients({"uk": ["src-bucket"], "de": ["dst-bucket"]})
+        svc = _searching_svc()
+        with patch("servonaut.services.object_storage_service.boto3.client", clients):
+            asyncio.run(svc.search_buckets())
+            asyncio.run(svc.move_object("src-bucket", "a.txt", "dst-bucket", "a.txt"))
+        clients.clients["de"].copy_object.assert_called_once()
+        clients.clients["uk"].delete_object.assert_called_once_with(
+            Bucket="src-bucket", Key="a.txt",
+        )
+
+
+class TestSingleEndpointListing:
+
+    def test_reports_the_endpoint_it_asked(self, ovh_svc) -> None:
+        client = MagicMock()
+        client.list_buckets.return_value = {"Buckets": []}
+        ovh_svc._client = client
+        listing = asyncio.run(ovh_svc.search_buckets())
+        assert listing.buckets == []
+        assert listing.endpoint == "https://s3.gra.io.cloud.ovh.net"
+        assert listing.region == "gra"
+        assert listing.searched_regions == ()
+
+    def test_hand_set_ovh_endpoint_stays_pinned(self, ovh_svc) -> None:
+        ovh_svc._client = MagicMock()
+        with pytest.raises(ValueError, match="pinned to endpoint"):
+            asyncio.run(ovh_svc.create_bucket("my-bucket", "uk"))

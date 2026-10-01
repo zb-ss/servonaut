@@ -456,3 +456,91 @@ class TestReturnShape:
             aws_svc, hetzner_svc, ovh_svc = build_object_storage_services(config)
         assert hetzner_svc is None
         assert ovh_svc is None
+
+
+# ---------------------------------------------------------------------------
+# OVH region search
+# ---------------------------------------------------------------------------
+
+def _ovh_call(mock_cls):
+    calls = [c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "ovh"]
+    assert len(calls) == 1
+    return calls[0].kwargs
+
+
+class TestOVHRegionSearch:
+
+    def test_derived_endpoint_searches_every_ovh_region(self):
+        from servonaut.services.object_storage_regions import OVH_S3_REGIONS
+
+        config = _make_config(ovh_key="key123", ovh_secret="sec", ovh_region="gra")
+        _, mock_cls = _call_factory(config)
+        kwargs = _ovh_call(mock_cls)
+        assert kwargs["endpoint_url"] == "https://s3.gra.io.cloud.ovh.net"
+        assert kwargs["endpoint_template"] == "https://s3.{region}.io.cloud.ovh.net"
+        assert kwargs["search_regions"] == tuple(code for _, code in OVH_S3_REGIONS)
+
+    def test_hand_set_endpoint_is_the_only_one_asked(self):
+        config = _make_config(
+            ovh_key="key123", ovh_secret="sec", ovh_region="gra",
+            ovh_endpoint="https://s3.gra.perf.cloud.ovh.net",
+        )
+        _, mock_cls = _call_factory(config)
+        kwargs = _ovh_call(mock_cls)
+        assert kwargs["endpoint_url"] == "https://s3.gra.perf.cloud.ovh.net"
+        assert kwargs["endpoint_template"] == ""
+        assert kwargs["search_regions"] == ()
+
+    def test_hetzner_is_not_searched(self):
+        config = _make_config(hetzner_key="key123", hetzner_secret="sec", hetzner_region="nbg1")
+        _, mock_cls = _call_factory(config)
+        calls = [c for c in mock_cls.call_args_list if c.kwargs.get("provider") == "hetzner"]
+        assert calls[0].kwargs["search_regions"] == ()
+        assert calls[0].kwargs["endpoint_template"] == ""
+
+    def test_saved_syd_region_reads_as_sydney(self):
+        """``syd`` was offered by earlier releases but never resolved."""
+        config = _make_config(ovh_key="key123", ovh_secret="sec", ovh_region="syd")
+        _, mock_cls = _call_factory(config)
+        kwargs = _ovh_call(mock_cls)
+        assert kwargs["region"] == "ap-southeast-syd"
+        assert kwargs["endpoint_url"] == "https://s3.ap-southeast-syd.io.cloud.ovh.net"
+
+    def test_real_service_builds_with_every_region(self):
+        """The shipped region list passes the service's own endpoint checks."""
+        from servonaut.services.object_storage_factory import build_keyed_object_storage
+
+        config = _make_config(ovh_key="key123", ovh_secret="sec", ovh_region="uk")
+        with patch("servonaut.config.secrets.resolve_secret", side_effect=lambda v: v):
+            svc = build_keyed_object_storage("ovh", config.ovh.object_storage)
+        assert svc is not None
+        assert svc._search_regions[0] == "uk"
+
+
+class TestOVHRegionList:
+
+    def test_codes_are_unique_and_well_formed(self):
+        from servonaut.services.object_storage_regions import OVH_S3_REGIONS
+        from servonaut.services.object_storage_service import S3_REGION_RE
+
+        codes = [code for _, code in OVH_S3_REGIONS]
+        assert len(codes) == len(set(codes))
+        assert all(S3_REGION_RE.match(code) for code in codes)
+
+    def test_default_region_is_listed(self):
+        from servonaut.services.object_storage_regions import (
+            OVH_S3_DEFAULT_REGION,
+            OVH_S3_REGIONS,
+        )
+        assert OVH_S3_DEFAULT_REGION in {code for _, code in OVH_S3_REGIONS}
+
+    def test_alias_targets_are_listed_regions(self):
+        from servonaut.services.object_storage_regions import (
+            OVH_S3_REGIONS,
+            canonical_ovh_s3_region,
+        )
+        codes = {code for _, code in OVH_S3_REGIONS}
+        assert canonical_ovh_s3_region("syd") in codes
+        assert "syd" not in codes
+        assert canonical_ovh_s3_region("gra") == "gra"
+        assert canonical_ovh_s3_region("") == ""

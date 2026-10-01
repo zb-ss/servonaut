@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING, TypedDict
+from dataclasses import dataclass, field
+from typing import Any, Callable, List, Dict, Optional, Tuple, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from servonaut.config.schema import (
@@ -1375,6 +1376,29 @@ class SecretProviderInterface(ABC):
         pass
 
 
+@dataclass(frozen=True)
+class BucketListing:
+    """The buckets one listing found, and where it looked for them.
+
+    Attributes:
+        buckets: Dicts with ``name`` and ``creation_date``, plus ``region``
+            when several regions were searched.
+        endpoint: The endpoint asked when only one was ("" for the provider
+            default, e.g. AWS S3).
+        region: The configured region ("" when unset).
+        searched_regions: Every region asked, when the provider lists buckets
+            per region and all of them were searched; empty otherwise.
+        failed_regions: Region → error code, for regions that could not be
+            searched (refused the keys, unreachable).
+    """
+
+    buckets: List[Dict[str, Any]]
+    endpoint: str = ""
+    region: str = ""
+    searched_regions: Tuple[str, ...] = ()
+    failed_regions: Dict[str, str] = field(default_factory=dict)
+
+
 class ObjectStorageServiceInterface(ABC):
     """Interface for S3-compatible object storage operations.
 
@@ -1389,9 +1413,19 @@ class ObjectStorageServiceInterface(ABC):
         """List all buckets accessible with the configured credentials.
 
         Returns:
-            List of dicts with keys: ``name`` (str), ``creation_date`` (str).
+            List of dicts with keys: ``name`` (str), ``creation_date`` (str),
+            and ``region`` (str) when the buckets of several regions were
+            searched.
         """
         pass
+
+    async def search_buckets(self) -> BucketListing:
+        """List buckets and report where they were looked for.
+
+        The default asks one endpoint; implementations that search several
+        regions override it.
+        """
+        return BucketListing(buckets=await self.list_buckets())
 
     @abstractmethod
     async def create_bucket(self, bucket: str, region: str = "") -> None:
