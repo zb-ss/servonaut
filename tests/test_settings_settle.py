@@ -1,4 +1,4 @@
-"""A panel left while its load is still settling never asks to discard.
+"""A panel left before or while it loads never asks to discard.
 
 After ``load()`` a panel re-takes its "saved" snapshot over the next few
 frames, so values that arrive late (editor rows mounting, a select settling)
@@ -76,6 +76,26 @@ async def test_leaving_settings_while_a_panel_settles_does_not_ask(monkeypatch):
 
         assert not isinstance(app.screen, DiscardChangesModal)
         assert app.screen is not settings
+
+
+@pytest.mark.asyncio
+async def test_switching_before_the_panel_has_loaded_does_not_ask(monkeypatch):
+    """A switch that reaches the panel before its first load, as on a busy machine."""
+    from servonaut.screens.settings.panels.general import GeneralPanel
+
+    loads: List[Any] = []
+    monkeypatch.setattr(GeneralPanel, "load", lambda self: loads.append(self))
+    app = _Host()
+    async with app.run_test(size=(140, 45)) as pilot:
+        settings = await _open_general(app, pilot)
+        panel = settings._current_panel()
+        assert panel in loads, "the panel should have been asked to load"
+
+        settings._request_switch("ai_provider")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, DiscardChangesModal)
+        assert settings._active_id == "ai_provider"
 
 
 @pytest.mark.asyncio

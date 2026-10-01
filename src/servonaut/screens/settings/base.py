@@ -71,6 +71,8 @@ class SettingsPanel(Vertical):
         self._demo_edited: Set[str] = set()
         # True from a load until the re-baseline below has settled.
         self._settling = False
+        # True once the panel has taken its first snapshot from the config.
+        self._loaded = False
 
     # ------------------------------------------------------------------
     # Composition
@@ -311,8 +313,23 @@ class SettingsPanel(Vertical):
         over the next few refresh frames, when the editor rows have mounted.
         """
         self._snapshot = self.current_values()
+        self._loaded = True
         self._settling = True
         self._schedule_rebaseline(self._REBASELINE_FRAMES)
+
+    def has_unsaved_changes(self) -> bool:
+        """Whether leaving this panel now would lose edits.
+
+        Guards a panel switch and leaving Settings. Never before the panel
+        has loaded: its widgets do not hold the config yet, so nothing in
+        them was typed (a panel can be left before its first load on a busy
+        machine). Otherwise the post-load re-baseline is finished first
+        (:meth:`settle`), then :meth:`is_dirty` decides.
+        """
+        if not getattr(self, "_loaded", True):
+            return False
+        self.settle()
+        return self.is_dirty()
 
     def settle(self) -> None:
         """Finish the post-load re-baseline now, if it is still running.
