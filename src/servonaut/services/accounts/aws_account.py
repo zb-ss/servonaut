@@ -3,14 +3,121 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
-from typing import Any, Optional, Tuple
+from pathlib import Path
+from typing import Any, Mapping, Optional, Tuple
 
 import boto3
+from botocore.configloader import load_config, raw_config_parse
+from botocore.exceptions import BotoCoreError, ConfigNotFound
 
 from servonaut.config.accounts import AccountRef
 
 logger = logging.getLogger(__name__)
+
+# Environment variables botocore reads credentials, or where to get them, from.
+_CREDENTIAL_ENV_VARS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+)
+# Profile keys botocore gets credentials from, once it is asked for them.
+_CREDENTIAL_KEYS = frozenset({
+    "aws_access_key_id",
+    "credential_process",
+    "role_arn",
+    "web_identity_token_file",
+    "sso_session",
+    "sso_start_url",
+    "sso_account_id",
+    "sso_role_name",
+    "login_session",
+})
+
+# Files in which an EC2 instance names itself (relative to _SYSFS_ROOT,
+# which tests move).
+_SYSFS_ROOT = Path("/")
+_SYS_VENDOR = "sys/devices/virtual/dmi/id/sys_vendor"
+_BIOS_VENDOR = "sys/devices/virtual/dmi/id/bios_vendor"
+_ASSET_TAG = "sys/devices/virtual/dmi/id/board_asset_tag"
+_HYPERVISOR_UUID = "sys/hypervisor/uuid"
+_BIOS_VERSION = "sys/devices/virtual/dmi/id/bios_version"
+_PRODUCT_VERSION = "sys/devices/virtual/dmi/id/product_version"
+
+
+def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> bool:
+    """Whether the ambient credential chain has anything to work with, checked offline.
+
+    True for a credential environment variable, a profile named in
+    ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE`` (using it says what is wrong
+    with it), a ``default`` profile in the shared credentials or config file
+    with a key that gives credentials, or an EC2 instance (its instance role;
+    see :func:`runs_on_ec2`). Credentials are not resolved just to decide
+    whether AWS is set up: no instance metadata request, no
+    ``credential_process`` run, no SSO token read. An account that is set up
+    is then listed with the credentials it is configured with, which may run
+    such a helper.
+    """
+    if any(environ.get(name) for name in _CREDENTIAL_ENV_VARS):
+        return True
+    if environ.get("AWS_PROFILE") or environ.get("AWS_DEFAULT_PROFILE"):
+        return True
+    credentials = _shared_file(environ, "AWS_SHARED_CREDENTIALS_FILE", "credentials")
+    config = _shared_file(environ, "AWS_CONFIG_FILE", "config")
+    try:
+        sections = [
+            _parsed(lambda: raw_config_parse(credentials)).get("default", {}),
+            _parsed(lambda: load_config(config)).get("profiles", {}).get("default", {}),
+        ]
+    except (BotoCoreError, OSError, UnicodeDecodeError):
+        return True  # a file botocore cannot read: listing says what is wrong
+    return any(_CREDENTIAL_KEYS.intersection(section) for section in sections) or runs_on_ec2()
+
+
+def runs_on_ec2() -> bool:
+    """Whether this machine is an EC2 instance, from files Linux exposes (offline).
+
+    The firmware vendor is ``Amazon EC2``, or a Nitro instance's asset tag is
+    its instance id, or a Xen instance's hypervisor UUID starts with ``ec2``
+    and its firmware names Amazon (EC2's Xen BIOS version reads like
+    ``4.11.amazon``). Any Xen guest reports a Xen vendor, and a random Xen
+    UUID starts with ``ec2`` about once in 4096, so neither is enough on its
+    own. Read only, errors ignored; always False off Linux.
+    On EC2 the instance role answers from the instance itself, so listing is
+    cheap there.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    vendor = _sysfs_text(_SYS_VENDOR)
+    if vendor == "Amazon EC2" or _sysfs_text(_ASSET_TAG).startswith("i-"):
+        return True
+    firmware = " ".join(
+        _sysfs_text(path) for path in (_BIOS_VENDOR, _BIOS_VERSION, _PRODUCT_VERSION)
+    ).lower()
+    return _sysfs_text(_HYPERVISOR_UUID).lower().startswith("ec2") and "amazon" in firmware
+
+
+def _sysfs_text(relative: str) -> str:
+    """A sysfs file's text, stripped; empty when it cannot be read."""
+    try:
+        return (_SYSFS_ROOT / relative).read_text(encoding="ascii", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _shared_file(environ: Mapping[str, str], variable: str, name: str) -> str:
+    return os.path.expanduser(environ.get(variable) or str(Path("~") / ".aws" / name))
+
+
+def _parsed(parse) -> dict:
+    """A botocore config parse; empty when the file does not exist."""
+    try:
+        return parse() or {}
+    except ConfigNotFound:
+        return {}
 
 
 class AWSAccountContext:

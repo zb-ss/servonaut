@@ -6,7 +6,8 @@ every account of every provider and applies the same reference rules as the
 TUI (see :mod:`servonaut.utils.instance_resolver`).
 
 - :class:`CachedFleet` reads every account's cached servers from disk, for
-  one-shot CLI commands that must never wait on a provider API.
+  one-shot CLI commands that must not wait on a provider API; only an
+  account that was never listed on this machine is read, once.
 - :class:`InstanceDirectory` finds a server for a tool call, refreshing
   provider inventories only while nothing has matched yet.
 - :func:`resolve_provider_target` tells which account a provider-level call
@@ -17,8 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -39,6 +43,12 @@ from servonaut.utils.instance_resolver import (
 logger = logging.getLogger(__name__)
 
 PROVIDERS = (AWS, HETZNER, OVH)
+# Seconds a CLI lookup allows, past its listing budget, for the listings to
+# be cancelled and their outcome written (a safety net; it is normally
+# instant).
+_WIND_DOWN_SECONDS = 2.0
+# What a CLI note calls one account of each provider (default "account").
+_ACCOUNT_NOUNS = {HETZNER: "project"}
 # Custom servers are listed after AWS and before the other clouds, as in the
 # TUI instance list.
 _LOOKUP_ORDER = (AWS, CUSTOM_QUALIFIER, OVH, HETZNER)
@@ -170,11 +180,9 @@ def with_ovh_login(row: dict, config: Any) -> dict:
     """
     if not row.get("is_ovh"):
         return row
-    from types import SimpleNamespace
-
     from servonaut.services.connection_service import ConnectionService
 
-    login = ConnectionService(SimpleNamespace(get=lambda: config)).resolve_ovh_connection(row)
+    login = ConnectionService.for_config(config).resolve_ovh_connection(row)
     enriched = dict(row)
     enriched["username"] = row.get("username") or login["username"]
     if login["key_path"] and not row.get("ssh_key"):
@@ -194,11 +202,21 @@ def _rows(value: Any) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CheckedRows:
+    """The rows a CLI command resolves a reference against, and its notes."""
+
+    rows: List[dict]
+    # One line per account whose servers could not be checked, and why.
+    notes: List[str]
+
+
 class CachedFleet:
     """Every account's cached servers plus the custom servers, from disk.
 
-    For one-shot CLI commands: nothing is fetched from a provider API, so a
-    command never waits on a slow or failing provider to find a server.
+    For one-shot CLI commands: a command does not wait on a slow or failing
+    provider to find a server. :meth:`checked_rows` reads an account only
+    when it was never listed on this machine.
     """
 
     def __init__(
@@ -257,24 +275,103 @@ class CachedFleet:
                 )
         return rows
 
-    def matches(self, reference: str) -> List[dict]:
-        """Every server *reference* could mean.
+    def matches(self, reference: str, rows: Optional[List[dict]] = None) -> List[dict]:
+        """Every server *reference* could mean, among *rows* (default: :meth:`instances`).
 
         Raises:
             AccountUnavailableError: See :func:`check_qualifier`.
         """
         check_qualifier(self._registry, reference)
-        return match_instances(reference, self.instances())
+        return match_instances(reference, self.instances() if rows is None else rows)
 
-    def resolve(self, reference: str) -> Optional[dict]:
-        """The one server *reference* names, or None.
+    def resolve(self, reference: str, rows: Optional[List[dict]] = None) -> Optional[dict]:
+        """The one server *reference* names among *rows* (default: :meth:`instances`).
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
             AccountUnavailableError: See :func:`check_qualifier`.
         """
         check_qualifier(self._registry, reference)
-        return resolve_unique(reference, self.instances())
+        return resolve_unique(reference, self.instances() if rows is None else rows)
+
+    async def checked_rows(self, reference: str) -> CheckedRows:
+        """The rows to resolve *reference* against in a CLI command.
+
+        The cached rows (:meth:`instances`), plus the servers of every
+        account that was never listed on this machine (it has no cache at
+        all; a single account of its provider as much as one of several),
+        read once through its normal cached fetch. That writes its cache, so
+        later commands stay offline, and a name no longer passes as unique
+        because another server of that name was never listed. A listing too
+        incomplete to be saved as the cache is remembered for the cache's
+        TTL instead, its servers counting as checked; a failed one for
+        ``account_retry_seconds`` (see :mod:`.listing_record`). The account
+        is not read again meanwhile. The listings run together, within
+        ``account_check_timeout_seconds``.
+
+        Nothing is read for an id a cached row has or a ``custom/...``
+        reference; ``<account>/...`` reads only that account. Nor is an
+        account nothing is set up for on this machine (AWS without
+        credentials, checked offline); it gets a note only when the
+        reference points at it (``<account>/...`` or an EC2 instance id).
+        An account that cannot be read, or cannot connect, never breaks the
+        command: it gets a note that its servers were not checked.
+        """
+        rows = self.instances()
+        needle = (reference or "").strip()
+        if not needle or _names_cached_id(needle, rows) or _is_custom_reference(needle):
+            return CheckedRows(rows, [])
+        only = qualifier_account(self._registry, needle)
+        notes: List[str] = []
+        listings: List[Tuple[Any, bool]] = []
+        for provider in PROVIDERS:
+            inventory = self._inventories[provider]
+            for binding in _never_listed(inventory, only):
+                if _has_credentials(binding.service):
+                    listings.append((binding, inventory.multi))
+                elif only is not None or _names_instance_id(provider, needle):
+                    notes.append(_not_checked(
+                        binding.ref, "has no credentials on this machine", needle,
+                    ))
+        fetched: List[dict] = []
+        for read, note in await _checked_listings(
+            listings, needle, self._check_seconds(), self._retry_seconds(),
+        ):
+            fetched.extend(read)
+            if note:
+                notes.append(note)
+        if fetched:
+            # The reads wrote their caches: list again, in the instance list's
+            # order, so candidates show the same way on every run. Rows a read
+            # did not keep (an incomplete listing) come last.
+            rows = self.instances()
+            known = {_row_key(row) for row in rows}
+            rows.extend(row for row in fetched if _row_key(row) not in known)
+        if only is None:
+            notes.extend(self._unavailable_notes(needle))
+        return CheckedRows(rows, notes)
+
+    def _check_seconds(self) -> float:
+        """How long the never-listed accounts may take in all (config)."""
+        return _seconds_setting(self._registry, "account_check_timeout_seconds")
+
+    def _retry_seconds(self) -> float:
+        """How long a failed listing is left alone before it is tried again (config)."""
+        return _seconds_setting(self._registry, "account_retry_seconds")
+
+    def _unavailable_notes(self, reference: str) -> List[str]:
+        """A note for every configured account that cannot connect."""
+        registry = self._registry
+        if registry is None:
+            return []
+        notes = []
+        for provider in PROVIDERS:
+            for ref in registry.configured_accounts(provider):
+                reason = registry.unavailable_reason(ref)
+                if reason:
+                    reason = reason.strip().rstrip(".")
+                    notes.append(_not_checked(ref, f"is not available ({reason})", reference))
+        return notes
 
 
 # ---------------------------------------------------------------------------
@@ -381,11 +478,7 @@ class InstanceDirectory:
 
     def _retry_seconds(self) -> float:
         """The configured wait before a failed account read is retried."""
-        from servonaut.config.schema import AppConfig
-
-        config = getattr(self._accounts(), "config", None)
-        value = getattr(config, "account_retry_seconds", AppConfig.account_retry_seconds)
-        return max(0.0, float(value))
+        return _seconds_setting(self._accounts(), "account_retry_seconds")
 
     def _forget_reads(self, provider: str, inventory: Any) -> None:
         """Drop reads made for accounts that were rebuilt since."""
@@ -526,6 +619,385 @@ async def _read_account(binding: Any, qualified: bool) -> List[dict]:
     """One account's servers, tagged as its fleet tags them."""
     fetched = await binding.service.fetch_instances_cached()
     return tag_rows(_rows(fetched), binding.ref, qualified=qualified)
+
+
+def _names_cached_id(reference: str, rows: List[dict]) -> bool:
+    """True when *reference* is the exact id of a cached row (ids always win)."""
+    wanted = reference.lower()
+    return any(str(row.get("id") or "").lower() == wanted for row in rows)
+
+
+def _is_custom_reference(reference: str) -> bool:
+    label, sep, rest = reference.partition("/")
+    return bool(sep and rest) and label.lower() == CUSTOM_QUALIFIER
+
+
+def _row_key(row: Mapping[str, Any]) -> Tuple[str, str]:
+    """A row's provider and id: ids are unique within one provider."""
+    if row.get("is_custom"):
+        provider = CUSTOM_QUALIFIER
+    elif row.get("is_ovh"):
+        provider = OVH
+    elif row.get("is_hetzner"):
+        provider = HETZNER
+    else:
+        provider = AWS
+    return provider, str(row.get("id") or "")
+
+
+def _never_listed(inventory: Any, only: Optional[AccountRef]) -> List[Any]:
+    """*inventory*'s accounts with no cache at all (of *only* alone, if set)."""
+    if not isinstance(inventory, AccountFleet):
+        return []
+    return [
+        binding for binding in inventory.bindings
+        if (only is None or (binding.ref.provider, binding.ref.key) == (only.provider, only.key))
+        and not _has_cache(binding.service)
+    ]
+
+
+def _has_cache(service: Any) -> bool:
+    """Whether *service*'s account was listed here; True when it cannot tell (read nothing).
+
+    The cache layer absorbs a missing or corrupt file (that counts as never
+    listed), so anything raised here is a bug that must surface.
+    """
+    check = getattr(service, "has_cached_instances", None)
+    return not callable(check) or bool(check())
+
+
+def _has_credentials(service: Any) -> bool:
+    """False for an account nothing is set up for here (AWS without credentials).
+
+    It holds no server this machine could connect to, so there is nothing to
+    check, and reading it would only fail on every command. The check is
+    offline (see ``AWSService.has_credentials``).
+    """
+    check = getattr(service, "has_credentials", None)
+    return not callable(check) or bool(check())
+
+
+def _names_instance_id(provider: str, reference: str) -> bool:
+    """Whether *reference* is an id of *provider*'s shape (EC2 ids only)."""
+    if provider != AWS:
+        return False
+    from servonaut.services.aws_service import is_instance_id
+
+    return is_instance_id(reference)
+
+
+class _DaemonExecutor(ThreadPoolExecutor):
+    """Runs each call in a daemon thread of its own; never waits for one.
+
+    asyncio takes only a ThreadPoolExecutor as a loop's default executor, so
+    this one is of that type, but :meth:`submit` starts a daemon thread
+    instead of a pool worker (pool workers are joined when the interpreter
+    exits) and :meth:`shutdown` returns at once. A call that is abandoned
+    therefore never holds up the command.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):  # noqa: D102 - see the class
+        future: Future = Future()
+
+        def run() -> None:
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - handed to the waiter
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+        threading.Thread(target=run, name="servonaut-listing", daemon=True).start()
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None
+
+
+async def _checked_listings(
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float, retry_seconds: float,
+) -> List[Tuple[List[dict], Optional[str]]]:
+    """:func:`_checked_listing` of every ``(binding, qualified)``, together, in *seconds*.
+
+    The listings run on an event loop of their own, in a daemon thread, whose
+    blocking calls (the provider SDKs) run in daemon threads too: a listing
+    abandoned when the time is up keeps no thread the command waits for,
+    either now or when the process exits.
+    """
+    if not listings:
+        return []
+    if seconds <= 0:
+        # No time allowed at all (config): list nothing.
+        return [
+            ([], _not_checked(binding.ref, "was not listed (no time allowed)", reference))
+            for binding, _ in listings
+        ]
+    done: Future = Future()
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        loop.set_default_executor(_DaemonExecutor())
+        try:
+            result = loop.run_until_complete(
+                _listings_within(listings, reference, seconds, retry_seconds),
+            )
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiter
+            _settle(done, exception=exc)
+        else:
+            _settle(done, result=result)
+        finally:
+            loop.close()
+
+    threading.Thread(target=run, name="servonaut-listings", daemon=True).start()
+    try:
+        # The listings end themselves after *seconds*; the margin covers
+        # cancelling them and writing what was learned.
+        return await asyncio.wait_for(asyncio.wrap_future(done), seconds + _WIND_DOWN_SECONDS)
+    except asyncio.TimeoutError:
+        return [
+            ([], _not_checked(binding.ref, f"could not be listed (timed out after {seconds:g} s)",
+                              reference))
+            for binding, _ in listings
+        ]
+
+
+def _settle(future: Future, *, result: Any = None, exception: Optional[BaseException] = None) -> None:
+    """Hand the listings' outcome to their waiter, unless it gave up (cancelled).
+
+    Nothing may raise in the listings' thread: its traceback would land in
+    the terminal, perhaps in the middle of an SSH session.
+    """
+    try:
+        if exception is not None:
+            future.set_exception(exception)
+        else:
+            future.set_result(result)
+    except InvalidStateError:
+        pass
+
+
+async def _listings_within(
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float, retry_seconds: float,
+) -> List[Tuple[List[dict], Optional[str]]]:
+    """The listings of :func:`_checked_listings`, on its own loop.
+
+    Each account's listing starts requests only in the first half of
+    *seconds* and gives each one the second half to answer (the services'
+    ``limit_listing_time``), so what it listed by then comes back as a
+    partial listing. A listing still running when the time is up is
+    abandoned: its account gets a note, and the timeout is remembered like
+    any failure: the next commands do not wait for it again until
+    *retry_seconds* have passed.
+    """
+    from servonaut.services.accounts.listing_record import TIMEOUT
+
+    request_seconds = seconds / 2
+    for binding, _ in listings:
+        limit = getattr(binding.service, "limit_listing_time", None)
+        if callable(limit):
+            limit(request_seconds, seconds - request_seconds)
+    tasks = [
+        asyncio.ensure_future(_checked_listing(binding, qualified, reference, retry_seconds))
+        for binding, qualified in listings
+    ]
+    _, pending = await asyncio.wait(tasks, timeout=seconds)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    results = []
+    for task, (binding, _) in zip(tasks, listings):
+        if task in pending:
+            detail = f"timed out after {seconds:g} s"
+            record = _listing_record(binding.service)
+            if record is not None:
+                record.save(TIMEOUT, detail, [], keep_seconds=retry_seconds)
+            results.append(([], _not_checked(
+                binding.ref, f"could not be listed ({detail})", reference,
+            )))
+        else:
+            results.append(task.result())
+    return results
+
+
+async def _checked_listing(
+    binding: Any, qualified: bool, reference: str, retry_seconds: float,
+) -> Tuple[List[dict], Optional[str]]:
+    """A never-listed account's servers for a lookup, and the note to print, if any.
+
+    A complete listing writes the account's cache. Otherwise the outcome is
+    remembered, for as long as it takes to change:
+    - partial (the listing ended early or skipped a part; it says what it
+      listed): the cache's TTL, its servers counting as checked;
+    - timeout (no answer: a request timed out or could not connect): the
+      config's ``account_retry_seconds``, *retry_seconds*, as a network
+      blip heals quickly;
+    - failed (an error response: credentials, permissions, a credential
+      helper or SSO, a missing profile): the cache's TTL, as these do not
+      heal on their own, and trying sooner would run a prompting credential
+      helper again and again.
+    """
+    from servonaut.services.accounts.listing_record import FAILED, PARTIAL, TIMEOUT
+
+    record = _listing_record(binding.service)
+    remembered = record.load() if record is not None else None
+    if remembered is not None:
+        if remembered.outcome == PARTIAL:
+            # Still counted as checked, but the gap is said on every lookup:
+            # a name may yet be on a server that was not listed.
+            return remembered.rows, _partly_listed(
+                binding.ref, remembered.detail, reference, at=remembered.at,
+            )
+        when = f"at {_clock(remembered.at)}, tried again after {_clock(remembered.until)}"
+        return [], _not_checked(
+            binding.ref, f"could not be listed ({remembered.detail}; {when})", reference,
+        )
+    rows, problem, error = await _read_never_listed(binding, qualified)
+    if not problem:
+        return rows, None
+    if error is None:
+        if record is not None and not _has_cache(binding.service):
+            record.save(PARTIAL, problem, rows)
+        return rows, _partly_listed(binding.ref, problem, reference)
+    if _is_no_answer(error):
+        outcome, detail, keep = TIMEOUT, f"no answer: {problem}", retry_seconds
+    else:
+        outcome, detail, keep = FAILED, problem, None
+    if record is not None:
+        record.save(outcome, detail, [], keep_seconds=keep)
+    return [], _not_checked(binding.ref, f"could not be listed ({detail})", reference)
+
+
+def _is_no_answer(error: BaseException) -> bool:
+    """Whether *error*, or one it was raised from, is a timeout or a failed connection.
+
+    Then nothing answered, and a little later something may. Anything else
+    is an error response (or a local one, like a missing profile). A TLS or
+    proxy failure is one too, though the HTTP libraries count it as a
+    connection error: a TLS-intercepting or wrongly set proxy does not heal
+    in seconds.
+    """
+    answered, no_answer = _error_response_types(), _no_answer_types()
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, answered):
+            return False
+        if isinstance(error, no_answer):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _error_response_types() -> Tuple[type, ...]:
+    """TLS and proxy errors, which the HTTP libraries file under connection errors."""
+    import ssl
+
+    types: List[type] = [ssl.SSLError]
+    try:
+        import requests
+
+        types += [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    except ImportError:
+        pass
+    try:
+        import botocore.exceptions as botocore_errors
+
+        types += [botocore_errors.SSLError, botocore_errors.ProxyConnectionError]
+    except ImportError:
+        pass
+    return tuple(types)
+
+
+def _no_answer_types() -> Tuple[type, ...]:
+    """Timeout and connection errors of Python and of the provider SDKs' HTTP layers."""
+    types: List[type] = [TimeoutError, ConnectionError]
+    try:
+        import requests
+
+        types += [requests.exceptions.Timeout, requests.exceptions.ConnectionError]
+    except ImportError:
+        pass
+    try:
+        import botocore.exceptions as botocore_errors
+
+        # ConnectTimeoutError and EndpointConnectionError are ConnectionErrors.
+        types += [botocore_errors.ConnectionError, botocore_errors.ReadTimeoutError,
+                  botocore_errors.ConnectionClosedError]
+    except ImportError:
+        pass
+    return tuple(types)
+
+
+def _partly_listed(
+    ref: AccountRef, detail: str, reference: str, *, at: Optional[float] = None,
+) -> str:
+    """The note of a partial listing (*at*: when it was made, if remembered)."""
+    when = f" at {_clock(at)}" if at is not None else ""
+    if ref.provider == AWS:
+        detail += (
+            "; list only the regions you use (aws.regions or the account's regions) "
+            "to make it complete"
+        )
+    return _not_checked(ref, f"was only partly listed{when} ({detail})", reference, some=True)
+
+
+def _listing_record(service: Any) -> Any:
+    """The service's ``ListingRecord``, or None when it keeps none."""
+    get = getattr(service, "listing_record", None)
+    return get() if callable(get) else None
+
+
+def _clock(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+
+
+def _seconds_setting(registry: Optional[AccountRegistry], name: str) -> float:
+    """The config's *name* in seconds (never negative); its default when not a number."""
+    from servonaut.config.schema import AppConfig
+
+    default = getattr(AppConfig, name)
+    value = getattr(getattr(registry, "config", None), name, default)
+    try:
+        if isinstance(value, bool):
+            raise TypeError(value)
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        logger.warning("Config %s is not a number (%r); using %s", name, value, default)
+        return float(default)
+
+
+async def _read_never_listed(
+    binding: Any, qualified: bool,
+) -> Tuple[List[dict], str, Optional[BaseException]]:
+    """An account's servers, why they may be incomplete ("" when they are not),
+    and the error behind a failed listing (None for a partial one).
+
+    The reason is one line, so each note stays one line on stderr.
+    """
+    try:
+        rows = await _read_account(binding, qualified)
+    except Exception as exc:  # noqa: BLE001 - one account never breaks a command
+        return [], _first_line(str(exc)) or type(exc).__name__, exc
+    problem = getattr(binding.service, "last_fetch_error", None)
+    if not isinstance(problem, str) or not problem.strip():
+        return rows, "", None
+    error = getattr(binding.service, "last_fetch_exception", None)
+    return rows, _first_line(problem), error if isinstance(error, BaseException) else None
+
+
+def _first_line(text: str) -> str:
+    """The first non-empty line of *text*, stripped (a helper's stderr may follow)."""
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def _not_checked(ref: AccountRef, what: str, reference: str, *, some: bool = False) -> str:
+    """``Note: Hetzner project 'staging' could not be listed (...); its servers ...``."""
+    noun = _ACCOUNT_NOUNS.get(ref.provider, "account")
+    title = PROVIDER_TITLES.get(ref.provider, ref.provider)
+    servers = "some of its servers" if some else "its servers"
+    return f"Note: {title} {noun} {ref.label!r} {what}; {servers} were not checked for {reference!r}"
 
 
 def _read_done(provider: str, read: _AccountRead, future: asyncio.Future) -> None:

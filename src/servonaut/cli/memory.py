@@ -108,7 +108,10 @@ def _resolve_or_exit(
     """Resolve instance from args.instance (if present), printing error on failure.
 
     Accepts an id, a name or an ``<account>/<name>`` reference (see
-    :mod:`servonaut.utils.instance_resolver`).
+    :mod:`servonaut.utils.instance_resolver`). It is resolved against the
+    cached rows and every account never listed on this machine, read once
+    (see ``CachedFleet.checked_rows``); an account whose servers could not
+    be checked gets a note on stderr.
 
     Raises:
         AmbiguousInstanceError: The reference names several servers; the
@@ -120,7 +123,10 @@ def _resolve_or_exit(
     if not instance_arg:
         return None
 
-    inst = fleet.resolve(instance_arg)
+    checked = _run_async(fleet.checked_rows(instance_arg))
+    for note in checked.notes:
+        print(note, file=sys.stderr)
+    inst = fleet.resolve(instance_arg, rows=checked.rows)
     if inst is None:
         msg = f"Instance not found: {instance_arg!r}"
         if use_json:

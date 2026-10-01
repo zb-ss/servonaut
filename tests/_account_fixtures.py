@@ -23,6 +23,7 @@ from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 from servonaut.services.accounts import AccountRegistry
 from servonaut.services.accounts.aws_account import AWSAccountContext
+from servonaut.services.accounts.listing_record import ListingRecord
 
 Rows = Sequence[Mapping[str, Any]]
 
@@ -44,9 +45,12 @@ class FakeProvider:
         # after a power action or a delete.
         self.invalidates_cache = False
         self.last_fetch_error: Optional[str] = None
+        self.last_fetch_exception: Optional[BaseException] = None
         self.last_fetch_partial = False
         # Return values of recorded API calls, by method name.
         self.returns: Dict[str, Any] = {}
+        # What a CLI lookup remembered about listing this account (in memory).
+        self.record = ListingRecord(None, ttl_seconds=300)
 
     async def fetch_instances_cached(self, force_refresh: bool = False) -> List[dict]:
         self.fetches += 1
@@ -61,6 +65,26 @@ class FakeProvider:
 
     def is_cache_fresh(self) -> bool:
         return self.fresh
+
+    def has_cached_instances(self) -> bool:
+        return self.cached is not None
+
+    # False: no credentials on this machine (an AWS account on the ambient
+    # chain when AWS is not set up).
+    credentials = True
+
+    def has_credentials(self) -> bool:
+        return self.credentials
+
+    def listing_record(self) -> ListingRecord:
+        return self.record
+
+    # What a caller allowed the listing: (seconds per request, seconds to
+    # start requests in), see limit_listing_time.
+    listing_time_limit: Optional[Tuple[float, float]] = None
+
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        self.listing_time_limit = (request_seconds, start_by_seconds)
 
     def resolve_token(self) -> str:
         return "token"

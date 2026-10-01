@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,6 +110,574 @@ def test_cached_fleet_surfaces_an_aws_cache_bug_but_not_other_providers():
 
 
 # ---------------------------------------------------------------------------
+# CachedFleet.checked_rows (CLI name lookups)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staging_never_listed(monkeypatch):
+    """Hetzner project staging holds web-1 too, but was never listed here."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    services[("hetzner", "staging")].cached = None
+    return registry, services
+
+
+def test_a_never_listed_account_is_read_once_and_cached(staging_never_listed):
+    registry, services = staging_never_listed
+    staging = services[("hetzner", "staging")]
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == []
+    with pytest.raises(AmbiguousInstanceError) as err:
+        fleet.resolve("web-1", rows=checked.rows)
+    assert "aws/web-1" in str(err.value) and "staging/web-1" in str(err.value)
+    assert staging.fetches == 1 and staging.cached is not None
+    # Its cache is written, so the next command stays offline.
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert staging.fetches == 1
+    assert all(s.fetches == 0 for key, s in services.items() if key != ("hetzner", "staging"))
+
+
+def test_rows_read_take_their_place_in_the_instance_list(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+        ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}],
+             "backup": [{"id": "vps-2", "name": "web-1", "is_ovh": True}]},
+    )
+    services[("hetzner", "staging")].cached = None
+    services[("ovh", "backup")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    first = [row["id"] for row in _run(fleet.checked_rows("web-1")).rows]
+    again = [row["id"] for row in _run(fleet.checked_rows("web-1")).rows]
+
+    assert first == again == ["custom-web", "vps-1", "vps-2", "1", "2"]
+
+
+def test_rows_a_read_did_not_keep_come_last(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    staging = services[("hetzner", "staging")]
+    staging.cached = None
+
+    async def incomplete(force_refresh=False):
+        staging.last_fetch_error = "listing incomplete"
+        return [dict(row) for row in staging.rows]
+
+    staging.fetch_instances_cached = incomplete
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert [row["id"] for row in checked.rows] == ["1", "2"]
+    assert len(checked.notes) == 1
+
+
+def test_a_single_never_listed_account_is_read_too(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}]},
+    )
+    services[("ovh", "ovh")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    rows = _run(fleet.checked_rows("web-1")).rows
+
+    assert [row["id"] for row in fleet.matches("web-1", rows)] == ["i-1", "vps-1"]
+    assert services[("ovh", "ovh")].fetches == 1
+
+
+def test_an_empty_cache_counts_as_listed(staging_never_listed):
+    registry, services = staging_never_listed
+    services[("hetzner", "staging")].cached = []
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert services[("hetzner", "staging")].fetches == 0
+
+
+def test_an_account_that_cannot_be_listed_gets_a_note(staging_never_listed):
+    registry, services = staging_never_listed
+    attempts = _failing(services[("hetzner", "staging")], "401 Unauthorized\nsecond line")
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' could not be listed (401 Unauthorized); "
+        "its servers were not checked for 'web-1'"
+    ]
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "i-1"
+    assert len(attempts) == 1
+
+
+def _partly_listing(service, message="1 region(s) failed: eu-west-1", keeps_cache=False):
+    """Make *service* list what it can and say why that is incomplete.
+
+    AWS keeps such a listing out of its cache; OVH saves it (*keeps_cache*).
+    """
+    calls = []
+
+    async def partial(force_refresh=False):
+        calls.append(1)
+        service.last_fetch_error = message
+        rows = [dict(row) for row in service.rows]
+        if keeps_cache:
+            service.cached = rows
+        return rows
+
+    service.fetch_instances_cached = partial
+    return calls
+
+
+@pytest.fixture
+def prod_partly_listed(monkeypatch):
+    """AWS account prod was never listed; listing it skips a failing region."""
+    registry, services = build_registry(
+        monkeypatch, aws={"aws": [], "prod": [{"id": "i-2", "name": "web-1"}]},
+    )
+    prod = services[("aws", "prod")]
+    prod.cached = None
+    return registry, prod, _partly_listing(prod)
+
+
+def test_a_partial_listing_is_noted_as_such(prod_partly_listed):
+    registry, _, _ = prod_partly_listed
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: AWS account 'prod' was only partly listed (1 region(s) failed: eu-west-1; "
+        "list only the regions you use (aws.regions or the account's regions) to make it "
+        "complete); some of its servers were not checked for 'web-1'"
+    ]
+    assert [row["id"] for row in checked.rows] == ["i-2"]
+
+
+def test_only_aws_gets_the_regions_hint(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}]},
+    )
+    project = services[("hetzner", "hetzner")]
+    project.cached = None
+    _partly_listing(project, "listed 1 server(s); the rest was not listed in the time allowed")
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'hetzner' was only partly listed (listed 1 server(s); the rest "
+        "was not listed in the time allowed); some of its servers were not checked for 'web-1'"
+    ]
+
+
+def test_a_reason_over_several_lines_keeps_the_note_on_one_line(monkeypatch):
+    registry, services = build_registry(monkeypatch, aws={"aws": [], "prod": []})
+    prod = services[("aws", "prod")]
+    prod.cached = None
+    message = "all 2 AWS regions failed: helper said:\nline two\nline three"
+
+    async def failed(force_refresh=False):
+        # As AWSService does: no rows, and the reason with the error behind it.
+        prod.last_fetch_error = message
+        prod.last_fetch_exception = RuntimeError(message)
+        return []
+
+    prod.fetch_instances_cached = failed
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: AWS account 'prod' could not be listed (all 2 AWS regions failed: helper "
+        "said:); its servers were not checked for 'web-1'"
+    ]
+
+
+def test_a_partial_listing_counts_as_checked_until_the_ttl_ends(prod_partly_listed,
+                                                                 monkeypatch):
+    from servonaut.services.accounts import listing_record
+
+    registry, prod, calls = prod_partly_listed
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert prod.record.load().outcome == listing_record.PARTIAL
+
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(calls) == 1
+    assert [row["id"] for row in again.rows] == ["i-2"]
+    # The gap is said on every lookup while the partial listing counts.
+    at = datetime.fromtimestamp(prod.record.load().at).strftime("%H:%M:%S")
+    assert again.notes == [
+        f"Note: AWS account 'prod' was only partly listed at {at} (1 region(s) failed: "
+        "eu-west-1; list only the regions you use (aws.regions or the account's regions) to "
+        "make it complete); some of its servers were not checked for 'web-1'"
+    ]
+    # Once the TTL is over the account is listed again.
+    later = prod.record.load().until + 1
+    monkeypatch.setattr(listing_record.time, "time", lambda: later)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(calls) == 2
+
+
+def test_a_partial_listing_the_provider_saved_is_its_cache(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch, ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}]},
+    )
+    ovh = services[("ovh", "ovh")]
+    ovh.cached = None
+    calls = _partly_listing(ovh, "the dedicated servers could not be read", keeps_cache=True)
+
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert first.notes == [
+        "Note: OVH account 'ovh' was only partly listed (the dedicated servers could not "
+        "be read); some of its servers were not checked for 'web-1'"
+    ]
+    assert again.notes == [] and len(calls) == 1
+    assert ovh.record.load() is None
+
+
+@pytest.mark.parametrize("error", [TimeoutError, ConnectionRefusedError])
+def test_no_answer_is_tried_again_after_account_retry_seconds(staging_never_listed, monkeypatch,
+                                                              error):
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 45
+    staging = services[("hetzner", "staging")]
+    attempts = _failing(staging, "no route", error)
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
+
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(attempts) == 1
+    remembered = staging.record.load()
+    assert remembered.outcome == listing_record.TIMEOUT
+    assert remembered.until - remembered.at == 45
+    assert first.notes == [
+        "Note: Hetzner project 'staging' could not be listed (no answer: no route); "
+        "its servers were not checked for 'web-1'"
+    ]
+    at, until = (datetime.fromtimestamp(t).strftime("%H:%M:%S")
+                 for t in (remembered.at, remembered.until))
+    assert again.notes == [
+        f"Note: Hetzner project 'staging' could not be listed (no answer: no route; at {at}, "
+        f"tried again after {until}); its servers were not checked for 'web-1'"
+    ]
+    monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 2
+
+
+def test_an_error_response_is_tried_again_only_after_the_cache_ttl(staging_never_listed,
+                                                                   monkeypatch):
+    """Credentials or a credential helper do not heal in seconds: no prompt per command."""
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 45
+    staging = services[("hetzner", "staging")]
+    attempts = _failing(staging, "401 Unauthorized")
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
+
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert first.notes == [
+        "Note: Hetzner project 'staging' could not be listed (401 Unauthorized); "
+        "its servers were not checked for 'web-1'"
+    ]
+    remembered = staging.record.load()
+    assert remembered.outcome == listing_record.FAILED
+    # The fake's record counts for its "cache TTL" of 300 s, not the 45 s.
+    assert remembered.until - remembered.at == 300
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0 + 46)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 1
+    monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 2
+
+
+def test_an_error_raised_from_a_timeout_counts_as_no_answer(staging_never_listed):
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    staging = services[("hetzner", "staging")]
+
+    async def wrapped(force_refresh=False):
+        # As HetznerService wraps the SDK's error: the timeout is the cause.
+        try:
+            raise TimeoutError("read timed out")
+        except TimeoutError as exc:
+            raise RuntimeError("Failed to fetch Hetzner servers: read timed out") from exc
+
+    staging.fetch_instances_cached = wrapped
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert staging.record.load().outcome == listing_record.TIMEOUT
+    assert "(no answer: Failed to fetch Hetzner servers: read timed out)" in checked.notes[0]
+
+
+def _raised_from(outer, inner):
+    try:
+        raise inner
+    except BaseException as cause:
+        try:
+            raise outer from cause
+        except BaseException as error:
+            return error
+
+
+@pytest.mark.parametrize("error, no_answer", [
+    (TimeoutError("timed out"), True),
+    (ConnectionResetError("reset"), True),
+    (RuntimeError("401 Unauthorized"), False),
+    (_raised_from(RuntimeError("Failed to fetch"), TimeoutError("timed out")), True),
+    # TLS and proxy failures are connection errors to the HTTP libraries, but
+    # they do not heal in seconds.
+    (__import__("ssl").SSLError("certificate verify failed"), False),
+    (_raised_from(RuntimeError("Failed to fetch"),
+                  __import__("requests").exceptions.SSLError("bad certificate")), False),
+    (__import__("requests").exceptions.ProxyError("proxy refused"), False),
+    (__import__("requests").exceptions.ConnectTimeout("connect timed out"), True),
+])
+def test_which_errors_count_as_no_answer(error, no_answer):
+    from servonaut.services.accounts.headless import _is_no_answer
+
+    assert _is_no_answer(error) is no_answer
+
+
+def test_no_retry_window_tries_no_answer_every_time(staging_never_listed):
+    registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 0
+    attempts = _failing(services[("hetzner", "staging")], "timed out", TimeoutError)
+
+    for _ in range(2):
+        _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(attempts) == 2
+
+
+def test_a_partial_listing_counts_for_the_cache_ttl_not_the_retry_window(prod_partly_listed):
+    registry, prod, _ = prod_partly_listed
+    registry.config.account_retry_seconds = 5
+
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    remembered = prod.record.load()
+    # The fake's record counts for its "cache TTL" of 300 s.
+    assert remembered.until - remembered.at == 300
+
+
+@pytest.mark.parametrize("name, value", [
+    ("account_check_timeout_seconds", "ten"),
+    ("account_retry_seconds", None),
+    ("account_check_timeout_seconds", True),
+])
+def test_a_setting_that_is_not_a_number_falls_back_to_its_default(staging_never_listed, caplog,
+                                                                   name, value):
+    from servonaut.config.schema import AppConfig
+
+    registry, services = staging_never_listed
+    setattr(registry.config, name, value)
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    setting = {"account_check_timeout_seconds": fleet._check_seconds,
+               "account_retry_seconds": fleet._retry_seconds}[name]
+    assert setting() == getattr(AppConfig, name)
+    _run(fleet.checked_rows("web-1"))
+    assert f"Config {name} is not a number" in caplog.text
+    assert services[("hetzner", "staging")].fetches == 1
+
+
+def _stalling(service):
+    """Make *service*'s listing never answer (a blackholed network)."""
+    started = []
+
+    async def stalled(force_refresh=False):
+        started.append(1)
+        await asyncio.sleep(3600)
+
+    service.fetch_instances_cached = stalled
+    return started
+
+
+def _slow_requests(service, count=5, seconds=1.0):
+    """Make *service*'s listing *count* blocking requests of *seconds* each.
+
+    Like an SDK's paging or AWS's region loop, all of them run in one call
+    in the loop's default executor: a thread that cancelling cannot stop.
+    """
+    made = []
+
+    def requests():
+        for _ in range(count):
+            time.sleep(seconds)
+            made.append(1)
+
+    async def listing(force_refresh=False):
+        await asyncio.to_thread(requests)
+        return [dict(row) for row in service.rows]
+
+    service.fetch_instances_cached = listing
+    return made
+
+
+def test_an_abandoned_listing_does_not_hold_the_command_up(staging_never_listed):
+    """The whole asyncio.run returns with the budget, not when the requests end."""
+    registry, services = staging_never_listed
+    made = _slow_requests(services[("hetzner", "staging")])
+    registry.config.account_check_timeout_seconds = 1.5
+
+    begin = time.monotonic()
+    checked = asyncio.run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    elapsed = time.monotonic() - begin
+
+    assert elapsed < 1.5 + 0.7, elapsed
+    assert len(made) < 5
+    assert "timed out after 1.5 s" in checked.notes[0]
+
+
+def test_listings_that_overrun_their_wind_down_raise_nothing(staging_never_listed, monkeypatch,
+                                                            capsys):
+    """A late outcome is dropped quietly, not printed into a running SSH session."""
+    from servonaut.services.accounts import headless
+
+    registry, _ = staging_never_listed
+    registry.config.account_check_timeout_seconds = 0.2
+    monkeypatch.setattr(headless, "_WIND_DOWN_SECONDS", 0.1)
+    raised = []
+    monkeypatch.setattr(threading, "excepthook", raised.append)
+    listings_within = headless._listings_within
+
+    async def stuck_then_done(*args):
+        time.sleep(0.6)  # blocks the listings' own loop past budget and wind-down
+        return await listings_within(*args)
+
+    monkeypatch.setattr(headless, "_listings_within", stuck_then_done)
+
+    checked = asyncio.run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert "could not be listed (timed out after 0.2 s)" in checked.notes[0]
+    for thread in threading.enumerate():
+        if thread.name == "servonaut-listings":
+            thread.join(5)
+    assert raised == []
+    assert "InvalidStateError" not in capsys.readouterr().err
+
+
+def test_never_listed_accounts_are_read_within_the_time_allowed(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "db"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    staging, primary = services[("hetzner", "staging")], services[("hetzner", "hetzner")]
+    staging.cached = primary.cached = None
+    started = _stalling(staging)
+    registry.config.account_check_timeout_seconds = 0.2
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    begin = time.monotonic()
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert time.monotonic() - begin < 2
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' could not be listed (timed out after 0.2 s); "
+        "its servers were not checked for 'web-1'"
+    ]
+    # The project that answered is in; both had half the time to start
+    # requests and half for the last one to answer.
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "1"
+    assert staging.listing_time_limit == primary.listing_time_limit == (0.1, 0.1)
+    # The timeout is remembered: the next command does not wait for it again.
+    begin = time.monotonic()
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert time.monotonic() - begin < 0.2 and len(started) == 1
+    assert "timed out after 0.2 s; at " in again.notes[0]
+
+
+def test_no_time_at_all_reads_nothing_and_says_so(staging_never_listed):
+    registry, services = staging_never_listed
+    registry.config.account_check_timeout_seconds = 0
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert services[("hetzner", "staging")].fetches == 0
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' was not listed (no time allowed); "
+        "its servers were not checked for 'web-1'"
+    ]
+
+
+def test_an_aws_account_without_credentials_is_not_read(monkeypatch):
+    registry, services = build_registry(monkeypatch)
+    aws = services[("aws", "aws")]
+    aws.cached = None
+    aws.credentials = False
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [] and aws.fetches == 0
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "custom-web"
+
+
+@pytest.mark.parametrize("reference", ["aws/web-1", "i-0123456789abcdef0"])
+def test_a_reference_to_an_aws_account_without_credentials_says_so(monkeypatch, reference):
+    registry, services = build_registry(monkeypatch)
+    aws = services[("aws", "aws")]
+    aws.cached = None
+    aws.credentials = False
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows(reference))
+
+    assert checked.notes == [
+        "Note: AWS account 'aws' has no credentials on this machine; "
+        f"its servers were not checked for {reference!r}"
+    ]
+    assert aws.fetches == 0
+
+
+@pytest.mark.parametrize("reference", ["i-1", "I-1", "custom/web-1", "  "])
+def test_an_id_or_custom_reference_reads_nothing(staging_never_listed, reference):
+    registry, services = staging_never_listed
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    checked = _run(fleet.checked_rows(reference))
+
+    assert checked.notes == []
+    assert all(service.fetches == 0 for service in services.values())
+
+
+def test_a_qualified_reference_reads_only_its_account(staging_never_listed):
+    registry, services = staging_never_listed
+    services[("aws", "aws")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    hetzner = _run(fleet.checked_rows("hetzner/db"))
+    assert fleet.resolve("hetzner/db", rows=hetzner.rows)["id"] == "1"
+    assert all(service.fetches == 0 for service in services.values())
+
+    staging = _run(fleet.checked_rows("staging/web-1"))
+    assert fleet.resolve("staging/web-1", rows=staging.rows)["id"] == "2"
+    assert services[("hetzner", "staging")].fetches == 1
+    assert services[("aws", "aws")].fetches == 0
+
+
+# ---------------------------------------------------------------------------
 # InstanceDirectory (MCP tools, relay)
 # ---------------------------------------------------------------------------
 
@@ -179,13 +750,14 @@ def test_one_account_never_listed_makes_its_provider_read(monkeypatch):
     assert "staging/web-1" in str(err.value)
 
 
-def _failing(service, message="Hetzner API unreachable (401)"):
-    """Make *service*'s listing raise, counting the attempts."""
+def _failing(service, message="Hetzner API unreachable (401)", error=RuntimeError):
+    """Make *service*'s listing raise *error* (an error response by default),
+    counting the attempts."""
     attempts = []
 
     async def refused(force_refresh=False):
         attempts.append(1)
-        raise RuntimeError(message)
+        raise error(message)
 
     service.fetch_instances_cached = refused
     return attempts
@@ -246,6 +818,29 @@ def test_a_zero_retry_window_asks_again_on_the_next_lookup(staging_unreachable):
     _run(directory.find("web-1"))
     _run(directory.find("web-1"))
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("value", ["thirty", None, True, [30]])
+def test_a_retry_window_that_is_not_a_number_uses_the_default(staging_unreachable, monkeypatch,
+                                                              caplog, value):
+    """The MCP lookup reads the setting as the CLI does: a bad value never breaks it."""
+    from servonaut.config.schema import AppConfig
+
+    registry, attempts = staging_unreachable
+    registry.config.account_retry_seconds = value
+    clock = [1000.0]
+    monkeypatch.setattr("servonaut.services.accounts.headless.time.monotonic", lambda: clock[0])
+    directory = _directory(registry)
+
+    assert directory._retry_seconds() == AppConfig.account_retry_seconds
+    assert _run(directory.find("web-1"))["id"] == "i-1"
+    clock[0] += AppConfig.account_retry_seconds - 1
+    _run(directory.find("web-1"))
+    assert len(attempts) == 1
+    clock[0] += 2
+    _run(directory.find("web-1"))
+    assert len(attempts) == 2
+    assert "Config account_retry_seconds is not a number" in caplog.text
 
 
 def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
@@ -607,3 +1202,17 @@ def test_cached_fleet_qualified_with_an_account_that_cannot_connect_says_why(sta
             lookup("staging/web-1")
         assert str(err.value) == STAGING_DOWN
     assert fleet.resolve("hetzner/web-1")["id"] == "1"
+
+
+def test_a_name_lookup_notes_accounts_that_cannot_connect(staging_down):
+    fleet = CachedFleet.from_registry(staging_down, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' is not available (No Hetzner Cloud API token "
+        "configured); its servers were not checked for 'web-1'"
+    ]
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "1"
+    # A reference qualified with another account says nothing about it.
+    assert _run(fleet.checked_rows("hetzner/web-1")).notes == []

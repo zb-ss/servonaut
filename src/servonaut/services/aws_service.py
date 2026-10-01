@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
+from botocore.exceptions import BotoCoreError
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
@@ -53,6 +55,15 @@ _KEY_NAME_RE = re.compile(r'^[\w .\-/]{1,255}$')
 _NAME_TAG_RE = re.compile(r'^[^\x00-\x1f\x7f]{1,255}$')
 
 
+# AWS's default region, where most accounts keep servers: listed early.
+_BUSIEST_REGION = "us-east-1"
+
+
+def is_instance_id(value: str) -> bool:
+    """Whether *value* has the shape of an EC2 instance id."""
+    return bool(_INSTANCE_ID_RE.match(value or ""))
+
+
 class AWSService(InstanceServiceInterface):
     """Service for fetching EC2 instances from AWS with caching."""
 
@@ -75,7 +86,15 @@ class AWSService(InstanceServiceInterface):
         # successful fetch. Surfaces (TUI notify, MCP list_instances) read it
         # to tell the operator they are looking at cached data.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
         self._failed_regions: List[str] = []
+        # Set by limit_listing_time: botocore timeouts, and when to stop listing.
+        self._client_config: Any = None
+        self._listing_deadline: Optional[float] = None
+        # Regions of the last listing skipped because its time was up.
+        self._late_regions: List[str] = []
 
     def get_cached_instances(self) -> List[dict]:
         """Return the cached AWS instances synchronously, regardless of TTL.
@@ -95,6 +114,32 @@ class AWSService(InstanceServiceInterface):
         """Whether this account's instance cache is within its TTL."""
         return self.cache_service.is_fresh()
 
+    def has_cached_instances(self) -> bool:
+        """Whether this account was listed on this machine: a usable cache
+        exists, whatever its age (an empty one included)."""
+        return self.cache_service.load_any() is not None
+
+    def listing_record(self):
+        """Where a CLI lookup remembers an incomplete listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self.cache_service.CACHE_PATH, self.cache_service.ttl_seconds)
+
+    def has_credentials(self) -> bool:
+        """Whether this account can be listed on this machine at all, checked offline.
+
+        An account with a profile is set up explicitly. The ambient-chain
+        account is when the environment or the shared files name
+        credentials (:func:`ambient_credentials_configured`); nothing is
+        resolved, so no instance metadata request is made and no
+        ``credential_process`` runs.
+        """
+        if self._uses_profile():
+            return True
+        from servonaut.services.accounts.aws_account import ambient_credentials_configured
+
+        return ambient_credentials_configured()
+
     def _uses_profile(self) -> bool:
         """True when this service's account has credentials of its own.
 
@@ -103,19 +148,41 @@ class AWSService(InstanceServiceInterface):
         """
         return self.account is not None and not self.account.uses_ambient_credentials
 
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
+
+        Every request gets *request_seconds* to connect and to answer, with
+        no retry, and no region is listed once *start_by_seconds* have
+        passed: the regions listed by then come back as a partial listing
+        (never saved as the cache). The CLI builds its services for one
+        command, so the limits reach no other surface.
+        """
+        from botocore.config import Config
+
+        self._client_config = Config(
+            connect_timeout=request_seconds, read_timeout=request_seconds,
+            retries={"total_max_attempts": 1},
+        )
+        self._listing_deadline = time.monotonic() + start_by_seconds
+
+    def _client_kwargs(self) -> dict:
+        return {"config": self._client_config} if self._client_config is not None else {}
+
     def _client(self, service: str, region: Optional[str] = None) -> Any:
         """A boto3 client for this service's account."""
+        kwargs = self._client_kwargs()
         if self._uses_profile():
-            return self.account.client(service, region)
+            return self.account.client(service, region, **kwargs)
         if region:
-            return boto3.client(service, region_name=region)
-        return boto3.client(service)
+            return boto3.client(service, region_name=region, **kwargs)
+        return boto3.client(service, **kwargs)
 
     def _resource(self, service: str, region: str) -> Any:
         """A boto3 resource for this service's account."""
+        kwargs = self._client_kwargs()
         if self._uses_profile():
-            return self.account.resource(service, region)
-        return boto3.resource(service, region_name=region)
+            return self.account.resource(service, region, **kwargs)
+        return boto3.resource(service, region_name=region, **kwargs)
 
     async def fetch_instances(self) -> List[dict]:
         """Fetch instances from AWS across all regions.
@@ -157,6 +224,7 @@ class AWSService(InstanceServiceInterface):
             instances = await self.fetch_instances()
         except AWSFetchError as exc:
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             stale = self.cache_service.load_any()
             if stale is not None:
                 logger.warning(
@@ -170,16 +238,45 @@ class AWSService(InstanceServiceInterface):
         if self._failed_regions:
             # A partial inventory is shown but never persisted: writing it
             # would silently drop every instance in the failed regions.
-            self.last_fetch_error = (
-                f"{len(self._failed_regions)} region(s) failed: "
-                + ", ".join(self._failed_regions)
-            )
+            self.last_fetch_error = self._incomplete_listing()
+            self.last_fetch_exception = None
             logger.warning("AWS fetch incomplete (%s); cache left untouched", self.last_fetch_error)
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self.cache_service.save(instances)
         return instances
+
+    def _likeliest_first(self, regions: List[str]) -> List[str]:
+        """*regions* with this account's default region first, then us-east-1.
+
+        A time-limited listing starts no region after its deadline, so the
+        regions most likely to hold servers are listed first; the rest keep
+        AWS's order.
+        """
+        first = [r for r in (self._default_region(), _BUSIEST_REGION) if r in regions]
+        first = list(dict.fromkeys(first))
+        return first + [region for region in regions if region not in first]
+
+    def _default_region(self) -> Optional[str]:
+        """The region this account's session defaults to (profile or environment)."""
+        try:
+            session = self.account.session() if self._uses_profile() else boto3.session.Session()
+            return session.region_name if session is not None else None
+        except BotoCoreError:
+            return None
+
+    def _incomplete_listing(self) -> str:
+        """Why the last listing is partial: the regions that failed, and the late ones."""
+        late = set(self._late_regions)
+        failed = [region for region in self._failed_regions if region not in late]
+        parts = []
+        if failed:
+            parts.append(f"{len(failed)} region(s) failed: " + ", ".join(failed))
+        if late:
+            parts.append(f"{len(late)} region(s) not listed in the time allowed")
+        return "; ".join(parts)
 
     def _fetch_all_regions(self) -> List[dict]:
         """Blocking fetch of instances across all AWS regions.
@@ -188,6 +285,7 @@ class AWSService(InstanceServiceInterface):
             List of instance dictionaries.
         """
         self._failed_regions = []
+        self._late_regions = []
         configured = list(self.account.regions) if self.account is not None else []
         if configured:
             regions = configured
@@ -198,10 +296,16 @@ class AWSService(InstanceServiceInterface):
             except Exception as e:
                 logger.error(f"Error fetching AWS regions: {e}")
                 raise AWSFetchError(f"could not list AWS regions: {e}") from e
+            regions = self._likeliest_first(regions)
 
         instances: List[dict] = []
         last_error: Optional[Exception] = None
         for region in regions:
+            if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
+                self._failed_regions.append(region)
+                self._late_regions.append(region)
+                last_error = TimeoutError("not listed in the time allowed")
+                continue
             try:
                 logger.debug(f"Fetching instances from region: {region}")
                 instances.extend(self._fetch_region(region))

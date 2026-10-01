@@ -1397,6 +1397,11 @@ class AppConfig:
         account_retry_seconds: With several accounts of a provider, how long
             an account that failed to answer a server lookup is left alone
             before it is asked again (default: 30)
+        account_check_timeout_seconds: How long a CLI server lookup waits,
+            in all, for the accounts it lists because they were never listed
+            on this machine; each of their API requests gets as long. An
+            account not listed in time is noted and left alone for its cache
+            TTL; 0 lists none of them (default: 10)
         default_scan_paths: Default paths to scan on all instances
         scan_rules: List of conditional scan rules
         connection_profiles: List of SSH connection profiles
@@ -1412,6 +1417,7 @@ class AppConfig:
     default_username: str = "ec2-user"
     cache_ttl_seconds: int = 3600
     account_retry_seconds: int = 30
+    account_check_timeout_seconds: int = 10
     default_scan_paths: List[str] = field(default_factory=lambda: ["~/"])
     scan_rules: List[ScanRule] = field(default_factory=list)
     connection_profiles: List[ConnectionProfile] = field(default_factory=list)

@@ -8,15 +8,18 @@ instead of being swallowed and reported as "instance not found".
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from servonaut.config.schema import AppConfig
+from servonaut.services.accounts import aws_account
 from servonaut.services.accounts.headless import CachedFleet
 from servonaut.services.aws_service import AWSService
 from servonaut.services.cache_service import CacheService
@@ -76,11 +79,185 @@ class TestAWSServiceGetCachedInstances:
         assert _aws_service().get_cached_instances() == []
 
 
+class TestAWSServiceNeverListed:
+    """What tells the CLI an AWS account was never listed on this machine."""
+
+    def test_a_stale_or_empty_cache_counts_as_listed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, aws_cache: Path,
+    ) -> None:
+        assert _aws_service().has_cached_instances()
+        aws_cache.write_text(json.dumps({"timestamp": datetime.now().isoformat(), "instances": []}))
+        assert _aws_service().has_cached_instances()
+
+    @pytest.mark.parametrize("content", [None, "{not json", "[]"])
+    def test_a_missing_or_unreadable_cache_does_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content,
+    ) -> None:
+        cache_path = tmp_path / "cache.json"
+        if content is not None:
+            cache_path.write_text(content)
+        monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
+        assert not _aws_service().has_cached_instances()
+
+
+@pytest.fixture
+def offline_aws(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """No AWS environment, shared files under tmp_path, and no way to resolve.
+
+    Resolving credentials (instance metadata, a credential_process, SSO)
+    or opening any connection fails the test.
+    """
+    import socket
+
+    import boto3
+
+    for name in list(os.environ):
+        if name.startswith("AWS_"):
+            monkeypatch.delenv(name)
+    files = SimpleNamespace(credentials=tmp_path / "credentials", config=tmp_path / "config",
+                            sysfs=tmp_path / "sysfs")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(files.credentials))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(files.config))
+    # Not an EC2 instance, whatever machine runs the tests.
+    monkeypatch.setattr(aws_account, "_SYSFS_ROOT", files.sysfs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the presence check must stay offline")
+
+    monkeypatch.setattr(boto3.session.Session, "get_credentials", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    return files
+
+
+class TestAWSCredentialsCheckedOffline:
+    """Whether AWS is set up here is read from the environment and files only."""
+
+    def test_nothing_set_up(self, offline_aws) -> None:
+        assert not _aws_service().has_credentials()
+
+    @pytest.mark.parametrize("variable", [
+        "AWS_ACCESS_KEY_ID", "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+    ])
+    def test_an_environment_variable(self, offline_aws, monkeypatch, variable) -> None:
+        monkeypatch.setenv(variable, "x")
+        assert _aws_service().has_credentials()
+
+    def test_keys_in_the_shared_credentials_file(self, offline_aws) -> None:
+        offline_aws.credentials.write_text("[other]\naws_access_key_id = AKIDEXAMPLE\n")
+        assert not _aws_service().has_credentials()
+        offline_aws.credentials.write_text("[default]\naws_access_key_id = AKIDEXAMPLE\n")
+        assert _aws_service().has_credentials()
+
+    @pytest.mark.parametrize("entry", [
+        "sso_session = corp", "sso_start_url = https://sso.invalid/start",
+        "role_arn = example-role", "login_session = s",
+    ])
+    def test_credential_keys_in_the_config_file(self, offline_aws, entry) -> None:
+        offline_aws.config.write_text(f"[default]\nregion = eu-west-1\n{entry}\n")
+        assert _aws_service().has_credentials()
+
+    def test_a_region_alone_is_not_credentials(self, offline_aws) -> None:
+        offline_aws.config.write_text("[default]\nregion = eu-west-1\n")
+        assert not _aws_service().has_credentials()
+
+    def test_a_credential_process_is_never_run(self, offline_aws, tmp_path) -> None:
+        marker = tmp_path / "ran"
+        offline_aws.config.write_text(
+            f"[default]\ncredential_process = /bin/sh -c 'touch {marker}'\n"
+        )
+        assert _aws_service().has_credentials()
+        assert not marker.exists()
+
+    def test_a_file_botocore_cannot_parse_counts_as_set_up(self, offline_aws) -> None:
+        # Listing then says what is wrong with it.
+        offline_aws.config.write_text("[default\nregion = eu-west-1\n")
+        assert _aws_service().has_credentials()
+
+    def test_a_file_that_is_not_utf8_counts_as_set_up(self, offline_aws, monkeypatch) -> None:
+        def undecodable(path, *args, **kwargs):
+            raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+
+        offline_aws.credentials.write_bytes(b"[default]\naws_access_key_id = caf\xe9\n")
+        monkeypatch.setattr(aws_account, "raw_config_parse", undecodable)
+        assert _aws_service().has_credentials()
+
+    @staticmethod
+    def _sysfs(root, files) -> None:
+        for relative, content in files.items():
+            marker = root / relative
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(content)
+
+    @pytest.mark.parametrize("files", [
+        {"sys/devices/virtual/dmi/id/sys_vendor": "Amazon EC2\n"},
+        {"sys/devices/virtual/dmi/id/board_asset_tag": "i-0123456789abcdef0\n"},
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_version": "4.11.amazon\n"},
+        {"sys/hypervisor/uuid": "EC2-FAKE-HYPERVISOR-ID\n",
+         "sys/devices/virtual/dmi/id/bios_vendor": "Amazon EC2\n"},
+    ])
+    def test_an_ec2_instance_is_set_up(self, offline_aws, monkeypatch, files) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        self._sysfs(offline_aws.sysfs, files)
+
+        assert aws_account.runs_on_ec2()
+        assert _aws_service().has_credentials()
+
+    @pytest.mark.parametrize("files", [
+        {"sys/devices/virtual/dmi/id/sys_vendor": "Microsoft Corporation\n"},
+        {"sys/devices/virtual/dmi/id/board_asset_tag": "Default string\n"},
+        {"sys/hypervisor/uuid": "xen-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n"},
+        # A random Xen UUID can start with "ec2": not without firmware naming Amazon.
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n"},
+        # Every Xen guest reports a Xen vendor, on EC2 or not.
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_version": "4.4.1\n"},
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "QEMU\n"},
+    ])
+    def test_another_machine_is_not(self, offline_aws, monkeypatch, files) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        self._sysfs(offline_aws.sysfs, files)
+
+        assert not aws_account.runs_on_ec2()
+
+    def test_the_ec2_check_is_linux_only(self, offline_aws, monkeypatch) -> None:
+        marker = offline_aws.sysfs / "sys/devices/virtual/dmi/id/sys_vendor"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("Amazon EC2\n")
+        monkeypatch.setattr(aws_account.sys, "platform", "darwin")
+
+        assert not aws_account.runs_on_ec2()
+
+    def test_an_unreadable_marker_is_ignored(self, offline_aws, monkeypatch) -> None:
+        monkeypatch.setattr(aws_account.sys, "platform", "linux")
+        # A directory where the file should be: reading it fails.
+        (offline_aws.sysfs / "sys/devices/virtual/dmi/id/sys_vendor").mkdir(parents=True)
+
+        assert not aws_account.runs_on_ec2()
+
+    def test_an_account_with_a_profile_is_set_up(self, offline_aws) -> None:
+        from servonaut.config.accounts import AccountRef
+        from servonaut.services.accounts.aws_account import AWSAccountContext
+
+        account = AWSAccountContext(AccountRef("aws", "prod", False), "prod")
+        assert AWSService(CacheService(ttl_seconds=60), account=account).has_credentials()
+
+
 class TestCliFindsCachedAwsInstances:
     def test_servers_cli(self, aws_cache: Path) -> None:
         from servonaut.cli.servers import _find_instance, _load_all_instances
 
-        instances = _load_all_instances(AppConfig(cache_ttl_seconds=60), _custom_service())
+        instances = asyncio.run(
+            _load_all_instances(AppConfig(cache_ttl_seconds=60), _custom_service(), "web-1"),
+        )
         assert _find_instance("web-1", instances) == _LISTED
 
     def test_memory_cli_list(self, aws_cache: Path) -> None:
@@ -100,7 +277,7 @@ class TestCliFindsCachedAwsInstances:
         from servonaut.cli.ssh import _find_instance, _load_instances
 
         config = AppConfig(cache_ttl_seconds=60)
-        instances = _load_instances(_custom_service(), config)
+        instances = asyncio.run(_load_instances(_custom_service(), config, "web-1"))
         assert _find_instance(instances, "web-1") == [_LISTED]
 
 
@@ -123,7 +300,11 @@ class TestCacheReadBugsSurface:
 
 
 class TestSshCliSurvivesOddCacheFiles:
-    """``servonaut ssh`` reads cache.json directly; odd shapes must not crash it."""
+    """``servonaut ssh`` reads cache.json directly; odd shapes must not crash it.
+
+    A cache that cannot be read counts as never written: the account is
+    listed once (stubbed here) to find out which servers it has.
+    """
 
     @pytest.mark.parametrize("payload", [
         [],
@@ -140,7 +321,11 @@ class TestSshCliSurvivesOddCacheFiles:
         monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
 
         config = AppConfig(cache_ttl_seconds=60)
-        assert _load_instances(_custom_service(), config) == []
+        listing = AsyncMock(return_value=[])
+        monkeypatch.setattr(AWSService, "has_credentials", lambda self: True)
+        monkeypatch.setattr(AWSService, "fetch_instances", listing)
+        assert asyncio.run(_load_instances(_custom_service(), config, "web-1")) == []
+        listing.assert_awaited_once()
 
     def test_aware_timestamp_still_finds_instance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -157,5 +342,5 @@ class TestSshCliSurvivesOddCacheFiles:
         monkeypatch.setattr(CacheService, "CACHE_PATH", cache_path)
 
         config = AppConfig(cache_ttl_seconds=60)
-        instances = _load_instances(_custom_service(), config)
+        instances = asyncio.run(_load_instances(_custom_service(), config, "web-1"))
         assert _find_instance(instances, "web-1") == [_LISTED]

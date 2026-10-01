@@ -20,6 +20,7 @@ from servonaut.cli.ssh import (
     _EXIT_BW_ERROR,
     _EXIT_SUCCESS,
 )
+from servonaut.config.schema import AppConfig, ConnectionProfile, ConnectionRule
 from servonaut.services.bw_resolver import (
     BwCliMissingError,
     BwSessionMissingError,
@@ -505,6 +506,127 @@ class TestHandleSshCommand:
 # ---------------------------------------------------------------------------
 # Hints must point at commands that exist
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Connection rules: the profile the TUI and the MCP tools apply
+# ---------------------------------------------------------------------------
+
+def _rule_config(**profile: Any) -> AppConfig:
+    """A config whose one rule routes servers named ``app-*`` through a bastion."""
+    config = AppConfig(default_username="ec2-user")
+    config.connection_profiles = [ConnectionProfile(
+        name="via-bastion", bastion_host="bastion-1", bastion_user="hop", **profile,
+    )]
+    config.connection_rules = [ConnectionRule(
+        name="private", match_conditions={"name_contains": "app-"}, profile_name="via-bastion",
+    )]
+    return config
+
+
+def _app_instance(**extra: Any) -> Dict[str, Any]:
+    return {"id": "i-0a1b2c3d4e5f60718", "name": "app-1", "provider": "aws",
+            "region": "eu-west-1", "public_ip": "9.9.9.9", "private_ip": "10.0.0.7", **extra}
+
+
+def _ssh_argv(args, instance, config, resolved=None) -> List[str]:
+    """The argv ``servonaut ssh`` runs, built by the real SSHService."""
+    from servonaut.cli import ssh as ssh_mod
+    from servonaut.services.ssh_service import SSHService
+
+    config_manager = MagicMock()
+    config_manager.get.return_value = config
+    headless = (config, MagicMock(is_authenticated=True), MagicMock(), MagicMock(),
+                MagicMock(), SSHService(config_manager), MagicMock())
+    with (
+        patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+        patch.object(ssh_mod, "_load_instances", return_value=[instance]),
+        patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+        patch("servonaut.services.bw_resolver.BwResolver") as MockBwResolver,
+        patch("servonaut.utils.ephemeral_key.ephemeral_ssh_key") as mock_eph,
+        patch("subprocess.run") as mock_subproc,
+    ):
+        MockResolver.return_value.resolve = AsyncMock(
+            return_value=resolved or _resolved_local("/keys/app.pem"),
+        )
+        MockBwResolver.return_value.resolve_ssh_key.return_value = "key body"
+        mock_eph.return_value.__enter__ = MagicMock(return_value="/tmp/ephemeral-key")
+        mock_eph.return_value.__exit__ = MagicMock(return_value=False)
+        mock_subproc.return_value = MagicMock(returncode=0)
+        assert ssh_mod.handle_ssh_command(args) == _EXIT_SUCCESS
+    return mock_subproc.call_args.args[0]
+
+
+def _options(argv: List[str]) -> List[str]:
+    return [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "-o"]
+
+
+class TestConnectionRules:
+    def test_without_a_matching_rule_it_connects_directly(self):
+        argv = _ssh_argv(_make_args("web-1"), _app_instance(name="web-1"), _rule_config())
+
+        assert argv[-1] == "ec2-user@9.9.9.9"
+        assert "-J" not in argv
+        assert not any(o.startswith("ProxyCommand=") for o in _options(argv))
+        assert "HostKeyAlias=aws:eu-west-1:i-0a1b2c3d4e5f60718" in _options(argv)
+
+    def test_a_matching_rule_routes_through_its_bastion(self):
+        config = _rule_config(username="deploy", extra_ssh_options=["HostKeyAlgorithms=+ssh-rsa"])
+
+        argv = _ssh_argv(_make_args("app-1"), _app_instance(), config)
+
+        # The private address, reached through the bastion hop.
+        assert argv[-1] == "deploy@10.0.0.7"
+        proxy = [o for o in _options(argv) if o.startswith("ProxyCommand=")]
+        assert len(proxy) == 1 and "hop@bastion-1" in proxy[0]
+        options = _options(argv)
+        alias = next(i for i, o in enumerate(options) if o.startswith("HostKeyAlias="))
+        assert alias < options.index("HostKeyAlgorithms=+ssh-rsa")
+        assert argv[argv.index("-i") + 1] == "/keys/app.pem"
+
+    def test_explicit_user_and_port_still_win(self):
+        config = _rule_config(username="deploy")
+
+        argv = _ssh_argv(_make_args("app-1", user="root", port=2222), _app_instance(), config)
+
+        assert argv[-1] == "root@10.0.0.7"
+        assert argv[argv.index("-p") + 1] == "2222"
+        assert any(o.startswith("ProxyCommand=") for o in _options(argv))
+
+    def test_a_bitwarden_key_is_routed_the_same_way(self):
+        argv = _ssh_argv(
+            _make_args("app-1"), _app_instance(), _rule_config(), _resolved_personal("uuid-bw"),
+        )
+
+        assert argv[-1] == "ec2-user@10.0.0.7"
+        assert argv[argv.index("-i") + 1] == "/tmp/ephemeral-key"
+        assert any(o.startswith("ProxyCommand=") for o in _options(argv))
+
+    def test_a_custom_server_keeps_its_own_username_and_options(self):
+        custom = {"id": "custom-app-c", "name": "app-c", "provider": "custom",
+                  "public_ip": "10.0.0.9", "private_ip": "10.0.0.9", "username": "admin",
+                  "port": 2200, "is_custom": True,
+                  "extra_ssh_options": ["ServerAliveCountMax=9"]}
+
+        argv = _ssh_argv(_make_args("app-c"), custom, _rule_config(username="deploy"))
+
+        assert argv[-1] == "admin@10.0.0.9"
+        assert argv[argv.index("-p") + 1] == "2200"
+        assert "ServerAliveCountMax=9" in _options(argv)
+        assert any(o.startswith("ProxyCommand=") for o in _options(argv))
+
+
+class TestResolveUsernameWithARule:
+    def test_the_rule_username_outranks_a_cloud_rows_default(self):
+        profile = ConnectionProfile(name="p", username="deploy")
+        hetzner = _make_instance(username="root")
+        assert _resolve_username(_make_args(), hetzner, _make_config(), profile) == "deploy"
+        assert _resolve_username(_make_args(user="me"), hetzner, _make_config(), profile) == "me"
+
+    def test_a_custom_server_ignores_the_rule_username(self):
+        profile = ConnectionProfile(name="p", username="deploy")
+        custom = {**_make_instance(username="admin"), "is_custom": True}
+        assert _resolve_username(_make_args(), custom, _make_config(), profile) == "admin"
+
 
 class TestHintsNameRealCommands:
     """``servonaut ssh`` error hints may only suggest commands a user can run."""

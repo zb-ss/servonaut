@@ -33,6 +33,7 @@ instead of leaking a hcloud-internal exception.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.atomic_file import write_json_atomic
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 
 if TYPE_CHECKING:
@@ -125,6 +127,18 @@ def _validate_resource_name(name: str, kind: str = 'resource') -> str:
     return name
 
 
+def _without_sdk_retries(client: Any) -> None:
+    """Make every request of an hcloud *client* a single attempt.
+
+    hcloud retries timeouts and gateway errors itself and has no public
+    setting for it, so its private ``_retry_max_retries`` is set; a guard
+    test fails when hcloud moves it.
+    """
+    for base in (getattr(client, "_client", None), getattr(client, "_client_hetzner", None)):
+        if base is not None and hasattr(base, "_retry_max_retries"):
+            base._retry_max_retries = 0
+
+
 class HetznerService:
     """Service for Hetzner Cloud instances + lifecycle (create / destroy)."""
 
@@ -141,12 +155,22 @@ class HetznerService:
         self._config = config
         self._allow_ambient_token = allow_ambient_token
         self._client = None  # lazy
+        # Seconds per API request (connect and read); None is the SDK default.
+        self._request_timeout: Optional[float] = None
+        # No page is requested after this (time.monotonic); None: no limit.
+        self._listing_deadline: Optional[float] = None
+        # Servers the last listing found before its time was up; None when
+        # it was complete.
+        self._listed_in_time: Optional[int] = None
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
         # Why the last refresh failed while cached servers were returned in
         # its place, or None after a successful fetch. Read by the instance
         # list and MCP list_instances so stale rows are never reported as new.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
 
     # ------------------------------------------------------------------
     # Token resolution
@@ -241,6 +265,13 @@ class HetznerService:
         # Only pass an endpoint when overridden, so the default stays the SDK's.
         endpoint_kwargs = {"api_endpoint": api_endpoint} if api_endpoint else {}
         token = self.resolve_token()
+        # hcloud sets no timeout by default; older releases take none at all.
+        timeout_kwargs = (
+            {"timeout": self._request_timeout}
+            if self._request_timeout is not None
+            and "timeout" in inspect.signature(Client).parameters
+            else {}
+        )
         self._client = Client(
             token=token,
             application_name="servonaut",
@@ -249,8 +280,25 @@ class HetznerService:
             # set application_version conservatively here.
             application_version="0",
             **endpoint_kwargs,
+            **timeout_kwargs,
         )
+        if self._request_timeout is not None:
+            _without_sdk_retries(self._client)
         return self._client
+
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
+
+        Every API request gets *request_seconds* to connect and to answer,
+        once: hcloud's own retries (up to five, with up to about 30 s of
+        backoff) are turned off. No page is requested once *start_by_seconds*
+        have passed: the servers listed by then come back as a partial
+        listing (never saved as the cache). The CLI builds its services for
+        one command, so the limits reach no other surface.
+        """
+        self._request_timeout = request_seconds
+        self._listing_deadline = time.monotonic() + start_by_seconds
+        self._client = None
 
     # Public access for callers (tests, MCP tools) that want the raw
     # client. Lazy init still applies.
@@ -310,6 +358,7 @@ class HetznerService:
             instances = await self.fetch_instances()
         except HetznerError as exc:
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             # Don't poison the cache — keep the previous good entries.
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -320,7 +369,18 @@ class HetznerService:
                 return stale
             raise
 
+        if self._listed_in_time is not None:
+            # A partial listing is returned but never saved: the cache would
+            # lose every server not listed in time.
+            self.last_fetch_error = (
+                f"listed {self._listed_in_time} server(s); "
+                "the rest was not listed in the time allowed"
+            )
+            self.last_fetch_exception = None
+            return instances
+
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self._save_cache(instances)
         return instances
 
@@ -332,6 +392,17 @@ class HetznerService:
         """
         cached = self._load_cache(ignore_ttl=True)
         return cached if cached is not None else []
+
+    def has_cached_instances(self) -> bool:
+        """Whether this project was listed on this machine: a usable cache
+        exists, whatever its age (an empty one included)."""
+        return self._load_cache(ignore_ttl=True) is not None
+
+    def listing_record(self):
+        """Where a CLI lookup remembers a failed listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self._cache_path, self._cache_ttl_seconds)
 
     def is_cache_fresh(self) -> bool:
         """Whether the on-disk cache is within TTL."""
@@ -1055,7 +1126,26 @@ class HetznerService:
 
     def _fetch_servers_blocking(self) -> List[Any]:
         client = self._get_client()
-        return client.servers.get_all()
+        self._listed_in_time = None
+        deadline = self._listing_deadline
+        if deadline is None:
+            return client.servers.get_all()
+        # Page by page, as get_all does, but no page after the deadline.
+        servers: List[Any] = []
+        page: Optional[int] = 1
+        while page:
+            if time.monotonic() >= deadline:
+                if not servers:
+                    raise TimeoutError("nothing was listed in the time allowed")
+                self._listed_in_time = len(servers)
+                break
+            result, meta = client.servers.get_list(
+                page=page, per_page=client.servers.max_per_page,
+            )
+            servers.extend(result or [])
+            pagination = getattr(meta, "pagination", None)
+            page = getattr(pagination, "next_page", None)
+        return servers
 
     def _lookup_server_blocking(self, client, identifier: str):
         # Numeric → ID lookup; string → name lookup. Hetzner server
@@ -1258,34 +1348,19 @@ class HetznerService:
         return instances
 
     def _save_cache(self, instances: List[dict]) -> None:
-        """Atomically write the cache: write to ``<path>.tmp`` then rename.
+        """Atomically write the cache, mode ``0o600`` (see :func:`write_json_atomic`).
 
         Atomicity matters because :meth:`_load_cache` may run
-        concurrently from another worker / sub-process. A non-atomic
-        truncate-then-write would briefly expose an empty / partial
-        JSON file. ``os.replace`` is atomic on POSIX and Windows for
-        same-filesystem renames.
-
-        File mode is forced to ``0o600`` via ``os.open`` to bypass
-        umask (which could be 0o022 by default), and ``O_NOFOLLOW`` to
-        defeat symlink-redirect attacks against the cache path.
+        concurrently from another worker / sub-process, and two processes
+        may save at once: each writes its own temporary file, so neither
+        can expose a torn JSON file.
         """
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
-            tmp_path = self._cache_path.with_suffix(
-                self._cache_path.suffix + '.tmp',
-            )
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            if hasattr(os, 'O_NOFOLLOW'):
-                flags |= os.O_NOFOLLOW
-            fd = os.open(str(tmp_path), flags, 0o600)
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
-            os.replace(str(tmp_path), str(self._cache_path))
+            write_json_atomic(self._cache_path, data, sweep_older_than=self._cache_ttl_seconds)
         except OSError as exc:
             logger.warning("Failed to save Hetzner cache: %s", exc)
 

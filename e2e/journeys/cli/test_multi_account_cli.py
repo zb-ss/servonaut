@@ -11,7 +11,8 @@ token reaches Hetzner. ``destroy`` acts in the project whose servers include
 the one named, and refuses the shared name with the candidates instead of
 guessing. The other commands that take a server (``servers verify``,
 ``ssh``) resolve ``staging/web-1`` to that project's server and refuse the
-bare shared name.
+bare shared name, even while one project was never listed on this machine:
+that project is listed once, then its cache answers.
 """
 
 from __future__ import annotations
@@ -221,3 +222,24 @@ def test_commands_taking_a_server_resolve_the_qualified_name(journey, fake_cloud
     assert f"root@{STAGING_WEB_1.public_ip}" in probe
     reports = fake_cloud.requests(f"/api/v1/me/instances/hetzner/{server_id}/ssh-verify-report")
     assert [r["body"]["status"] for r in reports] == ["verified"]
+
+
+def test_a_project_never_listed_is_read_before_a_name_counts_as_unique(
+    journey, fake_cloud, providers, cli,
+):
+    _projects(providers)
+    sandbox = _home(journey, fake_cloud)
+    # AWS and the primary project were listed on this machine, staging never.
+    HomeSeeder(sandbox.home).cache()
+    assert cli(sandbox, "hetzner", "list", "--account", PRIMARY).returncode == 0
+    assert _accounts(providers, method="GET", path="/servers") == [PRIMARY]
+
+    for _ in range(2):
+        ambiguous = cli(sandbox, "ssh", PRIMARY_WEB_1.name)
+        assert ambiguous.returncode == 5, ambiguous.describe()
+        for reference in (f"{PRIMARY}/{PRIMARY_WEB_1.name}", f"{STAGING}/{STAGING_WEB_1.name}"):
+            assert reference in ambiguous.stderr
+        assert "Note:" not in ambiguous.stderr
+    assert journey.shims.calls("ssh") == []
+    # staging was listed once; its cache answered the second time.
+    assert _accounts(providers, method="GET", path="/servers") == [PRIMARY, STAGING]
