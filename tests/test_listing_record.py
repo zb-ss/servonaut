@@ -39,6 +39,14 @@ def test_it_counts_for_the_ttl_only(tmp_path):
     assert record.load(now=999.0) is None
 
 
+def test_a_failure_counts_for_the_time_the_caller_says(tmp_path):
+    record = ListingRecord.beside(tmp_path / "cache.json", 3600)
+    record.save(FAILED, "401 Unauthorized", [], now=1000.0, keep_seconds=30)
+
+    assert record.load(now=1029.0).until == 1030.0
+    assert record.load(now=1030.0) is None
+
+
 @pytest.mark.parametrize("content", ["{not json", "[]", '{"outcome": "odd", "at": 1, "rows": []}',
                                      '{"outcome": "failed", "at": "x", "rows": []}'])
 def test_an_unusable_record_is_ignored(tmp_path, content):

@@ -314,10 +314,12 @@ def test_a_partial_listing_the_provider_saved_is_its_cache(monkeypatch):
     assert ovh.record.load() is None
 
 
-def test_a_failed_listing_is_not_retried_until_the_ttl_ends(staging_never_listed, monkeypatch):
+def test_a_failed_listing_is_tried_again_after_account_retry_seconds(staging_never_listed,
+                                                                     monkeypatch):
     from servonaut.services.accounts import listing_record
 
     registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 45
     staging = services[("hetzner", "staging")]
     attempts = _failing(staging, "401 Unauthorized")
     monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
@@ -328,7 +330,8 @@ def test_a_failed_listing_is_not_retried_until_the_ttl_ends(staging_never_listed
     assert len(attempts) == 1
     remembered = staging.record.load()
     assert remembered.outcome == listing_record.FAILED
-    at, until = (datetime.fromtimestamp(t).strftime("%H:%M")
+    assert remembered.until - remembered.at == 45
+    at, until = (datetime.fromtimestamp(t).strftime("%H:%M:%S")
                  for t in (remembered.at, remembered.until))
     assert again.notes == [
         f"Note: Hetzner project 'staging' could not be listed (401 Unauthorized; at {at}, "
@@ -337,6 +340,49 @@ def test_a_failed_listing_is_not_retried_until_the_ttl_ends(staging_never_listed
     monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
     _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
     assert len(attempts) == 2
+
+
+def test_no_retry_window_tries_a_failed_listing_every_time(staging_never_listed):
+    registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 0
+    attempts = _failing(services[("hetzner", "staging")], "401 Unauthorized")
+
+    for _ in range(2):
+        _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(attempts) == 2
+
+
+def test_a_partial_listing_counts_for_the_cache_ttl_not_the_retry_window(prod_partly_listed):
+    registry, prod, _ = prod_partly_listed
+    registry.config.account_retry_seconds = 5
+
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    remembered = prod.record.load()
+    # The fake's record counts for its "cache TTL" of 300 s.
+    assert remembered.until - remembered.at == 300
+
+
+@pytest.mark.parametrize("name, value", [
+    ("account_check_timeout_seconds", "ten"),
+    ("account_retry_seconds", None),
+    ("account_check_timeout_seconds", True),
+])
+def test_a_setting_that_is_not_a_number_falls_back_to_its_default(staging_never_listed, caplog,
+                                                                   name, value):
+    from servonaut.config.schema import AppConfig
+
+    registry, services = staging_never_listed
+    setattr(registry.config, name, value)
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    setting = {"account_check_timeout_seconds": fleet._check_seconds,
+               "account_retry_seconds": fleet._retry_seconds}[name]
+    assert setting() == getattr(AppConfig, name)
+    _run(fleet.checked_rows("web-1"))
+    assert f"Config {name} is not a number" in caplog.text
+    assert services[("hetzner", "staging")].fetches == 1
 
 
 def _stalling(service):

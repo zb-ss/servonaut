@@ -440,8 +440,9 @@ A name is checked against the servers of every account. An account that was
 never listed on this machine (it has no cache yet) is listed once first, so
 its servers count too, within `account_check_timeout_seconds` (see
 [Configuration](configuration.md)). An account that cannot be listed gets a
-`Note:` line on stderr and is not tried again until its cache TTL ends. The
-same applies to `servonaut servers verify` and `servonaut memory`.
+`Note:` line on stderr and is not tried again for `account_retry_seconds`;
+one listed only in part counts as listed until its cache TTL ends. The same
+applies to `servonaut servers verify` and `servonaut memory`.
 
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like

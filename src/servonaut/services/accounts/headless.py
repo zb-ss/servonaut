@@ -302,11 +302,12 @@ class CachedFleet:
         all; a single account of its provider as much as one of several),
         read once through its normal cached fetch. That writes its cache, so
         later commands stay offline, and a name no longer passes as unique
-        because another server of that name was never listed. A listing
-        that failed, or was too incomplete to be saved as the cache, is
-        remembered for the cache's TTL instead (see :mod:`.listing_record`):
-        the account is not read again meanwhile, and an incomplete listing's
-        servers count as checked.
+        because another server of that name was never listed. A listing too
+        incomplete to be saved as the cache is remembered for the cache's
+        TTL instead, its servers counting as checked; a failed one for
+        ``account_retry_seconds`` (see :mod:`.listing_record`). The account
+        is not read again meanwhile. The listings run together, within
+        ``account_check_timeout_seconds``.
 
         Nothing is read for an id a cached row has or a ``custom/...``
         reference; ``<account>/...`` reads only that account. Nor is an
@@ -333,7 +334,9 @@ class CachedFleet:
                         binding.ref, "has no credentials on this machine", needle,
                     ))
         fetched: List[dict] = []
-        for read, note in await _checked_listings(listings, needle, self._check_seconds()):
+        for read, note in await _checked_listings(
+            listings, needle, self._check_seconds(), self._retry_seconds(),
+        ):
             fetched.extend(read)
             if note:
                 notes.append(note)
@@ -350,13 +353,11 @@ class CachedFleet:
 
     def _check_seconds(self) -> float:
         """How long the never-listed accounts may take in all (config)."""
-        from servonaut.config.schema import AppConfig
+        return _seconds_setting(self._registry, "account_check_timeout_seconds")
 
-        config = getattr(self._registry, "config", None)
-        value = getattr(
-            config, "account_check_timeout_seconds", AppConfig.account_check_timeout_seconds,
-        )
-        return max(0.0, float(value))
+    def _retry_seconds(self) -> float:
+        """How long a failed listing is left alone before it is tried again (config)."""
+        return _seconds_setting(self._registry, "account_retry_seconds")
 
     def _unavailable_notes(self, reference: str) -> List[str]:
         """A note for every configured account that cannot connect."""
@@ -720,7 +721,7 @@ class _DaemonExecutor(ThreadPoolExecutor):
 
 
 async def _checked_listings(
-    listings: List[Tuple[Any, bool]], reference: str, seconds: float,
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float, retry_seconds: float,
 ) -> List[Tuple[List[dict], Optional[str]]]:
     """:func:`_checked_listing` of every ``(binding, qualified)``, together, in *seconds*.
 
@@ -744,7 +745,7 @@ async def _checked_listings(
         loop.set_default_executor(_DaemonExecutor())
         try:
             done.set_result(loop.run_until_complete(
-                _listings_within(listings, reference, seconds),
+                _listings_within(listings, reference, seconds, retry_seconds),
             ))
         except BaseException as exc:  # noqa: BLE001 - handed to the waiter
             done.set_exception(exc)
@@ -765,7 +766,7 @@ async def _checked_listings(
 
 
 async def _listings_within(
-    listings: List[Tuple[Any, bool]], reference: str, seconds: float,
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float, retry_seconds: float,
 ) -> List[Tuple[List[dict], Optional[str]]]:
     """The listings of :func:`_checked_listings`, on its own loop.
 
@@ -774,7 +775,8 @@ async def _listings_within(
     ``limit_listing_time``), so what it listed by then comes back as a
     partial listing. A listing still running when the time is up is
     abandoned: its account gets a note, and the timeout is remembered like
-    any failure, so the next commands do not wait for it again.
+    any failure: the next commands do not wait for it again until
+    *retry_seconds* have passed.
     """
     from servonaut.services.accounts.listing_record import FAILED
 
@@ -784,7 +786,7 @@ async def _listings_within(
         if callable(limit):
             limit(request_seconds, seconds - request_seconds)
     tasks = [
-        asyncio.ensure_future(_checked_listing(binding, qualified, reference))
+        asyncio.ensure_future(_checked_listing(binding, qualified, reference, retry_seconds))
         for binding, qualified in listings
     ]
     _, pending = await asyncio.wait(tasks, timeout=seconds)
@@ -797,7 +799,7 @@ async def _listings_within(
             detail = f"timed out after {seconds:g} s"
             record = _listing_record(binding.service)
             if record is not None:
-                record.save(FAILED, detail, [])
+                record.save(FAILED, detail, [], keep_seconds=retry_seconds)
             results.append(([], _not_checked(
                 binding.ref, f"could not be listed ({detail})", reference,
             )))
@@ -807,12 +809,13 @@ async def _listings_within(
 
 
 async def _checked_listing(
-    binding: Any, qualified: bool, reference: str,
+    binding: Any, qualified: bool, reference: str, retry_seconds: float,
 ) -> Tuple[List[dict], Optional[str]]:
     """A never-listed account's servers for a lookup, and the note to print, if any.
 
-    Read at most once per cache TTL: a failed or incomplete listing is
-    remembered (a complete one writes the account's cache instead).
+    A complete listing writes the account's cache. An incomplete one is
+    remembered for the cache's TTL, its servers counting as checked; a
+    failed one for *retry_seconds* (config ``account_retry_seconds``).
     """
     from servonaut.services.accounts.listing_record import FAILED, PARTIAL
 
@@ -836,7 +839,7 @@ async def _checked_listing(
             binding.ref, f"was only partly listed ({problem})", reference, some=True,
         )
     if record is not None:
-        record.save(FAILED, problem, [])
+        record.save(FAILED, problem, [], keep_seconds=retry_seconds)
     return [], _not_checked(binding.ref, f"could not be listed ({problem})", reference)
 
 
@@ -847,7 +850,22 @@ def _listing_record(service: Any) -> Any:
 
 
 def _clock(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch).strftime("%H:%M")
+    return datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+
+
+def _seconds_setting(registry: Optional[AccountRegistry], name: str) -> float:
+    """The config's *name* in seconds (never negative); its default when not a number."""
+    from servonaut.config.schema import AppConfig
+
+    default = getattr(AppConfig, name)
+    value = getattr(getattr(registry, "config", None), name, default)
+    try:
+        if isinstance(value, bool):
+            raise TypeError(value)
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        logger.warning("Config %s is not a number (%r); using %s", name, value, default)
+        return float(default)
 
 
 async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:

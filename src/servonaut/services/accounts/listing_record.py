@@ -5,8 +5,9 @@ A CLI name lookup lists an account that was never listed on this machine
 cache. One that failed, or found servers but was not complete enough to be
 saved as the cache, writes nothing there, so without a record every command
 would list the account again. The record sits next to the cache
-(``<cache file>.listing``) and holds the outcome, why, and the servers an
-incomplete listing found. It counts for as long as a cache would.
+(``<cache file>.listing``) and holds the outcome, why, until when it counts,
+and the servers an incomplete listing found. An incomplete listing counts for
+as long as a cache would; the caller says how long a failure counts.
 """
 
 from __future__ import annotations
@@ -61,12 +62,11 @@ class ListingRecord:
         data = self._read()
         if not isinstance(data, dict) or data.get("outcome") not in _OUTCOMES:
             return None
-        at = data.get("at")
+        at, until = data.get("at"), data.get("until")
         rows = data.get("rows")
-        if not isinstance(at, (int, float)) or not isinstance(rows, list):
+        if not all(isinstance(t, (int, float)) for t in (at, until)) or not isinstance(rows, list):
             return None
         now = time.time() if now is None else now
-        until = at + self._ttl_seconds
         # A listing from the future (a clock change) does not count either.
         if not at <= now < until:
             return None
@@ -77,12 +77,19 @@ class ListingRecord:
 
     def save(
         self, outcome: str, detail: str, rows: List[dict], now: Optional[float] = None,
+        *, keep_seconds: Optional[float] = None,
     ) -> None:
-        """Remember a listing; a record that cannot be written is only logged."""
+        """Remember a listing for *keep_seconds* (default: the cache's TTL).
+
+        A record that cannot be written is only logged.
+        """
+        at = time.time() if now is None else now
+        keep = self._ttl_seconds if keep_seconds is None else max(float(keep_seconds), 0.0)
         data = {
             "outcome": outcome,
             "detail": detail,
-            "at": time.time() if now is None else now,
+            "at": at,
+            "until": at + keep,
             "rows": rows,
         }
         if self._path is None:
