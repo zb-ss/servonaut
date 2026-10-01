@@ -116,6 +116,17 @@ async def _settle(pilot) -> None:
     await pilot.pause()
 
 
+async def _wait(pilot, condition, timeout: float = 5.0) -> None:
+    """Pause until *condition()* holds (fails the test at *timeout*)."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        assert loop.time() < deadline, "condition not met in time"
+        await pilot.pause(0.02)
+
+
 def _fill(screen: Screen, values: Dict[str, str]) -> None:
     for field_id, value in values.items():
         screen.query_one(f"#{field_id}", Input).value = value
@@ -363,6 +374,64 @@ class TestHetznerPrimary:
             assert any("already used by Hetzner · staging" in m for m in app.messages)
         assert _reread(tmp_path).hetzner.label == ""
 
+    async def test_save_buttons_follow_whether_hetzner_is_on(
+        self, tmp_path, hetzner_service
+    ) -> None:
+        app = Host(_manager(tmp_path, _hetzner_config()), HetznerSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            assert str(app.screen.query_one("#btn_hetzner_save", Button).label) == "Save"
+            disable = app.screen.query_one("#btn_hetzner_disable", Button)
+            assert str(disable.label) == "Disable Hetzner"
+
+    async def test_object_storage_only_setup_saves_without_enabling(
+        self, tmp_path, hetzner_service
+    ) -> None:
+        """With Hetzner off, the plain Save stores the form and keeps it off."""
+        config = AppConfig(hetzner=HetznerConfig(enabled=False))
+        app = Host(_manager(tmp_path, config), HetznerSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save & Enable"
+            keep_off = screen.query_one("#btn_hetzner_disable", Button)
+            assert str(keep_off.label) == "Save"
+            _fill(screen, {
+                "hetzner_input_s3_access_key": "$HETZNER_S3_ACCESS_KEY",
+                "hetzner_input_s3_secret_key": "$HETZNER_S3_SECRET_KEY",
+            })
+            keep_off.press()
+            await _settle(pilot)
+            assert "Hetzner settings saved; Hetzner stays disabled." in app.messages
+        hetzner = _reread(tmp_path).hetzner
+        assert hetzner.enabled is False
+        assert hetzner.object_storage.access_key == "$HETZNER_S3_ACCESS_KEY"
+
+    async def test_enabling_relabels_the_buttons_while_the_fleet_loads(
+        self, tmp_path, hetzner_service, monkeypatch
+    ) -> None:
+        import asyncio
+
+        release = asyncio.Event()
+
+        async def held(self) -> bool:
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(HetznerSetupScreen, "_install_hcloud_if_needed", held)
+        config = AppConfig(hetzner=HetznerConfig(enabled=False, api_token=PRIMARY_TOKEN))
+        app = Host(_manager(tmp_path, config), HetznerSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one("#btn_hetzner_save", Button).press()
+            await _wait(pilot, lambda: _reread(tmp_path).hetzner.enabled)
+            assert str(screen.query_one("#btn_hetzner_save", Button).label) == "Save"
+            disable = screen.query_one("#btn_hetzner_disable", Button)
+            assert str(disable.label) == "Disable Hetzner"
+            release.set()
+            await _settle(pilot)
+
     async def test_disabling_keeps_the_projects_and_reloads(self, tmp_path, hetzner_service) -> None:
         config = _hetzner_config(accounts=[HetznerAccount(label="staging", api_token="x")])
         app = Host(_manager(tmp_path, config), HetznerSetupScreen)
@@ -582,19 +651,119 @@ class TestOvhPrimary:
         assert ovh.ovh_audit_path == "~/audit/ovh.json" and ovh.cost_alert_threshold == 40.0
         assert [a.label for a in ovh.accounts] == ["client-b"]
 
-    async def test_a_single_account_setup_has_no_label_or_oauth_rows(
+    async def test_a_single_account_setup_has_no_label_and_starts_on_keys(
         self, tmp_path, ovh_service
     ) -> None:
+        """The primary account's form is the only place for its credentials,
+        so it offers both sets; the OAuth2 fields stay hidden until chosen."""
         app = Host(_manager(tmp_path, _ovh_config()), OVHSetupScreen)
         async with app.run_test(size=(160, 50)) as pilot:
             await pilot.pause()
-            for selector in ("#ovh_label_row", "#ovh_auth_row", "#ovh_input_client_id"):
-                assert not app.screen.query(selector), selector
+            screen = app.screen
+            assert not screen.query("#ovh_label_row")
+            assert screen.query_one("#ovh_select_auth", Select).value == "classic"
+            # Each credential set is shown or hidden by its row.
+            assert not screen.query_one("#ovh_input_client_id", Input).parent.display
+            assert screen.query_one("#ovh_input_app_key", Input).parent.display
             assert app.screen.query_one("#btn_ovh_add_account", Button).display
             app.screen.query_one("#btn_ovh_add_account", Button).press()
             await pilot.pause()
             await pilot.pause()
             assert isinstance(app.screen, OVHSetupScreen) and app.screen._add_extra
+
+    async def test_the_primary_account_can_switch_to_an_oauth2_client(
+        self, tmp_path, ovh_service
+    ) -> None:
+        app = Host(_manager(tmp_path, _ovh_config()), OVHSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one("#ovh_select_auth", Select).value = "oauth"
+            await pilot.pause()
+            assert screen.query_one("#ovh_input_client_id", Input).parent.display
+            _fill(screen, {
+                "ovh_input_client_id": "cid-new",
+                "ovh_input_client_secret": OVH_CLIENT_SECRET,
+            })
+            screen.query_one("#btn_ovh_save", Button).press()
+            await _settle(pilot)
+        ovh = _reread(tmp_path).ovh
+        assert (ovh.client_id, ovh.client_secret) == ("cid-new", OVH_CLIENT_SECRET)
+        # Only the chosen credential set is kept.
+        assert (ovh.application_key, ovh.application_secret, ovh.consumer_key) == ("", "", "")
+
+    async def test_a_primary_with_both_sets_opens_on_the_one_in_use(
+        self, tmp_path, ovh_service
+    ) -> None:
+        """A complete OAuth2 client wins when connecting, so the form shows
+        it: saving the form must not switch the account's credentials."""
+        config = _ovh_config(client_secret=OVH_CLIENT_SECRET)
+        app = Host(_manager(tmp_path, config), OVHSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            assert app.screen.query_one("#ovh_select_auth", Select).value == "oauth"
+            app.screen.query_one("#btn_ovh_save", Button).press()
+            await _settle(pilot)
+        ovh = _reread(tmp_path).ovh
+        assert (ovh.client_id, ovh.client_secret) == ("cid-primary", OVH_CLIENT_SECRET)
+
+    async def test_save_buttons_follow_whether_ovh_is_on(self, tmp_path, ovh_service) -> None:
+        app = Host(_manager(tmp_path, _ovh_config()), OVHSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            assert str(app.screen.query_one("#btn_ovh_save", Button).label) == "Save"
+            assert str(app.screen.query_one("#btn_ovh_disable", Button).label) == "Disable OVH"
+
+    async def test_object_storage_only_setup_saves_without_enabling(
+        self, tmp_path, ovh_service
+    ) -> None:
+        """With OVHcloud off, the plain Save stores the form and keeps it off."""
+        config = AppConfig(ovh=OVHConfig(enabled=False))
+        app = Host(_manager(tmp_path, config), OVHSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save & Enable"
+            keep_off = screen.query_one("#btn_ovh_disable", Button)
+            assert str(keep_off.label) == "Save"
+            _fill(screen, {
+                "ovh_input_s3_access_key": "$OVH_S3_ACCESS_KEY",
+                "ovh_input_s3_secret_key": "$OVH_S3_SECRET_KEY",
+            })
+            screen.query_one("#ovh_input_s3_region", Select).value = "uk"
+            keep_off.press()
+            await _settle(pilot)
+            assert "OVH settings saved; OVHcloud stays disabled." in app.messages
+        ovh = _reread(tmp_path).ovh
+        assert ovh.enabled is False
+        assert ovh.object_storage.access_key == "$OVH_S3_ACCESS_KEY"
+        assert ovh.object_storage.region == "uk"
+
+    async def test_enabling_relabels_the_buttons_while_the_fleet_loads(
+        self, tmp_path, ovh_service, monkeypatch
+    ) -> None:
+        """Save & Enable keeps the form open while the fleet loads; its second
+        button must then say it disables OVHcloud, not "Save"."""
+        import asyncio
+
+        release = asyncio.Event()
+
+        async def held(self) -> bool:
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(OVHSetupScreen, "_install_ovh_if_needed", held)
+        config = AppConfig(ovh=OVHConfig(enabled=False, application_key="ak-primary"))
+        app = Host(_manager(tmp_path, config), OVHSetupScreen)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one("#btn_ovh_save", Button).press()
+            await _wait(pilot, lambda: _reread(tmp_path).ovh.enabled)
+            assert str(screen.query_one("#btn_ovh_save", Button).label) == "Save"
+            assert str(screen.query_one("#btn_ovh_disable", Button).label) == "Disable OVH"
+            release.set()
+            await _settle(pilot)
 
     async def test_disabling_reloads_the_accounts(self, tmp_path, ovh_service) -> None:
         app = Host(_manager(tmp_path, _ovh_config()), OVHSetupScreen)

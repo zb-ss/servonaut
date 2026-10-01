@@ -24,6 +24,7 @@ from textual.widgets import Button, Footer, Input, Select, Static
 
 from servonaut.screens.settings.accounts import (
     label_error,
+    ovh_auth_kind,
     rebuild_accounts,
     reload_provider_fleet,
 )
@@ -183,40 +184,39 @@ class OVHSetupScreen(Screen):
                 classes="note",
             ),
         ]
-        if self._account_mode:
-            rows.extend([
-                Horizontal(
-                    Static("Authentication:", classes="label"),
-                    Select(
-                        [
-                            ("Application key (3 keys)", self._AUTH_CLASSIC),
-                            ("OAuth2 service account", self._AUTH_OAUTH),
-                        ],
-                        value=self._AUTH_CLASSIC,
-                        allow_blank=False,
-                        id="ovh_select_auth",
-                    ),
-                    classes="setting_row",
-                    id="ovh_auth_row",
+        rows.extend([
+            Horizontal(
+                Static("Authentication:", classes="label"),
+                Select(
+                    [
+                        ("Application key (3 keys)", self._AUTH_CLASSIC),
+                        ("OAuth2 service account", self._AUTH_OAUTH),
+                    ],
+                    value=self._AUTH_CLASSIC,
+                    allow_blank=False,
+                    id="ovh_select_auth",
                 ),
-                Horizontal(
-                    Static("Client ID:", classes="label"),
-                    Input(
-                        placeholder="OAuth2 service account client ID",
-                        id="ovh_input_client_id",
-                    ),
-                    classes="setting_row ovh-oauth-auth",
+                classes="setting_row",
+                id="ovh_auth_row",
+            ),
+            Horizontal(
+                Static("Client ID:", classes="label"),
+                Input(
+                    placeholder="OAuth2 service account client ID",
+                    id="ovh_input_client_id",
                 ),
-                Horizontal(
-                    Static("Client Secret:", classes="label"),
-                    Input(
-                        placeholder="Client secret, $ENV_VAR or file:/path",
-                        id="ovh_input_client_secret",
-                        password=True,
-                    ),
-                    classes="setting_row ovh-oauth-auth",
+                classes="setting_row ovh-oauth-auth",
+            ),
+            Horizontal(
+                Static("Client Secret:", classes="label"),
+                Input(
+                    placeholder="Client secret, $ENV_VAR or file:/path",
+                    id="ovh_input_client_secret",
+                    password=True,
                 ),
-            ])
+                classes="setting_row ovh-oauth-auth",
+            ),
+        ])
         rows.extend([
             Horizontal(
                 Static("Application Key:", classes="label"),
@@ -406,13 +406,28 @@ class OVHSetupScreen(Screen):
         back = Button("Back", id="btn_ovh_back")
         if self._account_mode:
             return [test, Button("Test & Save", id="btn_ovh_save", variant="primary"), back]
+        save = Button("Save & Enable", id="btn_ovh_save", variant="primary")
+        keep_off = Button("Save", id="btn_ovh_disable")
+        self._label_save_buttons(save, keep_off, self.app.config_manager.get().ovh.enabled)
         return [
             test,
-            Button("Save & Enable", id="btn_ovh_save", variant="primary"),
-            Button("Disable OVH", id="btn_ovh_disable", variant="error"),
+            save,
+            keep_off,
             Button("Add Another Account", id="btn_ovh_add_account"),
             back,
         ]
+
+    @staticmethod
+    def _label_save_buttons(save: Button, keep_off: Button, enabled: bool) -> None:
+        """Name the primary account's save buttons after whether OVHcloud is on.
+
+        Save turns OVHcloud on; the second button saves and leaves it off:
+        "Disable OVH" while it is on, a plain "Save" while it is off (an
+        Object-Storage-only setup saves its keys without listing servers).
+        """
+        save.label = "Save" if enabled else "Save & Enable"
+        keep_off.label = "Disable OVH" if enabled else "Save"
+        keep_off.variant = "error" if enabled else "default"
 
     def on_mount(self) -> None:
         """Load the account being set up into the form fields."""
@@ -447,8 +462,9 @@ class OVHSetupScreen(Screen):
         self.query_one("#ovh_input_include_cloud", Input).value = (
             "true" if source.include_cloud else "false"
         )
+        self._load_auth(source)
         if self._account_mode:
-            self._load_extra_auth(source, ovh)
+            self._show_inherited_defaults(ovh)
 
         # S3 / Object Storage credentials — independent of OVH API keys.
         s3 = source.object_storage
@@ -475,14 +491,24 @@ class OVHSetupScreen(Screen):
             return None
         return ovh.accounts[index]
 
-    def _load_extra_auth(self, account, ovh) -> None:
-        """Fill the OAuth2 fields and show the account's credential set."""
+    def _load_auth(self, account) -> None:
+        """Fill the OAuth2 fields and show the credential set the account uses.
+
+        A complete OAuth2 client wins over application keys, as it does when
+        the account connects, so saving the form never switches its
+        credentials.
+        """
         self.query_one("#ovh_input_client_id", Input).value = account.client_id
         self.query_one("#ovh_input_client_secret", Input).value = account.client_secret
-        oauth = bool(account.client_id or account.client_secret) and not account.application_key
+        oauth = ovh_auth_kind(account) == "OAuth2" or (
+            bool(account.client_id or account.client_secret) and not account.application_key
+        )
         auth = self._AUTH_OAUTH if oauth else self._AUTH_CLASSIC
         self.query_one("#ovh_select_auth", Select).value = auth
         self._show_auth(auth)
+
+    def _show_inherited_defaults(self, ovh) -> None:
+        """Show an extra account which SSH defaults it inherits."""
         # Empty SSH defaults fall back to the primary account's.
         if ovh.default_ssh_key:
             self.query_one("#ovh_input_default_ssh_key", Input).placeholder = (
@@ -570,19 +596,18 @@ class OVHSetupScreen(Screen):
         }
         if self._label_shown:
             values['label'] = self.query_one("#ovh_input_label", Input).value.strip()
-        if self._account_mode:
-            auth = self.query_one("#ovh_select_auth", Select).value
-            oauth = auth == self._AUTH_OAUTH
-            client_id = self.query_one("#ovh_input_client_id", Input).value.strip()
-            client_secret = self.query_one("#ovh_input_client_secret", Input).value.strip()
-            # Only the chosen credential set is kept: a hidden, stale set
-            # would decide which one the account really uses.
-            values['auth'] = self._AUTH_OAUTH if oauth else self._AUTH_CLASSIC
-            values['client_id'] = client_id if oauth else ""
-            values['client_secret'] = client_secret if oauth else ""
-            if oauth:
-                for key in ('application_key', 'application_secret', 'consumer_key'):
-                    values[key] = ""
+        auth = self.query_one("#ovh_select_auth", Select).value
+        oauth = auth == self._AUTH_OAUTH
+        client_id = self.query_one("#ovh_input_client_id", Input).value.strip()
+        client_secret = self.query_one("#ovh_input_client_secret", Input).value.strip()
+        # Only the chosen credential set is kept: a hidden, stale set
+        # would decide which one the account really uses.
+        values['auth'] = self._AUTH_OAUTH if oauth else self._AUTH_CLASSIC
+        values['client_id'] = client_id if oauth else ""
+        values['client_secret'] = client_secret if oauth else ""
+        if oauth:
+            for key in ('application_key', 'application_secret', 'consumer_key'):
+                values[key] = ""
         return values
 
     def _label_problem(self, values: dict) -> Optional[str]:
@@ -828,6 +853,7 @@ class OVHSetupScreen(Screen):
             self.query_one("#ovh_input_label", Input).focus()
             return
         config = self.app.config_manager.get()
+        was_enabled = config.ovh.enabled
 
         s3_config = replace(
             config.ovh.object_storage,
@@ -836,9 +862,8 @@ class OVHSetupScreen(Screen):
             region=values['s3_region'],
             endpoint_url=values['s3_endpoint_url'],
         )
-        # ``replace`` keeps what the form does not show — the OAuth2
-        # client, audit path, cost alerts, the label and the extra
-        # accounts — exactly as saved.
+        # ``replace`` keeps what the form does not show — the audit path,
+        # cost alerts, the label and the extra accounts — exactly as saved.
         ovh_config = replace(
             config.ovh,
             enabled=enable,
@@ -846,6 +871,8 @@ class OVHSetupScreen(Screen):
             application_key=values['application_key'],
             application_secret=values['application_secret'],
             consumer_key=values['consumer_key'],
+            client_id=values['client_id'],
+            client_secret=values['client_secret'],
             default_ssh_key=values['default_ssh_key'],
             default_username=values['default_username'],
             cloud_project_ids=values['cloud_project_ids'],
@@ -869,6 +896,12 @@ class OVHSetupScreen(Screen):
         # makes the OVH services go away.
         rebuild_accounts(self.app)
         if enable:
+            # The form stays open: its buttons now act on an enabled OVHcloud.
+            self._label_save_buttons(
+                self.query_one("#btn_ovh_save", Button),
+                self.query_one("#btn_ovh_disable", Button),
+                True,
+            )
             self.app.notify("OVH configuration saved.", severity="information")
             logger.info("OVH configuration saved: enabled=True, endpoint=%s", values['endpoint'])
             self.run_worker(
@@ -877,7 +910,11 @@ class OVHSetupScreen(Screen):
                 exclusive=True,
             )
         else:
-            self.app.notify("OVH disabled and settings saved.", severity="information")
+            self.app.notify(
+                "OVH disabled and settings saved." if was_enabled
+                else "OVH settings saved; OVHcloud stays disabled.",
+                severity="information",
+            )
             logger.info("OVH configuration saved: enabled=False")
             self.action_back()
 

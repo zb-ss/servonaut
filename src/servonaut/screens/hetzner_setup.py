@@ -346,13 +346,30 @@ class HetznerSetupScreen(Screen):
         back = Button("Back", id="btn_hetzner_back")
         if self._account_mode:
             return [test, Button("Test & Save", id="btn_hetzner_save", variant="primary"), back]
+        save = Button("Save & Enable", id="btn_hetzner_save", variant="primary")
+        keep_off = Button("Save", id="btn_hetzner_disable")
+        self._label_save_buttons(
+            save, keep_off, self.app.config_manager.get().hetzner.enabled
+        )
         return [
             test,
-            Button("Save & Enable", id="btn_hetzner_save", variant="primary"),
-            Button("Disable Hetzner", id="btn_hetzner_disable", variant="error"),
+            save,
+            keep_off,
             Button("Add Another Project", id="btn_hetzner_add_project"),
             back,
         ]
+
+    @staticmethod
+    def _label_save_buttons(save: Button, keep_off: Button, enabled: bool) -> None:
+        """Name the primary project's save buttons after whether Hetzner is on.
+
+        Save turns Hetzner on; the second button saves and leaves it off:
+        "Disable Hetzner" while it is on, a plain "Save" while it is off (an
+        Object-Storage-only setup saves its keys without listing servers).
+        """
+        save.label = "Save" if enabled else "Save & Enable"
+        keep_off.label = "Disable Hetzner" if enabled else "Save"
+        keep_off.variant = "error" if enabled else "default"
 
     def on_mount(self) -> None:
         """Load existing Hetzner config into form fields."""
@@ -835,6 +852,7 @@ class HetznerSetupScreen(Screen):
             self.query_one("#hetzner_input_label", Input).focus()
             return
         config = self.app.config_manager.get()
+        was_enabled = config.hetzner.enabled
 
         s3_config = replace(
             config.hetzner.object_storage,
@@ -877,6 +895,12 @@ class HetznerSetupScreen(Screen):
         rebuild_accounts(self.app)
 
         if enable:
+            # The form stays open: its buttons now act on an enabled Hetzner.
+            self._label_save_buttons(
+                self.query_one("#btn_hetzner_save", Button),
+                self.query_one("#btn_hetzner_disable", Button),
+                True,
+            )
             self.app.notify(
                 "Hetzner configuration saved.", severity="information"
             )
@@ -894,7 +918,9 @@ class HetznerSetupScreen(Screen):
             )
         else:
             self.app.notify(
-                "Hetzner disabled and settings saved.", severity="information"
+                "Hetzner disabled and settings saved." if was_enabled
+                else "Hetzner settings saved; Hetzner stays disabled.",
+                severity="information",
             )
             logger.info("Hetzner configuration saved: enabled=False")
             self.action_back()
