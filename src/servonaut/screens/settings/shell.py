@@ -313,6 +313,8 @@ class SettingsScreen(Screen):
         if target_id == self._active_id or target_id not in self._spec_of:
             return
         current = self._current_panel()
+        if current is not None:
+            current.settle()
         if current is not None and current.is_dirty():
             self.app.push_screen(
                 DiscardChangesModal(current.TITLE),
@@ -451,6 +453,8 @@ class SettingsScreen(Screen):
     def action_back(self) -> None:
         """Leave settings, guarding unsaved changes in the current panel."""
         current = self._current_panel()
+        if current is not None:
+            current.settle()
         if current is not None and current.is_dirty():
             self.app.push_screen(
                 DiscardChangesModal(current.TITLE),
