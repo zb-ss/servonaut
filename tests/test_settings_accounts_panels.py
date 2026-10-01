@@ -587,7 +587,7 @@ class TestHetznerAccounts:
             assert app.rebuilds == 1
             assert app.inventories["hetzner"].fetches == 1
             assert _table_rows(app.panel, "hetzner")[0][1] == "primary"
-            app.panel.query_one("#hetzner_default_image", Input).value = "debian-12"
+            app.panel.query_one("#hetzner_cache_ttl", Input).value = "600"
             app.panel.persist()
             await pilot.pause()
             assert app.rebuilds == 2
@@ -670,3 +670,49 @@ class TestOvhAccounts:
             assert app.rebuilds == 1
         ovh = _reread(tmp_path).ovh
         assert ovh.accounts == [] and ovh.application_secret == OVH_SECRET
+
+
+# ---------------------------------------------------------------------------
+# One place per setting: account fields live only in the account form
+# ---------------------------------------------------------------------------
+
+
+_ACCOUNT_FORM_FIELDS = {
+    "ovh": (
+        "ovh_endpoint", "ovh_client_id", "ovh_default_ssh_key", "ovh_default_username",
+        "ovh_include_dedicated", "ovh_include_vps", "ovh_include_cloud",
+        "ovh_cloud_project_ids", "ovh_s3_access_key", "ovh_s3_secret_key",
+        "ovh_s3_region", "ovh_s3_endpoint_url",
+    ),
+    "hetzner": (
+        "hetzner_default_hetzner_ssh_key", "hetzner_default_local_ssh_key",
+        "hetzner_default_username", "hetzner_default_image",
+        "hetzner_default_server_type", "hetzner_default_location",
+        "hetzner_s3_access_key", "hetzner_s3_secret_key", "hetzner_s3_region",
+        "hetzner_s3_endpoint_url",
+    ),
+}
+
+
+class TestOnePlacePerSetting:
+    async def test_ovh_panel_keeps_only_provider_wide_settings(self, tmp_path) -> None:
+        app = Host(OvhPanel, _manager(tmp_path, _ovh_config()))
+        async with app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            for field_id in _ACCOUNT_FORM_FIELDS["ovh"]:
+                assert not app.panel.query(f"#{field_id}"), field_id
+            for field_id in ("ovh_enabled", "ovh_audit_path", "ovh_cost_threshold",
+                             "ovh_cost_currency", "ovh_btn_setup"):
+                assert app.panel.query(f"#{field_id}"), field_id
+
+    async def test_hetzner_panel_keeps_only_provider_wide_settings(self, tmp_path) -> None:
+        app = Host(HetznerPanel, _manager(tmp_path, _hetzner_config()))
+        async with app.run_test(size=(160, 60)) as pilot:
+            await pilot.pause()
+            for field_id in _ACCOUNT_FORM_FIELDS["hetzner"]:
+                assert not app.panel.query(f"#{field_id}"), field_id
+            for field_id in ("hetzner_enabled", "hetzner_require_ssh_keys",
+                             "hetzner_cache_ttl", "hetzner_cache_path",
+                             "hetzner_audit_path", "hetzner_cost_alert_threshold",
+                             "btn_hetzner_setup"):
+                assert app.panel.query(f"#{field_id}"), field_id

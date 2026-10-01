@@ -288,16 +288,22 @@ async def test_aws_rejects_negative_cache_ttl(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ovh_preserves_wizard_secrets(tmp_path):
-    """OVH save preserves application_secret / consumer_key / client_secret."""
+async def test_ovh_preserves_account_fields(tmp_path):
+    """OVH panel save keeps everything the account form owns."""
     seeded = AppConfig(
         ovh=OVHConfig(
             enabled=True,
+            endpoint="ovh-ca",
             application_key="app-key",
             application_secret="app-secret",
             consumer_key="$OVH_CONSUMER_KEY",
             client_secret="$OVH_CLIENT_SECRET",
-            object_storage=ObjectStorageConfig(),
+            default_username="debian",
+            cloud_project_ids=["project-1"],
+            include_vps=False,
+            object_storage=ObjectStorageConfig(
+                access_key="$OVH_S3_ACCESS_KEY", region="uk",
+            ),
         )
     )
     manager = _temp_config_manager(tmp_path, seeded)
@@ -305,17 +311,23 @@ async def test_ovh_preserves_wizard_secrets(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app.panel
-        panel.query_one("#ovh_default_username", Input).value = "debian"
+        panel.query_one("#ovh_cost_currency", Input).value = "USD"
         panel.persist()
         await pilot.pause()
 
     ovh = _reload(tmp_path).ovh
-    assert ovh.default_username == "debian"
-    # Wizard-owned secrets preserved verbatim (including $ENV raw form).
+    assert ovh.cost_alert_currency == "USD"
+    # Account-form fields preserved verbatim (including $ENV raw form).
+    assert ovh.endpoint == "ovh-ca"
     assert ovh.application_key == "app-key"
     assert ovh.application_secret == "app-secret"
     assert ovh.consumer_key == "$OVH_CONSUMER_KEY"
     assert ovh.client_secret == "$OVH_CLIENT_SECRET"
+    assert ovh.default_username == "debian"
+    assert ovh.cloud_project_ids == ["project-1"]
+    assert ovh.include_vps is False
+    assert ovh.object_storage.access_key == "$OVH_S3_ACCESS_KEY"
+    assert ovh.object_storage.region == "uk"
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +336,15 @@ async def test_ovh_preserves_wizard_secrets(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hetzner_preserves_api_token(tmp_path):
-    """Hetzner save preserves the wizard-owned api_token via replace."""
+async def test_hetzner_preserves_project_fields(tmp_path):
+    """Hetzner panel save keeps everything the project form owns."""
     seeded = AppConfig(
         hetzner=HetznerConfig(
             enabled=True,
             api_token="$HCLOUD_TOKEN",
-            object_storage=ObjectStorageConfig(),
+            default_username="core",
+            default_location="hel1",
+            object_storage=ObjectStorageConfig(access_key="s3-key", region="fsn1"),
         )
     )
     manager = _temp_config_manager(tmp_path, seeded)
@@ -338,14 +352,18 @@ async def test_hetzner_preserves_api_token(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         panel = app.panel
-        panel.query_one("#hetzner_default_username", Input).value = "core"
+        panel.query_one("#hetzner_cache_ttl", Input).value = "600"
         panel.persist()
         await pilot.pause()
 
     hetzner = _reload(tmp_path).hetzner
-    assert hetzner.default_username == "core"
-    # Wizard-owned token preserved (RAW $ENV form, never resolved).
+    assert hetzner.cache_ttl_seconds == 600
+    # Project-form fields preserved (token in RAW $ENV form, never resolved).
     assert hetzner.api_token == "$HCLOUD_TOKEN"
+    assert hetzner.default_username == "core"
+    assert hetzner.default_location == "hel1"
+    assert hetzner.object_storage.access_key == "s3-key"
+    assert hetzner.object_storage.region == "fsn1"
 
 
 # ---------------------------------------------------------------------------
