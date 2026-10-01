@@ -44,6 +44,8 @@ _SYS_VENDOR = "sys/devices/virtual/dmi/id/sys_vendor"
 _BIOS_VENDOR = "sys/devices/virtual/dmi/id/bios_vendor"
 _ASSET_TAG = "sys/devices/virtual/dmi/id/board_asset_tag"
 _HYPERVISOR_UUID = "sys/hypervisor/uuid"
+_BIOS_VERSION = "sys/devices/virtual/dmi/id/bios_version"
+_PRODUCT_VERSION = "sys/devices/virtual/dmi/id/product_version"
 
 
 def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> bool:
@@ -80,8 +82,10 @@ def runs_on_ec2() -> bool:
 
     The firmware vendor is ``Amazon EC2``, or a Nitro instance's asset tag is
     its instance id, or a Xen instance's hypervisor UUID starts with ``ec2``
-    and the vendor is Xen or Amazon (a random Xen UUID starts with ``ec2``
-    about once in 4096). Read only, errors ignored; always False off Linux.
+    and its firmware names Amazon (EC2's Xen BIOS version reads like
+    ``4.11.amazon``). Any Xen guest reports a Xen vendor, and a random Xen
+    UUID starts with ``ec2`` about once in 4096, so neither is enough on its
+    own. Read only, errors ignored; always False off Linux.
     On EC2 the instance role answers from the instance itself, so listing is
     cheap there.
     """
@@ -90,10 +94,10 @@ def runs_on_ec2() -> bool:
     vendor = _sysfs_text(_SYS_VENDOR)
     if vendor == "Amazon EC2" or _sysfs_text(_ASSET_TAG).startswith("i-"):
         return True
-    vendors = f"{vendor} {_sysfs_text(_BIOS_VENDOR)}".lower()
-    return _sysfs_text(_HYPERVISOR_UUID).lower().startswith("ec2") and (
-        "xen" in vendors or "amazon" in vendors
-    )
+    firmware = " ".join(
+        _sysfs_text(path) for path in (_BIOS_VENDOR, _BIOS_VERSION, _PRODUCT_VERSION)
+    ).lower()
+    return _sysfs_text(_HYPERVISOR_UUID).lower().startswith("ec2") and "amazon" in firmware
 
 
 def _sysfs_text(relative: str) -> str:

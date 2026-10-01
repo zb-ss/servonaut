@@ -195,7 +195,8 @@ class TestAWSCredentialsCheckedOffline:
         {"sys/devices/virtual/dmi/id/sys_vendor": "Amazon EC2\n"},
         {"sys/devices/virtual/dmi/id/board_asset_tag": "i-0123456789abcdef0\n"},
         {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
-         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n"},
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_version": "4.11.amazon\n"},
         {"sys/hypervisor/uuid": "EC2-FAKE-HYPERVISOR-ID\n",
          "sys/devices/virtual/dmi/id/bios_vendor": "Amazon EC2\n"},
     ])
@@ -211,8 +212,13 @@ class TestAWSCredentialsCheckedOffline:
         {"sys/devices/virtual/dmi/id/board_asset_tag": "Default string\n"},
         {"sys/hypervisor/uuid": "xen-fake-hypervisor-id\n",
          "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n"},
-        # A random Xen UUID can start with "ec2": not without a Xen or Amazon vendor.
+        # A random Xen UUID can start with "ec2": not without firmware naming Amazon.
         {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n"},
+        # Every Xen guest reports a Xen vendor, on EC2 or not.
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_vendor": "Xen\n",
+         "sys/devices/virtual/dmi/id/bios_version": "4.4.1\n"},
         {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
          "sys/devices/virtual/dmi/id/sys_vendor": "QEMU\n"},
     ])
