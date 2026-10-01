@@ -5,7 +5,8 @@ the new one, never a partial write. The data goes to a temporary file with a
 unique name next to the target, readable by the owner only, and
 ``os.replace`` swaps it in (atomic on POSIX and Windows within one file
 system). Two processes saving at once never share a temporary file; the
-last one to finish wins.
+last one to finish wins. A writer that died leaves its temporary file
+behind; a later save can sweep those away.
 """
 
 from __future__ import annotations
@@ -13,12 +14,18 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
-def write_json_atomic(path: Path, data: Any, *, indent: int = 2) -> None:
+def write_json_atomic(
+    path: Path, data: Any, *, indent: int = 2, sweep_older_than: Optional[float] = None,
+) -> None:
     """Write *data* as JSON to *path* atomically, mode 0o600.
+
+    With *sweep_older_than* (seconds), temporary files of *path* older than
+    that, left by writers that died, are removed after the save.
 
     Raises:
         OSError: The file could not be written; *path* is left as it was.
@@ -37,3 +44,22 @@ def write_json_atomic(path: Path, data: Any, *, indent: int = 2) -> None:
     except BaseException:
         Path(temp_name).unlink(missing_ok=True)
         raise
+    if sweep_older_than:
+        _sweep_stale_temporaries(path, sweep_older_than)
+
+
+def _sweep_stale_temporaries(path: Path, seconds: float) -> None:
+    """Remove *path*'s temporary files older than *seconds*; errors are ignored."""
+    prefix, cutoff = f".{path.name}.", time.time() - seconds
+    try:
+        entries = list(path.parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not (entry.name.startswith(prefix) and entry.name.endswith(".tmp")):
+            continue
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue

@@ -20,7 +20,7 @@ import asyncio
 import logging
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -740,11 +740,13 @@ async def _checked_listings(
         loop = asyncio.new_event_loop()
         loop.set_default_executor(_DaemonExecutor())
         try:
-            done.set_result(loop.run_until_complete(
+            result = loop.run_until_complete(
                 _listings_within(listings, reference, seconds, retry_seconds),
-            ))
+            )
         except BaseException as exc:  # noqa: BLE001 - handed to the waiter
-            done.set_exception(exc)
+            _settle(done, exception=exc)
+        else:
+            _settle(done, result=result)
         finally:
             loop.close()
 
@@ -759,6 +761,21 @@ async def _checked_listings(
                               reference))
             for binding, _ in listings
         ]
+
+
+def _settle(future: Future, *, result: Any = None, exception: Optional[BaseException] = None) -> None:
+    """Hand the listings' outcome to their waiter, unless it gave up (cancelled).
+
+    Nothing may raise in the listings' thread: its traceback would land in
+    the terminal, perhaps in the middle of an SSH session.
+    """
+    try:
+        if exception is not None:
+            future.set_exception(exception)
+        else:
+            future.set_result(result)
+    except InvalidStateError:
+        pass
 
 
 async def _listings_within(
@@ -827,7 +844,11 @@ async def _checked_listing(
     remembered = record.load() if record is not None else None
     if remembered is not None:
         if remembered.outcome == PARTIAL:
-            return remembered.rows, None
+            # Still counted as checked, but the gap is said on every lookup:
+            # a name may yet be on a server that was not listed.
+            return remembered.rows, _partly_listed(
+                binding.ref, remembered.detail, reference, at=remembered.at,
+            )
         when = f"at {_clock(remembered.at)}, tried again after {_clock(remembered.until)}"
         return [], _not_checked(
             binding.ref, f"could not be listed ({remembered.detail}; {when})", reference,
@@ -838,9 +859,7 @@ async def _checked_listing(
     if error is None:
         if record is not None and not _has_cache(binding.service):
             record.save(PARTIAL, problem, rows)
-        return rows, _not_checked(
-            binding.ref, f"was only partly listed ({problem})", reference, some=True,
-        )
+        return rows, _partly_listed(binding.ref, problem, reference)
     if _is_no_answer(error):
         outcome, detail, keep = TIMEOUT, f"no answer: {problem}", retry_seconds
     else:
@@ -854,16 +873,41 @@ def _is_no_answer(error: BaseException) -> bool:
     """Whether *error*, or one it was raised from, is a timeout or a failed connection.
 
     Then nothing answered, and a little later something may. Anything else
-    is an error response (or a local one, like a missing profile).
+    is an error response (or a local one, like a missing profile). A TLS or
+    proxy failure is one too, though the HTTP libraries count it as a
+    connection error: a TLS-intercepting or wrongly set proxy does not heal
+    in seconds.
     """
-    types = _no_answer_types()
+    answered, no_answer = _error_response_types(), _no_answer_types()
     seen = set()
     while error is not None and id(error) not in seen:
         seen.add(id(error))
-        if isinstance(error, types):
+        if isinstance(error, answered):
+            return False
+        if isinstance(error, no_answer):
             return True
         error = error.__cause__ or error.__context__
     return False
+
+
+def _error_response_types() -> Tuple[type, ...]:
+    """TLS and proxy errors, which the HTTP libraries file under connection errors."""
+    import ssl
+
+    types: List[type] = [ssl.SSLError]
+    try:
+        import requests
+
+        types += [requests.exceptions.SSLError, requests.exceptions.ProxyError]
+    except ImportError:
+        pass
+    try:
+        import botocore.exceptions as botocore_errors
+
+        types += [botocore_errors.SSLError, botocore_errors.ProxyConnectionError]
+    except ImportError:
+        pass
+    return tuple(types)
 
 
 def _no_answer_types() -> Tuple[type, ...]:
@@ -884,6 +928,19 @@ def _no_answer_types() -> Tuple[type, ...]:
     except ImportError:
         pass
     return tuple(types)
+
+
+def _partly_listed(
+    ref: AccountRef, detail: str, reference: str, *, at: Optional[float] = None,
+) -> str:
+    """The note of a partial listing (*at*: when it was made, if remembered)."""
+    when = f" at {_clock(at)}" if at is not None else ""
+    if ref.provider == AWS:
+        detail += (
+            "; list only the regions you use (aws.regions or the account's regions) "
+            "to make it complete"
+        )
+    return _not_checked(ref, f"was only partly listed{when} ({detail})", reference, some=True)
 
 
 def _listing_record(service: Any) -> Any:

@@ -166,9 +166,24 @@ def _aws_auth_failure():
                        "DescribeInstances")
 
 
+def _aws_tls_failure():
+    from botocore.exceptions import SSLError
+
+    return SSLError(endpoint_url="https://ec2.invalid", error="certificate verify failed")
+
+
+def _aws_proxy_failure():
+    from botocore.exceptions import ProxyConnectionError
+
+    return ProxyConnectionError(proxy_url="http://proxy.invalid:3128", error="refused")
+
+
 @pytest.mark.parametrize("make_error, expected", [
     (_aws_timeout, "timeout"),
     (_aws_auth_failure, "failed"),
+    # A TLS-intercepting or wrongly set proxy does not heal in seconds.
+    (_aws_tls_failure, "failed"),
+    (_aws_proxy_failure, "failed"),
 ])
 def test_aws_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error, expected):
     config.aws.regions = ["r-1", "r-2"]
@@ -193,6 +208,8 @@ def test_aws_no_answer_and_error_response(config, tmp_path, monkeypatch, make_er
     (lambda: __import__("requests").exceptions.ReadTimeout("read timed out"), "timeout"),
     (lambda: __import__("hcloud").APIException("unauthorized", "unable to authenticate", None),
      "failed"),
+    (lambda: __import__("requests").exceptions.SSLError("certificate verify failed"), "failed"),
+    (lambda: __import__("requests").exceptions.ProxyError("proxy refused"), "failed"),
 ])
 def test_hetzner_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error,
                                               expected):

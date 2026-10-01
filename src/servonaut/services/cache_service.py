@@ -107,7 +107,7 @@ class CacheService:
 
         try:
             # Atomic: a reader in another process never sees a torn file.
-            write_json_atomic(self.CACHE_PATH, cache_data)
+            write_json_atomic(self.CACHE_PATH, cache_data, sweep_older_than=self.ttl_seconds)
             logger.debug(f"Cached {len(instances)} instances")
         except OSError as e:
             logger.error(f"Error writing cache file: {e}")

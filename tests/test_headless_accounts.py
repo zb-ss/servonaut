@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -255,10 +256,28 @@ def test_a_partial_listing_is_noted_as_such(prod_partly_listed):
     checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
 
     assert checked.notes == [
-        "Note: AWS account 'prod' was only partly listed (1 region(s) failed: eu-west-1); "
-        "some of its servers were not checked for 'web-1'"
+        "Note: AWS account 'prod' was only partly listed (1 region(s) failed: eu-west-1; "
+        "list only the regions you use (aws.regions or the account's regions) to make it "
+        "complete); some of its servers were not checked for 'web-1'"
     ]
     assert [row["id"] for row in checked.rows] == ["i-2"]
+
+
+def test_only_aws_gets_the_regions_hint(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}]},
+    )
+    project = services[("hetzner", "hetzner")]
+    project.cached = None
+    _partly_listing(project, "listed 1 server(s); the rest was not listed in the time allowed")
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'hetzner' was only partly listed (listed 1 server(s); the rest "
+        "was not listed in the time allowed); some of its servers were not checked for 'web-1'"
+    ]
 
 
 def test_a_reason_over_several_lines_keeps_the_note_on_one_line(monkeypatch):
@@ -294,7 +313,14 @@ def test_a_partial_listing_counts_as_checked_until_the_ttl_ends(prod_partly_list
     again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
 
     assert len(calls) == 1
-    assert again.notes == [] and [row["id"] for row in again.rows] == ["i-2"]
+    assert [row["id"] for row in again.rows] == ["i-2"]
+    # The gap is said on every lookup while the partial listing counts.
+    at = datetime.fromtimestamp(prod.record.load().at).strftime("%H:%M:%S")
+    assert again.notes == [
+        f"Note: AWS account 'prod' was only partly listed at {at} (1 region(s) failed: "
+        "eu-west-1; list only the regions you use (aws.regions or the account's regions) to "
+        "make it complete); some of its servers were not checked for 'web-1'"
+    ]
     # Once the TTL is over the account is listed again.
     later = prod.record.load().until + 1
     monkeypatch.setattr(listing_record.time, "time", lambda: later)
@@ -403,6 +429,35 @@ def test_an_error_raised_from_a_timeout_counts_as_no_answer(staging_never_listed
     assert "(no answer: Failed to fetch Hetzner servers: read timed out)" in checked.notes[0]
 
 
+def _raised_from(outer, inner):
+    try:
+        raise inner
+    except BaseException as cause:
+        try:
+            raise outer from cause
+        except BaseException as error:
+            return error
+
+
+@pytest.mark.parametrize("error, no_answer", [
+    (TimeoutError("timed out"), True),
+    (ConnectionResetError("reset"), True),
+    (RuntimeError("401 Unauthorized"), False),
+    (_raised_from(RuntimeError("Failed to fetch"), TimeoutError("timed out")), True),
+    # TLS and proxy failures are connection errors to the HTTP libraries, but
+    # they do not heal in seconds.
+    (__import__("ssl").SSLError("certificate verify failed"), False),
+    (_raised_from(RuntimeError("Failed to fetch"),
+                  __import__("requests").exceptions.SSLError("bad certificate")), False),
+    (__import__("requests").exceptions.ProxyError("proxy refused"), False),
+    (__import__("requests").exceptions.ConnectTimeout("connect timed out"), True),
+])
+def test_which_errors_count_as_no_answer(error, no_answer):
+    from servonaut.services.accounts.headless import _is_no_answer
+
+    assert _is_no_answer(error) is no_answer
+
+
 def test_no_retry_window_tries_no_answer_every_time(staging_never_listed):
     registry, services = staging_never_listed
     registry.config.account_retry_seconds = 0
@@ -492,6 +547,34 @@ def test_an_abandoned_listing_does_not_hold_the_command_up(staging_never_listed)
     assert elapsed < 1.5 + 0.7, elapsed
     assert len(made) < 5
     assert "timed out after 1.5 s" in checked.notes[0]
+
+
+def test_listings_that_overrun_their_wind_down_raise_nothing(staging_never_listed, monkeypatch,
+                                                            capsys):
+    """A late outcome is dropped quietly, not printed into a running SSH session."""
+    from servonaut.services.accounts import headless
+
+    registry, _ = staging_never_listed
+    registry.config.account_check_timeout_seconds = 0.2
+    monkeypatch.setattr(headless, "_WIND_DOWN_SECONDS", 0.1)
+    raised = []
+    monkeypatch.setattr(threading, "excepthook", raised.append)
+    listings_within = headless._listings_within
+
+    async def stuck_then_done(*args):
+        time.sleep(0.6)  # blocks the listings' own loop past budget and wind-down
+        return await listings_within(*args)
+
+    monkeypatch.setattr(headless, "_listings_within", stuck_then_done)
+
+    checked = asyncio.run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert "could not be listed (timed out after 0.2 s)" in checked.notes[0]
+    for thread in threading.enumerate():
+        if thread.name == "servonaut-listings":
+            thread.join(5)
+    assert raised == []
+    assert "InvalidStateError" not in capsys.readouterr().err
 
 
 def test_never_listed_accounts_are_read_within_the_time_allowed(monkeypatch):

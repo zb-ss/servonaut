@@ -184,31 +184,41 @@ class TestAWSCredentialsCheckedOffline:
         monkeypatch.setattr(aws_account, "raw_config_parse", undecodable)
         assert _aws_service().has_credentials()
 
-    @pytest.mark.parametrize("relative, content", [
-        ("sys/devices/virtual/dmi/id/sys_vendor", "Amazon EC2\n"),
-        ("sys/devices/virtual/dmi/id/board_asset_tag", "i-0123456789abcdef0\n"),
-        ("sys/hypervisor/uuid", "ec2-fake-hypervisor-id\n"),
-        ("sys/hypervisor/uuid", "EC2-FAKE-HYPERVISOR-ID\n"),
+    @staticmethod
+    def _sysfs(root, files) -> None:
+        for relative, content in files.items():
+            marker = root / relative
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(content)
+
+    @pytest.mark.parametrize("files", [
+        {"sys/devices/virtual/dmi/id/sys_vendor": "Amazon EC2\n"},
+        {"sys/devices/virtual/dmi/id/board_asset_tag": "i-0123456789abcdef0\n"},
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n"},
+        {"sys/hypervisor/uuid": "EC2-FAKE-HYPERVISOR-ID\n",
+         "sys/devices/virtual/dmi/id/bios_vendor": "Amazon EC2\n"},
     ])
-    def test_an_ec2_instance_is_set_up(self, offline_aws, monkeypatch, relative, content) -> None:
+    def test_an_ec2_instance_is_set_up(self, offline_aws, monkeypatch, files) -> None:
         monkeypatch.setattr(aws_account.sys, "platform", "linux")
-        marker = offline_aws.sysfs / relative
-        marker.parent.mkdir(parents=True)
-        marker.write_text(content)
+        self._sysfs(offline_aws.sysfs, files)
 
         assert aws_account.runs_on_ec2()
         assert _aws_service().has_credentials()
 
-    @pytest.mark.parametrize("relative, content", [
-        ("sys/devices/virtual/dmi/id/sys_vendor", "Microsoft Corporation\n"),
-        ("sys/devices/virtual/dmi/id/board_asset_tag", "Default string\n"),
-        ("sys/hypervisor/uuid", "xen-fake-hypervisor-id\n"),
+    @pytest.mark.parametrize("files", [
+        {"sys/devices/virtual/dmi/id/sys_vendor": "Microsoft Corporation\n"},
+        {"sys/devices/virtual/dmi/id/board_asset_tag": "Default string\n"},
+        {"sys/hypervisor/uuid": "xen-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "Xen\n"},
+        # A random Xen UUID can start with "ec2": not without a Xen or Amazon vendor.
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n"},
+        {"sys/hypervisor/uuid": "ec2-fake-hypervisor-id\n",
+         "sys/devices/virtual/dmi/id/sys_vendor": "QEMU\n"},
     ])
-    def test_another_machine_is_not(self, offline_aws, monkeypatch, relative, content) -> None:
+    def test_another_machine_is_not(self, offline_aws, monkeypatch, files) -> None:
         monkeypatch.setattr(aws_account.sys, "platform", "linux")
-        marker = offline_aws.sysfs / relative
-        marker.parent.mkdir(parents=True)
-        marker.write_text(content)
+        self._sysfs(offline_aws.sysfs, files)
 
         assert not aws_account.runs_on_ec2()
 

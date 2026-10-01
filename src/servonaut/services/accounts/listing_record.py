@@ -100,7 +100,7 @@ class ListingRecord:
             self._memory = data
             return
         try:
-            write_json_atomic(self._path, data)
+            write_json_atomic(self._path, data, sweep_older_than=self._ttl_seconds)
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("Could not remember the listing in %s: %s", self._path, exc)
 

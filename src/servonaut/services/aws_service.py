@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
+from botocore.exceptions import BotoCoreError
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
@@ -52,6 +53,10 @@ _SG_ID_RE = re.compile(r'^sg-[0-9a-f]{8,17}$')
 _INSTANCE_TYPE_RE = re.compile(r'^[a-z0-9]+\.[a-z0-9]+$')
 _KEY_NAME_RE = re.compile(r'^[\w .\-/]{1,255}$')
 _NAME_TAG_RE = re.compile(r'^[^\x00-\x1f\x7f]{1,255}$')
+
+
+# AWS's default region, where most accounts keep servers: listed early.
+_BUSIEST_REGION = "us-east-1"
 
 
 def is_instance_id(value: str) -> bool:
@@ -243,6 +248,25 @@ class AWSService(InstanceServiceInterface):
         self.cache_service.save(instances)
         return instances
 
+    def _likeliest_first(self, regions: List[str]) -> List[str]:
+        """*regions* with this account's default region first, then us-east-1.
+
+        A time-limited listing starts no region after its deadline, so the
+        regions most likely to hold servers are listed first; the rest keep
+        AWS's order.
+        """
+        first = [r for r in (self._default_region(), _BUSIEST_REGION) if r in regions]
+        first = list(dict.fromkeys(first))
+        return first + [region for region in regions if region not in first]
+
+    def _default_region(self) -> Optional[str]:
+        """The region this account's session defaults to (profile or environment)."""
+        try:
+            session = self.account.session() if self._uses_profile() else boto3.session.Session()
+            return session.region_name if session is not None else None
+        except BotoCoreError:
+            return None
+
     def _incomplete_listing(self) -> str:
         """Why the last listing is partial: the regions that failed, and the late ones."""
         late = set(self._late_regions)
@@ -272,6 +296,7 @@ class AWSService(InstanceServiceInterface):
             except Exception as e:
                 logger.error(f"Error fetching AWS regions: {e}")
                 raise AWSFetchError(f"could not list AWS regions: {e}") from e
+            regions = self._likeliest_first(regions)
 
         instances: List[dict] = []
         last_error: Optional[Exception] = None

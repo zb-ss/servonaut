@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -131,3 +132,53 @@ def test_hetzner_turns_hcloud_retries_off_under_a_limit(tmp_path):
 
     assert unlimited._client._retry_max_retries > 0
     assert limited._client._retry_max_retries == 0
+
+
+# ---------------------------------------------------------------------------
+# Region order: a time-limited listing reaches the likeliest regions first
+# ---------------------------------------------------------------------------
+
+AWS_ORDER = ["ap-south-1", "eu-west-1", "us-east-1", "eu-central-1"]
+
+
+def _listed_order(service, monkeypatch):
+    client = SimpleNamespace(describe_regions=lambda: {
+        "Regions": [{"RegionName": name} for name in AWS_ORDER],
+    })
+    monkeypatch.setattr(service, "_client", lambda name, region=None: client)
+    listed = []
+    monkeypatch.setattr(service, "_fetch_region", lambda region: listed.append(region) or [])
+    service._fetch_all_regions()
+    return listed
+
+
+def test_aws_lists_its_default_region_then_us_east_1_first(tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
+
+    listed = _listed_order(_aws(tmp_path), monkeypatch)
+
+    assert listed == ["eu-central-1", "us-east-1", "ap-south-1", "eu-west-1"]
+
+
+def test_aws_takes_a_profiles_region_as_its_default(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.write_text("[profile prod]\nregion = eu-west-1\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    account = AWSAccountContext(AccountRef("aws", "prod", False), "prod")
+    service = AWSService(CacheService(cache_path=tmp_path / "cache.prod.json"), account=account)
+
+    listed = _listed_order(service, monkeypatch)
+
+    assert listed == ["eu-west-1", "us-east-1", "ap-south-1", "eu-central-1"]
+
+
+def test_aws_configured_regions_keep_their_order(tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
+    service = _aws(tmp_path, regions=("ap-south-1", "eu-west-1"))
+    listed = []
+    monkeypatch.setattr(service, "_fetch_region", lambda region: listed.append(region) or [])
+
+    service._fetch_all_regions()
+
+    assert listed == ["ap-south-1", "eu-west-1"]

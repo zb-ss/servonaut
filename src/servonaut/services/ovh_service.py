@@ -1148,7 +1148,7 @@ class OVHService:
                 'instances': instances,
             }
             # Atomic, and readable by the owner only (see write_json_atomic).
-            write_json_atomic(self._cache_path, data)
+            write_json_atomic(self._cache_path, data, sweep_older_than=_OVH_CACHE_TTL_SECONDS)
             logger.debug("Saved %d OVH instances to cache", len(instances))
         except (OSError, TypeError, ValueError) as e:
             logger.error("Error saving OVH cache: %s", e)

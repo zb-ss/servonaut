@@ -37,13 +37,13 @@ _CREDENTIAL_KEYS = frozenset({
     "login_session",
 })
 
-# Where an EC2 instance names itself (relative to _SYSFS_ROOT; tests move it).
+# Files in which an EC2 instance names itself (relative to _SYSFS_ROOT,
+# which tests move).
 _SYSFS_ROOT = Path("/")
-_EC2_MARKERS = (
-    ("sys/devices/virtual/dmi/id/sys_vendor", lambda text: text == "Amazon EC2"),
-    ("sys/devices/virtual/dmi/id/board_asset_tag", lambda text: text.startswith("i-")),
-    ("sys/hypervisor/uuid", lambda text: text.lower().startswith("ec2")),
-)
+_SYS_VENDOR = "sys/devices/virtual/dmi/id/sys_vendor"
+_BIOS_VENDOR = "sys/devices/virtual/dmi/id/bios_vendor"
+_ASSET_TAG = "sys/devices/virtual/dmi/id/board_asset_tag"
+_HYPERVISOR_UUID = "sys/hypervisor/uuid"
 
 
 def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> bool:
@@ -78,21 +78,30 @@ def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> b
 def runs_on_ec2() -> bool:
     """Whether this machine is an EC2 instance, from files Linux exposes (offline).
 
-    The firmware vendor is ``Amazon EC2``, a Nitro instance's asset tag is its
-    instance id, and a Xen instance's hypervisor UUID starts with ``ec2``.
-    Read only, errors ignored; always False off Linux. On EC2 the instance
-    role answers from the instance itself, so listing is cheap there.
+    The firmware vendor is ``Amazon EC2``, or a Nitro instance's asset tag is
+    its instance id, or a Xen instance's hypervisor UUID starts with ``ec2``
+    and the vendor is Xen or Amazon (a random Xen UUID starts with ``ec2``
+    about once in 4096). Read only, errors ignored; always False off Linux.
+    On EC2 the instance role answers from the instance itself, so listing is
+    cheap there.
     """
     if not sys.platform.startswith("linux"):
         return False
-    for relative, is_ec2 in _EC2_MARKERS:
-        try:
-            text = (_SYSFS_ROOT / relative).read_text(encoding="ascii", errors="replace").strip()
-        except OSError:
-            continue
-        if is_ec2(text):
-            return True
-    return False
+    vendor = _sysfs_text(_SYS_VENDOR)
+    if vendor == "Amazon EC2" or _sysfs_text(_ASSET_TAG).startswith("i-"):
+        return True
+    vendors = f"{vendor} {_sysfs_text(_BIOS_VENDOR)}".lower()
+    return _sysfs_text(_HYPERVISOR_UUID).lower().startswith("ec2") and (
+        "xen" in vendors or "amazon" in vendors
+    )
+
+
+def _sysfs_text(relative: str) -> str:
+    """A sysfs file's text, stripped; empty when it cannot be read."""
+    try:
+        return (_SYSFS_ROOT / relative).read_text(encoding="ascii", errors="replace").strip()
+    except OSError:
+        return ""
 
 
 def _shared_file(environ: Mapping[str, str], variable: str, name: str) -> str:

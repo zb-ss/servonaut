@@ -1360,7 +1360,7 @@ class HetznerService:
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
-            write_json_atomic(self._cache_path, data)
+            write_json_atomic(self._cache_path, data, sweep_older_than=self._cache_ttl_seconds)
         except OSError as exc:
             logger.warning("Failed to save Hetzner cache: %s", exc)
 

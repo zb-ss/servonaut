@@ -446,9 +446,13 @@ its servers count too, within `account_check_timeout_seconds` (see
 |---------------|-------------------|
 | `timed out after N s` or `no answer: …` (a timeout, or no connection) | `account_retry_seconds` |
 | the provider's error (credentials, permissions, a credential helper, SSO, a missing profile) | its cache TTL |
-| `was only partly listed (…)`: what was listed counts as checked | its cache TTL |
+| `was only partly listed (…)`: what was listed counts as checked, and the note repeats on every lookup | its cache TTL |
 
-The same applies to `servonaut servers verify` and `servonaut memory`.
+AWS lists the account's own default region first, then `us-east-1`, then the
+rest. When an account is only partly listed in the time allowed, list only the
+regions you use (`aws.regions`, or the account's `regions`) to make it
+complete. The same applies to `servonaut servers verify` and
+`servonaut memory`.
 
 The AWS account without a profile is listed only when AWS is set up on this
 machine: credentials in the environment, a `default` profile with
@@ -457,6 +461,10 @@ credentials in `~/.aws/credentials` or `~/.aws/config`, or an EC2 instance
 account that is set up is listed with the credentials it is configured
 with, so a `credential_process` helper of the profile runs then, as it does
 for any AWS listing: once, and if it fails, again only after the cache TTL.
+A container on an EC2 instance sees the host's firmware details, so it counts
+as an EC2 instance too, but it usually cannot reach the instance role (the
+metadata service's hop limit): its first lookup per cache TTL waits for the
+metadata timeouts and ends with a note that AWS could not be listed.
 
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like
