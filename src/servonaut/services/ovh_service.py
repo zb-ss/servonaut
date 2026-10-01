@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import threading
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.atomic_file import write_json_atomic
 
 if TYPE_CHECKING:
     from servonaut.config.schema import OVHConfig
@@ -1072,19 +1072,12 @@ class OVHService:
             instances: List of instance dicts to cache.
         """
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
-            # Write with 0o600 permissions so only the owner can read the cache
-            fd = os.open(
-                str(self._cache_path),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Atomic, and readable by the owner only (see write_json_atomic).
+            write_json_atomic(self._cache_path, data)
             logger.debug("Saved %d OVH instances to cache", len(instances))
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             logger.error("Error saving OVH cache: %s", e)

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.atomic_file import write_json_atomic
 from servonaut.utils.endpoints import EndpointOverrideError, endpoint_override
 
 if TYPE_CHECKING:
@@ -1263,34 +1264,19 @@ class HetznerService:
         return instances
 
     def _save_cache(self, instances: List[dict]) -> None:
-        """Atomically write the cache: write to ``<path>.tmp`` then rename.
+        """Atomically write the cache, mode ``0o600`` (see :func:`write_json_atomic`).
 
         Atomicity matters because :meth:`_load_cache` may run
-        concurrently from another worker / sub-process. A non-atomic
-        truncate-then-write would briefly expose an empty / partial
-        JSON file. ``os.replace`` is atomic on POSIX and Windows for
-        same-filesystem renames.
-
-        File mode is forced to ``0o600`` via ``os.open`` to bypass
-        umask (which could be 0o022 by default), and ``O_NOFOLLOW`` to
-        defeat symlink-redirect attacks against the cache path.
+        concurrently from another worker / sub-process, and two processes
+        may save at once: each writes its own temporary file, so neither
+        can expose a torn JSON file.
         """
         try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
-            tmp_path = self._cache_path.with_suffix(
-                self._cache_path.suffix + '.tmp',
-            )
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            if hasattr(os, 'O_NOFOLLOW'):
-                flags |= os.O_NOFOLLOW
-            fd = os.open(str(tmp_path), flags, 0o600)
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
-            os.replace(str(tmp_path), str(self._cache_path))
+            write_json_atomic(self._cache_path, data)
         except OSError as exc:
             logger.warning("Failed to save Hetzner cache: %s", exc)
 

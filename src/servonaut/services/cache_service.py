@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import logging
 
+from servonaut.utils.atomic_file import write_json_atomic
+
 logger = logging.getLogger(__name__)
 
 # ``timestamp_utc`` is the authoritative write time: an ISO 8601 string with a
@@ -104,10 +106,10 @@ class CacheService:
         cache_data = {**timestamp_fields(), 'instances': instances}
 
         try:
-            with open(self.CACHE_PATH, 'w') as f:
-                json.dump(cache_data, f, indent=2)
+            # Atomic: a reader in another process never sees a torn file.
+            write_json_atomic(self.CACHE_PATH, cache_data)
             logger.debug(f"Cached {len(instances)} instances")
-        except IOError as e:
+        except OSError as e:
             logger.error(f"Error writing cache file: {e}")
 
     def load_any(self) -> Optional[List[dict]]:
