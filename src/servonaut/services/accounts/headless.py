@@ -170,11 +170,9 @@ def with_ovh_login(row: dict, config: Any) -> dict:
     """
     if not row.get("is_ovh"):
         return row
-    from types import SimpleNamespace
-
     from servonaut.services.connection_service import ConnectionService
 
-    login = ConnectionService(SimpleNamespace(get=lambda: config)).resolve_ovh_connection(row)
+    login = ConnectionService.for_config(config).resolve_ovh_connection(row)
     enriched = dict(row)
     enriched["username"] = row.get("username") or login["username"]
     if login["key_path"] and not row.get("ssh_key"):

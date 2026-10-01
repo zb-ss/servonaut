@@ -27,6 +27,11 @@ from servonaut.services.bw_resolver import (
     BwCliMissingError,
     BwSessionMissingError,
 )
+from servonaut.services.connection_service import (
+    ConnectionService,
+    profile_route,
+    rule_username,
+)
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_ACCEPT_NEW,
     HostKeyPolicy,
@@ -146,6 +151,7 @@ def _run_ssh_probe(
     timeout: int,
     host_key_policy: Optional[HostKeyPolicy] = None,
     instance: Optional[Dict[str, Any]] = None,
+    route: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run ``ssh -o BatchMode=yes ... true`` and return the exit code.
 
@@ -159,6 +165,9 @@ def _run_ssh_probe(
             (``accept-new``) when None.
         instance: The probed instance, so a cloud instance is pinned by
             its alias; None for a team server.
+        route: The instance's connection-rule route (``profile_route``):
+            its proxy arguments and extra options, the alias included.
+            None for a team server, which only gets the alias options.
     """
     policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
     cmd = [
@@ -169,7 +178,12 @@ def _run_ssh_probe(
         # keeps what it sent then.
         *policy.ssh_options(off_options=OFF_OPTIONS_ACCEPT_NEW),
     ]
-    for option in host_key_alias_options(instance, policy):
+    if route is None:
+        extra_options = host_key_alias_options(instance, policy)
+    else:
+        cmd += route["proxy_args"]
+        extra_options = route["extra_options"]
+    for option in extra_options:
         cmd += ["-o", option]
     cmd += [*identity_file_args(key_path), "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
@@ -188,7 +202,9 @@ def _run_ssh_probe(
     problem = detect_host_key_problem(
         getattr(result, "diagnostics", "") or "",
         result.returncode,
-        HostKeyTarget.for_connection(host, port, instance=instance),
+        HostKeyTarget.for_connection(
+            host, port, instance=instance, profile=route["profile"] if route else None,
+        ),
         policy,
         stdout=result.stdout,
     )
@@ -210,6 +226,7 @@ async def _probe_personal(
     port: Optional[int],
     timeout: int,
     host_key_policy: Optional[HostKeyPolicy] = None,
+    route: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Probe personal instance.  Returns a status string or None if no ref stored.
 
@@ -245,6 +262,7 @@ async def _probe_personal(
     with ephemeral_ssh_key(key_body) as key_path:
         rc = _run_ssh_probe(
             key_path, user, host, port, timeout, host_key_policy, instance,
+            route,
         )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
@@ -302,19 +320,28 @@ async def _probe_team(
 # Resolve connection details for an instance
 # ---------------------------------------------------------------------------
 
-def _resolve_host(instance: Dict[str, Any], host_override: Optional[str]) -> Optional[str]:
-    """Return the effective target host. None if neither override nor IP are available."""
+def _resolve_host(host_override: Optional[str], route: Dict[str, Any]) -> Optional[str]:
+    """Return the effective target host. None if neither override nor IP are available.
+
+    Without ``--host`` it is the route's: the private address through a
+    bastion, else the public one.
+    """
     if host_override:
         return host_override
-    host = instance.get("public_ip") or instance.get("private_ip")
-    return host or None
+    return route["host"] or None
 
 
-def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str:
-    """Return the effective SSH username."""
+def _resolve_user(
+    instance: Dict[str, Any], user_override: Optional[str], profile: Any = None,
+) -> str:
+    """Return the effective SSH username.
+
+    Priority: ``--user`` > the matching connection rule's username (not for
+    a custom server) > the instance's username > ``ec2-user``.
+    """
     if user_override:
         return user_override
-    return instance.get("username") or "ec2-user"
+    return rule_username(instance, profile) or instance.get("username") or "ec2-user"
 
 
 def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
@@ -423,10 +450,13 @@ async def _cmd_verify(args: Any) -> int:
     # Determine host/user for the probe
     # ------------------------------------------------------------------
 
+    route: Optional[Dict[str, Any]] = None
     if personal_instance is not None:
         personal_instance = with_ovh_login(personal_instance, config)
-        host = _resolve_host(personal_instance, host_override)
-        user = _resolve_user(personal_instance, user_override)
+        # The matching connection rule routes the probe as it routes `ssh`.
+        route = profile_route(personal_instance, ConnectionService.for_config(config))
+        host = _resolve_host(host_override, route)
+        user = _resolve_user(personal_instance, user_override, route["profile"])
         port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
@@ -464,7 +494,7 @@ async def _cmd_verify(args: Any) -> int:
             status = await _probe_personal(
                 bw_ssh_cfg, bw_resolver,
                 personal_instance, host, user, port, timeout,
-                host_key_policy,
+                host_key_policy, route,
             )
             if status is None:
                 print(
@@ -542,7 +572,10 @@ def add_servers_parser(subparsers: argparse._SubParsersAction) -> None:
     verify.add_argument(
         "--host",
         default=None,
-        help="Override target host (default: instance.public_ip or private_ip).",
+        help=(
+            "Override target host (default: instance.public_ip or private_ip; "
+            "the private one through a connection rule's bastion)."
+        ),
     )
     verify.add_argument(
         "--user", "-u",

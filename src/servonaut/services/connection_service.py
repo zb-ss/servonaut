@@ -43,6 +43,39 @@ def _ovh_account_config(config, instance: dict):
     return config.ovh
 
 
+def profile_route(instance: dict, connection_service: "ConnectionService") -> dict:
+    """The connection profile's part of reaching *instance*.
+
+    Applies the first matching connection rule: the target host (the private
+    address through a bastion), the proxy arguments for the bastion hop, and
+    the extra ssh options (the host-key alias first, then the profile's and
+    the server's own). Every surface that opens ssh to a server routes it
+    this way; the username, key and port stay each surface's own.
+
+    Returns:
+        ``profile`` (None for a direct connection), ``host``,
+        ``proxy_args`` and ``extra_options``.
+    """
+    profile = connection_service.resolve_profile(instance)
+    return {
+        'profile': profile,
+        'host': connection_service.get_target_host(instance, profile),
+        'proxy_args': connection_service.get_proxy_args(profile) if profile else [],
+        'extra_options': connection_service.get_extra_options(instance, profile),
+    }
+
+
+def rule_username(instance: dict, profile: Optional[ConnectionProfile]) -> Optional[str]:
+    """The matching connection rule's username for *instance*, as the TUI applies it.
+
+    It outranks a cloud server's provider or account default; a custom
+    server keeps the username saved with it.
+    """
+    if profile is None or instance.get('is_custom'):
+        return None
+    return profile.username or None
+
+
 def server_connection(
     instance: dict, connection_service: "ConnectionService", ssh_service,
     default_username: str,
@@ -57,10 +90,8 @@ def server_connection(
         ``host``, ``username``, ``key_path``, ``proxy_args``, ``profile``,
         ``port`` and ``extra_options``.
     """
-    profile = connection_service.resolve_profile(instance)
-    host = connection_service.get_target_host(instance, profile)
-    proxy_args = connection_service.get_proxy_args(profile) if profile else []
-    extra_options = connection_service.get_extra_options(instance, profile)
+    route = profile_route(instance, connection_service)
+    profile = route['profile']
 
     if instance.get('is_ovh'):
         # The defaults of the OVH account the server belongs to.
@@ -87,9 +118,9 @@ def server_connection(
         port = None
 
     return {
-        'host': host, 'username': username, 'key_path': key_path,
-        'proxy_args': proxy_args, 'profile': profile, 'port': port,
-        'extra_options': extra_options,
+        'host': route['host'], 'username': username, 'key_path': key_path,
+        'proxy_args': route['proxy_args'], 'profile': profile, 'port': port,
+        'extra_options': route['extra_options'],
     }
 
 
@@ -106,6 +137,13 @@ class ConnectionService(ConnectionServiceInterface):
             config_manager: Configuration manager instance.
         """
         self._config_manager = config_manager
+
+    @classmethod
+    def for_config(cls, config) -> "ConnectionService":
+        """A service over an already loaded config (one-shot CLI commands)."""
+        from types import SimpleNamespace
+
+        return cls(SimpleNamespace(get=lambda: config))
 
     def resolve_ovh_connection(
         self, instance: dict, fallback_key: Optional[str] = None,

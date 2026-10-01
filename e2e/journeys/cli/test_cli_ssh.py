@@ -4,20 +4,25 @@ The CLI runs as a real child process and opens a real OpenSSH session to the
 loopback target with the custom server's user, port and key. Commands piped
 to it run on the server and their output comes back on stdout. Running a
 single command given after ``--`` is how most SSH front ends are scripted.
+A server that matches a connection rule is reached the way the TUI reaches
+it: through the rule's bastion, at its private address.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from e2e.harness import remote_fleet
+from e2e.harness import fleet, remote_fleet
 from e2e.harness.known_issues import known_issue
 from e2e.harness.remote_root import OS_RELEASE
 from e2e.harness.seed import HomeSeeder
+from e2e.harness.shims import jump_host
+from e2e.harness.sshd import BASTION_ALIAS
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
 
 WEB_1 = remote_fleet.fleet.WEB_1
+APP_1 = fleet.APP_1
 
 
 def _home(journey, sshd, fake_cloud):
@@ -66,3 +71,25 @@ def test_a_command_after_a_double_dash_runs_on_the_server(journey, fake_cloud, s
     assert result.returncode == 0, result.describe()
     assert result.stdout.strip() == WEB_1.name
     assert sshd.target.commands() == ["hostname"]
+
+
+def test_a_connection_rule_routes_ssh_through_its_bastion(journey, fake_cloud, sshd, cli):
+    sandbox = journey.new_sandbox()
+    seeder = HomeSeeder(sandbox.home, api_url=fake_cloud.url)
+    remote_fleet.seed_app_1_behind_bastion(sshd, seeder, sandbox.home)
+    sshd.target.remote.write("/etc/hostname", f"{APP_1.name}\n")
+
+    result = cli(sandbox, "ssh", APP_1.name, "--", "hostname")
+
+    assert result.returncode == 0, result.describe()
+    assert result.stdout.strip() == APP_1.name
+    # The private address, through the bastion the rule names.
+    argv = journey.shims.calls("ssh")[0].argv
+    assert jump_host(argv) == f"{fleet.BASTION_USER}@{BASTION_ALIAS}"
+    assert argv[-2:] == [f"{fleet.BASTION_USER}@{APP_1.private_ip}", "hostname"]
+    assert [f["destination"] for f in sshd.bastion.sessions("forward")] == [
+        f"{APP_1.private_ip}:22"
+    ]
+    bastion_logins = sshd.bastion.sessions("auth")
+    assert bastion_logins and all(a["accepted"] for a in bastion_logins)
+    assert sshd.target.commands(user=fleet.BASTION_USER) == ["hostname"]

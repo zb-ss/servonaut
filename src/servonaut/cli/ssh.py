@@ -25,7 +25,11 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from servonaut.services.ssh_host_keys import HostKeyPolicy, host_key_alias_options
+from servonaut.services.connection_service import (
+    ConnectionService,
+    profile_route,
+    rule_username,
+)
 from servonaut.utils.instance_resolver import describe_candidate, match_instances
 
 logger = logging.getLogger(__name__)
@@ -210,13 +214,19 @@ def _find_instance(instances: List[Dict[str, Any]], search: str) -> List[Dict[st
 # Username resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_username(args: Any, instance: Dict[str, Any], config: Any) -> str:
+def _resolve_username(
+    args: Any, instance: Dict[str, Any], config: Any, profile: Any = None,
+) -> str:
     """Resolve SSH username in priority order.
 
-    Priority: args.user > instance username > config default_username > 'ubuntu'
+    Priority: args.user > the matching connection rule's username (not for
+    a custom server) > instance username > config default_username > 'ubuntu'
     """
     if args.user:
         return args.user
+    profile_username = rule_username(instance, profile)
+    if profile_username:
+        return profile_username
     inst_username = instance.get("username")
     if inst_username:
         return inst_username
@@ -364,27 +374,21 @@ async def _handle_ssh_async(args: Any) -> int:
         )
         return _EXIT_NO_CREDENTIAL
 
-    # --- Determine host ---
-    host = (
-        instance.get("public_ip")
-        or instance.get("private_ip")
-        or instance.get("host")
-        or iid
-    )
+    # --- Route: the matching connection rule, as the TUI and MCP apply it ---
+    # Through a bastion the target is the private address, reached by a
+    # proxy hop; the extra options pin a cloud instance by its host-key
+    # alias, then add the profile's and the server's own.
+    route = profile_route(instance, ConnectionService.for_config(config))
+    host = route["host"] or instance.get("host") or iid
 
     # --- Determine username ---
-    username = _resolve_username(args, instance, config)
+    username = _resolve_username(args, instance, config, route["profile"])
 
     # --- Determine port ---
     port = args.port or instance.get("port")
 
     # --- Remote command (None = interactive shell) ---
     remote_command = _remote_command_string(args)
-
-    # A cloud instance is pinned by its alias, as on every other path.
-    alias_options = host_key_alias_options(
-        instance, HostKeyPolicy.from_ssh_config(getattr(config, "ssh", None)),
-    )
 
     # --- Build + run SSH ---
     if resolved.source in ("personal", "team"):
@@ -433,9 +437,10 @@ async def _handle_ssh_async(args: Any) -> int:
                 host=host,
                 username=username,
                 key_path=tmpfile,
+                proxy_args=route["proxy_args"],
                 port=port,
                 remote_command=remote_command,
-                extra_options=alias_options,
+                extra_options=route["extra_options"],
             )
             logger.debug("Running SSH (BW key): %s", " ".join(cmd))
             # Inherit stdin/stdout/stderr: interactive shells, piped stdin and
@@ -449,9 +454,10 @@ async def _handle_ssh_async(args: Any) -> int:
             host=host,
             username=username,
             key_path=resolved.local_key_path,
+            proxy_args=route["proxy_args"],
             port=port,
             remote_command=remote_command,
-            extra_options=alias_options,
+            extra_options=route["extra_options"],
         )
         logger.debug("Running SSH (local key): %s", " ".join(cmd))
         result = subprocess.run(cmd)
