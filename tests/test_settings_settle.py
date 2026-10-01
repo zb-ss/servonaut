@@ -9,11 +9,12 @@ ask.
 """
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, Callable, List
 
 import pytest
 from textual.widgets import Input
 
+from servonaut.screens.settings import SettingsScreen
 from servonaut.screens.settings.base import SettingsPanel
 from servonaut.screens.settings.shell import DiscardChangesModal
 from tests.test_open_settings_screen import _Host
@@ -31,10 +32,24 @@ def _hold_rebaseline(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     return held
 
 
+async def _wait_until(pilot: Any, condition: Callable[[], bool], what: str) -> None:
+    """Wait for *condition*; a busy runner can take several frames to mount."""
+    for _ in range(50):
+        if condition():
+            return
+        await pilot.pause()
+    assert condition(), what
+
+
 async def _open_general(app: _Host, pilot: Any) -> Any:
     await pilot.pause()
     app.open_settings_screen()
-    await pilot.pause()
+    await _wait_until(
+        pilot,
+        lambda: isinstance(app.screen, SettingsScreen)
+        and app.screen._current_panel() is not None,
+        "Settings never opened a panel",
+    )
     settings = app.screen
     assert settings._active_id == "general"
     return settings
@@ -53,11 +68,18 @@ async def test_switching_panels_while_one_settles_does_not_ask(monkeypatch):
     async with app.run_test(size=(140, 45)) as pilot:
         settings = await _open_general(app, pilot)
         panel = settings._current_panel()
-        assert panel in held, "the load should have queued a re-baseline"
+        await _wait_until(
+            pilot, lambda: panel in held, "the load should have queued a re-baseline"
+        )
         await _late_value(pilot, panel)
 
         settings._request_switch("ai_provider")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: settings._active_id == "ai_provider"
+            or isinstance(app.screen, DiscardChangesModal),
+            "the switch never happened",
+        )
 
         assert not isinstance(app.screen, DiscardChangesModal)
         assert settings._active_id == "ai_provider"
@@ -65,14 +87,22 @@ async def test_switching_panels_while_one_settles_does_not_ask(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_leaving_settings_while_a_panel_settles_does_not_ask(monkeypatch):
-    _hold_rebaseline(monkeypatch)
+    held = _hold_rebaseline(monkeypatch)
     app = _Host()
     async with app.run_test(size=(140, 45)) as pilot:
         settings = await _open_general(app, pilot)
-        await _late_value(pilot, settings._current_panel())
+        panel = settings._current_panel()
+        await _wait_until(
+            pilot, lambda: panel in held, "the load should have queued a re-baseline"
+        )
+        await _late_value(pilot, panel)
 
         settings.action_back()
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: app.screen is not settings,
+            "Settings was never left",
+        )
 
         assert not isinstance(app.screen, DiscardChangesModal)
         assert app.screen is not settings
@@ -89,10 +119,17 @@ async def test_switching_before_the_panel_has_loaded_does_not_ask(monkeypatch):
     async with app.run_test(size=(140, 45)) as pilot:
         settings = await _open_general(app, pilot)
         panel = settings._current_panel()
-        assert panel in loads, "the panel should have been asked to load"
+        await _wait_until(
+            pilot, lambda: panel in loads, "the panel should have been asked to load"
+        )
 
         settings._request_switch("ai_provider")
-        await pilot.pause()
+        await _wait_until(
+            pilot,
+            lambda: settings._active_id == "ai_provider"
+            or isinstance(app.screen, DiscardChangesModal),
+            "the switch never happened",
+        )
 
         assert not isinstance(app.screen, DiscardChangesModal)
         assert settings._active_id == "ai_provider"
@@ -104,15 +141,19 @@ async def test_an_edit_after_the_panel_settled_still_asks():
     async with app.run_test(size=(140, 45)) as pilot:
         settings = await _open_general(app, pilot)
         panel = settings._current_panel()
-        for _ in range(20):
-            if not getattr(panel, "_settling", False):
-                break
-            await pilot.pause()
-        assert not getattr(panel, "_settling", False), "the panel never settled"
+        # Not settling is also true before the first load, and that load
+        # would overwrite the edit below: wait for loaded AND settled.
+        await _wait_until(
+            pilot,
+            lambda: panel._loaded and not panel._settling,
+            "the panel never settled",
+        )
 
         panel.query_one("#general_terminal", Input).value = "edited-by-the-user"
         await pilot.pause()
         settings._request_switch("ai_provider")
-        await pilot.pause()
-
-        assert isinstance(app.screen, DiscardChangesModal)
+        await _wait_until(
+            pilot,
+            lambda: isinstance(app.screen, DiscardChangesModal),
+            "an edit made after the load should ask before it is discarded",
+        )
