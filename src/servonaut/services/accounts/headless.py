@@ -775,13 +775,21 @@ def _clock(epoch: float) -> str:
 
 
 async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:
-    """An account's servers, and why they may be incomplete ("" when they are not)."""
+    """An account's servers, and why they may be incomplete ("" when they are not).
+
+    The reason is one line, so each note stays one line on stderr.
+    """
     try:
         rows = await _read_account(binding, qualified)
     except Exception as exc:  # noqa: BLE001 - one account never breaks a command
-        return [], (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        return [], _first_line(str(exc)) or type(exc).__name__
     error = getattr(binding.service, "last_fetch_error", None)
-    return rows, error.strip() if isinstance(error, str) else ""
+    return rows, _first_line(error) if isinstance(error, str) else ""
+
+
+def _first_line(text: str) -> str:
+    """The first non-empty line of *text*, stripped (a helper's stderr may follow)."""
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
 def _not_checked(ref: AccountRef, what: str, reference: str, *, some: bool = False) -> str:

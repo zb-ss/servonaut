@@ -261,6 +261,21 @@ def test_a_partial_listing_is_noted_as_such(prod_partly_listed):
     assert [row["id"] for row in checked.rows] == ["i-2"]
 
 
+def test_a_reason_over_several_lines_keeps_the_note_on_one_line(monkeypatch):
+    registry, services = build_registry(monkeypatch, aws={"aws": [], "prod": []})
+    prod = services[("aws", "prod")]
+    prod.cached = None
+    _partly_listing(prod, "all 2 AWS regions failed: helper said:\nline two\nline three")
+    prod.rows = []
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: AWS account 'prod' could not be listed (all 2 AWS regions failed: helper "
+        "said:); its servers were not checked for 'web-1'"
+    ]
+
+
 def test_a_partial_listing_counts_as_checked_until_the_ttl_ends(prod_partly_listed,
                                                                  monkeypatch):
     from servonaut.services.accounts import listing_record
