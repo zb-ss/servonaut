@@ -1761,8 +1761,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1803,8 +1805,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1836,8 +1840,9 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region to create the bucket in (e.g. 'eu-central-1'). "
                         "Omit to use the configured region for the provider. "
-                        "AWS only — for Hetzner/OVH the region is fixed by the "
-                        "configured endpoint URL and an override is rejected."
+                        "AWS, and OVH when no endpoint URL is configured. For "
+                        "Hetzner, or an OVH endpoint URL set by hand, the region is "
+                        "fixed by that endpoint and an override is rejected."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1869,8 +1874,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1910,8 +1917,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1947,8 +1956,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -1992,8 +2003,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
@@ -2037,8 +2050,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "src_region": {
@@ -2087,8 +2102,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "account": _account(_STORAGE_ACCOUNT),
