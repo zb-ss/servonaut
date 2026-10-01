@@ -300,9 +300,10 @@ class CachedFleet:
         Nothing is read for an id a cached row has or a ``custom/...``
         reference; ``<account>/...`` reads only that account. Nor is an
         account nothing is set up for on this machine (AWS without
-        credentials). An account that cannot be read, or cannot connect,
-        never breaks the command: it gets a note that its servers were not
-        checked.
+        credentials, checked offline); it gets a note only when the
+        reference points at it (``<account>/...`` or an EC2 instance id).
+        An account that cannot be read, or cannot connect, never breaks the
+        command: it gets a note that its servers were not checked.
         """
         rows = self.instances()
         needle = (reference or "").strip()
@@ -314,6 +315,12 @@ class CachedFleet:
         for provider in PROVIDERS:
             inventory = self._inventories[provider]
             for binding in _never_listed(inventory, only):
+                if not _has_credentials(binding.service):
+                    if only is not None or _names_instance_id(provider, needle):
+                        notes.append(_not_checked(
+                            binding.ref, "has no credentials on this machine", needle,
+                        ))
+                    continue
                 read, problem = await _read_never_listed(binding, inventory.multi)
                 fetched.extend(read)
                 if problem:
@@ -620,14 +627,13 @@ def _row_key(row: Mapping[str, Any]) -> Tuple[str, str]:
 
 
 def _never_listed(inventory: Any, only: Optional[AccountRef]) -> List[Any]:
-    """*inventory*'s accounts with no cache at all that can be listed (*only* alone, if set)."""
+    """*inventory*'s accounts with no cache at all (of *only* alone, if set)."""
     if not isinstance(inventory, AccountFleet):
         return []
     return [
         binding for binding in inventory.bindings
         if (only is None or (binding.ref.provider, binding.ref.key) == (only.provider, only.key))
         and not _has_cache(binding.service)
-        and _has_credentials(binding.service)
     ]
 
 
@@ -645,10 +651,20 @@ def _has_credentials(service: Any) -> bool:
     """False for an account nothing is set up for here (AWS without credentials).
 
     It holds no server this machine could connect to, so there is nothing to
-    check, and reading it would only fail on every command.
+    check, and reading it would only fail on every command. The check is
+    offline (see ``AWSService.has_credentials``).
     """
     check = getattr(service, "has_credentials", None)
     return not callable(check) or bool(check())
+
+
+def _names_instance_id(provider: str, reference: str) -> bool:
+    """Whether *reference* is an id of *provider*'s shape (EC2 ids only)."""
+    if provider != AWS:
+        return False
+    from servonaut.services.aws_service import is_instance_id
+
+    return is_instance_id(reference)
 
 
 async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:

@@ -3,14 +3,76 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from typing import Any, Optional, Tuple
+from pathlib import Path
+from typing import Any, Mapping, Optional, Tuple
 
 import boto3
+from botocore.configloader import load_config, raw_config_parse
+from botocore.exceptions import BotoCoreError, ConfigNotFound
 
 from servonaut.config.accounts import AccountRef
 
 logger = logging.getLogger(__name__)
+
+# Environment variables botocore reads credentials, or where to get them, from.
+_CREDENTIAL_ENV_VARS = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+)
+# Profile keys botocore gets credentials from, once it is asked for them.
+_CREDENTIAL_KEYS = frozenset({
+    "aws_access_key_id",
+    "credential_process",
+    "role_arn",
+    "web_identity_token_file",
+    "sso_session",
+    "sso_start_url",
+    "sso_account_id",
+    "sso_role_name",
+    "login_session",
+})
+
+
+def ambient_credentials_configured(environ: Mapping[str, str] = os.environ) -> bool:
+    """Whether the ambient credential chain has anything to work with, checked offline.
+
+    True for a credential environment variable, a profile named in
+    ``AWS_PROFILE`` / ``AWS_DEFAULT_PROFILE`` (using it says what is wrong
+    with it), or a ``default`` profile in the shared credentials or config
+    file with a key that gives credentials. Nothing is resolved: no instance
+    metadata request, no ``credential_process`` run, no SSO token read. A
+    machine that has only an instance role therefore counts as not set up.
+    """
+    if any(environ.get(name) for name in _CREDENTIAL_ENV_VARS):
+        return True
+    if environ.get("AWS_PROFILE") or environ.get("AWS_DEFAULT_PROFILE"):
+        return True
+    credentials = _shared_file(environ, "AWS_SHARED_CREDENTIALS_FILE", "credentials")
+    config = _shared_file(environ, "AWS_CONFIG_FILE", "config")
+    try:
+        sections = [
+            _parsed(lambda: raw_config_parse(credentials)).get("default", {}),
+            _parsed(lambda: load_config(config)).get("profiles", {}).get("default", {}),
+        ]
+    except (BotoCoreError, OSError):
+        return True  # a file botocore cannot read: listing says what is wrong
+    return any(_CREDENTIAL_KEYS.intersection(section) for section in sections)
+
+
+def _shared_file(environ: Mapping[str, str], variable: str, name: str) -> str:
+    return os.path.expanduser(environ.get(variable) or str(Path("~") / ".aws" / name))
+
+
+def _parsed(parse) -> dict:
+    """A botocore config parse; empty when the file does not exist."""
+    try:
+        return parse() or {}
+    except ConfigNotFound:
+        return {}
 
 
 class AWSAccountContext:

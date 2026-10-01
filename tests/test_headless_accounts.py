@@ -252,6 +252,22 @@ def test_an_aws_account_without_credentials_is_not_read(monkeypatch):
     assert fleet.resolve("web-1", rows=checked.rows)["id"] == "custom-web"
 
 
+@pytest.mark.parametrize("reference", ["aws/web-1", "i-0123456789abcdef0"])
+def test_a_reference_to_an_aws_account_without_credentials_says_so(monkeypatch, reference):
+    registry, services = build_registry(monkeypatch)
+    aws = services[("aws", "aws")]
+    aws.cached = None
+    aws.credentials = False
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows(reference))
+
+    assert checked.notes == [
+        "Note: AWS account 'aws' has no credentials on this machine; "
+        f"its servers were not checked for {reference!r}"
+    ]
+    assert aws.fetches == 0
+
+
 @pytest.mark.parametrize("reference", ["i-1", "I-1", "custom/web-1", "  "])
 def test_an_id_or_custom_reference_reads_nothing(staging_never_listed, reference):
     registry, services = staging_never_listed

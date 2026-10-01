@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
-from botocore.exceptions import BotoCoreError
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
@@ -52,6 +51,11 @@ _SG_ID_RE = re.compile(r'^sg-[0-9a-f]{8,17}$')
 _INSTANCE_TYPE_RE = re.compile(r'^[a-z0-9]+\.[a-z0-9]+$')
 _KEY_NAME_RE = re.compile(r'^[\w .\-/]{1,255}$')
 _NAME_TAG_RE = re.compile(r'^[^\x00-\x1f\x7f]{1,255}$')
+
+
+def is_instance_id(value: str) -> bool:
+    """Whether *value* has the shape of an EC2 instance id."""
+    return bool(_INSTANCE_ID_RE.match(value or ""))
 
 
 class AWSService(InstanceServiceInterface):
@@ -102,20 +106,19 @@ class AWSService(InstanceServiceInterface):
         return self.cache_service.load_any() is not None
 
     def has_credentials(self) -> bool:
-        """Whether this account can be listed on this machine at all.
+        """Whether this account can be listed on this machine at all, checked offline.
 
         An account with a profile is set up explicitly. The ambient-chain
-        account is when the chain finds credentials (environment, shared
-        files, instance role); without any, AWS is simply not used here.
-        A chain that cannot even be read (a missing profile in
-        ``AWS_PROFILE``) counts as set up, so listing it says what is wrong.
+        account is when the environment or the shared files name
+        credentials (:func:`ambient_credentials_configured`); nothing is
+        resolved, so no instance metadata request is made and no
+        ``credential_process`` runs.
         """
         if self._uses_profile():
             return True
-        try:
-            return boto3.session.Session().get_credentials() is not None
-        except BotoCoreError:
-            return True
+        from servonaut.services.accounts.aws_account import ambient_credentials_configured
+
+        return ambient_credentials_configured()
 
     def _uses_profile(self) -> bool:
         """True when this service's account has credentials of its own.
