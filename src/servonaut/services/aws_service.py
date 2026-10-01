@@ -81,6 +81,9 @@ class AWSService(InstanceServiceInterface):
         # successful fetch. Surfaces (TUI notify, MCP list_instances) read it
         # to tell the operator they are looking at cached data.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
         self._failed_regions: List[str] = []
         # Set by limit_listing_time: botocore timeouts, and when to stop listing.
         self._client_config: Any = None
@@ -216,6 +219,7 @@ class AWSService(InstanceServiceInterface):
             instances = await self.fetch_instances()
         except AWSFetchError as exc:
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             stale = self.cache_service.load_any()
             if stale is not None:
                 logger.warning(
@@ -230,10 +234,12 @@ class AWSService(InstanceServiceInterface):
             # A partial inventory is shown but never persisted: writing it
             # would silently drop every instance in the failed regions.
             self.last_fetch_error = self._incomplete_listing()
+            self.last_fetch_exception = None
             logger.warning("AWS fetch incomplete (%s); cache left untouched", self.last_fetch_error)
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self.cache_service.save(instances)
         return instances
 

@@ -265,8 +265,15 @@ def test_a_reason_over_several_lines_keeps_the_note_on_one_line(monkeypatch):
     registry, services = build_registry(monkeypatch, aws={"aws": [], "prod": []})
     prod = services[("aws", "prod")]
     prod.cached = None
-    _partly_listing(prod, "all 2 AWS regions failed: helper said:\nline two\nline three")
-    prod.rows = []
+    message = "all 2 AWS regions failed: helper said:\nline two\nline three"
+
+    async def failed(force_refresh=False):
+        # As AWSService does: no rows, and the reason with the error behind it.
+        prod.last_fetch_error = message
+        prod.last_fetch_exception = RuntimeError(message)
+        return []
+
+    prod.fetch_instances_cached = failed
 
     checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
 
@@ -314,8 +321,42 @@ def test_a_partial_listing_the_provider_saved_is_its_cache(monkeypatch):
     assert ovh.record.load() is None
 
 
-def test_a_failed_listing_is_tried_again_after_account_retry_seconds(staging_never_listed,
-                                                                     monkeypatch):
+@pytest.mark.parametrize("error", [TimeoutError, ConnectionRefusedError])
+def test_no_answer_is_tried_again_after_account_retry_seconds(staging_never_listed, monkeypatch,
+                                                              error):
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    registry.config.account_retry_seconds = 45
+    staging = services[("hetzner", "staging")]
+    attempts = _failing(staging, "no route", error)
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
+
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(attempts) == 1
+    remembered = staging.record.load()
+    assert remembered.outcome == listing_record.TIMEOUT
+    assert remembered.until - remembered.at == 45
+    assert first.notes == [
+        "Note: Hetzner project 'staging' could not be listed (no answer: no route); "
+        "its servers were not checked for 'web-1'"
+    ]
+    at, until = (datetime.fromtimestamp(t).strftime("%H:%M:%S")
+                 for t in (remembered.at, remembered.until))
+    assert again.notes == [
+        f"Note: Hetzner project 'staging' could not be listed (no answer: no route; at {at}, "
+        f"tried again after {until}); its servers were not checked for 'web-1'"
+    ]
+    monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 2
+
+
+def test_an_error_response_is_tried_again_only_after_the_cache_ttl(staging_never_listed,
+                                                                   monkeypatch):
+    """Credentials or a credential helper do not heal in seconds: no prompt per command."""
     from servonaut.services.accounts import listing_record
 
     registry, services = staging_never_listed
@@ -324,28 +365,48 @@ def test_a_failed_listing_is_tried_again_after_account_retry_seconds(staging_nev
     attempts = _failing(staging, "401 Unauthorized")
     monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
 
-    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
-    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
 
-    assert len(attempts) == 1
+    assert first.notes == [
+        "Note: Hetzner project 'staging' could not be listed (401 Unauthorized); "
+        "its servers were not checked for 'web-1'"
+    ]
     remembered = staging.record.load()
     assert remembered.outcome == listing_record.FAILED
-    assert remembered.until - remembered.at == 45
-    at, until = (datetime.fromtimestamp(t).strftime("%H:%M:%S")
-                 for t in (remembered.at, remembered.until))
-    assert again.notes == [
-        f"Note: Hetzner project 'staging' could not be listed (401 Unauthorized; at {at}, "
-        f"tried again after {until}); its servers were not checked for 'web-1'"
-    ]
+    # The fake's record counts for its "cache TTL" of 300 s, not the 45 s.
+    assert remembered.until - remembered.at == 300
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0 + 46)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 1
     monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
     _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
     assert len(attempts) == 2
 
 
-def test_no_retry_window_tries_a_failed_listing_every_time(staging_never_listed):
+def test_an_error_raised_from_a_timeout_counts_as_no_answer(staging_never_listed):
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    staging = services[("hetzner", "staging")]
+
+    async def wrapped(force_refresh=False):
+        # As HetznerService wraps the SDK's error: the timeout is the cause.
+        try:
+            raise TimeoutError("read timed out")
+        except TimeoutError as exc:
+            raise RuntimeError("Failed to fetch Hetzner servers: read timed out") from exc
+
+    staging.fetch_instances_cached = wrapped
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert staging.record.load().outcome == listing_record.TIMEOUT
+    assert "(no answer: Failed to fetch Hetzner servers: read timed out)" in checked.notes[0]
+
+
+def test_no_retry_window_tries_no_answer_every_time(staging_never_listed):
     registry, services = staging_never_listed
     registry.config.account_retry_seconds = 0
-    attempts = _failing(services[("hetzner", "staging")], "401 Unauthorized")
+    attempts = _failing(services[("hetzner", "staging")], "timed out", TimeoutError)
 
     for _ in range(2):
         _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
@@ -606,13 +667,14 @@ def test_one_account_never_listed_makes_its_provider_read(monkeypatch):
     assert "staging/web-1" in str(err.value)
 
 
-def _failing(service, message="Hetzner API unreachable (401)"):
-    """Make *service*'s listing raise, counting the attempts."""
+def _failing(service, message="Hetzner API unreachable (401)", error=RuntimeError):
+    """Make *service*'s listing raise *error* (an error response by default),
+    counting the attempts."""
     attempts = []
 
     async def refused(force_refresh=False):
         attempts.append(1)
-        raise RuntimeError(message)
+        raise error(message)
 
     service.fetch_instances_cached = refused
     return attempts

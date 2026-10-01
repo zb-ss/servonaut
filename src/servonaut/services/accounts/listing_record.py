@@ -23,9 +23,13 @@ from servonaut.utils.atomic_file import write_json_atomic
 
 logger = logging.getLogger(__name__)
 
+# An error response (credentials, permissions, a credential helper).
 FAILED = "failed"
+# Listed in part; what was listed counts as checked.
 PARTIAL = "partial"
-_OUTCOMES = (FAILED, PARTIAL)
+# No answer: the time ran out, a request timed out or could not connect.
+TIMEOUT = "timeout"
+_OUTCOMES = (FAILED, PARTIAL, TIMEOUT)
 
 
 @dataclass(frozen=True)

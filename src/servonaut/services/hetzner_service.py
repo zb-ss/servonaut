@@ -168,6 +168,9 @@ class HetznerService:
         # its place, or None after a successful fetch. Read by the instance
         # list and MCP list_instances so stale rows are never reported as new.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
 
     # ------------------------------------------------------------------
     # Token resolution
@@ -355,6 +358,7 @@ class HetznerService:
             instances = await self.fetch_instances()
         except HetznerError as exc:
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             # Don't poison the cache — keep the previous good entries.
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -372,9 +376,11 @@ class HetznerService:
                 f"listed {self._listed_in_time} server(s); "
                 "the rest was not listed in the time allowed"
             )
+            self.last_fetch_exception = None
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self._save_cache(instances)
         return instances
 
@@ -1129,6 +1135,8 @@ class HetznerService:
         page: Optional[int] = 1
         while page:
             if time.monotonic() >= deadline:
+                if not servers:
+                    raise TimeoutError("nothing was listed in the time allowed")
                 self._listed_in_time = len(servers)
                 break
             result, meta = client.servers.get_list(

@@ -176,6 +176,9 @@ class OVHService:
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Read by the instance list and MCP list_instances.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
         # True when some sources refreshed and others failed: the fresh rows
         # are then mixed with cached rows for the failed sources only.
         self.last_fetch_partial: bool = False
@@ -319,7 +322,9 @@ class OVHService:
                     last_error = e
 
         if self._late_sources and not instances:
-            raise OVHFetchError("nothing was listed in the time allowed")
+            raise OVHFetchError("nothing was listed in the time allowed") from TimeoutError(
+                "listing time is up",
+            )
         if attempted and len(self._failed_sources) == attempted:
             raise OVHFetchError(
                 f"all {attempted} OVH source(s) failed: {last_error}"
@@ -359,6 +364,7 @@ class OVHService:
         except OVHFetchError as exc:
             # Don't poison the cache — keep the previous good entries.
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             self.last_fetch_partial = False
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -378,6 +384,7 @@ class OVHService:
                 for source in self._late_sources
             )
             self.last_fetch_partial = True
+            self.last_fetch_exception = None
             return instances
 
         if self._failed_sources:
@@ -386,10 +393,12 @@ class OVHService:
             # stale project id or one missing permission freeze the whole
             # OVH cache; saving it as fetched would drop those rows.
             instances = self._keep_cached_rows_of_failed_sources(instances)
+            self.last_fetch_exception = None
             self._save_cache(instances)
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self.last_fetch_partial = False
         self._save_cache(instances)
         return instances

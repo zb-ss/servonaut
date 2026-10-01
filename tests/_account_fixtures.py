@@ -45,6 +45,7 @@ class FakeProvider:
         # after a power action or a delete.
         self.invalidates_cache = False
         self.last_fetch_error: Optional[str] = None
+        self.last_fetch_exception: Optional[BaseException] = None
         self.last_fetch_partial = False
         # Return values of recorded API calls, by method name.
         self.returns: Dict[str, Any] = {}

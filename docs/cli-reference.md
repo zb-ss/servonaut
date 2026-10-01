@@ -440,9 +440,15 @@ A name is checked against the servers of every account. An account that was
 never listed on this machine (it has no cache yet) is listed once first, so
 its servers count too, within `account_check_timeout_seconds` (see
 [Configuration](configuration.md)). An account that cannot be listed gets a
-`Note:` line on stderr and is not tried again for `account_retry_seconds`;
-one listed only in part counts as listed until its cache TTL ends. The same
-applies to `servonaut servers verify` and `servonaut memory`.
+`Note:` line on stderr saying why, and is left alone for a while:
+
+| The note says | Tried again after |
+|---------------|-------------------|
+| `timed out after N s` or `no answer: …` (a timeout, or no connection) | `account_retry_seconds` |
+| the provider's error (credentials, permissions, a credential helper, SSO, a missing profile) | its cache TTL |
+| `was only partly listed (…)`: what was listed counts as checked | its cache TTL |
+
+The same applies to `servonaut servers verify` and `servonaut memory`.
 
 The AWS account without a profile is listed only when AWS is set up on this
 machine: credentials in the environment, a `default` profile with
@@ -450,8 +456,7 @@ credentials in `~/.aws/credentials` or `~/.aws/config`, or an EC2 instance
 (its instance role). Credentials are not resolved just to decide that. An
 account that is set up is listed with the credentials it is configured
 with, so a `credential_process` helper of the profile runs then, as it does
-for any AWS listing (once, and again only after `account_retry_seconds` if
-it fails).
+for any AWS listing: once, and if it fails, again only after the cache TTL.
 
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like

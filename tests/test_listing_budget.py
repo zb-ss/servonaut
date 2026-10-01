@@ -136,3 +136,108 @@ def test_ovh_servers_listed_in_time_come_back(config, tmp_path, monkeypatch):
     _assert_partly_listed(checked, elapsed, "OVH account 'ovh'", service.listing_record())
     assert "OVH VPS not fully listed in the time allowed" in checked.notes[0]
     assert not service.has_cached_instances()
+
+
+# ---------------------------------------------------------------------------
+# No answer vs an error response: how long each is left alone
+# ---------------------------------------------------------------------------
+
+RETRY = 7
+
+
+def _outcome(config, record):
+    """The remembered outcome after one lookup, and for how many seconds it counts."""
+    config.account_retry_seconds = RETRY
+    checked, _ = _lookup(config)
+    remembered = record.load()
+    return remembered.outcome, round(remembered.until - remembered.at), checked.notes[0]
+
+
+def _aws_timeout():
+    from botocore.exceptions import ConnectTimeoutError
+
+    return ConnectTimeoutError(endpoint_url="http://ec2.invalid")
+
+
+def _aws_auth_failure():
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": "AuthFailure", "Message": "not authorized"}},
+                       "DescribeInstances")
+
+
+@pytest.mark.parametrize("make_error, expected", [
+    (_aws_timeout, "timeout"),
+    (_aws_auth_failure, "failed"),
+])
+def test_aws_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error, expected):
+    config.aws.regions = ["r-1", "r-2"]
+    (tmp_path / "cache.json").unlink()
+
+    def one_region(self, region):
+        raise make_error()
+
+    monkeypatch.setattr(AWSService, "_fetch_region", one_region)
+
+    outcome, keep, note = _outcome(
+        config, AWSService(CacheService(ttl_seconds=config.cache_ttl_seconds)).listing_record(),
+    )
+
+    ttl = config.cache_ttl_seconds
+    assert (outcome, keep) == (expected, RETRY if expected == "timeout" else ttl)
+    prefix = "no answer: " if expected == "timeout" else ""
+    assert f"could not be listed ({prefix}all 2 AWS regions failed" in note
+
+
+@pytest.mark.parametrize("make_error, expected", [
+    (lambda: __import__("requests").exceptions.ReadTimeout("read timed out"), "timeout"),
+    (lambda: __import__("hcloud").APIException("unauthorized", "unable to authenticate", None),
+     "failed"),
+])
+def test_hetzner_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error,
+                                              expected):
+    config.hetzner = HetznerConfig(enabled=True, api_token="token", cache_ttl_seconds=120,
+                                   cache_path=str(tmp_path / "hetzner_cache.json"))
+
+    def refuse(page, per_page):
+        raise make_error()
+
+    client = SimpleNamespace(servers=SimpleNamespace(max_per_page=50, get_list=refuse))
+    monkeypatch.setattr(HetznerService, "_get_client", lambda self: client)
+
+    outcome, keep, _ = _outcome(config, HetznerService(config.hetzner).listing_record())
+
+    assert (outcome, keep) == (expected, RETRY if expected == "timeout" else 120)
+
+
+def _ovh_http_error():
+    """python-ovh's wrapper of a requests error, raised while handling it."""
+    import ovh.exceptions
+    import requests
+
+    try:
+        raise requests.exceptions.ConnectTimeout("connect timed out")
+    except requests.exceptions.ConnectTimeout as error:
+        try:
+            raise ovh.exceptions.HTTPError("Low HTTP request failed error", error)
+        except ovh.exceptions.HTTPError as wrapped:
+            return wrapped
+
+
+@pytest.mark.parametrize("make_error, expected", [
+    (_ovh_http_error, "timeout"),
+    (lambda: __import__("ovh").exceptions.InvalidCredential("Invalid credential"), "failed"),
+])
+def test_ovh_no_answer_and_error_response(config, tmp_path, monkeypatch, make_error, expected):
+    config.ovh = OVHConfig(enabled=True, application_key="k", application_secret="s",
+                           consumer_key="c", include_dedicated=False, include_cloud=False)
+    monkeypatch.setattr(ovh_service, "_OVH_CACHE_PATH", tmp_path / "ovh_cache.json")
+
+    def get(path):
+        raise make_error()
+
+    monkeypatch.setattr(OVHService, "_get_client", lambda self: SimpleNamespace(get=get))
+
+    outcome, keep, _ = _outcome(config, OVHService(config.ovh).listing_record())
+
+    assert (outcome, keep) == (expected, RETRY if expected == "timeout" else 300)

@@ -778,7 +778,7 @@ async def _listings_within(
     any failure: the next commands do not wait for it again until
     *retry_seconds* have passed.
     """
-    from servonaut.services.accounts.listing_record import FAILED
+    from servonaut.services.accounts.listing_record import TIMEOUT
 
     request_seconds = seconds / 2
     for binding, _ in listings:
@@ -799,7 +799,7 @@ async def _listings_within(
             detail = f"timed out after {seconds:g} s"
             record = _listing_record(binding.service)
             if record is not None:
-                record.save(FAILED, detail, [], keep_seconds=retry_seconds)
+                record.save(TIMEOUT, detail, [], keep_seconds=retry_seconds)
             results.append(([], _not_checked(
                 binding.ref, f"could not be listed ({detail})", reference,
             )))
@@ -813,11 +813,19 @@ async def _checked_listing(
 ) -> Tuple[List[dict], Optional[str]]:
     """A never-listed account's servers for a lookup, and the note to print, if any.
 
-    A complete listing writes the account's cache. An incomplete one is
-    remembered for the cache's TTL, its servers counting as checked; a
-    failed one for *retry_seconds* (config ``account_retry_seconds``).
+    A complete listing writes the account's cache. Otherwise the outcome is
+    remembered, for as long as it takes to change:
+    - partial (the listing ended early or skipped a part; it says what it
+      listed): the cache's TTL, its servers counting as checked;
+    - timeout (no answer: a request timed out or could not connect): the
+      config's ``account_retry_seconds``, *retry_seconds*, as a network
+      blip heals quickly;
+    - failed (an error response: credentials, permissions, a credential
+      helper or SSO, a missing profile): the cache's TTL, as these do not
+      heal on their own, and trying sooner would run a prompting credential
+      helper again and again.
     """
-    from servonaut.services.accounts.listing_record import FAILED, PARTIAL
+    from servonaut.services.accounts.listing_record import FAILED, PARTIAL, TIMEOUT
 
     record = _listing_record(binding.service)
     remembered = record.load() if record is not None else None
@@ -828,19 +836,58 @@ async def _checked_listing(
         return [], _not_checked(
             binding.ref, f"could not be listed ({remembered.detail}; {when})", reference,
         )
-    rows, problem = await _read_never_listed(binding, qualified)
+    rows, problem, error = await _read_never_listed(binding, qualified)
     if not problem:
         return rows, None
-    kept = _has_cache(binding.service)
-    if rows or kept:
-        if record is not None and not kept:
+    if error is None:
+        if record is not None and not _has_cache(binding.service):
             record.save(PARTIAL, problem, rows)
         return rows, _not_checked(
             binding.ref, f"was only partly listed ({problem})", reference, some=True,
         )
+    if _is_no_answer(error):
+        outcome, detail, keep = TIMEOUT, f"no answer: {problem}", retry_seconds
+    else:
+        outcome, detail, keep = FAILED, problem, None
     if record is not None:
-        record.save(FAILED, problem, [], keep_seconds=retry_seconds)
-    return [], _not_checked(binding.ref, f"could not be listed ({problem})", reference)
+        record.save(outcome, detail, [], keep_seconds=keep)
+    return [], _not_checked(binding.ref, f"could not be listed ({detail})", reference)
+
+
+def _is_no_answer(error: BaseException) -> bool:
+    """Whether *error*, or one it was raised from, is a timeout or a failed connection.
+
+    Then nothing answered, and a little later something may. Anything else
+    is an error response (or a local one, like a missing profile).
+    """
+    types = _no_answer_types()
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, types):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _no_answer_types() -> Tuple[type, ...]:
+    """Timeout and connection errors of Python and of the provider SDKs' HTTP layers."""
+    types: List[type] = [TimeoutError, ConnectionError]
+    try:
+        import requests
+
+        types += [requests.exceptions.Timeout, requests.exceptions.ConnectionError]
+    except ImportError:
+        pass
+    try:
+        import botocore.exceptions as botocore_errors
+
+        # ConnectTimeoutError and EndpointConnectionError are ConnectionErrors.
+        types += [botocore_errors.ConnectionError, botocore_errors.ReadTimeoutError,
+                  botocore_errors.ConnectionClosedError]
+    except ImportError:
+        pass
+    return tuple(types)
 
 
 def _listing_record(service: Any) -> Any:
@@ -868,17 +915,23 @@ def _seconds_setting(registry: Optional[AccountRegistry], name: str) -> float:
         return float(default)
 
 
-async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:
-    """An account's servers, and why they may be incomplete ("" when they are not).
+async def _read_never_listed(
+    binding: Any, qualified: bool,
+) -> Tuple[List[dict], str, Optional[BaseException]]:
+    """An account's servers, why they may be incomplete ("" when they are not),
+    and the error behind a failed listing (None for a partial one).
 
     The reason is one line, so each note stays one line on stderr.
     """
     try:
         rows = await _read_account(binding, qualified)
     except Exception as exc:  # noqa: BLE001 - one account never breaks a command
-        return [], _first_line(str(exc)) or type(exc).__name__
-    error = getattr(binding.service, "last_fetch_error", None)
-    return rows, _first_line(error) if isinstance(error, str) else ""
+        return [], _first_line(str(exc)) or type(exc).__name__, exc
+    problem = getattr(binding.service, "last_fetch_error", None)
+    if not isinstance(problem, str) or not problem.strip():
+        return rows, "", None
+    error = getattr(binding.service, "last_fetch_exception", None)
+    return rows, _first_line(problem), error if isinstance(error, BaseException) else None
 
 
 def _first_line(text: str) -> str:
