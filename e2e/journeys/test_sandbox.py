@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -150,6 +151,34 @@ def test_a_link_in_the_root_can_be_removed_but_not_written_through(journey):
     recorded = GUARD.violations()
     GUARD.clear()
     assert [entry["target"] for entry in recorded] == [f"open {target}"]
+
+
+def test_a_suspended_guard_lets_only_its_own_thread_through(journey):
+    outside = Path("/tmp") / f"servonaut-e2e-suspended-{uuid.uuid4().hex}"
+    other_thread: list[str] = []
+
+    def write_elsewhere() -> None:
+        try:
+            outside.with_suffix(".other").write_text("must not be written")
+            other_thread.append("wrote")
+        except PermissionError:
+            other_thread.append("refused")
+
+    with GUARD.suspended():
+        # Recording something (the guard's own log write) keeps the suspension.
+        GUARD._append(str(journey.directory / "record.jsonl"), {"kind": "self-test"})
+        outside.write_text("the harness's own bookkeeping")
+        worker = threading.Thread(target=write_elsewhere)
+        worker.start()
+        worker.join()
+        outside.unlink()
+    with pytest.raises(PermissionError):
+        outside.write_text("guarded again")
+    recorded = GUARD.violations()
+    GUARD.clear()
+    assert other_thread == ["refused"]
+    assert not outside.with_suffix(".other").exists()
+    assert [entry["kind"] for entry in recorded] == ["filesystem", "filesystem"]
 
 
 def test_program_starts_are_limited_to_the_fake_tools():
