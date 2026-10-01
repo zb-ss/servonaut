@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -217,26 +218,109 @@ def test_an_account_that_cannot_be_listed_gets_a_note(staging_never_listed):
     assert len(attempts) == 1
 
 
-def test_a_listing_that_reports_an_error_gets_a_note(monkeypatch):
-    # AWS and OVH return what they could list and say why it is incomplete.
+def _partly_listing(service, message="1 region(s) failed: eu-west-1", keeps_cache=False):
+    """Make *service* list what it can and say why that is incomplete.
+
+    AWS keeps such a listing out of its cache; OVH saves it (*keeps_cache*).
+    """
+    calls = []
+
+    async def partial(force_refresh=False):
+        calls.append(1)
+        service.last_fetch_error = message
+        rows = [dict(row) for row in service.rows]
+        if keeps_cache:
+            service.cached = rows
+        return rows
+
+    service.fetch_instances_cached = partial
+    return calls
+
+
+@pytest.fixture
+def prod_partly_listed(monkeypatch):
+    """AWS account prod was never listed; listing it skips a failing region."""
     registry, services = build_registry(
         monkeypatch, aws={"aws": [], "prod": [{"id": "i-2", "name": "web-1"}]},
     )
     prod = services[("aws", "prod")]
     prod.cached = None
+    return registry, prod, _partly_listing(prod)
 
-    async def partial(force_refresh=False):
-        prod.last_fetch_error = "1 region(s) failed: eu-west-1"
-        return [dict(row) for row in prod.rows]
 
-    prod.fetch_instances_cached = partial
+def test_a_partial_listing_is_noted_as_such(prod_partly_listed):
+    registry, _, _ = prod_partly_listed
+
     checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
 
     assert checked.notes == [
-        "Note: AWS account 'prod' could not be listed (1 region(s) failed: eu-west-1); "
-        "its servers were not checked for 'web-1'"
+        "Note: AWS account 'prod' was only partly listed (1 region(s) failed: eu-west-1); "
+        "some of its servers were not checked for 'web-1'"
     ]
     assert [row["id"] for row in checked.rows] == ["i-2"]
+
+
+def test_a_partial_listing_counts_as_checked_until_the_ttl_ends(prod_partly_listed,
+                                                                 monkeypatch):
+    from servonaut.services.accounts import listing_record
+
+    registry, prod, calls = prod_partly_listed
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert prod.record.load().outcome == listing_record.PARTIAL
+
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(calls) == 1
+    assert again.notes == [] and [row["id"] for row in again.rows] == ["i-2"]
+    # Once the TTL is over the account is listed again.
+    later = prod.record.load().until + 1
+    monkeypatch.setattr(listing_record.time, "time", lambda: later)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(calls) == 2
+
+
+def test_a_partial_listing_the_provider_saved_is_its_cache(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch, ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}]},
+    )
+    ovh = services[("ovh", "ovh")]
+    ovh.cached = None
+    calls = _partly_listing(ovh, "the dedicated servers could not be read", keeps_cache=True)
+
+    first = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert first.notes == [
+        "Note: OVH account 'ovh' was only partly listed (the dedicated servers could not "
+        "be read); some of its servers were not checked for 'web-1'"
+    ]
+    assert again.notes == [] and len(calls) == 1
+    assert ovh.record.load() is None
+
+
+def test_a_failed_listing_is_not_retried_until_the_ttl_ends(staging_never_listed, monkeypatch):
+    from servonaut.services.accounts import listing_record
+
+    registry, services = staging_never_listed
+    staging = services[("hetzner", "staging")]
+    attempts = _failing(staging, "401 Unauthorized")
+    monkeypatch.setattr(listing_record.time, "time", lambda: 1_000_000.0)
+
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert len(attempts) == 1
+    remembered = staging.record.load()
+    assert remembered.outcome == listing_record.FAILED
+    at, until = (datetime.fromtimestamp(t).strftime("%H:%M")
+                 for t in (remembered.at, remembered.until))
+    assert again.notes == [
+        f"Note: Hetzner project 'staging' could not be listed (401 Unauthorized; at {at}, "
+        f"tried again after {until}); its servers were not checked for 'web-1'"
+    ]
+    monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert len(attempts) == 2
 
 
 def test_an_aws_account_without_credentials_is_not_read(monkeypatch):

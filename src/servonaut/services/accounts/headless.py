@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from functools import partial
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -295,7 +296,11 @@ class CachedFleet:
         all; a single account of its provider as much as one of several),
         read once through its normal cached fetch. That writes its cache, so
         later commands stay offline, and a name no longer passes as unique
-        because another server of that name was never listed.
+        because another server of that name was never listed. A listing
+        that failed, or was too incomplete to be saved as the cache, is
+        remembered for the cache's TTL instead (see :mod:`.listing_record`):
+        the account is not read again meanwhile, and an incomplete listing's
+        servers count as checked.
 
         Nothing is read for an id a cached row has or a ``custom/...``
         reference; ``<account>/...`` reads only that account. Nor is an
@@ -321,10 +326,10 @@ class CachedFleet:
                             binding.ref, "has no credentials on this machine", needle,
                         ))
                     continue
-                read, problem = await _read_never_listed(binding, inventory.multi)
+                read, note = await _checked_listing(binding, inventory.multi, needle)
                 fetched.extend(read)
-                if problem:
-                    notes.append(_not_checked(binding.ref, f"could not be listed ({problem})", needle))
+                if note:
+                    notes.append(note)
         if fetched:
             # The reads wrote their caches: list again, in the instance list's
             # order, so candidates show the same way on every run. Rows a read
@@ -667,6 +672,50 @@ def _names_instance_id(provider: str, reference: str) -> bool:
     return is_instance_id(reference)
 
 
+async def _checked_listing(
+    binding: Any, qualified: bool, reference: str,
+) -> Tuple[List[dict], Optional[str]]:
+    """A never-listed account's servers for a lookup, and the note to print, if any.
+
+    Read at most once per cache TTL: a failed or incomplete listing is
+    remembered (a complete one writes the account's cache instead).
+    """
+    from servonaut.services.accounts.listing_record import FAILED, PARTIAL
+
+    record = _listing_record(binding.service)
+    remembered = record.load() if record is not None else None
+    if remembered is not None:
+        if remembered.outcome == PARTIAL:
+            return remembered.rows, None
+        when = f"at {_clock(remembered.at)}, tried again after {_clock(remembered.until)}"
+        return [], _not_checked(
+            binding.ref, f"could not be listed ({remembered.detail}; {when})", reference,
+        )
+    rows, problem = await _read_never_listed(binding, qualified)
+    if not problem:
+        return rows, None
+    kept = _has_cache(binding.service)
+    if rows or kept:
+        if record is not None and not kept:
+            record.save(PARTIAL, problem, rows)
+        return rows, _not_checked(
+            binding.ref, f"was only partly listed ({problem})", reference, some=True,
+        )
+    if record is not None:
+        record.save(FAILED, problem, [])
+    return [], _not_checked(binding.ref, f"could not be listed ({problem})", reference)
+
+
+def _listing_record(service: Any) -> Any:
+    """The service's ``ListingRecord``, or None when it keeps none."""
+    get = getattr(service, "listing_record", None)
+    return get() if callable(get) else None
+
+
+def _clock(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).strftime("%H:%M")
+
+
 async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:
     """An account's servers, and why they may be incomplete ("" when they are not)."""
     try:
@@ -677,11 +726,12 @@ async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict],
     return rows, error.strip() if isinstance(error, str) else ""
 
 
-def _not_checked(ref: AccountRef, what: str, reference: str) -> str:
+def _not_checked(ref: AccountRef, what: str, reference: str, *, some: bool = False) -> str:
     """``Note: Hetzner project 'staging' could not be listed (...); its servers ...``."""
     noun = _ACCOUNT_NOUNS.get(ref.provider, "account")
     title = PROVIDER_TITLES.get(ref.provider, ref.provider)
-    return f"Note: {title} {noun} {ref.label!r} {what}; its servers were not checked for {reference!r}"
+    servers = "some of its servers" if some else "its servers"
+    return f"Note: {title} {noun} {ref.label!r} {what}; {servers} were not checked for {reference!r}"
 
 
 def _read_done(provider: str, read: _AccountRead, future: asyncio.Future) -> None:

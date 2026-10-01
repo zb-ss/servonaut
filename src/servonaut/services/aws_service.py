@@ -105,6 +105,12 @@ class AWSService(InstanceServiceInterface):
         exists, whatever its age (an empty one included)."""
         return self.cache_service.load_any() is not None
 
+    def listing_record(self):
+        """Where a CLI lookup remembers an incomplete listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self.cache_service.CACHE_PATH, self.cache_service.ttl_seconds)
+
     def has_credentials(self) -> bool:
         """Whether this account can be listed on this machine at all, checked offline.
 

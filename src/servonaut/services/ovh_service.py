@@ -386,6 +386,12 @@ class OVHService:
         exists, whatever its age (an empty one included)."""
         return self._load_cache(ignore_ttl=True) is not None
 
+    def listing_record(self):
+        """Where a CLI lookup remembers a failed listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self._cache_path, _OVH_CACHE_TTL_SECONDS)
+
     def is_cache_fresh(self) -> bool:
         """Check if OVH cache is within TTL.
 

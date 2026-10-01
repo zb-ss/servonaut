@@ -23,6 +23,7 @@ from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 from servonaut.services.accounts import AccountRegistry
 from servonaut.services.accounts.aws_account import AWSAccountContext
+from servonaut.services.accounts.listing_record import ListingRecord
 
 Rows = Sequence[Mapping[str, Any]]
 
@@ -47,6 +48,8 @@ class FakeProvider:
         self.last_fetch_partial = False
         # Return values of recorded API calls, by method name.
         self.returns: Dict[str, Any] = {}
+        # What a CLI lookup remembered about listing this account (in memory).
+        self.record = ListingRecord(None, ttl_seconds=300)
 
     async def fetch_instances_cached(self, force_refresh: bool = False) -> List[dict]:
         self.fetches += 1
@@ -71,6 +74,9 @@ class FakeProvider:
 
     def has_credentials(self) -> bool:
         return self.credentials
+
+    def listing_record(self) -> ListingRecord:
+        return self.record
 
     def resolve_token(self) -> str:
         return "token"

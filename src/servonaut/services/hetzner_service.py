@@ -339,6 +339,12 @@ class HetznerService:
         exists, whatever its age (an empty one included)."""
         return self._load_cache(ignore_ttl=True) is not None
 
+    def listing_record(self):
+        """Where a CLI lookup remembers a failed listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self._cache_path, self._cache_ttl_seconds)
+
     def is_cache_fresh(self) -> bool:
         """Whether the on-disk cache is within TTL."""
         if not self._cache_path.exists():
