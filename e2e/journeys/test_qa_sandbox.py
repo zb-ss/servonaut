@@ -544,10 +544,14 @@ def test_process_identity_without_proc_works_inside_a_sandbox(journey):
         env=journey.child_env(journey.new_sandbox("subject")),
     )
     try:
-        # Asked from two time zones, the same process has the same identity.
+        # Asked from two time zones, the same process has the same identity:
+        # its start time. (The state beside it is read live, running or
+        # sleeping, and only ever used to tell a zombie apart.)
         east = _without_proc(journey, subject.pid, TZ="Pacific/Auckland")
         west = _without_proc(journey, subject.pid, TZ="America/New_York")
-        assert east["identity"] and east["identity"] == west["identity"]
+        assert east["identity"] and west["identity"]
+        assert east["identity"][1] == west["identity"][1]
+        assert east["identity"][0] not in ("Z", "X")
         assert east["alive"] and west["alive"]
         assert "sys.stdin.read()" in east["command"]
     finally:
