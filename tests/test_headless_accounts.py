@@ -107,6 +107,178 @@ def test_cached_fleet_surfaces_an_aws_cache_bug_but_not_other_providers():
 
 
 # ---------------------------------------------------------------------------
+# CachedFleet.checked_rows (CLI name lookups)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staging_never_listed(monkeypatch):
+    """Hetzner project staging holds web-1 too, but was never listed here."""
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "db", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    services[("hetzner", "staging")].cached = None
+    return registry, services
+
+
+def test_a_never_listed_account_is_read_once_and_cached(staging_never_listed):
+    registry, services = staging_never_listed
+    staging = services[("hetzner", "staging")]
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == []
+    with pytest.raises(AmbiguousInstanceError) as err:
+        fleet.resolve("web-1", rows=checked.rows)
+    assert "aws/web-1" in str(err.value) and "staging/web-1" in str(err.value)
+    assert staging.fetches == 1 and staging.cached is not None
+    # Its cache is written, so the next command stays offline.
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert staging.fetches == 1
+    assert all(s.fetches == 0 for key, s in services.items() if key != ("hetzner", "staging"))
+
+
+def test_rows_read_take_their_place_in_the_instance_list(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+        ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}],
+             "backup": [{"id": "vps-2", "name": "web-1", "is_ovh": True}]},
+    )
+    services[("hetzner", "staging")].cached = None
+    services[("ovh", "backup")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    first = [row["id"] for row in _run(fleet.checked_rows("web-1")).rows]
+    again = [row["id"] for row in _run(fleet.checked_rows("web-1")).rows]
+
+    assert first == again == ["custom-web", "vps-1", "vps-2", "1", "2"]
+
+
+def test_rows_a_read_did_not_keep_come_last(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    staging = services[("hetzner", "staging")]
+    staging.cached = None
+
+    async def incomplete(force_refresh=False):
+        staging.last_fetch_error = "listing incomplete"
+        return [dict(row) for row in staging.rows]
+
+    staging.fetch_instances_cached = incomplete
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert [row["id"] for row in checked.rows] == ["1", "2"]
+    assert len(checked.notes) == 1
+
+
+def test_a_single_never_listed_account_is_read_too(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "web-1"}]},
+        ovh={"ovh": [{"id": "vps-1", "name": "web-1", "is_ovh": True}]},
+    )
+    services[("ovh", "ovh")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    rows = _run(fleet.checked_rows("web-1")).rows
+
+    assert [row["id"] for row in fleet.matches("web-1", rows)] == ["i-1", "vps-1"]
+    assert services[("ovh", "ovh")].fetches == 1
+
+
+def test_an_empty_cache_counts_as_listed(staging_never_listed):
+    registry, services = staging_never_listed
+    services[("hetzner", "staging")].cached = []
+    _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert services[("hetzner", "staging")].fetches == 0
+
+
+def test_an_account_that_cannot_be_listed_gets_a_note(staging_never_listed):
+    registry, services = staging_never_listed
+    attempts = _failing(services[("hetzner", "staging")], "401 Unauthorized\nsecond line")
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' could not be listed (401 Unauthorized); "
+        "its servers were not checked for 'web-1'"
+    ]
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "i-1"
+    assert len(attempts) == 1
+
+
+def test_a_listing_that_reports_an_error_gets_a_note(monkeypatch):
+    # AWS and OVH return what they could list and say why it is incomplete.
+    registry, services = build_registry(
+        monkeypatch, aws={"aws": [], "prod": [{"id": "i-2", "name": "web-1"}]},
+    )
+    prod = services[("aws", "prod")]
+    prod.cached = None
+
+    async def partial(force_refresh=False):
+        prod.last_fetch_error = "1 region(s) failed: eu-west-1"
+        return [dict(row) for row in prod.rows]
+
+    prod.fetch_instances_cached = partial
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: AWS account 'prod' could not be listed (1 region(s) failed: eu-west-1); "
+        "its servers were not checked for 'web-1'"
+    ]
+    assert [row["id"] for row in checked.rows] == ["i-2"]
+
+
+def test_an_aws_account_without_credentials_is_not_read(monkeypatch):
+    registry, services = build_registry(monkeypatch)
+    aws = services[("aws", "aws")]
+    aws.cached = None
+    aws.credentials = False
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [] and aws.fetches == 0
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "custom-web"
+
+
+@pytest.mark.parametrize("reference", ["i-1", "I-1", "custom/web-1", "  "])
+def test_an_id_or_custom_reference_reads_nothing(staging_never_listed, reference):
+    registry, services = staging_never_listed
+    fleet = CachedFleet.from_registry(registry, _custom(CUSTOM_WEB))
+
+    checked = _run(fleet.checked_rows(reference))
+
+    assert checked.notes == []
+    assert all(service.fetches == 0 for service in services.values())
+
+
+def test_a_qualified_reference_reads_only_its_account(staging_never_listed):
+    registry, services = staging_never_listed
+    services[("aws", "aws")].cached = None
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    hetzner = _run(fleet.checked_rows("hetzner/db"))
+    assert fleet.resolve("hetzner/db", rows=hetzner.rows)["id"] == "1"
+    assert all(service.fetches == 0 for service in services.values())
+
+    staging = _run(fleet.checked_rows("staging/web-1"))
+    assert fleet.resolve("staging/web-1", rows=staging.rows)["id"] == "2"
+    assert services[("hetzner", "staging")].fetches == 1
+    assert services[("aws", "aws")].fetches == 0
+
+
+# ---------------------------------------------------------------------------
 # InstanceDirectory (MCP tools, relay)
 # ---------------------------------------------------------------------------
 
@@ -607,3 +779,17 @@ def test_cached_fleet_qualified_with_an_account_that_cannot_connect_says_why(sta
             lookup("staging/web-1")
         assert str(err.value) == STAGING_DOWN
     assert fleet.resolve("hetzner/web-1")["id"] == "1"
+
+
+def test_a_name_lookup_notes_accounts_that_cannot_connect(staging_down):
+    fleet = CachedFleet.from_registry(staging_down, _custom())
+
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' is not available (No Hetzner Cloud API token "
+        "configured); its servers were not checked for 'web-1'"
+    ]
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "1"
+    # A reference qualified with another account says nothing about it.
+    assert _run(fleet.checked_rows("hetzner/web-1")).notes == []

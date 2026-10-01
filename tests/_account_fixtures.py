@@ -62,6 +62,16 @@ class FakeProvider:
     def is_cache_fresh(self) -> bool:
         return self.fresh
 
+    def has_cached_instances(self) -> bool:
+        return self.cached is not None
+
+    # False: no credentials on this machine (an AWS account on the ambient
+    # chain when AWS is not set up).
+    credentials = True
+
+    def has_credentials(self) -> bool:
+        return self.credentials
+
     def resolve_token(self) -> str:
         return "token"
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import json
 from contextlib import redirect_stderr, redirect_stdout
@@ -94,8 +95,144 @@ def test_ssh_loader_reads_every_account(monkeypatch):
     registry, _ = build_registry(monkeypatch, hetzner=PROJECTS)
     custom = MagicMock()
     custom.list_as_instances.return_value = []
-    ids = [r["id"] for r in ssh_mod._load_instances(custom, registry.config)]
+    rows = asyncio.run(ssh_mod._load_instances(custom, registry.config, "web-1"))
+    ids = [r["id"] for r in rows]
     assert ids == ["1", "2", "4"]
+
+
+# ---------------------------------------------------------------------------
+# A project never listed on this machine: read once for name lookups
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def staging_never_listed(monkeypatch):
+    """Project staging holds web-1 too, but has no cache: it was never listed here."""
+    registry, services = build_registry(monkeypatch, hetzner=PROJECTS)
+    services[("hetzner", "staging")].cached = None
+    # Every command builds its fleet from the config; serve this registry's.
+    monkeypatch.setattr(CachedFleet, "from_config", classmethod(
+        lambda cls, config, custom, config_manager=None: cls.from_registry(registry, custom),
+    ))
+    return registry, services
+
+
+def _failing(service, message):
+    async def refused(force_refresh=False):
+        raise RuntimeError(message)
+
+    service.fetch_instances_cached = refused
+
+
+STAGING_NOT_LISTED = (
+    "Note: Hetzner project 'staging' could not be listed (401 Unauthorized); "
+    "its servers were not checked for 'web-1'"
+)
+
+
+def test_ssh_refuses_a_name_a_never_listed_project_shares(staging_never_listed, capsys):
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, services = staging_never_listed
+    headless = (registry.config, MagicMock(is_authenticated=False), None, None, None,
+                MagicMock(), MagicMock())
+    with patch.object(ssh_mod, "_init_headless_services", return_value=headless):
+        rc = ssh_mod.handle_ssh_command(
+            argparse.Namespace(instance="web-1", user=None, port=None, remote_command=[]),
+        )
+    err = capsys.readouterr().err
+    assert rc == ssh_mod._EXIT_AMBIGUOUS
+    assert "hetzner/web-1 (1, Hetzner)" in err and "staging/web-1 (2, Hetzner)" in err
+    assert services[("hetzner", "staging")].fetches == 1
+
+
+def test_ssh_notes_a_project_that_cannot_be_listed(staging_never_listed, capsys):
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, services = staging_never_listed
+    _failing(services[("hetzner", "staging")], "401 Unauthorized")
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+
+    rows = asyncio.run(ssh_mod._load_instances(custom, registry.config, "web-1"))
+
+    assert [row["id"] for row in ssh_mod._find_instance(rows, "web-1")] == ["1"]
+    assert capsys.readouterr().err.strip() == STAGING_NOT_LISTED
+
+
+def test_ssh_by_id_reads_no_project(staging_never_listed):
+    from servonaut.cli import ssh as ssh_mod
+
+    registry, services = staging_never_listed
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    asyncio.run(ssh_mod._load_instances(custom, registry.config, "1"))
+    asyncio.run(ssh_mod._load_instances(custom, registry.config, "hetzner/web-1"))
+    assert all(service.fetches == 0 for service in services.values())
+
+
+def test_servers_verify_refuses_a_name_a_never_listed_project_shares(
+    staging_never_listed, monkeypatch, capsys,
+):
+    from servonaut.cli import servers as cli_servers
+
+    registry, services = staging_never_listed
+    config_manager = MagicMock()
+    config_manager.get.return_value = registry.config
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    services_tuple = (config_manager, MagicMock(is_authenticated=True), MagicMock(),
+                      MagicMock(), MagicMock(), custom)
+    monkeypatch.setattr(cli_servers, "_init_headless_services", lambda: services_tuple)
+    rc = cli_servers.handle_servers_command(argparse.Namespace(
+        servers_command="verify", instance="web-1", host=None, user=None,
+        port=None, timeout=5,
+    ))
+    err = capsys.readouterr().err
+    assert rc == cli_servers._EXIT_FATAL
+    assert "hetzner/web-1" in err and "staging/web-1" in err
+    assert services[("hetzner", "staging")].fetches == 1
+
+
+@pytest.mark.parametrize("use_json", [False, True])
+def test_memory_refuses_a_name_a_never_listed_project_shares(staging_never_listed, monkeypatch,
+                                                             capsys, use_json):
+    from servonaut.cli import memory as mem_mod
+
+    registry, services = staging_never_listed
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    fleet = CachedFleet.from_registry(registry, custom)
+    monkeypatch.setattr(
+        mem_mod, "_init_headless_services", lambda: (registry.config, MagicMock(), fleet),
+    )
+    monkeypatch.setattr(mem_mod, "_init_headless_sync_services", lambda *a: (None, None))
+    rc = mem_mod.run_memory(
+        argparse.Namespace(memory_command="show", instance="web-1", json=use_json),
+    )
+    out = capsys.readouterr()
+    assert rc == mem_mod._EXIT_USAGE_ERROR
+    if use_json:
+        assert json.loads(out.out)["error"]["candidates"] == ["hetzner/web-1", "staging/web-1"]
+    else:
+        assert "hetzner/web-1" in out.err and "staging/web-1" in out.err
+    assert services[("hetzner", "staging")].fetches == 1
+
+
+def test_memory_notes_a_project_that_cannot_be_listed(staging_never_listed, capsys):
+    from servonaut.cli import memory as mem_mod
+
+    registry, services = staging_never_listed
+    _failing(services[("hetzner", "staging")], "401 Unauthorized")
+    custom = MagicMock()
+    custom.list_as_instances.return_value = []
+    fleet = CachedFleet.from_registry(registry, custom)
+
+    inst = mem_mod._resolve_or_exit(argparse.Namespace(instance="web-1"), fleet, use_json=True)
+
+    assert inst["id"] == "1"
+    out = capsys.readouterr()
+    assert out.err.strip() == STAGING_NOT_LISTED and out.out == ""
 
 
 # ---------------------------------------------------------------------------

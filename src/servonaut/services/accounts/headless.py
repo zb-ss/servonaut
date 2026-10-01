@@ -6,7 +6,8 @@ every account of every provider and applies the same reference rules as the
 TUI (see :mod:`servonaut.utils.instance_resolver`).
 
 - :class:`CachedFleet` reads every account's cached servers from disk, for
-  one-shot CLI commands that must never wait on a provider API.
+  one-shot CLI commands that must not wait on a provider API; only an
+  account that was never listed on this machine is read, once.
 - :class:`InstanceDirectory` finds a server for a tool call, refreshing
   provider inventories only while nothing has matched yet.
 - :func:`resolve_provider_target` tells which account a provider-level call
@@ -39,6 +40,8 @@ from servonaut.utils.instance_resolver import (
 logger = logging.getLogger(__name__)
 
 PROVIDERS = (AWS, HETZNER, OVH)
+# What a CLI note calls one account of each provider (default "account").
+_ACCOUNT_NOUNS = {HETZNER: "project"}
 # Custom servers are listed after AWS and before the other clouds, as in the
 # TUI instance list.
 _LOOKUP_ORDER = (AWS, CUSTOM_QUALIFIER, OVH, HETZNER)
@@ -192,11 +195,21 @@ def _rows(value: Any) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CheckedRows:
+    """The rows a CLI command resolves a reference against, and its notes."""
+
+    rows: List[dict]
+    # One line per account whose servers could not be checked, and why.
+    notes: List[str]
+
+
 class CachedFleet:
     """Every account's cached servers plus the custom servers, from disk.
 
-    For one-shot CLI commands: nothing is fetched from a provider API, so a
-    command never waits on a slow or failing provider to find a server.
+    For one-shot CLI commands: a command does not wait on a slow or failing
+    provider to find a server. :meth:`checked_rows` reads an account only
+    when it was never listed on this machine.
     """
 
     def __init__(
@@ -255,24 +268,80 @@ class CachedFleet:
                 )
         return rows
 
-    def matches(self, reference: str) -> List[dict]:
-        """Every server *reference* could mean.
+    def matches(self, reference: str, rows: Optional[List[dict]] = None) -> List[dict]:
+        """Every server *reference* could mean, among *rows* (default: :meth:`instances`).
 
         Raises:
             AccountUnavailableError: See :func:`check_qualifier`.
         """
         check_qualifier(self._registry, reference)
-        return match_instances(reference, self.instances())
+        return match_instances(reference, self.instances() if rows is None else rows)
 
-    def resolve(self, reference: str) -> Optional[dict]:
-        """The one server *reference* names, or None.
+    def resolve(self, reference: str, rows: Optional[List[dict]] = None) -> Optional[dict]:
+        """The one server *reference* names among *rows* (default: :meth:`instances`).
 
         Raises:
             AmbiguousInstanceError: The reference names several servers.
             AccountUnavailableError: See :func:`check_qualifier`.
         """
         check_qualifier(self._registry, reference)
-        return resolve_unique(reference, self.instances())
+        return resolve_unique(reference, self.instances() if rows is None else rows)
+
+    async def checked_rows(self, reference: str) -> CheckedRows:
+        """The rows to resolve *reference* against in a CLI command.
+
+        The cached rows (:meth:`instances`), plus the servers of every
+        account that was never listed on this machine (it has no cache at
+        all; a single account of its provider as much as one of several),
+        read once through its normal cached fetch. That writes its cache, so
+        later commands stay offline, and a name no longer passes as unique
+        because another server of that name was never listed.
+
+        Nothing is read for an id a cached row has or a ``custom/...``
+        reference; ``<account>/...`` reads only that account. Nor is an
+        account nothing is set up for on this machine (AWS without
+        credentials). An account that cannot be read, or cannot connect,
+        never breaks the command: it gets a note that its servers were not
+        checked.
+        """
+        rows = self.instances()
+        needle = (reference or "").strip()
+        if not needle or _names_cached_id(needle, rows) or _is_custom_reference(needle):
+            return CheckedRows(rows, [])
+        only = qualifier_account(self._registry, needle)
+        notes: List[str] = []
+        fetched: List[dict] = []
+        for provider in PROVIDERS:
+            inventory = self._inventories[provider]
+            for binding in _never_listed(inventory, only):
+                read, problem = await _read_never_listed(binding, inventory.multi)
+                fetched.extend(read)
+                if problem:
+                    notes.append(_not_checked(binding.ref, f"could not be listed ({problem})", needle))
+        if fetched:
+            # The reads wrote their caches: list again, in the instance list's
+            # order, so candidates show the same way on every run. Rows a read
+            # did not keep (an incomplete listing) come last.
+            rows = self.instances()
+            known = {_row_key(row) for row in rows}
+            rows.extend(row for row in fetched if _row_key(row) not in known)
+        if only is None:
+            notes.extend(self._unavailable_notes(needle))
+        return CheckedRows(rows, notes)
+
+    def _unavailable_notes(self, reference: str) -> List[str]:
+        """A note for every configured account that cannot connect."""
+        registry = self._registry
+        if registry is None:
+            return []
+        notes = []
+        for provider in PROVIDERS:
+            for ref in registry.configured_accounts(provider):
+                reason = registry.unavailable_reason(ref)
+                if reason:
+                    reason = reason.strip().rstrip(".")
+                    notes.append(_not_checked(ref, f"is not available ({reason})", reference))
+        return notes
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +593,79 @@ async def _read_account(binding: Any, qualified: bool) -> List[dict]:
     """One account's servers, tagged as its fleet tags them."""
     fetched = await binding.service.fetch_instances_cached()
     return tag_rows(_rows(fetched), binding.ref, qualified=qualified)
+
+
+def _names_cached_id(reference: str, rows: List[dict]) -> bool:
+    """True when *reference* is the exact id of a cached row (ids always win)."""
+    wanted = reference.lower()
+    return any(str(row.get("id") or "").lower() == wanted for row in rows)
+
+
+def _is_custom_reference(reference: str) -> bool:
+    label, sep, rest = reference.partition("/")
+    return bool(sep and rest) and label.lower() == CUSTOM_QUALIFIER
+
+
+def _row_key(row: Mapping[str, Any]) -> Tuple[str, str]:
+    """A row's provider and id: ids are unique within one provider."""
+    if row.get("is_custom"):
+        provider = CUSTOM_QUALIFIER
+    elif row.get("is_ovh"):
+        provider = OVH
+    elif row.get("is_hetzner"):
+        provider = HETZNER
+    else:
+        provider = AWS
+    return provider, str(row.get("id") or "")
+
+
+def _never_listed(inventory: Any, only: Optional[AccountRef]) -> List[Any]:
+    """*inventory*'s accounts with no cache at all that can be listed (*only* alone, if set)."""
+    if not isinstance(inventory, AccountFleet):
+        return []
+    return [
+        binding for binding in inventory.bindings
+        if (only is None or (binding.ref.provider, binding.ref.key) == (only.provider, only.key))
+        and not _has_cache(binding.service)
+        and _has_credentials(binding.service)
+    ]
+
+
+def _has_cache(service: Any) -> bool:
+    """Whether *service*'s account was listed here; True when it cannot tell (read nothing).
+
+    The cache layer absorbs a missing or corrupt file (that counts as never
+    listed), so anything raised here is a bug that must surface.
+    """
+    check = getattr(service, "has_cached_instances", None)
+    return not callable(check) or bool(check())
+
+
+def _has_credentials(service: Any) -> bool:
+    """False for an account nothing is set up for here (AWS without credentials).
+
+    It holds no server this machine could connect to, so there is nothing to
+    check, and reading it would only fail on every command.
+    """
+    check = getattr(service, "has_credentials", None)
+    return not callable(check) or bool(check())
+
+
+async def _read_never_listed(binding: Any, qualified: bool) -> Tuple[List[dict], str]:
+    """An account's servers, and why they may be incomplete ("" when they are not)."""
+    try:
+        rows = await _read_account(binding, qualified)
+    except Exception as exc:  # noqa: BLE001 - one account never breaks a command
+        return [], (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    error = getattr(binding.service, "last_fetch_error", None)
+    return rows, error.strip() if isinstance(error, str) else ""
+
+
+def _not_checked(ref: AccountRef, what: str, reference: str) -> str:
+    """``Note: Hetzner project 'staging' could not be listed (...); its servers ...``."""
+    noun = _ACCOUNT_NOUNS.get(ref.provider, "account")
+    title = PROVIDER_TITLES.get(ref.provider, ref.provider)
+    return f"Note: {title} {noun} {ref.label!r} {what}; its servers were not checked for {reference!r}"
 
 
 def _read_done(provider: str, read: _AccountRead, future: asyncio.Future) -> None:

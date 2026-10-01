@@ -381,6 +381,11 @@ class OVHService:
         cached = self._load_cache(ignore_ttl=True)
         return cached if cached is not None else []
 
+    def has_cached_instances(self) -> bool:
+        """Whether this account was listed on this machine: a usable cache
+        exists, whatever its age (an empty one included)."""
+        return self._load_cache(ignore_ttl=True) is not None
+
     def is_cache_fresh(self) -> bool:
         """Check if OVH cache is within TTL.
 

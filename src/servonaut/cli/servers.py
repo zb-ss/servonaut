@@ -117,14 +117,24 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any]:
 # Instance resolution helpers
 # ---------------------------------------------------------------------------
 
-def _load_all_instances(
+async def _load_all_instances(
     config: Any,
     custom_server_service: Any,
+    reference: str,
 ) -> List[Dict[str, Any]]:
-    """Return every account's cached servers (AWS, OVH, Hetzner) + custom ones."""
+    """Every server *reference* could mean is among these rows.
+
+    Every account's cached servers (AWS, OVH, Hetzner) and the custom ones,
+    plus each account never listed on this machine, read once (see
+    ``CachedFleet.checked_rows``). An account whose servers could not be
+    checked gets a note on stderr.
+    """
     from servonaut.services.accounts.headless import CachedFleet
 
-    return CachedFleet.from_config(config, custom_server_service).instances()
+    checked = await CachedFleet.from_config(config, custom_server_service).checked_rows(reference)
+    for note in checked.notes:
+        print(note, file=sys.stderr)
+    return checked.rows
 
 
 def _find_instance(
@@ -409,9 +419,9 @@ async def _cmd_verify(args: Any) -> int:
     team_slug: Optional[str] = None
     team_server_id: Optional[str] = None
 
-    all_instances = _load_all_instances(config, custom_server_service)
     try:
         check_configured_reference(config, instance_arg)
+        all_instances = await _load_all_instances(config, custom_server_service, instance_arg)
         personal_instance = _find_instance(instance_arg, all_instances)
     except (AmbiguousInstanceError, UnknownAccountError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

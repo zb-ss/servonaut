@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
+from botocore.exceptions import BotoCoreError
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
@@ -94,6 +95,27 @@ class AWSService(InstanceServiceInterface):
     def is_cache_fresh(self) -> bool:
         """Whether this account's instance cache is within its TTL."""
         return self.cache_service.is_fresh()
+
+    def has_cached_instances(self) -> bool:
+        """Whether this account was listed on this machine: a usable cache
+        exists, whatever its age (an empty one included)."""
+        return self.cache_service.load_any() is not None
+
+    def has_credentials(self) -> bool:
+        """Whether this account can be listed on this machine at all.
+
+        An account with a profile is set up explicitly. The ambient-chain
+        account is when the chain finds credentials (environment, shared
+        files, instance role); without any, AWS is simply not used here.
+        A chain that cannot even be read (a missing profile in
+        ``AWS_PROFILE``) counts as set up, so listing it says what is wrong.
+        """
+        if self._uses_profile():
+            return True
+        try:
+            return boto3.session.Session().get_credentials() is not None
+        except BotoCoreError:
+            return True
 
     def _uses_profile(self) -> bool:
         """True when this service's account has credentials of its own.

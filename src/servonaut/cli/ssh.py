@@ -192,17 +192,24 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
 # Instance lookup
 # ---------------------------------------------------------------------------
 
-def _load_instances(
+async def _load_instances(
     custom_server_service: Any,
     config: Any,
+    reference: str,
 ) -> List[Dict[str, Any]]:
-    """Return every account's cached servers (AWS, OVH, Hetzner) + custom ones.
+    """Every server *reference* could mean is among these rows.
 
-    Read from the disk caches: no network round-trip for the CLI.
+    Every account's cached servers (AWS, OVH, Hetzner) and the custom ones,
+    plus each account never listed on this machine, read once (see
+    ``CachedFleet.checked_rows``). An account whose servers could not be
+    checked gets a note on stderr.
     """
     from servonaut.services.accounts.headless import CachedFleet
 
-    return CachedFleet.from_config(config, custom_server_service).instances()
+    checked = await CachedFleet.from_config(config, custom_server_service).checked_rows(reference)
+    for note in checked.notes:
+        print(note, file=sys.stderr)
+    return checked.rows
 
 
 def _find_instance(instances: List[Dict[str, Any]], search: str) -> List[Dict[str, Any]]:
@@ -295,9 +302,6 @@ async def _handle_ssh_async(args: Any) -> int:
         custom_server_service,
     ) = _init_headless_services()
 
-    # --- Load instances ---
-    instances = _load_instances(custom_server_service, config)
-
     # --- Find instance ---
     try:
         check_configured_reference(config, args.instance)
@@ -305,6 +309,7 @@ async def _handle_ssh_async(args: Any) -> int:
         # "<account>/<name>" where that account cannot connect: say why.
         print(str(exc), file=sys.stderr)
         return _EXIT_NOT_FOUND
+    instances = await _load_instances(custom_server_service, config, args.instance)
     matches = _find_instance(instances, args.instance)
     if not matches:
         print(
