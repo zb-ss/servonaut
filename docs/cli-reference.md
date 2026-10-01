@@ -429,8 +429,19 @@ servonaut ssh [--user USER] [--port PORT] <instance> [-- <command>...]
 
 | Flag | Description |
 |------|-------------|
-| `--user`, `-u` | Override the SSH username (default: the server's own username, then `default_username`, then `ubuntu`) |
+| `--user`, `-u` | Override the SSH username (default: the matching connection rule's username, except for a custom server; then the server's own username, then `default_username`, then `ubuntu`) |
 | `--port`, `-p` | Override the SSH port (default: the server's own port, else 22) |
+
+Connection rules apply as in the TUI: a server that matches a rule with a
+bastion is reached at its private address through that bastion, with the
+rule's extra SSH options (see [Connection Rules](configuration.md#connection-rules)).
+
+A name is checked against the servers of every account. An account that was
+never listed on this machine (it has no cache yet) is listed once first, so
+its servers count too, within `account_check_timeout_seconds` (see
+[Configuration](configuration.md)). An account that cannot be listed gets a
+`Note:` line on stderr and is not tried again until its cache TTL ends. The
+same applies to `servonaut servers verify` and `servonaut memory`.
 
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like

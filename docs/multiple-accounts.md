@@ -168,7 +168,9 @@ servers can use their own bastion:
 - `servonaut hetzner … --account <label>` runs a Hetzner command in one
   project; `servonaut hetzner list` shows every project's servers.
 - `servonaut ssh`, `servonaut servers verify` and `servonaut memory` see the
-  servers of every account and accept `label/name`.
+  servers of every account and accept `label/name`. An account not yet listed
+  on this machine is listed once before a name counts as unique; see the
+  [CLI reference](cli-reference.md#servonaut-ssh).
 - MCP tools that work on a whole account (AWS listings, CloudTrail,
   CloudWatch, IP bans, S3, Hetzner and OVH registries, billing, create) take
   an optional `account` argument; without it they use the provider's primary
