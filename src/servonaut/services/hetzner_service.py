@@ -33,6 +33,7 @@ instead of leaking a hcloud-internal exception.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -126,6 +127,18 @@ def _validate_resource_name(name: str, kind: str = 'resource') -> str:
     return name
 
 
+def _without_sdk_retries(client: Any) -> None:
+    """Make every request of an hcloud *client* a single attempt.
+
+    hcloud retries timeouts and gateway errors itself and has no public
+    setting for it, so its private ``_retry_max_retries`` is set; a guard
+    test fails when hcloud moves it.
+    """
+    for base in (getattr(client, "_client", None), getattr(client, "_client_hetzner", None)):
+        if base is not None and hasattr(base, "_retry_max_retries"):
+            base._retry_max_retries = 0
+
+
 class HetznerService:
     """Service for Hetzner Cloud instances + lifecycle (create / destroy)."""
 
@@ -142,6 +155,8 @@ class HetznerService:
         self._config = config
         self._allow_ambient_token = allow_ambient_token
         self._client = None  # lazy
+        # Seconds per API request (connect and read); None is the SDK default.
+        self._request_timeout: Optional[float] = None
         self._cache_path = Path(os.path.expanduser(config.cache_path)).resolve()
         self._cache_ttl_seconds = max(int(config.cache_ttl_seconds), 0)
         # Why the last refresh failed while cached servers were returned in
@@ -242,6 +257,13 @@ class HetznerService:
         # Only pass an endpoint when overridden, so the default stays the SDK's.
         endpoint_kwargs = {"api_endpoint": api_endpoint} if api_endpoint else {}
         token = self.resolve_token()
+        # hcloud sets no timeout by default; older releases take none at all.
+        timeout_kwargs = (
+            {"timeout": self._request_timeout}
+            if self._request_timeout is not None
+            and "timeout" in inspect.signature(Client).parameters
+            else {}
+        )
         self._client = Client(
             token=token,
             application_name="servonaut",
@@ -250,8 +272,20 @@ class HetznerService:
             # set application_version conservatively here.
             application_version="0",
             **endpoint_kwargs,
+            **timeout_kwargs,
         )
+        if self._request_timeout is not None:
+            _without_sdk_retries(self._client)
         return self._client
+
+    def limit_request_time(self, seconds: float) -> None:
+        """Give every API request *seconds* to connect and *seconds* to answer, once.
+
+        hcloud's own retries (up to five, with up to about 30 s of backoff)
+        are turned off: a caller with a time limit cannot wait them out.
+        """
+        self._request_timeout = seconds
+        self._client = None
 
     # Public access for callers (tests, MCP tools) that want the raw
     # client. Lazy init still applies.

@@ -794,6 +794,8 @@ class ConfigManager:
             warnings.append("cache_ttl_seconds is negative, should be >= 0")
         if config.account_retry_seconds < 0:
             warnings.append("account_retry_seconds is negative, should be >= 0")
+        if config.account_check_timeout_seconds < 0:
+            warnings.append("account_check_timeout_seconds is negative, should be >= 0")
 
         # Validate SSH port in connection profiles
         for profile in config.connection_profiles:

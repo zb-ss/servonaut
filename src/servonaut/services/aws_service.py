@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
@@ -81,6 +82,9 @@ class AWSService(InstanceServiceInterface):
         # to tell the operator they are looking at cached data.
         self.last_fetch_error: Optional[str] = None
         self._failed_regions: List[str] = []
+        # Set by limit_request_time: botocore timeouts, and when to stop listing.
+        self._client_config: Any = None
+        self._listing_deadline: Optional[float] = None
 
     def get_cached_instances(self) -> List[dict]:
         """Return the cached AWS instances synchronously, regardless of TTL.
@@ -134,19 +138,38 @@ class AWSService(InstanceServiceInterface):
         """
         return self.account is not None and not self.account.uses_ambient_credentials
 
+    def limit_request_time(self, seconds: float) -> None:
+        """Bound the listing for a caller that will not wait longer than *seconds*.
+
+        Every request gets *seconds* to connect and *seconds* to answer, with
+        no retry, and no region is listed once *seconds* have passed (those
+        regions count as failed).
+        """
+        from botocore.config import Config
+
+        self._client_config = Config(
+            connect_timeout=seconds, read_timeout=seconds, retries={"total_max_attempts": 1},
+        )
+        self._listing_deadline = time.monotonic() + seconds
+
+    def _client_kwargs(self) -> dict:
+        return {"config": self._client_config} if self._client_config is not None else {}
+
     def _client(self, service: str, region: Optional[str] = None) -> Any:
         """A boto3 client for this service's account."""
+        kwargs = self._client_kwargs()
         if self._uses_profile():
-            return self.account.client(service, region)
+            return self.account.client(service, region, **kwargs)
         if region:
-            return boto3.client(service, region_name=region)
-        return boto3.client(service)
+            return boto3.client(service, region_name=region, **kwargs)
+        return boto3.client(service, **kwargs)
 
     def _resource(self, service: str, region: str) -> Any:
         """A boto3 resource for this service's account."""
+        kwargs = self._client_kwargs()
         if self._uses_profile():
-            return self.account.resource(service, region)
-        return boto3.resource(service, region_name=region)
+            return self.account.resource(service, region, **kwargs)
+        return boto3.resource(service, region_name=region, **kwargs)
 
     async def fetch_instances(self) -> List[dict]:
         """Fetch instances from AWS across all regions.
@@ -233,6 +256,10 @@ class AWSService(InstanceServiceInterface):
         instances: List[dict] = []
         last_error: Optional[Exception] = None
         for region in regions:
+            if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
+                self._failed_regions.append(region)
+                last_error = TimeoutError("not listed within the time allowed")
+                continue
             try:
                 logger.debug(f"Fetching instances from region: {region}")
                 instances.extend(self._fetch_region(region))

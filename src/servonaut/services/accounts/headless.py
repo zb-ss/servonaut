@@ -316,20 +316,21 @@ class CachedFleet:
             return CheckedRows(rows, [])
         only = qualifier_account(self._registry, needle)
         notes: List[str] = []
-        fetched: List[dict] = []
+        listings: List[Tuple[Any, bool]] = []
         for provider in PROVIDERS:
             inventory = self._inventories[provider]
             for binding in _never_listed(inventory, only):
-                if not _has_credentials(binding.service):
-                    if only is not None or _names_instance_id(provider, needle):
-                        notes.append(_not_checked(
-                            binding.ref, "has no credentials on this machine", needle,
-                        ))
-                    continue
-                read, note = await _checked_listing(binding, inventory.multi, needle)
-                fetched.extend(read)
-                if note:
-                    notes.append(note)
+                if _has_credentials(binding.service):
+                    listings.append((binding, inventory.multi))
+                elif only is not None or _names_instance_id(provider, needle):
+                    notes.append(_not_checked(
+                        binding.ref, "has no credentials on this machine", needle,
+                    ))
+        fetched: List[dict] = []
+        for read, note in await _checked_listings(listings, needle, self._check_seconds()):
+            fetched.extend(read)
+            if note:
+                notes.append(note)
         if fetched:
             # The reads wrote their caches: list again, in the instance list's
             # order, so candidates show the same way on every run. Rows a read
@@ -340,6 +341,16 @@ class CachedFleet:
         if only is None:
             notes.extend(self._unavailable_notes(needle))
         return CheckedRows(rows, notes)
+
+    def _check_seconds(self) -> float:
+        """How long the never-listed accounts may take in all (config)."""
+        from servonaut.config.schema import AppConfig
+
+        config = getattr(self._registry, "config", None)
+        value = getattr(
+            config, "account_check_timeout_seconds", AppConfig.account_check_timeout_seconds,
+        )
+        return max(0.0, float(value))
 
     def _unavailable_notes(self, reference: str) -> List[str]:
         """A note for every configured account that cannot connect."""
@@ -670,6 +681,53 @@ def _names_instance_id(provider: str, reference: str) -> bool:
     from servonaut.services.aws_service import is_instance_id
 
     return is_instance_id(reference)
+
+
+async def _checked_listings(
+    listings: List[Tuple[Any, bool]], reference: str, seconds: float,
+) -> List[Tuple[List[dict], Optional[str]]]:
+    """:func:`_checked_listing` of every ``(binding, qualified)``, together, in *seconds*.
+
+    Each account's API requests get *seconds* as well (see the services'
+    ``limit_request_time``). A listing still running when the time is up is
+    abandoned: its account gets a note, and the timeout is remembered like
+    any failure, so the next commands do not wait for it again.
+    """
+    if not listings:
+        return []
+    if seconds <= 0:
+        # No time allowed at all (config): list nothing.
+        return [
+            ([], _not_checked(binding.ref, "was not listed (no time allowed)", reference))
+            for binding, _ in listings
+        ]
+    from servonaut.services.accounts.listing_record import FAILED
+
+    for binding, _ in listings:
+        limit = getattr(binding.service, "limit_request_time", None)
+        if callable(limit):
+            limit(seconds)
+    tasks = [
+        asyncio.ensure_future(_checked_listing(binding, qualified, reference))
+        for binding, qualified in listings
+    ]
+    _, pending = await asyncio.wait(tasks, timeout=seconds)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    results = []
+    for task, (binding, _) in zip(tasks, listings):
+        if task in pending:
+            detail = f"timed out after {seconds:g} s"
+            record = _listing_record(binding.service)
+            if record is not None:
+                record.save(FAILED, detail, [])
+            results.append(([], _not_checked(
+                binding.ref, f"could not be listed ({detail})", reference,
+            )))
+        else:
+            results.append(task.result())
+    return results
 
 
 async def _checked_listing(

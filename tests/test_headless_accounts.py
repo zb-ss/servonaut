@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from unittest.mock import MagicMock
 
@@ -321,6 +322,62 @@ def test_a_failed_listing_is_not_retried_until_the_ttl_ends(staging_never_listed
     monkeypatch.setattr(listing_record.time, "time", lambda: remembered.until + 1)
     _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
     assert len(attempts) == 2
+
+
+def _stalling(service):
+    """Make *service*'s listing never answer (a blackholed network)."""
+    started = []
+
+    async def stalled(force_refresh=False):
+        started.append(1)
+        await asyncio.sleep(3600)
+
+    service.fetch_instances_cached = stalled
+    return started
+
+
+def test_never_listed_accounts_are_read_within_the_time_allowed(monkeypatch):
+    registry, services = build_registry(
+        monkeypatch,
+        aws={"aws": [{"id": "i-1", "name": "db"}]},
+        hetzner={"hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                 "staging": [{"id": "2", "name": "web-1", "is_hetzner": True}]},
+    )
+    staging, primary = services[("hetzner", "staging")], services[("hetzner", "hetzner")]
+    staging.cached = primary.cached = None
+    started = _stalling(staging)
+    registry.config.account_check_timeout_seconds = 0.2
+    fleet = CachedFleet.from_registry(registry, _custom())
+
+    begin = time.monotonic()
+    checked = _run(fleet.checked_rows("web-1"))
+
+    assert time.monotonic() - begin < 2
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' could not be listed (timed out after 0.2 s); "
+        "its servers were not checked for 'web-1'"
+    ]
+    # The project that answered is in; both got the time limit for their requests.
+    assert fleet.resolve("web-1", rows=checked.rows)["id"] == "1"
+    assert staging.request_time_limit == primary.request_time_limit == 0.2
+    # The timeout is remembered: the next command does not wait for it again.
+    begin = time.monotonic()
+    again = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+    assert time.monotonic() - begin < 0.2 and len(started) == 1
+    assert "timed out after 0.2 s; at " in again.notes[0]
+
+
+def test_no_time_at_all_reads_nothing_and_says_so(staging_never_listed):
+    registry, services = staging_never_listed
+    registry.config.account_check_timeout_seconds = 0
+
+    checked = _run(CachedFleet.from_registry(registry, _custom()).checked_rows("web-1"))
+
+    assert services[("hetzner", "staging")].fetches == 0
+    assert checked.notes == [
+        "Note: Hetzner project 'staging' was not listed (no time allowed); "
+        "its servers were not checked for 'web-1'"
+    ]
 
 
 def test_an_aws_account_without_credentials_is_not_read(monkeypatch):

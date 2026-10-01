@@ -5,10 +5,17 @@ loopback target with the custom server's user, port and key. Commands piped
 to it run on the server and their output comes back on stdout. Running a
 single command given after ``--`` is how most SSH front ends are scripted.
 A server that matches a connection rule is reached the way the TUI reaches
-it: through the rule's bastion, at its private address.
+it: through the rule's bastion, at its private address. A provider account
+that was never listed is read before a name counts as unique, but an API that
+never answers holds the command up only for the time the config allows.
 """
 
 from __future__ import annotations
+
+import socket
+import threading
+import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -93,3 +100,60 @@ def test_a_connection_rule_routes_ssh_through_its_bastion(journey, fake_cloud, s
     bastion_logins = sshd.bastion.sessions("auth")
     assert bastion_logins and all(a["accepted"] for a in bastion_logins)
     assert sshd.target.commands(user=fleet.BASTION_USER) == ["hostname"]
+
+
+@contextmanager
+def _unanswering_api():
+    """A loopback HTTP endpoint that accepts connections and never answers."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    held, stop = [], threading.Event()
+
+    def accept():
+        listener.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                held.append(listener.accept()[0])
+            except OSError:
+                continue
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}/v1"
+    finally:
+        stop.set()
+        thread.join()
+        for connection in held:
+            connection.close()
+        listener.close()
+
+
+def test_an_api_that_never_answers_holds_ssh_up_only_briefly(journey, fake_cloud, sshd, cli):
+    sandbox = journey.new_sandbox()
+    seeder = HomeSeeder(sandbox.home, api_url=fake_cloud.url)
+    # A Hetzner project never listed on this machine, and two seconds to list it.
+    remote_fleet.seed_web_1(
+        sshd, seeder, sandbox.home,
+        hetzner=seeder.hetzner_config(), account_check_timeout_seconds=2,
+    )
+    seeder.cache()
+    with _unanswering_api() as url:
+        journey.env_overrides["SERVONAUT_HETZNER_API_URL"] = url
+
+        begin = time.monotonic()
+        result = cli(sandbox, "ssh", WEB_1.name, "--", "hostname")
+        first = time.monotonic() - begin
+        again = cli(sandbox, "ssh", WEB_1.name, "--", "hostname")
+
+    assert result.returncode == 0, result.describe()
+    assert result.stdout.strip() == WEB_1.name
+    note = ("Note: Hetzner project 'hetzner' could not be listed (timed out after 2 s); "
+            f"its servers were not checked for '{WEB_1.name}'")
+    assert note in result.stderr
+    # Two seconds to list; the request still open gets as long to give up
+    # before the process can exit; the rest is start-up and the SSH session.
+    assert first < 2 + 2 + 4, result.describe()
+    # The timeout is remembered: the next command does not wait for it again.
+    assert again.returncode == 0, again.describe()
+    assert "timed out after 2 s; at " in again.stderr
+    assert again.duration < first

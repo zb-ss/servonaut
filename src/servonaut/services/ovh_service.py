@@ -170,6 +170,8 @@ class OVHService:
             Path(cache_path).expanduser() if cache_path is not None else None
         )
         self._client = None  # lazy-initialized
+        # Seconds per API request; None keeps python-ovh's default (180).
+        self._request_timeout: Optional[float] = None
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Read by the instance list and MCP list_instances.
         self.last_fetch_error: Optional[str] = None
@@ -210,6 +212,9 @@ class OVHService:
         consumer_key = resolve_secret(config.consumer_key)
         client_id = resolve_secret(config.client_id)
         client_secret = resolve_secret(config.client_secret)
+        timeout_kwargs = (
+            {"timeout": self._request_timeout} if self._request_timeout is not None else {}
+        )
 
         with _ambient_ovh_config(ovh, self._allow_ambient_config):
             if client_id and client_secret:
@@ -218,6 +223,7 @@ class OVHService:
                     endpoint=config.endpoint,
                     client_id=client_id,
                     client_secret=client_secret,
+                    **timeout_kwargs,
                 )
             else:
                 # Classic 3-key auth
@@ -226,9 +232,15 @@ class OVHService:
                     application_key=application_key,
                     application_secret=application_secret,
                     consumer_key=consumer_key,
+                    **timeout_kwargs,
                 )
 
         return self._client
+
+    def limit_request_time(self, seconds: float) -> None:
+        """Give every API request *seconds* to answer (python-ovh's ``timeout``)."""
+        self._request_timeout = seconds
+        self._client = None
 
     # ------------------------------------------------------------------
     # Public async API
