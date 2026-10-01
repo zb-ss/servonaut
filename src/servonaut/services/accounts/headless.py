@@ -478,11 +478,7 @@ class InstanceDirectory:
 
     def _retry_seconds(self) -> float:
         """The configured wait before a failed account read is retried."""
-        from servonaut.config.schema import AppConfig
-
-        config = getattr(self._accounts(), "config", None)
-        value = getattr(config, "account_retry_seconds", AppConfig.account_retry_seconds)
-        return max(0.0, float(value))
+        return _seconds_setting(self._accounts(), "account_retry_seconds")
 
     def _forget_reads(self, provider: str, inventory: Any) -> None:
         """Drop reads made for accounts that were rebuilt since."""

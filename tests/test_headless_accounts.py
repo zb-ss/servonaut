@@ -737,6 +737,29 @@ def test_a_zero_retry_window_asks_again_on_the_next_lookup(staging_unreachable):
     assert len(attempts) == 2
 
 
+@pytest.mark.parametrize("value", ["thirty", None, True, [30]])
+def test_a_retry_window_that_is_not_a_number_uses_the_default(staging_unreachable, monkeypatch,
+                                                              caplog, value):
+    """The MCP lookup reads the setting as the CLI does: a bad value never breaks it."""
+    from servonaut.config.schema import AppConfig
+
+    registry, attempts = staging_unreachable
+    registry.config.account_retry_seconds = value
+    clock = [1000.0]
+    monkeypatch.setattr("servonaut.services.accounts.headless.time.monotonic", lambda: clock[0])
+    directory = _directory(registry)
+
+    assert directory._retry_seconds() == AppConfig.account_retry_seconds
+    assert _run(directory.find("web-1"))["id"] == "i-1"
+    clock[0] += AppConfig.account_retry_seconds - 1
+    _run(directory.find("web-1"))
+    assert len(attempts) == 1
+    clock[0] += 2
+    _run(directory.find("web-1"))
+    assert len(attempts) == 2
+    assert "Config account_retry_seconds is not a number" in caplog.text
+
+
 def test_a_failing_provider_before_a_match_falls_back_to_its_cache(monkeypatch):
     registry, services = build_registry(
         monkeypatch,
