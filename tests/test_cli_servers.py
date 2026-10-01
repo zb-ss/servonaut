@@ -603,6 +603,29 @@ class TestConnectionRules:
         assert alias < options.index("HostKeyAlgorithms=+ssh-rsa")
         assert "BatchMode=yes" in options
 
+    def test_the_probe_orders_its_options_as_ssh_does(self, monkeypatch):
+        """OpenSSH takes an option's first value: both must try the same path."""
+        from servonaut.services.connection_service import ConnectionService, profile_route
+        from servonaut.services.ssh_service import SSHService
+
+        # An extra option that also sets the proxy: whichever comes first wins.
+        config = _rule_config(extra_ssh_options=["ProxyCommand=none"])
+        probe = _options(_probe_argv(monkeypatch, _APP, config))
+
+        route = profile_route(_APP, ConnectionService.for_config(config))
+        manager = MagicMock()
+        manager.get.return_value = config
+        ssh = _options(SSHService(manager).build_ssh_command(
+            host=route["host"], username="ec2-user", key_path="/tmp/fake.pem",
+            proxy_args=route["proxy_args"], extra_options=route["extra_options"],
+        ))
+
+        def proxy_order(options):
+            return [o for o in options if o.startswith("ProxyCommand=")]
+
+        assert proxy_order(probe) == proxy_order(ssh)
+        assert proxy_order(probe)[0] == "ProxyCommand=none"
+
     def test_flags_still_win_and_keep_the_bastion(self, monkeypatch):
         argv = _probe_argv(
             monkeypatch, _APP, _rule_config(username="deploy"),

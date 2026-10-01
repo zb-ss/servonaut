@@ -189,12 +189,14 @@ def _run_ssh_probe(
         *policy.ssh_options(off_options=OFF_OPTIONS_ACCEPT_NEW),
     ]
     if route is None:
-        extra_options = host_key_alias_options(instance, policy)
+        extra_options, proxy_args = host_key_alias_options(instance, policy), []
     else:
-        cmd += route["proxy_args"]
-        extra_options = route["extra_options"]
+        extra_options, proxy_args = route["extra_options"], route["proxy_args"]
+    # The order SSHService.build_ssh_command uses for `servonaut ssh`: OpenSSH
+    # takes the first value of an option, so the probe tests the same path.
     for option in extra_options:
         cmd += ["-o", option]
+    cmd += proxy_args
     cmd += [*identity_file_args(key_path), "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
         # Insert -p <port> right after "ssh"
