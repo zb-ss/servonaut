@@ -55,6 +55,7 @@ from servonaut.screens._provider_accounts import (
     shown_label,
 )
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.services.interfaces import BucketListing
 from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -119,8 +120,12 @@ class ObjectStorageScreen(Screen):
         self._provider: str = provider
         self._view: str = _VIEW_BUCKETS
         self._current_bucket: str = ""
+        # Region the open bucket was listed in ("" when the listing gave none).
+        self._current_bucket_region: str = ""
         self._prefix: str = ""
         self._buckets: List[Dict] = []
+        # Bucket-view row key → that row's bucket dict.
+        self._bucket_rows: Dict[str, Dict] = {}
         self._folders: List[str] = []
         self._objects: List[Dict] = []
         # Region picker state (AWS only — other providers are endpoint-pinned).
@@ -303,6 +308,7 @@ class ObjectStorageScreen(Screen):
         self._hide_all_forms()
         self._view = _VIEW_BUCKETS
         self._current_bucket = ""
+        self._current_bucket_region = ""
         self._prefix = ""
         self._buckets = []
         self._folders = []
@@ -401,7 +407,7 @@ class ObjectStorageScreen(Screen):
 
         self._set_status("[dim]Loading buckets…[/dim]")
         try:
-            buckets = await svc.list_buckets()
+            listing = await svc.search_buckets()
         except Exception as err:
             logger.error("list_buckets failed: %s", err)
             err_msg = self.scrub(str(err))
@@ -413,30 +419,77 @@ class ObjectStorageScreen(Screen):
             )
             return
 
-        self._buckets = buckets
-        self._render_buckets_table(buckets)
+        self._buckets = listing.buckets
+        self._render_buckets_table(listing.buckets)
         self._update_breadcrumb()
-        count = len(buckets)
-        self._set_status(f"[dim]{count} bucket{'s' if count != 1 else ''}[/dim]")
+        self._set_status(self._bucket_listing_status(listing))
+
+    def _bucket_listing_status(self, listing: BucketListing) -> str:
+        """Status text for a bucket listing: the count, and where it looked.
+
+        An empty listing says where nothing was found, because a provider
+        that lists buckets per region shows nothing for buckets elsewhere.
+        """
+        count = len(listing.buckets)
+        parts = [f"{count} bucket{'s' if count != 1 else ''}"]
+        searched = listing.searched_regions
+        if searched:
+            parts.append(f"searched {len(searched)} regions")
+        failed = listing.failed_regions
+        if failed:
+            parts.append(
+                f"{len(failed)} could not be searched: {', '.join(failed)} (see the log)"
+            )
+        status = f"[dim]{markup_escape(' · '.join(parts))}[/dim]"
+        hint = "" if count else self._empty_listing_hint(listing)
+        return f"{status}\n{markup_escape(hint)}" if hint else status
+
+    def _empty_listing_hint(self, listing: BucketListing) -> str:
+        """Where an empty listing looked and what to check next ("" if nothing to add)."""
+        if listing.searched_regions:
+            return (
+                "No buckets in any region these keys can list. Check that the "
+                "keys belong to the project that owns the buckets."
+            )
+        if not listing.endpoint:
+            return ""
+        where = self.scrub(listing.endpoint)
+        if listing.region:
+            where += f" (region {listing.region})"
+        return (
+            f"No buckets at {where}. Buckets in another region are listed at "
+            "that region's endpoint: if yours are elsewhere, change the region "
+            "in Settings."
+        )
 
     def _render_buckets_table(self, buckets: List[Dict]) -> None:
-        """Populate the DataTable with bucket rows."""
+        """Populate the DataTable with bucket rows.
+
+        A Region column appears when the listing searched several regions;
+        rows are then keyed by region too, since two regions may each hold a
+        bucket of the same name.
+        """
         table = self.query_one("#s3_table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Type", "Bucket Name", "Created", "")
+        with_region = any(b.get("region") for b in buckets)
+        if with_region:
+            table.add_columns("Type", "Bucket Name", "Region", "Created", "")
+        else:
+            table.add_columns("Type", "Bucket Name", "Created", "")
+        self._bucket_rows = {}
         for b in buckets:
             name = b.get("name", "")
+            region = b.get("region", "") or ""
             created = b.get("creation_date", "") or ""
+            row_key = f"{region}/{name}" if region else name
+            self._bucket_rows[row_key] = b
             # Scrub first (demo-mode redaction), then escape markup so
             # cloud-origin names with '[' / ']' don't corrupt the table.
-            display_name = escape_cell(self.scrub_name(name))
-            table.add_row(
-                "bucket",
-                display_name,
-                escape_cell(created),
-                "",
-                key=name,
-            )
+            cells = ["bucket", escape_cell(self.scrub_name(name))]
+            if with_region:
+                cells.append(escape_cell(region))
+            cells += [escape_cell(created), ""]
+            table.add_row(*cells, key=row_key)
 
     async def _load_objects(self) -> None:
         """Load objects + folders for the current bucket/prefix."""
@@ -450,6 +503,7 @@ class ObjectStorageScreen(Screen):
                 self._current_bucket,
                 prefix=self._prefix,
                 delimiter="/",
+                region=self._current_bucket_region,
             )
         except Exception as err:
             logger.error("list_objects failed for %s/%s: %s", self._current_bucket, self._prefix, err)
@@ -525,29 +579,38 @@ class ObjectStorageScreen(Screen):
             breadcrumb_widget.update("[dim]/ (buckets)[/dim]")
             return
 
-        # Objects view — show bucket + prefix path
-        parts = [self.scrub_name(self._current_bucket)]
+        # Objects view — show bucket (and its region, when the listing gave
+        # one: two regions may hold a bucket of the same name) + prefix path
+        bucket = self.scrub_name(self._current_bucket)
+        if self._current_bucket_region:
+            bucket += f" ({self._current_bucket_region})"
+        parts = [bucket]
         if self._prefix:
             # Each prefix segment already ends with "/" — strip trailing
             segments = [seg for seg in self._prefix.split("/") if seg]
             for seg in segments:
                 parts.append(self.scrub_key(seg))
-        breadcrumb_widget.update("[dim]" + " / ".join(parts) + "[/dim]")
+        # Object keys may contain "[", which Rich would read as markup.
+        breadcrumb_widget.update("[dim]" + markup_escape(" / ".join(parts)) + "[/dim]")
 
     # ------------------------------------------------------------------
     # Table selection helpers
     # ------------------------------------------------------------------
 
-    def _get_selected_bucket_name(self) -> Optional[str]:
-        """Return the raw (un-redacted) bucket name for the cursor row."""
+    def _get_selected_bucket(self) -> Optional[Dict]:
+        """Return the cursor row's bucket (raw, un-redacted name and region)."""
         table = self.query_one("#s3_table", DataTable)
         if table.row_count == 0:
             return None
         try:
             row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-            return row_key  # bucket-view rows use raw bucket name as key
         except Exception:
             return None
+        return self._bucket_rows.get(row_key)
+
+    def _region_of(self, bucket: str) -> str:
+        """The listed region of *bucket* when it is the open one, else ""."""
+        return self._current_bucket_region if bucket == self._current_bucket else ""
 
     def _get_selected_object_info(self) -> Optional[Dict]:
         """Return a dict with type/key for the cursor row in objects view.
@@ -661,11 +724,12 @@ class ObjectStorageScreen(Screen):
 
     def _open_bucket(self) -> None:
         """Switch to objects view for the selected bucket."""
-        bucket = self._get_selected_bucket_name()
+        bucket = self._get_selected_bucket()
         if bucket is None:
             self.app.notify("No bucket selected", severity="warning", markup=False)
             return
-        self._current_bucket = bucket
+        self._current_bucket = bucket.get("name", "")
+        self._current_bucket_region = bucket.get("region", "") or ""
         self._prefix = ""
         self._view = _VIEW_OBJECTS
         self.run_worker(self._load_objects(), exclusive=True, name="s3_load_objects")
@@ -674,6 +738,7 @@ class ObjectStorageScreen(Screen):
         """Return to the buckets list view."""
         self._view = _VIEW_BUCKETS
         self._current_bucket = ""
+        self._current_bucket_region = ""
         self._prefix = ""
         self.run_worker(self._load_buckets(), exclusive=True, name="s3_load_buckets")
 
@@ -872,11 +937,13 @@ class ObjectStorageScreen(Screen):
     # ------------------------------------------------------------------
 
     def _action_delete_bucket(self) -> None:
-        bucket = self._get_selected_bucket_name()
-        if bucket is None:
+        selected = self._get_selected_bucket()
+        if selected is None:
             self.app.notify("No bucket selected", severity="warning", markup=False)
             return
 
+        bucket = selected.get("name", "")
+        region = selected.get("region", "") or ""
         display_name = self.scrub_name(bucket)
 
         async def _confirm_and_delete() -> None:
@@ -894,16 +961,16 @@ class ObjectStorageScreen(Screen):
                 )
             )
             if confirmed:
-                await self._delete_bucket(bucket, display_name)
+                await self._delete_bucket(bucket, display_name, region)
 
         self.run_worker(_confirm_and_delete(), exclusive=False, name="s3_delete_bucket")
 
-    async def _delete_bucket(self, bucket: str, display_name: str) -> None:
+    async def _delete_bucket(self, bucket: str, display_name: str, region: str = "") -> None:
         svc = self._get_storage_service()
         if svc is None:
             return
         try:
-            await svc.delete_bucket(bucket)
+            await svc.delete_bucket(bucket, region)
             self.app.notify(
                 f"Bucket '{display_name}' deleted",
                 severity="information",
@@ -956,7 +1023,7 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            await svc.delete_object(bucket, key)
+            await svc.delete_object(bucket, key, self._region_of(bucket))
             self.app.notify(
                 f"Object '{display_key}' deleted",
                 severity="information",
@@ -999,7 +1066,7 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            await svc.upload_object(bucket, key, local_path)
+            await svc.upload_object(bucket, key, local_path, self._region_of(bucket))
             display_key = self.scrub_key(key)
             self.app.notify(
                 f"Uploaded to '{display_key}'",
@@ -1046,7 +1113,7 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            await svc.download_object(bucket, key, local_path)
+            await svc.download_object(bucket, key, local_path, self._region_of(bucket))
             self.app.notify(
                 f"Downloaded to '{local_path}'",
                 severity="information",
@@ -1098,7 +1165,9 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            await svc.copy_object(src_bucket, src_key, dst_bucket, dst_key)
+            await svc.copy_object(
+                src_bucket, src_key, dst_bucket, dst_key, self._region_of(dst_bucket),
+            )
             display_key = self.scrub_key(dst_key)
             self.app.notify(
                 f"Copied to '{display_key}'",
@@ -1151,7 +1220,10 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            await svc.move_object(src_bucket, src_key, dst_bucket, dst_key)
+            await svc.move_object(
+                src_bucket, src_key, dst_bucket, dst_key,
+                self._region_of(dst_bucket), self._region_of(src_bucket),
+            )
             display_key = self.scrub_key(dst_key)
             self.app.notify(
                 f"Moved to '{display_key}'",
@@ -1195,7 +1267,9 @@ class ObjectStorageScreen(Screen):
         if svc is None:
             return
         try:
-            url = await svc.generate_presigned_url(bucket, key)
+            url = await svc.generate_presigned_url(
+                bucket, key, region=self._region_of(bucket),
+            )
             display_url = self.scrub(url)
             self._hide_all_forms()
             self.query_one("#s3_presigned_url_display", Static).update(

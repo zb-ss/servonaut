@@ -4796,14 +4796,19 @@ class ServonautTools:
             self._audit.log('s3_list_buckets', payload, '', False, f"api_error: {exc}")
             return f"Error listing {provider} S3 buckets: {exc}"
 
+        # A provider that lists buckets per region (OVH) reports each one's
+        # region; the bucket tools take it as their `region` argument.
+        with_region = any(b.get('region') for b in buckets)
+        region_header = f"  {'Region':<16}" if with_region else ''
         lines = [
             f"{provider} buckets ({len(buckets)} total):",
-            f"  {'Name':<48}  {'Creation Date':<20}",
-            '  ' + '-' * 70,
+            f"  {'Name':<48}{region_header}  {'Creation Date':<20}",
+            '  ' + '-' * (88 if with_region else 70),
         ]
         for b in buckets:
+            region_cell = f"  {(b.get('region') or ''):<16}" if with_region else ''
             lines.append(
-                f"  {(b.get('name') or ''):<48}  "
+                f"  {(b.get('name') or ''):<48}{region_cell}  "
                 f"{(b.get('creation_date') or ''):<20}"
             )
         result = '\n'.join(lines)

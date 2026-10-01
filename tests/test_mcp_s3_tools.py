@@ -185,6 +185,25 @@ class TestS3ListBuckets:
         svc.list_buckets.assert_called_once()
         assert "my-bucket" in result
 
+    def test_buckets_of_several_regions_show_their_region(self):
+        """OVH lists per region; agents need the region for the bucket tools."""
+        svc = _make_s3_svc()
+        svc.list_buckets = AsyncMock(return_value=[
+            {"name": "media-assets", "creation_date": "2024-01-01", "region": "uk"},
+            {"name": "backups", "creation_date": "2024-02-01", "region": "de"},
+        ])
+        tools = make_tools(ovh_os_service=svc)
+        result = run(tools.s3_list_buckets(provider="ovh"))
+        lines = result.splitlines()
+        assert "Region" in lines[1]
+        row = next(line for line in lines if "media-assets" in line)
+        assert row.split() == ["media-assets", "uk", "2024-01-01"]
+
+    def test_single_region_listing_has_no_region_column(self):
+        tools = make_tools(aws_os_service=_make_s3_svc())
+        result = run(tools.s3_list_buckets(provider="aws"))
+        assert "Region" not in result
+
 
 # ---------------------------------------------------------------------------
 # s3_list_objects

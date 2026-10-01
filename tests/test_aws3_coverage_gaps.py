@@ -962,6 +962,7 @@ class TestAWSCreateRefreshAfterCreate:
 from servonaut.screens.object_storage import (
     ObjectStorageScreen, _VIEW_BUCKETS, _VIEW_OBJECTS,
 )
+from servonaut.services.interfaces import BucketListing
 
 
 def _s3_mock_storage_service():
@@ -982,6 +983,12 @@ def _s3_mock_storage_service():
     svc.move_object = AsyncMock()
     svc.upload_object = AsyncMock()
     svc.download_object = AsyncMock()
+
+    # The interface's default: one listing at one endpoint.
+    async def _search_buckets():
+        return BucketListing(buckets=await svc.list_buckets())
+
+    svc.search_buckets = AsyncMock(side_effect=_search_buckets)
     return svc
 
 
@@ -1166,7 +1173,7 @@ class TestObjectStorageNavigation:
         screen._buckets = [{"name": "my-bucket"}]
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value="my-bucket"), \
+             patch.object(screen, "_get_selected_bucket", return_value={"name": "my-bucket"}), \
              patch.object(screen, "run_worker") as mock_rw:
             screen._open_bucket()
 
@@ -1303,7 +1310,7 @@ class TestObjectStorageDeleteBucket:
              patch.object(screen, "_load_buckets", new_callable=AsyncMock):
             asyncio.run(screen._delete_bucket("my-bucket", "my-bucket"))
 
-        svc.delete_bucket.assert_called_once_with("my-bucket")
+        svc.delete_bucket.assert_called_once_with("my-bucket", "")
         app.notify.assert_called()
 
     def test_delete_bucket_error_notifies(self) -> None:
@@ -1334,7 +1341,7 @@ class TestObjectStorageDeleteObject:
              patch.object(screen, "_load_objects", new_callable=AsyncMock):
             asyncio.run(screen._delete_object("my-bucket", "file.txt", "file.txt"))
 
-        svc.delete_object.assert_called_once_with("my-bucket", "file.txt")
+        svc.delete_object.assert_called_once_with("my-bucket", "file.txt", "")
 
     def test_delete_object_error_notifies(self) -> None:
         svc = _s3_mock_storage_service()
@@ -1408,7 +1415,7 @@ class TestObjectStorageCopyMove:
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app):
             asyncio.run(screen._copy_object("src", "old.txt", "dst", "new.txt"))
 
-        svc.copy_object.assert_called_once_with("src", "old.txt", "dst", "new.txt")
+        svc.copy_object.assert_called_once_with("src", "old.txt", "dst", "new.txt", "")
         app.notify.assert_called()
 
     def test_copy_error_notifies(self) -> None:
@@ -2514,9 +2521,9 @@ class TestObjectStorageLoadObjectsNoService:
 
 
 class TestObjectStorageSelectionHelpers:
-    """_get_selected_bucket_name and _get_selected_object_info (lines 424-471)."""
+    """_get_selected_bucket and _get_selected_object_info."""
 
-    def test_get_selected_bucket_name_exception_returns_none(self) -> None:
+    def test_get_selected_bucket_exception_returns_none(self) -> None:
         screen = ObjectStorageScreen("aws")
         app = _s3_app(provider="aws", storage_service=_s3_mock_storage_service())
         mock_table = MagicMock()
@@ -2525,11 +2532,11 @@ class TestObjectStorageSelectionHelpers:
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", return_value=mock_table):
-            result = screen._get_selected_bucket_name()
+            result = screen._get_selected_bucket()
 
         assert result is None
 
-    def test_get_selected_bucket_name_empty_table_returns_none(self) -> None:
+    def test_get_selected_bucket_empty_table_returns_none(self) -> None:
         screen = ObjectStorageScreen("aws")
         app = _s3_app(provider="aws", storage_service=_s3_mock_storage_service())
         mock_table = MagicMock()
@@ -2537,7 +2544,7 @@ class TestObjectStorageSelectionHelpers:
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", return_value=mock_table):
-            result = screen._get_selected_bucket_name()
+            result = screen._get_selected_bucket()
 
         assert result is None
 
@@ -2664,7 +2671,7 @@ class TestObjectStorageNavigateNoSelection:
         screen._view = _VIEW_BUCKETS
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value=None), \
+             patch.object(screen, "_get_selected_bucket", return_value=None), \
              patch.object(screen, "run_worker") as mock_rw:
             screen._open_bucket()
 
@@ -2799,7 +2806,7 @@ class TestObjectStorageDeleteBucketNoSelection:
         screen = ObjectStorageScreen("aws")
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value=None), \
+             patch.object(screen, "_get_selected_bucket", return_value=None), \
              patch.object(screen, "run_worker") as mock_rw:
             screen._action_delete_bucket()
 
@@ -3709,11 +3716,12 @@ class TestObjectStorageUpdateBreadcrumbException:
             screen._update_breadcrumb()
 
 
-class TestObjectStorageGetSelectedBucketNameSuccess:
-    """_get_selected_bucket_name success path (line 451)."""
+class TestObjectStorageGetSelectedBucketSuccess:
+    """_get_selected_bucket success path."""
 
-    def test_get_selected_bucket_name_returns_key(self) -> None:
+    def test_get_selected_bucket_returns_the_rows_bucket(self) -> None:
         screen = ObjectStorageScreen("aws")
+        screen._bucket_rows = {"my-bucket": {"name": "my-bucket"}}
         app = _s3_app(provider="aws", storage_service=_s3_mock_storage_service())
         mock_table = MagicMock()
         mock_table.row_count = 1
@@ -3723,9 +3731,9 @@ class TestObjectStorageGetSelectedBucketNameSuccess:
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "query_one", return_value=mock_table):
-            result = screen._get_selected_bucket_name()
+            result = screen._get_selected_bucket()
 
-        assert result == "my-bucket"
+        assert result == {"name": "my-bucket"}
 
 
 class TestObjectStorageActionUpPaths:
@@ -3999,7 +4007,7 @@ class TestObjectStorageConfirmAndDeleteClosures:
             captured.append(coro)
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value="my-bucket"), \
+             patch.object(screen, "_get_selected_bucket", return_value={"name": "my-bucket"}), \
              patch.object(screen, "run_worker", side_effect=capture_rw):
             screen._action_delete_bucket()
 
@@ -4008,7 +4016,7 @@ class TestObjectStorageConfirmAndDeleteClosures:
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_delete_bucket", new_callable=AsyncMock) as mock_db:
             asyncio.run(captured[0])
-        mock_db.assert_called_once_with("my-bucket", "my-bucket")
+        mock_db.assert_called_once_with("my-bucket", "my-bucket", "")
 
     def test_confirm_and_delete_bucket_closure_cancelled(self) -> None:
         """Running the inner closure with confirmed=False does NOT call _delete_bucket."""
@@ -4024,7 +4032,7 @@ class TestObjectStorageConfirmAndDeleteClosures:
             captured.append(coro)
 
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
-             patch.object(screen, "_get_selected_bucket_name", return_value="my-bucket"), \
+             patch.object(screen, "_get_selected_bucket", return_value={"name": "my-bucket"}), \
              patch.object(screen, "run_worker", side_effect=capture_rw):
             screen._action_delete_bucket()
 
