@@ -1,15 +1,16 @@
 """Hetzner Cloud settings panel.
 
-Edits all NON-secret scalars on :class:`~servonaut.config.schema.HetznerConfig`
-plus the nested :class:`~servonaut.config.schema.ObjectStorageConfig` for
-Hetzner Object Storage. The API token (``api_token``) is owned exclusively by
-the ``HetznerSetupScreen`` wizard — this panel preserves it via
-``dataclasses.replace`` but never displays or stores it.
+Holds the provider-wide settings of :class:`~servonaut.config.schema.HetznerConfig`:
+whether Hetzner is listed (``enabled``), whether creating a server requires
+SSH keys, the cache, the audit log path and the cost alert. Everything that
+belongs to one project — API token, SSH defaults, server-creation defaults and
+Object Storage keys — is edited in that project's form,
+``HetznerSetupScreen``, so each setting has one place. "Setup Hetzner" opens
+the primary project's form; the Projects section lists every project and
+opens the same form to add or edit one.
 
-A status row shows whether Hetzner is configured (token set) or needs setup,
-and a "Setup Hetzner" launcher opens the wizard for credential entry. The
-Projects section lists the primary project and any extra ones; adding or
-editing a project opens the same wizard for that project.
+The panel saves with ``dataclasses.replace``, so every field the form owns is
+kept exactly as saved.
 """
 
 from __future__ import annotations
@@ -29,18 +30,12 @@ from servonaut.screens.settings.accounts import (
     refresh_provider_fleet,
 )
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
-from servonaut.screens.settings.widgets import EnvVarInput
 
 logger = logging.getLogger(__name__)
 
 
 class HetznerPanel(SettingsPanel):
-    """Hetzner Cloud provider settings — scalars + Object Storage.
-
-    Credentials (``api_token``) are managed in the Hetzner setup wizard.
-    This panel edits only non-secret scalar fields and the S3 object-storage
-    settings, preserving ``api_token`` via ``dataclasses.replace``.
-    """
+    """Hetzner Cloud provider-wide settings plus the list of projects."""
 
     PANEL_ID = "hetzner"
     TITLE = "Hetzner Cloud"
@@ -49,10 +44,6 @@ class HetznerPanel(SettingsPanel):
     DEMO_REDACTED_FIELDS = {
         "hetzner_cache_path": "redact_path",
         "hetzner_audit_path": "redact_path",
-        "hetzner_s3_endpoint_url": "redact_url",
-        "hetzner_default_hetzner_ssh_key": "redact_key_name",
-        "hetzner_default_local_ssh_key": "redact_key_name",
-        "hetzner_default_username": "redact_username",
     }
 
     DEFAULT_CSS = """
@@ -87,7 +78,9 @@ class HetznerPanel(SettingsPanel):
             classes="setting_row",
         )
         yield Static(
-            "API token and Object Storage credentials live in the setup wizard above.",
+            "API token, SSH and server defaults and Object Storage keys are in "
+            "each project's form: Setup Hetzner for the primary project, "
+            "Projects below for the others.",
             classes="help-note",
         )
 
@@ -98,50 +91,8 @@ class HetznerPanel(SettingsPanel):
             classes="setting_row",
         )
 
-        # SSH keys
-        yield Static("SSH Keys", classes="section-heading")
-        yield Horizontal(
-            Static("Default Hetzner SSH key", classes="label"),
-            Input(
-                placeholder="my-key (Hetzner-side name or ID)",
-                id="hetzner_default_hetzner_ssh_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default local SSH key", classes="label"),
-            Input(
-                placeholder="~/.ssh/id_rsa",
-                id="hetzner_default_local_ssh_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default username", classes="label"),
-            Input(placeholder="root", id="hetzner_default_username"),
-            classes="setting_row",
-        )
-
-        # Server defaults
-        yield Static("Server Defaults", classes="section-heading")
-        yield Horizontal(
-            Static("Default image", classes="label"),
-            Input(placeholder="ubuntu-22.04", id="hetzner_default_image"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default server type", classes="label"),
-            Input(placeholder="cx23", id="hetzner_default_server_type"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default location", classes="label"),
-            Input(
-                placeholder="fsn1 / nbg1 / hel1 / ash / hil",
-                id="hetzner_default_location",
-            ),
-            classes="setting_row",
-        )
+        # Server creation policy
+        yield Static("Server Creation", classes="section-heading")
         yield Horizontal(
             Static("Require SSH keys on create", classes="label"),
             Switch(id="hetzner_require_ssh_keys"),
@@ -177,48 +128,7 @@ class HetznerPanel(SettingsPanel):
             classes="setting_row",
         )
 
-        # Object Storage (S3-compatible)
-        yield Static("Object Storage (S3-compatible)", classes="section-heading")
-        yield Static(
-            "Supports $ENV_VAR and file: prefix syntax for credentials.",
-            classes="help-note",
-        )
-        yield Horizontal(
-            Static("Access key", classes="label"),
-            EnvVarInput(
-                placeholder="access key or $ENV_VAR",
-                password=False,
-                id="hetzner_s3_access_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Secret key", classes="label"),
-            EnvVarInput(
-                placeholder="$HETZNER_SECRET_KEY",
-                password=True,
-                id="hetzner_s3_secret_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Region", classes="label"),
-            Input(
-                placeholder="eu-central-1",
-                id="hetzner_s3_region",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Endpoint URL", classes="label"),
-            Input(
-                placeholder="https://fsn1.your-objectstorage.com",
-                id="hetzner_s3_endpoint_url",
-            ),
-            classes="setting_row",
-        )
-
-        # Projects (saved per project by the setup wizard)
+        # Projects (each one edited in its own form)
         yield HetznerAccountsSection(heading_classes="section-heading")
 
     # ------------------------------------------------------------------
@@ -233,14 +143,6 @@ class HetznerPanel(SettingsPanel):
         self._update_status_label(h)
 
         self.query_one("#hetzner_enabled", Switch).value = h.enabled
-        self._show_field("hetzner_default_hetzner_ssh_key", h.default_hetzner_ssh_key)
-        self._show_field("hetzner_default_local_ssh_key", h.default_local_ssh_key)
-        self._show_field("hetzner_default_username", h.default_username)
-        self.query_one("#hetzner_default_image", Input).value = h.default_image
-        self.query_one("#hetzner_default_server_type", Input).value = (
-            h.default_server_type
-        )
-        self.query_one("#hetzner_default_location", Input).value = h.default_location
         self.query_one("#hetzner_require_ssh_keys", Switch).value = (
             h.require_ssh_keys_on_create
         )
@@ -251,22 +153,16 @@ class HetznerPanel(SettingsPanel):
             h.cost_alert_threshold
         )
 
-        s3 = h.object_storage
-        self.query_one("#hetzner_s3_access_key", EnvVarInput).value = s3.access_key
-        self.query_one("#hetzner_s3_secret_key", EnvVarInput).value = s3.secret_key
-        self.query_one("#hetzner_s3_region", Input).value = s3.region
-        self._show_field("hetzner_s3_endpoint_url", s3.endpoint_url)
-
         self.query_one(HetznerAccountsSection).refresh_accounts()
         self._snapshot_now()
 
     def refresh_external_state(self) -> None:
-        """Show what the setup wizard saved.
+        """Show what the project form saved.
 
-        The wizard can enable Hetzner and add, edit or rename projects. An
-        untouched form reloads, so a later Save never writes back the values
-        from before the wizard; unsaved edits are kept and only the status
-        and the projects are redrawn.
+        The project form can enable Hetzner and add, edit or rename projects.
+        An untouched panel reloads, so a later Save never writes back the
+        values from before the form; unsaved edits are kept and only the
+        status and the projects are redrawn.
         """
         try:
             if not self.is_dirty():
@@ -288,22 +184,6 @@ class HetznerPanel(SettingsPanel):
         """Return current widget values for dirty comparison."""
         return {
             "enabled": self.query_one("#hetzner_enabled", Switch).value,
-            "default_hetzner_ssh_key": self._field_value(
-                "hetzner_default_hetzner_ssh_key"
-            ).strip(),
-            "default_local_ssh_key": self._field_value(
-                "hetzner_default_local_ssh_key"
-            ).strip(),
-            "default_username": self._field_value("hetzner_default_username").strip(),
-            "default_image": self.query_one(
-                "#hetzner_default_image", Input
-            ).value.strip(),
-            "default_server_type": self.query_one(
-                "#hetzner_default_server_type", Input
-            ).value.strip(),
-            "default_location": self.query_one(
-                "#hetzner_default_location", Input
-            ).value.strip(),
             "require_ssh_keys_on_create": self.query_one(
                 "#hetzner_require_ssh_keys", Switch
             ).value,
@@ -313,16 +193,6 @@ class HetznerPanel(SettingsPanel):
             "cost_alert_threshold": self.query_one(
                 "#hetzner_cost_alert_threshold", Input
             ).value.strip(),
-            "s3_access_key": self.query_one(
-                "#hetzner_s3_access_key", EnvVarInput
-            ).value.strip(),
-            "s3_secret_key": self.query_one(
-                "#hetzner_s3_secret_key", EnvVarInput
-            ).value.strip(),
-            "s3_region": self.query_one(
-                "#hetzner_s3_region", Input
-            ).value.strip(),
-            "s3_endpoint_url": self._field_value("hetzner_s3_endpoint_url").strip(),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -361,24 +231,6 @@ class HetznerPanel(SettingsPanel):
 
         return {
             "enabled": self.query_one("#hetzner_enabled", Switch).value,
-            "default_hetzner_ssh_key": self._field_value(
-                "hetzner_default_hetzner_ssh_key"
-            ).strip(),
-            "default_local_ssh_key": self._field_value(
-                "hetzner_default_local_ssh_key"
-            ).strip(),
-            "default_username": self._field_value(
-                "hetzner_default_username"
-            ).strip() or "root",
-            "default_image": self.query_one(
-                "#hetzner_default_image", Input
-            ).value.strip(),
-            "default_server_type": self.query_one(
-                "#hetzner_default_server_type", Input
-            ).value.strip(),
-            "default_location": self.query_one(
-                "#hetzner_default_location", Input
-            ).value.strip(),
             "require_ssh_keys_on_create": self.query_one(
                 "#hetzner_require_ssh_keys", Switch
             ).value,
@@ -386,61 +238,30 @@ class HetznerPanel(SettingsPanel):
             "cache_path": self._field_value("hetzner_cache_path").strip(),
             "audit_path": self._field_value("hetzner_audit_path").strip(),
             "cost_alert_threshold": cost_threshold,
-            "s3_access_key": self.query_one(
-                "#hetzner_s3_access_key", EnvVarInput
-            ).value.strip(),
-            "s3_secret_key": self.query_one(
-                "#hetzner_s3_secret_key", EnvVarInput
-            ).value.strip(),
-            "s3_region": self.query_one(
-                "#hetzner_s3_region", Input
-            ).value.strip(),
-            "s3_endpoint_url": self._field_value("hetzner_s3_endpoint_url").strip(),
         }
 
     def persist(self) -> None:
-        """Validate via :meth:`collect`, preserve secret fields, and write config.
+        """Validate via :meth:`collect` and write the provider-wide fields.
 
-        Uses ``dataclasses.replace`` on the existing ``HetznerConfig`` so that
-        ``api_token`` (owned by the setup wizard) is never touched or cleared.
-        The nested ``ObjectStorageConfig`` is similarly replaced field-by-field,
-        preserving any other future fields the wizard may own.
+        ``dataclasses.replace`` keeps every project field (API token, SSH and
+        server-creation defaults, Object Storage) exactly as the project form
+        saved it.
         """
         fields = self.collect()
 
-        config = self.app.config_manager.get()
-        existing = config.hetzner
-
-
-        new_s3 = dataclasses.replace(
-            existing.object_storage,
-            access_key=fields["s3_access_key"],
-            secret_key=fields["s3_secret_key"],
-            region=fields["s3_region"],
-            endpoint_url=fields["s3_endpoint_url"],
-        )
-
+        existing = self.app.config_manager.get().hetzner
         new_hetzner = dataclasses.replace(
             existing,
             enabled=fields["enabled"],
-            default_hetzner_ssh_key=fields["default_hetzner_ssh_key"],
-            default_local_ssh_key=fields["default_local_ssh_key"],
-            default_username=fields["default_username"],
-            default_image=fields["default_image"],
-            default_server_type=fields["default_server_type"],
-            default_location=fields["default_location"],
             require_ssh_keys_on_create=fields["require_ssh_keys_on_create"],
             cache_ttl_seconds=fields["cache_ttl_seconds"],
             cache_path=fields["cache_path"],
             audit_path=fields["audit_path"],
             cost_alert_threshold=fields["cost_alert_threshold"],
-            object_storage=new_s3,
-            # api_token preserved implicitly via dataclasses.replace default
         )
 
         self.app.config_manager.update(hetzner=new_hetzner)
-        # Extra projects inherit these defaults, the switch decides whether
-        # Hetzner is listed at all, and the reload rebuilds Object Storage.
+        # The switch decides whether Hetzner is listed at all.
         if rebuild_accounts(self.app) and new_hetzner.enabled != existing.enabled:
             refresh_provider_fleet(self.app, "hetzner")
         self.query_one(HetznerAccountsSection).refresh_accounts()
@@ -489,7 +310,7 @@ class HetznerPanel(SettingsPanel):
             label.update("Status: Enabled but no token — run Setup Hetzner")
 
     def _open_hetzner_setup(self) -> None:
-        """Push the Hetzner setup wizard screen onto the navigation stack."""
+        """Push the primary project's form onto the navigation stack."""
         try:
             from servonaut.screens.hetzner_setup import HetznerSetupScreen
 

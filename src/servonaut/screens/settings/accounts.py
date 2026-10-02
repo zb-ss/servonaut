@@ -674,7 +674,10 @@ class HetznerAccountsSection(AccountsSection):
     PROVIDER = "hetzner"
     NOUN = "project"
     HEADING = "Projects"
-    HELP = "One API token per project, entered in the setup wizard."
+    HELP = (
+        "Each project has its own API token, SSH defaults and Object Storage "
+        "keys; Add project or Edit opens its form."
+    )
     COLUMNS = ("Label", "API token")
 
     def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:
@@ -730,7 +733,10 @@ class OvhAccountsSection(AccountsSection):
     """OVHcloud accounts; each has its own credentials, set in the wizard."""
 
     PROVIDER = "ovh"
-    HELP = "Each account has its own API credentials, entered in the setup wizard."
+    HELP = (
+        "Each account has its own API credentials, projects, SSH defaults and "
+        "Object Storage keys; Add account or Edit opens its form."
+    )
     COLUMNS = ("Label", "Endpoint", "Auth", "Projects")
 
     def redacted_cells(self, config: Any, row: AccountRow) -> Tuple[str, ...]:

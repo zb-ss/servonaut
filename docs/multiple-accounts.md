@@ -37,6 +37,17 @@ Add, edit and remove accounts in **Settings** under the provider. The setup
 wizards (`servonaut --setup-ovh`, the Hetzner setup screen) can also add a
 further account once the first one is configured.
 
+For OVHcloud and Hetzner, everything that belongs to one account — its
+credentials, projects, SSH defaults and Object Storage keys (and, for the
+primary Hetzner project, the server-creation defaults) — is edited in that
+account's form: **Setup OVHcloud** or **Setup Hetzner** for the primary
+account, **Add** or **Edit** in the accounts list for the others. The provider
+page in Settings keeps only provider-wide settings: whether the provider is
+listed, the audit log and the cost alert (for Hetzner also the cache and
+whether new servers need SSH keys). With the provider off, the primary
+account's form offers **Save** next to **Save & Enable**, so an Object
+Storage-only setup can store its keys without listing servers.
+
 ## Configuration
 
 Accounts live in `~/.servonaut/config.json`, in an `accounts` list inside each
