@@ -439,7 +439,10 @@ jobs:
             fi
 
             # Between releases, master carries the latest release's version.
+            # The checkout is as old as the run and approval can take days,
+            # so the bump goes onto master as it is now, not as it was then.
             refs=("refs/tags/$TAG" ":refs/heads/$BRANCH")
+            git fetch --quiet --no-tags origin "+refs/heads/master:refs/remotes/origin/master"
             git switch --detach origin/master
             raised="$(python3 "$policy" set-version "$VERSION" --only-if-newer)"
             if grep -qx "changed=true" <<< "$raised"; then
