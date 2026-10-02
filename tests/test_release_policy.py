@@ -1902,6 +1902,31 @@ def test_promotion_changes_only_the_version(
     ]
 
 
+def test_promotion_raises_the_master_that_moved_while_it_waited(
+    repo: Path, origin: Path, tmp_path: Path
+) -> None:
+    """Approval can take days, and the job's checkout is as old as the run.
+
+    Work merged to master meanwhile must not make the push non-fast-forward:
+    the version bump lands on the master of the moment of promotion.
+    """
+    candidate = prepare_promotion(repo, origin)
+    clone = checkout(origin, tmp_path, "runner-stale")
+    commit(repo, "src/servonaut/meanwhile.py", "fix: merged while waiting")
+    git(repo, "push", "origin", "master")
+    moved = git(repo, "rev-parse", "master")
+    result = run_mutation(
+        tmp_path, clone, "Promote the candidate",
+        ACTION="promote", VERSION="1.2.4", TAG="v1.2.4", CANDIDATE="v1.2.4rc1",
+        BRANCH="release/1.2.4", BASE=candidate, LAST="v1.2.3",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git(origin, "rev-parse", "master^") == moved
+    assert versions(origin, "master") == ("1.2.4", "1.2.4")
+    assert "refs/tags/v1.2.4" in remote_refs(origin)
+    assert "refs/heads/release/1.2.4" not in remote_refs(origin)
+
+
 def test_promotion_leaves_a_higher_master_version_alone(
     repo: Path, origin: Path, tmp_path: Path
 ) -> None:
