@@ -167,7 +167,7 @@ it is attached. A release can go out without a preview when the desktop app
 has a known problem at that version.
 
 Check the download before you install it. Both commands must succeed; the
-second needs the [GitHub CLI](https://cli.github.com/):
+second needs the [GitHub CLI](https://cli.github.com/) 2.67 or later:
 
 ```bash
 sha256sum -c servonaut-desktop-preview_2.28.0rc1_SHA256SUMS
@@ -176,6 +176,21 @@ gh attestation verify servonaut-desktop-preview_2.28.0rc1_amd64.deb --repo zb-ss
 
 The attestation shows that the package was built by a workflow in this
 repository, and records the commit it was built from.
+
+Older GitHub CLI versions cannot be relied on here: before 2.49 there is no
+`gh attestation` command at all ("unknown command"; some distributions still
+package such a version), and from 2.49 to 2.66 `gh attestation verify`
+reports success even for a file that has no attestation
+([CVE-2025-25204](https://nvd.nist.gov/vuln/detail/CVE-2025-25204)). Install
+a current release from [cli.github.com](https://cli.github.com/). Until then
+you can look the attestation up through the API, which shows the workflow
+and the tag the file was built from (and answers `Not Found` for a file with
+no attestation) but does not check the signature itself:
+
+```bash
+gh api "repos/zb-ss/servonaut/attestations/sha256:$(sha256sum servonaut-desktop-preview_2.28.0rc1_amd64.deb | cut -d' ' -f1)" \
+  --jq '.attestations[].bundle.dsseEnvelope.payload | @base64d | fromjson | .predicate.buildDefinition.externalParameters.workflow'
+```
 
 Install it with apt, which also installs the system libraries it needs:
 
