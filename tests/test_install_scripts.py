@@ -155,6 +155,21 @@ def test_the_failure_message_points_at_troubleshooting(script: Path) -> None:
     assert TROUBLESHOOTING_HEADING in TROUBLESHOOTING.read_text(encoding="utf-8")
 
 
+def test_the_documented_install_commands_download_a_release() -> None:
+    """Users fetch the scripts of the latest stable release, never the
+    default branch's copy, which may hold unreleased changes."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    release = "https://github.com/zb-ss/servonaut/releases/latest/download"
+
+    for path in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))]:
+        assert "raw.githubusercontent.com/zb-ss/servonaut" not in path.read_text(
+            encoding="utf-8"
+        ), path.name
+    assert f"curl -fsSL {release}/install.sh | bash\n" in readme
+    assert f"irm {release}/install.ps1 | iex\n" in readme
+    assert f"curl -fsSL {release}/install.sh | bash -s -- --pre\n" in readme
+
+
 def test_install_ps1_is_ascii() -> None:
     """Release assets are served without a charset, and Windows PowerShell
     then decodes them as ISO-8859-1, so anything but ASCII would be garbled."""

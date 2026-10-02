@@ -46,26 +46,28 @@ an existing installation keeps your configuration and data in
 
 ### With the install script
 
-The install scripts install the newest candidate when asked, or the stable
-release when that is newer than every candidate. They replace an existing
-pipx installation.
+The install scripts of the latest stable release install the newest
+candidate when asked, or the stable release when that is newer than every
+candidate. They replace an existing pipx installation.
 
 **Linux / macOS:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:SERVONAUT_PRE = "1"; irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+$env:SERVONAUT_PRE = "1"; irm https://github.com/zb-ss/servonaut/releases/latest/download/install.ps1 | iex
 ```
 
 `SERVONAUT_PRE` stays set in that PowerShell window, so running the installer
 there again installs a candidate again. Clear it with
 `Remove-Item Env:SERVONAUT_PRE`, or open a new window. From a downloaded copy
-of the scripts, run `./install.sh --pre` or `.\install.ps1 -Pre`.
+of the scripts, run `./install.sh --pre` or `.\install.ps1 -Pre`. Each
+candidate's release page also carries its own copy of the scripts, with
+`install-scripts_SHA256SUMS`.
 
 ### With pipx
 
@@ -165,7 +167,7 @@ it is attached. A release can go out without a preview when the desktop app
 has a known problem at that version.
 
 Check the download before you install it. Both commands must succeed; the
-second needs the [GitHub CLI](https://cli.github.com/):
+second needs the [GitHub CLI](https://cli.github.com/) 2.67 or later:
 
 ```bash
 sha256sum -c servonaut-desktop-preview_2.28.0rc1_SHA256SUMS
@@ -174,6 +176,21 @@ gh attestation verify servonaut-desktop-preview_2.28.0rc1_amd64.deb --repo zb-ss
 
 The attestation shows that the package was built by a workflow in this
 repository, and records the commit it was built from.
+
+Older GitHub CLI versions cannot be relied on here: before 2.49 there is no
+`gh attestation` command at all ("unknown command"; some distributions still
+package such a version), and from 2.49 to 2.66 `gh attestation verify`
+reports success even for a file that has no attestation
+([CVE-2025-25204](https://nvd.nist.gov/vuln/detail/CVE-2025-25204)). Install
+a current release from [cli.github.com](https://cli.github.com/). Until then
+you can look the attestation up through the API, which shows the workflow
+and the tag the file was built from (and answers `Not Found` for a file with
+no attestation) but does not check the signature itself:
+
+```bash
+gh api "repos/zb-ss/servonaut/attestations/sha256:$(sha256sum servonaut-desktop-preview_2.28.0rc1_amd64.deb | cut -d' ' -f1)" \
+  --jq '.attestations[].bundle.dsseEnvelope.payload | @base64d | fromjson | .predicate.buildDefinition.externalParameters.workflow'
+```
 
 Install it with apt, which also installs the system libraries it needs:
 

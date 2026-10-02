@@ -13,14 +13,19 @@ Manage AWS, Hetzner, OVH, and custom servers from one terminal — with a built-
 **Linux / macOS:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash
+curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/zb-ss/servonaut/master/install.ps1 | iex
+irm https://github.com/zb-ss/servonaut/releases/latest/download/install.ps1 | iex
 ```
+
+The scripts come from the latest stable release and install Servonaut from
+PyPI with pipx. Every [release](https://github.com/zb-ss/servonaut/releases)
+carries them with `install-scripts_SHA256SUMS`, to check a downloaded copy
+before you run it.
 
 **Or install directly via pipx / pip:**
 
@@ -37,7 +42,7 @@ only when you ask for it.
 
 ```bash
 # The newest candidate, with the install script
-curl -sSL https://raw.githubusercontent.com/zb-ss/servonaut/master/install.sh | bash -s -- --pre
+curl -fsSL https://github.com/zb-ss/servonaut/releases/latest/download/install.sh | bash -s -- --pre
 
 # With pipx: a specific candidate, or the newest one
 pipx install --force 'servonaut==2.28.0rc1'
