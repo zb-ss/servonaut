@@ -68,8 +68,15 @@ logs = Path(os.environ["HOME"]) / ".servonaut" / "logs"
 logs.mkdir(parents=True, exist_ok=True)
 (logs / "desktop.log").write_text("launcher started\\n")
 sys.stderr.write("Gtk-WARNING: stand-in launcher\\n")
+{wayland_requests}
 {behaviour}
 time.sleep(300)
+"""
+# Like libwayland under WAYLAND_DEBUG=client, the stand-in logs the requests
+# it sends, among them the app id its window announces.
+_WAYLAND_REQUESTS = """\
+if os.environ.get("WAYLAND_DEBUG") == "client":
+    sys.stderr.write({requests!r})
 """
 _CONNECTS = """\
 (logs / "servonaut.log").write_text(
@@ -78,20 +85,21 @@ _CONNECTS = """\
 """
 
 
-def _host_session_message() -> str:
-    """The host's constant, read without importing the host's aiohttp stack."""
-    tree = ast.parse((_REPO_ROOT / "src/servonaut/desktop/host.py").read_text())
+def _product_constant(module: str, name: str) -> str:
+    """A constant of the product's *module*, read without importing its dependencies."""
+    tree = ast.parse((_REPO_ROOT / "src" / "servonaut" / module).read_text())
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.AnnAssign)
             and isinstance(node.target, ast.Name)
-            and node.target.id == "SESSION_CONNECTED_MESSAGE"
+            and node.target.id == name
         ):
             return ast.literal_eval(node.value)
-    raise AssertionError("host.py defines no SESSION_CONNECTED_MESSAGE")
+    raise AssertionError(f"{module} defines no {name}")
 
 
-SESSION_CONNECTED_MESSAGE = _host_session_message()
+# The host's, without the host's aiohttp stack.
+SESSION_CONNECTED_MESSAGE = _product_constant("desktop/host.py", "SESSION_CONNECTED_MESSAGE")
 
 
 @contextlib.contextmanager
@@ -151,11 +159,22 @@ def policy() -> window_smoke.DesktopSmokePolicy:
     )
 
 
+def _wayland_requests(app_id: str | None) -> str:
+    """What libwayland logs of a window that announces *app_id*, or none."""
+    requests = "[1234567.890] {Default Queue}  -> xdg_toplevel#39.set_title(\"Servonaut\")\n"
+    if app_id is not None:
+        requests += (
+            f"[1234567.891] {{Default Queue}}  -> xdg_toplevel#39.set_app_id(\"{app_id}\")\n"
+        )
+    return _WAYLAND_REQUESTS.format(requests=requests)
+
+
 def _payload(
     tmp_path: Path,
     behaviour: str,
     child: str = _CHILD,
     display_connection: str = _CONNECTS_TO_ITS_DISPLAY,
+    app_id: str | None = window_smoke.LINUX_APP_ID,
 ) -> Path:
     payload = tmp_path / "payload"
     payload.mkdir()
@@ -166,6 +185,7 @@ def _payload(
             child=child,
             behaviour=behaviour,
             display_connection=display_connection,
+            wayland_requests=_wayland_requests(app_id),
         )
     )
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
@@ -230,6 +250,7 @@ def test_a_connected_window_is_photographed_and_stopped_with_its_children(
     written = json.loads(report.to_json())
     assert written["target"] == _TARGET
     assert written["display_protocols"] == ["x11"]
+    assert written["window_app_ids"] == []
     # Whatever the host's security module says, the report carries it.
     assert all(
         labels and labels == sorted(labels)
@@ -345,6 +366,7 @@ def test_the_environment_is_isolated_but_keeps_the_display(tmp_path: Path) -> No
     assert environment["DISPLAY"] == ":99"
     assert environment["XAUTHORITY"] == "/tmp/xauth"
     assert "AWS_PROFILE" not in environment
+    assert "WAYLAND_DEBUG" not in environment
     assert environment["PATH"] == "/usr/local/bin:/usr/bin:/bin"
     runtime = Path(environment["XDG_RUNTIME_DIR"])
     assert runtime.is_relative_to(home)
@@ -371,9 +393,78 @@ def test_a_wayland_window_is_proven_connected_to_the_compositor_and_photographed
     )
 
     assert report.display_protocols == ["wayland"]
+    assert report.window_app_ids == [window_smoke.LINUX_APP_ID]
     assert report.screenshot_captured is True
     assert screenshot.read_bytes() == b"\x89PNG wayland"
     assert report.process_tree_exited is True
+
+
+@pytest.mark.parametrize(
+    ("app_id", "announced"), [("servonaut-desktop", "servonaut-desktop"), (None, "none")]
+)
+def test_a_wayland_window_must_announce_the_launchers_app_id(
+    tmp_path: Path,
+    policy: window_smoke.DesktopSmokePolicy,
+    wayland_display: dict[str, str],
+    app_id: str | None,
+    announced: str,
+) -> None:
+    payload = _payload(
+        tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE), app_id=app_id
+    )
+
+    with pytest.raises(window_smoke.WindowSmokeError) as raised:
+        window_smoke.run_window_smoke(
+            payload, _TARGET, policy, screenshot=None, inherited=wayland_display, display="wayland"
+        )
+
+    assert f"announced the app id {announced}, not {window_smoke.LINUX_APP_ID}" in str(
+        raised.value
+    )
+
+
+def test_an_x11_window_is_not_asked_for_its_app_id(
+    tmp_path: Path, policy: window_smoke.DesktopSmokePolicy, x_display: dict[str, str]
+) -> None:
+    payload = _payload(
+        tmp_path, _CONNECTS.format(message=SESSION_CONNECTED_MESSAGE), app_id="servonaut-desktop"
+    )
+
+    report = window_smoke.run_window_smoke(
+        payload, _TARGET, policy, screenshot=None, inherited=x_display
+    )
+
+    assert report.window_app_ids == []
+
+
+def test_app_ids_are_read_from_both_libwayland_log_formats() -> None:
+    log = (
+        # libwayland before 1.22 names objects with "@", which is not an address.
+        '[ 12.345]  -> xdg_toplevel@12.set_app_id("dev.servonaut.Servonaut")\n'  # leak-guard:allow
+        '[1234567.890] {Default Queue}  -> xdg_toplevel#39.set_title("set_app_id(\\"x\\")")\n'
+        '[1234567.891] {Default Queue}  -> xdg_toplevel#39.set_app_id("dev.servonaut.Servonaut")\n'
+    )
+
+    assert window_smoke.wayland_app_ids(log) == ["dev.servonaut.Servonaut"]
+    assert window_smoke.wayland_app_ids("(servonaut-desktop:42): Gtk-WARNING **: x\n") == []
+
+
+def test_the_launchers_diagnostics_leave_out_libwayland_requests() -> None:
+    log = (
+        "[1234567.890] {Default Queue}  -> wl_display#1.get_registry(new id wl_registry#2)\n"
+        "(servonaut-desktop:42): Gtk-WARNING **: the problem\n"
+        "[1234567.891] {Display Queue} wl_display#1.delete_id(3)"
+    )
+
+    assert window_smoke.without_wayland_debug(log) == (
+        "(servonaut-desktop:42): Gtk-WARNING **: the problem\n"
+    )
+
+
+def test_the_app_id_is_the_launchers_and_its_desktop_entrys() -> None:
+    assert _product_constant("desktop/launcher.py", "LINUX_APP_ID") == window_smoke.LINUX_APP_ID
+    entry = _REPO_ROOT / "packaging" / "deb" / f"{window_smoke.LINUX_APP_ID}.desktop"
+    assert f"StartupWMClass={window_smoke.LINUX_APP_ID}" in entry.read_text().splitlines()
 
 
 def test_a_wayland_window_that_falls_back_to_x11_fails(
@@ -441,6 +532,8 @@ def test_the_wayland_environment_has_no_way_back_to_x11(
     socket_path = Path(wayland_display["XDG_RUNTIME_DIR"]) / "wayland-test"
     assert environment["WAYLAND_DISPLAY"] == str(socket_path)
     assert environment["GDK_BACKEND"] == "wayland"
+    # libwayland logs the requests of the launcher, among them its app id.
+    assert environment["WAYLAND_DEBUG"] == "client"
     assert "DISPLAY" not in environment
     assert "XAUTHORITY" not in environment
     # The window keeps its own private runtime dir.

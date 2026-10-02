@@ -447,7 +447,9 @@ def test_linux_shortcut_writes_a_desktop_entry_exec_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: str, prefix: str
 ) -> None:
     app_argv = [str(Path(sys.executable).resolve()), "-c", "print('benign')"]
-    desktop_file = tmp_path / ".local" / "share" / "applications" / "servonaut.desktop"
+    desktop_file = (
+        tmp_path / ".local" / "share" / "applications" / "dev.servonaut.Servonaut.Terminal.desktop"
+    )
     written_encodings: list[str | None] = []
     original_write_text = Path.write_text
 
@@ -613,9 +615,9 @@ def test_macos_shortcut_uses_a_bundle_relative_command_helper(
 
     main._install_desktop()
 
-    app_dir = tmp_path / "Applications" / "Servonaut.app" / "Contents" / "MacOS"
+    app_dir = tmp_path / "Applications" / "Servonaut Terminal.app" / "Contents" / "MacOS"
     helper = app_dir / "Servonaut.command"
-    launcher = app_dir / "Servonaut"
+    launcher = app_dir / "ServonautTerminal"
     assert f"exec {shlex.join(app_argv)}" in helper.read_text(encoding="utf-8")
     launcher_content = launcher.read_text(encoding="utf-8")
     assert 'exec open -a Terminal "$script_dir/Servonaut.command"' in launcher_content

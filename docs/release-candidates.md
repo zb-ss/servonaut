@@ -188,6 +188,12 @@ The package is named `servonaut` and also provides the `servonaut` command;
 if you installed Servonaut with pipx as well, `which servonaut` shows which
 one your shell runs. Both use your configuration in `~/.servonaut/`.
 
+A shortcut made by an earlier `servonaut --install-desktop`, which opens
+Servonaut in a terminal, may also be listed as **Servonaut**. Run
+`servonaut --install-desktop` from your pipx installation to replace it with
+**Servonaut (terminal)**; the packaged `servonaut` command only tells you
+where that shortcut is.
+
 A candidate's package version is `2.28.0~rc1`, so apt counts the release
 `2.28.0` as newer and installs it over the candidate as an upgrade.
 

@@ -294,6 +294,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/cloudwatch_browser.py", "_cycle_ip_filter", "update",
                    "Writes 'Filter: <label>' where label is from a hard-coded "
                    "tuple of action names — not user-streaming data."),
+    AllowlistEntry("screens/cloudwatch_browser.py", "on_account_picker_changed", "update",
+                   "Resets the detail pane to its hard-coded placeholder when the "
+                   "account changes — no user data."),
 
     # log_viewer.py — probe/start writes hard-coded status and error strings.
     AllowlistEntry("screens/log_viewer.py", "_probe_and_start", "write",
@@ -590,6 +593,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/ovh_billing.py", "refresh_after_demo_toggle", "update",
                    "Only writes the literal Loading placeholder while clearing "
                    "old billing values before guarded reloads."),
+    AllowlistEntry("screens/ovh_billing.py", "_reload", "update",
+                   "Only writes the literal Loading placeholder while clearing "
+                   "the previous account's billing values before guarded reloads."),
 
     # ovh_cloud_create.py — flavors and images are provider taxonomy.
     AllowlistEntry("screens/ovh_cloud_create.py", "_load_flavors", "add_row",
@@ -605,6 +611,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Displays IP and IP block from a row already scrubbed in "
                    "_load_rdns when demo_mode is on — safe by the time the form "
                    "is populated."),
+    AllowlistEntry("screens/ovh_dns.py", "on_account_picker_changed", "update",
+                   "Clears the selected-zone label with an empty string when "
+                   "another account is picked."),
 
     # ovh_firewall.py — _update_status_widget writes hard-coded
     # 'Firewall: Enabled/Disabled' strings.
@@ -656,6 +665,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/ovh_ssh_keys.py", "_set_status", "update",
                    "Writes hard-coded count strings ('N keys.') "
                    "— no user PII."),
+    AllowlistEntry("screens/ovh_ssh_keys.py", "on_account_picker_changed", "update",
+                   "Clears the project label with an empty string when another "
+                   "account is picked."),
 
     # scan_results.py — status messages (_load_cached_results, action_scan_now,
     # on_worker_state_changed) are count-based or hard-coded; _populate_table

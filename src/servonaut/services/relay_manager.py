@@ -682,6 +682,7 @@ class RelayManager:
         """Construct a RelayListener wired to the app's services."""
         from servonaut.services.relay_listener import (
             RelayListener,
+            _resolve_account_labels,
             _resolve_providers_configured,
         )
 
@@ -703,8 +704,10 @@ class RelayManager:
         # token rotated, which in turn let the server's 90s
         # cli_connected key expire and surfaced as "CLI not connected"
         # for tool dispatches.
-        executors = _build_executors(self._config_manager)
-        providers = _resolve_providers_configured(self._app)
+        executors = _build_executors(
+            self._config_manager, accounts=getattr(self._app, "accounts", None),
+        )
+        app = self._app
         probe_bridge = self._build_probe_bridge(executors)
         return RelayListener(
             executors=executors,
@@ -729,8 +732,11 @@ class RelayManager:
             # Only a session that is really gone expires the relay; a
             # transient refresh failure leaves it authenticated.
             session_alive=lambda: auth.is_authenticated,
-            providers_configured=providers,
+            # Read on every handshake and heartbeat: accounts changed in
+            # the settings are advertised without restarting the relay.
+            providers_configured=lambda: _resolve_providers_configured(app),
             probe_bridge=probe_bridge,
+            accounts=lambda: _resolve_account_labels(app),
         )
 
     def _build_probe_bridge(self, executors):
@@ -828,23 +834,26 @@ def _extract_user_id(auth_service) -> str | None:
     return email or None
 
 
-def _build_executors(config_manager):
-    """Assemble the same executor graph that ``main.py _relay_run_foreground`` uses."""
-    from servonaut.services.aws_service import AWSService
-    from servonaut.services.cache_service import CacheService
+def _build_executors(config_manager, accounts=None):
+    """Assemble the same executor graph that ``main.py _relay_run_foreground`` uses.
+
+    *accounts* is the app's account registry; without one a registry is
+    built from the config, so every provider account can be targeted.
+    """
+    from servonaut.services.accounts.headless import build_account_registry
     from servonaut.services.connection_service import ConnectionService
     from servonaut.services.custom_server_service import CustomServerService
     from servonaut.services.relay_executors import RelayExecutors
     from servonaut.services.scp_service import SCPService
     from servonaut.services.ssh_service import SSHService
     cfg = config_manager.get()
-    cache_service = CacheService(ttl_seconds=cfg.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
+    if accounts is None:
+        accounts = build_account_registry(config_manager)
     custom_server_service = CustomServerService(config_manager)
     ssh_service = SSHService(config_manager)
     connection_service = ConnectionService(config_manager)
     scp_service = SCPService(ssh_config=cfg.ssh)
     return RelayExecutors(
-        config_manager, aws_service, custom_server_service,
-        ssh_service, connection_service, scp_service,
+        config_manager, accounts.default_service('aws'), custom_server_service,
+        ssh_service, connection_service, scp_service, accounts=accounts,
     )

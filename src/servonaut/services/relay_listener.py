@@ -11,7 +11,7 @@ import socket
 import time
 from collections import OrderedDict
 from dataclasses import asdict, replace
-from typing import Any, Awaitable, Callable, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 try:
     import httpx
@@ -226,37 +226,43 @@ def _resolve_release_channel() -> str:
     return "stable"
 
 
+def _resolve_account_labels(app: Any) -> Optional[Dict[str, List[str]]]:
+    """Account labels per provider for the handshake, or None without accounts.
+
+    Labels only: never account ids, profile names or credentials.
+    """
+    registry = getattr(app, "accounts", None) if app is not None else None
+    if registry is None:
+        return None
+    from servonaut.services.accounts.headless import account_labels
+    return account_labels(registry)
+
+
 def _resolve_providers_configured(app: Any) -> List[str]:
     """Return sorted list of provider names that have at least one service wired.
 
     Per wire format v1.0 spec:
-    - ``"aws"``      → aws_service or aws_object_storage_service is not None
-    - ``"hetzner"``  → hetzner_service or hetzner_object_storage_service
-    - ``"ovh"``      → ovh_service or ovh_object_storage_service
+    - ``"aws"``      → an AWS account or aws_object_storage_service
+    - ``"hetzner"``  → a Hetzner account or hetzner_object_storage_service
+    - ``"ovh"``      → an OVH account or ovh_object_storage_service
 
-    If ``app`` is None or any attribute is absent the provider is omitted.
+    With an account registry any usable account counts (the primary one
+    may be down while another serves), computed exactly as the headless
+    relay does; without one, the provider's service. If ``app`` is None or
+    any attribute is absent the provider is omitted.
     """
-    providers: List[str] = []
-    if app is not None:
-        aws = (
-            getattr(app, "aws_service", None) is not None
-            or getattr(app, "aws_object_storage_service", None) is not None
-        )
-        hetzner = (
-            getattr(app, "hetzner_service", None) is not None
-            or getattr(app, "hetzner_object_storage_service", None) is not None
-        )
-        ovh = (
-            getattr(app, "ovh_service", None) is not None
-            or getattr(app, "ovh_object_storage_service", None) is not None
-        )
-        if aws:
-            providers.append("aws")
-        if hetzner:
-            providers.append("hetzner")
-        if ovh:
-            providers.append("ovh")
-    return sorted(providers)
+    if app is None:
+        return []
+    registry = getattr(app, "accounts", None)
+    if registry is not None:
+        from servonaut.services.accounts.headless import usable_providers
+
+        return usable_providers(registry)
+    return sorted(
+        provider for provider in ("aws", "hetzner", "ovh")
+        if getattr(app, f"{provider}_service", None) is not None
+        or getattr(app, f"{provider}_object_storage_service", None) is not None
+    )
 
 
 # A token source: either a literal string (legacy / headless mode where
@@ -330,9 +336,15 @@ class RelayListener:
                      Callable[[], Awaitable[bool]]
                  ] = None,
                  session_alive: Optional[Callable[[], bool]] = None,
-                 providers_configured: Optional[List[str]] = None,
+                 providers_configured: Union[
+                     None, List[str], Callable[[], List[str]]
+                 ] = None,
                  ai_tool_executor=None,
-                 probe_bridge=None) -> None:
+                 probe_bridge=None,
+                 accounts: Union[
+                     None, Dict[str, List[str]],
+                     Callable[[], Optional[Dict[str, List[str]]]],
+                 ] = None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
                 "httpx-sse required. Install with: pip install 'servonaut[relay]'"
@@ -408,9 +420,16 @@ class RelayListener:
         # interval. None = no way to tell, so the rejection is final; that
         # is the env-token mode, where nothing can be refreshed either.
         self._session_alive = session_alive
-        # Wire format v1.0: providers + release channel resolve once at
-        # construction time and are embedded in every handshake/heartbeat.
-        self._providers_configured: List[str] = sorted(providers_configured or [])
+        # Wire format v1.0: the providers with a usable account and each
+        # provider's account labels ({"aws": [...], ...}; None = not sent).
+        # Either may be a callable, read for every handshake and heartbeat,
+        # so an account added, renamed or removed in the settings is
+        # advertised without restarting the relay.
+        self._providers_source = providers_configured
+        self._accounts_source = accounts
+        self._last_providers: List[str] = []
+        self._last_accounts: Optional[Dict[str, List[str]]] = None
+        # The release channel resolves once, at construction time.
         self._release_channel: str = _resolve_release_channel()
         # Tracks whether the server has accepted the initial handshake.
         # Until it has, every heartbeat tick posts the handshake, so one
@@ -438,6 +457,29 @@ class RelayListener:
         """Hostname-derived client id currently being sent in heartbeats."""
         return self._client_id
 
+    def _providers_configured(self) -> List[str]:
+        """The providers to advertise now (the last known ones if reading fails)."""
+        try:
+            source = self._providers_source
+            value = source() if callable(source) else source
+            self._last_providers = sorted(value or [])
+        except Exception:  # noqa: BLE001 - never lose a heartbeat over it
+            logger.debug("Reading the configured providers failed", exc_info=True)
+        return list(self._last_providers)
+
+    def _account_labels(self) -> Optional[Dict[str, List[str]]]:
+        """Each provider's account labels now, or None when not advertised."""
+        try:
+            source = self._accounts_source
+            value = source() if callable(source) else source
+            self._last_accounts = (
+                None if value is None
+                else {provider: list(labels) for provider, labels in value.items()}
+            )
+        except Exception:  # noqa: BLE001 - never lose a heartbeat over it
+            logger.debug("Reading the account labels failed", exc_info=True)
+        return self._last_accounts
+
     def _build_handshake(self) -> dict:
         """Build the v1.0 ``cli.handshake`` payload.
 
@@ -447,28 +489,39 @@ class RelayListener:
         """
         import servonaut
 
-        return {
+        handshake = {
             "type": "cli.handshake",
             "version": getattr(servonaut, "__version__", "unknown"),
             "cli_release_channel": self._release_channel,
-            "providers_configured": list(self._providers_configured),
+            "providers_configured": self._providers_configured(),
             # v2.15.0: capability bit flipped True — CLI now consumes the
             # tool_catalog SSE event and routes all 60 catalog tools via
             # _LOCAL_TOOL_HANDLERS / _RELAY_TOOL_TO_TYPE (PR5').
             "capabilities": {"supports_dynamic_catalog": True},
             "client_id": self._client_id,
         }
+        accounts = self._account_labels()
+        if accounts is not None:
+            # Which accounts servers can be addressed by ("<account>/<name>").
+            handshake["accounts"] = accounts
+        return handshake
 
     def _build_heartbeat(self) -> dict:
         """Build the v1.0 ``cli.heartbeat`` payload (minimal shape).
 
-        Sent on every heartbeat tick after the initial handshake.
+        Sent on every heartbeat tick after the initial handshake. It carries
+        the current account labels too, so a change made in the settings
+        reaches the service on the next tick.
         """
-        return {
+        heartbeat = {
             "type": "cli.heartbeat",
-            "providers_configured": list(self._providers_configured),
+            "providers_configured": self._providers_configured(),
             "client_id": self._client_id,
         }
+        accounts = self._account_labels()
+        if accounts is not None:
+            heartbeat["accounts"] = accounts
+        return heartbeat
 
     def _get_auth_token(self) -> str:
         """Resolve the current bearer via the token provider.
@@ -1262,21 +1315,13 @@ class RelayListener:
         # Resolve the IPBanConfig for the requested method, preferring a
         # region match (envelope region, else the instance's region).
         svc = self._executors.ip_ban_service
-        candidates = [c for c in svc.get_configs() if c.method == method]
         region = str(payload.get("region") or "") or region_hint
-        config = None
-        if region:
-            config = next(
-                (c for c in candidates if c.region == region), None,
-            )
-        if config is None and candidates:
-            config = candidates[0]
+        config, refusal = self._ban_config(
+            instance, method, region, "block_ip_config_missing",
+            "add one under IP Ban settings first",
+        )
         if config is None:
-            return "error", "", (
-                f"block_ip_config_missing: no IP-ban configuration with "
-                f"method '{method}' exists on this CLI — add one under "
-                f"IP Ban settings first"
-            )
+            return "error", "", refusal
 
         extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
         if coerce_dry_run(payload):
@@ -1318,6 +1363,38 @@ class RelayListener:
             payload=payload, slug="block_ip_failed", extra=extra,
         )
         return "success", output, ""
+
+    def _ban_config(
+        self, instance: Optional[dict], method: str, region: str,
+        slug: str, missing_hint: str,
+    ) -> tuple:
+        """``(config, "")``, or ``(None, slug-first refusal)``: the ban config to use.
+
+        Only configs acting in the target server's AWS account qualify: a ban
+        in another account's IP set would be reported as applied while the
+        server stays exposed (and an unban there would miss the real one).
+        Among those, one in *region* is preferred.
+        """
+        from servonaut.services.accounts import UnknownAccountError
+
+        svc = self._executors.ip_ban_service
+        try:
+            configs, account = svc.configs_for_server(instance)
+        except UnknownAccountError as exc:
+            return None, f"{slug}: cannot choose an IP-ban configuration — {exc}"
+        candidates = [c for c in configs if c.method == method]
+        config = None
+        if region:
+            config = next((c for c in candidates if c.region == region), None)
+        if config is None and candidates:
+            config = candidates[0]
+        if config is None:
+            where = f"acts in AWS account '{account}'" if account else "exists on this CLI"
+            return None, (
+                f"{slug}: no IP-ban configuration with method '{method}' "
+                f"{where} — {missing_hint}"
+            )
+        return config, ""
 
     async def _execute_rate_limit(
         self, raw: dict, payload: dict, verb: str,
@@ -1431,7 +1508,9 @@ class RelayListener:
             WAFManagementService,
         )
         try:
-            res = await WAFManagementService().set_rate_rule(
+            # Changed in the AWS account the WebACL was found in.
+            waf = WAFManagementService(self._executors.webacl_account(acl))
+            res = await waf.set_rate_rule(
                 acl.get("name"), acl.get("id"), acl.get("scope"),
                 acl.get("region"), rule_name=rule_name, limit=limit,
                 uri_scope=(path or "") if is_path else "",
@@ -1602,6 +1681,7 @@ class RelayListener:
         # instance lookup for the region hint only — no self-ban mirror is
         # needed on the unban path.
         region_hint = ""
+        instance = None
         target = str(raw.get("target_server_id") or "")
         if target:
             try:
@@ -1612,21 +1692,13 @@ class RelayListener:
                 region_hint = str(instance.get("region") or "")
 
         svc = self._executors.ip_ban_service
-        candidates = [c for c in svc.get_configs() if c.method == method]
         region = str(payload.get("region") or "") or region_hint
-        config = None
-        if region:
-            config = next(
-                (c for c in candidates if c.region == region), None,
-            )
-        if config is None and candidates:
-            config = candidates[0]
+        config, refusal = self._ban_config(
+            instance, method, region, "unblock_ip_config_missing",
+            f"cannot undo a '{method}' ban without its config",
+        )
         if config is None:
-            return "error", "", (
-                f"unblock_ip_config_missing: no IP-ban configuration with "
-                f"method '{method}' exists on this CLI — cannot undo a "
-                f"'{method}' ban without its config"
-            )
+            return "error", "", refusal
 
         extra = {"strategy": method, "ip": ip, "ip_ban_config": config.name}
         if coerce_dry_run(payload):

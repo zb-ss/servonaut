@@ -25,6 +25,24 @@ page before saving it. Keep the previous key until the replacement is working.
 OVH Object Storage uses a separate S3 access key and secret, configured in
 Settings. Replacing the OVH API consumer key does not replace those S3 credentials.
 
+## Object Storage Shows No Buckets
+
+OVH and Hetzner list buckets per region: each regional endpoint only answers
+with the buckets that live in its region.
+
+- **OVH** — with no endpoint URL configured, Servonaut asks every OVH region
+  and shows each bucket's region in a Region column. The status line names any
+  region that could not be searched. Some regions may refuse your keys (for
+  example, the Asia-Pacific regions can refuse keys used in Europe); the other
+  regions are still listed. An endpoint
+  URL set by hand is the only one asked, so leave it empty unless you need a
+  specific endpoint.
+- **Hetzner** — only the configured region is asked. If your buckets live in
+  another location, change the region in Settings.
+
+An empty list states where it looked. If no region has your buckets, check
+that the S3 keys belong to the project that owns them.
+
 ## SSH Connection Fails
 
 When SSH fails, the terminal window **stays open** showing the error and exit code. Common causes:

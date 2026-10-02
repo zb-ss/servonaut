@@ -25,7 +25,12 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from servonaut.services.ssh_host_keys import HostKeyPolicy, host_key_alias_options
+from servonaut.services.connection_service import (
+    ConnectionService,
+    profile_route,
+    rule_username,
+)
+from servonaut.utils.instance_resolver import describe_candidate, match_instances
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +102,10 @@ def add_ssh_parser(subparsers: Any) -> None:
     p.__class__ = _RemoteCommandParser
     p.add_argument(
         "instance",
-        help="Instance name or id (case-insensitive match).",
+        help=(
+            "Instance name or id (case-insensitive match); "
+            "<account>/<name> picks the server of one provider account."
+        ),
     )
     p.add_argument(
         "--user", "-u",
@@ -184,50 +192,48 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
 # Instance lookup
 # ---------------------------------------------------------------------------
 
-def _load_instances(
+async def _load_instances(
     custom_server_service: Any,
     config: Any,
+    reference: str,
 ) -> List[Dict[str, Any]]:
-    """Return merged list of cached AWS + custom instances."""
-    from servonaut.services.cache_service import CacheService
-    from servonaut.services.aws_service import AWSService
+    """Every server *reference* could mean is among these rows.
 
-    # AWS — load from disk cache (no network round-trip for the CLI). No
-    # try/except: the cache layer already absorbs a missing or corrupt file,
-    # so anything raised here is a bug that must surface loudly.
-    aws_service = AWSService(CacheService(ttl_seconds=config.cache_ttl_seconds))
-    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
+    Every account's cached servers (AWS, OVH, Hetzner) and the custom ones,
+    plus each account never listed on this machine, read once (see
+    ``CachedFleet.checked_rows``). An account whose servers could not be
+    checked gets a note on stderr.
+    """
+    from servonaut.services.accounts.headless import CachedFleet
 
-    # Custom servers
-    try:
-        instances.extend(custom_server_service.list_as_instances())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-
-    return instances
+    checked = await CachedFleet.from_config(config, custom_server_service).checked_rows(reference)
+    for note in checked.notes:
+        print(note, file=sys.stderr)
+    return checked.rows
 
 
 def _find_instance(instances: List[Dict[str, Any]], search: str) -> List[Dict[str, Any]]:
-    """Return all instances whose ``id`` or ``name`` match *search* (case-insensitive)."""
-    needle = search.lower()
-    return [
-        inst for inst in instances
-        if (inst.get("id") or "").lower() == needle
-        or (inst.get("name") or "").lower() == needle
-    ]
+    """Return every instance *search* could mean (id, name or ``<account>/<name>``)."""
+    return match_instances(search, instances)
 
 
 # ---------------------------------------------------------------------------
 # Username resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_username(args: Any, instance: Dict[str, Any], config: Any) -> str:
+def _resolve_username(
+    args: Any, instance: Dict[str, Any], config: Any, profile: Any = None,
+) -> str:
     """Resolve SSH username in priority order.
 
-    Priority: args.user > instance username > config default_username > 'ubuntu'
+    Priority: args.user > the matching connection rule's username (not for
+    a custom server) > instance username > config default_username > 'ubuntu'
     """
     if args.user:
         return args.user
+    profile_username = rule_username(instance, profile)
+    if profile_username:
+        return profile_username
     inst_username = instance.get("username")
     if inst_username:
         return inst_username
@@ -262,6 +268,11 @@ def handle_ssh_command(args: Any) -> int:
 
 
 async def _handle_ssh_async(args: Any) -> int:
+    from servonaut.services.accounts import UnknownAccountError
+    from servonaut.services.accounts.headless import (
+        check_configured_reference,
+        with_ovh_login,
+    )
     from servonaut.services.ssh_ref_resolver import SshRefResolver
     from servonaut.services.bw_resolver import (
         BwResolver,
@@ -291,10 +302,14 @@ async def _handle_ssh_async(args: Any) -> int:
         custom_server_service,
     ) = _init_headless_services()
 
-    # --- Load instances ---
-    instances = _load_instances(custom_server_service, config)
-
     # --- Find instance ---
+    try:
+        check_configured_reference(config, args.instance)
+    except UnknownAccountError as exc:
+        # "<account>/<name>" where that account cannot connect: say why.
+        print(str(exc), file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    instances = await _load_instances(custom_server_service, config, args.instance)
     matches = _find_instance(instances, args.instance)
     if not matches:
         print(
@@ -306,16 +321,14 @@ async def _handle_ssh_async(args: Any) -> int:
 
     if len(matches) > 1:
         print(
-            f"Multiple instances match {args.instance!r}. Be more specific:",
+            f"Multiple instances match {args.instance!r}. Use one of these references:",
             file=sys.stderr,
         )
         for i, inst in enumerate(matches, 1):
-            iid = inst.get("id", "?")
-            iname = inst.get("name", "?")
-            print(f"  {i}. {iname} ({iid})", file=sys.stderr)
+            print(f"  {i}. {describe_candidate(inst, matches)}", file=sys.stderr)
         return _EXIT_AMBIGUOUS
 
-    instance = matches[0]
+    instance = with_ovh_login(matches[0], config)
     iid = instance.get("id") or instance.get("name") or args.instance
 
     # --- Build resolver ---
@@ -366,27 +379,21 @@ async def _handle_ssh_async(args: Any) -> int:
         )
         return _EXIT_NO_CREDENTIAL
 
-    # --- Determine host ---
-    host = (
-        instance.get("public_ip")
-        or instance.get("private_ip")
-        or instance.get("host")
-        or iid
-    )
+    # --- Route: the matching connection rule, as the TUI and MCP apply it ---
+    # Through a bastion the target is the private address, reached by a
+    # proxy hop; the extra options pin a cloud instance by its host-key
+    # alias, then add the profile's and the server's own.
+    route = profile_route(instance, ConnectionService.for_config(config))
+    host = route["host"] or instance.get("host") or iid
 
     # --- Determine username ---
-    username = _resolve_username(args, instance, config)
+    username = _resolve_username(args, instance, config, route["profile"])
 
     # --- Determine port ---
     port = args.port or instance.get("port")
 
     # --- Remote command (None = interactive shell) ---
     remote_command = _remote_command_string(args)
-
-    # A cloud instance is pinned by its alias, as on every other path.
-    alias_options = host_key_alias_options(
-        instance, HostKeyPolicy.from_ssh_config(getattr(config, "ssh", None)),
-    )
 
     # --- Build + run SSH ---
     if resolved.source in ("personal", "team"):
@@ -435,9 +442,10 @@ async def _handle_ssh_async(args: Any) -> int:
                 host=host,
                 username=username,
                 key_path=tmpfile,
+                proxy_args=route["proxy_args"],
                 port=port,
                 remote_command=remote_command,
-                extra_options=alias_options,
+                extra_options=route["extra_options"],
             )
             logger.debug("Running SSH (BW key): %s", " ".join(cmd))
             # Inherit stdin/stdout/stderr: interactive shells, piped stdin and
@@ -451,9 +459,10 @@ async def _handle_ssh_async(args: Any) -> int:
             host=host,
             username=username,
             key_path=resolved.local_key_path,
+            proxy_args=route["proxy_args"],
             port=port,
             remote_command=remote_command,
-            extra_options=alias_options,
+            extra_options=route["extra_options"],
         )
         logger.debug("Running SSH (local key): %s", " ".join(cmd))
         result = subprocess.run(cmd)

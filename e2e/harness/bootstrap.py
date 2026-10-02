@@ -47,6 +47,10 @@ _ENV_BASE_TMP = "SERVONAUT_E2E_BASE_TMP"
 ENV_PREBUILT_WHEELS = "SERVONAUT_E2E_PREBUILT_WHEELS"
 
 GUARD_MODULE = "_servonaut_e2e_netguard"
+# What the suite and the QA sandbox need beyond the application's own
+# dependencies (the e2e and provider extras), and how to get it.
+REQUIRED_MODULES = ("moto", "aiohttp", "mcp", "textual_serve", "playwright", "hcloud", "ovh")
+INSTALL_HINT = "pip install -e '.[test,e2e,hetzner,ovh]'"
 
 # Port 9 (discard) on loopback: nothing listens, so any request that was not
 # pointed at a fake is refused at once instead of reaching a real service.
@@ -161,14 +165,16 @@ def is_within(path: "str | os.PathLike[str]", root: "str | os.PathLike[str]") ->
 
 def load_guard() -> ModuleType:
     """Return the shared guard module (also loaded by child_site/sitecustomize)."""
-    module = sys.modules.get(GUARD_MODULE)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(GUARD_MODULE, HARNESS_DIR / "netguard.py")
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[GUARD_MODULE] = module
-        spec.loader.exec_module(module)
-    return module
+    from e2e.harness import child_guard
+
+    return child_guard.guard_module()
+
+
+def missing_modules(extra: tuple[str, ...] = ()) -> list[str]:
+    """The modules of the ``e2e`` and provider extras that are not installed."""
+    return [
+        name for name in (*REQUIRED_MODULES, *extra) if importlib.util.find_spec(name) is None
+    ]
 
 
 def _real_home_dirs(original_env: Mapping[str, str]) -> tuple[str, ...]:
@@ -423,8 +429,14 @@ def _apply_environment(ctx: E2EContext, original_env: Mapping[str, str], base: s
     sys.dont_write_bytecode = True
 
 
-def bootstrap() -> E2EContext:
-    """Create the test root, apply the hermetic environment, arm the guards."""
+def bootstrap(root: Optional[Path] = None) -> E2EContext:
+    """Create the test root, apply the hermetic environment, arm the guards.
+
+    *root* names the test root instead of a new temporary directory; the
+    caller owns it (it is created when missing). The local QA sandbox
+    (``e2e/sandbox``) keeps a fixed root so the processes that drive it can
+    find it again.
+    """
     global _CONTEXT
     if _CONTEXT is not None:
         return _CONTEXT
@@ -435,13 +447,18 @@ def bootstrap() -> E2EContext:
     # Validate the settings before anything is created on disk.
     protected = _real_home_dirs(original_env)
     artifacts_dir = _artifacts_dir(original_env, protected)
-    base = (
-        original_env.get(ENV_ROOT_BASE)
-        or original_env.get(_ENV_BASE_TMP)
-        or tempfile.gettempdir()
-    )
-    Path(base).mkdir(parents=True, exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix=f"servonaut-e2e-{worker}-", dir=base)).resolve()
+    if root is None:
+        base = (
+            original_env.get(ENV_ROOT_BASE)
+            or original_env.get(_ENV_BASE_TMP)
+            or tempfile.gettempdir()
+        )
+        Path(base).mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix=f"servonaut-e2e-{worker}-", dir=base)).resolve()
+    else:
+        Path(root).mkdir(mode=0o700, parents=True, exist_ok=True)
+        root = Path(root).resolve()
+        base = str(root.parent)
     _CONTEXT = _make_context(root, worker, original_env, protected, artifacts_dir)
     _apply_environment(_CONTEXT, original_env, base)
     load_guard().install(

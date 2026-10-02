@@ -69,6 +69,10 @@ class SettingsPanel(Vertical):
         self._demo_shown: Dict[str, Any] = {}
         self._demo_pending: Dict[str, List[str]] = {}
         self._demo_edited: Set[str] = set()
+        # True from a load until the re-baseline below has settled.
+        self._settling = False
+        # True once the panel has taken its first snapshot from the config.
+        self._loaded = False
 
     # ------------------------------------------------------------------
     # Composition
@@ -309,18 +313,54 @@ class SettingsPanel(Vertical):
         over the next few refresh frames, when the editor rows have mounted.
         """
         self._snapshot = self.current_values()
+        self._loaded = True
+        self._settling = True
         self._schedule_rebaseline(self._REBASELINE_FRAMES)
+
+    def has_unsaved_changes(self) -> bool:
+        """Whether leaving this panel now would lose edits.
+
+        Guards a panel switch and leaving Settings. Never before the panel
+        has loaded: its widgets do not hold the config yet, so nothing in
+        them was typed (a panel can be left before its first load on a busy
+        machine). Otherwise the post-load re-baseline is finished first
+        (:meth:`settle`), then :meth:`is_dirty` decides.
+        """
+        if not getattr(self, "_loaded", True):
+            return False
+        self.settle()
+        return self.is_dirty()
+
+    def settle(self) -> None:
+        """Finish the post-load re-baseline now, if it is still running.
+
+        Called before the shell asks :meth:`is_dirty` to guard a panel switch
+        or leaving Settings. Rows that mounted after the load would otherwise
+        count as unsaved edits until the deferred re-baseline catches up,
+        which on a busy machine can take long enough for a quick switch to
+        raise a spurious "discard changes?" prompt. Edits made while the panel
+        settles are absorbed either way, as the deferred re-baseline does.
+        """
+        if not getattr(self, "_settling", False):
+            return
+        self._settling = False
+        try:
+            self._snapshot = self.current_values()
+        except NoMatches:
+            return
+        self._refresh_dirty_marker()
 
     def _schedule_rebaseline(self, frames_left: int) -> None:
         """Queue a post-refresh re-baseline, if the panel is attached to an app."""
         if frames_left <= 0:
+            self._settling = False
             return
         try:
             self.call_after_refresh(self._rebaseline_after_refresh, frames_left)
         except Exception:
             # No running app (e.g. a panel constructed in isolation). The
             # synchronous snapshot above is the best we can do.
-            pass
+            self._settling = False
 
     def _rebaseline_after_refresh(self, frames_left: int) -> None:
         """Re-capture the snapshot after async editor rows have mounted.
@@ -338,12 +378,15 @@ class SettingsPanel(Vertical):
         nothing left to re-baseline.
         """
         if not self.is_attached:
+            self._settling = False
             return
         try:
             settled = self.current_values()
         except NoMatches:
+            self._settling = False
             return
         if settled == self._snapshot:
+            self._settling = False
             return  # Stable — rows mounted, nothing left to absorb.
         self._snapshot = settled
         self._refresh_dirty_marker()
@@ -396,6 +439,10 @@ class SettingsPanel(Vertical):
         if event.button.id != f"save_{self.PANEL_ID}":
             return
         event.stop()
+        # Textual also runs this base handler after a subclass's own
+        # on_button_pressed, which already called it through super():
+        # without this, every Save persisted (and reloaded accounts) twice.
+        event.prevent_default()
         self.clear_field_errors()
         try:
             self.persist()

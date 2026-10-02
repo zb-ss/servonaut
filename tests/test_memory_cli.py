@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.config.schema import MemoryConfig
+from servonaut.services.accounts.headless import CachedFleet
 from servonaut.services.aws_service import AWSService
 from servonaut.services.memory.interfaces import ModuleResult
 from servonaut.services.memory.service import MemoryService
@@ -169,7 +170,8 @@ class TestExitCode1:
         custom_service.list_as_instances.return_value = []
 
         args = _make_args(instance="does-not-exist")
-        result = _resolve_or_exit(args, aws_service, custom_service, None, use_json=False)
+        fleet = CachedFleet(custom_service, aws=aws_service)
+        result = _resolve_or_exit(args, fleet, use_json=False)
 
         assert result is None
         captured = capsys.readouterr()
@@ -259,7 +261,8 @@ class TestExitCode3:
 
         args = _make_args(memory_command="build", all=True, modules=None, json=False)
         config = _fake_config()
-        rc = _cmd_build_all(args, config, memory_service, aws_service, custom_service, None)
+        fleet = CachedFleet(custom_service, aws=aws_service)
+        rc = _cmd_build_all(args, config, memory_service, fleet)
 
         assert rc == 3
 
@@ -659,14 +662,14 @@ class TestRunMemoryDispatch:
     """Test run_memory routes correctly to each subcommand handler."""
 
     def _make_headless_mocks(self, tmp_path: Path):
-        """Return (config, memory_service, aws, custom, ovh) mocks."""
+        """Return (config, memory_service, fleet) mocks."""
         memory_service = _make_memory_service(tmp_path)
         aws_service = MagicMock(spec=AWSService)
         aws_service.get_cached_instances.return_value = [_make_inst()]
         custom_service = MagicMock()
         custom_service.list_as_instances.return_value = []
         config = _fake_config()
-        return config, memory_service, aws_service, custom_service, None
+        return config, memory_service, CachedFleet(custom_service, aws=aws_service)
 
     def test_run_memory_no_subcommand_returns_usage_error(self, tmp_path: Path, capsys: Any) -> None:
         """run_memory without a subcommand returns exit code 4 immediately."""
@@ -680,7 +683,7 @@ class TestRunMemoryDispatch:
         """run_memory dispatches 'build' to _cmd_build."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
 
         build_called = []
 
@@ -689,7 +692,7 @@ class TestRunMemoryDispatch:
             return 0
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
         monkeypatch.setattr(mem_mod, "_cmd_build", _fake_cmd_build)
 
         args = _make_args(memory_command="build", instance="test-server")
@@ -702,7 +705,7 @@ class TestRunMemoryDispatch:
         """run_memory dispatches 'refresh' to _cmd_refresh."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
         refresh_called = []
 
         def _fake_cmd_refresh(args, cfg, svc, inst):
@@ -710,7 +713,7 @@ class TestRunMemoryDispatch:
             return 0
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
         monkeypatch.setattr(mem_mod, "_cmd_refresh", _fake_cmd_refresh)
 
         args = _make_args(memory_command="refresh", instance="test-server")
@@ -723,7 +726,7 @@ class TestRunMemoryDispatch:
         """run_memory dispatches 'show' to _cmd_show."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
         show_called = []
 
         def _fake_cmd_show(args, cfg, svc, inst):
@@ -731,7 +734,7 @@ class TestRunMemoryDispatch:
             return 0
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
         monkeypatch.setattr(mem_mod, "_cmd_show", _fake_cmd_show)
 
         args = _make_args(memory_command="show", instance="test-server")
@@ -744,7 +747,7 @@ class TestRunMemoryDispatch:
         """run_memory dispatches 'export' to _cmd_export."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
         export_called = []
 
         def _fake_cmd_export(args, cfg, svc, inst):
@@ -752,7 +755,7 @@ class TestRunMemoryDispatch:
             return 0
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
         monkeypatch.setattr(mem_mod, "_cmd_export", _fake_cmd_export)
 
         args = _make_args(memory_command="export", instance="test-server")
@@ -765,7 +768,7 @@ class TestRunMemoryDispatch:
         """run_memory dispatches 'clear' to _cmd_clear."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
         clear_called = []
 
         def _fake_cmd_clear(args, cfg, svc, inst):
@@ -773,7 +776,7 @@ class TestRunMemoryDispatch:
             return 0
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
         monkeypatch.setattr(mem_mod, "_cmd_clear", _fake_cmd_clear)
 
         args = _make_args(memory_command="clear", instance="test-server")
@@ -786,10 +789,10 @@ class TestRunMemoryDispatch:
         """Unknown subcommand returns exit code 4."""
         from servonaut.cli import memory as mem_mod
 
-        config, memory_service, aws_service, custom_service, ovh = self._make_headless_mocks(tmp_path)
+        config, memory_service, fleet = self._make_headless_mocks(tmp_path)
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, ovh))
+                            lambda: (config, memory_service, fleet))
 
         args = _make_args(memory_command="no_such_cmd", instance="test-server")
         rc = mem_mod.run_memory(args)
@@ -1024,7 +1027,8 @@ class TestBuildAllNoInstances:
 
         args = _make_args(memory_command="build", all=True, modules=None, json=False)
         config = _fake_config()
-        rc = _cmd_build_all(args, config, memory_service, aws_service, custom_service, None)
+        fleet = CachedFleet(custom_service, aws=aws_service)
+        rc = _cmd_build_all(args, config, memory_service, fleet)
 
         assert rc == 1
 
@@ -1058,7 +1062,8 @@ class TestResolveOrExitJsonError:
         custom_service.list_as_instances.return_value = []
 
         args = _make_args(instance="no-such-instance")
-        result = _resolve_or_exit(args, aws_service, custom_service, None, use_json=True)
+        fleet = CachedFleet(custom_service, aws=aws_service)
+        result = _resolve_or_exit(args, fleet, use_json=True)
 
         assert result is None
         captured = capsys.readouterr()
@@ -1081,7 +1086,8 @@ class TestRunMemoryBuildNoInstance:
         config = _fake_config()
 
         monkeypatch.setattr(mem_mod, "_init_headless_services",
-                            lambda: (config, memory_service, aws_service, custom_service, None))
+                            lambda: (config, memory_service,
+                                     CachedFleet(custom_service, aws=aws_service)))
 
         args = _make_args(memory_command="build", instance=None, all=False)
         rc = mem_mod.run_memory(args)
@@ -1141,31 +1147,38 @@ class TestPinModuleError:
         assert rc == 4
 
 
-class TestInitHeadlessServicesOvhSkipped:
-    def test_init_without_ovh_config_sets_none(self, monkeypatch: Any) -> None:
+class TestInitHeadlessServicesAccounts:
+    def test_init_without_ovh_config_skips_ovh(self, monkeypatch: Any) -> None:
         """_init_headless_services succeeds when OVH is not configured."""
         from servonaut.cli import memory as mem_mod
+        from servonaut.config.schema import AppConfig
 
-        class _FakeConfigManager:
-            def get(self):
-                import types
-                cfg = types.SimpleNamespace()
-                cfg.cache_ttl_seconds = 3600
-                cfg.keyword_store_path = "/tmp/kw.json"
-                cfg.command_history_path = "/tmp/ch.json"
-                mem = __import__("servonaut.config.schema", fromlist=["MemoryConfig"]).MemoryConfig
-                cfg.memory = mem()
-                cfg.ovh = types.SimpleNamespace(enabled=False, application_key="", client_id="")
-                return cfg
-
-        def _fake_config_manager():
-            return _FakeConfigManager()
-
+        config_manager = MagicMock()
+        config_manager.get.return_value = AppConfig()
         import servonaut.config.manager as cm_mod
-        monkeypatch.setattr(cm_mod, "ConfigManager", _fake_config_manager)
+        monkeypatch.setattr(cm_mod, "ConfigManager", lambda: config_manager)
 
-        # _init_headless_services calls ConfigManager() internally;
-        # with OVH disabled it must succeed and return ovh_service=None.
-        result = mem_mod._init_headless_services()
-        assert len(result) == 5
-        assert result[4] is None  # ovh_service is None when disabled
+        config, _memory, fleet = mem_mod._init_headless_services()
+        assert config is config_manager.get.return_value
+        assert fleet._inventories["ovh"] is None
+
+    def test_init_reads_every_hetzner_project(self, monkeypatch: Any) -> None:
+        """Every account of every provider is resolvable, Hetzner included."""
+        from servonaut.cli import memory as mem_mod
+        from tests._account_fixtures import build_registry
+
+        registry, _ = build_registry(
+            monkeypatch,
+            hetzner={
+                "hetzner": [{"id": "1", "name": "web-1", "is_hetzner": True}],
+                "staging": [{"id": "2", "name": "db-1", "is_hetzner": True}],
+            },
+        )
+        config_manager = MagicMock()
+        config_manager.get.return_value = registry.config
+        import servonaut.config.manager as cm_mod
+        monkeypatch.setattr(cm_mod, "ConfigManager", lambda: config_manager)
+
+        _config, _memory, fleet = mem_mod._init_headless_services()
+        assert fleet.resolve("staging/db-1")["id"] == "2"
+        assert [r["id"] for r in mem_mod._list_all_instances(fleet)] == ["1", "2"]

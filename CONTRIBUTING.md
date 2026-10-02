@@ -428,6 +428,21 @@ When you add a journey:
   Anthropic and Ollama through the provider base-URL setting, and
   `fake_cloud.ai.script(...)` scripts the hosted chat, replaying the recorded
   streams in `tests/fixtures/sse`.
+- For several accounts per provider, `fleet.seed_second_accounts(providers)`
+  adds a second Hetzner project and OVH account, with their servers, to the
+  stand-ins, and `seed.hetzner_account(...)` / `seed.ovh_account(...)` write
+  config entries with the credentials those accounts answer; each stand-in
+  refuses credentials it does not know, as the real service does. A second
+  AWS account is a named profile that assumes a role in another moto
+  account: `moto.seed_account(...)`, then `seed.aws_profile(...)` and
+  `seed.aws_account(...)`. `providers.requests(..., account="staging")`
+  shows which account each call reached.
+- Seeded configs list AWS instances from the fleet's regions only
+  (`fleet.AWS_REGIONS`): discovering every region costs one call per region
+  on each refresh, which is slow on a busy machine. `seed.aws_config(...)`
+  and `seed.aws_account(...)` set that list for you; give an AWS config you
+  build yourself a `regions` list too, unless the journey is about discovery
+  (then pass `regions=[]`).
 - Wait for conditions (`wait_until`, `wait_for_screen`, `wait_for_toast`),
   never for a fixed time.
 - To prove a secret never reached the service, use
@@ -444,6 +459,76 @@ When you add a journey:
   journey raises at the exact symptom, so any other failure still fails. The
   fix makes it fail as "unexpectedly passing", so remove the marker in the
   same change as the fix.
+
+## Local QA sandbox
+
+Before you open a pull request, use what you changed the way a user would:
+open the screen, run the command, try the wrong input and a narrow terminal.
+The QA sandbox makes that safe. It runs the stand-ins of the end-to-end suite
+(Servonaut API, package index, AWS, CloudTrail, Hetzner, OVH and the loopback
+SSH servers) with a seeded home, under the same guards, and never touches
+your own config, credentials or servers.
+
+```bash
+python -m e2e.sandbox up &          # or: up --scenario multi-account
+python -m e2e.sandbox status        # seeded servers, stand-ins, request logs
+```
+
+`up` stays in the foreground until it is stopped; wait for the line
+`SANDBOX READY <path to state.json>`. Everything lives in `.qa-sandbox/` in
+the checkout. Another directory given with `--root` belongs outside the
+checkout, or at `.qa-sandbox-<name>` in its top level: git ignores only
+those, and a sandbox holds private keys and tokens (`up` refuses anything
+else inside the checkout). One sandbox runs per user at a time: every command finds it
+through `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/current.json`, the
+only file the sandbox writes outside its directory. `--signed-in` starts
+signed in to the local API.
+
+- `single` is the typical user: one account per provider, the AWS, Hetzner
+  and OVH fleets of `e2e/harness/fleet.py` and the custom server `web-1`.
+  `multi-account` adds a second account per provider, each with a server
+  named `web-1`. `status` lists every server with the reference that picks
+  it and whether it accepts SSH (`web-1`, and `app-1` through `bastion-1`).
+- CLI: `python -m e2e.sandbox run -- ssh web-1 -- uptime` runs the
+  checkout's `servonaut` in the sandbox and exits with its status.
+- MCP: `python -m e2e.sandbox mcp-call list_instances '{"account": "prod"}'`
+  calls one tool of the real MCP server and prints the result;
+  `python -m e2e.sandbox mcp` serves it over stdio for an MCP client.
+- TUI: `e2e/sandbox/tpmcp_spec.py` (160x50) and `tpmcp_spec_narrow.py`
+  (100x30) are specs for [textual-pilot-mcp](https://github.com/zb-ss/textual-pilot-mcp),
+  which drives the TUI over MCP. Its `launch` runs the TUI of the checkout
+  that started the sandbox, inside the sandbox. Register each spec once with
+  `textual-pilot-mcp install --client <client> --spec <absolute path>`. The
+  server's Python needs Servonaut's dependencies with the Hetzner and OVH
+  client libraries; for a pipx install run
+  `pipx inject textual-pilot-mcp -e "<checkout>[hetzner,ovh]" --force` (again
+  after a dependency changes). Snapshots go to
+  `${XDG_STATE_HOME:-~/.local/state}/servonaut-qa/captures/`. Start the server
+  from the checkout root, and without an empty entry in `PYTHONPATH` (an
+  empty entry means the working directory): a directory inside
+  `src/servonaut` on the import path puts Servonaut's own modules (such as
+  `secrets.py`) in place of the standard library's, and the server fails at
+  start-up. A server keeps the checkout and sandbox directory of its first
+  `launch`; restart it after starting a sandbox from another checkout.
+- Desktop: `python -m e2e.sandbox desktop` starts the desktop child without a
+  window and prints its URL, a single-use session token, a snippet that
+  starts the session in a browser page (it waits for the first output and
+  focuses the terminal), and one that clicks a terminal cell. Keys reach the
+  app only while the terminal has focus; `window.servonautQa.focus()` gives
+  it back after a click elsewhere. The terminal is drawn on a canvas, so a
+  browser's text waits never match: judge states from screenshots, or read
+  the visible screen with `window.servonautQa.text()` and
+  `window.servonautQa.waitForText(...)`.
+
+`python -m e2e.sandbox down` stops everything and deletes `.qa-sandbox/`;
+with `up --keep` the directory is kept for inspection, renamed to
+`.qa-sandbox.kept-<time>` (delete it yourself). `down` exits non-zero if a
+sandbox process survived. Where there is no `/proc` (macOS), it can only
+check the desktop processes the sandbox recorded, by their start time and
+command; the others stop by themselves once the sandbox directory is gone.
+The sandbox's owner holds a lock on a marker file in that directory for as
+long as it runs; only a directory with that marker and nobody holding its
+lock is ever removed automatically.
 
 ## Code of Conduct
 Please note that this project is released with a Contributor Code of Conduct. By participating in this project you agree to abide by its terms. For now, please be respectful and constructive in all interactions.

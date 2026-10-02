@@ -8,8 +8,12 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+import boto3
+
+from servonaut.services.accounts.aws_account import aws_client
+from servonaut.services.accounts.registry import UnknownAccountError, row_provider
 from servonaut.services.interfaces import IPBanStrategyInterface, IPBanServiceInterface
 
 if TYPE_CHECKING:
@@ -24,15 +28,46 @@ def _to_cidr(ip_address: str) -> str:
     return ip_address if "/" in ip_address else f"{ip_address}/32"
 
 
-class WAFStrategy(IPBanStrategyInterface):
+def _aws_account_key(accounts: Any, label: str) -> Optional[str]:
+    """Key of the AWS account *label* names ("" = default); None if none."""
+    try:
+        return accounts.account("aws", label or None).key
+    except UnknownAccountError:
+        return None
+
+
+def _label(config: Any) -> str:
+    """The account label a config names ("" = the default account)."""
+    label = getattr(config, "account", "")
+    return label if isinstance(label, str) else ""
+
+
+class _AccountClients:
+    """Builds AWS clients in the account a ban config names.
+
+    ``IPBanConfig.account`` is an account label; empty means the default
+    AWS account. Without a registry (older callers) every config uses the
+    default credential chain, as before.
+    """
+
+    def __init__(self, accounts: Optional[Any] = None) -> None:
+        self._accounts = accounts
+
+    def _client(self, service: str, config: 'IPBanConfig') -> Any:
+        account = None
+        if self._accounts is not None:
+            account = self._accounts.aws_context(getattr(config, "account", "") or None)
+        return aws_client(account, boto3, service, region_name=config.region or 'us-east-1')
+
+
+class WAFStrategy(_AccountClients, IPBanStrategyInterface):
     """Ban IPs via AWS WAFv2 IP sets."""
 
     async def ban_ip(self, ip_address: str, config: 'IPBanConfig') -> dict:
         loop = asyncio.get_event_loop()
 
         def _ban() -> dict:
-            import boto3
-            client = boto3.client('wafv2', region_name=config.region or 'us-east-1')
+            client = self._client('wafv2', config)
             response = client.get_ip_set(
                 Name=config.ip_set_name,
                 Scope=config.waf_scope,
@@ -64,8 +99,7 @@ class WAFStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _unban() -> dict:
-            import boto3
-            client = boto3.client('wafv2', region_name=config.region or 'us-east-1')
+            client = self._client('wafv2', config)
             response = client.get_ip_set(
                 Name=config.ip_set_name,
                 Scope=config.waf_scope,
@@ -91,8 +125,7 @@ class WAFStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _list() -> List[str]:
-            import boto3
-            client = boto3.client('wafv2', region_name=config.region or 'us-east-1')
+            client = self._client('wafv2', config)
             response = client.get_ip_set(
                 Name=config.ip_set_name,
                 Scope=config.waf_scope,
@@ -103,7 +136,7 @@ class WAFStrategy(IPBanStrategyInterface):
         return await loop.run_in_executor(None, _list)
 
 
-class SecurityGroupStrategy(IPBanStrategyInterface):
+class SecurityGroupStrategy(_AccountClients, IPBanStrategyInterface):
     """Ban IPs via Security Group ingress deny rules."""
 
     _BAN_DESCRIPTION = "servonaut-ban"
@@ -112,8 +145,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _ban() -> dict:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             # Check if already banned
             sg_response = ec2.describe_security_groups(
                 GroupIds=[config.security_group_id]
@@ -149,8 +181,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _unban() -> dict:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             try:
                 ec2.revoke_security_group_ingress(
                     GroupId=config.security_group_id,
@@ -172,8 +203,7 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _list() -> List[str]:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             response = ec2.describe_security_groups(GroupIds=[config.security_group_id])
             banned = []
             for perm in response['SecurityGroups'][0].get('IpPermissions', []):
@@ -187,15 +217,14 @@ class SecurityGroupStrategy(IPBanStrategyInterface):
         return await loop.run_in_executor(None, _list)
 
 
-class NACLStrategy(IPBanStrategyInterface):
+class NACLStrategy(_AccountClients, IPBanStrategyInterface):
     """Ban IPs via Network ACL DENY rules."""
 
     async def ban_ip(self, ip_address: str, config: 'IPBanConfig') -> dict:
         loop = asyncio.get_event_loop()
 
         def _ban() -> dict:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             # Find next available rule number
             response = ec2.describe_network_acls(NetworkAclIds=[config.nacl_id])
             entries = response['NetworkAcls'][0].get('Entries', [])
@@ -233,8 +262,7 @@ class NACLStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _unban() -> dict:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             response = ec2.describe_network_acls(NetworkAclIds=[config.nacl_id])
             entries = response['NetworkAcls'][0].get('Entries', [])
             cidr = _to_cidr(ip_address)
@@ -260,8 +288,7 @@ class NACLStrategy(IPBanStrategyInterface):
         loop = asyncio.get_event_loop()
 
         def _list() -> List[str]:
-            import boto3
-            ec2 = boto3.client('ec2', region_name=config.region or 'us-east-1')
+            ec2 = self._client('ec2', config)
             response = ec2.describe_network_acls(NetworkAclIds=[config.nacl_id])
             banned = []
             for entry in response['NetworkAcls'][0].get('Entries', []):
@@ -283,9 +310,17 @@ class IPBanService(IPBanServiceInterface):
         'nacl': NACLStrategy,
     }
 
-    def __init__(self, config_manager: 'ConfigManager') -> None:
+    def __init__(self, config_manager: 'ConfigManager', accounts: Optional[Any] = None) -> None:
+        """Build the service.
+
+        Args:
+            config_manager: Source of the ban configurations.
+            accounts: The account registry, so each ban config acts in the
+                AWS account it names. None uses the default credential chain.
+        """
         self._config_manager = config_manager
-        self._strategies = {k: v() for k, v in self.STRATEGIES.items()}
+        self._accounts = accounts
+        self._strategies = {k: v(accounts) for k, v in self.STRATEGIES.items()}
 
     def _get_config(self, config_name: str) -> 'IPBanConfig':
         configs = self._config_manager.get().ip_ban_configs
@@ -328,6 +363,61 @@ class IPBanService(IPBanServiceInterface):
     def get_configs(self) -> List['IPBanConfig']:
         return self._config_manager.get().ip_ban_configs
 
+    # ------------------------------------------------------------------
+    # Which AWS account each config acts in
+    # ------------------------------------------------------------------
+
+    def account_of(self, config: 'IPBanConfig') -> str:
+        """Label of the AWS account *config* acts in.
+
+        Its own ``account``, or the default account's label when it names
+        none.
+        """
+        from servonaut.config.accounts import primary_label
+
+        return _label(config) or primary_label("aws", self._config_manager.get())
+
+    def configs_for_account(self, account: str = "") -> List['IPBanConfig']:
+        """The configs that act in AWS account *account* ("" = the default).
+
+        Only these change that account's WAF IP sets, security groups and
+        network ACLs. A config naming an account that no longer exists acts
+        in none. Without an account registry there is one account and every
+        config acts in it.
+        """
+        configs = list(self.get_configs())
+        if self._accounts is None:
+            return configs
+        wanted = _aws_account_key(self._accounts, account)
+        if wanted is None:
+            return []
+        return [c for c in configs if _aws_account_key(self._accounts, _label(c)) == wanted]
+
+    def configs_for_server(
+        self, server: Optional[Dict[str, Any]],
+    ) -> Tuple[List['IPBanConfig'], str]:
+        """The configs that can shield *server*, and the account they act in.
+
+        With one AWS account (or no registry) every config qualifies and the
+        account label is "". With several, only the configs of the server's
+        own AWS account do: a ban in another account's IP set would be
+        reported as applied while the server stays exposed.
+
+        Raises:
+            UnknownAccountError: There are several AWS accounts and the
+                server's cannot be told (not a listed AWS server, or its
+                account was removed from the settings).
+        """
+        if self._accounts is None or not self._accounts.is_multi("aws"):
+            return list(self.get_configs()), ""
+        if not server or row_provider(server) != "aws":
+            name = (server or {}).get("name") or (server or {}).get("id") or "the target"
+            raise UnknownAccountError(
+                f"the AWS account of {name} is unknown: it is not a listed AWS server"
+            )
+        owner = self._accounts.account_for(server)
+        return self.configs_for_account(owner.label), owner.label
+
     def validate_ip(self, ip_address: str) -> bool:
         """Accept a bare IP or a CIDR block (additive — old callers unaffected)."""
         try:
@@ -338,6 +428,13 @@ class IPBanService(IPBanServiceInterface):
             return True
         except ValueError:
             return False
+
+    def _config_account(self, config_name: str) -> str:
+        """The account label a ban config names ("" = default account)."""
+        try:
+            return self._get_config(config_name).account or ""
+        except (ValueError, AttributeError):
+            return ""
 
     def _audit_log(self, action: str, ip_address: str, config_name: str, result: dict) -> None:
         """Append action to the audit trail JSON file."""
@@ -351,6 +448,9 @@ class IPBanService(IPBanServiceInterface):
             'success': result.get('success', False),
             'message': result.get('message', ''),
         }
+        account = self._config_account(config_name)
+        if account:
+            entry['account'] = account
         entries: List[dict] = []
         if audit_path.exists():
             try:

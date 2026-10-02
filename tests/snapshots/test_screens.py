@@ -70,6 +70,15 @@ async def _fleet(pilot: Any) -> None:
     del pilot
 
 
+async def _fleet_memory_banner(pilot: Any) -> None:
+    """No server has memory yet: the fleet shows its one-line memory hint."""
+    app = pilot.app
+    app.memory_service.list_all = lambda: []
+    app.screen._sync_memory_banner()
+    banner = app.screen.query_one("#memory_discover_banner")
+    await _harness.wait_until(pilot, lambda: banner.display, "the memory hint")
+
+
 async def _fleet_search(pilot: Any) -> None:
     await pilot.press("slash", *"web")
     table = pilot.app.screen.query_one("InstanceTable")
@@ -180,6 +189,10 @@ async def _ip_ban_configured(pilot: Any) -> None:
     await _navigate(pilot, "nav_ip_ban", "IPBanScreen")
 
 
+async def _cloudtrail(pilot: Any) -> None:
+    await _navigate(pilot, "nav_cloudtrail", "CloudTrailBrowserScreen")
+
+
 async def _cloudwatch(pilot: Any) -> None:
     await _navigate(pilot, "nav_cloudwatch", "CloudWatchBrowserScreen")
 
@@ -223,6 +236,12 @@ def test_fleet_table(screen_snapshot, size: str) -> None:
 
 
 @sizes
+def test_fleet_memory_banner(screen_snapshot, size: str) -> None:
+    """The memory hint takes one row, so the fleet keeps its rows."""
+    _capture(screen_snapshot, size, _fleet_memory_banner)
+
+
+@sizes
 def test_fleet_search(screen_snapshot, size: str) -> None:
     """The fleet filtered from the search box; the footer keeps the shortcuts, greyed."""
     _capture(screen_snapshot, size, _fleet_search)
@@ -232,6 +251,32 @@ def test_fleet_search(screen_snapshot, size: str) -> None:
 def test_fleet_table_demo_mode(screen_snapshot, size: str) -> None:
     """The same fleet with demo mode on: every identifier is a stand-in."""
     _capture(screen_snapshot, size, _fleet, demo=True)
+
+
+def _capture_multi_account(
+    screen_snapshot: Any, size: str, scenario: Scenario, *, demo: bool = False,
+) -> None:
+    async def run_before(pilot: Any) -> None:
+        await _harness.wait_for_fleet(pilot, rows=_harness.MULTI_ACCOUNT_FLEET_SIZE)
+        await scenario(pilot)
+        await pilot.pause()
+        _harness.freeze_cursors(pilot.app)
+
+    screen_snapshot(
+        _harness.MultiAccountSnapshotApp(demo=demo), _harness.SIZES[size], run_before,
+    )
+
+
+@sizes
+def test_fleet_table_two_hetzner_projects(screen_snapshot, size: str) -> None:
+    """A provider with two accounts lists its servers as account/name."""
+    _capture_multi_account(screen_snapshot, size, _fleet)
+
+
+@sizes
+def test_fleet_table_two_hetzner_projects_demo_mode(screen_snapshot, size: str) -> None:
+    """Demo mode also stands in for the account label."""
+    _capture_multi_account(screen_snapshot, size, _fleet, demo=True)
 
 
 @sizes
@@ -326,6 +371,12 @@ def test_ip_ban(screen_snapshot, size: str) -> None:
 def test_ip_ban_configured(screen_snapshot) -> None:
     """The IP ban manager once a ban method exists: no hint."""
     _capture(screen_snapshot, "100x30", _ip_ban_configured)
+
+
+@sizes
+def test_cloudtrail_empty(screen_snapshot, size: str) -> None:
+    """The CloudTrail browser before a fetch: every filter reads on one line."""
+    _capture(screen_snapshot, size, _cloudtrail)
 
 
 @sizes

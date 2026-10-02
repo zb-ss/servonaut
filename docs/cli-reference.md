@@ -429,8 +429,42 @@ servonaut ssh [--user USER] [--port PORT] <instance> [-- <command>...]
 
 | Flag | Description |
 |------|-------------|
-| `--user`, `-u` | Override the SSH username (default: the server's own username, then `default_username`, then `ubuntu`) |
+| `--user`, `-u` | Override the SSH username (default: the matching connection rule's username, except for a custom server; then the server's own username, then `default_username`, then `ubuntu`) |
 | `--port`, `-p` | Override the SSH port (default: the server's own port, else 22) |
+
+Connection rules apply as in the TUI: a server that matches a rule with a
+bastion is reached at its private address through that bastion, with the
+rule's extra SSH options (see [Connection Rules](configuration.md#connection-rules)).
+
+A name is checked against the servers of every account. An account that was
+never listed on this machine (it has no cache yet) is listed once first, so
+its servers count too, within `account_check_timeout_seconds` (see
+[Configuration](configuration.md)). An account that cannot be listed gets a
+`Note:` line on stderr saying why, and is left alone for a while:
+
+| The note says | Tried again after |
+|---------------|-------------------|
+| `timed out after N s` or `no answer: …` (a timeout, or no connection) | `account_retry_seconds` |
+| the provider's error (credentials, permissions, a credential helper, SSO, a missing profile) | its cache TTL |
+| `was only partly listed (…)`: what was listed counts as checked, and the note repeats on every lookup | its cache TTL |
+
+AWS lists the account's own default region first, then `us-east-1`, then the
+rest. When an account is only partly listed in the time allowed, list only the
+regions you use (`aws.regions`, or the account's `regions`) to make it
+complete. The same applies to `servonaut servers verify` and
+`servonaut memory`.
+
+The AWS account without a profile is listed only when AWS is set up on this
+machine: credentials in the environment, a `default` profile with
+credentials in `~/.aws/credentials` or `~/.aws/config`, or an EC2 instance
+(its instance role). Credentials are not resolved just to decide that. An
+account that is set up is listed with the credentials it is configured
+with, so a `credential_process` helper of the profile runs then, as it does
+for any AWS listing: once, and if it fails, again only after the cache TTL.
+A container on an EC2 instance sees the host's firmware details, so it counts
+as an EC2 instance too, but it usually cannot reach the instance role (the
+metadata service's hop limit): its first lookup per cache TTL waits for the
+metadata timeouts and ends with a note that AWS could not be listed.
 
 With no command, an interactive shell opens. With a command, it runs on the
 instance and `servonaut ssh` exits with the command's exit status, like
@@ -473,7 +507,7 @@ Once connected, the exit code is the remote command's (or the session's);
 | `servonaut --update` | Check for and apply updates from PyPI |
 | `servonaut --list-backups` | List local configuration backups, newest first |
 | `servonaut --restore-backup [N]` | Restore configuration backup `N` from `--list-backups` (1 = newest); without `N`, choose from a list |
-| `servonaut --install-desktop` | Create a desktop shortcut (Linux/macOS) |
+| `servonaut --install-desktop` | Add a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS. It replaces the shortcut earlier versions created under the desktop app's name |
 | `servonaut --setup-ovh` | Guided OVHcloud credential setup |
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
 | `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |

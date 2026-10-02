@@ -206,6 +206,11 @@
     text-style: bold;
 }
 
+/* S3 account picker — shown only when the provider has several accounts */
+#s3_account {
+    margin: 0 1 1 1;
+}
+
 /* S3 breadcrumb — slim muted-text path indicator above the table */
 #s3_breadcrumb {
     padding: 0 1 1 1;
@@ -365,6 +370,25 @@
 #aws_create_container DataTable {
     height: auto;
     max-height: 10;
+}
+
+/* The AWS account picker (shown only with several accounts) reads as one
+   more wizard section: its label is drawn like a .section_header. */
+#aws_create_account {
+    width: 100%;
+}
+
+#aws_create_account > Label {
+    width: 100%;
+    padding: 1 0;
+    margin-top: 2;
+    color: $accent;
+    text-style: bold;
+    border-bottom: wide $primary;
+}
+
+#aws_create_account > Select {
+    width: 1fr;
 }
 
 /* Dock the Create / Back row to the bottom of the scroll area so it

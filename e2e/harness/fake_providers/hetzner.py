@@ -6,8 +6,14 @@ server types, locations, images and actions. Every action completes at
 once (``status: success``), and a created server is ``running`` straight
 away, so no journey waits on the SDK's polling.
 
-Journeys seed the account through :class:`HetznerState` and read back what
-the product changed; the request log in ``FakeProviders`` records the calls.
+Each project answers one API token, as a real project does: the primary
+project answers :data:`PRIMARY_TOKEN` (the token ``HomeSeeder.hetzner_config``
+writes) and :meth:`HetznerProjects.add` creates further projects with their
+own tokens. A request with any other token is refused with 401.
+
+Journeys seed a project through its :class:`HetznerState` and read back what
+the product changed; the request log in ``FakeProviders`` records the calls
+with the label of the project each one reached.
 """
 
 from __future__ import annotations
@@ -19,8 +25,20 @@ from typing import Any, Iterable, Optional
 
 from aiohttp import web
 
+from e2e.harness.fake_providers.accounts import ACCOUNT, bearer_token
+
 PREFIX = "/hetzner/v1"
 CREATED_AT = "2026-01-05T10:00:00+00:00"
+# The primary project, as the product labels it when nothing renames it.
+PRIMARY_LABEL = "hetzner"
+PRIMARY_TOKEN = "hz-fake-token"
+# Ids the fake hands out (servers, SSH keys) start here in the primary
+# project; each further project gets its own range, because ids are unique
+# across all of Hetzner, not per project.
+_FIRST_ID = 9000001
+_ID_RANGE = 100000
+# Action ids follow the same ranges, this far below.
+_ACTION_ID_OFFSET = 2000000
 
 # Hetzner's own vocabulary: public taxonomy, not anybody's infrastructure.
 LOCATIONS = (
@@ -86,6 +104,11 @@ POWER_ACTIONS = {
 }
 
 
+def token_for(label: str) -> str:
+    """The placeholder API token of the project labelled *label*."""
+    return PRIMARY_TOKEN if label == PRIMARY_LABEL else f"{PRIMARY_TOKEN}-{label}"
+
+
 @dataclass(frozen=True)
 class SeedServer:
     """A server to put in the fake project before a journey starts."""
@@ -100,9 +123,18 @@ class SeedServer:
 
 
 class HetznerState:
-    """The fake project: servers, SSH keys and the actions taken on them."""
+    """One fake project: servers, SSH keys and the actions taken on them.
 
-    def __init__(self) -> None:
+    *label* names the project in the request log; *token* is the only API
+    token it answers; *first_id* starts the ids the project hands out.
+    """
+
+    def __init__(
+        self, label: str = PRIMARY_LABEL, token: str = PRIMARY_TOKEN, first_id: int = _FIRST_ID
+    ) -> None:
+        self.label = label
+        self.token = token
+        self._first_id = first_id
         self._lock = threading.Lock()
         self.reset()
 
@@ -112,9 +144,10 @@ class HetznerState:
             self.ssh_keys: dict[int, dict] = {}
             self.actions: dict[int, dict] = {}
             self.created_payloads: list[dict] = []
-            self._ids = itertools.count(9000001)
-            self._action_ids = itertools.count(7000001)
-            # Set to an API error code (e.g. "unauthorized") to fail every call.
+            self._ids = itertools.count(self._first_id)
+            self._action_ids = itertools.count(self._first_id - _ACTION_ID_OFFSET)
+            # Set to an API error code (e.g. "unauthorized") to fail every
+            # call made with this project's token.
             self.fail_with: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -175,6 +208,47 @@ class HetznerState:
         }
         self.actions[action_id] = action
         return action
+
+
+class HetznerProjects:
+    """Every fake project, found by the API token a request carries."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.primary = HetznerState()
+        self._extra: dict[str, HetznerState] = {}
+
+    def reset(self) -> None:
+        """Forget the extra projects and empty the primary one."""
+        with self._lock:
+            self._extra.clear()
+        self.primary.label, self.primary.token = PRIMARY_LABEL, PRIMARY_TOKEN
+        self.primary.reset()
+
+    def add(self, label: str, token: Optional[str] = None) -> HetznerState:
+        """A further, empty project answering *token* (default :func:`token_for`)."""
+        token = token or token_for(label)
+        with self._lock:
+            if any(p.label == label or p.token == token for p in self._all()):
+                raise ValueError(f"the Hetzner fake already has a project like {label!r}")
+            first_id = _FIRST_ID + _ID_RANGE * (len(self._extra) + 1)
+            project = HetznerState(label, token, first_id)
+            self._extra[label] = project
+            return project
+
+    def get(self, label: str) -> HetznerState:
+        with self._lock:
+            for project in self._all():
+                if project.label == label:
+                    return project
+        raise KeyError(f"the Hetzner fake has no project {label!r}")
+
+    def for_token(self, token: Optional[str]) -> Optional[HetznerState]:
+        with self._lock:
+            return next((p for p in self._all() if token and p.token == token), None)
+
+    def _all(self) -> list[HetznerState]:
+        return [self.primary, *self._extra.values()]
 
 
 def _find(items: Iterable[dict], name: str) -> dict:
@@ -274,34 +348,37 @@ def _by_id_or_name(items: Iterable[dict], ref: Any) -> Optional[dict]:
     return None
 
 
-def add_routes(app: web.Application, state: HetznerState) -> None:
+def add_routes(app: web.Application, projects: HetznerProjects) -> None:
     """Register the Hetzner routes on *app*."""
 
-    def guard() -> Optional[web.Response]:
-        if state.fail_with:
-            return error_response(401, state.fail_with, "unable to authenticate")
-        return None
+    def authenticated(handler: Any) -> Any:
+        """Run *handler* for the project the request's token belongs to."""
 
-    async def list_servers(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+        async def wrapper(request: web.Request) -> web.StreamResponse:
+            state = projects.for_token(bearer_token(request))
+            if state is None:
+                return error_response(401, "unauthorized", "unable to authenticate")
+            request[ACCOUNT] = state.label
+            if state.fail_with:
+                return error_response(401, state.fail_with, "unable to authenticate")
+            return await handler(request, state)
+
+        return wrapper
+
+    async def list_servers(request: web.Request, state: HetznerState) -> web.Response:
         name = request.query.get("name")
         with state._lock:
             servers = [s for s in state.servers.values() if name is None or s["name"] == name]
         return web.json_response(_page("servers", servers))
 
-    async def get_server(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def get_server(request: web.Request, state: HetznerState) -> web.Response:
         with state._lock:
             server = state.servers.get(int(request.match_info["server_id"]))
         if server is None:
             return error_response(404, "not_found", "server not found")
         return web.json_response({"server": server})
 
-    async def create_server(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def create_server(request: web.Request, state: HetznerState) -> web.Response:
         body = await request.json()
         with state._lock:
             if any(s["name"] == body.get("name") for s in state.servers.values()):
@@ -337,9 +414,7 @@ def add_routes(app: web.Application, state: HetznerState) -> None:
             status=201,
         )
 
-    async def delete_server(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def delete_server(request: web.Request, state: HetznerState) -> web.Response:
         server_id = int(request.match_info["server_id"])
         with state._lock:
             if state.servers.pop(server_id, None) is None:
@@ -347,9 +422,7 @@ def add_routes(app: web.Application, state: HetznerState) -> None:
             action = state._action("delete_server", server_id)
         return web.json_response({"action": action})
 
-    async def server_action(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def server_action(request: web.Request, state: HetznerState) -> web.Response:
         server_id = int(request.match_info["server_id"])
         verb = request.match_info["verb"]
         if verb not in POWER_ACTIONS:
@@ -362,33 +435,27 @@ def add_routes(app: web.Application, state: HetznerState) -> None:
             action = state._action(f"{verb}_server", server_id)
         return web.json_response({"action": action}, status=201)
 
-    async def get_action(request: web.Request) -> web.Response:
+    async def get_action(request: web.Request, state: HetznerState) -> web.Response:
         with state._lock:
             action = state.actions.get(int(request.match_info["action_id"]))
         if action is None:
             return error_response(404, "not_found", "action not found")
         return web.json_response({"action": action})
 
-    async def list_ssh_keys(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def list_ssh_keys(request: web.Request, state: HetznerState) -> web.Response:
         name = request.query.get("name")
         with state._lock:
             keys = [k for k in state.ssh_keys.values() if name is None or k["name"] == name]
         return web.json_response(_page("ssh_keys", keys))
 
-    async def get_ssh_key(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def get_ssh_key(request: web.Request, state: HetznerState) -> web.Response:
         with state._lock:
             key = state.ssh_keys.get(int(request.match_info["key_id"]))
         if key is None:
             return error_response(404, "not_found", "ssh key not found")
         return web.json_response({"ssh_key": key})
 
-    async def create_ssh_key(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def create_ssh_key(request: web.Request, state: HetznerState) -> web.Response:
         body = await request.json()
         with state._lock:
             if any(k["name"] == body.get("name") for k in state.ssh_keys.values()):
@@ -400,18 +467,14 @@ def add_routes(app: web.Application, state: HetznerState) -> None:
             state.ssh_keys[key_id] = key
         return web.json_response({"ssh_key": key}, status=201)
 
-    async def delete_ssh_key(request: web.Request) -> web.Response:
-        if (failure := guard()) is not None:
-            return failure
+    async def delete_ssh_key(request: web.Request, state: HetznerState) -> web.Response:
         with state._lock:
             if state.ssh_keys.pop(int(request.match_info["key_id"]), None) is None:
                 return error_response(404, "not_found", "ssh key not found")
         return web.Response(status=204)
 
     def static_list(key: str, items: tuple) -> Any:
-        async def handler(request: web.Request) -> web.Response:
-            if (failure := guard()) is not None:
-                return failure
+        async def handler(request: web.Request, state: HetznerState) -> web.Response:
             selected = list(items)
             for field in ("type", "architecture", "name"):
                 wanted = request.query.getall(field, [])
@@ -421,17 +484,20 @@ def add_routes(app: web.Application, state: HetznerState) -> None:
 
         return handler
 
-    r = app.router
-    r.add_get(f"{PREFIX}/servers", list_servers)
-    r.add_post(f"{PREFIX}/servers", create_server)
-    r.add_get(f"{PREFIX}/servers/{{server_id:\\d+}}", get_server)
-    r.add_delete(f"{PREFIX}/servers/{{server_id:\\d+}}", delete_server)
-    r.add_post(f"{PREFIX}/servers/{{server_id:\\d+}}/actions/{{verb}}", server_action)
-    r.add_get(f"{PREFIX}/actions/{{action_id:\\d+}}", get_action)
-    r.add_get(f"{PREFIX}/ssh_keys", list_ssh_keys)
-    r.add_post(f"{PREFIX}/ssh_keys", create_ssh_key)
-    r.add_get(f"{PREFIX}/ssh_keys/{{key_id:\\d+}}", get_ssh_key)
-    r.add_delete(f"{PREFIX}/ssh_keys/{{key_id:\\d+}}", delete_ssh_key)
-    r.add_get(f"{PREFIX}/server_types", static_list("server_types", SERVER_TYPES))
-    r.add_get(f"{PREFIX}/locations", static_list("locations", LOCATIONS))
-    r.add_get(f"{PREFIX}/images", static_list("images", IMAGES))
+    routes: list[tuple[str, str, Any]] = [
+        ("GET", "/servers", list_servers),
+        ("POST", "/servers", create_server),
+        ("GET", "/servers/{server_id:\\d+}", get_server),
+        ("DELETE", "/servers/{server_id:\\d+}", delete_server),
+        ("POST", "/servers/{server_id:\\d+}/actions/{verb}", server_action),
+        ("GET", "/actions/{action_id:\\d+}", get_action),
+        ("GET", "/ssh_keys", list_ssh_keys),
+        ("POST", "/ssh_keys", create_ssh_key),
+        ("GET", "/ssh_keys/{key_id:\\d+}", get_ssh_key),
+        ("DELETE", "/ssh_keys/{key_id:\\d+}", delete_ssh_key),
+        ("GET", "/server_types", static_list("server_types", SERVER_TYPES)),
+        ("GET", "/locations", static_list("locations", LOCATIONS)),
+        ("GET", "/images", static_list("images", IMAGES)),
+    ]
+    for method, path, handler in routes:
+        app.router.add_route(method, f"{PREFIX}{path}", authenticated(handler))

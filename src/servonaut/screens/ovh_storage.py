@@ -1,4 +1,8 @@
-"""OVH block storage management screen for Servonaut."""
+"""OVH block storage management screen for Servonaut.
+
+With several OVH accounts configured, a picker chooses the account whose
+Public Cloud projects are listed and changed.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,16 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._provider_accounts import (
+    UnknownAccountError,
+    account_settings,
+    ovh_services,
+    registry_for,
+    show_account_labels,
+    with_account,
+)
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.widgets.account_picker import AccountPicker
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -26,6 +39,11 @@ class OVHStorageScreen(Screen):
         Binding("escape", "back", "Back", show=True),
         Binding("r", "refresh", "Refresh", show=True),
     ]
+
+    # Label of the chosen account; "" is the default account.
+    _account: str = ""
+    # Counts volume list loads; see _load_volumes.
+    _loads: int = 0
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
@@ -42,6 +60,10 @@ class OVHStorageScreen(Screen):
                 Static(
                     "[bold cyan]OVH Block Storage[/bold cyan]",
                     id="storage_title",
+                ),
+                # Hidden unless several OVH accounts are configured.
+                AccountPicker.for_provider(
+                    registry_for(self.app, "ovh"), "ovh", id="storage_account",
                 ),
                 DataTable(id="volumes_table"),
                 Horizontal(
@@ -107,7 +129,17 @@ class OVHStorageScreen(Screen):
     def on_mount(self) -> None:
         self._setup_table()
         self._hide_all_forms()
-        self.run_worker(self._load_volumes(), exclusive=True)
+        picker = self.query_one("#storage_account", AccountPicker)
+        self._account = picker.account
+        show_account_labels(picker)
+        self._start_load()
+
+    def on_account_picker_changed(self, event: AccountPicker.Changed) -> None:
+        """Another account was picked: list its volumes instead."""
+        self._account = event.account
+        self._volumes = []
+        self.query_one("#volumes_table", DataTable).clear()
+        self.action_refresh()
 
     def _setup_table(self) -> None:
         table = self.query_one("#volumes_table", DataTable)
@@ -148,7 +180,12 @@ class OVHStorageScreen(Screen):
     # ------------------------------------------------------------------
 
     def _get_storage_service(self):
-        return getattr(self.app, "ovh_storage_service", None)
+        """The chosen account's storage service (None when unavailable)."""
+        try:
+            return ovh_services(self.app, self._account).storage
+        except UnknownAccountError as exc:
+            self.app.notify(str(exc), severity="error", markup=False)
+            return None
 
     def _display_name(self, value: str) -> str:
         if not self.app.demo_mode:
@@ -184,10 +221,9 @@ class OVHStorageScreen(Screen):
         if config_manager is None:
             return []
         try:
-            config = config_manager.get()
+            ovh_cfg = account_settings(self.app, "ovh", self._account)
         except Exception:
             return []
-        ovh_cfg = getattr(config, "ovh", None)
         if ovh_cfg is None:
             return []
         return list(getattr(ovh_cfg, "cloud_project_ids", []))
@@ -213,6 +249,10 @@ class OVHStorageScreen(Screen):
             )
             return
 
+        # Only the latest load draws: a change reloads the list itself, and an
+        # older load still running must not draw over it.
+        self._loads += 1
+        load = self._loads
         all_volumes: List[dict] = []
         for pid in project_ids:
             try:
@@ -224,6 +264,8 @@ class OVHStorageScreen(Screen):
                 logger.error("list_volumes failed for project %s: %s", pid, exc)
                 self.app.notify(f"Failed to load volumes: {self._provider_error(exc)}", severity="error", markup=False)
 
+        if load != self._loads:
+            return
         self._volumes: List[dict] = all_volumes
 
         table = self.query_one("#volumes_table", DataTable)
@@ -283,7 +325,15 @@ class OVHStorageScreen(Screen):
 
     def action_refresh(self) -> None:
         self._hide_all_forms()
-        self.run_worker(self._load_volumes(), exclusive=True)
+        self._start_load()
+
+    def _start_load(self) -> None:
+        """Load the volumes in a group of their own.
+
+        A reload cancels an older load, never a volume change that is
+        still running.
+        """
+        self.run_worker(self._load_volumes(), group="ovh_storage_load", exclusive=True)
 
     # ------------------------------------------------------------------
     # Create volume
@@ -368,7 +418,9 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_delete",
                         volume_id,
-                        {"name": volume_name, "project_id": project_id},
+                        with_account(self.app, "ovh", self._account, {
+                            "name": volume_name, "project_id": project_id,
+                        }),
                         confirmed=True,
                     )
                 await self._delete_volume(project_id, volume_id, volume_name)
@@ -440,11 +492,11 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_attach",
                         volume_id,
-                        {
+                        with_account(self.app, "ovh", self._account, {
                             "name": volume_name,
                             "project_id": project_id,
                             "instance_id": instance_id,
-                        },
+                        }),
                         confirmed=True,
                     )
                 await self._attach_volume(project_id, volume_id, instance_id, volume_name)
@@ -510,11 +562,11 @@ class OVHStorageScreen(Screen):
                     audit.log_action(
                         "volume_detach",
                         volume_id,
-                        {
+                        with_account(self.app, "ovh", self._account, {
                             "name": volume_name,
                             "project_id": project_id,
                             "instance_id": instance_id,
-                        },
+                        }),
                         confirmed=True,
                     )
                 await self._detach_volume(project_id, volume_id, instance_id, volume_name)

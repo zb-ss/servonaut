@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.config.secrets import resolve_secret
+from servonaut.utils.atomic_file import write_json_atomic
 
 if TYPE_CHECKING:
     from servonaut.config.schema import OVHConfig
@@ -104,25 +107,92 @@ def _first_line(exc: Exception) -> str:
     return lines[0].strip() if lines else type(exc).__name__
 
 
+class _NoAmbientConfig:
+    """A python-ovh configuration source that knows nothing.
+
+    python-ovh builds one of these per client and asks it for every
+    credential the caller left out, reading ``OVH_*`` variables and the
+    ``ovh.conf`` files. An extra account must only ever use its own settings.
+    """
+
+    def get(self, section: str, name: str) -> None:
+        return None
+
+    def read(self, config_file: str) -> None:
+        return None
+
+
+# python-ovh looks its configuration source up at client construction; the
+# swap below must not overlap another client being built.
+_OVH_CONFIG_LOCK = threading.Lock()
+
+
+@contextmanager
+def _ambient_ovh_config(ovh_module, allowed: bool):
+    """Build a python-ovh client with (``allowed``) or without ambient config."""
+    if allowed:
+        with _OVH_CONFIG_LOCK:
+            yield
+        return
+    config_module = ovh_module.client.config
+    with _OVH_CONFIG_LOCK:
+        original = config_module.ConfigurationManager
+        config_module.ConfigurationManager = _NoAmbientConfig
+        try:
+            yield
+        finally:
+            config_module.ConfigurationManager = original
+
+
 class OVHService:
     """Service for fetching OVHcloud instances (dedicated, VPS, Public Cloud)."""
 
-    def __init__(self, config: 'OVHConfig') -> None:
+    def __init__(
+        self,
+        config: 'OVHConfig',
+        cache_path: Optional[Path] = None,
+        allow_ambient_config: bool = True,
+    ) -> None:
         """Initialize OVH service.
 
         Args:
             config: OVHConfig dataclass instance.
+            cache_path: Cache file for this account. None uses the primary
+                account's ``~/.servonaut/ovh_cache.json``.
+            allow_ambient_config: Whether python-ovh may fill credentials this
+                config leaves out from ``OVH_*`` variables and ``ovh.conf``.
+                Only the primary account may: they belong to it, and an extra
+                account picking them up would mix two accounts' credentials
+                (python-ovh then refuses the account outright).
         """
         self._config = config
+        self._allow_ambient_config = allow_ambient_config
+        self._cache_path_override = (
+            Path(cache_path).expanduser() if cache_path is not None else None
+        )
         self._client = None  # lazy-initialized
+        # Seconds per API request; None keeps python-ovh's default (180).
+        self._request_timeout: Optional[float] = None
         # Why the last refresh could not be trusted, or None after a complete
         # successful fetch. Read by the instance list and MCP list_instances.
         self.last_fetch_error: Optional[str] = None
+        # The error behind a failed refresh (None after a complete or partial
+        # one), so a caller can tell a timeout from an error response.
+        self.last_fetch_exception: Optional[BaseException] = None
         # True when some sources refreshed and others failed: the fresh rows
         # are then mixed with cached rows for the failed sources only.
         self.last_fetch_partial: bool = False
         self._failed_sources: List[str] = []
         self._source_errors: Dict[str, str] = {}
+        # No request starts after this (time.monotonic); None: no limit.
+        self._listing_deadline: Optional[float] = None
+        # Sources of the last listing cut short because its time was up.
+        self._late_sources: List[str] = []
+
+    @property
+    def _cache_path(self) -> Path:
+        """This account's cache file (read at call time so tests can patch it)."""
+        return self._cache_path_override or _OVH_CACHE_PATH
 
     def _get_client(self):
         """Lazy-initialize the OVH API client.
@@ -150,24 +220,46 @@ class OVHService:
         consumer_key = resolve_secret(config.consumer_key)
         client_id = resolve_secret(config.client_id)
         client_secret = resolve_secret(config.client_secret)
+        timeout_kwargs = (
+            {"timeout": self._request_timeout} if self._request_timeout is not None else {}
+        )
 
-        if client_id and client_secret:
-            # OAuth2 service account auth
-            self._client = ovh.Client(
-                endpoint=config.endpoint,
-                client_id=client_id,
-                client_secret=client_secret,
-            )
-        else:
-            # Classic 3-key auth
-            self._client = ovh.Client(
-                endpoint=config.endpoint,
-                application_key=application_key,
-                application_secret=application_secret,
-                consumer_key=consumer_key,
-            )
+        with _ambient_ovh_config(ovh, self._allow_ambient_config):
+            if client_id and client_secret:
+                # OAuth2 service account auth
+                self._client = ovh.Client(
+                    endpoint=config.endpoint,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    **timeout_kwargs,
+                )
+            else:
+                # Classic 3-key auth
+                self._client = ovh.Client(
+                    endpoint=config.endpoint,
+                    application_key=application_key,
+                    application_secret=application_secret,
+                    consumer_key=consumer_key,
+                    **timeout_kwargs,
+                )
 
         return self._client
+
+    def limit_listing_time(self, request_seconds: float, start_by_seconds: float) -> None:
+        """Bound the next listing for a caller that will not wait long.
+
+        Every API request gets *request_seconds* (python-ovh's ``timeout``),
+        and no request starts once *start_by_seconds* have passed: what was
+        listed by then comes back as a partial listing (never saved as the
+        cache). The CLI builds its services for one command, so the limits
+        reach no other surface.
+        """
+        self._request_timeout = request_seconds
+        self._listing_deadline = time.monotonic() + start_by_seconds
+        self._client = None
+
+    def _out_of_time(self) -> bool:
+        return self._listing_deadline is not None and time.monotonic() >= self._listing_deadline
 
     # ------------------------------------------------------------------
     # Public async API
@@ -183,10 +275,11 @@ class OVHService:
         instances: List[dict] = []
         self._failed_sources = []
         self._source_errors = {}
+        self._late_sources = []
         attempted = 0
         last_error: Optional[Exception] = None
 
-        if self._config.include_dedicated:
+        if self._config.include_dedicated and self._started_in_time("dedicated"):
             attempted += 1
             try:
                 dedicated = await asyncio.to_thread(self._fetch_dedicated)
@@ -197,7 +290,7 @@ class OVHService:
                 self._record_failed_source("dedicated", e)
                 last_error = e
 
-        if self._config.include_vps:
+        if self._config.include_vps and self._started_in_time("vps"):
             attempted += 1
             try:
                 vps = await asyncio.to_thread(self._fetch_vps)
@@ -210,6 +303,8 @@ class OVHService:
 
         if self._config.include_cloud:
             for project_id in self._config.cloud_project_ids:
+                if not self._started_in_time(f"cloud:{project_id}"):
+                    continue
                 attempted += 1
                 try:
                     cloud = await asyncio.to_thread(self._fetch_cloud, project_id)
@@ -226,6 +321,10 @@ class OVHService:
                     self._record_failed_source(f"cloud:{project_id}", e)
                     last_error = e
 
+        if self._late_sources and not instances:
+            raise OVHFetchError("nothing was listed in the time allowed") from TimeoutError(
+                "listing time is up",
+            )
         if attempted and len(self._failed_sources) == attempted:
             raise OVHFetchError(
                 f"all {attempted} OVH source(s) failed: {last_error}"
@@ -233,6 +332,13 @@ class OVHService:
 
         logger.info("Fetched %d total OVH instances", len(instances))
         return instances
+
+    def _started_in_time(self, source: str) -> bool:
+        """False, and *source* counts as cut short, once the listing's time is up."""
+        if self._out_of_time():
+            self._late_sources.append(source)
+            return False
+        return True
 
     def _record_failed_source(self, source: str, exc: Exception) -> None:
         self._failed_sources.append(source)
@@ -258,6 +364,7 @@ class OVHService:
         except OVHFetchError as exc:
             # Don't poison the cache — keep the previous good entries.
             self.last_fetch_error = str(exc)
+            self.last_fetch_exception = exc
             self.last_fetch_partial = False
             stale = self._load_cache(ignore_ttl=True)
             if stale is not None:
@@ -269,16 +376,29 @@ class OVHService:
             logger.warning("OVH fetch failed (%s); no cached instances to fall back on", exc)
             return []
 
+        if self._late_sources:
+            # Cut short by its time limit: returned, never saved (the cache
+            # would lose every server not listed in time).
+            self.last_fetch_error = "; ".join(
+                f"OVH {_describe_source(source)} not fully listed in the time allowed"
+                for source in self._late_sources
+            )
+            self.last_fetch_partial = True
+            self.last_fetch_exception = None
+            return instances
+
         if self._failed_sources:
             # Save what did refresh and keep the cached rows of the sources
             # that failed. Refusing to save a partial inventory would let one
             # stale project id or one missing permission freeze the whole
             # OVH cache; saving it as fetched would drop those rows.
             instances = self._keep_cached_rows_of_failed_sources(instances)
+            self.last_fetch_exception = None
             self._save_cache(instances)
             return instances
 
         self.last_fetch_error = None
+        self.last_fetch_exception = None
         self.last_fetch_partial = False
         self._save_cache(instances)
         return instances
@@ -320,16 +440,27 @@ class OVHService:
         cached = self._load_cache(ignore_ttl=True)
         return cached if cached is not None else []
 
+    def has_cached_instances(self) -> bool:
+        """Whether this account was listed on this machine: a usable cache
+        exists, whatever its age (an empty one included)."""
+        return self._load_cache(ignore_ttl=True) is not None
+
+    def listing_record(self):
+        """Where a CLI lookup remembers a failed listing (see ``ListingRecord``)."""
+        from servonaut.services.accounts.listing_record import ListingRecord
+
+        return ListingRecord.beside(self._cache_path, _OVH_CACHE_TTL_SECONDS)
+
     def is_cache_fresh(self) -> bool:
         """Check if OVH cache is within TTL.
 
         Returns:
             True if cache exists and has not expired.
         """
-        if not _OVH_CACHE_PATH.exists():
+        if not self._cache_path.exists():
             return False
         try:
-            with open(_OVH_CACHE_PATH, 'r') as f:
+            with open(self._cache_path, 'r') as f:
                 data = json.load(f)
             ts = data.get('timestamp')
             if not ts:
@@ -521,11 +652,12 @@ class OVHService:
 
         application_key = resolve_secret(config.application_key)
 
-        client = ovh.Client(
-            endpoint=config.endpoint,
-            application_key=application_key,
-            application_secret=application_secret,
-        )
+        with _ambient_ovh_config(ovh, self._allow_ambient_config):
+            client = ovh.Client(
+                endpoint=config.endpoint,
+                application_key=application_key,
+                application_secret=application_secret,
+            )
 
         access_rules = [
             # Listing endpoints (/* doesn't match the root list endpoint)
@@ -646,6 +778,9 @@ class OVHService:
 
         instances = []
         for name in server_names:
+            if self._out_of_time():
+                self._late_sources.append("dedicated")
+                break
             try:
                 instance = self._fetch_dedicated_server(name)
                 if instance:
@@ -719,6 +854,9 @@ class OVHService:
 
         instances = []
         for name in vps_names:
+            if self._out_of_time():
+                self._late_sources.append("vps")
+                break
             try:
                 details = client.get(f"/vps/{name}")
                 model = details.get('model') or {}
@@ -972,11 +1110,11 @@ class OVHService:
         Returns:
             List of instance dicts or None if cache invalid/expired.
         """
-        if not _OVH_CACHE_PATH.exists():
+        if not self._cache_path.exists():
             return None
 
         try:
-            with open(_OVH_CACHE_PATH, 'r') as f:
+            with open(self._cache_path, 'r') as f:
                 data = json.load(f)
 
             ts = data.get('timestamp')
@@ -1005,19 +1143,12 @@ class OVHService:
             instances: List of instance dicts to cache.
         """
         try:
-            _OVH_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'timestamp': datetime.now().isoformat(),
                 'instances': instances,
             }
-            # Write with 0o600 permissions so only the owner can read the cache
-            fd = os.open(
-                str(_OVH_CACHE_PATH),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
+            # Atomic, and readable by the owner only (see write_json_atomic).
+            write_json_atomic(self._cache_path, data, sweep_older_than=_OVH_CACHE_TTL_SECONDS)
             logger.debug("Saved %d OVH instances to cache", len(instances))
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             logger.error("Error saving OVH cache: %s", e)

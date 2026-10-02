@@ -22,13 +22,16 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from servonaut.services.aws_service import AWSService
 from servonaut.services.bw_resolver import (
     BwResolver,
     BwCliMissingError,
     BwSessionMissingError,
 )
-from servonaut.services.cache_service import CacheService
+from servonaut.services.connection_service import (
+    ConnectionService,
+    profile_route,
+    rule_username,
+)
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_ACCEPT_NEW,
     HostKeyPolicy,
@@ -37,6 +40,7 @@ from servonaut.services.ssh_host_keys import (
     host_key_alias_options,
     identity_file_args,
 )
+from servonaut.utils.instance_resolver import AmbiguousInstanceError, resolve_unique
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.utils.ephemeral_key import ephemeral_ssh_key
 
@@ -113,33 +117,36 @@ def _init_headless_services() -> Tuple[Any, Any, Any, Any, Any, Any]:
 # Instance resolution helpers
 # ---------------------------------------------------------------------------
 
-def _load_all_instances(
-    aws_service: Any,
+async def _load_all_instances(
+    config: Any,
     custom_server_service: Any,
+    reference: str,
 ) -> List[Dict[str, Any]]:
-    """Return combined list of cached AWS + custom server instances."""
-    # No try/except: the cache layer already absorbs a missing or corrupt
-    # file, so anything raised here is a bug that must surface loudly.
-    instances: List[Dict[str, Any]] = list(aws_service.get_cached_instances())
-    try:
-        instances.extend(custom_server_service.list_as_instances())
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Could not load custom server instances: %s", exc)
-    return instances
+    """Every server *reference* could mean is among these rows.
+
+    Every account's cached servers (AWS, OVH, Hetzner) and the custom ones,
+    plus each account never listed on this machine, read once (see
+    ``CachedFleet.checked_rows``). An account whose servers could not be
+    checked gets a note on stderr.
+    """
+    from servonaut.services.accounts.headless import CachedFleet
+
+    checked = await CachedFleet.from_config(config, custom_server_service).checked_rows(reference)
+    for note in checked.notes:
+        print(note, file=sys.stderr)
+    return checked.rows
 
 
 def _find_instance(
     id_or_name: str,
     instances: List[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Case-insensitive match on ``id`` or ``name`` across the instance list."""
-    needle = id_or_name.lower()
-    for inst in instances:
-        if str(inst.get("id", "")).lower() == needle:
-            return inst
-        if str(inst.get("name", "")).lower() == needle:
-            return inst
-    return None
+    """The instance *id_or_name* names (id, name or ``<account>/<name>``).
+
+    Raises:
+        AmbiguousInstanceError: The reference names several servers.
+    """
+    return resolve_unique(id_or_name, instances)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +161,7 @@ def _run_ssh_probe(
     timeout: int,
     host_key_policy: Optional[HostKeyPolicy] = None,
     instance: Optional[Dict[str, Any]] = None,
+    route: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Run ``ssh -o BatchMode=yes ... true`` and return the exit code.
 
@@ -167,6 +175,9 @@ def _run_ssh_probe(
             (``accept-new``) when None.
         instance: The probed instance, so a cloud instance is pinned by
             its alias; None for a team server.
+        route: The instance's connection-rule route (``profile_route``):
+            its proxy arguments and extra options, the alias included.
+            None for a team server, which only gets the alias options.
     """
     policy = host_key_policy or HostKeyPolicy.from_ssh_config(None)
     cmd = [
@@ -177,8 +188,15 @@ def _run_ssh_probe(
         # keeps what it sent then.
         *policy.ssh_options(off_options=OFF_OPTIONS_ACCEPT_NEW),
     ]
-    for option in host_key_alias_options(instance, policy):
+    if route is None:
+        extra_options, proxy_args = host_key_alias_options(instance, policy), []
+    else:
+        extra_options, proxy_args = route["extra_options"], route["proxy_args"]
+    # The order SSHService.build_ssh_command uses for `servonaut ssh`: OpenSSH
+    # takes the first value of an option, so the probe tests the same path.
+    for option in extra_options:
         cmd += ["-o", option]
+    cmd += proxy_args
     cmd += [*identity_file_args(key_path), "--", f"{user}@{host}", "true"]
     if port is not None and port != 22:
         # Insert -p <port> right after "ssh"
@@ -196,7 +214,9 @@ def _run_ssh_probe(
     problem = detect_host_key_problem(
         getattr(result, "diagnostics", "") or "",
         result.returncode,
-        HostKeyTarget.for_connection(host, port, instance=instance),
+        HostKeyTarget.for_connection(
+            host, port, instance=instance, profile=route["profile"] if route else None,
+        ),
         policy,
         stdout=result.stdout,
     )
@@ -218,6 +238,7 @@ async def _probe_personal(
     port: Optional[int],
     timeout: int,
     host_key_policy: Optional[HostKeyPolicy] = None,
+    route: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Probe personal instance.  Returns a status string or None if no ref stored.
 
@@ -253,6 +274,7 @@ async def _probe_personal(
     with ephemeral_ssh_key(key_body) as key_path:
         rc = _run_ssh_probe(
             key_path, user, host, port, timeout, host_key_policy, instance,
+            route,
         )
 
     return STATUS_VERIFIED if rc == 0 else STATUS_AUTH_FAILED
@@ -310,19 +332,28 @@ async def _probe_team(
 # Resolve connection details for an instance
 # ---------------------------------------------------------------------------
 
-def _resolve_host(instance: Dict[str, Any], host_override: Optional[str]) -> Optional[str]:
-    """Return the effective target host. None if neither override nor IP are available."""
+def _resolve_host(host_override: Optional[str], route: Dict[str, Any]) -> Optional[str]:
+    """Return the effective target host. None if neither override nor IP are available.
+
+    Without ``--host`` it is the route's: the private address through a
+    bastion, else the public one.
+    """
     if host_override:
         return host_override
-    host = instance.get("public_ip") or instance.get("private_ip")
-    return host or None
+    return route["host"] or None
 
 
-def _resolve_user(instance: Dict[str, Any], user_override: Optional[str]) -> str:
-    """Return the effective SSH username."""
+def _resolve_user(
+    instance: Dict[str, Any], user_override: Optional[str], profile: Any = None,
+) -> str:
+    """Return the effective SSH username.
+
+    Priority: ``--user`` > the matching connection rule's username (not for
+    a custom server) > the instance's username > ``ec2-user``.
+    """
     if user_override:
         return user_override
-    return instance.get("username") or "ec2-user"
+    return rule_username(instance, profile) or instance.get("username") or "ec2-user"
 
 
 def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Optional[int]:
@@ -343,6 +374,11 @@ def _resolve_port(instance: Dict[str, Any], port_override: Optional[int]) -> Opt
 async def _cmd_verify(args: Any) -> int:
     """Async body of ``servers verify``."""
     from servonaut import __version__
+    from servonaut.services.accounts import UnknownAccountError
+    from servonaut.services.accounts.headless import (
+        check_configured_reference,
+        with_ovh_login,
+    )
     from servonaut.services.bw_ssh_config_service import STATUS_VERIFIED
 
     checked_by_client = f"servonaut-cli/{__version__}"
@@ -364,8 +400,6 @@ async def _cmd_verify(args: Any) -> int:
         return _EXIT_FATAL
 
     config = config_manager.get()
-    cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
-    aws_service = AWSService(cache_service)
     host_key_policy = HostKeyPolicy.from_ssh_config(config.ssh)
 
     instance_arg: str = args.instance
@@ -387,10 +421,16 @@ async def _cmd_verify(args: Any) -> int:
     team_slug: Optional[str] = None
     team_server_id: Optional[str] = None
 
+    try:
+        check_configured_reference(config, instance_arg)
+        all_instances = await _load_all_instances(config, custom_server_service, instance_arg)
+        personal_instance = _find_instance(instance_arg, all_instances)
+    except (AmbiguousInstanceError, UnknownAccountError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return _EXIT_FATAL
+
     if not is_uuid:
         # Must be a personal instance id/name — look it up in cached lists.
-        all_instances = _load_all_instances(aws_service, custom_server_service)
-        personal_instance = _find_instance(instance_arg, all_instances)
         if personal_instance is None:
             print(
                 f"Instance not found: {instance_arg!r}",
@@ -399,10 +439,7 @@ async def _cmd_verify(args: Any) -> int:
             return _EXIT_FATAL
     else:
         # UUID: try personal first (provider unknown — try each allowed provider).
-        # Walk the instance list to find a matching entry; if found use its provider.
-        all_instances = _load_all_instances(aws_service, custom_server_service)
-        personal_instance = _find_instance(instance_arg, all_instances)
-
+        # The instance list was searched above; if found use its provider.
         if personal_instance is None:
             # Not in local cache by uuid — try team lookup.
             try:
@@ -425,9 +462,13 @@ async def _cmd_verify(args: Any) -> int:
     # Determine host/user for the probe
     # ------------------------------------------------------------------
 
+    route: Optional[Dict[str, Any]] = None
     if personal_instance is not None:
-        host = _resolve_host(personal_instance, host_override)
-        user = _resolve_user(personal_instance, user_override)
+        personal_instance = with_ovh_login(personal_instance, config)
+        # The matching connection rule routes the probe as it routes `ssh`.
+        route = profile_route(personal_instance, ConnectionService.for_config(config))
+        host = _resolve_host(host_override, route)
+        user = _resolve_user(personal_instance, user_override, route["profile"])
         port = _resolve_port(personal_instance, port_override)
         label = (
             f"{personal_instance.get('name') or personal_instance.get('id')} "
@@ -465,7 +506,7 @@ async def _cmd_verify(args: Any) -> int:
             status = await _probe_personal(
                 bw_ssh_cfg, bw_resolver,
                 personal_instance, host, user, port, timeout,
-                host_key_policy,
+                host_key_policy, route,
             )
             if status is None:
                 print(
@@ -543,7 +584,10 @@ def add_servers_parser(subparsers: argparse._SubParsersAction) -> None:
     verify.add_argument(
         "--host",
         default=None,
-        help="Override target host (default: instance.public_ip or private_ip).",
+        help=(
+            "Override target host (default: instance.public_ip or private_ip; "
+            "the private one through a connection rule's bastion)."
+        ),
     )
     verify.add_argument(
         "--user", "-u",

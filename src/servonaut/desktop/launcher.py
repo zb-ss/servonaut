@@ -39,6 +39,10 @@ from servonaut.runtime import (
 logger = logging.getLogger(__name__)
 
 _MB_ICONERROR: Final = 0x00000010
+# The desktop-file ID of the packaged Linux launcher. GTK sends the program
+# name as the window's Wayland app_id and X11 WM_CLASS, which is how a desktop
+# shell matches the window to that launcher (its StartupWMClass).
+LINUX_APP_ID: Final = "dev.servonaut.Servonaut"
 # Text reaches AppleScript as run arguments, never spliced into its source.
 _MACOS_ALERT_SCRIPT: Final = (
     "on run argv",
@@ -106,6 +110,22 @@ def show_native_error(title: str, message: str) -> None:
             )
     except (OSError, AttributeError) as exc:
         logger.warning("Could not show the startup error dialog: %s", exc)
+
+
+def set_linux_program_name(*, platform_name: str | None = None) -> None:
+    """Name the GUI process after its launcher before GTK opens a window.
+
+    pywebview's GTK application has no application id, so GTK falls back to
+    the program name, which otherwise is the executable's file name.
+    """
+    if not (platform_name or sys.platform).startswith("linux"):
+        return
+    try:
+        from gi.repository import GLib
+    except ImportError as exc:
+        logger.warning("Could not set the desktop program name: %s", exc)
+        return
+    GLib.set_prgname(LINUX_APP_ID)
 
 
 def _report_startup_failure(request: DesktopLaunchRequest, reason: str) -> None:
@@ -308,6 +328,7 @@ def run_desktop(request: DesktopLaunchRequest) -> int:
     except ImportError as exc:
         _report_startup_failure(request, f"pywebview is unavailable: {exc}")
         return 1
+    set_linux_program_name()
 
     window: Any = None
 

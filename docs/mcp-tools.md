@@ -26,6 +26,25 @@ Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_
 
 Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, arguments, success flag, and short reason code on early returns.
 
+## Several accounts per provider
+
+When a provider has more than one account configured (see
+[Multiple accounts per provider](multiple-accounts.md)):
+
+- `list_instances` names those servers `label/name` and takes an `account`
+  filter (an account label, or `custom`).
+- Every `instance_id` / `identifier` also accepts `label/name`,
+  `label/<id>` and `custom/<name>`. An instance id always wins, so OVH
+  Public Cloud ids (`<project_id>/<id>`) keep working. A name several
+  servers share is refused with the references that pick each one.
+- Tools that act on a whole account (AWS listings, CloudTrail, CloudWatch,
+  IP bans, S3, Hetzner and OVH registries, billing, create) take an optional
+  `account`; without it they use the provider's primary account. If the
+  primary account cannot connect, name the account to use.
+- Start, stop, reboot and delete find the account the server belongs to
+  themselves; `account` narrows the search. A server that no account lists
+  is refused rather than tried in the primary account.
+
 ## Tool categories
 
 - [Instance inventory and ops](#instance-inventory-and-ops)
@@ -38,9 +57,9 @@ Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, argumen
 
 ## Instance inventory and ops
 
-### `list_instances(region?, state?)`
+### `list_instances(region?, state?, account?)`
 
-List every managed instance (AWS EC2, OVH, custom servers).  Optional filters on `region` or `state`.
+List every managed instance (AWS EC2, OVH, Hetzner, custom servers) of every account.  Optional filters on `region`, `state` or `account`.
 
 ### `check_status(instance_id)`
 

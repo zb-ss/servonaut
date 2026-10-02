@@ -9,10 +9,14 @@ It follows the real API where Servonaut depends on it, and is no more
 lenient than it:
 
 - the JSON 1.1 protocol, dispatched on ``X-Amz-Target``;
-- events per region (the region comes from the request's signing scope),
-  newest first, inside ``StartTime``..``EndTime``;
+- events per account and region, newest first, inside
+  ``StartTime``..``EndTime``. The region comes from the request's signing
+  scope; the account is the one moto runs the request's access key in, so
+  the credentials of a role assumed in another account read that account's
+  trail;
 - ``MaxResults`` from 1 to 50, continued with an opaque ``NextToken`` that
-  is only valid for the same region, time range and lookup attribute;
+  is only valid for the same account, region, time range and lookup
+  attribute;
 - only the FIRST lookup attribute is applied, as the real API does.
 
 A request the real API would reject gets its 400 error (named after the
@@ -34,11 +38,13 @@ import threading
 import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
+
+from e2e.harness.aws import DEFAULT_ACCOUNT
 
 API_PAGE_SIZE = 50
 _TARGET_PREFIX = "CloudTrail_20131101."
-_SCOPE_REGION = re.compile(r"Credential=[^/]+/\d{8}/([a-z0-9-]+)/cloudtrail/")
+_SCOPE = re.compile(r"Credential=([^/]+)/\d{8}/([a-z0-9-]+)/cloudtrail/")
 _ATTRIBUTE_FIELDS = {
     "EventName": lambda event: [event.get("EventName")],
     "Username": lambda event: [event.get("Username")],
@@ -133,9 +139,17 @@ def _max_results(params: dict) -> int:
     return value
 
 
-def _query_key(region: str, params: dict) -> str:
-    """What a NextToken is bound to: the same region, window and attribute."""
+def _moto_account(access_key: str) -> str:
+    """The account moto runs a request signed with *access_key* in."""
+    from moto.iam.models import get_account_id_from
+
+    return get_account_id_from(access_key)
+
+
+def _query_key(account: str, region: str, params: dict) -> str:
+    """What a NextToken is bound to: the same account, region, window and attribute."""
     scope = {
+        "account": account,
         "region": region,
         "start": params.get("StartTime"),
         "end": params.get("EndTime"),
@@ -157,7 +171,8 @@ def _decode_token(token: Any, query: str) -> int:
     if token_query != query:
         raise ApiError(
             "InvalidNextTokenException",
-            "NextToken was issued for a different region, time range or lookup attribute",
+            "NextToken was issued for a different account, region, time range or lookup "
+            "attribute",
         )
     return position
 
@@ -170,10 +185,16 @@ def _wire(event: dict) -> dict:
 
 
 class CloudTrailStub:
-    """The endpoint plus a log of the lookups it answered."""
+    """The endpoint plus a log of the lookups it answered.
 
-    def __init__(self) -> None:
-        self._events: dict[str, list[dict]] = {}
+    *account_of* maps a request's access key id to its account; it defaults
+    to moto's own mapping, as the moto server runs in the same process.
+    """
+
+    def __init__(self, account_of: Callable[[str], str] = _moto_account) -> None:
+        self._account_of = account_of
+        # (account, region) -> events, newest first.
+        self._events: dict[tuple[str, str], list[dict]] = {}
         self._lookups: list[dict] = []
         self._rejections: list[str] = []
         self._lock = threading.Lock()
@@ -205,14 +226,21 @@ class CloudTrailStub:
             self._lookups.clear()
             self._rejections.clear()
 
-    def seed(self, events: Iterable[dict], *, region: str = "us-east-1") -> None:
+    def seed(
+        self,
+        events: Iterable[dict],
+        *,
+        region: str = "us-east-1",
+        account: str = DEFAULT_ACCOUNT,
+    ) -> None:
+        """Add *events* to the trail of *account* in *region*."""
         with self._lock:
-            stored = self._events.setdefault(region, [])
+            stored = self._events.setdefault((account, region), [])
             stored.extend(events)
             stored.sort(key=lambda event: event["EventTime"], reverse=True)
 
     def lookups(self) -> list[dict]:
-        """Every ``LookupEvents`` request received: region and parameters."""
+        """Every ``LookupEvents`` request received: account, region and parameters."""
         with self._lock:
             return [dict(entry) for entry in self._lookups]
 
@@ -230,16 +258,16 @@ class CloudTrailStub:
     # The API
     # ------------------------------------------------------------------
 
-    def _lookup(self, region: str, params: dict) -> dict:
+    def _lookup(self, account: str, region: str, params: dict) -> dict:
         with self._lock:
-            self._lookups.append({"region": region, **params})
-            events = list(self._events.get(region, []))
+            self._lookups.append({"account": account, "region": region, **params})
+            events = list(self._events.get((account, region), []))
         start, end = _epoch(params, "StartTime"), _epoch(params, "EndTime")
         if start is not None and end is not None and start > end:
             raise ApiError("InvalidTimeRangeException", "StartTime is after EndTime")
         attribute = _attribute(params)
         size = _max_results(params)
-        query = _query_key(region, params)
+        query = _query_key(account, region, params)
         offset = _decode_token(params["NextToken"], query) if params.get("NextToken") else 0
         selected = []
         for event in events:
@@ -266,12 +294,13 @@ class CloudTrailStub:
                 params = json.loads(self.rfile.read(length) or b"{}")
                 target = self.headers.get("X-Amz-Target", "")
                 operation = target.rsplit(".", 1)[-1] if _TARGET_PREFIX in target else ""
-                scope = _SCOPE_REGION.search(self.headers.get("Authorization", ""))
+                scope = _SCOPE.search(self.headers.get("Authorization", ""))
                 if operation != "LookupEvents" or scope is None:
                     self._reply(400, {"__type": "UnknownOperationException", "message": target})
                     return
+                access_key, region = scope.groups()
                 try:
-                    body = stub._lookup(scope.group(1), params)
+                    body = stub._lookup(stub._account_of(access_key), region, params)
                 except ApiError as error:
                     stub._reject(error)
                     self._reply(400, {"__type": error.error_type, "message": error.message})

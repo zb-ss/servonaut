@@ -10,8 +10,10 @@ binding, the native window, the page, the one-shot session hand-over and the
 host to work together, so a window that stays blank never passes. The window
 is then photographed; on Linux the security labels its processes run under
 are recorded, and the display servers they are connected to must be exactly
-the one asked for, so a Wayland window that fell back to X11 fails. The
-launcher is then stopped; every process it started must exit with it.
+the one asked for, so a Wayland window that fell back to X11 fails. A
+Wayland window must also announce the app id of the packaged launcher, which
+is how the desktop shell matches the window to it. The launcher is then
+stopped; every process it started must exit with it.
 """
 
 from __future__ import annotations
@@ -63,6 +65,16 @@ _SOCKET_LINK_RE = re.compile(r"socket:\[(\d+)\]")
 _GLIB_PROBLEM_RE = re.compile(
     r"^(?:\*\* )?\([^()]*:\d+\): (?:(\S+)-)?(WARNING|CRITICAL|ERROR) \*\*", re.MULTILINE
 )
+# The desktop-file ID of the packaged launcher, which the GUI takes as its
+# program name (servonaut.desktop.launcher.LINUX_APP_ID). GTK announces it as
+# the Wayland app_id and the X11 WM_CLASS, both from that one program name.
+LINUX_APP_ID = "dev.servonaut.Servonaut"
+# With WAYLAND_DEBUG=client, libwayland logs every request the launcher sends
+# to stderr, one line each, such as
+# "[1234.567] {Default Queue}  -> xdg_toplevel#39.set_app_id(...)"; before
+# libwayland 1.22 an "@" stands where this has "#".
+_WAYLAND_DEBUG_LINE_RE = re.compile(r"^\[ *\d+\.\d+\] .*(?:\n|$)", re.MULTILINE)
+_WAYLAND_APP_ID_RE = re.compile(r'\bxdg_toplevel(?:_v6)?[@#]\d+\.set_app_id\("([^"]*)"\)')
 # Linux lists processes in /proc; macOS has no /proc and asks ps.
 _PS = "/bin/ps"
 _PS_TIMEOUT_SECONDS = 10
@@ -144,6 +156,9 @@ class WindowSmokeReport:
     # How often the launcher's GTK stack logged each kind of GLib warning or
     # critical, such as {"Gtk-CRITICAL": 2}, without the messages.
     launcher_glib_problems: dict[str, int] = field(default_factory=dict)
+    # The app ids the window announced to the Wayland compositor; an X11 or
+    # macOS window reports none.
+    window_app_ids: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2) + "\n"
@@ -212,8 +227,13 @@ def _display_variables(inherited: Mapping[str, str], display: str) -> dict[str, 
     if display == WAYLAND:
         # GTK is held to Wayland, with no X display to fall back to, and gets
         # the compositor's socket as a path, so its own runtime dir stays
-        # private.
-        return {"WAYLAND_DISPLAY": str(wayland_socket(inherited)), "GDK_BACKEND": WAYLAND}
+        # private. libwayland logs the launcher's requests, among them the
+        # app id its window announces.
+        return {
+            "WAYLAND_DISPLAY": str(wayland_socket(inherited)),
+            "GDK_BACKEND": WAYLAND,
+            "WAYLAND_DEBUG": "client",
+        }
     if not inherited.get("DISPLAY"):
         raise WindowSmokeError("the window smoke needs an X display; run it under xvfb-run")
     return {name: inherited[name] for name in _X11_VARIABLES if inherited.get(name)}
@@ -493,6 +513,16 @@ def glib_problems(log_text: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def wayland_app_ids(log_text: str) -> list[str]:
+    """The app ids a WAYLAND_DEBUG=client log shows the window announcing."""
+    return sorted(set(_WAYLAND_APP_ID_RE.findall(log_text)))
+
+
+def without_wayland_debug(log_text: str) -> str:
+    """*log_text* without libwayland's request and event lines."""
+    return _WAYLAND_DEBUG_LINE_RE.sub("", log_text)
+
+
 def wait_until(
     condition: Callable[[], bool],
     timeout_seconds: float,
@@ -578,7 +608,10 @@ def run_window_smoke(
                 else _connected_display(window_processes, display, inherited)
             )
             exit_code = _stop_launcher(process, policy)
-            problems = glib_problems(_read_text(stderr_path))
+            launcher_stderr = _read_text(stderr_path)
+            problems = glib_problems(launcher_stderr)
+            announces_app_id = system != "darwin" and display == WAYLAND
+            app_ids = wayland_app_ids(launcher_stderr) if announces_app_id else []
             tree_exited = wait_until(
                 lambda: not started_tree & process_parents().keys(),
                 policy.window_shutdown_timeout_seconds,
@@ -587,6 +620,11 @@ def run_window_smoke(
                 raise WindowSmokeError(
                     "processes the launcher started outlived it: "
                     f"{sorted(started_tree & process_parents().keys())}"
+                )
+            if announces_app_id and app_ids != [LINUX_APP_ID]:
+                raise WindowSmokeError(
+                    f"the window announced the app id {', '.join(app_ids) or 'none'}, "
+                    f"not {LINUX_APP_ID}, so the desktop shell cannot match it to its launcher"
                 )
         finally:
             _kill_leftovers(process, started_tree)
@@ -602,6 +640,7 @@ def run_window_smoke(
         process_security_labels=labels,
         display_protocols=protocols,
         launcher_glib_problems=problems,
+        window_app_ids=app_ids,
     )
 
 
@@ -720,13 +759,12 @@ def _photograph(
 
 def _diagnostics(home: Path, stderr_path: Path) -> str:
     sections = (
-        ("launcher stderr", stderr_path),
-        ("launcher log", home / _LAUNCHER_LOG),
-        ("child log", home / _CHILD_LOG),
+        ("launcher stderr", without_wayland_debug(_read_text(stderr_path))),
+        ("launcher log", _read_text(home / _LAUNCHER_LOG)),
+        ("child log", _read_text(home / _CHILD_LOG)),
     )
     return "".join(
-        f"\n--- {label} (tail) ---\n{_read_text(path)[-_DIAGNOSTIC_TAIL_BYTES:]}"
-        for label, path in sections
+        f"\n--- {label} (tail) ---\n{text[-_DIAGNOSTIC_TAIL_BYTES:]}" for label, text in sections
     )
 
 
@@ -781,9 +819,10 @@ def main(argv: list[str] | None = None) -> int:
         report_name = f"window-smoke-report-{target.name}-on-{session}.json"
         (args.evidence_dir / report_name).write_text(report.to_json(), encoding="utf-8")
     connected = "".join(f", connected to {name}" for name in report.display_protocols)
+    announced = "".join(f", app id {app_id}" for app_id in report.window_app_ids)
     print(
         f"Window smoke succeeded for {target.name} on {session}: "
-        f"session opened after {report.connect_elapsed_ms} ms{connected}"
+        f"session opened after {report.connect_elapsed_ms} ms{connected}{announced}"
     )
     return 0
 

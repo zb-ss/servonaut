@@ -105,6 +105,16 @@ class TestConfigManager:
         warnings = config_manager._validate(config)
         assert any('negative' in w for w in warnings)
 
+    @pytest.mark.parametrize("name", ["account_check_timeout_seconds", "account_retry_seconds"])
+    def test_validate_lookup_seconds(self, config_manager, name):
+        assert config_manager._validate(AppConfig(**{name: 5})) == []
+        assert config_manager._validate(AppConfig(**{name: -1})) == [
+            f"{name} is negative, should be >= 0"
+        ]
+        assert config_manager._validate(AppConfig(**{name: "ten"})) == [
+            f"{name} is not a number ('ten'); its default is used"
+        ]
+
     def test_validate_invalid_ssh_port(self, config_manager):
         config = AppConfig(
             connection_profiles=[

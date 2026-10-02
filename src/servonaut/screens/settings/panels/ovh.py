@@ -1,18 +1,16 @@
 """OVHcloud settings panel.
 
-Exposes the non-secret scalars of :class:`~servonaut.config.schema.OVHConfig`
-(enabled, endpoint, client_id, default_ssh_key, default_username,
-cloud_project_ids, include_dedicated/vps/cloud switches, ovh_audit_path,
-cost_alert_threshold, cost_alert_currency) plus the object-storage S3 fields
-(access_key, secret_key, region, endpoint_url).
+Holds the provider-wide settings of :class:`~servonaut.config.schema.OVHConfig`:
+whether OVHcloud is listed (``enabled``), the audit log path and the cost
+alert. Everything that belongs to one account — API endpoint and
+credentials, Public Cloud projects, resource types, SSH defaults and Object
+Storage keys — is edited in that account's form,
+:class:`~servonaut.screens.ovh_setup.OVHSetupScreen`, so each setting has one
+place. "Setup OVHcloud" opens the primary account's form; the Accounts
+section lists every account and opens the same form to add or edit one.
 
-Credential fields owned by the OVH setup wizard
-(application_key, application_secret, consumer_key, client_secret) are
-intentionally NOT shown here.  The panel uses ``dataclasses.replace`` when
-saving so those wizard-owned secrets are always preserved.
-
-A "Setup OVHcloud" button opens :class:`~servonaut.screens.ovh_setup.OVHSetupScreen`
-for credential entry, mirroring the legacy behaviour.
+The panel saves with ``dataclasses.replace``, so every field the form owns is
+kept exactly as saved.
 """
 
 from __future__ import annotations
@@ -23,28 +21,21 @@ from typing import Any, Dict
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Button, Input, Select, Static, Switch
+from textual.css.query import NoMatches
+from textual.widgets import Button, Input, Static, Switch
 
+from servonaut.screens.settings.accounts import (
+    OvhAccountsSection,
+    rebuild_accounts,
+    refresh_provider_fleet,
+)
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
-from servonaut.screens.settings.widgets import EnvVarInput, StringListEditor
 
 logger = logging.getLogger(__name__)
 
-_ENDPOINT_OPTIONS = [
-    ("OVH EU (ovh-eu)", "ovh-eu"),
-    ("OVH US (ovh-us)", "ovh-us"),
-    ("OVH CA (ovh-ca)", "ovh-ca"),
-    ("Kimsufi EU (kimsufi-eu)", "kimsufi-eu"),
-    ("Kimsufi CA (kimsufi-ca)", "kimsufi-ca"),
-    ("So You Start EU (soyoustart-eu)", "soyoustart-eu"),
-    ("So You Start CA (soyoustart-ca)", "soyoustart-ca"),
-]
-
-_KNOWN_ENDPOINTS = {ep for _, ep in _ENDPOINT_OPTIONS}
-
 
 class OvhPanel(SettingsPanel):
-    """OVHcloud provider settings: non-secret scalars + object storage S3."""
+    """OVHcloud provider-wide settings plus the list of accounts."""
 
     PANEL_ID = "ovh"
     TITLE = "OVHcloud"
@@ -52,11 +43,6 @@ class OvhPanel(SettingsPanel):
     # Identifiers demo mode hides; see SettingsPanel.DEMO_REDACTED_FIELDS.
     DEMO_REDACTED_FIELDS = {
         "ovh_audit_path": "redact_path",
-        "ovh_s3_endpoint_url": "redact_url",
-        "ovh_client_id": "redact_identifier",
-        "ovh_default_ssh_key": "redact_key_name",
-        "ovh_default_username": "redact_username",
-        "ovh_cloud_project_ids": "redact_identifier",
     }
 
     DEFAULT_CSS = """
@@ -91,10 +77,12 @@ class OvhPanel(SettingsPanel):
         # Status line (updated on load)
         yield Static("", id="ovh_status_display", classes="ovh-status")
 
-        # Setup wizard launcher
-        yield Static("Credentials", classes="ovh-section-header")
+        # The account form
+        yield Static("Account settings", classes="ovh-section-header")
         yield Static(
-            "API keys and S3 credentials are managed in the setup wizard.",
+            "Credentials, projects, SSH defaults and Object Storage keys are "
+            "in each account's form: Setup OVHcloud for the primary account, "
+            "Accounts below for the others.",
             classes="ovh-note",
         )
         yield Horizontal(
@@ -108,57 +96,6 @@ class OvhPanel(SettingsPanel):
             Static("Enable OVHcloud", classes="label"),
             Switch(value=False, id="ovh_enabled"),
             classes="setting_row",
-        )
-        yield Horizontal(
-            Static("API endpoint", classes="label"),
-            Select(
-                _ENDPOINT_OPTIONS,
-                value="ovh-eu",
-                allow_blank=False,
-                id="ovh_endpoint",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("OAuth2 client ID", classes="label"),
-            Input(placeholder="(optional — set in wizard)", id="ovh_client_id"),
-            classes="setting_row",
-        )
-
-        # SSH / connection defaults
-        yield Static("Connection defaults", classes="ovh-section-header")
-        yield Horizontal(
-            Static("Default SSH key", classes="label"),
-            Input(placeholder="~/.ssh/id_rsa", id="ovh_default_ssh_key"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Default username", classes="label"),
-            Input(placeholder="ubuntu", id="ovh_default_username"),
-            classes="setting_row",
-        )
-
-        # Instance filters
-        yield Static("Instance filters", classes="ovh-section-header")
-        yield Horizontal(
-            Static("Include dedicated servers", classes="label"),
-            Switch(value=True, id="ovh_include_dedicated"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Include VPS", classes="label"),
-            Switch(value=True, id="ovh_include_vps"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Include Public Cloud", classes="label"),
-            Switch(value=True, id="ovh_include_cloud"),
-            classes="setting_row",
-        )
-        yield Static("Cloud project IDs", classes="label")
-        yield StringListEditor(
-            placeholder="project-id",
-            id="ovh_cloud_project_ids",
         )
 
         # Audit + cost
@@ -182,42 +119,8 @@ class OvhPanel(SettingsPanel):
             classes="setting_row",
         )
 
-        # Object storage (S3)
-        yield Static("Object Storage (S3-compatible)", classes="ovh-section-header")
-        yield Static(
-            "Access key and secret key support $ENV_VAR syntax.",
-            classes="ovh-note",
-        )
-        yield Horizontal(
-            Static("Access key", classes="label"),
-            EnvVarInput(
-                placeholder="$OVH_S3_ACCESS_KEY or literal",
-                id="ovh_s3_access_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Secret key", classes="label"),
-            EnvVarInput(
-                placeholder="$OVH_S3_SECRET_KEY or literal",
-                password=True,
-                id="ovh_s3_secret_key",
-            ),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Region", classes="label"),
-            Input(placeholder="gra", id="ovh_s3_region"),
-            classes="setting_row",
-        )
-        yield Horizontal(
-            Static("Endpoint URL", classes="label"),
-            Input(
-                placeholder="https://s3.gra.io.cloud.ovh.net",
-                id="ovh_s3_endpoint_url",
-            ),
-            classes="setting_row",
-        )
+        # Accounts (each one edited in its own form)
+        yield OvhAccountsSection(heading_classes="ovh-section-header")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -225,50 +128,45 @@ class OvhPanel(SettingsPanel):
 
     def load(self) -> None:
         """Populate widgets from config and snapshot for dirty tracking."""
-        config = self.app.config_manager.get()
-        ovh = config.ovh
+        ovh = self.app.config_manager.get().ovh
 
         self._set_status(ovh)
-
         self.query_one("#ovh_enabled", Switch).value = ovh.enabled
-
-        endpoint = ovh.endpoint if ovh.endpoint in _KNOWN_ENDPOINTS else "ovh-eu"
-        self.query_one("#ovh_endpoint", Select).value = endpoint
-
-        self._show_field("ovh_client_id", ovh.client_id)
-        self._show_field("ovh_default_ssh_key", ovh.default_ssh_key)
-        self._show_field("ovh_default_username", ovh.default_username)
-
-        self.query_one("#ovh_include_dedicated", Switch).value = ovh.include_dedicated
-        self.query_one("#ovh_include_vps", Switch).value = ovh.include_vps
-        self.query_one("#ovh_include_cloud", Switch).value = ovh.include_cloud
-
-        self._show_field("ovh_cloud_project_ids", list(ovh.cloud_project_ids))
-
         self._show_field("ovh_audit_path", ovh.ovh_audit_path)
         self.query_one("#ovh_cost_threshold", Input).value = str(ovh.cost_alert_threshold)
         self.query_one("#ovh_cost_currency", Input).value = ovh.cost_alert_currency
 
-        s3 = ovh.object_storage
-        self.query_one("#ovh_s3_access_key", EnvVarInput).value = s3.access_key
-        self.query_one("#ovh_s3_secret_key", EnvVarInput).value = s3.secret_key
-        self.query_one("#ovh_s3_region", Input).value = s3.region
-        self._show_field("ovh_s3_endpoint_url", s3.endpoint_url)
-
+        self.query_one(OvhAccountsSection).refresh_accounts()
         self._snapshot_now()
+
+    def refresh_external_state(self) -> None:
+        """Show what the account form saved.
+
+        The form can enable OVHcloud and add, edit or rename accounts. An
+        untouched panel reloads, so a later Save never writes back the values
+        from before the form; unsaved edits are kept and only the status and
+        the accounts are redrawn.
+        """
+        try:
+            if not self.is_dirty():
+                self.load()
+                return
+            self._set_status(self.app.config_manager.get().ovh)
+            self.query_one(OvhAccountsSection).refresh_accounts()
+        except NoMatches:
+            # Settings resumes while this panel is still being built; its
+            # own mount loads it.
+            return
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-show the redacted fields and redraw the accounts table."""
+        super().refresh_after_demo_toggle()
+        self.query_one(OvhAccountsSection).refresh_after_demo_toggle()
 
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
         return {
             "enabled": self.query_one("#ovh_enabled", Switch).value,
-            "endpoint": str(self.query_one("#ovh_endpoint", Select).value),
-            "client_id": self._field_value("ovh_client_id").strip(),
-            "default_ssh_key": self._field_value("ovh_default_ssh_key").strip(),
-            "default_username": self._field_value("ovh_default_username").strip(),
-            "include_dedicated": self.query_one("#ovh_include_dedicated", Switch).value,
-            "include_vps": self.query_one("#ovh_include_vps", Switch).value,
-            "include_cloud": self.query_one("#ovh_include_cloud", Switch).value,
-            "cloud_project_ids": self._field_value("ovh_cloud_project_ids"),
             "ovh_audit_path": self._field_value("ovh_audit_path").strip(),
             "cost_alert_threshold": self.query_one(
                 "#ovh_cost_threshold", Input
@@ -276,10 +174,6 @@ class OvhPanel(SettingsPanel):
             "cost_alert_currency": self.query_one(
                 "#ovh_cost_currency", Input
             ).value.strip(),
-            "s3_access_key": self.query_one("#ovh_s3_access_key", EnvVarInput).value,
-            "s3_secret_key": self.query_one("#ovh_s3_secret_key", EnvVarInput).value,
-            "s3_region": self.query_one("#ovh_s3_region", Input).value.strip(),
-            "s3_endpoint_url": self._field_value("ovh_s3_endpoint_url").strip(),
         }
 
     def collect(self) -> Dict[str, Any]:
@@ -304,68 +198,34 @@ class OvhPanel(SettingsPanel):
 
         return {
             "enabled": vals["enabled"],
-            "endpoint": vals["endpoint"],
-            "client_id": vals["client_id"],
-            "default_ssh_key": vals["default_ssh_key"],
-            "default_username": vals["default_username"],
-            "include_dedicated": vals["include_dedicated"],
-            "include_vps": vals["include_vps"],
-            "include_cloud": vals["include_cloud"],
-            "cloud_project_ids": vals["cloud_project_ids"],
             "ovh_audit_path": vals["ovh_audit_path"] or "~/.servonaut/ovh_audit.json",
             "cost_alert_threshold": threshold,
             "cost_alert_currency": vals["cost_alert_currency"] or "EUR",
-            "s3_access_key": vals["s3_access_key"],
-            "s3_secret_key": vals["s3_secret_key"],
-            "s3_region": vals["s3_region"],
-            "s3_endpoint_url": vals["s3_endpoint_url"],
         }
 
     def persist(self) -> None:
-        """Validate via :meth:`collect` and write OVH config via replace.
+        """Validate via :meth:`collect` and write the provider-wide fields.
 
-        Wizard-owned secrets (application_key, application_secret,
-        consumer_key, client_secret) are preserved via
-        ``dataclasses.replace`` — they are never touched here.
+        ``dataclasses.replace`` keeps every account field (credentials,
+        projects, SSH defaults, Object Storage) exactly as the account form
+        saved it.
         """
-
         fields = self.collect()
 
-        config = self.app.config_manager.get()
-        existing_ovh = config.ovh
-
-        new_s3 = dataclasses.replace(
-            existing_ovh.object_storage,
-            access_key=fields["s3_access_key"],
-            secret_key=fields["s3_secret_key"],
-            region=fields["s3_region"],
-            endpoint_url=fields["s3_endpoint_url"],
-        )
-
+        existing_ovh = self.app.config_manager.get().ovh
         new_ovh = dataclasses.replace(
             existing_ovh,
             enabled=fields["enabled"],
-            endpoint=fields["endpoint"],
-            client_id=fields["client_id"],
-            default_ssh_key=fields["default_ssh_key"],
-            default_username=fields["default_username"],
-            include_dedicated=fields["include_dedicated"],
-            include_vps=fields["include_vps"],
-            include_cloud=fields["include_cloud"],
-            cloud_project_ids=fields["cloud_project_ids"],
             ovh_audit_path=fields["ovh_audit_path"],
             cost_alert_threshold=fields["cost_alert_threshold"],
             cost_alert_currency=fields["cost_alert_currency"],
-            object_storage=new_s3,
-            # Wizard-owned secrets preserved via replace — not changed here:
-            # application_key, application_secret, consumer_key, client_secret
         )
 
         self.app.config_manager.update(ovh=new_ovh)
-
-        # Rebuild OVH object storage service after saving so the new
-        # credentials take effect without a restart.
-        self._rebuild_ovh_object_storage()
+        # The switch decides whether OVHcloud is listed at all.
+        if rebuild_accounts(self.app) and new_ovh.enabled != existing_ovh.enabled:
+            refresh_provider_fleet(self.app, "ovh")
+        self.query_one(OvhAccountsSection).refresh_accounts()
 
         self._set_status(new_ovh)
         self._finish_save("OVHcloud settings saved")
@@ -378,16 +238,12 @@ class OvhPanel(SettingsPanel):
         """Refresh the dirty marker on any input edit."""
         self._dirty_watch()
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        """Refresh the dirty marker on endpoint change."""
-        self._dirty_watch()
-
     def on_switch_changed(self, event: Switch.Changed) -> None:
         """Refresh the dirty marker on any switch toggle."""
         self._dirty_watch()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Open the OVH setup wizard when the setup button is pressed."""
+        """Open the primary account's form when the setup button is pressed."""
         if event.button.id == "ovh_btn_setup":
             event.stop()
             self._open_ovh_setup()
@@ -413,25 +269,7 @@ class OvhPanel(SettingsPanel):
             label.update("Status: Enabled but no credentials set")
 
     def _open_ovh_setup(self) -> None:
-        """Push the OVH credential setup screen."""
+        """Push the primary account's form."""
         from servonaut.screens.ovh_setup import OVHSetupScreen
 
         self.app.push_screen(OVHSetupScreen())
-
-    def _rebuild_ovh_object_storage(self) -> None:
-        """Rebuild the OVH object storage service on the app after saving.
-
-        Mirrors the side-effect in the legacy settings save path
-        (settings.py:2025-2038) so the new credentials are live
-        immediately without a restart.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-
-            config = self.app.config_manager.get()
-            _aws, _hetzner, ovh_oss = build_object_storage_services(config)
-            self.app.ovh_object_storage_service = ovh_oss
-        except Exception as exc:
-            logger.warning("Could not rebuild OVH object storage service: %s", exc)

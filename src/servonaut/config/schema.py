@@ -187,10 +187,13 @@ class IPBanConfig:
         security_group_id: Security group ID (security_group only)
         nacl_id: Network ACL ID (nacl only)
         rule_number_start: Starting rule number for NACL entries (nacl only)
+        account: Label of the AWS account the IP set / security group / NACL
+            lives in. Empty means the default AWS account.
     """
     name: str
     method: str  # 'waf', 'security_group', 'nacl'
     region: str = ""
+    account: str = ""
     # WAF-specific
     ip_set_id: str = ""
     ip_set_name: str = ""
@@ -368,6 +371,131 @@ class ObjectStorageConfig:
         )
 
 
+# Account labels name each provider account on screen and in qualified server
+# references ("prod/web-1"), so they must stay short, unambiguous and safe in
+# a file name (per-account caches are named after them).
+ACCOUNT_LABEL_MAX_LENGTH = 32
+
+
+@dataclass
+class AWSAccount:
+    """An additional AWS account, reached through a named profile.
+
+    The provider block itself (:class:`AWSConfig`) is the primary account;
+    entries in ``AWSConfig.accounts`` are the extra ones.
+
+    Attributes:
+        label: Name shown for this account and used in ``label/name``
+            server references. Unique across every provider.
+        profile: Named profile in the AWS shared config / credentials files.
+            Required: an extra account never falls back to the ambient
+            credential chain, which would silently load the primary account
+            a second time.
+        regions: Regions to list instances from. Empty means every region
+            the account has enabled.
+    """
+
+    label: str = ""
+    profile: str = ""
+    regions: List[str] = field(default_factory=list)
+
+
+@dataclass(repr=False)
+class HetznerAccount:
+    """An additional Hetzner Cloud project (each API token is one project).
+
+    Attributes:
+        label: Name shown for this project and used in ``label/name``
+            server references. Unique across every provider.
+        api_token: Project API token. Supports ``$ENV_VAR`` and ``file:``.
+            Required: an extra project never falls back to ``$HCLOUD_TOKEN``
+            or the hcloud CLI token file, which belong to the primary one.
+        default_hetzner_ssh_key: SSH key name registered in THIS project,
+            used when creating servers here.
+        default_local_ssh_key: Local private key for SSH into this
+            project's servers. Empty inherits the provider default.
+        default_username: SSH username. Empty inherits the provider default.
+        object_storage: S3 credentials for this project's object storage.
+    """
+
+    label: str = ""
+    api_token: str = ""  # supports $ENV_VAR and file:/path/to/token
+    default_hetzner_ssh_key: str = ""
+    default_local_ssh_key: str = ""
+    default_username: str = ""
+    object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+
+    def __repr__(self) -> str:
+        """Redact the API token so the account never leaks into a log line."""
+        token_repr = "'<set>'" if self.api_token else "''"
+        return (
+            f"HetznerAccount(label={self.label!r}, api_token={token_repr}, "
+            f"default_hetzner_ssh_key={self.default_hetzner_ssh_key!r}, "
+            f"default_local_ssh_key={self.default_local_ssh_key!r}, "
+            f"default_username={self.default_username!r}, "
+            f"object_storage={self.object_storage!r})"
+        )
+
+
+@dataclass(repr=False)
+class OVHAccount:
+    """An additional OVHcloud account (its own API credentials).
+
+    Attributes:
+        label: Name shown for this account and used in ``label/name``
+            server references. Unique across every provider.
+        endpoint: OVH API endpoint (``ovh-eu``, ``ovh-ca``, ``ovh-us``, ...).
+        application_key / application_secret / consumer_key: Classic
+            3-key auth. Secrets support ``$ENV_VAR`` and ``file:``.
+        client_id / client_secret: OAuth2 service account (alternative).
+            One complete credential set is required: an extra account never
+            falls back to ``ovh.conf`` or ``OVH_*`` variables, which belong
+            to the primary account.
+        cloud_project_ids: Public Cloud projects of this account to list.
+        include_dedicated / include_vps / include_cloud: Resource types.
+        default_ssh_key: Local private key for this account's servers.
+            Empty inherits the provider default.
+        default_username: SSH username. Empty = automatic per server type.
+        object_storage: S3 credentials for this account's object storage.
+    """
+
+    label: str = ""
+    endpoint: str = "ovh-eu"
+    application_key: str = ""
+    application_secret: str = ""  # supports $ENV_VAR
+    consumer_key: str = ""  # supports $ENV_VAR
+    client_id: str = ""
+    client_secret: str = ""  # supports $ENV_VAR
+    cloud_project_ids: List[str] = field(default_factory=list)
+    include_dedicated: bool = True
+    include_vps: bool = True
+    include_cloud: bool = True
+    default_ssh_key: str = ""
+    default_username: str = ""
+    object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+
+    def __repr__(self) -> str:
+        """Redact every credential so the account never leaks into a log line."""
+        def shown(value: str) -> str:
+            return "'<set>'" if value else "''"
+
+        return (
+            f"OVHAccount(label={self.label!r}, endpoint={self.endpoint!r}, "
+            f"application_key={shown(self.application_key)}, "
+            f"application_secret={shown(self.application_secret)}, "
+            f"consumer_key={shown(self.consumer_key)}, "
+            f"client_id={shown(self.client_id)}, "
+            f"client_secret={shown(self.client_secret)}, "
+            f"cloud_project_ids={self.cloud_project_ids!r}, "
+            f"include_dedicated={self.include_dedicated!r}, "
+            f"include_vps={self.include_vps!r}, "
+            f"include_cloud={self.include_cloud!r}, "
+            f"default_ssh_key={self.default_ssh_key!r}, "
+            f"default_username={self.default_username!r}, "
+            f"object_storage={self.object_storage!r})"
+        )
+
+
 @dataclass(repr=False)
 class AWSConfig:
     """AWS provider configuration for EC2 management and S3 object storage.
@@ -409,6 +537,13 @@ class AWSConfig:
     # falls back to the ambient credential chain instead of the read role.
     control_plane_mutate_role_arn: str = ""
     control_plane_mutate_role_arns: Dict[str, str] = field(default_factory=dict)
+    # Primary account. Empty ``label`` shows as "aws"; empty ``profile`` keeps
+    # the ambient credential chain (env / shared config / instance profile).
+    label: str = ""
+    profile: str = ""
+    regions: List[str] = field(default_factory=list)
+    # Extra accounts, each reached through its own named profile.
+    accounts: List[AWSAccount] = field(default_factory=list)
 
     def __repr__(self) -> str:
         """Custom repr that redacts any nested secrets."""
@@ -423,6 +558,8 @@ class AWSConfig:
             f"control_plane_role_arns={self.control_plane_role_arns!r}, "
             f"control_plane_external_id={ext_repr}, "
             f"assume_role_session_name={self.assume_role_session_name!r}, "
+            f"label={self.label!r}, profile={self.profile!r}, "
+            f"regions={self.regions!r}, accounts={self.accounts!r}, "
             f"object_storage={self.object_storage!r})"
         )
 
@@ -813,6 +950,10 @@ class OVHConfig:
     # Independent of cloud product — a user can have OVH Object Storage
     # without any OVH Public Cloud instances.
     object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+    # The fields above are the primary account; empty ``label`` shows as
+    # "ovh". Extra accounts carry their own credentials.
+    label: str = ""
+    accounts: List[OVHAccount] = field(default_factory=list)
 
 
 @dataclass(repr=False)
@@ -910,6 +1051,10 @@ class HetznerConfig:
     cost_alert_threshold: float = 0.0
     require_ssh_keys_on_create: bool = True
     object_storage: ObjectStorageConfig = field(default_factory=ObjectStorageConfig)
+    # The token above is the primary project; empty ``label`` shows as
+    # "hetzner". Extra projects carry their own tokens.
+    label: str = ""
+    accounts: List[HetznerAccount] = field(default_factory=list)
 
     def __repr__(self) -> str:
         """Custom repr that redacts the API token to prevent log leaks.
@@ -934,6 +1079,7 @@ class HetznerConfig:
             f"audit_path={self.audit_path!r}, "
             f"cost_alert_threshold={self.cost_alert_threshold!r}, "
             f"require_ssh_keys_on_create={self.require_ssh_keys_on_create!r}, "
+            f"label={self.label!r}, accounts={self.accounts!r}, "
             f"object_storage={self.object_storage!r})"
         )
 
@@ -1248,6 +1394,14 @@ class AppConfig:
         instance_keys: Instance-specific SSH key mappings {instance_id: key_path}
         default_username: Default SSH username (default: ec2-user)
         cache_ttl_seconds: Instance cache TTL in seconds (default: 300)
+        account_retry_seconds: With several accounts of a provider, how long
+            an account that failed to answer a server lookup is left alone
+            before it is asked again (default: 30)
+        account_check_timeout_seconds: How long a CLI server lookup waits,
+            in all, for the accounts it lists because they were never listed
+            on this machine; each of their API requests gets as long. An
+            account not listed in time is noted and left alone for its cache
+            TTL; 0 lists none of them (default: 10)
         default_scan_paths: Default paths to scan on all instances
         scan_rules: List of conditional scan rules
         connection_profiles: List of SSH connection profiles
@@ -1262,6 +1416,8 @@ class AppConfig:
     instance_keys: Dict[str, str] = field(default_factory=dict)
     default_username: str = "ec2-user"
     cache_ttl_seconds: int = 3600
+    account_retry_seconds: int = 30
+    account_check_timeout_seconds: int = 10
     default_scan_paths: List[str] = field(default_factory=lambda: ["~/"])
     scan_rules: List[ScanRule] = field(default_factory=list)
     connection_profiles: List[ConnectionProfile] = field(default_factory=list)

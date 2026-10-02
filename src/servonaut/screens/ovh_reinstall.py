@@ -13,13 +13,14 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.screens._provider_accounts import ServerAccountMixin, ServerAuditMixin
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
 
 
-class OVHReinstallScreen(Screen):
+class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
     """Screen for reinstalling a VPS with a new OS image.
 
     Fetches available images from OVHcloud, shows them in a DataTable,
@@ -85,7 +86,7 @@ class OVHReinstallScreen(Screen):
             self.notify("No VPS ID found in instance data.", severity="error")
             return
 
-        ovh_vps_service = getattr(self.app, 'ovh_vps_service', None)
+        ovh_vps_service = self._ovh_service("vps")
         if ovh_vps_service is None:
             self.notify("OVH VPS service is not available.", severity="error")
             return
@@ -184,14 +185,16 @@ class OVHReinstallScreen(Screen):
             ovh_audit.log_action(
                 action="vps_reinstall",
                 target=vps_name,
-                details={"image_id": image.get('id', ''), "image_name": image_name},
+                details=self._audit_details(
+                    {"image_id": image.get('id', ''), "image_name": image_name},
+                ),
                 confirmed=bool(confirmed),
             )
 
         if not confirmed:
             return False
 
-        ovh_vps_service = getattr(self.app, 'ovh_vps_service', None)
+        ovh_vps_service = self._ovh_service("vps")
         if ovh_vps_service is None:
             self.notify("OVH VPS service is not available.", severity="error")
             return False

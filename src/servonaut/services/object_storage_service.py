@@ -6,14 +6,16 @@ import asyncio
 import ipaddress
 import re
 import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 import boto3
 import logging
 
-from servonaut.services.interfaces import ObjectStorageServiceInterface
+from servonaut.services.interfaces import BucketListing, ObjectStorageServiceInterface
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,33 @@ def _validate_endpoint_url(url: str) -> None:
             )
 
 
+def _bucket_entry(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    """The listing dict for one ``ListBuckets`` entry."""
+    created = bucket.get("CreationDate")
+    return {
+        "name": bucket["Name"],
+        "creation_date": created.isoformat() if created else "",
+    }
+
+
+def _try_list_buckets(client: Any) -> Tuple[List[Dict[str, Any]], Optional[Exception]]:
+    """``(buckets, None)`` from one client's ListBuckets, or ``([], error)``."""
+    try:
+        return client.list_buckets().get("Buckets", []), None
+    except Exception as exc:  # noqa: BLE001 — reported per region by the caller
+        return [], exc
+
+
+def _error_code(exc: Exception) -> str:
+    """The S3 error code of *exc* (e.g. ``AccessDenied``), else its type name."""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code")
+        if isinstance(code, str) and code:
+            return code
+    return type(exc).__name__
+
+
 class ObjectStorageService(ObjectStorageServiceInterface):
     """S3-compatible object storage client for AWS, Hetzner, and OVH.
 
@@ -141,6 +170,12 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             instance-profile auth).
         region: AWS region or provider region string.  Empty → boto3 default.
         endpoint_url: Custom S3 endpoint URL.  Empty → use AWS S3.
+        endpoint_template: For a provider whose endpoint is derived from the
+            region, that endpoint with a ``{region}`` placeholder.  Required
+            with *search_regions*.
+        search_regions: For a provider whose ListBuckets answers for one
+            region only (OVH), every region to look for buckets in.  Each
+            bucket found is then reached at its own region's endpoint.
     """
 
     def __init__(
@@ -151,7 +186,17 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         secret_key: str = "",
         region: str = "",
         endpoint_url: str = "",
+        account: Optional[Any] = None,
+        endpoint_template: str = "",
+        search_regions: Sequence[str] = (),
     ) -> None:
+        """Build an S3-compatible storage service.
+
+        Args:
+            account: For AWS, the account (``AWSAccountContext``) whose
+                credentials sign requests when no access key is configured.
+                None keeps the process-wide default credential chain.
+        """
         if provider not in _VALID_PROVIDERS:
             raise ValueError(
                 f"Invalid provider {provider!r}. Must be one of: "
@@ -164,13 +209,32 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             _validate_endpoint_url(endpoint_url)
         # Validate region format to prevent injection into derived URLs.
         self._validate_region(region)
+        if search_regions and not endpoint_template:
+            raise ValueError("search_regions needs an endpoint_template.")
+        searched = tuple(dict.fromkeys(r for r in (region, *search_regions) if r))
+        if endpoint_template:
+            if "{region}" not in endpoint_template:
+                raise ValueError(
+                    f"Endpoint template {endpoint_template!r} has no {{region}} placeholder."
+                )
+            for candidate in searched or ("region",):
+                self._validate_region(candidate)
+                _validate_endpoint_url(endpoint_template.format(region=candidate))
         self._provider = provider
         self._access_key = access_key
         self._secret_key = secret_key
         self._region = region
         self._endpoint_url = endpoint_url
+        self._account = account
+        self._endpoint_template = endpoint_template
+        # Configured region first, so its error is the one reported when no
+        # region answers at all.
+        self._search_regions: Tuple[str, ...] = searched if search_regions else ()
         self._client: Optional[Any] = None
-        # bucket name → home region, populated lazily by _discover_bucket_region.
+        # region → client, for the regional endpoints of endpoint_template.
+        self._regional_clients: Dict[str, Any] = {}
+        self._regional_clients_lock = threading.Lock()
+        # bucket name → home region, populated by discovery and bucket searches.
         self._bucket_regions: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -187,17 +251,38 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         if self._client is not None:
             return self._client
 
+        self._client = self._new_client(self._client_kwargs(self._region))
+        return self._client
+
+    def _client_kwargs(self, region: str) -> Dict[str, Any]:
+        """boto3 client arguments for a client bound to *region*."""
         kwargs: Dict[str, Any] = {}
-        if self._region:
-            kwargs["region_name"] = self._region
-        if self._endpoint_url:
-            kwargs["endpoint_url"] = self._endpoint_url
+        if region:
+            kwargs["region_name"] = region
+        endpoint = self._endpoint_for_region(region)
+        if endpoint:
+            kwargs["endpoint_url"] = endpoint
         if self._access_key and self._secret_key:
             kwargs["aws_access_key_id"] = self._access_key
             kwargs["aws_secret_access_key"] = self._secret_key
+        return kwargs
 
-        self._client = boto3.client("s3", **kwargs)
-        return self._client
+    def _endpoint_for_region(self, region: str) -> str:
+        """The endpoint serving *region*: derived from the template, else fixed."""
+        if self._endpoint_template and region:
+            return self._endpoint_template.format(region=region)
+        return self._endpoint_url
+
+    def _new_client(self, kwargs: Dict[str, Any]) -> Any:
+        """An S3 client; explicit keys win, then the account's credentials."""
+        account = self._account
+        if (
+            account is not None
+            and not account.uses_ambient_credentials
+            and "aws_access_key_id" not in kwargs
+        ):
+            return account.client("s3", **kwargs)
+        return boto3.client("s3", **kwargs)
 
     def _region_for_bucket(
         self, bucket: str, override: str = "", *, discover: bool = False,
@@ -207,6 +292,10 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         Resolution order: explicit *override* → endpoint-pinned region →
         cached discovery → live discovery (only when *discover*) → the
         configured region.
+
+        A provider with *search_regions* always discovers: its regional
+        endpoints never redirect to each other, so a bucket not seen yet is
+        looked for in every region before the request goes out.
 
         Discovery is off by default on purpose.  botocore's
         ``S3RegionRedirectorv2`` already retries a misdirected request against
@@ -225,8 +314,13 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         """
         if override:
             return override
-        # For Hetzner/OVH the endpoint URL encodes the region; there is no
-        # cross-region redirect to discover and no other endpoint to reach.
+        if self._search_regions:
+            if bucket not in self._bucket_regions:
+                self._search_all_regions()
+            return self._bucket_regions.get(bucket, self._region)
+        # For Hetzner (and an OVH endpoint set by hand) the endpoint URL
+        # encodes the region; there is no cross-region redirect to discover
+        # and no other endpoint to reach.
         if self._endpoint_url:
             return self._region
         cached = self._bucket_regions.get(bucket)
@@ -308,14 +402,15 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         """
         if not region or region == self._region:
             return self._get_client()
-
-        kwargs: Dict[str, Any] = {"region_name": region}
-        if self._endpoint_url:
-            kwargs["endpoint_url"] = self._endpoint_url
-        if self._access_key and self._secret_key:
-            kwargs["aws_access_key_id"] = self._access_key
-            kwargs["aws_secret_access_key"] = self._secret_key
-        return boto3.client("s3", **kwargs)
+        if not self._endpoint_template:
+            return self._new_client(self._client_kwargs(region))
+        # Regional endpoints are a fixed, small set, so their clients are kept.
+        with self._regional_clients_lock:
+            client = self._regional_clients.get(region)
+            if client is None:
+                client = self._new_client(self._client_kwargs(region))
+                self._regional_clients[region] = client
+            return client
 
     @property
     def region(self) -> str:
@@ -347,10 +442,12 @@ class ObjectStorageService(ObjectStorageServiceInterface):
     def _reject_pinned_region(self, region: str) -> None:
         """Reject a region override that the configured endpoint cannot honour.
 
-        For Hetzner/OVH the endpoint URL encodes the region, so accepting an
-        override would send the request to the endpoint's region while
-        reporting the requested one back to the caller.  Failing loudly is the
-        honest outcome.
+        For Hetzner, or an OVH endpoint set by hand, the endpoint URL encodes
+        the region, so accepting an override would send the request to the
+        endpoint's region while reporting the requested one back to the
+        caller.  Failing loudly is the honest outcome.  An endpoint derived
+        from a template reaches every region at its own endpoint, so any
+        override is honoured.
 
         Args:
             region: Requested region ("" is always allowed).
@@ -358,7 +455,12 @@ class ObjectStorageService(ObjectStorageServiceInterface):
         Raises:
             ValueError: If an override disagrees with the pinned endpoint.
         """
-        if region and self._endpoint_url and region != self._region:
+        if (
+            region
+            and self._endpoint_url
+            and not self._endpoint_template
+            and region != self._region
+        ):
             raise ValueError(
                 f"Cannot target region {region!r}: provider {self._provider!r} "
                 f"is pinned to endpoint {self._endpoint_url} "
@@ -519,24 +621,68 @@ class ObjectStorageService(ObjectStorageServiceInterface):
 
         Returns:
             List of dicts with keys: ``name`` (str),
-            ``creation_date`` (str ISO-8601 or empty).
+            ``creation_date`` (str ISO-8601 or empty), and ``region`` (str)
+            when every region was searched.
         """
-        def _sync() -> List[Dict[str, Any]]:
-            client = self._get_client()
-            response = client.list_buckets()
-            return [
-                {
-                    "name": b["Name"],
-                    "creation_date": (
-                        b["CreationDate"].isoformat()
-                        if b.get("CreationDate")
-                        else ""
-                    ),
-                }
-                for b in response.get("Buckets", [])
-            ]
+        return (await self.search_buckets()).buckets
 
-        return await asyncio.to_thread(_sync)
+    async def search_buckets(self) -> BucketListing:
+        """List buckets and report where they were looked for.
+
+        With *search_regions*, every region is asked at once and a region
+        that does not answer is reported rather than failing the listing;
+        only when none answers is the configured region's error raised.
+        """
+        if self._search_regions:
+            return await asyncio.to_thread(self._search_all_regions)
+
+        def _sync() -> List[Dict[str, Any]]:
+            response = self._get_client().list_buckets()
+            return [_bucket_entry(b) for b in response.get("Buckets", [])]
+
+        return BucketListing(
+            buckets=await asyncio.to_thread(_sync),
+            endpoint=self._endpoint_url,
+            region=self._region,
+        )
+
+    def _search_all_regions(self) -> BucketListing:
+        """Ask every search region for its buckets and remember where each is.
+
+        Raises:
+            Exception: The first region's error, when no region answered.
+        """
+        # Clients are made here, one after another: building boto3 clients
+        # from several threads at once is not safe.  The calls then run
+        # side by side.
+        clients = {region: self._client_for_region(region) for region in self._search_regions}
+        with ThreadPoolExecutor(max_workers=len(clients)) as pool:
+            answers = dict(zip(clients, pool.map(_try_list_buckets, clients.values())))
+
+        buckets: List[Dict[str, Any]] = []
+        failures: Dict[str, str] = {}
+        errors: List[Exception] = []
+        found: Dict[str, str] = {}
+        for region, (raw, error) in answers.items():
+            if error is not None:
+                failures[region] = _error_code(error)
+                errors.append(error)
+                logger.info("Bucket search: region %s could not be searched: %s", region, error)
+                continue
+            for bucket in raw:
+                entry = _bucket_entry(bucket)
+                entry["region"] = region
+                buckets.append(entry)
+                found.setdefault(entry["name"], region)
+        if len(failures) == len(answers):
+            raise errors[0]
+        self._bucket_regions.update(found)
+        return BucketListing(
+            buckets=buckets,
+            region=self._region,
+            searched_regions=self._search_regions,
+            failed_regions=failures,
+        )
 
     async def create_bucket(self, bucket: str, region: str = "") -> None:
         """Create a new S3 bucket.
@@ -545,9 +691,9 @@ class ObjectStorageService(ObjectStorageServiceInterface):
             bucket: Bucket name to create.
             region: Region to create the bucket in.  Empty → the region this
                 service was configured with (or the credential chain's default
-                when that is also unset).  Only meaningful for AWS: for
-                Hetzner/OVH the region is pinned by the configured endpoint
-                URL, so an override that disagrees with it is rejected rather
+                when that is also unset).  Where the region is pinned by a
+                configured endpoint URL (Hetzner, an OVH endpoint set by
+                hand), an override that disagrees with it is rejected rather
                 than silently creating the bucket somewhere else.
 
         Raises:

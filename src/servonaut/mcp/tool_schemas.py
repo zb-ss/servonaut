@@ -23,12 +23,51 @@ from __future__ import annotations
 from typing import Any, Dict
 
 
+def _account(description: str) -> Dict[str, Any]:
+    """Schema of an optional ``account`` argument (a provider account label)."""
+    return {"type": "string", "description": description}
+
+
+# How every instance argument can be spelled.
+_INSTANCE_REF = (
+    "Instance ID or name. '<account>/<name>' picks the server of one "
+    "provider account; custom servers are 'custom/<name>'."
+)
+_AWS_ACCOUNT = "AWS account label to act in; omit for the default account."
+_HETZNER_ACCOUNT = (
+    "Hetzner project (account label) to act in; omit for the default project."
+)
+_HETZNER_LIST_ACCOUNT = (
+    "Hetzner project (account label) to list; omit to list every project."
+)
+_OVH_ACCOUNT = "OVH account label to act in; omit for the default account."
+_STORAGE_ACCOUNT = (
+    "Account label of the provider whose object storage to use; omit for "
+    "that provider's default account."
+)
+_SERVER_ACCOUNT = (
+    "Account label the server is in; omit to use the account whose "
+    "inventory lists it (else the default account)."
+)
+_SITE_ACCOUNT = (
+    "AWS account label a WebACL/ALB ARN site (or a named ban config) is in; "
+    "omit for the default account. An instance site always uses its own "
+    "account."
+)
+_LIST_ACCOUNT = (
+    "Only this account's servers: an account label, or 'custom' for the "
+    "custom servers."
+)
+
+
 TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     # --- Instance inventory + ops ---------------------------------------
     "list_instances": {
         "description": (
-            "List all managed server instances (AWS EC2, OVH, custom servers). "
-            "Optionally filter by region or state."
+            "List all managed server instances (AWS EC2, OVH, Hetzner, custom "
+            "servers) of every configured account. Optionally filter by region, "
+            "state or account. With several accounts of a provider its servers "
+            "are named '<account>/<name>'; use that form to target one."
         ),
         "schema": {
             "type": "object",
@@ -42,6 +81,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Instance state filter (running, stopped, ...).",
                 },
+                "account": _account(_LIST_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -53,7 +93,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -68,7 +108,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -86,7 +126,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "command": {"type": "string", "description": "Command to execute."},
                 "transport": {
@@ -110,7 +150,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "log_path": {
                     "type": "string",
@@ -134,7 +174,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "local_path": {"type": "string"},
                 "remote_path": {"type": "string"},
@@ -148,7 +188,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     # --- OVH -------------------------------------------------------------
     "ovh_list_ips": {
         "description": "List all IPs on the OVH account with type and routing info.",
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_OVH_ACCOUNT)}},
         "chat_exposed": False,
         "required_service": "ovh",
     },
@@ -158,6 +198,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "ip": {"type": "string", "description": "IP address (e.g. '1.2.3.4')."},
+                "account": _account(_OVH_ACCOUNT),
             },
             "required": ["ip"],
         },
@@ -166,7 +207,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "ovh_ssh_keys": {
         "description": "List SSH keys registered on the OVH account.",
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_OVH_ACCOUNT)}},
         "chat_exposed": False,
         "required_service": "ovh",
     },
@@ -175,7 +216,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "schema": {
             "type": "object",
             "properties": {
-                "instance_id": {"type": "string", "description": "OVH instance ID or name."},
+                "instance_id": {"type": "string", "description": _INSTANCE_REF},
             },
             "required": ["instance_id"],
         },
@@ -192,6 +233,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Optional record type filter (A, MX, CNAME, ...).",
                 },
+                "account": _account(_OVH_ACCOUNT),
             },
             "required": ["zone"],
         },
@@ -200,7 +242,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "ovh_billing": {
         "description": "Get current OVH billing summary including spend and forecast.",
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_OVH_ACCOUNT)}},
         "chat_exposed": False,
         "required_service": "ovh",
     },
@@ -213,6 +255,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "integer",
                     "description": "Maximum number of invoices to return (default: 5).",
                 },
+                "account": _account(_OVH_ACCOUNT),
             },
         },
         "chat_exposed": False,
@@ -222,10 +265,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     # --- Hetzner Cloud --------------------------------------------------
     "hetzner_list_servers": {
         "description": (
-            "List all Hetzner Cloud servers in the user's project. "
-            "Returns name, ID, type, status, public IPv4, and location."
+            "List Hetzner Cloud servers (every configured project unless "
+            "account names one). Returns name, ID, type, status, public "
+            "IPv4, and location."
         ),
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_HETZNER_LIST_ACCOUNT)}},
         "chat_exposed": True,
         "required_service": "hetzner",
     },
@@ -234,7 +278,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "List available Hetzner Cloud server types (cx23, cpx22, "
             "ccx13, ...) with their hourly + monthly EUR prices."
         ),
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_HETZNER_ACCOUNT)}},
         "chat_exposed": True,
         "required_service": "hetzner",
     },
@@ -243,7 +287,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "List SSH keys registered with Hetzner Cloud. Use the names "
             "returned here as the ssh_keys argument to hetzner_create_server."
         ),
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_HETZNER_ACCOUNT)}},
         "chat_exposed": True,
         "required_service": "hetzner",
     },
@@ -266,6 +310,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "Numeric SSH key ID (as a string) or key name."
                     ),
                 },
+                "account": _account(_HETZNER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -292,6 +337,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "prefix (e.g. 'ssh-ed25519 AAA...')."
                     ),
                 },
+                "account": _account(_HETZNER_ACCOUNT),
             },
             "required": ["name", "public_key"],
         },
@@ -358,6 +404,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "returning (default true)."
                     ),
                 },
+                "account": _account(_HETZNER_ACCOUNT),
             },
             "required": ["name"],
         },
@@ -377,9 +424,11 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "identifier": {
                     "type": "string",
                     "description": (
-                        "Numeric server ID (as a string) or server name."
+                        "Numeric server ID (as a string) or server name; "
+                        "'<project>/<name>' picks one project's server."
                     ),
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -397,8 +446,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Numeric server ID or server name.",
+                    "description": "Numeric server ID or server name; "
+                                   "'<project>/<name>' picks one project's server.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -417,8 +468,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Numeric server ID or server name.",
+                    "description": "Numeric server ID or server name; "
+                                   "'<project>/<name>' picks one project's server.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -438,8 +491,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Numeric server ID or server name.",
+                    "description": "Numeric server ID or server name; "
+                                   "'<project>/<name>' picks one project's server.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -458,8 +513,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "identifier": {
                     "type": "string",
-                    "description": "Numeric server ID or server name.",
+                    "description": "Numeric server ID or server name; "
+                                   "'<project>/<name>' picks one project's server.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["identifier"],
         },
@@ -511,6 +568,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "(rare — only useful for snapshot-based images)."
                     ),
                 },
+                "account": _account(_OVH_ACCOUNT),
             },
             "required": ["project_id", "name", "flavor_id", "image_id", "region"],
         },
@@ -530,13 +588,15 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "OVH Public Cloud project ID.",
+                    "description": "OVH Public Cloud project ID "
+                                   "('<account>/<project_id>' picks the account).",
                 },
                 "instance_id": {
                     "type": "string",
                     "description": "Instance identifier (the bare id, "
                                    "not the composite project/id form).",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["project_id", "instance_id"],
         },
@@ -558,7 +618,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "OVH instance identifier. For Cloud instances, "
                         "use the composite '<project_id>/<id>' form so the "
-                        "service can route to the right project."
+                        "service can route to the right project. "
+                        "'<account>/<id>' picks the instance of one account."
                     ),
                 },
                 "provider_type": {
@@ -566,6 +627,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "enum": ["vps", "cloud"],
                     "description": "OVH resource type.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "provider_type"],
         },
@@ -587,7 +649,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": (
                         "OVH instance identifier. For Cloud, use the "
-                        "composite '<project_id>/<id>' form."
+                        "composite '<project_id>/<id>' form. "
+                        "'<account>/<id>' picks the instance of one account."
                     ),
                 },
                 "provider_type": {
@@ -595,6 +658,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "enum": ["vps", "cloud"],
                     "description": "OVH resource type.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "provider_type"],
         },
@@ -615,7 +679,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": (
                         "OVH instance identifier. For Cloud, use the "
-                        "composite '<project_id>/<id>' form."
+                        "composite '<project_id>/<id>' form. "
+                        "'<account>/<id>' picks the instance of one account."
                     ),
                 },
                 "provider_type": {
@@ -623,6 +688,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "enum": ["dedicated", "vps", "cloud"],
                     "description": "OVH resource type.",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "provider_type"],
         },
@@ -758,7 +824,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "format": {
                     "type": "string",
@@ -793,7 +859,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "modules": {
                     "type": "array",
@@ -823,7 +889,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "modules": {
                     "type": "array",
@@ -875,7 +941,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "title": {
                     "type": "string",
@@ -935,7 +1001,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "query": {
                     "type": "string",
@@ -985,6 +1051,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "AWS region (defaults to the boto3 "
                                    "default region when empty).",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -1049,6 +1116,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Return only the event count, not raw lines.",
                     "default": False,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["log_group"],
         },
@@ -1093,6 +1161,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                                    "capped at 50000).",
                     "default": 0,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["log_group"],
         },
@@ -1143,6 +1212,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Max seconds to wait for the query to finish.",
                     "default": 60,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["query"],
         },
@@ -1188,8 +1258,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 },
                 "account": {
                     "type": "string",
-                    "description": "Account id selecting a per-account control-"
-                                   "plane role (optional).",
+                    "description": "An account label (that AWS account's "
+                                   "credentials), or a 12-digit account id "
+                                   "(selects its control-plane role). Omit "
+                                   "for the default account.",
                 },
                 "mutate": {
                     "type": "boolean",
@@ -1258,6 +1330,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                                    "capped at 10000).",
                     "default": 50,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -1269,7 +1342,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "List the configured IP-ban targets (WAF IP sets, security "
             "groups, or network ACLs) available for ip_ban_set."
         ),
-        "schema": {"type": "object", "properties": {}},
+        "schema": {"type": "object", "properties": {"account": _account(_AWS_ACCOUNT)}},
         "chat_exposed": True,
         "required_service": "ip_ban",
     },
@@ -1286,6 +1359,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Name of the IP-ban config "
                                    "(see ip_ban_list_configs).",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["config_name"],
         },
@@ -1338,6 +1412,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "'ban' to block, 'unban' to remove a block.",
                     "default": "ban",
                 },
+                "account": _account(_SITE_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -1355,12 +1430,14 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "EC2 instance ID (i-...).",
+                    "description": "EC2 instance ID (i-...); '<account>/<id or name>' "
+                                   "picks the server of one AWS account.",
                 },
                 "region": {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "region"],
         },
@@ -1377,12 +1454,14 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "EC2 instance ID (i-...).",
+                    "description": "EC2 instance ID (i-...); '<account>/<id or name>' "
+                                   "picks the server of one AWS account.",
                 },
                 "region": {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "region"],
         },
@@ -1398,12 +1477,14 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "EC2 instance ID (i-...).",
+                    "description": "EC2 instance ID (i-...); '<account>/<id or name>' "
+                                   "picks the server of one AWS account.",
                 },
                 "region": {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "region"],
         },
@@ -1422,12 +1503,14 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "EC2 instance ID (i-...).",
+                    "description": "EC2 instance ID (i-...); '<account>/<id or name>' "
+                                   "picks the server of one AWS account.",
                 },
                 "region": {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_SERVER_ACCOUNT),
             },
             "required": ["instance_id", "region"],
         },
@@ -1477,6 +1560,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Number of instances to launch (1–10, default 1).",
                     "default": 1,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": [
                 "region", "ami_id", "instance_type", "key_name",
@@ -1501,6 +1585,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Region used to bootstrap the EC2 client (default: us-east-1).",
                     "default": "us-east-1",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -1535,6 +1620,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Maximum number of results (default: 50).",
                     "default": 50,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["region"],
         },
@@ -1557,6 +1643,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Maximum number of results (default: 100).",
                     "default": 100,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["region"],
         },
@@ -1575,6 +1662,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["region"],
         },
@@ -1592,6 +1680,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["region"],
         },
@@ -1610,6 +1699,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "AWS region (e.g. us-east-1).",
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["region"],
         },
@@ -1630,6 +1720,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "enum": ["aws", "hetzner", "ovh"],
                     "description": "Storage provider.",
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider"],
         },
@@ -1670,10 +1761,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket"],
         },
@@ -1711,10 +1805,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket", "key", "local_path"],
         },
@@ -1743,10 +1840,12 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region to create the bucket in (e.g. 'eu-central-1'). "
                         "Omit to use the configured region for the provider. "
-                        "AWS only — for Hetzner/OVH the region is fixed by the "
-                        "configured endpoint URL and an override is rejected."
+                        "AWS, and OVH when no endpoint URL is configured. For "
+                        "Hetzner, or an OVH endpoint URL set by hand, the region is "
+                        "fixed by that endpoint and an override is rejected."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket"],
         },
@@ -1775,10 +1874,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket"],
         },
@@ -1815,10 +1917,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket", "key", "local_path"],
         },
@@ -1851,10 +1956,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket", "key"],
         },
@@ -1895,10 +2003,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
         },
@@ -1939,8 +2050,10 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the DESTINATION bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
                 "src_region": {
@@ -1950,6 +2063,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                         "source and destination are in different regions."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "src_bucket", "src_key", "dst_bucket", "dst_key"],
         },
@@ -1988,10 +2102,13 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": (
                         "Region the bucket lives in (e.g. 'eu-central-1'). "
                         "Omit unless you know it — it is resolved automatically. "
-                        "AWS only; rejected for Hetzner/OVH, whose region is fixed "
-                        "by the configured endpoint URL."
+                        "AWS, and OVH when no endpoint URL is configured (pass "
+                        "the region s3_list_buckets reports). Rejected for Hetzner, "
+                        "and for an OVH endpoint URL set by hand, whose region is "
+                        "fixed by that endpoint."
                     ),
                 },
+                "account": _account(_STORAGE_ACCOUNT),
             },
             "required": ["provider", "bucket", "key"],
         },
@@ -2012,7 +2129,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "log_path": {
                     "type": "string",
@@ -2066,6 +2183,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Per-host SSH timeout in seconds (5–60, default 15).",
                     "default": 15,
                 },
+                "account": _account(_LIST_ACCOUNT),
             },
         },
         "chat_exposed": True,
@@ -2085,7 +2203,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2105,7 +2223,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2122,7 +2240,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "container": {
                     "type": "string",
@@ -2157,7 +2275,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "container": {
                     "type": "string",
@@ -2190,7 +2308,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "since_minutes": {
                     "type": "integer",
@@ -2219,7 +2337,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "since_minutes": {
                     "type": "integer",
@@ -2252,7 +2370,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "top_n": {
                     "type": "integer",
@@ -2280,7 +2398,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2304,7 +2422,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2325,7 +2443,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2345,7 +2463,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
             },
             "required": ["instance_id"],
@@ -2367,7 +2485,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID or name.",
+                    "description": _INSTANCE_REF,
                 },
                 "since_minutes": {
                     "type": "integer",
@@ -2423,7 +2541,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "full": {
                     "type": "boolean",
@@ -2457,7 +2575,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "limit": {
                     "type": "integer",
@@ -2491,7 +2609,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "AWS instance ID or name.",
+                    "description": "AWS instance ID or name; '<account>/<name>' "
+                                   "picks the server of one AWS account.",
                 },
                 "region": {
                     "type": "string",
@@ -2564,6 +2683,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "AWS region override.",
                 },
+                "account": _account(_SITE_ACCOUNT),
             },
             "required": ["site"],
         },
@@ -2599,6 +2719,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "AWS region override.",
                 },
+                "account": _account(_SITE_ACCOUNT),
             },
             "required": ["ip", "site"],
         },
@@ -2627,6 +2748,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                     "description": "Look-back window in hours (default 3).",
                     "default": 3,
                 },
+                "account": _account(_AWS_ACCOUNT),
             },
             "required": ["db_instance"],
         },
@@ -2646,7 +2768,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "instance_id": {
                     "type": "string",
-                    "description": "Instance ID, name, or custom-server name.",
+                    "description": _INSTANCE_REF,
                 },
                 "search_path": {
                     "type": "string",

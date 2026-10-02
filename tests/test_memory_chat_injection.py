@@ -489,6 +489,27 @@ class TestParseAtPrefix:
         assert inst is None
         assert text == "@unknown hello"
 
+    def test_a_shared_name_is_refused_not_replaced(self) -> None:
+        """An ``@name`` two servers share must never pick one of them."""
+        from servonaut.utils.instance_resolver import (
+            AmbiguousInstanceError,
+            resolve_unique,
+        )
+
+        app = _make_stub_app([
+            dict(_make_inst(iid="i-a", name="web-1"), account="prod", account_qualified=True),
+            dict(_make_inst(iid="i-b", name="web-1"), account="staging", account_qualified=True),
+        ])
+        app.resolve_instance = lambda token: resolve_unique(token, app.instances)
+        with _panel_with_app(app) as panel:
+            with pytest.raises(AmbiguousInstanceError):
+                panel._parse_at_prefix("@web-1 check disk")
+            error = panel._ambiguous_reference("@web-1 check disk")
+            assert error is not None and "prod/web-1" in str(error)
+            inst, text = panel._parse_at_prefix("@staging/web-1 check disk")
+            assert inst["id"] == "i-b" and text == "check disk"
+            assert panel._ambiguous_reference("no prefix") is None
+
     def test_no_prefix_returns_original(self) -> None:
         app = _make_stub_app([])
         with _panel_with_app(app) as panel:

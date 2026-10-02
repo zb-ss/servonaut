@@ -149,6 +149,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 - **Interactive TUI** — mouse + keyboard, powered by [Textual](https://textual.textualize.io/).
 - **Multi-provider fleet** — AWS EC2, OVHcloud (dedicated / VPS / Public Cloud), Hetzner Cloud, and custom servers from any provider (DigitalOcean, on-prem, …) — listed and searchable in one view across all regions.
+- **Multiple accounts per provider** — several AWS accounts (named profiles), Hetzner projects and OVH accounts in the same fleet; servers show as `account/name` and every action runs in the server's own account. → [docs](docs/multiple-accounts.md)
 - **Per-instance dashboard** — click a server for a Server Actions view: a **memory snapshot** (OS, disk, web stack, databases, runtimes, containers) plus an opt-in **live resource monitor** (`L` — CPU / RAM / load / disk / uptime, polled only while open).
 - **SSH & SCP** — one-key SSH in a new terminal window (auto-detected emulator); upload/download files and directories.
 - **Run remote commands** — overlay panel with real-time streaming output, history, and saved favorites.
@@ -195,7 +196,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 - **Instance caching** — stale-while-revalidate for fast startup.
 - **Auto-update** — startup check + one-click update (`servonaut --update`). Stable installations are offered stable releases only; see [Release candidates](docs/release-candidates.md).
-- **Desktop shortcut** — `servonaut --install-desktop` (Linux/macOS).
+- **Terminal shortcut** — `servonaut --install-desktop` adds a launcher that opens the TUI in a terminal: **Servonaut (terminal)** on Linux, **Servonaut Terminal** in `~/Applications` on macOS.
 - **Fully configurable** — everything in `~/.servonaut/config.json`.
 
 ## Prerequisites
@@ -231,7 +232,7 @@ A few flags you may want on day one:
 
 ```bash
 servonaut --update                # Check for updates and upgrade
-servonaut --install-desktop       # Create desktop shortcut (Linux/macOS)
+servonaut --install-desktop       # Add a launcher that opens the TUI in a terminal (Linux/macOS)
 servonaut --setup-ovh             # Guided OVHcloud credential setup
 servonaut --debug                 # Verbose logging to stderr
 ```

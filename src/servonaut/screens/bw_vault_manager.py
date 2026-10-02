@@ -35,6 +35,7 @@ from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.utils.instance_resolver import display_name
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -221,7 +222,7 @@ class BwVaultManagerScreen(Screen):
             return {}
 
         name_by_id = {
-            str(i.get("id", "")): i.get("name", "") for i in getattr(self.app, "instances", [])
+            str(i.get("id", "")): display_name(i) for i in getattr(self.app, "instances", [])
         }
 
         async def _ref_for(inst: dict) -> Optional[dict]:

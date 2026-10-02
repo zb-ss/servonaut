@@ -32,12 +32,15 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import boto3
 
 from servonaut.config.schema import AWSConfig
 from servonaut.config.secrets import resolve_secret
+
+if TYPE_CHECKING:
+    from servonaut.services.accounts.aws_account import AWSAccountContext
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +65,38 @@ class _CachedCredentials:
 class AWSClientFactory:
     """Builds boto3 clients, optionally via STS AssumeRole, with creds caching."""
 
-    def __init__(self, aws_config: Optional[AWSConfig] = None) -> None:
+    def __init__(
+        self,
+        aws_config: Optional[AWSConfig] = None,
+        account: Optional["AWSAccountContext"] = None,
+    ) -> None:
+        """Build a factory.
+
+        Args:
+            aws_config: AWS settings (roles, default region).
+            account: The AWS account whose credentials are the base of every
+                client (and of the STS call when a role is assumed). None
+                keeps the process-wide default credential chain.
+        """
         self._config = aws_config or AWSConfig()
+        self._account = account
         self._cred_cache: Dict[str, _CachedCredentials] = {}
         self._lock = threading.Lock()
+
+    @property
+    def account(self) -> Optional["AWSAccountContext"]:
+        """The AWS account this factory builds clients for (None = ambient)."""
+        return self._account
+
+    def _base_client(self, service: str, **kwargs: Any) -> Any:
+        """A client on this factory's base credentials.
+
+        The ambient-chain account calls this module's ``boto3`` directly, as
+        before extra accounts existed.
+        """
+        if self._account is not None and not self._account.uses_ambient_credentials:
+            return self._account.client(service, **kwargs)
+        return boto3.client(service, **kwargs)
 
     # ------------------------------------------------------------------
     # Public API
@@ -85,16 +116,22 @@ class AWSClientFactory:
         for a write would only ever hit AccessDenied. An empty result means
         "use the ambient credential chain".
         """
-        if mutate:
-            if account:
-                mapped = (self._config.control_plane_mutate_role_arns or {}).get(account)
-                if mapped:
-                    return mapped
-            return self._config.control_plane_mutate_role_arn or ""
+        mapping = (
+            self._config.control_plane_mutate_role_arns if mutate
+            else self._config.control_plane_role_arns
+        ) or {}
         if account:
-            mapped = (self._config.control_plane_role_arns or {}).get(account)
+            mapped = mapping.get(account)
             if mapped:
                 return mapped
+        if self._account is not None and not self._account.ref.primary:
+            # The default roles belong to the primary account. Assumed with
+            # an extra account's credentials, one would act in the primary
+            # account (or be refused), so an extra account only ever assumes
+            # a role mapped to it, and otherwise uses its own credentials.
+            return ""
+        if mutate:
+            return self._config.control_plane_mutate_role_arn or ""
         return self._config.control_plane_role_arn or ""
 
     def uses_assumed_role(self, account: str = "", mutate: bool = False) -> bool:
@@ -122,7 +159,7 @@ class AWSClientFactory:
             kwargs: Dict[str, Any] = {}
             if region_name:
                 kwargs["region_name"] = region_name
-            return boto3.client(service, **kwargs)
+            return self._base_client(service, **kwargs)
 
         creds = self._assume(role_arn)
         kwargs = {
@@ -148,7 +185,7 @@ class AWSClientFactory:
 
         # AssumeRole outside the lock — the STS round-trip can take a moment and
         # we don't want to serialise every other role's lookups behind it.
-        sts = boto3.client("sts")
+        sts = self._base_client("sts")
         assume_kwargs: Dict[str, Any] = {
             "RoleArn": role_arn,
             "RoleSessionName": self._config.assume_role_session_name
@@ -174,12 +211,10 @@ class AWSClientFactory:
 
 
 def build_aws_client_factory(config) -> AWSClientFactory:
-    """Construct an :class:`AWSClientFactory` from an :class:`AppConfig`.
+    """Construct the ambient-credential :class:`AWSClientFactory` from an :class:`AppConfig`.
 
-    Mirrors :func:`servonaut.services.object_storage_factory.build_object_storage_services`
-    — the single shared construction helper called by every wiring site
-    (``app.py``, ``mcp/server.py``, the CLI) so the STS/region resolution logic
-    lives in exactly one place.
+    The account registry (``AccountRegistry.aws_client_factory``) builds the
+    per-account factories; this is the fallback for callers without one.
     """
     aws_config = getattr(config, "aws", None)
     return AWSClientFactory(aws_config)

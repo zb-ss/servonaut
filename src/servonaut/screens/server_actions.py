@@ -29,6 +29,8 @@ from servonaut.utils.memory_panel import render_memory_panel
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
+from servonaut.screens._provider_accounts import ServerAccountMixin
+from servonaut.utils.instance_resolver import display_name
 
 #: Per-action one-line help shown in the detail pane on focus.
 _ACTION_HELP: dict[str, str] = {
@@ -122,7 +124,7 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class ServerActionsScreen(Screen):
+class ServerActionsScreen(ServerAccountMixin, Screen):
     """Screen displaying available actions for a selected EC2 instance.
 
     Shows server information and action buttons:
@@ -292,8 +294,13 @@ class ServerActionsScreen(Screen):
         def field(key: str, default: str) -> str:
             return escape(str(self._instance.get(key) or default))
 
-        name = field('name', 'Unnamed')
+        name = escape(display_name(self._instance) or 'Unnamed')
         public_ip = field('public_ip', 'N/A')
+        # With several accounts of this provider, say which one it is in.
+        account_line = (
+            f"[dim]Account:[/dim] {field('account', '-')}\n"
+            if self._instance.get('account_qualified') else ""
+        )
 
         if self._instance.get('is_ovh'):
             provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
@@ -310,6 +317,7 @@ class ServerActionsScreen(Screen):
             )
             return (
                 f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
+                f"{account_line}"
                 f"[dim]ID:[/dim] {instance_id}\n"
                 f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
                 f"[dim]Public IP:[/dim] {public_ip}\n"
@@ -362,6 +370,7 @@ class ServerActionsScreen(Screen):
 
         return (
             f"[bold cyan]Server: {name}[/bold cyan]\n\n"
+            f"{account_line}"
             f"[dim]Instance ID:[/dim] {instance_id}\n"
             f"[dim]Public IP:[/dim] {public_ip}\n"
             f"[dim]Private IP:[/dim] {private_ip}\n"
@@ -394,14 +403,15 @@ class ServerActionsScreen(Screen):
 
         OVH is asked about the real VPS and address: in demo mode the row
         holds stand-ins OVH has never heard of. Only what is drawn is
-        redacted (see ``_display_reverse_dns``).
+        redacted (see ``_display_reverse_dns``). The VPS is looked up in
+        the OVH account it belongs to.
         """
-        vps_service = getattr(self.app, "ovh_vps_service", None)
-        if vps_service is None:
-            return
         has_real = getattr(self.app, "has_real_record", None)
         if callable(has_real) and has_real(self._instance) is False:
             return  # a stand-in with no real VPS behind it is never sent to OVH
+        vps_service = self._ovh_service("vps")
+        if vps_service is None:
+            return
         real = connection_instance(self.app, self._instance)
         vps_name = real.get('id', '')
         public_ip = real.get('public_ip', '')

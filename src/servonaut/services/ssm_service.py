@@ -19,9 +19,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import boto3
+
+from servonaut.services.accounts.aws_account import aws_client
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,10 @@ _MAX_OUTPUT = 24000
 
 class SSMService:
     """Execute commands on EC2 instances over the SSM agent channel."""
+
+    def __init__(self, account: Optional[Any] = None) -> None:
+        """Args: account: the AWS account the instance lives in (None = default)."""
+        self._account = account
 
     async def run_command(
         self, instance_id: str, command: str,
@@ -60,7 +66,7 @@ class SSMService:
         }
         kwargs = {"region_name": region} if region else {}
         try:
-            ssm = boto3.client("ssm", **kwargs)
+            ssm = aws_client(self._account, boto3, "ssm", **kwargs)
         except Exception as exc:  # noqa: BLE001
             result["error"] = f"ssm client: {exc}"
             return result

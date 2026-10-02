@@ -9,11 +9,12 @@ Covers all fields of :class:`~servonaut.config.schema.AWSConfig`:
   endpoint URL)
 - Control-plane IAM role fields: default ARN, per-account ARN map, external ID
   (EnvVarInput), session name, mutate role ARN, per-account mutate ARN map
+- Accounts: the primary account's label, profile and regions, and the extra
+  accounts (named profiles), saved per account (see ``aws_accounts.py``)
 
-On save the panel replicates the legacy S3-rebuild side-effect: it calls
-``build_object_storage_services`` and reassigns the three object-storage
-service attributes on the app so newly saved credentials take effect without
-an app restart.
+On save the panel reloads the provider accounts (``app.rebuild_accounts``),
+which also rebuilds the object-storage services, so newly saved credentials
+take effect without an app restart.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Input, Select, Static, Switch
 
+from servonaut.screens.settings.accounts import rebuild_accounts
+from servonaut.screens.settings.aws_accounts import AwsAccountsSection
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import EnvVarInput, KeyValueEditor
 from servonaut.services.object_storage_regions import (
@@ -215,6 +218,9 @@ class AwsPanel(SettingsPanel):
             id="aws_mutate_arns",
         )
 
+        # --- Accounts (saved per account, not by the Save dock) -------------
+        yield AwsAccountsSection(heading_classes="aws-subheader")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -255,7 +261,13 @@ class AwsPanel(SettingsPanel):
         self._show_field("aws_mutate_arns", dict(aws.control_plane_mutate_role_arns))
 
         self._update_status_label(aws)
+        self.query_one(AwsAccountsSection).refresh_accounts()
         self._snapshot_now()
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Re-show the redacted fields and redraw the accounts table."""
+        super().refresh_after_demo_toggle()
+        self.query_one(AwsAccountsSection).refresh_after_demo_toggle()
 
     def current_values(self) -> Dict[str, Any]:
         """Return current widget values for dirty comparison."""
@@ -372,33 +384,15 @@ class AwsPanel(SettingsPanel):
             control_plane_mutate_role_arns=fields["mutate_arns"],
         )
         self.app.config_manager.update(aws=new_aws)
-
-        self._rebuild_s3_services()
+        # Every account's services, S3 included, are built from these settings.
+        rebuild_accounts(self.app)
+        self.query_one(AwsAccountsSection).refresh_accounts()
         self._update_status_label(new_aws)
         self._finish_save("AWS settings saved")
 
     # ------------------------------------------------------------------
     # Side-effect helpers
     # ------------------------------------------------------------------
-
-    def _rebuild_s3_services(self) -> None:
-        """Rebuild object-storage services after save so credentials take effect.
-
-        Mirrors the legacy side-effect at settings.py:2022-2034 so the user
-        does not need to restart the app for new S3 credentials to apply.
-        """
-        try:
-            from servonaut.services.object_storage_factory import (
-                build_object_storage_services,
-            )
-            refreshed = self.app.config_manager.get()
-            (
-                self.app.aws_object_storage_service,
-                self.app.hetzner_object_storage_service,
-                self.app.ovh_object_storage_service,
-            ) = build_object_storage_services(refreshed)
-        except Exception as exc:
-            logger.warning("S3 service rebuild after AWS settings save failed: %s", exc)
 
     def _update_status_label(self, aws_config: Any) -> None:
         """Update the status label based on the provided AWS config."""

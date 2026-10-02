@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 
+from servonaut.services.accounts.aws_account import aws_client
+
 logger = logging.getLogger(__name__)
 
 # arn:aws:wafv2:<region>:<acct>:<regional|global>/<webacl|ipset>/<name>/<id>
@@ -54,6 +56,7 @@ def parse_wafv2_arn(arn: str) -> Optional[Dict[str, str]]:
 
 async def resolve_webacl(
     target: str, region: str = "", *, find_instance=None,
+    account: Optional[Any] = None, account_for=None,
 ) -> Dict[str, Any]:
     """Resolve a WebACL from a WebACL ARN, an ALB ARN, or an instance.
 
@@ -61,6 +64,10 @@ async def resolve_webacl(
     it walks the ingress path to find the WebACL fronting its ALB, which needs
     an async ``find_instance(identifier) -> instance dict | None`` callable
     (the MCP tools and the relay executors each supply their own).
+
+    ``account`` is the AWS account an ARN target lives in (None = default).
+    For an instance target, ``account_for(instance)`` returns the account the
+    instance belongs to, so the walk runs with that account's credentials.
 
     Shared by ``waf_rate_rule_set`` (MCP) and the ``rate_limit`` remediation
     executor so the instance→ALB→WebACL walk has a single implementation. AWS
@@ -81,7 +88,7 @@ async def resolve_webacl(
 
     if target.startswith("arn:aws:elasticloadbalancing:"):
         alb_region = (target.split(":")[3] if ":" in target else "") or region
-        summ = await WAFManagementService().get_web_acl_for_resource(
+        summ = await WAFManagementService(account).get_web_acl_for_resource(
             target, alb_region,
         )
         if not summ:
@@ -103,7 +110,8 @@ async def resolve_webacl(
         return {"error": f"{target} is not an AWS instance"}
     from servonaut.services.ingress_path_service import IngressPathService
     eff_region = region or instance.get("region") or ""
-    topo = await IngressPathService().describe(
+    instance_account = account_for(instance) if account_for is not None else account
+    topo = await IngressPathService(instance_account).describe(
         instance.get("id", ""), instance.get("private_ip") or "", eff_region,
     )
     for lb in topo.get("load_balancers", []):
@@ -121,6 +129,10 @@ async def resolve_webacl(
 class WAFManagementService:
     """Add IPs to a WebACL's block IP set, and add/remove rate-based rules."""
 
+    def __init__(self, account: Optional[Any] = None) -> None:
+        """Args: account: the AWS account the WebACL lives in (None = default)."""
+        self._account = account
+
     async def get_web_acl_for_resource(
         self, resource_arn: str, region: str = "",
     ) -> Optional[Dict[str, str]]:
@@ -135,7 +147,7 @@ class WAFManagementService:
     ) -> Optional[Dict[str, str]]:
         kwargs = {"region_name": region} if region else {}
         try:
-            client = boto3.client("wafv2", **kwargs)
+            client = aws_client(self._account, boto3, "wafv2", **kwargs)
             resp = client.get_web_acl_for_resource(ResourceArn=resource_arn)
         except Exception as exc:  # noqa: BLE001
             logger.warning("get_web_acl_for_resource(%s): %s", resource_arn, exc)
@@ -169,7 +181,7 @@ class WAFManagementService:
         }
         kwargs = {"region_name": region} if region else {}
         try:
-            client = boto3.client("wafv2", **kwargs)
+            client = aws_client(self._account, boto3, "wafv2", **kwargs)
             acl = client.get_web_acl(Name=web_acl_name, Scope=scope, Id=web_acl_id)
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"get_web_acl: {exc}"
@@ -342,7 +354,7 @@ class WAFManagementService:
         }
         kwargs = {"region_name": region} if region else {}
         try:
-            client = boto3.client("wafv2", **kwargs)
+            client = aws_client(self._account, boto3, "wafv2", **kwargs)
             resp = client.get_web_acl(Name=web_acl_name, Scope=scope, Id=web_acl_id)
         except Exception as exc:  # noqa: BLE001
             out["error"] = f"get_web_acl: {exc}"

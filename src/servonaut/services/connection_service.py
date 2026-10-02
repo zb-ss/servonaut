@@ -31,6 +31,99 @@ def _int_setting(value: object, default: int) -> int:
         return default
 
 
+def _ovh_account_config(config, instance: dict):
+    """The OVH settings of the account *instance* belongs to (primary if unknown)."""
+    from servonaut.config.accounts import ovh_accounts
+
+    label = str(instance.get("account") or "").lower()
+    if label:
+        for ref, effective in ovh_accounts(config):
+            if ref.key == label:
+                return effective
+    return config.ovh
+
+
+def profile_route(instance: dict, connection_service: "ConnectionService") -> dict:
+    """The connection profile's part of reaching *instance*.
+
+    Applies the first matching connection rule: the target host (the private
+    address through a bastion), the proxy arguments for the bastion hop, and
+    the extra ssh options (the host-key alias first, then the profile's and
+    the server's own). Every surface that opens ssh to a server routes it
+    this way; the username, key and port stay each surface's own.
+
+    Returns:
+        ``profile`` (None for a direct connection), ``host``,
+        ``proxy_args`` and ``extra_options``.
+    """
+    profile = connection_service.resolve_profile(instance)
+    return {
+        'profile': profile,
+        'host': connection_service.get_target_host(instance, profile),
+        'proxy_args': connection_service.get_proxy_args(profile) if profile else [],
+        'extra_options': connection_service.get_extra_options(instance, profile),
+    }
+
+
+def rule_username(instance: dict, profile: Optional[ConnectionProfile]) -> Optional[str]:
+    """The matching connection rule's username for *instance*, as the TUI applies it.
+
+    It outranks a cloud server's provider or account default; a custom
+    server keeps the username saved with it.
+    """
+    if profile is None or instance.get('is_custom'):
+        return None
+    return profile.username or None
+
+
+def server_connection(
+    instance: dict, connection_service: "ConnectionService", ssh_service,
+    default_username: str,
+) -> dict:
+    """SSH parameters for one server row of any provider.
+
+    Shared by the MCP tools and the relay, so every headless surface
+    connects to AWS, OVH, Hetzner and custom servers the same way. The
+    services are passed in, so each surface keeps its own instances.
+
+    Returns:
+        ``host``, ``username``, ``key_path``, ``proxy_args``, ``profile``,
+        ``port`` and ``extra_options``.
+    """
+    route = profile_route(instance, connection_service)
+    profile = route['profile']
+
+    if instance.get('is_ovh'):
+        # The defaults of the OVH account the server belongs to.
+        options = connection_service.resolve_ovh_connection(instance)
+        username = options['username']
+        key_path = options['key_path']
+        port = None
+    elif instance.get('is_hetzner'):
+        # Hetzner rows carry their project's SSH defaults (the key resolved
+        # via $ENV_VAR/file: at probe time). Stock images have no non-root
+        # user, so the fallback is the operator's default, then root.
+        username = instance.get('username') or default_username or 'root'
+        key_path = instance.get('ssh_key') or None
+        port = None
+    elif instance.get('is_custom'):
+        username = instance.get('username') or default_username or 'root'
+        key_path = instance.get('ssh_key') or instance.get('key_name') or None
+        port = instance.get('port') or None
+    else:
+        username = (profile.username if profile else None) or default_username
+        key_path = ssh_service.get_key_path(instance.get('id', ''))
+        if not key_path and instance.get('key_name'):
+            key_path = ssh_service.discover_key(instance['key_name'])
+        port = None
+
+    return {
+        'host': route['host'], 'username': username, 'key_path': key_path,
+        'proxy_args': route['proxy_args'], 'profile': profile, 'port': port,
+        'extra_options': route['extra_options'],
+    }
+
+
 class ConnectionService(ConnectionServiceInterface):
     """Connection service for resolving connection profiles and bastion configuration.
 
@@ -45,21 +138,33 @@ class ConnectionService(ConnectionServiceInterface):
         """
         self._config_manager = config_manager
 
+    @classmethod
+    def for_config(cls, config) -> "ConnectionService":
+        """A service over an already loaded config (one-shot CLI commands)."""
+        from types import SimpleNamespace
+
+        return cls(SimpleNamespace(get=lambda: config))
+
     def resolve_ovh_connection(
         self, instance: dict, fallback_key: Optional[str] = None,
     ) -> SSHConnectionOptions:
-        """Use the same OVH defaults for interactive SSH and background reads."""
+        """Use the same OVH defaults for interactive SSH and background reads.
+
+        The defaults come from the OVH account the server belongs to, so an
+        extra account's key and username apply to its own servers.
+        """
         from servonaut.services.ovh_service import OVHService
 
         config = self._config_manager.get()
+        ovh = _ovh_account_config(config, instance)
         return {
             "host": instance.get("public_ip") or instance.get("private_ip") or "",
-            "username": config.ovh.default_username or OVHService.default_username(
+            "username": ovh.default_username or OVHService.default_username(
                 instance.get("provider_type", "vps"),
             ),
             "key_path": (
                 config.instance_keys.get(instance.get("id", ""))
-                or config.ovh.default_ssh_key or config.default_key or fallback_key
+                or ovh.default_ssh_key or config.default_key or fallback_key
             ),
             "proxy_args": [],
             "port": None,

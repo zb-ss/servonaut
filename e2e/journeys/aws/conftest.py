@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import pytest
 
-from e2e.harness import fleet
+from e2e.harness import endpoints, fleet
 from e2e.harness.bootstrap import Sandbox
 from e2e.harness.seed import HomeSeeder
 
@@ -32,8 +32,9 @@ def cloudtrail(_cloudtrail_server: Any, moto: Any, journey: Any, monkeypatch: An
     journey that means to send one takes it with ``take_rejections()``.
     """
     _cloudtrail_server.reset()
-    monkeypatch.setenv("AWS_ENDPOINT_URL_CLOUDTRAIL", _cloudtrail_server.url)
-    journey.env_overrides["AWS_ENDPOINT_URL_CLOUDTRAIL"] = _cloudtrail_server.url
+    for key, value in endpoints.cloudtrail_env(_cloudtrail_server).items():
+        monkeypatch.setenv(key, value)
+        journey.env_overrides[key] = value
     yield _cloudtrail_server
     rejected = _cloudtrail_server.take_rejections()
     if rejected:
