@@ -159,6 +159,23 @@ def test_ai_quota_falls_back_to_exact_micros_when_server_display_is_missing(
     assert "Tokens remaining:" not in output
 
 
+def test_ai_quota_shows_a_capped_members_limit_before_the_team_pool(monkeypatch, capsys):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "ok",
+        "remaining_micros": 72_496_738, "member_limit_micros": 2_000_000,
+        "member_spent_micros": 3_262, "approx_requests_remaining": 199,
+        "display": {"remaining": "£72.50", "member_limit": "£2.00", "member_spent": "< £0.01"},
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Your limit this period: £2.00 (< £0.01 used)"
+    assert lines[1] == "Team balance remaining: £72.50"
+    assert "Balance remaining: £72.50" not in lines
+
+
 def test_ai_quota_explains_when_a_balance_payload_is_unusable(monkeypatch, capsys):
     services = _make_services(quota={
         "tokens_used": 0, "tokens_limit": 1_000_000,

@@ -97,6 +97,28 @@ class AIHostedBalance:
         value = _int_or_none(self.raw.get("approx_requests_remaining"))
         return value if value is None or value >= 0 else None
 
+    @property
+    def payer_is_team(self) -> bool:
+        """Whether this balance is the team pool the caller spends from."""
+        return self.raw.get("payer_type") == "team"
+
+    @property
+    def remaining_label(self) -> str:
+        """Name the remaining amount after whose money it is."""
+        return "Team balance remaining" if self.payer_is_team else "Balance remaining"
+
+    def member_limit_summary(self) -> str:
+        """Return "<limit> (<spent> used)" for a capped team member, else ``""``.
+
+        A member with a per-member limit can spend only that limit, however
+        much is left in the team pool, so surfaces show it before the pool.
+        """
+        limit = safe_terminal_text(self.human_display("member_limit"))
+        if not limit:
+            return ""
+        spent = safe_terminal_text(self.human_display("member_spent"))
+        return f"{limit} ({spent} used)" if spent else limit
+
     def display_value(self, name: str) -> str:
         """Return the untouched server display string, when present."""
         return self.display.get(name, "")

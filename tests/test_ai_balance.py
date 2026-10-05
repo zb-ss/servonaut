@@ -153,3 +153,30 @@ def test_server_pack_display_wins_with_a_money_fallback_for_older_servers() -> N
     })
     assert grouped is not None
     assert (grouped.display_price, grouped.display_credit) == ("£1,234", "£1,234.56")
+
+
+_CAPPED_MEMBER = {
+    "currency": "GBP", "payer_type": "team", "state": "ok",
+    "remaining_micros": 72_496_738, "member_limit_micros": 2_000_000, "member_spent_micros": 3_262,
+    "display": {"remaining": "£72.50", "member_limit": "£2.00", "member_spent": "< £0.01"},
+}
+
+
+def test_capped_team_member_sees_their_limit_and_the_pool_named_as_the_team() -> None:
+    balance = AIHostedBalance.from_dict(_CAPPED_MEMBER)
+
+    assert balance is not None
+    assert balance.member_limit_summary() == "£2.00 (< £0.01 used)"
+    assert balance.payer_is_team is True
+    assert balance.remaining_label == "Team balance remaining"
+
+
+def test_member_limit_summary_falls_back_to_exact_micros_and_is_empty_without_a_limit() -> None:
+    fallback = AIHostedBalance.from_dict({
+        "currency": "GBP", "member_limit_micros": 2_000_000, "member_spent_micros": 500_000,
+    })
+    personal = AIHostedBalance.from_dict({"currency": "GBP", "payer_type": "user", "remaining_micros": 1})
+
+    assert fallback is not None and fallback.member_limit_summary() == "£2.00 (£0.50 used)"
+    assert personal is not None and personal.member_limit_summary() == ""
+    assert personal.remaining_label == "Balance remaining"

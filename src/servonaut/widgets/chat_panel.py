@@ -1126,7 +1126,12 @@ class ChatPanel(Widget):
                 footer.update("[dim]Balance:[/dim] unavailable — refresh to retry")
                 footer.remove_class("hidden")
                 return
-            parts = [f"[dim]Balance:[/dim] [bold]{_rich_escape(remaining)}[/bold]"]
+            parts = []
+            member_limit = balance.member_limit_summary()
+            if member_limit:
+                parts.append(f"[dim]Your limit:[/dim] [bold]{_rich_escape(member_limit)}[/bold]")
+            pool_label = "Team balance:" if balance.payer_is_team else "Balance:"
+            parts.append(f"[dim]{pool_label}[/dim] [bold]{_rich_escape(remaining)}[/bold]")
             if balance.state_label:
                 parts.append(f"[dim]{_rich_escape(balance.state_label)}[/dim]")
             if balance.approx_requests_remaining is not None:

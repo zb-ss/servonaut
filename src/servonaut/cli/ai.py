@@ -102,6 +102,20 @@ def _spend_refusal_guidance(code: Any, message: Any, details: Any) -> str:
     )
 
 
+def _print_balance_lines(balance: Any, *, file: Any) -> bool:
+    """Print a capped member's limit, then the remaining balance.
+
+    Returns whether the remaining balance was printed.
+    """
+    member_limit = balance.member_limit_summary()
+    if member_limit:
+        print(f"Your limit this period: {member_limit}", file=file)
+    remaining = balance.human_display("remaining")
+    if remaining:
+        print(f"{balance.remaining_label}: {remaining}", file=file)
+    return bool(remaining)
+
+
 def _print_spend_topup_hint(details: Any) -> None:
     """Offer the current catalog only when the server marks top-up as helpful."""
     if isinstance(details, dict) and details.get("topup_helps") is True:
@@ -460,14 +474,11 @@ async def _do_chat_buffered(
     result = result or {}
     balance = result.get("balance")
     if isinstance(balance, dict):
-        from servonaut.services.ai_balance import AIHostedBalance, safe_terminal_text
+        from servonaut.services.ai_balance import AIHostedBalance
 
         parsed = AIHostedBalance.from_dict(balance)
-        remaining = safe_terminal_text(
-            parsed.human_display("remaining") if parsed is not None else ""
-        )
-        if remaining:
-            print(f"Balance remaining: {remaining}", file=sys.stderr)
+        if parsed is not None:
+            _print_balance_lines(parsed, file=sys.stderr)
         debit = result.get("debit_micros")
         if parsed is not None:
             from servonaut.services.ai_balance import display_debit
@@ -601,11 +612,8 @@ async def _do_chat_stream(
             from servonaut.services.ai_balance import AIHostedBalance
 
             parsed = AIHostedBalance.from_dict(balance)
-            remaining = safe_terminal_text(
-                parsed.human_display("remaining") if parsed is not None else ""
-            )
-            if remaining:
-                print(f"Balance remaining: {remaining}", file=sys.stderr)
+            if parsed is not None:
+                _print_balance_lines(parsed, file=sys.stderr)
             from servonaut.services.ai_balance import display_debit
 
             debit_label = display_debit(
@@ -705,10 +713,7 @@ def _handle_quota(args: argparse.Namespace) -> int:
     if balance is not None:
         from servonaut.services.ai_balance import safe_terminal_text
 
-        remaining = balance.human_display("remaining")
-        if remaining:
-            print(f"Balance remaining: {remaining}")
-        else:
+        if not _print_balance_lines(balance, file=sys.stdout):
             print("Balance: unavailable; refresh entitlements and try again.")
         spent = balance.human_display("spent_this_period")
         if spent:

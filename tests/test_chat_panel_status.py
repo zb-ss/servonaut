@@ -402,6 +402,27 @@ def test_hosted_balance_footer_uses_money_fallback_or_refresh_guidance():
     })
 
 
+def test_hosted_balance_footer_shows_a_capped_members_limit_and_team_pool():
+    panel, app = _error_panel()
+    footer = MagicMock()
+    panel.query_one = lambda *args, **kwargs: footer
+    del panel._update_quota_footer
+    panel._active_provider_name = lambda: "servonaut"
+    app.auth_service = MagicMock()
+    app.auth_service._token = MagicMock()
+    app.auth_service._token.entitlements = {"balance": {
+        "currency": "GBP", "payer_type": "team", "state": "ok",
+        "display": {"remaining": "£72.50", "member_limit": "£2.00", "member_spent": "< £0.01"},
+    }}
+
+    panel._update_quota_footer()
+
+    rendered = footer.update.call_args.args[0]
+    assert rendered.index("Your limit:") < rendered.index("Team balance:")
+    assert "£2.00 (< £0.01 used)" in rendered
+    assert "£72.50" in rendered
+
+
 def test_topup_errors_scrub_controls_before_tui_notification():
     from servonaut.services.api_client import APIError
 
