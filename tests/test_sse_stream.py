@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -584,3 +585,135 @@ def test_sse_error_with_infinite_retry_after_does_not_overflow(monkeypatch):
         run(_drain(stream_sse(api, "/api/ai/chat", {"task": "chat"})))
     assert exc_info.value.code == "rate_limited"
     assert exc_info.value.retry_after is None
+
+
+def test_terminal_error_drains_following_usage_before_raising(monkeypatch):
+    """Accounting survives a terminal error, while the turn still fails."""
+    body = (
+        b'event: error\n'
+        b'data: {"code":"quota_exhausted","message":"blocked"}\n\n'
+        b'event: usage\n'
+        b'data: {"debit_micros":123,"balance":{"display":{"remaining":"\\u00a30.00"}}}\n\n'
+    )
+
+    monkeypatch.setattr(
+        ai_sse,
+        "_TEST_TRANSPORT",
+        httpx.MockTransport(lambda _request: httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body,
+        )),
+    )
+    api = _make_api_client()
+
+    async def consume():
+        seen = []
+        with pytest.raises(SSEStreamError) as raised:
+            async for event in stream_sse(
+                api, "/api/ai/chat", {"task": "chat"}, drain_terminal_error=True,
+            ):
+                seen.append(event)
+        return seen, raised.value
+
+    events, error = run(consume())
+    assert events == [{"event": "usage", "data": {
+        "debit_micros": 123, "balance": {"display": {"remaining": "£0.00"}},
+    }}]
+    assert error.code == "quota_exhausted"
+
+
+def test_terminal_error_never_yields_late_tool_calls(monkeypatch):
+    body = (
+        b'event: error\n'
+        b'data: {"code":"quota_exhausted","message":"blocked"}\n\n'
+        b'event: tool_call\n'
+        b'data: {"tool":"run_command"}\n\n'
+        b'event: usage\n'
+        b'data: {}\n\n'
+    )
+    monkeypatch.setattr(
+        ai_sse,
+        "_TEST_TRANSPORT",
+        httpx.MockTransport(lambda _request: httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=body,
+        )),
+    )
+    api = _make_api_client()
+
+    async def consume():
+        seen = []
+        with pytest.raises(SSEStreamError):
+            async for event in stream_sse(
+                api, "/api/ai/chat", {"task": "chat"}, drain_terminal_error=True,
+            ):
+                seen.append(event["event"])
+        return seen
+
+    assert run(consume()) == ["usage"]
+
+
+def test_direct_stream_error_is_immediate_even_if_the_transport_stays_open():
+    """Non-chat consumers retain immediate terminal-error semantics."""
+    class Source:
+        def aiter_sse(self):
+            async def events():
+                yield SimpleNamespace(
+                    event="error", data='{"code":"cli_not_connected","message":"connect first"}',
+                )
+                await asyncio.sleep(1)
+            return events()
+
+    async def consume():
+        async for _ in ai_sse._iterate_with_watchdog(Source(), 0.01):  # noqa: SLF001
+            pass
+
+    with pytest.raises(SSEStreamError, match="connect first"):
+        run(consume())
+
+
+def test_drained_error_raises_original_after_usage_when_transport_stays_open():
+    class Source:
+        def aiter_sse(self):
+            async def events():
+                yield SimpleNamespace(
+                    event="error", data='{"code":"quota_exhausted","message":"blocked"}',
+                )
+                yield SimpleNamespace(event="usage", data='{"debit_micros":123}')
+                await asyncio.sleep(1)
+            return events()
+
+    async def consume():
+        seen = []
+        with pytest.raises(SSEStreamError) as raised:
+            async for event in ai_sse._iterate_with_watchdog(  # noqa: SLF001
+                Source(), 0.01, drain_terminal_error=True,
+            ):
+                seen.append(event)
+        return seen, raised.value
+
+    seen, error = run(consume())
+    assert [event["event"] for event in seen] == ["usage"]
+    assert error.code == "quota_exhausted"
+
+
+def test_drained_error_has_an_absolute_deadline_despite_continuous_pings():
+    """A failed hosted turn cannot stay live merely because pings continue."""
+    class Source:
+        def aiter_sse(self):
+            async def events():
+                yield SimpleNamespace(
+                    event="error", data='{"code":"quota_exhausted","message":"blocked"}',
+                )
+                while True:
+                    await asyncio.sleep(0.001)
+                    yield SimpleNamespace(event="ping", data="")
+            return events()
+
+    async def consume():
+        async for _ in ai_sse._iterate_with_watchdog(  # noqa: SLF001
+            Source(), 0.01, drain_terminal_error=True,
+        ):
+            pass
+
+    with pytest.raises(SSEStreamError) as raised:
+        run(asyncio.wait_for(consume(), timeout=0.1))
+    assert raised.value.code == "quota_exhausted"

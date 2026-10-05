@@ -206,7 +206,8 @@
 
 /* Stats bar */
 #chat-stats {
-    height: 1;
+    /* The border consumes one row; reserve a content row at narrow heights. */
+    height: 2;
     padding: 0 2;
     background: $panel;
     color: $text-muted;
@@ -262,3 +263,8 @@
     color: $text;
 }
 
+
+AITopUpModal #btn_topup_billing {
+    width: 100%;
+    margin-top: 1;
+}

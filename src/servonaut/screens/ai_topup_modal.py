@@ -1,12 +1,12 @@
 """Top-up pack picker modal (T8).
 
-Brief blocking choice between three top-up packs. The caller (chat
-panel quota_exhausted / budget_exhausted handler, or
-``servonaut ai topup`` CLI) awaits the dismiss return value:
+The caller supplies the current server-advertised pack inventory. The caller
+may also offer an explicit billing-page action for a refusal that included a
+validated first-party route. The caller awaits the dismiss return value:
 
-- ``"small" | "medium" | "large"`` — the user picked a pack; caller
-  invokes ``ServonautProvider.topup_checkout(pack)`` and opens the
-  returned ``checkout_url`` in the browser.
+- a pack key — the user chose a current pack and the caller requests its
+  checkout session;
+- :attr:`BILLING_ACTION` — the user selected the separate billing action;
 - ``None`` — the user cancelled / pressed Escape.
 
 Per the project ModalScreen convention: this fits the brief-blocking-choice
@@ -15,45 +15,40 @@ descriptions.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Static
 
+from servonaut.services.ai_balance import safe_terminal_text
 from servonaut.widgets.safe_header import SafeHeader
-
-
-# Pack labels — server is authoritative on dollar amount + token count;
-# we display rough guidance only. Update if the backend pricing tier
-# changes; out-of-date copy is purely cosmetic (server returns the
-# correct checkout_url regardless).
-_PACK_LABELS = {
-    "small":  ("Small",  "≈ 1M tokens"),
-    "medium": ("Medium", "≈ 5M tokens"),
-    "large":  ("Large",  "≈ 20M tokens"),
-}
 
 
 class AITopUpModal(ModalScreen[Optional[str]]):
     """Pack picker for ``POST /api/ai/topup/checkout``.
 
     Args:
-        prefill_pack: Optional pack name to pre-highlight (caller may
-            pass it from a CLI ``--pack`` flag). Currently informational
-            only — the modal always shows all three options.
+        prefill_pack: Optional pack key to pre-highlight (caller may
+            pass it from a CLI ``--pack`` flag). Currently informational.
         reason: Optional context string rendered above the buttons.
             Use cases: ``"Out of monthly tokens"``,
             ``"Budget hard cap reached"``. Plain string — escaped before
             interpolation.
+        show_billing_action: Show the explicit billing action for a validated
+            server refusal route. The URL remains with the caller, so this
+            screen cannot open it itself.
 
     Returns via ``dismiss``:
-        - One of ``"small"`` / ``"medium"`` / ``"large"`` on a pack pick.
+        - A server pack key on a pack pick.
+        - :attr:`BILLING_ACTION` when the user selects billing.
         - ``None`` if the user dismissed without choosing.
     """
+
+    BILLING_ACTION = "__billing__"
 
     BINDINGS = [
         Binding("escape", "dismiss_none", "Cancel", show=True),
@@ -67,6 +62,7 @@ class AITopUpModal(ModalScreen[Optional[str]]):
     AITopUpModal #ai_topup_container {
         width: 78;
         height: auto;
+        max-height: 24;
         border: round $primary;
         background: $surface;
         padding: 1 2;
@@ -87,14 +83,35 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         margin-bottom: 1;
     }
 
-    AITopUpModal #ai_topup_buttons {
+    AITopUpModal #ai_topup_catalog {
         height: auto;
-        align: center middle;
+        max-height: 9;
+        margin-bottom: 1;
+        border: round $primary-background;
+        background: $panel;
     }
 
-    AITopUpModal #ai_topup_buttons Button {
-        margin: 0 1;
-        width: 18;
+    AITopUpModal .ai_topup_pack {
+        height: 3;
+        padding: 0 1;
+    }
+
+    AITopUpModal .ai_topup_pack_details {
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+    }
+
+    AITopUpModal .ai_topup_pack Button {
+        width: 10;
+        min-width: 10;
+        height: 3;
+    }
+
+    AITopUpModal #ai_topup_catalog #btn_topup_billing {
+        width: 100%;
+        height: 3;
+        margin: 0;
     }
 
     AITopUpModal #ai_topup_cancel {
@@ -108,13 +125,17 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         *,
         prefill_pack: Optional[str] = None,
         reason: Optional[str] = None,
+        packs: Sequence[Any] = (),
+        show_billing_action: bool = False,
     ) -> None:
         super().__init__()
         # ``prefill_pack`` is currently informational; reserved for a
         # future "highlight the suggested pack" affordance once the
         # server tells us which pack matches the user's burn rate.
         self._prefill_pack = prefill_pack
-        self._reason = (reason or "").strip()
+        self._reason = safe_terminal_text(reason).strip()
+        self._packs = [pack for pack in packs if getattr(pack, "key", "")]
+        self._show_billing_action = show_billing_action
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -131,30 +152,43 @@ class AITopUpModal(ModalScreen[Optional[str]]):
                     id="ai_topup_reason",
                 )
             )
+        body = (
+            "Open billing in your browser to review available top-up options."
+            if self._show_billing_action and not self._packs else
+            "Pick a pack to open Stripe Checkout in your browser. Your "
+            "available balance updates after checkout completes."
+        )
         children.extend([
             Static(
-                "Pick a pack to open Stripe Checkout in your browser. "
-                "Top-up tokens stack on top of your monthly quota and never "
-                "expire while your subscription is active.",
+                body,
                 id="ai_topup_body",
             ),
-            Horizontal(
-                Button(
-                    self._button_label("small"),
-                    id="btn_topup_small",
-                    variant="primary",
-                ),
-                Button(
-                    self._button_label("medium"),
-                    id="btn_topup_medium",
-                    variant="primary",
-                ),
-                Button(
-                    self._button_label("large"),
-                    id="btn_topup_large",
-                    variant="primary",
-                ),
-                id="ai_topup_buttons",
+            *(
+                [
+                    VerticalScroll(
+                        *[
+                            Horizontal(
+                                Static(
+                                    self._catalog_line(pack),
+                                    classes="ai_topup_pack_details",
+                                ),
+                                Button(
+                                    "Choose",
+                                    id=f"btn_topup_{index}",
+                                    variant="primary",
+                                ),
+                                classes="ai_topup_pack",
+                            )
+                            for index, pack in enumerate(self._packs)
+                        ],
+                        *(
+                            [Button("Open billing", id="btn_topup_billing", variant="default")]
+                            if self._show_billing_action else []
+                        ),
+                        id="ai_topup_catalog",
+                    )
+                ]
+                if self._packs or self._show_billing_action else []
             ),
             Vertical(
                 Button("Cancel", id="btn_topup_cancel", variant="default"),
@@ -165,24 +199,41 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         yield Footer()
 
     @staticmethod
-    def _button_label(pack: str) -> str:
-        name, hint = _PACK_LABELS.get(pack, (pack.title(), ""))
-        if hint:
-            return f"{name}\n[dim]{hint}[/dim]"
-        return name
+    def _button_label(pack: Any) -> str:
+        """Return the short, safe action label for a server pack."""
+        raw_label = getattr(pack, "label", getattr(pack, "key", ""))
+        return escape(safe_terminal_text(raw_label))
+
+    @classmethod
+    def _catalog_line(cls, pack: Any) -> str:
+        """Return one readable, sanitized pack price and credit line."""
+        label = cls._button_label(pack)
+        price = escape(safe_terminal_text(getattr(pack, "display_price", "")))
+        credit = escape(safe_terminal_text(getattr(pack, "display_credit", "")))
+        details = " · ".join(
+            part for part in (price, f"adds {credit}" if credit else "") if part
+        )
+        return f"[bold]{label}[/bold] — {details}" if details else label
+
+    @classmethod
+    def _catalog_text(cls, packs: Sequence[Any]) -> str:
+        """Return all readable, sanitized catalog rows for non-UI consumers."""
+        return "\n".join(cls._catalog_line(pack) for pack in packs)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
-        mapping = {
-            "btn_topup_small": "small",
-            "btn_topup_medium": "medium",
-            "btn_topup_large": "large",
-        }
-        pack = mapping.get(button_id)
-        if pack is not None:
-            self.dismiss(pack)
-        elif button_id == "btn_topup_cancel":
+        if button_id == "btn_topup_cancel":
             self.dismiss(None)
+            return
+        if button_id == "btn_topup_billing":
+            self.dismiss(self.BILLING_ACTION)
+            return
+        if button_id.startswith("btn_topup_"):
+            try:
+                pack = self._packs[int(button_id.removeprefix("btn_topup_"))]
+            except (IndexError, ValueError):
+                return
+            self.dismiss(pack.key)
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)

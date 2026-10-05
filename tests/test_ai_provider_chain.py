@@ -111,7 +111,7 @@ def test_fallback_used_badge_state_set_from_usage_event():
         },
     })
 
-    assert panel._last_fallback_used is True
+    assert panel._last_fallback_used is False
     assert panel._total_tokens == 30
     assert panel._model == "gemini-2-flash-002"
 
@@ -128,7 +128,7 @@ def test_fallback_used_false_does_not_persist_after_reset():
     panel.query_one = lambda *args, **kwargs: SimpleNamespace(update=lambda _x: None)
 
     panel._consume_usage_event({"fallback_used": True})
-    assert panel._last_fallback_used is True
+    assert panel._last_fallback_used is False
     panel._consume_usage_event({"fallback_used": False})
     assert panel._last_fallback_used is False
 

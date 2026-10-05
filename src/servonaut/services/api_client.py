@@ -403,6 +403,7 @@ class APIClient(APIClientInterface):
         method: str = "POST",
         params: Optional[Dict[str, Any]] = None,
         silence_timeout: Optional[float] = None,
+        drain_terminal_error: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream Server-Sent Events from ``path`` with ``body``.
 
@@ -410,6 +411,8 @@ class APIClient(APIClientInterface):
         progress); the defaults keep the original POST behaviour.
         ``silence_timeout`` overrides the heartbeat watchdog limit
         (``None`` keeps the default).
+        ``drain_terminal_error`` is reserved for hosted chat's final usage
+        accounting; direct consumers retain immediate terminal errors.
 
         Thin wrapper that delegates to
         :func:`servonaut.services.ai_sse.stream_sse` so SSE concerns
@@ -438,6 +441,7 @@ class APIClient(APIClientInterface):
         async for event in _stream_sse(
             self, path, body, timeout=timeout, method=method, params=params,
             silence_timeout=silence_timeout,
+            drain_terminal_error=drain_terminal_error,
         ):
             yield event
 

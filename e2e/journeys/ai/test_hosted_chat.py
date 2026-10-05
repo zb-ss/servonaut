@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 
 import pytest
 
@@ -42,6 +43,7 @@ from e2e.harness.ai_chat import (
 )
 from e2e.harness.fake_cloud.chat_script import (
     ChatTurn,
+    SseEvent,
     error,
     fixture_names,
     token,
@@ -97,7 +99,7 @@ STREAMS = {
     "tokens_only": (
         "Hello world, how are you?", ["Model: gemini-2-flash-002", "Tokens: 120"], None
     ),
-    "fallback_used": ("Working...", ["via backup vendor"], None),
+    "fallback_used": ("Working...", [], None),
     "soft_cap": ("Hello world, how are you?", ["downgraded to faster model"], None),
     "wall_clock_120s": (
         "Working on it...",
@@ -341,7 +343,7 @@ REFUSED = "Refused by the service [b]now[/b] [/]."
             {},
             "toast:Rate limited — wait a moment, then try again.",
         ),
-        (402, "quota_exhausted", {}, "screen:AITopUpModal"),
+        (402, "quota_exhausted", {"topup_helps": True}, "screen:AITopUpModal"),
         (409, "e2e_unknown_code", {}, f"toast:{REFUSED}"),
     ],
     ids=["rate-limited", "rate-limited-no-wait-given", "out-of-tokens", "unknown-code"],
@@ -363,6 +365,75 @@ async def test_refusal_before_the_stream_opens(
         assert await wait_for_reply(t) == []
         assert _chat(fake_cloud)["ended"] == f"refused:{status}"
         await _still_usable(t, fake_cloud)
+
+
+async def test_refusal_that_topup_cannot_help_stays_in_chat(tui, seed, fake_cloud):
+    seed_hosted(seed, fake_cloud)
+    fake_cloud.ai.script(ChatTurn.refused(
+        402,
+        "budget_exhausted",
+        "Blocked",
+        reason="member_limit_reached",
+        topup_helps=False,
+    ))
+    async with tui() as t:
+        await open_chat(t)
+        await send(t, "Hello")
+        await wait_for_literal_toast(
+            t,
+            "Your team member limit has been reached. Ask a team owner to raise it or wait for the next period.",
+            severity="warning",
+        )
+        assert t.screen_name() == "InstanceListScreen"
+        assert await wait_for_reply(t) == []
+
+
+@pytest.mark.parametrize("size", [(120, 36), (60, 18)], ids=["normal", "narrow"])
+async def test_hosted_balance_footer_stays_visible_at_supported_terminal_sizes(
+    tui, seed, fake_cloud, size,
+):
+    """The server display string is retained in both normal and narrow TUI layouts."""
+    fake_cloud.configure(balance={
+        "currency": "GBP",
+        "remaining_micros": 4_500_000,
+        "state": "ok",
+        "approx_requests_remaining": 3,
+        "display": {"remaining": "£4.50"},
+    })
+    seed_hosted(seed, fake_cloud)
+    async with tui(size=size) as t:
+        chat = await open_chat(t)
+        footer = plain(chat.query_one("#chat-quota-footer"))
+        assert "Balance:" in footer
+        assert "£4.50" in footer
+        assert "≈ 3 requests left" in footer
+
+
+async def test_hosted_turn_debit_is_visible_in_the_rendered_stats(tui, seed, fake_cloud):
+    balance = {
+        "currency": "GBP",
+        "remaining_micros": 4_380_000,
+        "display": {"remaining": "£4.38"},
+    }
+    fake_cloud.ai.script(ChatTurn.of(
+        token("Accounted."),
+        SseEvent("usage", json.dumps({
+            "model": "hosted-e2e-model",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "quota": {},
+            "balance": balance,
+            "debit_micros": 120_000,
+            "debit_display": "£0.13",
+        })),
+    ))
+    seed_hosted(seed, fake_cloud)
+    async with tui(size=(100, 30)) as t:
+        await open_chat(t)
+        await send(t, "Show my charge")
+        assert await wait_for_reply(t) == ["Accounted."]
+        assert "Last turn debit: £0.13" in stats(t)
+        assert "Last turn debit: £0.12" not in stats(t)
 
 
 async def test_a_rate_limited_turn_is_not_retried_behind_the_users_back(

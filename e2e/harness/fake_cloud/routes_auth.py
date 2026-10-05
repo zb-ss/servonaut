@@ -49,6 +49,7 @@ def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
         "premium_ai": scenario.premium_ai,
         "mcp_connections": scenario.mcp_connections,
         "quota": scenario.quota,
+        "balance": scenario.balance,
     }
 
 

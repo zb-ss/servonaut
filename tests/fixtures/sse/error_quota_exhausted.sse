@@ -2,5 +2,5 @@ event: token
 data: {"text": "Starting..."}
 
 event: error
-data: {"code": "quota_exhausted", "message": "Token quota exhausted for this period.", "details": {"tokens_used": 15000000, "tokens_limit": 15000000, "topup_url": "https://servonaut.dev/account/billing/topup"}}
+data: {"code": "quota_exhausted", "message": "Token quota exhausted for this period.", "details": {"tokens_used": 15000000, "tokens_limit": 15000000, "reason": "balance_exhausted", "topup_helps": true, "remaining_micros": 0, "topup_url": "https://servonaut.dev/account/billing/topup"}}
 

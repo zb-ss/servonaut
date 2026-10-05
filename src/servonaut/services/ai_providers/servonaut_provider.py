@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any, AsyncIterator, Dict, List, Literal, Optional, TYPE_CHECKING
+from typing import Any, AsyncIterator, Dict, List, Optional, TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from ..interfaces import AIProviderInterface
 from ._guards import require_premium_ai, require_premium_ai_stream
+from servonaut.services.api_client import APIError
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AIProviderConfig
@@ -52,6 +54,7 @@ _CHAT_PATH = "/api/ai/chat"
 # HTTP read times out. The default 30s client timeout is too short.
 _CHAT_BUFFERED_TIMEOUT_SECONDS = 150
 _TOPUP_PATH = "/api/ai/topup/checkout"
+_TOPUP_PACKS_PATH = "/api/ai/topup/packs"
 
 # Rate-limit retry budget (T5). Buffered chat retries up to this many
 # times when the server returns ``rate_limited``. Streaming never
@@ -60,25 +63,31 @@ _TOPUP_PATH = "/api/ai/topup/checkout"
 # user when to try again.
 _RATE_LIMIT_MAX_ATTEMPTS = 3
 _RATE_LIMIT_JITTER_S = 2.0
-_VALID_TOPUP_PACKS = frozenset({"small", "medium", "large"})
 
 # A4 — pin the expected Stripe Checkout host. Any other origin in the
 # server response means we either talk to a compromised gateway or a
 # misconfigured staging — either way, do NOT auto-launch the browser at it.
-_STRIPE_CHECKOUT_HOST_PREFIX = "https://checkout.stripe.com/"
+_STRIPE_CHECKOUT_HOST = "checkout.stripe.com"
 
 
-def is_valid_stripe_checkout_url(url: str) -> bool:
-    """Return True iff *url* is a Stripe-hosted checkout URL.
-
-    Strict prefix match on :data:`_STRIPE_CHECKOUT_HOST_PREFIX` — this is
-    deliberately conservative. Any subdomain change or scheme drift
-    blocks the auto-open path; the user can still copy-paste the URL
-    manually.
-    """
+def is_valid_stripe_checkout_url(url: Any) -> bool:
+    """Return ``True`` only for a structurally safe Stripe Checkout URL."""
     if not isinstance(url, str) or not url:
         return False
-    return url.startswith(_STRIPE_CHECKOUT_HOST_PREFIX)
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 or char == "\\" for char in url):
+        return False
+    try:
+        parsed = urlsplit(url)
+        parsed.port  # raises for malformed ports
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == _STRIPE_CHECKOUT_HOST
+        and parsed.hostname == _STRIPE_CHECKOUT_HOST
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 class ServonautProvider(AIProviderInterface):
@@ -102,6 +111,7 @@ class ServonautProvider(AIProviderInterface):
         self._api_client = api_client
         self._auth_service = auth_service
         self._config_manager = config_manager
+        self._topup_pack_keys: set[str] | None = None
 
     def is_available(self) -> bool:
         """Return True iff caller is authenticated AND has the ``premium_ai`` feature.
@@ -225,8 +235,21 @@ class ServonautProvider(AIProviderInterface):
 
         # APIClient.post enforces json= keyword-only; positional args raise.
         # T5 rate-limit retry: honour ``retry_after`` + jitter, max 3 attempts.
-        data = await self._post_with_rate_limit_retry(_CHAT_PATH, body)
-        return self._unmarshal_buffered_response(data)
+        try:
+            data = await self._post_with_rate_limit_retry(_CHAT_PATH, body)
+        except APIError as exc:
+            from servonaut.services.ai_balance import cache_hosted_balance
+
+            details = exc.details if isinstance(exc.details, dict) else {}
+            cache_hosted_balance(self._auth_service, details.get("balance"), None)
+            raise
+        result = self._unmarshal_buffered_response(data)
+        from servonaut.services.ai_balance import cache_hosted_balance
+
+        cache_hosted_balance(
+            self._auth_service, result.get("balance"), result.get("debit_micros"),
+        )
+        return result
 
     async def _post_with_rate_limit_retry(
         self,
@@ -290,7 +313,9 @@ class ServonautProvider(AIProviderInterface):
         if raw is None:
             details = getattr(err, "details", None) or {}
             if isinstance(details, dict):
-                raw = details.get("retry_after")
+                raw = details.get("retry_after_seconds")
+                if raw is None:
+                    raw = details.get("retry_after")
         return coerce_retry_after(raw)
 
     def _build_chat_body(
@@ -414,7 +439,10 @@ class ServonautProvider(AIProviderInterface):
         # Invalid or missing values fall back to the SSE module default.
         silence_timeout = getattr(config, "stream_silence_timeout_seconds", None)
         async for event in self._api_client.stream_sse(
-            _CHAT_PATH, body, silence_timeout=silence_timeout,
+            _CHAT_PATH,
+            body,
+            silence_timeout=silence_timeout,
+            drain_terminal_error=True,
         ):
             if event.get("event") == "tool_catalog":
                 # PR5' audit-only consumer. The static _LOCAL_TOOL_HANDLERS map
@@ -500,6 +528,9 @@ class ServonautProvider(AIProviderInterface):
         warning = data.get("warning") or ""
         # quota may legitimately be None (free user) — preserve that.
         quota = data.get("quota") if "quota" in data else None
+        balance = data.get("balance") if "balance" in data else None
+        debit_micros = data.get("debit_micros")
+        debit_display = data.get("debit_display")
 
         # Buffered responses do not surface individual tool calls — the
         # server has already executed them and their summary lives in
@@ -522,22 +553,29 @@ class ServonautProvider(AIProviderInterface):
             "conversation_id": conversation_id,
             "fallback_used": fallback_used,
             "quota": quota,
+            "balance": balance,
+            "debit_micros": debit_micros,
+            "debit_display": debit_display,
             "cached_tokens": cached_tokens,
             "tool_calls_count": tool_calls_count,
             "vendor": vendor,
             "warning": warning,
         }
 
-    async def topup_checkout(
-        self,
-        pack: Literal["small", "medium", "large"],
-    ) -> str:
+    async def topup_packs(self) -> list["AITopupPack"]:
+        """Load current server-owned top-up inventory."""
+        from servonaut.services.ai_balance import parse_topup_packs
+
+        response = await self._api_client.get(_TOPUP_PACKS_PATH)
+        packs = parse_topup_packs(response)
+        self._topup_pack_keys = {pack.key for pack in packs}
+        return packs
+
+    async def topup_checkout(self, pack: str) -> str:
         """Open a Stripe Checkout session for a top-up pack (T8).
 
         Args:
-            pack: Pack name — one of ``"small"``, ``"medium"``, ``"large"``.
-                Server is authoritative on the dollar amount per pack;
-                the CLI only routes the user to the right SKU.
+            pack: A key loaded from :meth:`topup_packs`.
 
         Returns:
             The ``checkout_url`` the caller opens in the user's browser
@@ -545,7 +583,7 @@ class ServonautProvider(AIProviderInterface):
             server contract guarantees a populated URL on 2xx.
 
         Raises:
-            ValueError: ``pack`` is not one of the three valid values.
+            ValueError: ``pack`` is empty or malformed.
             RuntimeError: server returned 2xx but omitted ``checkout_url``
                 (defensive — should never happen against the live API).
             APIError subclass: any HTTP failure surfaces verbatim so the
@@ -556,10 +594,10 @@ class ServonautProvider(AIProviderInterface):
             can buy a top-up to convert into the Solo plan. The server
             enforces plan eligibility on its side.
         """
-        if pack not in _VALID_TOPUP_PACKS:
-            raise ValueError(
-                f"Invalid pack: {pack!r}; expected one of {sorted(_VALID_TOPUP_PACKS)!r}"
-            )
+        if not isinstance(pack, str) or not pack.strip() or pack != pack.strip():
+            raise ValueError("Invalid top-up pack key")
+        if self._topup_pack_keys is not None and pack not in self._topup_pack_keys:
+            raise ValueError("Top-up pack is no longer in the current catalog")
         body = {"pack": pack}
         response = await self._api_client.post(_TOPUP_PATH, json=body)
         # Defensive: we'd rather fail loud than ``webbrowser.open("")``.

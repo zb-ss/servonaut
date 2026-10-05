@@ -17,18 +17,76 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from textual.app import App
+from textual.widgets import Button
 
 from servonaut.config.schema import AIProviderConfig
+from servonaut.services.ai_balance import AITopupPack
 from servonaut.services.ai_providers import ServonautProvider
 from servonaut.services.ai_providers.servonaut_provider import (
     is_valid_stripe_checkout_url,
 )
 from servonaut.services.api_client import APIClient
 from servonaut.services.auth_service import AuthService, AuthToken
+from servonaut.styles import CSS_FILES
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+class _TopupModalApp(App):
+    """Mount the real modal with the production stylesheet."""
+
+    CSS_PATH = CSS_FILES
+
+    def __init__(
+        self,
+        packs,
+        *,
+        reason: str = "",
+        show_billing_action: bool = False,
+    ) -> None:
+        super().__init__()
+        self._packs = packs
+        self._reason = reason
+        self._show_billing_action = show_billing_action
+        self.dismissed: list[str | None] = []
+
+    def on_mount(self) -> None:
+        from servonaut.screens.ai_topup_modal import AITopUpModal
+
+        self.push_screen(
+            AITopUpModal(
+                packs=self._packs,
+                reason=self._reason,
+                show_billing_action=self._show_billing_action,
+            ),
+            callback=self.dismissed.append,
+        )
+
+
+def _rendered_screen_text(app) -> str:
+    """Return the compositor output, which excludes clipped widget lines."""
+    import io
+
+    from rich.console import Console
+
+    update = app.screen._compositor.render_update(
+        full=True, screen_stack=app._background_screens, simplify=True,
+    )
+    console = Console(
+        width=app.size.width,
+        height=app.size.height,
+        file=io.StringIO(),
+        force_terminal=True,
+        color_system="truecolor",
+        record=True,
+        legacy_windows=False,
+        safe_box=False,
+    )
+    console.print(update)
+    return console.export_text()
 
 
 def _make_provider(*, post_response=None) -> tuple[ServonautProvider, MagicMock]:
@@ -48,7 +106,7 @@ def _make_provider(*, post_response=None) -> tuple[ServonautProvider, MagicMock]
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad_pack", ["", "huge", "premium", "small_extra", " small "])
+@pytest.mark.parametrize("bad_pack", ["", " small ", None])
 def test_topup_checkout_invalid_pack_raises(bad_pack):
     provider, _ = _make_provider()
     with pytest.raises(ValueError):
@@ -80,6 +138,19 @@ def test_topup_checkout_raises_runtime_error_when_url_empty():
     provider, _ = _make_provider(post_response={"checkout_url": ""})
     with pytest.raises(RuntimeError):
         run(provider.topup_checkout("medium"))
+
+
+def test_topup_modal_cancel_button_dismisses_without_selecting_a_pack():
+    """The visible Cancel button follows the same path as Escape."""
+    from types import SimpleNamespace
+
+    from servonaut.screens.ai_topup_modal import AITopUpModal
+
+    modal = AITopUpModal()
+    modal.dismiss = MagicMock()
+    modal.on_button_pressed(SimpleNamespace(button=SimpleNamespace(id="btn_topup_cancel")))
+
+    modal.dismiss.assert_called_once_with(None)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +218,9 @@ def test_is_valid_stripe_checkout_url_accepts_stripe_origins(url):
         "http://checkout.stripe.com/pay/spoof",  # http not https
         "https://checkout.stripe.com.evil.example/pay",  # subdomain spoof
         "https://checkout-stripe.com/pay/foo",  # typosquat
+        "https://user:pass@checkout.stripe.com/pay/cs_test",  # leak-guard:allow
+        "https://checkout.stripe.com:443/pay/cs_test",
+        "https://checkout.stripe.com/pay/cs_test\x1b]52;unsafe\x07\x9b",
         "",
         None,
     ],
@@ -184,6 +258,9 @@ def test_topup_rejects_non_stripe_url(monkeypatch, capsys):
     provider.topup_checkout = AsyncMock(
         return_value="https://evil.example/login",
     )
+    provider.topup_packs = AsyncMock(return_value=[
+        type("Pack", (), {"key": "small", "label": "Small", "display_price": ""})(),
+    ])
 
     convs = MagicMock()
     pref = MagicMock()
@@ -201,14 +278,135 @@ def test_topup_rejects_non_stripe_url(monkeypatch, capsys):
     args = argparse.Namespace(ai_command="topup", pack="small")
     rc = cli_ai.handle_ai_command(args)
 
-    assert rc == 0
+    assert rc == 1
     # Critical: the browser was NEVER opened with the malicious URL.
     assert opened == [], (
         f"Non-Stripe URL leaked through to webbrowser.open: {opened!r}"
     )
     captured = capsys.readouterr()
-    # User instructed to open manually — message visible on stderr.
-    assert "manually" in captured.err.lower() or "manually" in captured.out.lower()
+    assert "invalid Stripe checkout URL" in captured.err
+    assert "https://evil.example/login" not in captured.err
+
+
+def test_topup_modal_scrubs_catalog_controls_before_markup_rendering():
+    from servonaut.screens.ai_topup_modal import AITopUpModal
+
+    pack = AITopupPack(
+        key="starter",
+        label="追加\x1b]52;label\x07\x9b",
+        currency="GBP",
+        display_price="£5\x1b]52;price\x07",
+        display_credit="£5\x9b",
+    )
+
+    catalog = AITopUpModal._catalog_text([pack])
+
+    assert "追加]52;label" in catalog
+    assert "£5]52;price" in catalog
+    assert "adds £5" in catalog
+    assert "\x1b" not in catalog
+    assert "\x07" not in catalog
+    assert "\x9b" not in catalog
+
+
+@pytest.mark.parametrize("size", [(100, 30), (160, 37), (160, 50)])
+@pytest.mark.asyncio
+async def test_topup_catalog_prices_and_credit_are_visibly_rendered(size):
+    """Price and credit live in a visible catalog, not clipped button labels."""
+    packs = [
+        AITopupPack("starter", "Starter", "GBP", "£5.00", "£5.00"),
+        AITopupPack("extended", "Extended", "GBP", "£20.00", "£20.00"),
+    ]
+    app = _TopupModalApp(packs, reason="Your AI balance is used up. Top up to keep going.")
+
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        container = app.screen.query_one("#ai_topup_container")
+        catalog = app.screen.query_one("#ai_topup_catalog")
+        assert container.region.height <= 24
+        assert catalog.region.height >= len(packs)
+        # Let Textual finish the catalog layout before capturing the viewport.
+        await asyncio.sleep(0.1)
+        rendered = _rendered_screen_text(app)
+        screenshot = app.export_screenshot(title="top-up catalog visibility")
+
+    assert "Cancel" in rendered
+    for amount in ("£5.00", "£20.00"):
+        assert amount in rendered
+        assert amount in screenshot
+
+
+@pytest.mark.asyncio
+async def test_topup_cancel_is_painted_and_clickable_with_billing_action():
+    """Billing stays reachable through the catalog without covering Cancel."""
+    app = _TopupModalApp(
+        [
+            AITopupPack("starter", "Starter", "GBP", "£5", "£5.00"),
+            AITopupPack("extended", "Extended", "GBP", "£20", "£20.00"),
+        ],
+        reason="Your AI balance is used up. Top up to keep going.",
+        show_billing_action=True,
+    )
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        cancel = app.screen.query_one("#btn_topup_cancel", Button)
+        region = cancel.region
+        hit, _ = app.get_widget_at(
+            region.x + region.width // 2,
+            region.y + region.height // 2,
+        )
+        assert hit is cancel
+        assert _rendered_screen_text(app).count("Cancel") >= 2
+        assert await pilot.click(
+            cancel,
+            offset=(region.width // 2, region.height // 2),
+        )
+        await pilot.pause()
+
+    assert app.dismissed == [None]
+
+
+@pytest.mark.asyncio
+async def test_topup_catalog_scrolls_to_every_runtime_pack_with_cancel_pinned():
+    """A long server catalog scrolls to its final action without hiding Cancel."""
+    packs = [
+        AITopupPack(
+            f"pack-{number}", f"Pack {number}", "GBP",
+            f"£{number}.00", f"£{number}.00",
+        )
+        for number in range(1, 21)
+    ]
+    app = _TopupModalApp(packs, reason="Your AI balance is used up. Top up to keep going.")
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        catalog = app.screen.query_one("#ai_topup_catalog")
+        container = app.screen.query_one("#ai_topup_container")
+        cancel = app.screen.query_one("#btn_topup_cancel", Button)
+        first = app.screen.query_one("#btn_topup_0", Button)
+        last = app.screen.query_one("#btn_topup_19", Button)
+        assert len(list(catalog.query(Button))) == len(packs)
+        assert catalog.virtual_size.height > catalog.size.height
+        assert cancel.region.bottom <= container.region.bottom
+        await asyncio.sleep(0.1)
+
+        app.screen.set_focus(first)
+        for _ in range(len(packs) - 1):
+            await pilot.press("tab")
+        await pilot.pause()
+
+        assert app.focused is last
+        assert catalog.scroll_y > 0
+        assert cancel.region.bottom <= container.region.bottom
+        assert last.region.y >= catalog.region.y
+        assert last.region.bottom <= catalog.region.bottom
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert app.dismissed == ["pack-20"]
+
 
 
 def test_post_topup_refresh_tasks_self_discard_on_completion():

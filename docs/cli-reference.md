@@ -16,10 +16,7 @@ and is honoured by all `servonaut ai *` subcommands.
 
 **Cancelling:** Ctrl+C cancels any running command with a one-line
 `Cancelled.` and exit code `130` (the shell convention for SIGINT) — never a
-traceback. Some commands handle it more specifically: interrupting the
-post-top-up wait skips only the courtesy balance refresh (the purchase is
-unaffected, exit `0`), and interrupting `servonaut login` prints
-`Sign-in aborted.` (exit `130`).
+traceback. `servonaut login` prints `Sign-in aborted.` (exit `130`).
 
 ---
 
@@ -39,8 +36,7 @@ All `servonaut ai *` commands use these exit codes:
 | `1` | Other / unknown error |
 | `2` | Unauthenticated — run `servonaut login` |
 | `3` | Insufficient entitlement — Solo or Teams plan required |
-| `4` | Quota exhausted — run `servonaut ai topup` |
-| `5` | Budget (cost-cap) exhausted — run `servonaut ai topup` |
+| `4` | Invalid command usage, such as an unknown catalog key |
 
 ---
 
@@ -79,7 +75,7 @@ servonaut ai chat --no-tools "what is the difference between a NACL and a securi
 
 ### `servonaut ai quota`
 
-Print your current Servonaut AI token quota to stdout.
+Print your current hosted AI balance to stdout.
 
 ```
 servonaut ai quota [--json]
@@ -89,23 +85,24 @@ servonaut ai quota [--json]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--json` | off | Output raw JSON instead of the human-readable summary. Useful for scripts. |
+| `--json` | off | Output the legacy quota projection plus the additive raw balance object when available. Useful for scripts. |
 
 **Examples:**
 
 ```bash
-# Human-readable summary
+# Human-readable summary uses the server's money display values
 servonaut ai quota
-# Tokens used: 1,234,567 / 15,000,000 (≈ 2,753 queries remaining)
-# Top-up balance: +500,000
-# Resets: in 4 days (2026-05-01)
+# Balance remaining: £4.50
+# Spent this period: £1.25
+# Allowance remaining: £1.00
 
-# Machine-readable
-servonaut ai quota --json
-
-# Use in a shell script
-remaining=$(servonaut ai quota --json | jq .tokens_topup_remaining)
+# Machine-readable: read money micros when a balance object is present
+remaining=$(servonaut ai quota --json | jq .balance.remaining_micros)
 ```
+
+Older servers may not return `balance`; in that case the command retains the
+legacy token quota output and JSON fields for compatibility. New integrations
+should prefer `balance.remaining_micros` and the server-provided display strings.
 
 ---
 
@@ -262,7 +259,7 @@ servonaut ai conversations delete 550e8400-e29b-41d4-a716-446655440000 \
 
 ### `servonaut ai topup`
 
-Open a Stripe Checkout session to purchase additional AI tokens.
+Open a Stripe Checkout session to purchase an available hosted AI balance pack.
 
 ```
 servonaut ai topup [<pack>]
@@ -272,25 +269,22 @@ servonaut ai topup [<pack>]
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `<pack>` | string | interactive | Top-up pack to purchase: `small`, `medium`, or `large`. If omitted, the TUI modal (or a CLI prompt) lets you choose. |
+| `<pack>` | string | omitted | Current top-up catalog key. If omitted, Servonaut loads and lists the available catalog, then exits. |
 
-The command calls `POST /api/ai/topup/checkout`, receives a `checkout_url`, and
-opens it in your default browser via `$BROWSER` / `webbrowser.open`. Stripe is
-not embedded in the CLI. After the purchase completes the CLI schedules background
-entitlement refreshes at +30 s and +60 s so your new `tokens_topup_remaining`
-balance appears quickly.
+The command loads the current catalog from `GET /api/ai/topup/packs`, then calls
+`POST /api/ai/topup/checkout`, receives a `checkout_url`, and opens it in your
+default browser via `$BROWSER` / `webbrowser.open`. Stripe is not embedded in the
+CLI. The command exits after it opens checkout; after completing the purchase,
+run `servonaut ai quota` to retrieve the latest hosted balance.
 
 **Examples:**
 
 ```bash
-# Interactive pack selection
+# List the current catalog, then choose a key
 servonaut ai topup
 
-# Buy the small pack directly
-servonaut ai topup small
-
-# Buy the medium pack and confirm the URL is opening
-servonaut ai topup medium
+# Buy a key shown by the current catalog
+servonaut ai topup <catalog-key>
 # Opening https://checkout.stripe.com/... in your browser.
 ```
 

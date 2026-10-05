@@ -108,6 +108,27 @@ def usage(model: str = "hosted-e2e-model", **quota: Any) -> SseEvent:
     )
 
 
+def error_then_usage(
+    code: str,
+    message: str,
+    *,
+    balance: Optional[dict[str, Any]] = None,
+    debit_micros: int = 0,
+) -> "ChatTurn":
+    """A refusal followed by final accounting, as the live stream permits."""
+    usage_data: dict[str, Any] = {
+        "model": "hosted-e2e-model",
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "fallback_used": False,
+        "quota": {},
+        "debit_micros": debit_micros,
+    }
+    if balance is not None:
+        usage_data["balance"] = balance
+    return ChatTurn.of(error(code, message), _event("usage", **usage_data))
+
+
 def error(code: str, message: str, **extra: Any) -> SseEvent:
     return _event("error", code=code, message=message, **extra)
 
