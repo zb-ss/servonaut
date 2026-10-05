@@ -74,6 +74,20 @@ class TestEntitlementGuard:
         allowed, _ = guard.check("config_sync")
         assert allowed
 
+    @pytest.mark.parametrize(
+        ("feature", "minimum_plan"),
+        [
+            ("personal_vault", "solo"),
+            ("team_vault", "teams"),
+            ("ssh_ca", "teams"),
+        ],
+    )
+    def test_vault_feature_plan_requirements(self, free_guard, solo_guard, teams_guard, feature, minimum_plan):
+        assert FEATURE_PLANS[feature] == minimum_plan
+        assert not free_guard.check(feature)[0]
+        assert solo_guard.check(feature)[0] is (minimum_plan == "solo")
+        assert teams_guard.check(feature)[0]
+
 
 class TestRequireDecorator:
     def test_require_blocks_unauthorized(self, free_guard):

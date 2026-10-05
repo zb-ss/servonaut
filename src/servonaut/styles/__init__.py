@@ -39,6 +39,7 @@ CSS_FILES = [
     _S / "screens/ai_banners.tcss",
     _S / "screens/memory.tcss",
     _S / "screens/secrets.tcss",
+    _S / "screens/vault.tcss",
     _S / "screens/db_vault.tcss",
     _S / "screens/findings.tcss",
 ]

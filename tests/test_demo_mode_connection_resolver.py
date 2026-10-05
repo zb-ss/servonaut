@@ -341,6 +341,18 @@ class TestPaletteNavigation:
         assert isinstance(posted[0], Sidebar.NavigationRequested)
         assert posted[0].target_id == "nav_custom_servers"
 
+    @pytest.mark.parametrize("available", [False, True])
+    def test_vault_commands_follow_discovered_availability(self, available: bool) -> None:
+        app = object.__new__(ServonautApp)
+        app.ovh_service = None
+        app.hetzner_service = None
+        app.vault_available = available
+        app.post_message = MagicMock()
+        with patch("textual.app.App.get_system_commands", return_value=iter(())):
+            titles = [command.title for command in ServonautApp.get_system_commands(app, None)]
+        assert ("Go to Vault" in titles) is available
+        assert ("Go to SSH Certificates" in titles) is available
+
 
 class TestCustomServersRemoveToast:
     def test_toast_names_the_fake_row_in_demo_mode(self) -> None:

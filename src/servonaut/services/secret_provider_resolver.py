@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from servonaut.services.entitlement_guard import EntitlementGuard
 
 from servonaut.config.schema import SecretsConfig
+from servonaut.services.api_client import APIError
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,57 @@ from servonaut.services.secret_provider import LocalProvider
 logger = logging.getLogger(__name__)
 
 
+class NativeFirstSecretProvider(SecretProviderInterface):
+    """Read native-vault bindings before the configured legacy provider.
+
+    The native vault is deliberately read-only through this generic provider
+    interface. Creation, deletion, and listing retain the existing provider
+    semantics, while a native miss uses that provider as a compatibility
+    fallback. Only an explicitly disabled or absent native feature may fall
+    through after an API error; custody and authentication failures propagate.
+    """
+
+    def __init__(
+        self,
+        native_provider: SecretProviderInterface,
+        legacy_provider: SecretProviderInterface,
+    ) -> None:
+        self._native_provider = native_provider
+        self._legacy_provider = legacy_provider
+
+    @property
+    def provider_name(self) -> str:
+        """Keep the configured backend identity for legacy CRUD/status users."""
+        return self._legacy_provider.provider_name
+
+    async def get_secret(self, name: str) -> Optional[str]:
+        try:
+            native_value = await self._native_provider.get_secret(name)
+        except APIError as exc:
+            if not self._native_feature_unavailable(exc):
+                raise
+            return await self._legacy_provider.get_secret(name)
+
+        if native_value is not None:
+            return native_value
+        return await self._legacy_provider.get_secret(name)
+
+    async def set_secret(self, name: str, value: str) -> None:
+        await self._legacy_provider.set_secret(name, value)
+
+    async def delete_secret(self, name: str) -> bool:
+        return await self._legacy_provider.delete_secret(name)
+
+    async def list_secrets(self) -> list[str]:
+        return await self._legacy_provider.list_secrets()
+
+    @staticmethod
+    def _native_feature_unavailable(exc: APIError) -> bool:
+        return exc.status == 404 or (
+            exc.status == 503 and exc.code == "feature_disabled"
+        )
+
+
 # Env var that swaps the production
 # :meth:`APIClient.get_team_secrets_config` for the
 # :class:`FakeSecretsConfigClient`. Set to a truthy value during dev
@@ -178,6 +230,8 @@ def is_fake_client_env_enabled() -> bool:
 def resolve_secret_provider(
     auth_service: "AuthService",
     entitlement_guard: "EntitlementGuard",
+    *,
+    native_provider: Optional[SecretProviderInterface] = None,
 ) -> Optional[SecretProviderInterface]:
     """Pick the active provider for the current session.
 
@@ -217,6 +271,10 @@ def resolve_secret_provider(
 
     allowed, reason = entitlement_guard.check("secrets_management")
     if not allowed:
+        # Existing vaults remain readable after a plan downgrade. The native
+        # provider is supplied only after its signed vault state was verified.
+        if native_provider is not None:
+            return native_provider
         logger.info(
             "resolve_secret_provider: secrets_management not entitled (%s) → None",
             reason,
@@ -245,13 +303,17 @@ def resolve_secret_provider(
             project_id[:8] + "…" if len(project_id) > 8 else project_id,
             token_env_var, eff.source,
         )
-        return BitwardenProvider(
+        legacy_provider: SecretProviderInterface = BitwardenProvider(
             project_id=project_id,
             token_env_var=token_env_var,
         )
+    else:
+        logger.debug("resolve_secret_provider: LocalProvider (source=%s)", eff.source)
+        legacy_provider = LocalProvider()
 
-    logger.debug("resolve_secret_provider: LocalProvider (source=%s)", eff.source)
-    return LocalProvider()
+    if native_provider is not None:
+        return NativeFirstSecretProvider(native_provider, legacy_provider)
+    return legacy_provider
 
 
 async def fetch_and_apply_secrets_config(

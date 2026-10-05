@@ -427,6 +427,7 @@ class BwSshConfigService(BwSshConfigServiceInterface):
         instance_id: str,
         status: str,
         checked_by_client: Optional[str] = None,
+        resolution_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit a verify probe result for a personal instance.
 
@@ -438,6 +439,10 @@ class BwSshConfigService(BwSshConfigServiceInterface):
             allowed = ", ".join(sorted(VALID_VERIFY_STATUSES))
             raise ValueError(f"status must be one of {{{allowed}}}, got {status!r}")
         body: Dict[str, Any] = {"status": status}
+        if resolution_tier is not None:
+            if resolution_tier not in {"ca", "vault", "personal", "team", "local"}:
+                raise ValueError("invalid SSH resolution tier")
+            body["resolution_tier"] = resolution_tier
         if checked_by_client:
             body["checked_by_client"] = checked_by_client
         path = f"/api/v1/me/instances/{provider}/{instance_id}/ssh-verify-report"

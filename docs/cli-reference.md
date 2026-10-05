@@ -492,6 +492,118 @@ Once connected, the exit code is the remote command's (or the session's);
 
 ---
 
+## `servonaut vault`
+
+Manage an encrypted personal or team vault. Vault keys and SSH private keys
+remain on the device; the service stores encrypted records and signed metadata.
+Sign in first with `servonaut login`. On a server that does not provide the
+feature, existing local and Bitwarden SSH configuration continues to work.
+
+```
+servonaut vault status
+servonaut vault setup
+servonaut vault recover
+servonaut vault identity confirm
+servonaut vault devices list|approve|revoke
+```
+
+`setup` displays a recovery key once. Record it offline before continuing.
+`recover` and escrow recovery read recovery material with a hidden terminal
+prompt; do not place recovery keys in shell arguments or scripts. A newly
+created identity can require confirmation after an MFA login; use
+`servonaut vault identity confirm` after completing that login.
+
+Use `servonaut vault devices approve <device-id>` only while comparing the
+six-digit safety code on both devices. A mismatch rejects that registration;
+start again with the new device rather than retrying it. `devices revoke` asks
+for a reason because reporting a device as lost or compromised can require
+vault-key rotation and expose affected SSH keys for review.
+
+Vault and item commands are:
+
+```
+servonaut vault create [--team TEAM] [--name NAME] [--grant-policy auto|approval]
+servonaut vault list
+servonaut vault items --vault VAULT_ID [--include-deleted]
+servonaut vault show ITEM_ID --vault VAULT_ID [--reveal --yes]
+servonaut vault import ssh --vault VAULT_ID [--path PATH] [--break-glass --from-cidr CIDR [--from-cidr CIDR ...]]
+servonaut vault import bitwarden --vault VAULT_ID --item BITWARDEN_ITEM_ID
+servonaut vault bind SERVER ITEM_ID --vault VAULT_ID --team TEAM [--login USER] (--host-key 'OPENSSH_HOST_KEY' [--host-key ...] | --pin-host-key) --yes
+servonaut vault bind-personal --vault VAULT_ID --item ITEM_ID --provider PROVIDER --instance-id INSTANCE_ID --hostname HOST --login USER --host-key 'OPENSSH_HOST_KEY' [--host-key 'OPENSSH_HOST_KEY' ...]
+servonaut vault rotate --vault VAULT_ID --yes
+servonaut vault exposures --vault VAULT_ID
+servonaut vault exposures --vault VAULT_ID --rotate-ssh ITEM_ID --team TEAM --server SERVER_ID [--server SERVER_ID ...] --yes
+servonaut vault grants process [--vault VAULT_ID] [--yes]
+servonaut vault verify-member MEMBER
+```
+
+`items` and `show` print metadata by default. `show --reveal` requires an
+explicit confirmation and only displays the value in the terminal; `--json`
+never exports revealed values. `rotate` re-keys a vault after membership or
+device changes. Review open exposures and rotate deployed SSH keys before
+marking any exposure as accepted risk or not deployed.
+
+`bind` pins the host keys you pass with `--host-key` (one OpenSSH public key
+per flag, without a host name or comment, for example from `ssh-keyscan`
+output). With `--pin-host-key` instead, it pins the keys this machine already
+trusts for the server from an earlier `servonaut ssh` login. `bind-personal`
+always requires explicit `--host-key` pins. Neither copies trust from an
+unverified server record.
+
+The exposure rotation command installs and proves the replacement on every
+selected host, then removes the old key. If any host does not complete, it
+exits non-zero and names the servers where the old key may still log in:
+treat the exposure as open there, even if it shows as resolved.
+
+After importing a Bitwarden SSH item in the Vault screen, you can choose a
+team server that already uses that same Bitwarden reference. Servonaut checks
+the match, creates the signed native binding, and proves a pinned SSH login.
+Only after that proof does it offer a separate confirmation to remove the
+server's old Bitwarden reference. It never deletes the Bitwarden item; cancel
+or a failed proof leaves the existing server access in place.
+
+For a sole-owner team, `servonaut vault escrow setup --vault VAULT_ID --label
+LABEL` prints an offline recovery key once. `servonaut vault escrow recover`
+uses a hidden prompt. A lost or compromised report can require a fresh MFA
+login before escrow recovery.
+
+---
+
+## `servonaut ca`
+
+Manage a team SSH certificate authority after the team has enabled the
+feature and the account has completed MFA. These commands change access on
+real hosts, so enrollment, refresh, unenrollment and enablement require an
+interactive confirmation or `--yes`.
+
+```
+servonaut ca status --team TEAM
+servonaut ca enable --team TEAM --yes
+servonaut ca policy --team TEAM [--set '{"...": "..."}']
+servonaut ca enroll SERVER --team TEAM [--break-glass-item ITEM_ID]
+servonaut ca refresh SERVER --team TEAM --yes
+servonaut ca unenroll SERVER --team TEAM --yes
+servonaut ca krl --team TEAM [--server SERVER]
+servonaut ca audit --team TEAM
+servonaut ca break-glass-scan --team TEAM [--server SERVER ...] [--hours 24]
+```
+
+The enrollment path uses a versioned local script and structured enrollment
+data. It refuses unrecognised script versions and does not execute server
+supplied shell text. `ca krl` delivers the signed revocation list to selected
+enrolled hosts. `ca audit` verifies the append-only certificate issuance log.
+
+A break-glass key is an emergency root key for when certificate logins fail.
+Import it into the team vault with `servonaut vault import ssh --break-glass
+--from-cidr CIDR` (it may only be used from those networks), then pass its
+item ID to `ca enroll --break-glass-item`: enrollment appends it to the host's
+`/root/.ssh/authorized_keys` with a `from=` restriction. `ca break-glass-scan`
+reads each enrolled host's SSH log over your existing access and reports any
+login with a break-glass key to the team, once per event; the team owner is
+notified.
+
+---
+
 ## Other top-level commands
 
 | Command | Description |

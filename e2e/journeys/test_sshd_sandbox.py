@@ -16,6 +16,7 @@ from e2e.harness import fleet
 from e2e.harness.bootstrap import HARNESS_DIR, load_guard
 from e2e.harness.processes import require_armed
 from e2e.harness.sshd import LOOPBACK
+from servonaut.services.vault.ssh_agent import PrivateSshAgent
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
 
@@ -32,6 +33,32 @@ def _ssh(journey, sshd, *args: str) -> subprocess.CompletedProcess:
         timeout=30,
         check=False,
     )
+
+
+def _agent_ssh(journey, sshd, agent: str, identity_file: str) -> subprocess.CompletedProcess:
+    """Connect with a Vault agent and its public selector, never ``-i``."""
+    return subprocess.run(
+        [
+            "ssh", "-p", str(sshd.target.port), "-o", f"IdentityAgent={agent}", "-o",
+            "IdentitiesOnly=yes", "-o", f"IdentityFile={identity_file}",
+            f"deploy@{LOOPBACK}", "hostname",
+        ],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+
+
+def _public_identity_file(journey, sshd):
+    import asyncssh
+
+    path = journey.directory / "vault-agent.pub"
+    public = asyncssh.read_private_key(str(sshd.client_key_path)).export_public_key()
+    path.write_bytes(public)
+    path.chmod(0o600)
+    return path
 
 
 def _child(journey, code: str) -> subprocess.CompletedProcess:
@@ -147,6 +174,93 @@ def test_options_after_the_destination_are_checked_too(journey, sshd):
     result = _ssh(journey, sshd, f"deploy@{LOOPBACK}", "-o", "IdentityAgent=SSH_AUTH_SOCK", "true")
 
     _refused(result, "identityagent", sshd)
+
+
+def test_vault_agent_socket_inside_custody_authenticates(journey, sshd):
+    """A real agent works only from the guarded Vault custody directory."""
+    identity_file = _public_identity_file(journey, sshd)
+    directory = journey.ctx.sandbox.home / ".servonaut" / "vault" / "tmp"
+    try:
+        agent = PrivateSshAgent.start()
+    except OSError as exc:
+        pytest.skip(f"OpenSSH agent sockets are unavailable: {exc}")
+    try:
+        agent.add_private_key(sshd.client_key_path.read_bytes(), ttl_seconds=60)
+        result = _agent_ssh(journey, sshd, str(agent.socket_path), str(identity_file))
+    finally:
+        agent.close()
+
+    assert agent.socket_path.parent == directory
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == sshd.target.name
+    assert [call.argv for call in journey.shims.calls("ssh-add")] == [["-t", "60", "-"]]
+    assert [call.argv for call in journey.shims.calls("ssh-agent")] == [
+        ["-a", str(agent.socket_path), "-s"], ["-k"],
+    ]
+
+
+def test_vault_agent_refuses_outside_custody_and_a_named_regular_file(journey, sshd):
+    """Neither an outside path nor a filename alone grants agent access."""
+    identity_file = _public_identity_file(journey, sshd)
+    outside = "/tmp/agent-1-0123456789abcdef.sock"
+    agent_start = subprocess.run(
+        ["ssh-agent", "-a", outside, "-s"], capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert agent_start.returncode == 255
+    assert "agent socket is outside the Vault custody directory" in agent_start.stderr
+    add_file = subprocess.run(
+        ["ssh-add", "-t", "60", "/tmp/outside-private-key"], capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert add_file.returncode == 255
+    assert "ssh-add arguments are not allowed" in add_file.stderr
+    add_unbounded = subprocess.run(
+        ["ssh-add", "-t", "3601", "-"], capture_output=True, text=True,
+        stdin=subprocess.DEVNULL, timeout=30, check=False,
+    )
+    assert add_unbounded.returncode == 255
+    assert "ssh-add TTL is not allowed" in add_unbounded.stderr
+    _refused(
+        _agent_ssh(journey, sshd, outside, str(identity_file)), "outside the Vault custody directory", sshd,
+    )
+
+    directory = journey.ctx.sandbox.home / ".servonaut" / "vault" / "tmp"
+    directory.mkdir(mode=0o700, parents=True)
+    candidate = directory / "agent-1-0123456789abcdef.sock"
+    candidate.write_text("not a socket\n", encoding="ascii")
+    _refused(
+        _agent_ssh(journey, sshd, str(candidate), str(identity_file)), "not an owned Unix socket", sshd,
+    )
+
+
+def test_vault_agent_refuses_unsafe_custody_links_and_private_identity(journey, sshd):
+    """The agent exception cannot weaken custody or accept private key files."""
+    identity_file = _public_identity_file(journey, sshd)
+    directory = journey.ctx.sandbox.home / ".servonaut" / "vault" / "tmp"
+    agent = PrivateSshAgent.start(directory)
+    try:
+        _refused(
+            _agent_ssh(journey, sshd, str(agent.socket_path), str(sshd.client_key_path)),
+            "may only use a public IdentityFile", sshd,
+        )
+
+        directory.chmod(0o755)
+        _refused(
+            _agent_ssh(journey, sshd, str(agent.socket_path), str(identity_file)),
+            "unsafe ownership or permissions", sshd,
+        )
+        directory.chmod(0o700)
+
+        linked_socket = directory / "agent-1-0123456789abcdef.sock"
+        linked_socket.symlink_to(agent.socket_path)
+        _refused(
+            _agent_ssh(journey, sshd, str(linked_socket), str(identity_file)),
+            "contains a symbolic link", sshd,
+        )
+    finally:
+        directory.chmod(0o700)
+        agent.close()
 
 
 def test_known_hosts_files_in_the_home_are_accepted(journey, sshd):

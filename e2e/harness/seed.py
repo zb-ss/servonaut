@@ -29,9 +29,6 @@ from e2e.harness.fake_providers import hetzner as fake_hetzner
 from e2e.harness.fake_providers import ovh as fake_ovh
 from e2e.harness.shims import TERMINAL
 
-# The v5 → v6 migration raises this one value (and only this value).
-_V5_CLOUDTRAIL_MAX_EVENTS = 100
-
 
 def _with_overrides(config: Any, overrides: dict[str, Any]) -> Any:
     """*config* with each override set; an unknown field is an error."""
@@ -199,16 +196,17 @@ class HomeSeeder:
         The document is produced from a real ``AppConfig`` and then rewound
         one schema step, so it holds exactly what the previous release saved.
         """
-        if CONFIG_VERSION != 6:
+        if CONFIG_VERSION != 7:
             raise NotImplementedError(
                 f"add the rewind step for schema v{CONFIG_VERSION - 1}"
             )
-        # The previous release had no AWS region allowlist.
-        overrides.setdefault("aws", self.aws_config(regions=[]))
         self.config(**overrides)
         data = self.read_config()
         data["version"] = CONFIG_VERSION - 1
-        data["cloudtrail_max_events"] = _V5_CLOUDTRAIL_MAX_EVENTS
+        # Schema v7 introduced native Vault policy.  A v6 release never
+        # wrote this section, so remove it rather than merely lowering the
+        # version marker.
+        data.pop("vault", None)
         self.config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.config_path.chmod(0o600)
         backups = self.data_dir / "backups"

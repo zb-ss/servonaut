@@ -1,5 +1,7 @@
 """Tests for SCP service."""
 
+import subprocess
+
 from servonaut.services.scp_service import SCPService
 from servonaut.config.schema import SSHConfig
 
@@ -89,6 +91,44 @@ class TestBuildUploadCommand(TestSCPService):
         )
         assert '-J' not in cmd
         assert 'ProxyCommand=ssh -W %h:%p bastion' in cmd
+
+    def test_native_vault_transfer_uses_only_verified_host_key_policy(self):
+        command = self.scp_service.build_upload_command(
+            local_path='/tmp/file.txt',
+            remote_path='/srv/file.txt',
+            host='web-1.example.net',
+            username='deploy',
+            identity_agent='/tmp/servonaut-agent.sock',
+            identity_file='/tmp/servonaut-agent-key.pub',
+            certificate_file='/tmp/device-cert.pub',
+            known_hosts_file='/tmp/vault-known-hosts',
+        )
+
+        assert '-i' not in command
+        assert 'StrictHostKeyChecking=accept-new' not in command
+        assert 'UserKnownHostsFile=/tmp/vault-known-hosts' in command
+        assert 'StrictHostKeyChecking=yes' in command
+        assert 'IdentityAgent=/tmp/servonaut-agent.sock' in command
+        assert 'IdentityFile=/tmp/servonaut-agent-key.pub' in command
+        assert 'CertificateFile=/tmp/device-cert.pub' in command
+
+        # scp has no -G mode. Its target options are parsed by ssh, so prove
+        # the equivalent OpenSSH configuration with the exact scp -o prefix.
+        option_end = command.index('--')
+        probe = subprocess.run(
+            [
+                'ssh', '-F', '/dev/null', '-G', *command[1:option_end],
+                'deploy@web-1.example.net',  # leak-guard:allow — example host
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        effective = dict(
+            line.split(' ', 1) for line in probe.stdout.splitlines() if ' ' in line
+        )
+        assert effective['stricthostkeychecking'] == 'true'
+        assert effective['userknownhostsfile'] == '/tmp/vault-known-hosts'
 
 
 class TestBuildDownloadCommand(TestSCPService):

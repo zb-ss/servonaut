@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from e2e.harness import installs as installs_module
 from e2e.tools import fetch_previous_release as fetcher
 
 pytestmark = [pytest.mark.e2e_pr]
@@ -60,3 +61,56 @@ def test_a_schema_bump_is_covered_once_the_latest_release_is_added(monkeypatch):
         assert roles["previous"] == current
     assert f"schema-{CONFIG_VERSION}" in fetcher.boundary_roles()
     assert fetcher.pinned_sha256(f"schema-{CONFIG_VERSION}") == "0" * 64
+
+
+def test_overlay_sources_include_inherited_distribution_paths(monkeypatch, journey):
+    """Offline installs retain dependencies from inherited ``dist-packages``."""
+    workspace = journey.directory / "overlay-source-fixture"
+    purelib = workspace / "venv" / "site-packages"
+    inherited = workspace / "system" / "dist-packages"
+    metadata_only = workspace / "metadata" / "site-packages"
+    for path in (purelib, inherited, metadata_only):
+        path.mkdir(parents=True)
+
+    class Distribution:
+        def locate_file(self, name: str):
+            assert name == ""
+            return metadata_only
+
+    monkeypatch.setattr(
+        installs_module.sysconfig,
+        "get_paths",
+        lambda: {"purelib": str(purelib), "platlib": str(purelib)},
+    )
+    monkeypatch.setattr(installs_module.sys, "path", [str(inherited)])
+    monkeypatch.setattr(installs_module.metadata, "distributions", lambda: [Distribution()])
+
+    assert installs_module.environment_site_dirs() == [
+        purelib.resolve(),
+        inherited.resolve(),
+        metadata_only.resolve(),
+    ]
+
+
+def test_overlay_prefers_the_first_visible_distribution(monkeypatch, journey):
+    """An inherited older dist-info cannot override the active dependency."""
+    workspace = journey.directory / "overlay-precedence-fixture"
+    active = workspace / "venv" / "site-packages"
+    inherited = workspace / "system" / "dist-packages"
+    active.mkdir(parents=True)
+    inherited.mkdir(parents=True)
+    (active / "rich").mkdir()
+    for directory, version in ((active, "15.0.0"), (inherited, "13.9.4")):
+        info = directory / f"rich-{version}.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: rich\nVersion: {version}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(installs_module, "environment_site_dirs", lambda: [active, inherited])
+
+    overlay = installs_module.build_overlay(workspace / "overlay")
+
+    assert (overlay / "rich").resolve() == (active / "rich").resolve()
+    assert (overlay / "rich-15.0.0.dist-info").is_symlink()
+    assert not (overlay / "rich-13.9.4.dist-info").exists()

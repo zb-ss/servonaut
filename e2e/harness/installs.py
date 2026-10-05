@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib.metadata as metadata
 import json
 import os
 import re
@@ -142,26 +143,71 @@ _HOOK_PTH_LINE = f"import sys; sys.dont_write_bytecode = True; import {HOOK_MODU
 
 
 def environment_site_dirs() -> list[Path]:
-    """This interpreter's site-packages directories (the overlay's source)."""
-    paths = sysconfig.get_paths()
+    """Installed-package directories visible to this interpreter.
+
+    A virtual environment's ``sysconfig`` paths do not include distribution
+    ``dist-packages`` directories inherited from the interpreter.  The
+    package installer sees them through ``sys.path`` and distribution
+    metadata, so the offline overlay must include them too.
+    """
     out: list[Path] = []
+
+    def add(path: Path) -> None:
+        if path.is_dir():
+            resolved = path.resolve()
+            if resolved not in out:
+                out.append(resolved)
+
+    paths = sysconfig.get_paths()
     for key in ("purelib", "platlib"):
-        path = Path(paths[key]).resolve()
-        if path not in out:
-            out.append(path)
+        add(Path(paths[key]))
+    for raw_path in sys.path:
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if path.name in {"site-packages", "dist-packages"}:
+            add(path)
+    for distribution in metadata.distributions():
+        try:
+            path = Path(distribution.locate_file(""))
+        except (OSError, TypeError, ValueError):
+            continue
+        if path.name in {"site-packages", "dist-packages"}:
+            add(path)
     return out
 
 
 def build_overlay(destination: Path) -> Path:
     """Link every package of this environment, except Servonaut and pip."""
     destination.mkdir(parents=True)
+    linked_distributions: set[str] = set()
     for site_dir in environment_site_dirs():
         for entry in sorted(site_dir.iterdir()):
             link = destination / entry.name
-            if _OVERLAY_EXCLUDED.match(entry.name) or link.exists():
+            distribution = _distribution_name(entry)
+            if (
+                _OVERLAY_EXCLUDED.match(entry.name)
+                or link.exists()
+                or distribution in linked_distributions
+            ):
                 continue
             link.symlink_to(entry)
+            if distribution is not None:
+                linked_distributions.add(distribution)
     return destination
+
+
+def _distribution_name(entry: Path) -> Optional[str]:
+    """Return a normalized distribution name for a metadata directory."""
+    if not entry.name.endswith((".dist-info", ".egg-info")):
+        return None
+    try:
+        name = metadata.Distribution.at(entry).metadata.get("Name")
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(name, str) or not name:
+        return None
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # The Python pipx runs. pipx drops PYTHONPATH from its children, so this

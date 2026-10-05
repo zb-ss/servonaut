@@ -12,7 +12,7 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def build_headless_tools(config_manager=None, accounts=None):
+def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=None):
     """Construct a fully wired :class:`ServonautTools` with no TUI.
 
     Single source of truth for headless service construction — shared by
@@ -25,6 +25,8 @@ def build_headless_tools(config_manager=None, accounts=None):
     single-service arguments are each provider's default account, and the
     registry gives the tools every other account. A caller that already
     built the registry (the relay runner) passes it as *accounts*.
+    A relay can also pass its existing *vault_runtime* so it owns one custody
+    store and closes every private agent lease through the same lifecycle.
     """
     from servonaut.mcp.installer import prune_empty_forwarded_env
     pruned = prune_empty_forwarded_env()
@@ -108,6 +110,13 @@ def build_headless_tools(config_manager=None, accounts=None):
     guard = CommandGuard(config.mcp, config_manager)
     audit = AuditTrail(config.mcp.audit_path)
     auth_service = AuthService()
+    if vault_runtime is None and auth_service.is_authenticated:
+        from servonaut.services.api_client import APIClient
+        from servonaut.services.vault.command_service import VaultCommandService
+        vault_runtime = VaultCommandService(
+            APIClient(auth_service), auth_service, config,
+            ssh_service=ssh_service, connection_service=connection_service,
+        )
 
     # Bitwarden SSH-ref service — lets SSH-backed tools resolve a stored
     # vault ref when no local key is configured. Optional: any construction
@@ -121,6 +130,14 @@ def build_headless_tools(config_manager=None, accounts=None):
         logger.info("Bitwarden SSH-ref service initialized for MCP")
     except Exception as e:
         logger.warning("Bitwarden SSH-ref service unavailable in MCP: %s", e)
+    if vault_runtime is not None:
+        from servonaut.services.ssh_ref_resolver import SshRefResolver
+        vault_runtime.ssh_ref_resolver = SshRefResolver(
+            bw_ssh_config_service, vault_runtime.teams, ssh_service,
+            vault_runtime=vault_runtime,
+        )
+        from servonaut.services.vault.background import unlock_vault_for_startup
+        unlock_vault_for_startup(vault_runtime)
 
     # Hetzner Cloud and OVH — optional. The registry builds an account only
     # when it can connect (Hetzner: a token resolves; OVH: credentials are
@@ -187,6 +204,7 @@ def build_headless_tools(config_manager=None, accounts=None):
         )
         secret_provider = resolve_secret_provider(
             auth_service, EntitlementGuard(auth_service),
+            native_provider=(vault_runtime.native_provider if vault_runtime else None),
         )
         if secret_provider is not None:
             logger.info(
@@ -228,6 +246,7 @@ def build_headless_tools(config_manager=None, accounts=None):
         secret_provider=secret_provider,
         ip_enrichment_service=ip_enrichment_service,
         account_registry=accounts,
+        vault_runtime=vault_runtime,
     )
     return tools
 
@@ -377,6 +396,7 @@ def create_mcp_server():
         # crashing the stdio loop and dropping the whole session.
         return await _dispatch_tool(tools, name, arguments)
 
+    server.servonaut_tools = tools
     return server
 
 
@@ -390,5 +410,10 @@ async def run_server() -> None:
 
     server = create_mcp_server()
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        runtime = getattr(server.servonaut_tools, "_vault_runtime", None)
+        if runtime is not None:
+            runtime.close()

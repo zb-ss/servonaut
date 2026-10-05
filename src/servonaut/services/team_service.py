@@ -318,6 +318,7 @@ class TeamService(TeamServiceInterface):
         server_id: str,
         status: str,
         checked_by_client: Optional[str] = None,
+        resolution_tier: Optional[str] = None,
     ) -> dict:
         """POST /teams/{slug}/servers/{server_id}/ssh-verify-report.
 
@@ -333,6 +334,10 @@ class TeamService(TeamServiceInterface):
             allowed = ", ".join(sorted(VALID_VERIFY_STATUSES))
             raise ValueError(f"status must be one of {{{allowed}}}, got {status!r}")
         body: Dict = {"status": status}
+        if resolution_tier is not None:
+            if resolution_tier not in {"ca", "vault", "personal", "team", "local"}:
+                raise ValueError("invalid SSH resolution tier")
+            body["resolution_tier"] = resolution_tier
         if checked_by_client:
             body["checked_by_client"] = checked_by_client
         return await self._api.post(

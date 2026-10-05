@@ -18,9 +18,9 @@ scripted fakes write) and then decides whether the call may run:
   already expanded. The host must be a loopback address (or be reached
   through jump hosts that are, each checked the same way); every file the
   settings name must be ``none``, ``/dev/null`` or inside the test root
-  *<root>*; and nothing may run or load local code or reach an agent
+  *<root>*; and nothing may run or load local code or reach an arbitrary agent
   (``PermitLocalCommand``, ``KnownHostsCommand``, ``PKCS11Provider``,
-  ``SecurityKeyProvider``, ``IdentityAgent``, ``ForwardAgent``, X11,
+  ``SecurityKeyProvider``, ``ForwardAgent``, X11,
   ``ssh-keysign``, GSSAPI, DNS look-ups). A ProxyCommand must be a plain
   ``ssh ...`` command line, which PATH brings back through this shim; quoted
   words are allowed, and the only expansion is Servonaut's own ssh-log
@@ -41,7 +41,9 @@ import fcntl
 import ipaddress
 import json
 import os
+import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -78,7 +80,6 @@ REQUIRED_SETTINGS = {
     "knownhostscommand": {"none"},
     "pkcs11provider": {"none"},
     "securitykeyprovider": {"internal", "none"},
-    "identityagent": {"none"},
     "forwardagent": {"no"},
     "forwardx11": {"no"},
     "enablesshkeysign": {"no"},
@@ -88,6 +89,9 @@ REQUIRED_SETTINGS = {
     "gatewayports": {"no"},
 }
 _NO_FILE = {"none", "/dev/null"}
+_VAULT_AGENT_DIRECTORY = (".servonaut", "vault", "tmp")
+_VAULT_AGENT_SOCKET = re.compile(r"agent-\d+-[0-9a-f]{16}\.sock\Z")
+_PUBLIC_KEY_PREFIXES = ("ssh-", "ecdsa-", "sk-")
 # Characters that would make a ProxyCommand more than one plain command
 # (outside quotes, and inside double quotes respectively).
 _SHELL_METACHARACTERS = frozenset("$`;|&<>()\\!*?[]{}\n\r")
@@ -213,6 +217,90 @@ def _settings_problem(settings: dict[str, list[str]]) -> str:
     return ""
 
 
+def _vault_agent_problem(settings: dict[str, list[str]], root: str) -> str:
+    """Validate the one private Vault agent the hermetic client may use.
+
+    The agent owns private key material, so an expected-looking filename is
+    insufficient. The socket and every custody-directory component are
+    inspected with ``lstat`` before OpenSSH can connect.
+    """
+    agent = _first(settings, "identityagent")
+    if agent.lower() == "none":
+        return ""
+    if not os.path.isabs(agent):
+        return f"identityagent {agent!r} is not an absolute Vault agent socket"
+
+    raw_home = os.environ.get("HOME", "")
+    home = os.path.normpath(raw_home) if raw_home else ""
+    if not home or not os.path.isabs(home) or home != os.path.realpath(home) or not _within(home, root):
+        return "HOME is outside the hermetic test root"
+    directory = os.path.join(home, *_VAULT_AGENT_DIRECTORY)
+    candidate = os.path.normpath(agent)
+    if candidate != agent or os.path.dirname(candidate) != directory:
+        return f"identityagent {agent!r} is outside the Vault custody directory"
+    if _VAULT_AGENT_SOCKET.fullmatch(os.path.basename(candidate)) is None:
+        return f"identityagent {agent!r} is not a Vault agent socket"
+    if os.path.realpath(candidate) != candidate:
+        return f"identityagent {agent!r} contains a symbolic link"
+
+    current = home
+    try:
+        for part in _VAULT_AGENT_DIRECTORY:
+            current = os.path.join(current, part)
+            info = os.lstat(current)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                return "Vault custody directory is not a real directory"
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            return "Vault custody directory has unsafe ownership or permissions"
+        socket = os.lstat(candidate)
+    except OSError:
+        return "Vault agent socket could not be inspected"
+    if stat.S_ISLNK(socket.st_mode) or not stat.S_ISSOCK(socket.st_mode):
+        return "identityagent is not an owned Unix socket"
+    if socket.st_uid != os.getuid():
+        return "identityagent is not owned by this user"
+    return _public_identity_file_problem(settings)
+
+
+def _public_identity_file_problem(settings: dict[str, list[str]]) -> str:
+    """Require an agent-backed call to select only an existing public key file."""
+    found_public_identity = False
+    for value in settings.get("identityfile", []):
+        for path in value.split():
+            if path in _NO_FILE:
+                continue
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                # The sandbox's deliberate no-default identity cannot make an
+                # agent offer a key from an ambient SSH configuration.
+                continue
+            except OSError:
+                return f"identityfile {path!r} could not be inspected"
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                return "IdentityAgent requires a real public IdentityFile"
+            try:
+                with open(path, "r", encoding="ascii") as handle:
+                    contents = handle.read(16384)
+            except (OSError, UnicodeError):
+                return "IdentityAgent requires a readable public IdentityFile"
+            if not _is_public_identity(contents):
+                return "IdentityAgent may only use a public IdentityFile"
+            found_public_identity = True
+    if not found_public_identity:
+        return "IdentityAgent requires an existing public IdentityFile"
+    return ""
+
+
+def _is_public_identity(contents: str) -> bool:
+    """Recognise a one-line OpenSSH public key without parsing private material."""
+    lines = [line for line in contents.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return False
+    fields = lines[0].split(maxsplit=2)
+    return len(fields) >= 2 and fields[0].startswith(_PUBLIC_KEY_PREFIXES) and bool(fields[1])
+
+
 def _shell_syntax_problem(command: str) -> bool:
     """True if *command* is more to ``sh`` than quoted and unquoted words."""
     quote = ""
@@ -269,7 +357,11 @@ def _connection_problem(real_ssh: str, config: str, root: str, args: list[str],
     settings = _effective(real_ssh, config, args)
     if settings is None:
         return "OpenSSH could not evaluate the connection"
-    problem = _file_problem(settings, root) or _settings_problem(settings)
+    problem = (
+        _file_problem(settings, root)
+        or _settings_problem(settings)
+        or _vault_agent_problem(settings, root)
+    )
     if problem:
         return problem
     command = _first(settings, "proxycommand")

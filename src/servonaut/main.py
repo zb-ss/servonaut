@@ -625,6 +625,7 @@ def _relay_run_foreground() -> None:
     # stays disabled and tool dispatches time out server-side as before.
     ai_tool_executor = None
     probe_bridge = None
+    vault_runtime = None
     ai_tool_note = "disabled (run `servonaut login` to enable)"
     if auth_service is not None:
         try:
@@ -639,8 +640,24 @@ def _relay_run_foreground() -> None:
             from servonaut.mcp.server import build_headless_tools
 
             api_client = APIClient(auth_service)
+            from servonaut.services.vault.command_service import VaultCommandService
+            vault_runtime = VaultCommandService(
+                api_client, auth_service, config,
+                ssh_service=ssh_service, connection_service=connection_service,
+            )
+            from servonaut.services.bw_ssh_config_service import BwSshConfigService
+            from servonaut.services.ssh_ref_resolver import SshRefResolver
+            vault_runtime.ssh_ref_resolver = SshRefResolver(
+                BwSshConfigService(api_client), vault_runtime.teams, ssh_service,
+                vault_runtime=vault_runtime,
+            )
+            from servonaut.services.vault.background import unlock_vault_for_startup
+            unlock_vault_for_startup(vault_runtime)
+            executors.set_vault_runtime(vault_runtime)
             mcp_audit = AuditTrail(config.mcp.audit_path)
-            headless_tools = build_headless_tools(config_manager, accounts=accounts)
+            headless_tools = build_headless_tools(
+                config_manager, accounts=accounts, vault_runtime=vault_runtime,
+            )
             ip_ban_service = IPBanService(config_manager, accounts=accounts)
 
             bridge = AIToolBridge(
@@ -706,6 +723,9 @@ def _relay_run_foreground() -> None:
         # Read on every handshake and heartbeat.
         providers_configured=lambda: usable_providers(accounts),
         accounts=lambda: account_labels(accounts),
+        vault_event_handler=(
+            vault_runtime.handle_event if vault_runtime is not None else None
+        ),
     )
 
     print(f"Starting Servonaut relay listener (user: {user_id})")
@@ -716,7 +736,8 @@ def _relay_run_foreground() -> None:
     log_relay_event("starting", mode="bg", client_id=listener.client_id)
 
     try:
-        asyncio.run(listener.run())
+        from servonaut.services.vault.background import run_relay_with_vault
+        asyncio.run(run_relay_with_vault(listener, vault_runtime))
     finally:
         log_relay_event(
             "stopped", mode="bg",
@@ -1429,6 +1450,11 @@ def _main() -> None:
     from servonaut.cli.secrets import add_secrets_parser, handle_secrets_command
     add_secrets_parser(subparsers)
 
+    from servonaut.cli.vault import add_vault_parser, handle_vault_command
+    from servonaut.cli.ca import add_ca_parser, handle_ca_command
+    add_vault_parser(subparsers)
+    add_ca_parser(subparsers)
+
     # ---- ssh subcommand (BW Password Manager SSH integration) ----
     from servonaut.cli.ssh import add_ssh_parser, handle_ssh_command
     add_ssh_parser(subparsers)
@@ -1468,6 +1494,14 @@ def _main() -> None:
     if getattr(args, 'subcommand', None) == 'secrets':
         _setup_logging(debug=args.debug)
         sys.exit(handle_secrets_command(args))
+
+    if getattr(args, 'subcommand', None) == 'vault':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_vault_command(args))
+
+    if getattr(args, 'subcommand', None) == 'ca':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_ca_command(args))
 
     if getattr(args, 'subcommand', None) == 'ssh':
         _setup_logging(debug=args.debug)

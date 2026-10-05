@@ -708,6 +708,9 @@ class RelayManager:
             self._config_manager, accounts=getattr(self._app, "accounts", None),
         )
         app = self._app
+        vault_runtime = getattr(app, "vault_command_service", None)
+        if vault_runtime is not None:
+            executors.set_vault_runtime(vault_runtime)
         probe_bridge = self._build_probe_bridge(executors)
         return RelayListener(
             executors=executors,
@@ -737,6 +740,9 @@ class RelayManager:
             providers_configured=lambda: _resolve_providers_configured(app),
             probe_bridge=probe_bridge,
             accounts=lambda: _resolve_account_labels(app),
+            vault_event_handler=(
+                vault_runtime.handle_event if vault_runtime is not None else None
+            ),
         )
 
     def _build_probe_bridge(self, executors):

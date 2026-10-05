@@ -427,6 +427,30 @@ Default models per provider: OpenAI → `gpt-4o-mini`, Anthropic → `claude-son
 
 No extra install needed — `httpx` ships as a base dependency.
 
+## Vault
+
+The `vault` object controls local client behaviour for encrypted personal and
+team vaults. It does not contain a recovery key, a vault key, or an SSH private
+key. Those values are stored separately with operating-system key protection.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `vault.auto_grant` | bool | Lets an eligible administrator process pending automatic grants. The team vault policy still decides whether approval is required. |
+| `vault.strict_verification` | bool | Requires a local safety-number confirmation before a new or changed member identity receives a vault grant. |
+| `vault.allow_file_key_store` | bool | Allows the explicitly weaker, mode-restricted local device-key fallback when no trusted OS keyring is available. Keep this disabled unless headless operation requires it. |
+| `vault.poll_after_seconds` | int | Poll interval used when a live vault-event connection is unavailable. |
+| `vault.approval_poll_initial_seconds` / `vault.approval_poll_max_seconds` | number | Initial and capped delay while a new device waits for approval. |
+| `vault.agent_key_ttl_seconds` | int | Maximum lifetime of a key loaded into the private SSH agent. |
+
+Native vault SSH keys are loaded into a private session agent and are never
+written as a key file. For unattended test environments only,
+`SERVONAUT_VAULT_DEVICE_KEY` may provide the device-key material; do not use it
+for an ordinary interactive installation.
+
+Runtime state lives under `~/.servonaut/vault/` with owner-only permissions.
+It contains wrapped device material, trust pins and rollback state. Removing it
+does not recover encrypted vault data; use the recovery flow instead.
+
 ## Secrets
 
 API keys and other sensitive values can be externalized so `config.json` is safe to commit to a dotfiles repo.

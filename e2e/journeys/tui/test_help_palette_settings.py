@@ -13,9 +13,10 @@ saved.
 from __future__ import annotations
 
 import pytest
-from textual.command import CommandList
+from textual.command import CommandList, CommandPalette
 
 from e2e.harness import fleet
+from e2e.harness.session_seed import seed_session
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
@@ -26,19 +27,46 @@ PROVIDER_QUERIES = {
     "OVH DNS Zones": "OVHDNSScreen",
 }
 
+VAULT_PALETTE_DESTINATIONS = {
+    "Go to Vault": "VaultScreen",
+    "Go to SSH Certificates": "CaScreen",
+}
 
-async def _palette_has_no_match(t, query: str) -> None:
-    """Type *query* into the palette and wait for its "No matches found"."""
+
+async def _palette_results(t, query: str) -> list[str]:
+    """Return filtered palette labels after Textual has finished its command search."""
     await t.press("ctrl+p")
     await t.wait_for_screen("CommandPalette")
     await t.type(query)
     command_list = t.on_screen(CommandList)
 
-    def no_matches() -> bool:
-        options = [command_list.get_option_at_index(i) for i in range(command_list.option_count)]
-        return len(options) == 1 and "No matches found" in str(options[0].prompt)
+    def search_finished() -> bool:
+        searching = any(
+            worker.group == CommandPalette._GATHER_COMMANDS_GROUP and not worker.is_finished
+            for worker in t.app.workers
+        )
+        return not searching and command_list.option_count > 0
 
-    await t.wait_until(no_matches, timeout=5, desc=f"no palette match for {query!r}")
+    await t.wait_until(search_finished, desc=f"palette search for {query!r}")
+    return [
+        getattr(command_list.get_option_at_index(i).prompt, "plain", str(command_list.get_option_at_index(i).prompt))
+        for i in range(command_list.option_count)
+    ]
+
+
+async def _palette_has_no_match(t, query: str) -> None:
+    """Type *query* into the palette and require its "No matches found" result."""
+    prompts = await _palette_results(t, query)
+    assert len(prompts) == 1 and "No matches found" in prompts[0]
+
+    await t.press("escape")
+    await t.wait_until(lambda: t.screen_name() != "CommandPalette", desc="palette closed")
+
+
+async def _palette_omits_native_vault(t) -> None:
+    """The legacy BW destination may match ``Vault`` but native Vault may not."""
+    prompts = await _palette_results(t, "Vault")
+    assert "Go to Vault" not in prompts
     await t.press("escape")
     await t.wait_until(lambda: t.screen_name() != "CommandPalette", desc="palette closed")
 
@@ -51,6 +79,28 @@ async def test_provider_palette_entries_are_hidden_without_providers(tui, seed):
         for query in PROVIDER_QUERIES:
             await _palette_has_no_match(t, query)
         assert t.screen_name() == "InstanceListScreen"
+
+
+async def test_vault_palette_entries_wait_for_discovery_and_open_native_screens(tui, seed, fake_cloud):
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+    seed_session(seed.home, fake_cloud)
+
+    async with tui(size=(100, 30)) as t:
+        await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
+        for command, screen in VAULT_PALETTE_DESTINATIONS.items():
+            await t.palette(command)
+            await t.wait_for_screen(screen)
+
+
+async def test_vault_palette_entries_are_hidden_when_vault_is_unavailable(tui, seed):
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+
+    async with tui() as t:
+        assert not t.app.vault_available
+        await _palette_omits_native_vault(t)
+        await _palette_has_no_match(t, "Go to SSH Certificates")
 
 
 async def test_provider_palette_entries_lead_to_their_screens(tui, seed, providers):

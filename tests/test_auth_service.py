@@ -205,6 +205,30 @@ class TestAuthServiceBasic:
 
         assert authenticated_service.has_feature("memory_ai_summary") is False
 
+    def test_vault_feature_defaults_follow_the_plan(self, authenticated_service):
+        assert authenticated_service.has_feature("personal_vault") is True
+        assert authenticated_service.has_feature("team_vault") is False
+        assert authenticated_service.has_feature("ssh_ca") is False
+
+        authenticated_service._apply_entitlements({"plan": "teams"})
+        assert authenticated_service.has_feature("personal_vault") is True
+        assert authenticated_service.has_feature("team_vault") is True
+        assert authenticated_service.has_feature("ssh_ca") is True
+
+    @pytest.mark.parametrize("value", ["1", "true", 1.0, 2, None])
+    def test_vault_wire_features_reject_noncanonical_booleans(self, authenticated_service, value):
+        authenticated_service._apply_entitlements({
+            "plan": "free",
+            "features": {
+                "personal_vault": value,
+                "team_vault": value,
+                "ssh_ca": value,
+            },
+        })
+        assert authenticated_service.has_feature("personal_vault") is False
+        assert authenticated_service.has_feature("team_vault") is False
+        assert authenticated_service.has_feature("ssh_ca") is False
+
     def test_get_status_unauthenticated(self, auth_service):
         status = auth_service.get_status()
         assert not status["authenticated"]

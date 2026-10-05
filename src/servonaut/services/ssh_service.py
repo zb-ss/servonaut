@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
-from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args
+from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
 from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -532,6 +532,10 @@ class SSHService(SSHServiceInterface):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        identity_agent: Optional[str] = None,
+        identity_file: Optional[str] = None,
+        certificate_file: Optional[str] = None,
+        known_hosts_file: Optional[str] = None,
     ) -> List[str]:
         """Build SSH command as List[str]. NEVER use shell=True.
 
@@ -552,6 +556,15 @@ class SSHService(SSHServiceInterface):
             extra_options: Extra ``-o KEY=VALUE`` entries (KEY=VALUE strings
                 only — the ``-o`` is added automatically). Applied before proxy
                 and identity flags so later ``-o`` values can refine them.
+            identity_agent: Explicit private-agent socket for a native vault
+                key. The process environment is never changed.
+            identity_file: Public key corresponding to the native private
+                agent identity. OpenSSH needs this explicit public identity
+                when ``IdentitiesOnly=yes`` filters agent keys.
+            certificate_file: Public OpenSSH certificate associated with the
+                private-agent key.
+            known_hosts_file: Strict Team Vault known-hosts file. This is
+                emitted before configurable options so it cannot be weakened.
 
         Returns:
             List of command arguments for subprocess.
@@ -562,9 +575,13 @@ class SSHService(SSHServiceInterface):
             from servonaut.config.schema import SSHConfig
             ssh_cfg = SSHConfig()
 
-        # Host-key options come first: OpenSSH honours the FIRST value of an
-        # option, so neither extra_options nor ~/.ssh/config can weaken them.
-        cmd = ['ssh', *HostKeyPolicy.from_ssh_config(ssh_cfg).ssh_options()]
+        # OpenSSH honours the FIRST value of each option. A Vault lease must
+        # omit the configurable policy: emitting ``accept-new`` or its paths
+        # first would silently defeat the verified binding pins below.
+        if known_hosts_file:
+            cmd = ['ssh', *pinned_host_key_options(known_hosts_file)]
+        else:
+            cmd = ['ssh', *HostKeyPolicy.from_ssh_config(ssh_cfg).ssh_options()]
 
         # SSH keepalive options — guard against NAT/firewall idle drops.
         # Emitted before extra_options so that per-profile overrides placed
@@ -584,9 +601,17 @@ class SSHService(SSHServiceInterface):
         if port is not None and port != 22:
             cmd.extend(['-p', str(port)])
 
-        # Apply per-host extras (e.g. legacy algorithm negotiation)
+        # Apply per-host extras (e.g. legacy algorithm negotiation).  A
+        # native lease pins the host name recorded in its verified binding;
+        # the ordinary cloud alias belongs to the configurable known-hosts
+        # policy and would make OpenSSH look up a name that is absent from the
+        # lease file.  Keep all other profile options, but never let one
+        # redirect the strict native lookup.
         if extra_options:
             for opt in extra_options:
+                option_name = opt.split("=", 1)[0].strip().casefold() if opt else ""
+                if known_hosts_file and option_name == "hostkeyalias":
+                    continue
                 if opt:
                     cmd.extend(['-o', opt])
 
@@ -600,6 +625,12 @@ class SSHService(SSHServiceInterface):
         if key_path:
             expanded = os.path.expanduser(key_path)
             cmd.extend(['-o', 'IdentitiesOnly=yes', *identity_file_args(expanded)])
+        elif identity_agent:
+            cmd.extend(['-o', f'IdentityAgent={identity_agent}', '-o', 'IdentitiesOnly=yes'])
+            if identity_file:
+                cmd.extend(['-o', f'IdentityFile={os.path.expanduser(identity_file)}'])
+            if certificate_file:
+                cmd.extend(['-o', f'CertificateFile={certificate_file}'])
 
         # End option parsing before the destination: OpenSSH keeps parsing
         # options that follow the host, so a remote command starting with

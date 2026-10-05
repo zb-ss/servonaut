@@ -273,6 +273,7 @@ class TestCreateConfirmation:
 
         monkeypatch.setattr('builtins.input', press_ctrl_c)
         try:
+            previous_sigint_handler = signal.getsignal(signal.SIGINT)
             rc, out, _ = _run_cli(_make_parser(), self.ARGV)
         except KeyboardInterrupt:
             pytest.fail("Ctrl-C escaped the question instead of cancelling it")
@@ -283,7 +284,33 @@ class TestCreateConfirmation:
         audit = (tmp_path / "audit.jsonl").read_text()
         assert "declined: not confirmed" in audit
         # The prompt hands SIGINT back to whoever handled it before.
-        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        assert signal.getsignal(signal.SIGINT) is previous_sigint_handler
+
+    def test_ctrl_c_cancels_and_restores_nondefault_signal_handler(
+        self, service, monkeypatch, tmp_path,
+    ):
+        def previous_sigint_handler(_signum, _frame):
+            pass
+
+        original_sigint_handler = signal.signal(signal.SIGINT, previous_sigint_handler)
+        try:
+            def press_ctrl_c(*_args):
+                os.kill(os.getpid(), signal.SIGINT)
+                return "y"
+
+            monkeypatch.setattr('builtins.input', press_ctrl_c)
+            rc, out, _ = _run_cli(_make_parser(), self.ARGV)
+
+            assert rc == _EXIT_DECLINED
+            assert "Cancelled." in out
+            service.client_mock.servers.create.assert_not_called()
+            audit = (tmp_path / "audit.jsonl").read_text()
+            assert "declined: not confirmed" in audit
+            # A fixed default-handler assertion would reject a valid prior handler.
+            assert signal.getsignal(signal.SIGINT) is not signal.default_int_handler
+            assert signal.getsignal(signal.SIGINT) is previous_sigint_handler
+        finally:
+            signal.signal(signal.SIGINT, original_sigint_handler)
 
     def test_refusal_is_reported_without_asking(self, service, monkeypatch):
         # No key anywhere: the create is refused before any question.

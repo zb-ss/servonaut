@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Static, Button, Footer
+from textual.widgets import Static, Button, Footer, Input
 
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_KEEP_KNOWN_HOSTS,
@@ -46,6 +46,7 @@ _ACTION_HELP: dict[str, str] = {
     "btn_scp": "Upload or download files via SCP.",
     "btn_ban_ip": "Ban this server's public IP via WAF, Security Group, or NACL.",
     "btn_manage_ssh_ref": "Add, edit, or remove the Bitwarden SSH item ref.",
+    "btn_use_vault_key": "Bind a verified native-vault SSH key to this server.",
     "btn_verify_ssh": "Run a local SSH probe and report the result.",
     "btn_ovh_reinstall": "Reinstall this OVH server with a new OS image.",
     "btn_ovh_resize": "Change the VPS model or Cloud flavor.",
@@ -122,6 +123,36 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
     def action_action_cancel(self) -> None:
         """Escape — dismiss False."""
         self.dismiss(False)
+
+
+class VaultBindingModal(ModalScreen[Optional[dict]]):
+    """Collect explicit native-vault binding identifiers without exposing a key."""
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("[bold]Use vault key[/bold]"),
+            Static("Enter a team slug for a shared server. Personal servers require explicit host-key pins."),
+            Input(placeholder="Team slug (shared server only)", id="vault_bind_team"),
+            Input(placeholder="Vault ID", id="vault_bind_vault"),
+            Input(placeholder="Vault SSH item ID", id="vault_bind_item"),
+            Input(placeholder="Login user (optional)", id="vault_bind_login"),
+            Input(placeholder="Verified OpenSSH host keys, comma separated (shared: optional)", id="vault_bind_host_keys"),
+            Horizontal(Button("Cancel", id="vault_bind_cancel"), Button("Bind", id="vault_bind_confirm")),
+            id="vault_bind_modal",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "vault_bind_confirm":
+            self.dismiss(None)
+            return
+        values = {
+            "team": self.query_one("#vault_bind_team", Input).value.strip(),
+            "vault_id": self.query_one("#vault_bind_vault", Input).value.strip(),
+            "item_id": self.query_one("#vault_bind_item", Input).value.strip(),
+            "login": self.query_one("#vault_bind_login", Input).value.strip() or None,
+            "host_keys": self.query_one("#vault_bind_host_keys", Input).value.strip(),
+        }
+        self.dismiss(values if all(values[key] for key in ("vault_id", "item_id")) else None)
 
 
 class ServerActionsScreen(ServerAccountMixin, Screen):
@@ -263,6 +294,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     Button("4. SCP Transfer", id="btn_scp"),
                     Button("8. Ban IP", id="btn_ban_ip"),
                     Static("MANAGE", classes="section_label"),
+                    Button("Use Vault Key", id="btn_use_vault_key"),
                     Button("R. Manage SSH Ref", id="btn_manage_ssh_ref"),
                     Button("V. Verify SSH", id="btn_verify_ssh"),
                     Button("9. Back", id="btn_back", variant="error"),
@@ -301,6 +333,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             f"[dim]Account:[/dim] {field('account', '-')}\n"
             if self._instance.get('account_qualified') else ""
         )
+        credential_line = self._credential_source_line()
 
         if self._instance.get('is_ovh'):
             provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
@@ -327,6 +360,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]State:[/dim] {self._colorize_state(state)}\n"
                 f"[dim]OS:[/dim] {os_label}\n"
                 f"[dim]RAM:[/dim] {ram} GB\n\n"
+                f"{credential_line}"
                 f"[cyan]Direct Connection[/cyan]\n"
                 f"[dim]Target:[/dim] {public_ip}"
             )
@@ -344,6 +378,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]Provider:[/dim] {provider}\n"
                 f"[dim]Group:[/dim] {group}\n"
                 f"[dim]State:[/dim] [dim]N/A (custom server)[/dim]\n\n"
+                f"{credential_line}"
                 f"[cyan]Direct Connection[/cyan]\n"
                 f"[dim]Target:[/dim] {public_ip}"
             )
@@ -376,9 +411,21 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             f"[dim]Private IP:[/dim] {private_ip}\n"
             f"[dim]Region:[/dim] {region}\n"
             f"[dim]State:[/dim] {self._colorize_state(state)}\n\n"
+            f"{credential_line}"
             f"{connection_info}\n"
             f"[dim]Target:[/dim] {target_ip}"
         )
+
+    def _credential_source_line(self) -> str:
+        """Describe the configured SSH credential without exposing its reference."""
+        binding = self._instance.get("credential_binding")
+        source = binding.get("source") if isinstance(binding, dict) else None
+        labels = {
+            "servonaut_vault": "Servonaut Vault",
+            "bitwarden": "Bitwarden",
+        }
+        label = labels.get(source, "Automatic resolution")
+        return f"[dim]SSH credential:[/dim] {label}\n"
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.
@@ -701,6 +748,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             self.app.push_screen(OVHFirewallScreen(self._instance))
         elif button_id == "btn_manage_ssh_ref":
             self.action_manage_ssh_ref()
+        elif button_id == "btn_use_vault_key":
+            self.action_use_vault_key()
         elif button_id == "btn_verify_ssh":
             self.action_verify_ssh()
         elif button_id == "btn_back":
@@ -846,9 +895,21 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             team_service=team_service,
             ssh_service=self.app.ssh_service,
             teams_supplier=teams_supplier,
+            vault_runtime=getattr(self.app, "vault_command_service", None),
         )
 
-        resolved = await resolver.resolve(instance)
+        try:
+            resolved = await resolver.resolve(instance)
+        except Exception as exc:  # Configured native credentials fail closed.
+            logger.warning("Native Vault SSH resolution failed: %s", type(exc).__name__)
+            from servonaut.services.vault.errors import vault_failure_reason
+
+            self.app.notify(
+                f"The configured Vault SSH credential could not be used ({vault_failure_reason(exc)}).",
+                severity="error",
+                markup=False,
+            )
+            return
 
         if resolved is None:
             self.app.notify(
@@ -862,6 +923,57 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Build the SSH command depending on the resolution source
         # ------------------------------------------------------------------
         source = resolved.source
+
+        if source in ("ca", "vault"):
+            if (
+                not resolved.identity_agent
+                or not getattr(resolved, "identity_file", None)
+                or not resolved.known_hosts_path
+            ):
+                self.app.notify(
+                    "The configured Vault SSH credential is incomplete.",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            profile = self.app.connection_service.resolve_profile(instance)
+            host = self.app.connection_service.get_target_host(instance, profile)
+            host = host or instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or instance.get("hostname")
+            # Connect exactly where the pinned known_hosts entry points.
+            host = getattr(resolved.lease, "target_host", None) or host
+            if not host:
+                self.app.notify("No IP address available for this instance.", severity="error")
+                return
+            proxy_args = self.app.connection_service.get_proxy_args(
+                profile, identity_agent=resolved.identity_agent
+            ) if profile else []
+            username = (
+                resolved.login_user
+                or (profile.username if profile else None)
+                or instance.get("username")
+                or self.app.config_manager.get().default_username
+                or "ubuntu"
+            )
+            ssh_cmd = self.app.ssh_service.build_ssh_command(
+                host=host,
+                username=username,
+                proxy_args=proxy_args,
+                port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
+                extra_options=self.app.connection_service.get_extra_options(instance, profile),
+                identity_agent=resolved.identity_agent,
+                identity_file=getattr(resolved, "identity_file", None),
+                certificate_file=resolved.certificate_path,
+                known_hosts_file=resolved.known_hosts_path,
+            )
+            if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
+                # The terminal is detached. The runtime owns this lease and
+                # keeps its private agent alive until process shutdown/TTL.
+                self.app.notify(
+                    f"Connected (resolution tier: {source}): {rich_escape(name)}", markup=True
+                )
+            else:
+                self.app.notify("Could not launch the terminal.", severity="error", markup=False)
+            return
 
         if source in ("personal", "team"):
             # BW path — resolve key body via bw CLI, write persistent tmpfile
@@ -954,7 +1066,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             tier_label = "personal" if source == "personal" else "team"
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
                 self.app.notify(
-                    f"Connected via BW ({tier_label}): {rich_escape(name)}",
+                    f"Connected via BW (resolution tier: {tier_label}): {rich_escape(name)}",
                     markup=True,
                 )
                 logger.info(
@@ -1054,6 +1166,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     )
 
                 if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
+                    self.app.notify(
+                        f"Local SSH fallback selected (resolution tier: local): {rich_escape(name)}",
+                        severity="warning",
+                        markup=True,
+                    )
                     if (instance.get("is_ovh")
                             or instance.get("is_custom")
                             or instance.get("is_hetzner")):
@@ -1161,6 +1278,74 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             group="ssh_verify",
             exclusive=True,
         )
+
+    def action_use_vault_key(self) -> None:
+        """Bind a native-vault SSH item with the server's verified host pins."""
+        if self._refuse_if_unresolved():
+            return
+
+        async def flow() -> None:
+            values = await self.app.push_screen_wait(VaultBindingModal())
+            if not values:
+                return
+            service = getattr(self.app, "vault_command_service", None)
+            if service is None:
+                self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
+                return
+            instance = connection_instance(self.app, self._instance)
+            server = str(instance.get("id") or "")
+            if not server:
+                self.app.notify("This server has no usable identifier.", severity="error", markup=False)
+                return
+            host_keys = [key.strip() for key in values["host_keys"].split(",") if key.strip()]
+            try:
+                if values["team"]:
+                    # Without typed keys, the keys this machine already trusts are pinned.
+                    result = await service.bind(
+                        vault_id=values["vault_id"], server=server, item_id=values["item_id"],
+                        team=values["team"], login=values["login"], pin_host_key=True,
+                        host_keys=tuple(host_keys),
+                    )
+                else:
+                    if not host_keys:
+                        self.app.notify(
+                            "Personal-server binding requires verified OpenSSH host keys.",
+                            severity="warning",
+                            markup=False,
+                        )
+                        return
+                    provider = str(instance.get("provider") or "")
+                    hostname = str(
+                        instance.get("hostname") or instance.get("host") or instance.get("public_ip") or ""
+                    )
+                    port = instance.get("port", 22)
+                    login = values["login"] or instance.get("username")
+                    if not isinstance(port, int) or not isinstance(login, str) or not login:
+                        self.app.notify(
+                            "The personal server needs a numeric port and login user.",
+                            severity="warning",
+                            markup=False,
+                        )
+                        return
+                    result = await service.bind_personal(
+                        vault_id=values["vault_id"],
+                        item_id=values["item_id"],
+                        provider=provider,
+                        instance_id=server,
+                        hostname=hostname,
+                        port=port,
+                        login=login,
+                        host_keys=host_keys,
+                    )
+            except Exception as exc:
+                from servonaut.services.vault.errors import vault_failure_reason
+
+                self.app.notify(f"Vault key binding failed: {vault_failure_reason(exc)}", severity="error", markup=False)
+                return
+            source = result.get("source", "servonaut_vault") if isinstance(result, dict) else "servonaut_vault"
+            self.app.notify(f"SSH credential source: {source}", markup=False)
+
+        self.run_worker(flow(), group="vault", exclusive=True)
 
     async def _manage_ssh_ref_flow(self) -> None:
         """Fetch existing ref then open SshRefEditorModal in add or edit mode."""
@@ -1294,12 +1479,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             # fallbacks). Probe still runs with local keys; say so.
             self.app.notify(
                 "A stored SSH ref exists but its vault item isn't available on "
-                "this device — probing with local keys instead. Re-save the ref "
-                "here to enable Bitwarden-backed verify.",
+                "this device — using the local fallback (resolution tier: local) "
+                "for verification. Re-save the ref here to enable Bitwarden-backed verify.",
                 severity="warning",
                 markup=False,
             )
 
+        resolution_tier = "personal" if item_id is not None else "local"
         status = await self._run_ssh_probe(item_id, host)
 
         # Report the result to the server.
@@ -1311,6 +1497,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 instance_id=instance_id,
                 status=status,
                 checked_by_client=client_version,
+                resolution_tier=resolution_tier,
             )
         except Exception as exc:
             from servonaut.services.api_client import APIError

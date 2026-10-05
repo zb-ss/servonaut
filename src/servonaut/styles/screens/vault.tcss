@@ -1,0 +1,239 @@
+#vault_layout, #ca_layout {
+    height: 1fr;
+}
+
+#vault_content, #ca_content {
+    width: 1fr;
+    padding: 1 2;
+}
+
+/* The CA actions stack below three inputs: let them scroll into reach on short terminals. */
+#ca_content {
+    overflow-y: auto;
+}
+
+#vault_title, #ca_title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#vault_status, #ca_status {
+    margin-bottom: 1;
+}
+
+#vault_table {
+    height: 1fr;
+    min-height: 7;
+}
+
+#vault_action_scroll {
+    height: auto;
+    max-height: 9;
+    min-height: 3;
+    margin-top: 1;
+}
+
+#vault_actions {
+    height: auto;
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-gutter: 0 1;
+}
+
+#vault_actions #vault_refresh,
+#vault_actions #vault_setup,
+#vault_actions #vault_items,
+#vault_actions #vault_reveal,
+#vault_actions #vault_exposures,
+#vault_actions #vault_resolve_exposure,
+#vault_actions #vault_rotate_exposure,
+#vault_actions #vault_devices,
+#vault_actions #vault_add_device,
+#vault_actions #vault_approve,
+#vault_actions #vault_recover,
+#vault_actions #vault_recovery_rotate,
+#vault_actions #vault_reset,
+#vault_actions #vault_import,
+#vault_actions #vault_roster,
+#vault_actions #vault_grants,
+#vault_actions #vault_rotate {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+VaultScreen.-narrow #vault_actions {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+VaultScreen.-narrow #vault_action_scroll {
+    max-height: 8;
+}
+
+VaultScreen.-short #vault_action_scroll {
+    max-height: 7;
+}
+
+VaultRevealModal {
+    align: center middle;
+}
+
+#vault_reveal_modal {
+    width: 80%;
+    height: auto;
+    max-height: 80%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#vault_revealed_value {
+    margin: 1 0;
+    overflow-y: auto;
+}
+
+VaultSecretPromptModal,
+VaultRecoveryConfirmModal,
+VaultSasConfirmModal,
+VaultExposureActionModal,
+VaultImportedReferenceModal,
+VaultImportedTeamBindingModal,
+VaultBindingModal,
+CaEnrollmentConfirmModal {
+    align: center middle;
+}
+
+#vault_secret_modal,
+#vault_recovery_confirm_modal,
+#vault_sas_modal,
+#vault_pending_device_modal,
+#vault_exposure_modal,
+#vault_import_bind_reference_modal,
+#vault_import_bind_target_modal,
+#vault_bind_modal,
+#vault_import_modal,
+#ca_confirm_modal {
+    width: 72;
+    max-width: 92%;
+    height: auto;
+    max-height: 88%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+#vault_secret_input,
+#vault_recovery_group_0,
+#vault_recovery_group_1,
+#vault_recovery_group_2,
+#vault_recovery_group_3,
+#vault_recovery_group_4,
+#vault_recovery_group_5,
+#vault_exposure_team,
+#vault_exposure_servers,
+#vault_exposure_resolution,
+#vault_exposure_note,
+#vault_import_bind_team,
+#vault_import_bind_server,
+#vault_import_bind_login,
+#vault_bind_team,
+#vault_bind_vault,
+#vault_bind_item,
+#vault_bind_login,
+#vault_bind_host_keys,
+#vault_import_path,
+#ca_confirm_host,
+#ca_team,
+#ca_server,
+#ca_break_glass,
+#vault_recovery_confirm_modal Input {
+    width: 100%;
+    margin-top: 1;
+}
+
+#vault_recovery_key,
+#vault_sas {
+    margin: 1 0;
+    padding: 1;
+    border: round $accent;
+    background: $boost;
+    text-style: bold;
+}
+
+#vault_import_title {
+    text-style: bold;
+}
+
+#vault_import_intro {
+    margin-top: 1;
+}
+
+#vault_import_bind_list {
+    height: auto;
+    max-height: 12;
+    margin-top: 1;
+}
+
+#vault_import_bind_reference_modal Horizontal,
+#vault_import_bind_target_modal Horizontal {
+    height: auto;
+    margin-top: 1;
+}
+
+#vault_import_bind_reference_modal Button,
+#vault_import_bind_target_modal Button {
+    width: 1fr;
+    min-width: 0;
+}
+
+#vault_import_bind_cancel,
+#vault_import_bind_continue,
+#vault_import_bind_target_cancel,
+#vault_import_bind_target_continue {
+    width: 1fr;
+}
+
+#vault_import_choices #vault_import_local,
+#vault_import_choices #vault_import_bitwarden,
+#vault_import_actions #vault_import_cancel,
+#vault_import_actions #vault_import_confirm {
+    width: 1fr;
+    min-width: 0;
+}
+
+#vault_secret_cancel,
+#vault_secret_continue,
+#vault_reveal_close,
+#vault_recovery_cancel,
+#vault_recovery_confirm,
+#vault_sas_no,
+#vault_sas_yes,
+#vault_pending_device_later,
+#vault_pending_device_review,
+#vault_exposure_cancel,
+#vault_exposure_confirm,
+#vault_bind_cancel,
+#vault_bind_confirm,
+#vault_import_go,
+#ca_cancel,
+#ca_confirm {
+    min-width: 12;
+    margin-top: 1;
+}
+
+#ca_content #ca_refresh,
+#ca_content #ca_audit,
+#ca_content #ca_enroll,
+#ca_content #ca_krl,
+#ca_content #ca_break_glass_scan {
+    width: 1fr;
+    margin-top: 1;
+}
+
+#action_buttons #btn_use_vault_key {
+    border: tall $accent;
+    color: $accent;
+}

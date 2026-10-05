@@ -28,10 +28,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.config.schema import SecretsConfig
+from servonaut.services.api_client import APIError
 from servonaut.services.bitwarden_provider import BitwardenProvider
 from servonaut.services.secret_provider import LocalProvider
+from servonaut.services.vault.team_vault_client import VaultStateError
 from servonaut.services.secret_provider_resolver import (
     FAKE_CLIENT_ENV_VAR,
+    NativeFirstSecretProvider,
     fetch_and_apply_secrets_config,
     is_fake_client_env_enabled,
     resolve_secret_provider,
@@ -86,6 +89,23 @@ def _guard_allows(allow: bool) -> MagicMock:
     return guard
 
 
+def _secret_provider(
+    name: str,
+    *,
+    secret: str | None = None,
+    get_side_effect: Exception | None = None,
+) -> MagicMock:
+    provider = MagicMock()
+    provider.provider_name = name
+    provider.get_secret = AsyncMock(
+        return_value=secret, side_effect=get_side_effect,
+    )
+    provider.set_secret = AsyncMock()
+    provider.delete_secret = AsyncMock(return_value=True)
+    provider.list_secrets = AsyncMock(return_value=["legacy-name"])
+    return provider
+
+
 # ---------------------------------------------------------------------------
 # resolve_secret_provider — decision matrix
 # ---------------------------------------------------------------------------
@@ -122,6 +142,114 @@ class TestResolverEntitlementGate:
         guard = _guard_allows(True)
         provider = resolve_secret_provider(auth, guard)
         assert isinstance(provider, LocalProvider)
+
+
+class TestNativeFirstSecretProvider:
+    def test_native_value_is_used_before_legacy(self):
+        native = _secret_provider("servonaut_vault", secret="native-result")
+        legacy = _secret_provider("local", secret="legacy-result")
+        provider = NativeFirstSecretProvider(native, legacy)
+
+        assert run(provider.get_secret("db/password")) == "native-result"
+        native.get_secret.assert_awaited_once_with("db/password")
+        legacy.get_secret.assert_not_awaited()
+
+    def test_native_miss_falls_back_to_legacy(self):
+        native = _secret_provider("servonaut_vault")
+        legacy = _secret_provider("local", secret="legacy-result")
+        provider = NativeFirstSecretProvider(native, legacy)
+
+        assert run(provider.get_secret("db/password")) == "legacy-result"
+        legacy.get_secret.assert_awaited_once_with("db/password")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(
+                APIError(code="not_found", message="missing", status=404),
+                id="404",
+            ),
+            pytest.param(
+                APIError(
+                    code="feature_disabled", message="disabled", status=503,
+                ),
+                id="feature-disabled",
+            ),
+        ],
+    )
+    def test_unavailable_native_feature_falls_back(self, error):
+        native = _secret_provider("servonaut_vault", get_side_effect=error)
+        legacy = _secret_provider("local", secret="legacy-result")
+        provider = NativeFirstSecretProvider(native, legacy)
+
+        assert run(provider.get_secret("db/password")) == "legacy-result"
+        legacy.get_secret.assert_awaited_once_with("db/password")
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(VaultStateError("verification failed"), id="custody"),
+            pytest.param(
+                APIError(code="unauthorized", message="not authorised", status=401),
+                id="api-auth",
+            ),
+            pytest.param(
+                APIError(
+                    code="service_unavailable", message="retry later", status=503,
+                ),
+                id="generic-503",
+            ),
+        ],
+    )
+    def test_native_security_or_api_failure_is_not_masked(self, error):
+        native = _secret_provider("servonaut_vault", get_side_effect=error)
+        legacy = _secret_provider("local", secret="legacy-result")
+        provider = NativeFirstSecretProvider(native, legacy)
+
+        with pytest.raises(type(error)) as raised:
+            run(provider.get_secret("db/password"))
+
+        assert raised.value is error
+        legacy.get_secret.assert_not_awaited()
+
+    def test_legacy_crud_and_listing_are_preserved(self):
+        native = _secret_provider("servonaut_vault", secret="native-result")
+        legacy = _secret_provider("local")
+        provider = NativeFirstSecretProvider(native, legacy)
+
+        run(provider.set_secret("db/password", "updated-result"))
+        assert run(provider.delete_secret("db/password")) is True
+        assert run(provider.list_secrets()) == ["legacy-name"]
+
+        legacy.set_secret.assert_awaited_once_with("db/password", "updated-result")
+        legacy.delete_secret.assert_awaited_once_with("db/password")
+        legacy.list_secrets.assert_awaited_once_with()
+        native.set_secret.assert_not_awaited()
+        native.delete_secret.assert_not_awaited()
+        native.list_secrets.assert_not_awaited()
+        assert provider.provider_name == "local"
+
+
+class TestResolverNativeVault:
+    def test_entitled_session_wraps_native_and_legacy_providers(self):
+        native = _secret_provider("servonaut_vault")
+        auth = _auth_authenticated()
+
+        provider = resolve_secret_provider(
+            auth, _guard_allows(True), native_provider=native,
+        )
+
+        assert isinstance(provider, NativeFirstSecretProvider)
+
+    def test_downgraded_session_keeps_verified_native_provider(self):
+        native = _secret_provider("servonaut_vault")
+        auth = _auth_authenticated(plan="free")
+
+        provider = resolve_secret_provider(
+            auth, _guard_allows(False), native_provider=native,
+        )
+
+        assert provider is native
 
 
 class TestResolverBitwardenPath:

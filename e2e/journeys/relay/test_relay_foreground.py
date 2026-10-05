@@ -62,7 +62,10 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     assert "AI chat tools: enabled" in output
     handshake = fake_cloud.relay.heartbeats()[0]
     assert handshake["type"] == "cli.handshake"
-    assert handshake["capabilities"] == {"supports_dynamic_catalog": True}
+    assert handshake["capabilities"] == {
+        "supports_dynamic_catalog": True,
+        "supports_vault_events": True,
+    }
     assert fake_cloud.requests("/api/cli/mercure-token")[0]["bearer_ok"]
 
     publish = fake_cloud.relay.publish

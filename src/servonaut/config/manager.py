@@ -38,6 +38,7 @@ from .schema import (
     ConnectionRule,
     SSHConfig,
     VoiceConfig,
+    VaultConfig,
     CONFIG_VERSION,
 )
 from .migration import migrate_to_latest
@@ -912,6 +913,7 @@ class ConfigManager:
         gcp = _coerce(GCPConfig, raw_data.get('gcp', {}), 'gcp')
         azure = _coerce(AzureConfig, raw_data.get('azure', {}), 'azure')
         memory = _coerce(MemoryConfig, raw_data.get('memory', {}), 'memory')
+        vault = _coerce(VaultConfig, raw_data.get('vault', {}), 'vault')
         ssh_config = _coerce(SSHConfig, raw_data.get('ssh', {}), 'ssh')
         voice = _coerce(VoiceConfig, raw_data.get('voice', {}), 'voice')
 
@@ -933,6 +935,7 @@ class ConfigManager:
         config_dict['gcp'] = gcp
         config_dict['azure'] = azure
         config_dict['memory'] = memory
+        config_dict['vault'] = vault
         config_dict['ssh'] = ssh_config
         config_dict['voice'] = voice
 
