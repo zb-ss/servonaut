@@ -341,6 +341,17 @@ class ServonautApp(App):
             exclusive=True,
             exit_on_error=False,
         )
+        # Refresh the plan and hosted-AI balance once per launch: the token's
+        # cached entitlements date from sign-in, so the chat footer would
+        # otherwise show stale money (or old token counters) until a chat turn.
+        if self.auth_service is not None and self.auth_service.is_authenticated:
+            self.run_worker(
+                self._refresh_entitlements_on_start(),
+                name="entitlements_refresh",
+                group="entitlements_refresh",
+                exclusive=True,
+                exit_on_error=False,
+            )
         # Decorate instances with SSH verify sidecar data (no-op if not logged in)
         self.run_worker(
             self._refresh_ssh_verify_status(),
@@ -2647,6 +2658,19 @@ class ServonautApp(App):
         if unreachable:
             summary += f" Could not connect to: {', '.join(unreachable)}."
         self.notify(summary, severity="warning" if unreachable else "information", markup=False)
+
+    async def _refresh_entitlements_on_start(self) -> None:
+        """Fetch current entitlements, then redraw any open chat footer."""
+        try:
+            await self.auth_service.fetch_entitlements()
+        except Exception as exc:  # noqa: BLE001 — a stale footer must never take the TUI down
+            logger.debug("Startup entitlements refresh failed: %s", type(exc).__name__)
+            return
+        from servonaut.widgets.chat_panel import ChatPanel
+
+        for screen in list(self.screen_stack):
+            for panel in screen.query(ChatPanel):
+                panel._update_quota_footer()
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

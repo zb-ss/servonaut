@@ -176,6 +176,29 @@ def test_ai_quota_shows_a_capped_members_limit_before_the_team_pool(monkeypatch,
     assert "Balance remaining: £72.50" not in lines
 
 
+def test_ai_quota_says_why_it_is_paused_and_offers_a_top_up_only_when_it_helps(monkeypatch, capsys):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "blocked",
+        "reason": "team_pool_exhausted", "topup_helps": True, "display": {"remaining": "£0.00"},
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    pool = capsys.readouterr().out
+    assert "Why: Your team's AI balance is used up. Top up to keep going." in pool
+    assert "Run 'servonaut ai topup'" in pool
+
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "blocked",
+        "reason": "member_limit_reached", "topup_helps": False, "display": {"remaining": "£40.00"},
+    }
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    member = capsys.readouterr().out
+    assert "Why: Your team member limit has been reached." in member
+    assert "servonaut ai topup" not in member
+
+
 def test_ai_quota_explains_when_a_balance_payload_is_unusable(monkeypatch, capsys):
     services = _make_services(quota={
         "tokens_used": 0, "tokens_limit": 1_000_000,

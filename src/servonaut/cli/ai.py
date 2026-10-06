@@ -116,12 +116,12 @@ def _print_balance_lines(balance: Any, *, file: Any) -> bool:
     return bool(remaining)
 
 
-def _print_spend_topup_hint(details: Any) -> None:
+def _print_spend_topup_hint(details: Any, *, file: Any = None) -> None:
     """Offer the current catalog only when the server marks top-up as helpful."""
     if isinstance(details, dict) and details.get("topup_helps") is True:
         print(
             "Run 'servonaut ai topup' to choose a current pack.",
-            file=sys.stderr,
+            file=file or sys.stderr,
         )
 
 
@@ -720,6 +720,11 @@ def _handle_quota(args: argparse.Namespace) -> int:
             print(f"Spent this period: {spent}")
         if balance.state_label:
             print(f"Status: {balance.state_label}")
+        if balance.state == "blocked":
+            guidance = _spend_refusal_guidance(balance.reason, None, {"reason": balance.reason})
+            if guidance:
+                print(f"Why: {guidance}")
+            _print_spend_topup_hint({"topup_helps": balance.topup_helps}, file=sys.stdout)
         for field, label in (
             ("allowance_remaining", "Allowance remaining"),
             ("topup_remaining", "Top-ups remaining"),
