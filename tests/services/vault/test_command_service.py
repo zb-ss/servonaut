@@ -606,6 +606,18 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
     service._shared_server = shared  # type: ignore[method-assign]
     service.resolve_ssh = lease  # type: ignore[method-assign]
     service._remote_executor = lambda *_args: Executor()  # type: ignore[method-assign]
+    resolved: list[tuple[str, str, str]] = []
+
+    async def list_exposures(*, vault_id: str) -> dict[str, object]:
+        return {"data": [{"exposure_id": "e-1", "item_id": item_id, "status": "open"},
+                         {"exposure_id": "e-2", "item_id": "another-item", "status": "open"}]}
+
+    async def resolve_exposure(vault, exposure_id, *, resolution, note):
+        resolved.append((exposure_id, resolution, note))
+        return {"status": "resolved"}
+
+    service.list_exposures = list_exposures  # type: ignore[method-assign]
+    service.rotation = SimpleNamespace(resolve_exposure=resolve_exposure)  # type: ignore[assignment]
     service._new_ed25519_private_key = lambda: b"-----BEGIN OPENSSH PRIVATE KEY-----\ninvalid"  # type: ignore[method-assign]
     service._public_key_from_private = lambda *_args: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE5ld0tleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="  # type: ignore[method-assign]
     import servonaut.services.vault.command_service as module
@@ -618,6 +630,11 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
 
     assert result["rotated"] is True, result
     assert calls.index("verify") < calls.index("write") < calls.index("rebind") < calls.index("remove-old")
+    # Only after every host dropped the old key: this item's open exposure is resolved.
+    assert result["exposures"] == {"resolved": ["e-1"], "needs_owner": False, "failed": []}
+    assert [(exposure_id, resolution) for exposure_id, resolution, _note in resolved] == [("e-1", "rotated")]
+    assert "old key removed from server-1" in resolved[0][2] and len(resolved[0][2]) <= 500
+    resolved.clear()
 
     calls.clear()
     items.fail_write = True
@@ -662,6 +679,8 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
 
     assert failed_proof["rotated"] is False
     assert calls == ["append", "verify", "remove-new", "close"]
+    # No failed rotation resolves anything.
+    assert resolved == []
 
 
 def test_native_known_hosts_requires_private_real_directory_and_formats_port(tmp_path) -> None:
@@ -1388,3 +1407,30 @@ async def test_krl_updated_event_delivers_only_to_enrolled_hosts_that_drifted() 
     await service.handle_event({"type": "ssh_ca.krl_updated", "data": {"team_slug": "team-a"}})
 
     service.ca_deliver_krl.assert_awaited_once_with(team="team-a", servers=["server-1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("failure", "expected"), [
+    (APIError(code="already_resolved", message="x", status=409), {"resolved": ["e-1"], "needs_owner": False, "failed": []}),
+    (APIError(code="forbidden", message="x", status=403), {"resolved": [], "needs_owner": True, "failed": []}),
+    (APIError(code="server_error", message="x", status=500),
+     {"resolved": [], "needs_owner": False, "failed": [{"exposure_id": "e-1", "reason": "HTTP 500, server_error"}]}),
+])
+async def test_rotated_exposure_resolution_reports_each_outcome(failure, expected) -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_exposures = AsyncMock(return_value={"data": [{"exposure_id": "e-1", "item_id": "item", "status": "open"}]})  # type: ignore[method-assign]
+    service.rotation = SimpleNamespace(resolve_exposure=AsyncMock(side_effect=failure))  # type: ignore[assignment]
+
+    outcome = await service._resolve_rotated_exposures("vault", "item", [{"id": "server-1", "name": "web-1"}])
+
+    assert outcome == expected
+
+
+@pytest.mark.asyncio
+async def test_rotated_exposure_resolution_when_exposures_cannot_be_listed() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_exposures = AsyncMock(side_effect=APIError(code="forbidden", message="x", status=403))  # type: ignore[method-assign]
+
+    outcome = await service._resolve_rotated_exposures("vault", "item", [{"id": "server-1"}])
+
+    assert outcome == {"resolved": [], "needs_owner": True, "failed": []}
