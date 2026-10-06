@@ -49,12 +49,16 @@ from e2e.harness.fake_cloud.state import ScenarioStore
 CHAT_PATH = "/api/ai/chat"
 TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
 TOPUP_PATH = "/api/ai/topup/checkout"
+TOPUP_PACKS_PATH = "/api/ai/topup/packs"
 CONVERSATIONS_PATH = "/api/ai/conversations"
 HOSTED_MCP_PATH = "/mcp/message"
 # Tools the fake hosted MCP server answers; any other name is an error.
 HOSTED_TOOLS = frozenset({"fleet_summary"})
 TOOL_RESULT_STATUSES = frozenset({"ok", "error", "timeout", "denied"})
-TOPUP_PACKS = frozenset({"small", "medium", "large"})
+DEFAULT_TOPUP_PACKS = (
+    {"key": "pack_small", "label": "Starter", "price_minor": 500, "currency": "GBP", "credit_micros": 5_000_000},
+    {"key": "pack_large", "label": "Extended", "price_minor": 2000, "currency": "GBP", "credit_micros": 20_000_000},
+)
 STRIPE_CHECKOUT_URL = "https://checkout.stripe.com/c/pay/cs_test_e2e_0001"
 
 
@@ -79,6 +83,7 @@ class AiState:
             self._conversation_numbers = itertools.count(1)
             self._topup_url = STRIPE_CHECKOUT_URL
             self._topups: list[dict[str, Any]] = []
+            self._topup_packs: list[dict[str, Any]] = copy.deepcopy(list(DEFAULT_TOPUP_PACKS))
 
     def drop_streams(self) -> None:
         """End every open chat stream (they check between frames)."""
@@ -91,6 +96,7 @@ class AiState:
         conversations: Optional[Iterable[dict[str, Any]]] = None,
         exports: Optional[dict[str, str]] = None,
         topup_url: Optional[str] = None,
+        topup_packs: Optional[Iterable[dict[str, Any]]] = None,
     ) -> None:
         """Set the stored conversations (see ``chat_script.conversation_row``),
         their Markdown exports by id, and the top-up checkout URL."""
@@ -101,6 +107,8 @@ class AiState:
                 self._exports = dict(exports)
             if topup_url is not None:
                 self._topup_url = topup_url
+            if topup_packs is not None:
+                self._topup_packs = copy.deepcopy(list(topup_packs))
 
     def script(self, *turns: ChatTurn) -> None:
         """Queue *turns*; each chat request consumes the next one."""
@@ -131,6 +139,10 @@ class AiState:
         """Top-up checkouts requested, oldest first."""
         with self._lock:
             return [dict(t) for t in self._topups]
+
+    def topup_packs(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._topup_packs)
 
     def conversations(self, status: Optional[str] = None) -> list[dict[str, Any]]:
         """Conversation summaries (without their messages), optionally by status."""
@@ -257,9 +269,13 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
 
     async def topup(request: web.Request) -> web.Response:
         pack = (await json_body(request)).get("pack")
-        if pack not in TOPUP_PACKS:
-            return validation_failed(f"pack must be one of {sorted(TOPUP_PACKS)}")
+        available = {item.get("key") for item in state.topup_packs()}
+        if pack not in available:
+            return validation_failed("pack is not in the current top-up catalog")
         return web.json_response({"checkout_url": state.record_topup(pack)})
+
+    async def topup_packs(request: web.Request) -> web.Response:
+        return web.json_response({"packs": state.topup_packs()})
 
     async def conversations(request: web.Request) -> web.Response:
         items = state.conversations(request.query.get("status", "active"))
@@ -303,6 +319,7 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
     app.router.add_post(CHAT_PATH, guarded(chat))
     app.router.add_post(TOOL_RESULT_PATH, guarded(tool_result))
     app.router.add_post(TOPUP_PATH, guarded(topup))
+    app.router.add_get(TOPUP_PACKS_PATH, guarded(topup_packs))
     app.router.add_get(CONVERSATIONS_PATH, guarded(conversations))
     app.router.add_get(f"{one}/export.{{suffix}}", guarded(export))
     app.router.add_get(one, guarded(get_conversation))

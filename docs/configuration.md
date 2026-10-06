@@ -643,24 +643,29 @@ login and chat response; mid-session changes take effect on the next
 
 ### Top-up flow
 
-When your monthly token quota is exhausted you will see a modal with a **Top up** button.
-Clicking it (or running `servonaut ai topup [pack]`) calls
-`POST /api/ai/topup/checkout` and opens the resulting Stripe Checkout URL in your default
-browser. The CLI does not embed Stripe. After completing the purchase, your
-`tokens_topup_remaining` balance typically refreshes within 60 seconds (the CLI
-schedules two background entitlement fetches at +30 s and +60 s to absorb webhook
-latency).
+When your hosted AI balance is blocked and an additional balance purchase can
+help, Servonaut offers a **Top up** action. Running `servonaut ai topup [pack]`
+loads the current catalog from the service, then calls
+`POST /api/ai/topup/checkout` with the selected catalog key and opens the
+resulting Stripe Checkout URL in your default browser. The CLI does not embed
+Stripe. The balance and current billing terms are shown by the service; older
+servers that do not return a balance continue to show the legacy quota view.
 
-Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
-`servonaut.dev/account/billing/topup`).
+Omitting `[pack]` lists the current catalog and exits; run the command again
+with one listed key to open checkout. The one-shot CLI cannot observe when an
+external checkout completes, so run `servonaut ai quota` afterwards to fetch
+the latest hosted balance.
+
+Top-up packs are loaded from the hosted catalog. Pricing and availability are
+shown in the billing flow rather than fixed in the client.
 
 ### Error codes
 
 | Code | What it means | CLI response |
 |------|--------------|--------------|
 | `rate_limited` | You are sending requests too fast | Auto-retries up to 3× with `retry_after` + jitter; toast if all retries fail |
-| `quota_exhausted` | Monthly token allowance is used up | Top-up modal with link to billing; no auto-retry |
-| `budget_exhausted` | Your per-period cost cap has been reached | Same modal; shows `$X.XX of $Y.YY used` |
+| `quota_exhausted` | Personal hosted balance is exhausted | Offers top-up only when the service says it can help; no auto-retry |
+| `budget_exhausted` | Team hosted balance is exhausted | Offers top-up only when it can help; member limits direct the user to a team owner or the next period |
 | `free_not_entitled` | This path requires Solo or Teams | Upgrade modal linking to `/pricing` |
 | `entitlement_required` | `premium_ai` is false for your account | Same upgrade modal; triggers `refresh_entitlements()` first in case of stale cache |
 | `service_unavailable` | Servonaut AI feature flag is off | Banner: "AI temporarily off"; offers fallback to your local provider if configured |
@@ -677,8 +682,7 @@ Top-up packs: `small`, `medium`, `large` (canonical names; pricing at
 | `1` | Other / unknown error |
 | `2` | Unauthenticated — run `servonaut login` |
 | `3` | Insufficient entitlement — requires Solo or Teams plan |
-| `4` | Quota exhausted — run `servonaut ai topup` |
-| `5` | Budget exhausted — cost cap reached; run `servonaut ai topup` |
+| `4` | Invalid command usage, such as an unknown current catalog key |
 
 ## Config Migration
 

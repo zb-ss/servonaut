@@ -134,6 +134,7 @@ async def stream_sse(
     method: str = "POST",
     params: Optional[Dict[str, Any]] = None,
     silence_timeout: Optional[float] = None,
+    drain_terminal_error: bool = False,
 ) -> AsyncIterator[Dict[str, Any]]:
     """Stream Server-Sent Events from ``path`` with ``body``.
 
@@ -153,7 +154,9 @@ async def stream_sse(
     - ``error`` events with code in ``_INFO_ERROR_CODES`` are yielded as
       ``{"event": "info", "data": {"code": ..., "message": ...}}`` so
       the UI can render them softly.
-    - Any other ``error`` event raises :class:`SSEStreamError`.
+    - Any other ``error`` event raises :class:`SSEStreamError`. Hosted chat
+      opts into ``drain_terminal_error`` so it can retain one final accounting
+      frame; all other callers keep the immediate-error contract.
     - Pre-stream HTTP failures (4xx/5xx before the SSE body opens) are
       surfaced via :meth:`APIClient._parse_error` — typed
       :class:`APIError` subclasses.
@@ -214,7 +217,7 @@ async def stream_sse(
                     raise api_client._parse_error(response)
 
                 async for normalised in _iterate_with_watchdog(
-                    event_source, limit,
+                    event_source, limit, drain_terminal_error=drain_terminal_error,
                 ):
                     if normalised is None:
                         continue  # ping absorbed
@@ -277,6 +280,8 @@ def coerce_retry_after(raw: Any) -> Optional[int]:
 async def _iterate_with_watchdog(
     event_source: Any,
     limit: float,
+    *,
+    drain_terminal_error: bool = False,
 ) -> AsyncIterator[Optional[Dict[str, Any]]]:
     """Iterate the SSE stream and enforce the heartbeat watchdog.
 
@@ -291,22 +296,63 @@ async def _iterate_with_watchdog(
     meanwhile are buffered and reset the clock as soon as reading resumes.
     """
     import asyncio
+    import time
 
     aiter = event_source.aiter_sse().__aiter__()
 
+    pending_error: Optional[SSEStreamError] = None
+    drain_deadline: Optional[float] = None
     while True:
+        read_limit = limit
+        if pending_error is not None and drain_deadline is not None:
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                raise pending_error
+            # Heartbeats keep a live stream alive in normal operation, but
+            # after a terminal refusal they cannot extend its accounting
+            # drain indefinitely.
+            read_limit = min(read_limit, remaining)
         try:
-            sse = await asyncio.wait_for(aiter.__anext__(), timeout=limit)
+            sse = await asyncio.wait_for(aiter.__anext__(), timeout=read_limit)
         except asyncio.TimeoutError as exc:
+            if pending_error is not None:
+                raise pending_error from exc
             raise SSEStreamDead(
                 f"No SSE event received for >{limit}s — upstream presumed dead"
             ) from exc
         except StopAsyncIteration:
             # Stream closed gracefully by the server.
+            if pending_error is not None:
+                raise pending_error
             return
 
+        if pending_error is not None and drain_deadline is not None:
+            if time.monotonic() >= drain_deadline:
+                raise pending_error
+
         # ``None`` for a ping — already logged inside _normalise_event.
-        yield _normalise_event(sse)
+        try:
+            normalised = _normalise_event(sse)
+        except SSEStreamError as exc:
+            if not drain_terminal_error:
+                raise
+            # Hosted chat alone may receive its terminal accounting frame
+            # after the refusal. Retain the first failure under the existing
+            # watchdog and surface it as soon as that frame arrives.
+            if pending_error is None:
+                pending_error = exc
+                drain_deadline = time.monotonic() + limit
+            continue
+        if pending_error is not None and normalised is not None:
+            # After an error, preserve accounting and informational notices
+            # but do not hand a late token or tool event to a caller that
+            # could render or execute it as part of a successful turn.
+            if normalised.get("event") not in {"usage", "info"}:
+                continue
+            if normalised.get("event") == "usage":
+                yield normalised
+                raise pending_error
+        yield normalised
 
 
 def _normalise_event(sse: Any) -> Optional[Dict[str, Any]]:
@@ -342,7 +388,9 @@ def _normalise_event(sse: Any) -> Optional[Dict[str, Any]]:
     if event_name == "error":
         code = str(data.get("code") or "unknown")
         message = str(data.get("message") or f"Server error: {code}")
-        retry_after = coerce_retry_after(data.get("retry_after"))
+        retry_after = coerce_retry_after(data.get("retry_after_seconds"))
+        if retry_after is None:
+            retry_after = coerce_retry_after(data.get("retry_after"))
         details = data.get("details") if isinstance(data.get("details"), dict) else None
 
         if code in _INFO_ERROR_CODES:

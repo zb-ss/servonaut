@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from e2e.harness import fleet
+from e2e.harness.ai_chat import plain, seed_hosted
 from e2e.harness.desktop import click_widget, nav, open_session, wait_until
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_browser, pytest.mark.asyncio]
@@ -55,6 +56,41 @@ async def test_the_app_renders_in_the_page(desktop, seed):
         assert {urlsplit(url).netloc for url, _ in browser.requests()} == {host}
         assert [urlsplit(socket.url).netloc for socket in page.sockets] == [host]
         assert page.errors() == []
+
+
+async def test_hosted_balance_footer_renders_in_the_desktop_terminal(
+    desktop, seed, fake_cloud,
+):
+    """The desktop transport draws the hosted balance supplied by the service."""
+    fake_cloud.configure(balance={
+        "currency": "GBP",
+        "remaining_micros": 4_500_000,
+        "state": "ok",
+        "approx_requests_remaining": 3,
+        "display": {"remaining": "£4.50"},
+    })
+    seed_hosted(seed, fake_cloud)
+    async with desktop.in_process() as app, desktop.browser() as browser:
+        page = await open_session(browser, app)
+        await app.tui.wait_until(
+            lambda: app.app.auth_service.is_authenticated,
+            desc="seeded hosted session loaded",
+        )
+        await page.press("F2")
+        await app.tui.wait_until(
+            lambda: app.tui.focused_id() == "chat-input", desc="chat input focused"
+        )
+        panel = app.tui.on_screen("#chat-panel")
+        footer = panel.query_one("#chat-quota-footer")
+        assert panel._active_provider_name() == "servonaut"  # noqa: SLF001
+        assert panel._current_balance().display_value("remaining") == "£4.50"  # noqa: SLF001
+        assert not footer.has_class("hidden")
+        assert "£4.50" in plain(footer)
+        await page.wait_for_text("£4.50")
+        rendered = app.tui.rendered_text()
+        assert "Balance:" in rendered
+        assert "£4.50" in rendered
+        assert "≈ 3 requests left" in rendered
 
 
 async def test_sidebar_navigation_with_the_mouse(desktop, seed):

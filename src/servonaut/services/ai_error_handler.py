@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Union
+from urllib.parse import urlsplit
 
 from servonaut.services.api_client import (
     APIError,
@@ -42,6 +43,7 @@ from servonaut.services.ai_sse import (
     SSEStreamError,
     coerce_retry_after,
 )
+from servonaut.services.ai_balance import safe_terminal_text
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,40 @@ logger = logging.getLogger(__name__)
 # Both URLs are user-visible only — never used to authenticate, so
 # rotating them on the server side is a one-line constant change.
 _PRICING_URL = "https://servonaut.dev/pricing"
-_TOPUP_URL = "https://servonaut.dev/account/billing/topup"
+_BILLING_TOPUP_PATHS = frozenset({"/account/billing", "/account/billing/topup"})
+
+
+def is_valid_billing_topup_url(value: Any) -> bool:
+    """Accept an exact first-party billing route for a user-selected action.
+
+    The link is only offered as a consented navigation choice. Current hosted
+    responses may name ``/account/billing`` (including its ``#topup`` fragment) or
+    the legacy ``/account/billing/topup`` route, and no descendants.
+    """
+    if not isinstance(value, str):
+        return False
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 or char == "\\" for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        parsed.port  # raises for malformed ports
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "servonaut.dev"
+        and parsed.path in _BILLING_TOPUP_PATHS
+        and "%" not in value
+        and parsed.query == ""
+        and parsed.fragment in {"", "topup"}
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
+def _safe_topup_url(details: Dict[str, Any]) -> str:
+    value = details.get("topup_url")
+    return value if is_valid_billing_topup_url(value) else ""
 
 
 class UserFacingAction(str, Enum):
@@ -112,13 +147,16 @@ def _retry_after_of(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> Opti
     """Seconds to wait before retrying, if the server said so.
 
     Checked in order: the ``retry_after`` attribute (SSE error events),
-    ``details.retry_after`` (JSON envelopes), then the ``Retry-After``
+    ``details.retry_after_seconds`` / ``details.retry_after`` (JSON envelopes), then the ``Retry-After``
     response header. Parsed by :func:`coerce_retry_after`, so bad values
     (bools, Infinity, dates) give ``None`` and large ones are capped.
     """
     raw = getattr(err, "retry_after", None)
     if raw is None:
-        raw = _details_of(err).get("retry_after")
+        details = _details_of(err)
+        raw = details.get("retry_after_seconds")
+        if raw is None:
+            raw = details.get("retry_after")
     if raw is None:
         headers = getattr(err, "response_headers", None)
         raw = headers.get("retry-after") if isinstance(headers, Mapping) else None
@@ -142,6 +180,40 @@ def _message_of(err: Union[APIError, SSEStreamError, SSEStreamDead], default: st
         return msg
     text = str(err) if err else ""
     return text or default
+
+
+_SPEND_REFUSAL_REASONS = frozenset({
+    "balance_exhausted", "team_pool_exhausted", "member_limit_reached",
+})
+
+
+def is_spend_refusal_reason(value: Any) -> bool:
+    """Return whether an SSE info code carries a hosted-spend refusal."""
+    return isinstance(value, str) and value in _SPEND_REFUSAL_REASONS
+
+
+def spend_refusal_message(message: Any, details: Mapping[str, Any]) -> str:
+    """Return stable customer guidance for known spend-refusal reasons.
+
+    A known reason is a protocol field and takes precedence over the gateway's
+    free-form message. Older servers that omit it retain their sanitised
+    wording when present.
+    """
+    reason = details.get("reason")
+    if reason == "team_pool_exhausted":
+        return "Your team's AI balance is used up. Top up to keep going."
+    if reason == "member_limit_reached":
+        return (
+            "Your team member limit has been reached. Ask a team owner to "
+            "raise it or wait for the next period."
+        )
+    if reason == "balance_exhausted":
+        return "Your AI balance is used up. Top up to keep going."
+    if isinstance(message, str):
+        rendered = safe_terminal_text(message).strip()
+        if rendered:
+            return rendered
+    return "Your AI balance is used up. Top up to keep going."
 
 
 # ---------------------------------------------------------------------------
@@ -170,24 +242,29 @@ def _map_rate_limited(err: Union[APIError, SSEStreamError]) -> ErrorActionPayloa
 
 
 def _map_quota_exhausted(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
-    """402 — out of monthly tokens. Pop the top-up modal, do NOT auto-retry."""
+    """402 — personal hosted balance exhausted. Do NOT auto-retry."""
+    details = _details_of(err)
+    can_topup = details.get("topup_helps") is True
+    message = spend_refusal_message(_message_of(err), details)
     return ErrorActionPayload(
         action=UserFacingAction.MODAL_QUOTA_EXHAUSTED,
-        user_message="You've run out of monthly tokens. Top up to keep going.",
+        user_message=message,
         code="quota_exhausted",
-        topup_url=_TOPUP_URL,
-        details=_details_of(err),
+        topup_url=_safe_topup_url(details) if can_topup else "",
+        details=details,
     )
 
 
 def _map_budget_exhausted(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
-    """402 — customer-cost hard cap. Same modal as quota_exhausted."""
+    """402 — team hosted balance exhausted. Same modal as quota_exhausted."""
     details = _details_of(err)
+    can_topup = details.get("topup_helps") is True
+    message = spend_refusal_message(_message_of(err), details)
     return ErrorActionPayload(
         action=UserFacingAction.MODAL_BUDGET_EXHAUSTED,
-        user_message="Monthly budget cap reached. Top up to continue.",
+        user_message=message,
         code="budget_exhausted",
-        topup_url=_TOPUP_URL,
+        topup_url=_safe_topup_url(details) if can_topup else "",
         details=details,
     )
 
@@ -348,5 +425,7 @@ def map_error_to_action(
 __all__ = [
     "ErrorActionPayload",
     "UserFacingAction",
+    "is_spend_refusal_reason",
     "map_error_to_action",
+    "spend_refusal_message",
 ]

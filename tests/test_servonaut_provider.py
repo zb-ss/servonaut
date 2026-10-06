@@ -18,7 +18,7 @@ import pytest
 from servonaut.config.schema import AIProviderConfig, AppConfig
 from servonaut.services.ai_analysis_service import AIAnalysisService
 from servonaut.services.ai_providers import ServonautProvider
-from servonaut.services.api_client import APIClient, RateLimitedError
+from servonaut.services.api_client import APIClient, APIError, RateLimitedError
 
 
 def run(coro):
@@ -530,6 +530,7 @@ def test_stream_chat_passes_configured_silence_timeout():
     _drain_stream(provider, config=config)
 
     assert api.stream_sse.call_args.kwargs["silence_timeout"] == 90.0
+    assert api.stream_sse.call_args.kwargs["drain_terminal_error"] is True
 
 
 def test_ai_provider_config_default_silence_timeout_matches_sse_default():
@@ -556,6 +557,62 @@ def test_buffered_retry_after_is_bounded(details, headers, expected):
         details=details, response_headers=headers,
     )
     assert ServonautProvider._retry_after_seconds(err) == expected
+
+
+def test_buffered_response_keeps_additive_balance_and_turn_debit():
+    result = ServonautProvider._unmarshal_buffered_response({
+        "content": "done",
+        "balance": {"currency": "GBP", "display": {"remaining": "£4.50"}},
+        "debit_micros": 1_629,
+    })
+
+    assert result["balance"]["display"]["remaining"] == "£4.50"
+    assert result["debit_micros"] == 1_629
+    assert result["debit_display"] is None
+
+
+def test_buffered_refusal_updates_the_hosted_balance_cache_before_reraising():
+    provider, api, auth = _make_provider()
+    auth._token = MagicMock(entitlements={"quota": {"tokens_used": 1}})
+    api.post = AsyncMock(side_effect=APIError(
+        code="quota_exhausted",
+        message="balance blocked",
+        status=402,
+        details={"balance": {"state": "blocked", "display": {"remaining": "£0.00"}}},
+    ))
+
+    with pytest.raises(APIError):
+        run(provider.chat([{"role": "user", "content": "hi"}], "", _ai_config()))
+
+    assert auth._token.entitlements["balance"]["state"] == "blocked"
+
+
+def test_topup_catalog_rejects_stale_key_after_loading_inventory():
+    provider, api, _auth = _make_provider()
+    api.get.return_value = {
+        "packs": [{"key": "pack_small", "label": "Starter", "currency": "GBP"}],
+    }
+
+    packs = run(provider.topup_packs())
+    assert [pack.key for pack in packs] == ["pack_small"]
+    with pytest.raises(ValueError, match="current catalog"):
+        run(provider.topup_checkout("obsolete"))
+    api.post.assert_not_awaited()
+
+
+def test_buffered_chat_updates_the_hosted_balance_cache():
+    provider, api, auth = _make_provider()
+    auth._token = MagicMock(entitlements={"quota": {"tokens_used": 1}})
+    api.post.return_value = {
+        "content": "done",
+        "balance": {"currency": "GBP", "display": {"remaining": "£4.50"}},
+        "debit_micros": 1_629,
+    }
+
+    run(provider.chat([{"role": "user", "content": "hi"}], "", _ai_config()))
+
+    assert auth._token.entitlements["balance"]["currency"] == "GBP"
+    assert auth._token.entitlements["last_debit_micros"] == 1_629
 
 
 def _chat_body(provider):

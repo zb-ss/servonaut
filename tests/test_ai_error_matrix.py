@@ -22,6 +22,7 @@ import pytest
 from servonaut.services.ai_error_handler import (
     ErrorActionPayload,
     UserFacingAction,
+    is_valid_billing_topup_url,
     map_error_to_action,
 )
 from servonaut.services.ai_sse import SSEStreamDead, SSEStreamError
@@ -274,7 +275,7 @@ def test_sse_stream_dead_maps_to_upstream_unavailable_banner():
 
 
 def test_sse_stream_error_quota_exhausted_routes_to_modal():
-    err = _sse_error("quota_exhausted")
+    err = _sse_error("quota_exhausted", details={"topup_helps": True, "topup_url": "https://servonaut.dev/account/billing/topup"})
     payload = map_error_to_action(err)
     assert payload.action is UserFacingAction.MODAL_QUOTA_EXHAUSTED
     # Top-up URL populated for the modal CTA.
@@ -336,7 +337,7 @@ def test_legacy_feature_disabled_routes_to_banner():
 
 
 def test_quota_exhausted_payload_includes_topup_url():
-    err = _make_api_error(code="quota_exhausted", status=402)
+    err = _make_api_error(code="quota_exhausted", status=402, details={"topup_helps": True, "topup_url": "https://servonaut.dev/account/billing/topup"})
     payload = map_error_to_action(err)
     assert payload.topup_url
     assert payload.topup_url.startswith("https://")
@@ -345,11 +346,69 @@ def test_quota_exhausted_payload_includes_topup_url():
 def test_budget_exhausted_payload_includes_topup_url_and_details():
     err = _make_api_error(
         code="budget_exhausted", status=402,
-        details={"remaining_micros": 0, "month_total_micros": 100_000},
+        details={"remaining_micros": 0, "month_total_micros": 100_000, "topup_helps": True, "topup_url": "https://servonaut.dev/account/billing/topup"},
     )
     payload = map_error_to_action(err)
     assert payload.topup_url
     assert payload.details.get("remaining_micros") == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://servonaut.dev/account/billing/topup", True),
+        ("https://servonaut.dev/account/billing?topup=1", False),
+        ("https://servonaut.dev/account/billing?next=https://evil.example", False),
+        ("https://checkout.stripe.com/pay/cs_test", False),
+        ("https://servonaut.dev.example/account/billing", False),
+        ("https://user:pass@servonaut.dev/account/billing", False),  # leak-guard:allow
+        ("https://servonaut.dev/account/billingevil", False),
+        ("https://servonaut.dev/account/billing/../../settings", False),
+        ("https://servonaut.dev/account/billing/%2e%2e/settings", False),
+        ("https://servonaut.dev/account/billing%2f..%2fsettings", False),
+        ("https://servonaut.dev/account/billing%5c..%5csettings", False),
+        ("https://servonaut.dev/account/billing?topup=%2f..", False),
+        ("https://servonaut.dev/account/billing#topup", True),
+        ("https://servonaut.dev/account/billing\x1b]52;unsafe\x07", False),
+        ("https://servonaut.dev:bad/account/billing", False),
+        ("https://[malformed/account/billing", False),
+    ],
+)
+def test_billing_topup_url_has_a_distinct_first_party_allowlist(url, expected):
+    assert is_valid_billing_topup_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("balance_exhausted", "Your AI balance is used up. Top up to keep going."),
+        (
+            "member_limit_reached",
+            "Your team member limit has been reached. Ask a team owner to "
+            "raise it or wait for the next period.",
+        ),
+    ],
+)
+def test_spend_refusal_reason_uses_customer_guidance(reason, expected):
+    err = _make_api_error(
+        code="quota_exhausted",
+        status=402,
+        message="Blocked\x1b]52;unsafe\x07",
+        details={"reason": reason, "topup_helps": reason != "member_limit_reached"},
+    )
+
+    assert map_error_to_action(err).user_message == expected
+
+
+def test_spend_refusal_uses_sanitised_server_money_wording():
+    err = _make_api_error(
+        code="quota_exhausted",
+        status=402,
+        message="Your AI balance is used up. Top up to keep going.\x1b",
+        details={"topup_helps": True},
+    )
+
+    assert map_error_to_action(err).user_message == "Your AI balance is used up. Top up to keep going."
 
 
 # ---------------------------------------------------------------------------

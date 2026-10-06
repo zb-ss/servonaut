@@ -495,6 +495,8 @@ class ChatPanel(Widget):
         # Last seen quota / fallback flags from a usage event (rendered
         # in the chat-stats line).
         self._last_fallback_used: bool = False
+        self._last_debit_micros: int | None = None
+        self._last_debit_display: str | None = None
         self._last_soft_capped: bool = False
         # Per-turn counter — incremented for every ``tool_call`` SSE
         # event the server emits during the current turn. Used by
@@ -926,8 +928,6 @@ class ChatPanel(Widget):
         """Update the token/cost stats bar.
 
         Wave-3 additions:
-        - ``[dim]via backup vendor[/dim]`` suffix when ``fallback_used``
-          was true on the last usage event (T10 acceptance criterion).
         - Soft / hard cap badges via :func:`format_soft_cap_badge`.
         - Tool note when the active provider is a bring-your-own one:
           the guard level its tools run at, or "Tools off".
@@ -937,8 +937,11 @@ class ChatPanel(Widget):
         except Exception:
             return
 
-        if self._model:
-            parts = [f"[dim]Model:[/dim] [bold]{self._model}[/bold]"]
+        from servonaut.services.ai_balance import display_debit, safe_terminal_text
+
+        model = safe_terminal_text(self._model)
+        if model:
+            parts = [f"[dim]Model:[/dim] [bold]{_rich_escape(model)}[/bold]"]
         else:
             parts = [f"[dim]Model:[/dim] [dim italic]not configured[/dim italic]"]
 
@@ -971,15 +974,32 @@ class ChatPanel(Widget):
         if self._total_cost > 0:
             parts.append(f"[dim]Cost:[/dim] ${self._total_cost:.4f}")
 
+        active_provider = self._active_provider_name()
+        if active_provider == "servonaut":
+            balance = self._current_balance()
+            debit = getattr(self, "_last_debit_micros", None)
+            if (
+                balance is not None
+                and isinstance(debit, int)
+                and not isinstance(debit, bool)
+                and debit >= 0
+            ):
+                debit_label = display_debit(
+                    debit,
+                    balance.currency,
+                    getattr(self, "_last_debit_display", None),
+                )
+                if debit_label:
+                    parts.insert(
+                        0,
+                        "[dim]Last turn debit:[/dim] "
+                        f"[bold]{_rich_escape(debit_label)}[/bold]",
+                    )
+
         msg_count = 0
         if self._session is not None:
             msg_count = len(self._session.messages)  # type: ignore[union-attr]
         parts.append(f"[dim]Messages:[/dim] {msg_count}")
-
-        # T10 \u2014 fallback-used badge. Only render after we've seen at
-        # least one ``usage`` event flagged ``fallback_used: true``.
-        if self._last_fallback_used:
-            parts.append("[dim]via backup vendor[/dim]")
 
         # T7 acceptance \u2014 soft / hard cap badges via formatter helper.
         # Lazy import keeps the chat panel import cost low for users
@@ -998,7 +1018,6 @@ class ChatPanel(Widget):
 
         # Bring-your-own providers run chat tools too, without per-call
         # prompts, limited by the chat guard level — say which level.
-        active_provider = self._active_provider_name()
         if active_provider and active_provider != "servonaut":
             parts.append(self._byo_tools_note())
 
@@ -1007,6 +1026,12 @@ class ChatPanel(Widget):
         # call from the streaming consumer doesn't leave them out of sync.
         self._update_quota_footer()
         self._update_provider_indicator()
+
+    def _clear_last_turn_debit(self) -> None:
+        """Remove panel-local debit display state for a replaced turn."""
+        self._last_debit_micros = None
+        self._last_debit_display = None
+
 
     def _byo_tools_note(self) -> str:
         """Stats-bar note on the tools a bring-your-own provider chat can run."""
@@ -1069,6 +1094,20 @@ class ChatPanel(Widget):
         except Exception:
             return None
 
+    def _current_balance(self) -> Optional[Any]:
+        """Return the optional hosted balance without touching BYOK state."""
+        auth = getattr(self.app, "auth_service", None)
+        token = getattr(auth, "_token", None) if auth is not None else None
+        ents = getattr(token, "entitlements", None) if token is not None else None
+        if not isinstance(ents, dict):
+            return None
+        try:
+            from servonaut.services.ai_balance import AIHostedBalance
+
+            return AIHostedBalance.from_dict(ents.get("balance"))
+        except Exception:
+            return None
+
     def _update_quota_footer(self) -> None:
         """Render the quota footer if the active provider is Servonaut."""
         try:
@@ -1078,6 +1117,29 @@ class ChatPanel(Widget):
 
         if self._active_provider_name() != "servonaut":
             footer.add_class("hidden")
+            return
+
+        balance = self._current_balance()
+        if balance is not None:
+            remaining = balance.human_display("remaining")
+            if not remaining:
+                footer.update("[dim]Balance:[/dim] unavailable — refresh to retry")
+                footer.remove_class("hidden")
+                return
+            parts = []
+            member_limit = balance.member_limit_summary()
+            if member_limit:
+                parts.append(f"[dim]Your limit:[/dim] [bold]{_rich_escape(member_limit)}[/bold]")
+            pool_label = "Team balance:" if balance.payer_is_team else "Balance:"
+            parts.append(f"[dim]{pool_label}[/dim] [bold]{_rich_escape(remaining)}[/bold]")
+            if balance.state_label:
+                parts.append(f"[dim]{_rich_escape(balance.state_label)}[/dim]")
+            if balance.approx_requests_remaining is not None:
+                parts.append(
+                    f"[dim]≈ {balance.approx_requests_remaining} requests left[/dim]"
+                )
+            footer.update("  │  ".join(parts))
+            footer.remove_class("hidden")
             return
 
         quota = self._current_quota()
@@ -1428,6 +1490,7 @@ class ChatPanel(Widget):
         messages = self._session.messages  # type: ignore[union-attr]
         if not messages:
             self._show_welcome()
+            self._update_stats()
             return
 
         for msg in messages:
@@ -1802,6 +1865,7 @@ class ChatPanel(Widget):
         self._remote_conversation_id = session.remote_conversation_id
         self._total_tokens = 0
         self._total_cost = 0.0
+        ChatPanel._clear_last_turn_debit(self)
         self._refresh_messages()
         self._update_stats()
         # Hide history panel after selection
@@ -1828,6 +1892,7 @@ class ChatPanel(Widget):
             self._remote_conversation_id = None
             self._total_tokens = 0
             self._total_cost = 0.0
+            ChatPanel._clear_last_turn_debit(self)
             self._refresh_messages()
             self._update_stats()
 
@@ -1847,6 +1912,7 @@ class ChatPanel(Widget):
         self._remote_conversation_id = None
         self._total_tokens = 0
         self._total_cost = 0.0
+        ChatPanel._clear_last_turn_debit(self)
         self._refresh_messages()
         self._update_stats()
         self.query_one("#chat-history-list", VerticalScroll).add_class("hidden")
@@ -3330,6 +3396,8 @@ class ChatPanel(Widget):
         through :meth:`_do_send_servonaut` for streaming + tool-use; for
         any other provider the existing chat-service path runs unchanged.
         """
+        ChatPanel._clear_last_turn_debit(self)
+        self._update_stats()
         active_provider = self._active_provider_name()
         if active_provider == "servonaut":
             await self._do_send_servonaut(text)
@@ -3844,6 +3912,27 @@ class ChatPanel(Widget):
         elif etype == "info":
             code = data.get("code", "info")
             message = data.get("message") or code
+            details = data.get("details") if isinstance(data.get("details"), dict) else {}
+            from servonaut.services.ai_error_handler import (
+                is_spend_refusal_reason,
+                spend_refusal_message,
+            )
+
+            if is_spend_refusal_reason(code):
+                refusal_message = spend_refusal_message(message, details)
+                if details.get("topup_helps") is True:
+                    from servonaut.services.ai_error_handler import is_valid_billing_topup_url
+
+                    billing_url = details.get("topup_url")
+                    self._push_topup_modal(
+                        reason=refusal_message,
+                        billing_url=billing_url if is_valid_billing_topup_url(billing_url) else "",
+                    )
+                else:
+                    self.app.notify(
+                        refusal_message, severity="warning", timeout=4, markup=False,
+                    )
+                return accumulated
             # A1 — server-controlled ``code`` and ``message`` flow
             # straight into a notify. ``markup=False`` keeps brackets
             # literal.
@@ -4220,7 +4309,9 @@ class ChatPanel(Widget):
         model = data.get("model")
         if isinstance(model, str) and model:
             self._model = model
-        self._last_fallback_used = bool(data.get("fallback_used", False))
+        # A hosted balance is separate from BYOK accounting. The old vendor
+        # badge is intentionally no longer rendered.
+        self._last_fallback_used = False
         quota_block = data.get("quota")
         if isinstance(quota_block, dict):
             self._last_soft_capped = bool(quota_block.get("soft_capped", False))
@@ -4235,6 +4326,20 @@ class ChatPanel(Widget):
                     ents = dict(getattr(token, "entitlements", None) or {})
                     ents["quota"] = quota_block
                     token.entitlements = ents
+        balance_block = data.get("balance")
+        debit = data.get("debit_micros")
+        if isinstance(debit, int) and not isinstance(debit, bool) and debit >= 0:
+            from servonaut.services.ai_balance import safe_terminal_text
+
+            self._last_debit_micros = debit
+            self._last_debit_display = safe_terminal_text(data.get("debit_display")) or None
+        else:
+            ChatPanel._clear_last_turn_debit(self)
+        from servonaut.services.ai_balance import cache_hosted_balance
+
+        cache_hosted_balance(
+            getattr(self.app, "auth_service", None), balance_block, debit,
+        )
 
         conv_id = data.get("conversation_id")
         if isinstance(conv_id, str) and conv_id:
@@ -4260,6 +4365,14 @@ class ChatPanel(Widget):
             return
 
         payload = map_error_to_action(exc)
+        from servonaut.services.ai_balance import cache_hosted_balance
+
+        if cache_hosted_balance(
+            getattr(self.app, "auth_service", None),
+            payload.details.get("balance"),
+            None,
+        ):
+            self._update_stats()
 
         # T10 watcher — count upstream_unavailable + heartbeat-deads.
         if payload.code == "upstream_unavailable":
@@ -4273,10 +4386,14 @@ class ChatPanel(Widget):
         # ``markup=False`` to every notify path that carries it so a
         # malicious server cannot inject Rich markup (e.g. a clickable
         # ``[link=evil]`` href) into the toast.
-        if action == UserFacingAction.MODAL_QUOTA_EXHAUSTED:
-            self._push_topup_modal(reason="Out of monthly tokens.")
-        elif action == UserFacingAction.MODAL_BUDGET_EXHAUSTED:
-            self._push_topup_modal(reason="Budget hard cap reached.")
+        if action in {UserFacingAction.MODAL_QUOTA_EXHAUSTED, UserFacingAction.MODAL_BUDGET_EXHAUSTED}:
+            if payload.details.get("topup_helps") is True:
+                self._push_topup_modal(
+                    reason=payload.user_message,
+                    billing_url=payload.topup_url or "",
+                )
+            else:
+                self.app.notify(payload.user_message, severity="warning", markup=False)
         elif action == UserFacingAction.MODAL_UPGRADE_REQUIRED:
             # Refresh entitlements first per plan §T5 entitlement_required
             # ("trigger refresh_entitlements first to handle plan staleness").
@@ -4319,21 +4436,82 @@ class ChatPanel(Widget):
                 payload.user_message, severity="error", markup=False,
             )
 
-    def _push_topup_modal(self, *, reason: str) -> None:
-        """Show :class:`AITopUpModal`; on a pack pick, drive checkout."""
+    def _open_billing_topup(self, url: str) -> None:
+        """Open an already validated first-party billing route for this refusal."""
+        import webbrowser
+
+        try:
+            opened = bool(webbrowser.open(url))
+        except Exception:  # noqa: BLE001
+            opened = False
+        if opened:
+            self.app.notify(
+                "Opening billing in your browser.", severity="information", markup=False,
+            )
+        else:
+            self.app.notify(
+                f"Open billing in your browser: {url}", severity="warning", markup=False,
+            )
+
+    def _push_topup_modal(self, *, reason: str, billing_url: str = "") -> None:
+        """Load current server inventory before showing the top-up picker."""
+        from servonaut.services.ai_error_handler import is_valid_billing_topup_url
+
+        safe_billing_url = billing_url if is_valid_billing_topup_url(billing_url) else ""
+        self.run_worker(
+            self._load_topup_modal(reason, safe_billing_url),
+            name="ai_topup_inventory",
+            group="ai_chat",
+        )
+
+    async def _load_topup_modal(self, reason: str, billing_url: str = "") -> None:
+        """Fetch dynamic inventory; stale local keys are never offered."""
         from servonaut.screens.ai_topup_modal import AITopUpModal
 
-        def _on_pack(pack: Optional[str]) -> None:
-            if not pack:
+        provider = getattr(self.app, "servonaut_provider", None)
+        if provider is None:
+            self.app.notify("Servonaut AI not initialised.", severity="error", markup=False)
+            return
+        try:
+            packs = await provider.topup_packs()
+        except Exception as exc:  # noqa: BLE001
+            from servonaut.services.ai_balance import safe_terminal_text
+
+            detail = safe_terminal_text(str(exc)) or "request failed"
+            if not billing_url:
+                self.app.notify(
+                    f"Could not load top-up packs: {detail}",
+                    severity="error",
+                    markup=False,
+                )
+                return
+            logger.warning("Could not load top-up packs; retaining billing action")
+            packs = []
+        if not packs and not billing_url:
+            self.app.notify("No top-up packs are currently available.", severity="warning", markup=False)
+            return
+
+        def _on_pack(selection: Optional[str]) -> None:
+            if not selection:
+                return
+            if selection == AITopUpModal.BILLING_ACTION:
+                self._open_billing_topup(billing_url)
                 return
             self.run_worker(
-                self._do_topup_checkout(pack),
+                self._do_topup_checkout(selection),
                 name="ai_topup_checkout",
                 group="ai_chat",
             )
 
         try:
-            self.app.push_screen(AITopUpModal(reason=reason), _on_pack)
+            self.app.push_screen(
+                AITopUpModal(
+                    reason=reason,
+                    packs=packs,
+                    show_billing_action=bool(billing_url),
+                ),
+                _on_pack,
+            )
         except Exception:
             logger.exception("Failed to push AITopUpModal")
 
@@ -4360,35 +4538,32 @@ class ChatPanel(Widget):
         try:
             url = await provider.topup_checkout(pack)
         except Exception as exc:  # noqa: BLE001
-            # A1 — exc message can carry server-controlled markup (e.g. the
-            # APIError message). Pass through markup=False so brackets stay
-            # literal.
+            from servonaut.services.ai_balance import safe_terminal_text
+
+            detail = safe_terminal_text(str(exc)) or "checkout request failed"
             self.app.notify(
-                f"Top-up failed: {exc}", severity="error", markup=False,
+                f"Top-up failed: {detail}", severity="error", markup=False,
             )
             return
 
-        # A4 — validate the URL host strictly. Anything other than
-        # Stripe's checkout origin: log + tell the user to open manually.
+        # A4 — validate the URL structurally before any browser hand-off.
         if not is_valid_stripe_checkout_url(url):
-            logger.warning(
-                "Top-up checkout returned non-Stripe URL %r (pack=%s) — refusing auto-open",
-                url, pack,
-            )
+            logger.warning("Top-up checkout returned an invalid Stripe URL")
             self.app.notify(
-                f"Open this URL manually: {url}",
+                "Top-up checkout returned an invalid Stripe checkout URL.",
                 severity="warning",
                 markup=False,
             )
-        else:
-            try:
-                webbrowser.open(url)
-            except Exception:
-                self.app.notify(
-                    f"Open this URL in your browser: {url}",
-                    severity="warning",
-                    markup=False,
-                )
+            return
+
+        try:
+            webbrowser.open(url)
+        except Exception:
+            self.app.notify(
+                "Could not open Stripe Checkout in your browser.",
+                severity="warning",
+                markup=False,
+            )
 
         auth = getattr(self.app, "auth_service", None)
         if auth is not None and hasattr(auth, "schedule_post_topup_refresh"):
@@ -4485,6 +4660,7 @@ class ChatPanel(Widget):
             self._remote_conversation_id = str(uuid)
             self._total_tokens = 0
             self._total_cost = 0.0
+            ChatPanel._clear_last_turn_debit(self)
             self.call_after_refresh(self._refresh_messages)
 
         self.run_worker(

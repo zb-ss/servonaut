@@ -57,6 +57,27 @@ def test_quota_heals_expired_tokens_and_rotates_the_session(journey, fake_cloud,
     assert len(fake_cloud.requests("/api/oauth/revoke")) == 1
 
 
+def test_quota_prefers_additive_hosted_balance(journey, fake_cloud, cli, account_home):
+    fake_cloud.configure(balance={
+        "currency": "GBP",
+        "remaining_micros": 4_500_000,
+        "state": "degraded",
+        "approx_requests_remaining": 3,
+        "display": {"remaining": "£4.50", "spent_this_period": "£1.20"},
+    })
+    home = account_home("cli-money-balance")
+
+    plain = cli(home, "ai", "quota")
+    assert plain.returncode == 0, plain.describe()
+    assert "Balance remaining: £4.50" in plain.stdout
+    assert "≈ 3 requests left" in plain.stdout
+    assert "Tokens remaining:" not in plain.stdout
+
+    encoded = cli(home, "ai", "quota", "--json")
+    assert encoded.returncode == 0, encoded.describe()
+    assert json.loads(encoded.stdout)["balance"]["remaining_micros"] == 4_500_000
+
+
 def test_conversation_history(journey, fake_cloud, cli, account_home):
     fake_cloud.ai.configure(
         conversations=[

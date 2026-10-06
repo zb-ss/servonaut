@@ -43,6 +43,9 @@ class Scenario:
             "tokens_per_minute_limit": 60000,
         }
     )
+    # Optional additive hosted-money contract. Set to None for old-server
+    # compatibility journeys.
+    balance: Optional[dict[str, Any]] = None
     # Version the fake package index reports for servonaut.
     pypi_version: str = "0.0.0"
     # Wheel files the fake package index offers (absolute paths).

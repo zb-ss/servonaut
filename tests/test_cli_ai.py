@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from servonaut.cli import ai as cli_ai
+from servonaut.services.ai_balance import AITopupPack
 from servonaut.services.api_client import APIClient
 
 
@@ -60,6 +61,9 @@ def _make_services(
     provider._chat_internal = AsyncMock()
     provider.stream_chat = MagicMock()
     provider.topup_checkout = AsyncMock()
+    provider.topup_packs = AsyncMock(return_value=[
+        AITopupPack(key="small", label="Small", currency="GBP"),
+    ])
 
     convs = MagicMock()
     convs.list = AsyncMock()
@@ -112,6 +116,187 @@ def test_ai_quota_json(monkeypatch, capsys):
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert data == canonical
+
+
+def test_ai_quota_terminal_output_strips_controls_but_json_preserves_raw(
+    monkeypatch, capsys
+):
+    raw_balance = {
+        "state": "ok",
+        "currency": "G\x1bBP",
+        "display": {
+            "remaining": "追加 £4.50\x1b]52;unsafe\x07",
+            "spent_this_period": "£1.20\x9b",
+        },
+    }
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = raw_balance
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    terminal = capsys.readouterr().out
+    assert "追加 £4.50]52;unsafe" in terminal
+    assert "£1.20" in terminal
+    assert "\x1b" not in terminal
+    assert "\x9b" not in terminal
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=True)) == 0
+    assert json.loads(capsys.readouterr().out)["balance"] == raw_balance
+
+
+def test_ai_quota_falls_back_to_exact_micros_when_server_display_is_missing(
+    monkeypatch, capsys
+):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "remaining_micros": 1_234_560_000,
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    output = capsys.readouterr().out
+    assert "Balance remaining: £1,234.56" in output
+    assert "Tokens remaining:" not in output
+
+
+def test_ai_quota_shows_a_capped_members_limit_before_the_team_pool(monkeypatch, capsys):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "ok",
+        "remaining_micros": 72_496_738, "member_limit_micros": 2_000_000,
+        "member_spent_micros": 3_262, "approx_requests_remaining": 199,
+        "display": {"remaining": "£72.50", "member_limit": "£2.00", "member_spent": "< £0.01"},
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Your limit this period: £2.00 (< £0.01 used)"
+    assert lines[1] == "Team balance remaining: £72.50"
+    assert "Balance remaining: £72.50" not in lines
+
+
+def test_ai_quota_says_why_it_is_paused_and_offers_a_top_up_only_when_it_helps(monkeypatch, capsys):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "blocked",
+        "reason": "team_pool_exhausted", "topup_helps": True, "display": {"remaining": "£0.00"},
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    pool = capsys.readouterr().out
+    assert "Why: Your team's AI balance is used up. Top up to keep going." in pool
+    assert "Run 'servonaut ai topup'" in pool
+
+    services[1]._token.entitlements["balance"] = {
+        "currency": "GBP", "payer_type": "team", "state": "blocked",
+        "reason": "member_limit_reached", "topup_helps": False, "display": {"remaining": "£40.00"},
+    }
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    member = capsys.readouterr().out
+    assert "Why: Your team member limit has been reached." in member
+    assert "servonaut ai topup" not in member
+
+
+def test_ai_quota_explains_when_a_balance_payload_is_unusable(monkeypatch, capsys):
+    services = _make_services(quota={
+        "tokens_used": 0, "tokens_limit": 1_000_000,
+        "tokens_topup_remaining": 0, "resets_at": "",
+        "soft_capped": False, "hard_capped": False,
+        "rpm_limit": 30, "tokens_per_minute_limit": 600_000,
+    })
+    services[1]._token.entitlements["balance"] = {
+        "display": {"remaining": 450},
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    output = capsys.readouterr().out
+    assert "Balance: unavailable; refresh entitlements and try again." in output
+    assert "Tokens remaining:" not in output
+
+
+def test_ai_quota_human_output_includes_money_breakdown_and_renewals(
+    monkeypatch, capsys
+):
+    services = _make_services()
+    services[1]._token.entitlements["balance"] = {
+        "state": "degraded",
+        "display": {
+            "remaining": "£4.50",
+            "spent_this_period": "£1.25",
+            "allowance_remaining": "£1.00",
+            "topup_remaining": "£2.50",
+            "credit_remaining": "£1.00",
+        },
+        "next_grant_at": "2026-11-01T00:00:00Z",
+        "next_topup_expiry": "2026-12-01T00:00:00Z",
+        "next_credit_expiry": "2026-10-15T00:00:00Z",
+    }
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="quota", json=False)) == 0
+    output = capsys.readouterr().out
+    assert "Status: Running low (faster model)" in output
+    assert "Allowance remaining: £1.00" in output
+    assert "Top-ups remaining: £2.50" in output
+    assert "Credit remaining: £1.00" in output
+    assert "Allowance renews: 2026-11-01T00:00:00Z" in output
+    assert "Top-up expires: 2026-12-01T00:00:00Z" in output
+    assert "Credit expires: 2026-10-15T00:00:00Z" in output
+
+
+def test_ai_topup_catalog_strips_controls_and_keeps_unicode_labels(
+    monkeypatch, capsys
+):
+    services = _make_services()
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.topup_packs.return_value = [
+        AITopupPack(
+            key="starter\x1b]52;unsafe\x07",
+            label="追加 £5\x9b",
+            currency="GBP",
+            display_price="£5.00\x07",
+        )
+    ]
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="topup", pack=None)) == 0
+    terminal = capsys.readouterr().out
+    assert "starter]52;unsafe" in terminal
+    assert "追加 £5" in terminal
+    assert "£5.00" in terminal
+    assert "\x1b" not in terminal
+    assert "\x9b" not in terminal
+
+
+def test_ai_topup_errors_strip_terminal_controls(monkeypatch, capsys):
+    from servonaut.services.api_client import APIError
+
+    services = _make_services()
+    _config, _auth, _api, provider, _convs, _pref = services
+    failure = APIError(
+        code="unknown", message="Failure £4\x1b]52;unsafe\x07\x9b", status=400,
+    )
+    provider.topup_packs.side_effect = failure
+    _patch_init(monkeypatch, services)
+
+    assert cli_ai.handle_ai_command(_ns(ai_command="topup", pack=None)) == 1
+    catalog_error = capsys.readouterr().err
+    assert "Failure £4]52;unsafe" in catalog_error
+    assert "\x1b" not in catalog_error
+    assert "\x07" not in catalog_error
+    assert "\x9b" not in catalog_error
+
+    provider.topup_packs.side_effect = None
+    provider.topup_checkout.side_effect = failure
+    assert cli_ai.handle_ai_command(_ns(ai_command="topup", pack="small")) == 1
+    checkout_error = capsys.readouterr().err
+    assert "Failure £4]52;unsafe" in checkout_error
+    assert "\x1b" not in checkout_error
+    assert "\x07" not in checkout_error
+    assert "\x9b" not in checkout_error
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +423,94 @@ def test_ai_chat_buffered_warning_surfaced(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "hi back!" in captured.out
     assert "fallback model used" in captured.err
+
+
+def test_ai_chat_buffered_sanitises_server_metadata_without_mutating_raw(
+    monkeypatch, capsys
+):
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    raw_result = {
+        "content": "hi back!",
+        "warning": "notice\x1b]52;warning\x07\x9b",
+        "balance": {
+            "currency": "GBP",
+            "display": {"remaining": "£4.50"},
+        },
+        "debit_micros": 1_629,
+        "debit_display": "£0.01\x1b]52;debit\x07\x9b",
+    }
+    provider.chat.return_value = raw_result
+
+    assert cli_ai.handle_ai_command(_chat_args()) == 0
+    terminal = capsys.readouterr().err
+    assert "£0.01]52;debit" in terminal
+    assert "notice]52;warning" in terminal
+    assert "\x1b" not in terminal
+    assert "\x9b" not in terminal
+    assert raw_result["debit_display"] == "£0.01\x1b]52;debit\x07\x9b"
+
+
+def test_ai_chat_buffered_sanitises_server_error_code_and_message(monkeypatch, capsys):
+    from servonaut.services.api_client import APIError
+
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.side_effect = APIError(
+        code="quota\x1b]52;code\x07\x9b",
+        message="blocked\x1b]52;message\x07\x9b",
+        status=402,
+    )
+
+    assert cli_ai.handle_ai_command(_chat_args()) == 1
+    terminal = capsys.readouterr().err
+    assert "Error [quota]52;code]: blocked]52;message" in terminal
+    assert "\x1b" not in terminal
+    assert "\x9b" not in terminal
+
+
+@pytest.mark.parametrize(
+    ("code", "reason", "topup_helps", "expected", "has_topup_hint"),
+    [
+        (
+            "budget_exhausted", "member_limit_reached", False,
+            "Ask a team owner to raise it or wait for the next period.", False,
+        ),
+        (
+            "quota_exhausted", "team_pool_exhausted", True,
+            "Your team's AI balance is used up.", True,
+        ),
+        (
+            "budget_exhausted", "balance_exhausted", True,
+            "Your AI balance is used up.", True,
+        ),
+        ("unknown", "unknown_reason", False, "Blocked]52;unsafe", False),
+    ],
+)
+def test_ai_chat_buffered_maps_known_spend_reasons_and_keeps_unknown_safe(
+    monkeypatch, capsys, code, reason, topup_helps, expected, has_topup_hint,
+):
+    from servonaut.services.api_client import APIError
+
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+    provider.chat.side_effect = APIError(
+        code=code,
+        message="Blocked\x1b]52;unsafe\x07\x9b",
+        status=402,
+        details={"reason": reason, "topup_helps": topup_helps},
+    )
+
+    assert cli_ai.handle_ai_command(_chat_args()) == 1
+    terminal = capsys.readouterr().err
+    assert expected in terminal
+    assert ("servonaut ai topup" in terminal) is has_topup_hint
+    assert "\x1b" not in terminal
+    assert "\x07" not in terminal
+    assert "\x9b" not in terminal
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +692,83 @@ def test_ai_chat_stream_writes_tokens_line_buffered(monkeypatch, capsys):
     assert "tokens=13" in captured.err
 
 
+def test_ai_chat_stream_sanitises_info_tool_and_terminal_error_metadata(
+    monkeypatch, capsys
+):
+    from servonaut.services.api_client import APIError
+
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+
+    async def _fake_stream(*_a, **_kw):
+        yield {
+            "event": "info",
+            "data": {
+                "code": "limit\x1b]52;code\x07\x9b",
+                "message": "wait\x1b]52;message\x07\x9b",
+            },
+        }
+        yield {
+            "event": "tool_call",
+            "data": {"tool": "inspect\x1b]52;tool\x07\x9b"},
+        }
+        raise APIError(
+            code="quota\x1b]52;error-code\x07\x9b",
+            message="blocked\x1b]52;error-message\x07\x9b",
+            status=402,
+        )
+        yield  # pragma: no cover
+
+    provider.stream_chat = _fake_stream
+
+    assert cli_ai.handle_ai_command(_chat_args(stream=True)) == 1
+    terminal = capsys.readouterr().err
+    assert "[limit]52;code] wait]52;message" in terminal
+    assert "[tool_call] inspect]52;tool" in terminal
+    assert "Error [quota]52;error-code]: blocked]52;error-message" in terminal
+    assert "\x1b" not in terminal
+    assert "\x9b" not in terminal
+
+
+def test_ai_chat_stream_terminal_member_refusal_keeps_final_accounting(
+    monkeypatch, capsys,
+):
+    from servonaut.services.api_client import APIError
+
+    services = _make_services()
+    _patch_init(monkeypatch, services)
+    _config, _auth, _api, provider, _convs, _pref = services
+
+    async def _stream(*_args, **_kwargs):
+        yield {
+            "event": "usage",
+            "data": {
+                "model": "hosted-proof",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "balance": {"currency": "GBP", "display": {"remaining": "£4.38"}},
+                "debit_micros": 120_000,
+                "debit_display": "£0.13",
+            },
+        }
+        raise APIError(
+            code="budget_exhausted",
+            message="Blocked",
+            status=402,
+            details={"reason": "member_limit_reached", "topup_helps": False},
+        )
+
+    provider.stream_chat = _stream
+
+    assert cli_ai.handle_ai_command(_chat_args(stream=True)) == 1
+    terminal = capsys.readouterr().err
+    assert "Ask a team owner to raise it or wait for the next period." in terminal
+    assert "Turn debit: £0.13" in terminal
+    assert "Balance remaining: £4.38" in terminal
+    assert "servonaut ai topup" not in terminal
+
+
 # ---------------------------------------------------------------------------
 # 5. provider reset
 # ---------------------------------------------------------------------------
@@ -440,18 +790,12 @@ def test_ai_provider_reset_clears_preference(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# 6. topup — opens browser + schedules entitlements refresh
+# 6. topup — opens browser and returns without guessed refresh timing
 # ---------------------------------------------------------------------------
 
 
-def test_ai_topup_opens_browser_and_schedules_refresh(monkeypatch, capsys):
-    """`servonaut ai topup small` opens Stripe Checkout AND awaits refresh.
-
-    B3 — switched ``schedule_post_topup_refresh`` (async-but-fire-and-forget,
-    dies when CLI exits) for the new ``await_post_topup_refresh``
-    blocking variant. We assert the new method was awaited so a future
-    regression that drops the await is caught.
-    """
+def test_ai_topup_opens_browser_and_returns_without_refresh(monkeypatch):
+    """A browser launch returns immediately; checkout completion is external."""
     services = _make_services()
     _patch_init(monkeypatch, services)
     _config, auth, _api, provider, _convs, _pref = services
@@ -475,13 +819,11 @@ def test_ai_topup_opens_browser_and_schedules_refresh(monkeypatch, capsys):
     assert rc == 0
     provider.topup_checkout.assert_awaited_once_with("small")
     assert opened_with == ["https://checkout.stripe.com/pay/cs_test_abc"]
-    auth.await_post_topup_refresh.assert_awaited_once()
+    auth.await_post_topup_refresh.assert_not_called()
 
 
-def test_ai_topup_ctrl_c_during_refresh_wait_is_graceful(monkeypatch, capsys):
-    """Ctrl+C during the post-checkout wait is not a failure: the purchase
-    already happened. Expect exit 0 + a 'top-up is unaffected' note, never
-    a traceback."""
+def test_ai_topup_exits_without_waiting_for_checkout_completion(monkeypatch, capsys):
+    """The one-shot command cannot know when an external checkout completes."""
     services = _make_services()
     _patch_init(monkeypatch, services)
     _config, auth, _api, provider, _convs, _pref = services
@@ -489,24 +831,20 @@ def test_ai_topup_ctrl_c_during_refresh_wait_is_graceful(monkeypatch, capsys):
     provider.topup_checkout.return_value = (
         "https://checkout.stripe.com/pay/cs_test_abc"
     )
-    auth.await_post_topup_refresh = AsyncMock(side_effect=KeyboardInterrupt)
+    auth.await_post_topup_refresh = AsyncMock()
     monkeypatch.setattr(cli_ai.webbrowser, "open", lambda url: True)
 
     rc = cli_ai.handle_ai_command(_ns(ai_command="topup", pack="small"))
 
     assert rc == 0
     err = capsys.readouterr().err
-    assert "top-up is unaffected" in err
+    assert "After checkout completes" in err
     assert "servonaut ai quota" in err
+    auth.await_post_topup_refresh.assert_not_called()
 
 
-def test_ai_topup_blocks_for_post_checkout_refresh(monkeypatch):
-    """B3 — the CLI handler awaits the refresh; the entitlements actually fetch.
-
-    Drives the topup handler with a real ``await_post_topup_refresh``
-    that calls ``fetch_entitlements`` so we can assert the lifecycle
-    isn't truncated by ``asyncio.run`` exiting.
-    """
+def test_ai_topup_does_not_fetch_entitlements_before_external_checkout(monkeypatch):
+    """A browser launch is not evidence that checkout has completed."""
     services = _make_services()
     _patch_init(monkeypatch, services)
     _config, auth, _api, provider, _convs, _pref = services
@@ -515,13 +853,7 @@ def test_ai_topup_blocks_for_post_checkout_refresh(monkeypatch):
         "https://checkout.stripe.com/pay/cs_test_abc"
     )
 
-    fetch_called = MagicMock()
-
-    async def _await_refresh(progress_callback=None, *, wait_seconds=45.0):
-        fetch_called(wait_seconds)
-        await auth.fetch_entitlements()
-
-    auth.await_post_topup_refresh = _await_refresh
+    auth.await_post_topup_refresh = AsyncMock()
 
     monkeypatch.setattr(cli_ai.webbrowser, "open", lambda _u: True)
 
@@ -529,8 +861,8 @@ def test_ai_topup_blocks_for_post_checkout_refresh(monkeypatch):
     rc = cli_ai.handle_ai_command(args)
 
     assert rc == 0
-    fetch_called.assert_called_once()
-    auth.fetch_entitlements.assert_awaited_once()
+    auth.await_post_topup_refresh.assert_not_called()
+    auth.fetch_entitlements.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

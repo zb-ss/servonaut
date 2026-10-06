@@ -1272,9 +1272,8 @@ class AuthService(AuthServiceInterface):
         Stripe → Servonaut webhook latency is typically <30s, but worst-case
         we observe up to 60s in the wild. Two refreshes at +30s and +60s
         ensure ``tokens_topup_remaining`` lands in the chat-panel footer
-        within the spec'd window without spamming the API. The plan's
-        T8 acceptance criterion ("balance reflected in CLI within 60s")
-        is satisfied by the second refresh.
+        within the spec'd window without spamming the API.
+        The second refresh keeps the long-running chat-panel footer current.
 
         Implementation note:
             Tasks are created via :func:`asyncio.create_task` and tracked
@@ -1282,10 +1281,9 @@ class AuthService(AuthServiceInterface):
             mid-flight (asyncio caveat — orphaned tasks can be cancelled
             by the event loop). Tasks self-discard on completion.
 
-            This variant is for the *long-running TUI* — the +30s/+60s
-            tasks die immediately if the calling event loop exits (which
-            is what happens in a one-shot CLI invocation). For the CLI,
-            use :meth:`await_post_topup_refresh` (B3 fix).
+            This variant is for the long-running TUI. A one-shot CLI exits
+            after opening checkout and asks the user to run ``ai quota``
+            after the external purchase completes.
         """
         if not hasattr(self, "_post_topup_tasks"):
             # Lazy-initialised; lives for the lifetime of the AuthService.
@@ -1319,27 +1317,23 @@ class AuthService(AuthServiceInterface):
         *,
         wait_seconds: float = 45.0,
     ) -> None:
-        """Inline-block variant of post-topup refresh for the one-shot CLI (B3).
+        """Optional inline delayed refresh for callers that explicitly need it.
 
-        The TUI path (:meth:`schedule_post_topup_refresh`) creates +30s/+60s
-        tasks via :func:`asyncio.create_task`; those tasks die when the
-        loop exits, which is exactly what happens in
-        ``servonaut ai topup`` after :func:`asyncio.run` returns. To deliver
-        the entitlements refresh in a one-shot lifecycle, this method
-        sleeps inline (~45s by default — middle of the +30s/+60s window)
-        and then awaits :meth:`fetch_entitlements` once.
+        This helper is retained for compatibility with callers that accept a
+        fixed delay before a single entitlement refresh. The one-shot
+        ``servonaut ai topup`` command intentionally does not use it: opening
+        an external checkout is not evidence that its purchase has completed.
+        The long-running TUI instead uses :meth:`schedule_post_topup_refresh`.
 
         Args:
             progress_callback: Optional callable invoked with progress
                 strings ("Waiting 45s for Stripe webhook…", "Refreshing
-                entitlements…", "Done."). When None we ``logger.info`` the
-                same lines so a CLI caller sees them.
-            wait_seconds: How long to sleep before refreshing. Default 45s
-                threads the needle between the +30s task (typical webhook
-                landing time) and the +60s safety net.
+                entitlements…", "Done."). When None the messages are logged.
+            wait_seconds: How long to sleep before refreshing. The default is
+                retained for compatibility with existing explicit callers.
 
-        Returns when the refresh completes (success OR failure — failures
-        are logged at WARNING level and swallowed so the CLI still exits 0).
+        Returns when the refresh completes. Failures are logged at WARNING
+        level and swallowed for compatibility with existing callers.
         """
         emit = progress_callback or (lambda msg: logger.info(msg))
         emit(

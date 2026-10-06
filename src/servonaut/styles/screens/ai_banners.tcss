@@ -51,7 +51,9 @@
 
 /* T3 — quota footer (Servonaut-only). Hidden for user-keyed providers. */
 #chat-quota-footer {
-    height: 1;
+    /* A wide top border consumes one terminal row. Keep one row for the
+       server-provided balance label in the desktop terminal as well. */
+    height: 2;
     padding: 0 2;
     background: $panel;
     color: $text-muted;
@@ -61,4 +63,3 @@
 #chat-quota-footer.hidden {
     display: none;
 }
-

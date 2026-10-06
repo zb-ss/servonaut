@@ -1,4 +1,4 @@
-"""CLI subcommand handlers for ``servonaut ai`` (Wave 3 / Agent H — T9).
+"""CLI subcommand handlers for ``servonaut ai``.
 
 Mirrors the shape of :mod:`servonaut.cli.memory`:
 
@@ -9,7 +9,7 @@ Mirrors the shape of :mod:`servonaut.cli.memory`:
   ``main.py``; it dispatches on ``args.ai_command`` and returns an
   integer exit code.
 
-Subcommand tree (per plan T9 + architect plan §T9):
+Subcommand tree:
 
     servonaut ai chat <prompt>           [--stream] [--no-tools] [--tools]
                                           [--ai-provider X] [--task TASK]
@@ -21,7 +21,7 @@ Subcommand tree (per plan T9 + architect plan §T9):
                                           [--format md|json] [--force]
     servonaut ai conversations archive UUID
     servonaut ai conversations delete UUID
-    servonaut ai topup [PACK]             # small | medium | large
+    servonaut ai topup [PACK]             # keys from the current catalog
     servonaut ai provider reset
 
 All Servonaut-AI-only commands gate on:
@@ -35,8 +35,8 @@ The flag wins over the env var (argparse already enforces that ordering
 since the CLI flag is checked first in
 :func:`_resolve_per_session_provider`).
 
-This module deliberately does NOT touch the chat panel, ``app.py`` or any
-screen — those are owned by the sibling Wave 3 chat-panel agent.
+This module handles headless commands; the chat panel owns the interactive
+equivalents.
 """
 
 from __future__ import annotations
@@ -62,11 +62,6 @@ _EXIT_UNAUTHENTICATED = 2
 _EXIT_NOT_ENTITLED = 3
 _EXIT_USAGE_ERROR = 4
 
-# Hard-coded top-up packs as documented in the plan §"Top-up checkout".
-# The server is authoritative; this is a UX fallback when no live pack
-# table is available (mirrors plan T9 spec).
-_TOPUP_PACKS = ("small", "medium", "large")
-
 # Valid task enum (mirrors backend AiChatController + servonaut_provider).
 _VALID_TASKS = ("chat", "analyze_logs", "security_audit",
                 "cost_report", "incident_triage")
@@ -79,6 +74,55 @@ _UPGRADE_HINT = (
     "Servonaut AI requires the Solo or Teams plan: "
     "https://servonaut.dev/pricing"
 )
+
+
+def _safe_server_text(value: Any, fallback: str = "") -> str:
+    """Return server metadata safe for a human terminal, without mutating it."""
+    from servonaut.services.ai_balance import safe_terminal_text
+
+    return safe_terminal_text(value) or fallback
+
+
+def _spend_refusal_guidance(code: Any, message: Any, details: Any) -> str:
+    """Return stable guidance for a recognised hosted-spend refusal only."""
+    from servonaut.services.ai_error_handler import (
+        is_spend_refusal_reason,
+        spend_refusal_message,
+    )
+
+    safe_details = details if isinstance(details, dict) else {}
+    if not (
+        is_spend_refusal_reason(code)
+        or is_spend_refusal_reason(safe_details.get("reason"))
+    ):
+        return ""
+    return _safe_server_text(
+        spend_refusal_message(message, safe_details),
+        "Your AI balance is used up. Top up to keep going.",
+    )
+
+
+def _print_balance_lines(balance: Any, *, file: Any) -> bool:
+    """Print a capped member's limit, then the remaining balance.
+
+    Returns whether the remaining balance was printed.
+    """
+    member_limit = balance.member_limit_summary()
+    if member_limit:
+        print(f"Your limit this period: {member_limit}", file=file)
+    remaining = balance.human_display("remaining")
+    if remaining:
+        print(f"{balance.remaining_label}: {remaining}", file=file)
+    return bool(remaining)
+
+
+def _print_spend_topup_hint(details: Any, *, file: Any = None) -> None:
+    """Offer the current catalog only when the server marks top-up as helpful."""
+    if isinstance(details, dict) and details.get("topup_helps") is True:
+        print(
+            "Run 'servonaut ai topup' to choose a current pack.",
+            file=file or sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +291,7 @@ def _handle_chat(args: argparse.Namespace) -> int:
         )
 
     # Per-session provider override is resolved + threaded into env var so
-    # the chat-panel TUI (sister Agent G) honours it without a side-channel.
+    # the chat-panel TUI honours it without a side-channel.
     # For the headless CLI we currently only call the Servonaut provider —
     # if the override is non-servonaut we honour the user's expectation that
     # we exit with a clear message rather than silently ignore it.
@@ -412,7 +456,13 @@ async def _do_chat_buffered(
         # T5 owns the rich UX mapping; here we degrade to a single-line
         # error so the CLI is scriptable. The error code is the most
         # actionable detail (rate_limited / quota_exhausted / ...).
-        print(f"Error [{exc.code}]: {exc.message}", file=sys.stderr)
+        details = getattr(exc, "details", None)
+        guidance = _spend_refusal_guidance(exc.code, exc.message, details)
+        code = _safe_server_text(exc.code, "unknown")
+        message = guidance or _safe_server_text(exc.message, "Request failed.")
+        print(f"Error [{code}]: {message}", file=sys.stderr)
+        if guidance:
+            _print_spend_topup_hint(details)
         return _EXIT_GENERIC_ERROR
     except Exception as exc:  # noqa: BLE001 — last-resort defence
         logger.exception("Buffered chat failed")
@@ -422,7 +472,26 @@ async def _do_chat_buffered(
         return _EXIT_GENERIC_ERROR
 
     result = result or {}
-    warning = result.get("warning", "") or ""
+    balance = result.get("balance")
+    if isinstance(balance, dict):
+        from servonaut.services.ai_balance import AIHostedBalance
+
+        parsed = AIHostedBalance.from_dict(balance)
+        if parsed is not None:
+            _print_balance_lines(parsed, file=sys.stderr)
+        debit = result.get("debit_micros")
+        if parsed is not None:
+            from servonaut.services.ai_balance import display_debit
+
+            debit_label = display_debit(
+                debit, parsed.currency, result.get("debit_display"),
+            )
+            if debit_label:
+                print(
+                    f"Turn debit: {_safe_server_text(debit_label)}",
+                    file=sys.stderr,
+                )
+    warning = _safe_server_text(result.get("warning", ""))
     if warning:
         print(f"Warning: {warning}", file=sys.stderr)
 
@@ -464,6 +533,7 @@ async def _do_chat_stream(
     from servonaut.services.api_client import APIError
 
     last_usage: dict = {}
+    stream_error: BaseException | None = None
     saw_any_token = False
 
     try:
@@ -490,7 +560,18 @@ async def _do_chat_stream(
                 # don't pollute stdout but the user still sees them.
                 code = data.get("code", "")
                 msg = data.get("message", "")
-                print(f"\n[{code}] {msg}", file=sys.stderr)
+                details = data.get("details") if isinstance(data.get("details"), dict) else {}
+                guidance = _spend_refusal_guidance(code, msg, details)
+
+                if guidance:
+                    print(f"\nWarning: {guidance}", file=sys.stderr)
+                    _print_spend_topup_hint(details)
+                else:
+                    print(
+                        f"\n[{_safe_server_text(code)}] "
+                        f"{_safe_server_text(msg)}",
+                        file=sys.stderr,
+                    )
             elif etype == "done":
                 break
             # tool_call / tool_result events are not actionable in the
@@ -498,18 +579,16 @@ async def _do_chat_stream(
             # surface their existence to stderr so the user knows a tool
             # ran and they should switch to the TUI for full execution.
             elif etype == "tool_call":
-                tool = data.get("tool", "<unknown>")
+                tool = _safe_server_text(data.get("tool"), "<unknown>")
                 print(
                     f"\n[tool_call] {tool} (TUI required to confirm/execute)",
                     file=sys.stderr,
                 )
     except APIError as exc:
-        print(f"\nError [{exc.code}]: {exc.message}", file=sys.stderr)
-        return _EXIT_GENERIC_ERROR
+        stream_error = exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("Stream chat failed")
-        print(f"\nError: {exc}", file=sys.stderr)
-        return _EXIT_GENERIC_ERROR
+        stream_error = exc
 
     # Final newline so the prompt sits on its own row in interactive shells.
     if saw_any_token:
@@ -517,7 +596,9 @@ async def _do_chat_stream(
         sys.stdout.flush()
 
     if last_usage:
-        model = last_usage.get("model", "")
+        from servonaut.services.ai_balance import safe_terminal_text
+
+        model = safe_terminal_text(last_usage.get("model", ""))
         in_tokens = int(last_usage.get("input_tokens") or 0)
         out_tokens = int(last_usage.get("output_tokens") or 0)
         total = in_tokens + out_tokens
@@ -526,6 +607,40 @@ async def _do_chat_stream(
             f"(in={in_tokens} out={out_tokens})",
             file=sys.stderr,
         )
+        balance = last_usage.get("balance")
+        if isinstance(balance, dict):
+            from servonaut.services.ai_balance import AIHostedBalance
+
+            parsed = AIHostedBalance.from_dict(balance)
+            if parsed is not None:
+                _print_balance_lines(parsed, file=sys.stderr)
+            from servonaut.services.ai_balance import display_debit
+
+            debit_label = display_debit(
+                last_usage.get("debit_micros"),
+                parsed.currency if parsed else "",
+                last_usage.get("debit_display"),
+            )
+            if debit_label:
+                print(
+                    f"Turn debit: {_safe_server_text(debit_label)}",
+                    file=sys.stderr,
+                )
+    if stream_error is not None:
+        details = getattr(stream_error, "details", None)
+        guidance = _spend_refusal_guidance(
+            getattr(stream_error, "code", None),
+            getattr(stream_error, "message", None),
+            details,
+        )
+        code = _safe_server_text(getattr(stream_error, "code", None), "stream_failed")
+        message = guidance or _safe_server_text(
+            getattr(stream_error, "message", None), "Stream failed.",
+        )
+        print(f"\nError [{code}]: {message}", file=sys.stderr)
+        if guidance:
+            _print_spend_topup_hint(details)
+        return _EXIT_GENERIC_ERROR
     return _EXIT_SUCCESS
 
 
@@ -574,20 +689,60 @@ def _handle_quota(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    from servonaut.services.ai_balance import AIHostedBalance
     from servonaut.services.ai_quota import AIQuota
 
     token = getattr(auth, "_token", None)
     raw_quota = None
+    raw_balance = None
     if token is not None and isinstance(getattr(token, "entitlements", None), dict):
         raw_quota = token.entitlements.get("quota")
+        raw_balance = token.entitlements.get("balance")
 
     quota = AIQuota.from_dict(raw_quota)
+    balance = AIHostedBalance.from_dict(raw_balance)
 
     if use_json:
-        if quota is None:
-            print(json.dumps({"quota": None}))
-        else:
-            print(json.dumps(quota.to_dict(), indent=2))
+        # Preserve the legacy quota-only schema when balance is absent.
+        payload: dict[str, Any] = {"quota": None} if quota is None else quota.to_dict()
+        if balance is not None:
+            payload["balance"] = balance.raw
+        print(json.dumps(payload, indent=2))
+        return _EXIT_SUCCESS
+
+    if balance is not None:
+        from servonaut.services.ai_balance import safe_terminal_text
+
+        if not _print_balance_lines(balance, file=sys.stdout):
+            print("Balance: unavailable; refresh entitlements and try again.")
+        spent = balance.human_display("spent_this_period")
+        if spent:
+            print(f"Spent this period: {spent}")
+        if balance.state_label:
+            print(f"Status: {balance.state_label}")
+        if balance.state == "blocked":
+            guidance = _spend_refusal_guidance(balance.reason, None, {"reason": balance.reason})
+            if guidance:
+                print(f"Why: {guidance}")
+            _print_spend_topup_hint({"topup_helps": balance.topup_helps}, file=sys.stdout)
+        for field, label in (
+            ("allowance_remaining", "Allowance remaining"),
+            ("topup_remaining", "Top-ups remaining"),
+            ("credit_remaining", "Credit remaining"),
+        ):
+            value = balance.human_display(field)
+            if value:
+                print(f"{label}: {value}")
+        for field, label in (
+            ("next_grant_at", "Allowance renews"),
+            ("next_topup_expiry", "Top-up expires"),
+            ("next_credit_expiry", "Credit expires"),
+        ):
+            value = safe_terminal_text(balance.raw.get(field))
+            if value:
+                print(f"{label}: {value}")
+        if balance.approx_requests_remaining is not None:
+            print(f"≈ {balance.approx_requests_remaining} requests left")
         return _EXIT_SUCCESS
 
     if quota is None:
@@ -843,15 +998,14 @@ def _handle_topup(args: argparse.Namespace) -> int:
     """Implement ``servonaut ai topup [pack]``.
 
     With a pack argument: directly drive the checkout — calls
-    ``provider.topup_checkout(pack)`` (defined by sister Agent G as part
-    of T8) and opens the returned URL in the user's default browser.
-    Without a pack: prints the static pack table from the plan and asks
-    the caller to re-run with a pack arg.
+    ``provider.topup_checkout(pack)`` and opens the returned URL in the
+    user's default browser.
+    Without a pack: prints the authenticated server inventory and asks the
+    caller to re-run with one of its current keys.
 
-    Post-launch, schedules a delayed entitlements refresh via
-    ``auth.schedule_post_topup_refresh()`` so the new
-    ``tokens_topup_remaining`` shows up within ~60s of the Stripe
-    webhook completing.
+    The one-shot command exits after it opens (or prints) checkout. It cannot
+    observe when the browser purchase finishes, so it tells the user to run
+    ``servonaut ai quota`` afterwards rather than guessing at webhook timing.
     """
     (
         _config_manager,
@@ -869,43 +1023,55 @@ def _handle_topup(args: argparse.Namespace) -> int:
     if code is not None:
         return code
 
+    async def _packs() -> list[Any]:
+        return await provider.topup_packs()
+
+    try:
+        packs = _run_async(_packs())
+    except Exception as exc:  # noqa: BLE001
+        detail = _safe_server_text(str(exc), "request failed")
+        print(f"Error: could not load top-up packs: {detail}", file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
+
+    from servonaut.services.ai_balance import safe_terminal_text
+
+    pack_map = {item.key: item for item in packs if getattr(item, "key", "")}
     pack: Optional[str] = getattr(args, "pack", None)
     if not pack:
-        # No pack arg → print the static table and exit cleanly.
         print("Available top-up packs:")
-        for name in _TOPUP_PACKS:
-            print(f"  - {name}")
+        for item in packs:
+            key = safe_terminal_text(getattr(item, "key", ""))
+            label = safe_terminal_text(getattr(item, "label", key))
+            price = safe_terminal_text(getattr(item, "display_price", ""))
+            print(f"  - {key}: {label}" + (f" ({price})" if price else ""))
         print(
             "\nRun `servonaut ai topup <pack>` to launch a Stripe Checkout "
             "for that pack."
         )
         return _EXIT_SUCCESS
 
-    if pack not in _TOPUP_PACKS:
+    if pack not in pack_map:
+        expected = [safe_terminal_text(key) for key in pack_map]
         print(
-            f"Error: unknown pack {pack!r}; expected one of "
-            f"{list(_TOPUP_PACKS)!r}.",
+            f"Error: unknown pack {safe_terminal_text(pack)!r}; expected one of {expected!r}.",
             file=sys.stderr,
         )
         return _EXIT_USAGE_ERROR
 
     async def _do() -> str:
-        # ``topup_checkout`` lands with sister Wave 3 Agent G (T8).
-        # Until that merges, the AttributeError surface below documents
-        # the dependency clearly to the user.
         return await provider.topup_checkout(pack)
 
     try:
         url = _run_async(_do())
     except AttributeError:
         print(
-            "Error: top-up checkout helper not yet wired in this build "
-            "(Agent G / T8 dependency).",
+            "Error: top-up checkout is unavailable in this build.",
             file=sys.stderr,
         )
         return _EXIT_GENERIC_ERROR
     except Exception as exc:  # noqa: BLE001
-        print(f"Error: {exc}", file=sys.stderr)
+        detail = _safe_server_text(str(exc), "checkout request failed")
+        print(f"Error: {detail}", file=sys.stderr)
         return _EXIT_GENERIC_ERROR
 
     if not url:
@@ -920,70 +1086,30 @@ def _handle_topup(args: argparse.Namespace) -> int:
     )
 
     if not is_valid_stripe_checkout_url(url):
-        logger.warning(
-            "Top-up checkout returned non-Stripe URL %r — refusing auto-open",
-            url,
-        )
+        logger.warning("Top-up checkout returned an invalid Stripe URL")
         print(
-            f"Refusing to auto-open non-Stripe URL. Open this URL manually: {url}",
+            "Error: server returned an invalid Stripe checkout URL.",
             file=sys.stderr,
         )
-    else:
+        return _EXIT_GENERIC_ERROR
+
+    opened = False
+    try:
+        opened = bool(webbrowser.open(url))
+    except Exception:  # noqa: BLE001
         opened = False
-        try:
-            opened = bool(webbrowser.open(url))
-        except Exception:  # noqa: BLE001
-            opened = False
 
-        print(f"Opening checkout for {pack!r} pack: {url}", flush=True)
-        if not opened:
-            print("(could not auto-launch browser; copy the URL above)",
-                  flush=True)
+    safe_url = safe_terminal_text(url)
+    print(f"Opening checkout for {safe_terminal_text(pack)!r} pack: {safe_url}", flush=True)
+    if not opened:
+        print("(could not auto-launch browser; copy the URL above)",
+              flush=True)
 
-    # B3 — block inline for the post-checkout entitlements refresh. The
-    # TUI variant (:meth:`schedule_post_topup_refresh`) uses
-    # :func:`asyncio.create_task`, which works against a long-running
-    # event loop; in a one-shot CLI invocation those tasks die when
-    # ``asyncio.run`` returns, leaving ``tokens_topup_remaining`` stale
-    # forever. ``await_post_topup_refresh`` sleeps inline ~45s then
-    # refreshes once — the user's CLI process waits, but the spec'd
-    # T8 acceptance bullet ("balance reflected within 60s") is honoured.
-    await_refresh = getattr(auth, "await_post_topup_refresh", None)
-    if callable(await_refresh):
-        try:
-            _run_async(await_refresh(lambda msg: print(msg)))
-        except KeyboardInterrupt:
-            # The purchase is already done — interrupting the courtesy
-            # wait is not a failure.
-            print(
-                "\nSkipping the entitlement refresh (your top-up is "
-                "unaffected). Run `servonaut ai quota` in ~60s to see "
-                "the new balance.",
-                file=sys.stderr,
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "await_post_topup_refresh raised; continuing.",
-            )
-    else:
-        # Backward-compat with older AuthService that only ships the TUI
-        # variant: best-effort schedule, document the gap to the user.
-        schedule = getattr(auth, "schedule_post_topup_refresh", None)
-        if callable(schedule):
-            try:
-                # Old TUI variant — coroutine is created but never awaited
-                # in a way that survives. Surface the limitation.
-                result = schedule()
-                if asyncio.iscoroutine(result):
-                    _run_async(result)
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "schedule_post_topup_refresh raised; continuing.",
-                )
-        print(
-            "Run `servonaut ai quota` in ~60s to confirm the new balance.",
-            file=sys.stderr,
-        )
+    print(
+        "After checkout completes, run `servonaut ai quota` to view your "
+        "latest hosted balance.",
+        file=sys.stderr,
+    )
     return _EXIT_SUCCESS
 
 
@@ -1170,14 +1296,13 @@ def add_ai_parser(subparsers: Any) -> argparse.ArgumentParser:
     # ---- ai topup --------------------------------------------------------
     topup_parser = ai_sub.add_parser(
         "topup",
-        help="Open a Stripe Checkout for a token top-up pack.",
+        help="Open a Stripe Checkout for a current balance top-up pack.",
     )
     topup_parser.add_argument(
         "pack",
         nargs="?",
         default=None,
-        choices=list(_TOPUP_PACKS),
-        help="Top-up pack name. Omit to print the available packs.",
+        help="Current catalog key. Omit to print the available packs.",
     )
 
     # ---- ai provider reset ----------------------------------------------
