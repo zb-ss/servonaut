@@ -25,7 +25,6 @@ from servonaut.services.api_client import APIClient
 from servonaut.services.api_client import APIError
 from servonaut.services.auth_service import AuthService
 from servonaut.services.team_service import TeamService
-from servonaut.utils.validation import ValidationError, validate_instance_id, validate_provider
 
 from . import crypto
 from .bindings import VaultBindingService
@@ -37,6 +36,7 @@ from .identity_client import IdentityClient
 from .identity_store import IdentityStore
 from .items import VaultItemService
 from .local_state import VaultLocalState
+from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
@@ -1050,8 +1050,7 @@ class VaultCommandService:
         """
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
-        normalized_provider = validate_provider(provider)
-        normalized_instance_id = validate_instance_id(instance_id)
+        normalized_provider, normalized_instance_id = personal_target(provider, instance_id)
         if (not isinstance(hostname, str) or not hostname or hostname != hostname.strip()
                 or any(character.isspace() for character in hostname)
                 or any(character in hostname for character in "*!?[]")):
@@ -1070,9 +1069,7 @@ class VaultCommandService:
         if not isinstance(fingerprint, str) or not fingerprint.startswith("SHA256:"):
             raise VaultStateError("personal binding item has no verified SSH fingerprint")
         target = f"instance:{normalized_provider}:{normalized_instance_id}"
-        existing, existing_target = await self._credential_binding({
-            "provider": normalized_provider, "id": normalized_instance_id,
-        })
+        existing, existing_target = await self._personal_binding(normalized_provider, normalized_instance_id)
         if existing is None:
             revision = 1
         else:
@@ -1085,9 +1082,16 @@ class VaultCommandService:
             login_user=login, vault_id=vault_id, vault_item_id=item_id,
             public_fingerprint=fingerprint, host_keys=host_keys, binding_revision=revision,
         )
-        return await self.bindings.put_personal_binding(
-            normalized_provider, normalized_instance_id, binding,
-        )
+        try:
+            return await self.bindings.put_personal_binding(
+                normalized_provider, normalized_instance_id, binding,
+            )
+        except APIError as exc:
+            if normalized_provider == CUSTOM_PROVIDER and exc.status == 404:
+                raise VaultUserError(
+                    "this Servonaut service does not accept vault keys for custom servers yet"
+                ) from exc
+            raise
 
     async def bind_imported_bitwarden_ref(
         self,
@@ -1423,17 +1427,15 @@ class VaultCommandService:
                     "native Vault SSH binding requires an unlocked Team Vault identity"
                 )
             return None
-        # The personal binding endpoint is limited to managed providers.  It
-        # must not pre-empt the resolver's established local-key path for a
-        # custom or otherwise unsupported target merely because the user has
-        # unlocked a Vault identity.  An explicit native binding remains an
-        # authenticated instruction and is allowed to fail closed below.
+        # A personal binding exists only for targets the service can address
+        # (cloud instances and named custom servers). Anything else keeps the
+        # resolver's established local-key path; a missing binding (404) does
+        # too. An explicit native binding remains an authenticated instruction
+        # and is allowed to fail closed below.
         if not requires_native and instance.get("is_shared") is not True:
-            if instance.get("is_custom") is True:
-                return None
             try:
-                validate_provider(instance.get("provider", "aws"))
-            except ValidationError:
+                instance_target({**instance, "provider": instance.get("provider", "aws")})
+            except ValueError:
                 return None
         ca_lease = await self._resolve_ca_ssh(instance)
         if ca_lease is not None:
@@ -1492,8 +1494,12 @@ class VaultCommandService:
             if not isinstance(server_id, str) or not server_id:
                 raise VaultStateError("shared server has no canonical id")
             return instance.get("credential_binding") if isinstance(instance.get("credential_binding"), Mapping) else None, f"shared_server:{server_id}"
-        provider = validate_provider(instance.get("provider"))
-        instance_id = validate_instance_id(instance.get("id"))
+        return await self._personal_binding(*instance_target(instance))
+
+    async def _personal_binding(
+        self, provider: str, instance_id: str,
+    ) -> tuple[Mapping[str, Any] | None, str]:
+        """GET the signed personal binding for already-validated route keys."""
         path = f"/api/v1/me/instances/{provider}/{instance_id}/credential-binding"
         try:
             response = await self.api.request_signed("GET", path, json={}, device=self.store.signer())

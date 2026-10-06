@@ -548,7 +548,10 @@ per flag, without a host name or comment, for example from `ssh-keyscan`
 output). With `--pin-host-key` instead, it pins the keys this machine already
 trusts for the server from an earlier `servonaut ssh` login. `bind-personal`
 always requires explicit `--host-key` pins. Neither copies trust from an
-unverified server record.
+unverified server record. For a cloud instance, `bind-personal` takes
+`--provider aws|ovh|hetzner` and its instance id; for a custom server, use
+`--provider custom` and the custom server's name. Renaming a custom server
+needs a new binding.
 
 The exposure rotation command installs and proves the replacement on every
 selected host, then removes the old key. If any host does not complete, it

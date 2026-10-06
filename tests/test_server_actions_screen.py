@@ -1206,3 +1206,31 @@ class TestVerifySshNoRefPathPushesEditorModal:
         _run(screen._verify_ssh_flow())
         msgs = [n["message"] for n in fake_app._notifications]
         assert not any("not yet implemented" in m for m in msgs)
+
+
+class TestUseVaultKeyForCustomServer:
+    def test_custom_server_binds_by_name_with_the_custom_provider(self):
+        inst = {
+            "id": "custom-Web 1", "name": "Web 1", "host": "192.0.2.10", "is_custom": True,
+            "provider": "DigitalOcean", "port": 2222, "username": "deploy",
+        }
+        app = _FakeApp()
+        app._push_screen_wait_result = {
+            "vault_id": "v", "item_id": "i", "team": "", "login": "", "host_keys": "ssh-ed25519 AAAA",
+        }
+        service = MagicMock()
+        service.bind_personal = AsyncMock(return_value={"source": "servonaut_vault"})
+        app.vault_command_service = service
+        screen = _make_screen(instance=inst, app=app)
+        flows = []
+        screen.run_worker = lambda coroutine, **_kwargs: flows.append(coroutine)
+
+        screen.action_use_vault_key()
+        _run(flows[0])
+
+        kwargs = service.bind_personal.await_args.kwargs
+        # The provider label of a custom server is free text: the binding uses
+        # "custom" and the server's name, whatever the label says.
+        assert (kwargs["provider"], kwargs["instance_id"]) == ("custom", "Web 1")
+        assert (kwargs["hostname"], kwargs["port"], kwargs["login"]) == ("192.0.2.10", 2222, "deploy")
+        assert app._notifications[-1]["message"] == "SSH credential source: servonaut_vault"

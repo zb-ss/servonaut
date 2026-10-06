@@ -965,12 +965,19 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
                 return web.json_response(copy.deepcopy(exposure))
         return _not_found()
 
+    # Personal bindings exist for cloud instances and named custom servers only.
+    personal_providers = {"aws", "ovh", "hetzner", "custom"}
+
     async def binding_get(request: web.Request, device: Optional[_Device]) -> web.Response:
+        if request.match_info["provider"] not in personal_providers:
+            return _not_found()
         assert device is not None
         value = vault._bindings.get((request.match_info["provider"], request.match_info["instance_id"]))
         return web.json_response(copy.deepcopy(value)) if value else _not_found()
 
     async def binding_put(request: web.Request, device: Optional[_Device]) -> web.Response:
+        if request.match_info["provider"] not in personal_providers:
+            return _not_found()
         assert device is not None
         body = await json_body(request)
         target = f"instance:{request.match_info['provider']}:{request.match_info['instance_id']}"

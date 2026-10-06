@@ -504,7 +504,7 @@ async def test_explicit_native_custom_binding_remains_fail_closed_when_unlocked(
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
     service._resolve_ca_ssh = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
-    with pytest.raises(ValidationError, match="Unknown provider"):
+    with pytest.raises(ValueError, match="custom server needs a name"):
         await service.resolve_ssh({
             "provider": "colo", "id": "web-1", "is_custom": True,
             "public_ip": "192.0.2.10",
@@ -756,10 +756,11 @@ async def test_personal_binding_uses_canonical_target_and_advances_verified_revi
     service.items = Items()  # type: ignore[assignment]
     service.bindings = Bindings()  # type: ignore[assignment]
 
-    async def existing(_instance):
+    async def existing(provider, instance_id):
+        assert (provider, instance_id) == ("aws", "i-abc")
         return ({"binding_revision": 4}, "instance:aws:i-abc")
 
-    service._credential_binding = existing  # type: ignore[method-assign]
+    service._personal_binding = existing  # type: ignore[method-assign]
     result = await service.bind_personal(
         vault_id=vault_id, item_id=item_id, provider="AWS", instance_id="i-abc",
         hostname="server.example.test", port=2222, login="deploy", host_keys=["ssh-ed25519 AAAA"],
@@ -1388,3 +1389,83 @@ async def test_krl_updated_event_delivers_only_to_enrolled_hosts_that_drifted() 
     await service.handle_event({"type": "ssh_ca.krl_updated", "data": {"team_slug": "team-a"}})
 
     service.ca_deliver_krl.assert_awaited_once_with(team="team-a", servers=["server-1"])
+
+
+@pytest.mark.asyncio
+async def test_custom_server_ssh_looks_up_its_personal_binding_by_name(tmp_path) -> None:
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    api = _Api({})
+    paths: list[str] = []
+
+    async def request_signed(method, path, **_kwargs):
+        paths.append(path)
+        raise APIError(code="not_found", message="none", status=404)
+
+    api.request_signed = request_signed
+    service = VaultCommandService(api, SimpleNamespace(user_id=1), _config(), store=store)
+    service._resolve_ca_ssh = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    lease = await service.resolve_ssh({
+        "provider": "DigitalOcean", "id": "custom-Web 1", "name": "Web 1", "is_custom": True,
+        "host": "192.0.2.10",
+    })
+
+    # No binding yet: the local-key path continues.
+    assert lease is None
+    assert paths == [f"/api/v1/me/instances/custom/{custom_binding_id('Web 1')}/credential-binding"]
+
+
+@pytest.mark.asyncio
+async def test_bind_personal_for_a_custom_server_signs_the_custom_target() -> None:
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    vault = {"scope": "user:1"}
+    service.vaults.get_vault = AsyncMock(return_value=vault)  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = AsyncMock(return_value={"ok": True})  # type: ignore[method-assign]
+
+    await service.bind_personal(
+        vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+        provider="custom", instance_id="Web 1", hostname="192.0.2.10", port=2222, login="deploy",
+        host_keys=["ssh-ed25519 AAAA"],
+    )
+
+    route_id = custom_binding_id("Web 1")
+    service._personal_binding.assert_awaited_once_with("custom", route_id)
+    provider, instance_id, binding = service.bindings.put_personal_binding.await_args.args
+    assert (provider, instance_id) == ("custom", route_id)
+    assert binding["target"] == f"instance:custom:{route_id}"
+
+
+@pytest.mark.asyncio
+async def test_binding_a_custom_server_on_a_service_without_support_says_so() -> None:
+    from servonaut.services.vault.errors import VaultUserError
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = AsyncMock(  # type: ignore[method-assign]
+        side_effect=APIError(code="not_found", message="x", status=404),
+    )
+
+    with pytest.raises(VaultUserError, match="does not accept vault keys for custom servers yet"):
+        await service.bind_personal(
+            vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+            provider="custom", instance_id="Web 1", hostname="192.0.2.10", port=22, login="deploy",
+            host_keys=["ssh-ed25519 AAAA"],
+        )
