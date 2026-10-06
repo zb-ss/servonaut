@@ -21,6 +21,7 @@ from servonaut.screens.vault import (
     show_pending_device,
 )
 from servonaut.styles import CSS_FILES
+from tests._async_bounds import wait_until
 
 def test_vault_screen_exposes_safe_metadata_actions() -> None:
     actions = {binding.action for binding in VaultScreen.BINDINGS}
@@ -173,9 +174,7 @@ async def test_narrow_vault_keeps_metadata_visible_and_scrolls_clear_actions() -
         await asyncio.wait_for(service.metadata_requested.wait(), timeout=2)
         service.release_metadata.set()
         table = app.screen.query_one("#vault_table", DataTable)
-        async with asyncio.timeout(2):
-            while table.row_count != 1:
-                await pilot.pause()
+        await wait_until(lambda: table.row_count == 1)
 
         screen = app.screen
         assert isinstance(screen, VaultScreen)
@@ -229,9 +228,7 @@ async def test_import_refreshes_selected_vault_counts_before_bitwarden_binding_o
 
     async with app.run_test(size=(100, 30)) as pilot:
         table = app.screen.query_one("#vault_table", DataTable)
-        async with asyncio.timeout(2):
-            while table.row_count != 2:
-                await pilot.pause()
+        await wait_until(lambda: table.row_count == 2)
         table.move_cursor(row=1)
         screen = app.screen
         assert isinstance(screen, VaultScreen)
@@ -247,9 +244,7 @@ async def test_import_refreshes_selected_vault_counts_before_bitwarden_binding_o
         })
         await asyncio.wait_for(service.refresh_requested.wait(), timeout=2)
         service.release_refresh.set()
-        async with asyncio.timeout(2):
-            while table.cursor_row != 1 or offered.await_count != 1:
-                await pilot.pause()
+        await wait_until(lambda: table.cursor_row == 1 and offered.await_count == 1)
 
         assert screen._selected_vault_id == "vault-imported"
         assert "2 imported, 0 failed" in str(screen.query_one("#vault_status", Static).render())

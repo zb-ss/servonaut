@@ -12,6 +12,7 @@ from servonaut.screens.bw_passphrase_modal import BwPassphraseModal
 from servonaut.screens.vault_import_modal import VaultImportModal
 from servonaut.services.bw_key_import import DecryptedKey, KeyImportError, ScannedKey
 from servonaut.services.bw_session_service import BwAuthState, BwItemSummary
+from tests._async_bounds import wait_until
 
 
 class _List:
@@ -315,26 +316,20 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
     ):
         app = LocalHost()
         async with app.run_test(size=(100, 30)) as pilot:
-            async with asyncio.timeout(2):
-                while not isinstance(app.screen, VaultImportModal):
-                    await pilot.pause()
+            await wait_until(lambda: isinstance(app.screen, VaultImportModal))
             await pilot.click("#vault_import_local")
             await asyncio.wait_for(local_started.wait(), timeout=2)
             release_local.set()
             modal = app.screen
             listing = modal.query_one("#vault_import_list", SelectionList)
-            async with asyncio.timeout(2):
-                while listing.option_count != 1:
-                    await pilot.pause()
+            await wait_until(lambda: listing.option_count == 1)
 
             for button_id in ("vault_import_cancel", "vault_import_confirm"):
                 button = modal.query_one(f"#{button_id}", Button)
                 assert button.region.y >= 0 and button.region.bottom <= app.size.height
                 assert button.region.x >= 0 and button.region.right <= app.size.width
             await pilot.click("#vault_import_cancel")
-            async with asyncio.timeout(2):
-                while isinstance(app.screen, VaultImportModal):
-                    await pilot.pause()
+            await wait_until(lambda: not isinstance(app.screen, VaultImportModal))
 
     bitwarden_started = asyncio.Event()
     release_bitwarden = asyncio.Event()
@@ -357,23 +352,17 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
 
     app = BitwardenHost()
     async with app.run_test(size=(100, 30)) as pilot:
-        async with asyncio.timeout(2):
-            while not isinstance(app.screen, VaultImportModal):
-                await pilot.pause()
+        await wait_until(lambda: isinstance(app.screen, VaultImportModal))
         await pilot.click("#vault_import_bitwarden")
         await asyncio.wait_for(bitwarden_started.wait(), timeout=2)
         release_bitwarden.set()
         modal = app.screen
         listing = modal.query_one("#vault_import_list", SelectionList)
-        async with asyncio.timeout(2):
-            while listing.option_count != 1:
-                await pilot.pause()
+        await wait_until(lambda: listing.option_count == 1)
 
         assert "Deploy key" in str(listing.get_option_at_index(0).prompt)
         for button_id in ("vault_import_cancel", "vault_import_confirm"):
             button = modal.query_one(f"#{button_id}", Button)
             assert button.region.y >= 0 and button.region.bottom <= app.size.height
         await pilot.click("#vault_import_cancel")
-        async with asyncio.timeout(2):
-            while isinstance(app.screen, VaultImportModal):
-                await pilot.pause()
+        await wait_until(lambda: not isinstance(app.screen, VaultImportModal))
