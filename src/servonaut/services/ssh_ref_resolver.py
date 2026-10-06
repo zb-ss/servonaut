@@ -1,12 +1,13 @@
-"""SSH ref resolution chain: personal BW ref → team BW ref → local ~/.ssh.
+"""SSH ref resolution chain: CA → native Vault → BW → local ~/.ssh.
 
 Resolution order (matches the locked wire contract in bw_ssh_config_service):
 
-    1. Personal — ``BwSshConfigService.get_personal_instance_ref()``
-    2. Team     — ``TeamService.get_team_server_ssh_ref()`` (only when
+    1. CA / native Vault — ``VaultCommandService.resolve_ssh()``
+    2. Personal — ``BwSshConfigService.get_personal_instance_ref()``
+    3. Team     — ``TeamService.get_team_server_ssh_ref()`` (only when
                   ``teams_supplier`` is set and the instance is a shared server)
-    3. Local    — ``SSHService.get_key_path()`` / ``discover_key()``
-    4. None     — if nothing matched
+    4. Local    — ``SSHService.get_key_path()`` / ``discover_key()``
+    5. None     — if nothing matched
 
 Any tier that raises an ``APIError`` (e.g. 403 Forbidden) is logged at
 WARNING and skipped; the chain continues to the next tier.  A 404 from a
@@ -15,13 +16,15 @@ tier means "no ref stored" (not a failure) and also advances the chain.
 
 from __future__ import annotations
 
+import inspect
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Callable, List, Literal, Optional
+from typing import Any, Callable, List, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
-ResolutionSource = Literal["personal", "team", "local"]
+ResolutionSource = Literal["ca", "vault", "personal", "team", "local"]
 
 _KNOWN_PROVIDERS = frozenset({"aws", "ovh", "hetzner"})
 
@@ -37,26 +40,54 @@ class ResolvedSshRef:
     source: ResolutionSource
     """Which tier produced this ref."""
 
-    item_id: Optional[str]
+    item_id: Optional[str] = None
     """Bitwarden item UUID.  Set when ``source`` is ``'personal'`` or ``'team'``."""
 
-    vault_url: Optional[str]
+    vault_url: Optional[str] = None
     """Bitwarden vault URL from the ref payload.  May be ``None`` even for BW
     sources when the personal/global default is used."""
 
-    collection_id: Optional[str]
+    collection_id: Optional[str] = None
     """Bitwarden collection UUID from the ref payload.  Optional."""
 
-    local_key_path: Optional[str]
+    local_key_path: Optional[str] = None
     """Absolute path to an ``~/.ssh`` key file.  Set only when ``source`` is
     ``'local'``."""
 
-    team_slug: Optional[str]
+    team_slug: Optional[str] = None
     """Team slug.  Set only when ``source`` is ``'team'``."""
 
-    server_id: Optional[str]
+    server_id: Optional[str] = None
     """SharedServer row id used to fetch the team ref.  Set only when
     ``source`` is ``'team'``."""
+
+    vault_id: Optional[str] = None
+    """Native vault id for ``'vault'`` sources."""
+
+    vault_item_id: Optional[str] = None
+    """Native vault item id for ``'vault'`` sources."""
+
+    login_user: Optional[str] = None
+    """Signed binding login for a native vault or CA source."""
+
+    host_keys: Optional[list[str]] = None
+    """Signed host-key pins associated with a native vault binding."""
+
+    binding: Optional[dict[str, Any]] = None
+    """The verified native binding, never an unverified server payload."""
+
+    lease: Any = None
+    """Opaque runtime-owned connection lease for native vault or CA access."""
+
+    identity_agent: Optional[str] = None
+    identity_file: Optional[str] = None
+    certificate_path: Optional[str] = None
+    known_hosts_path: Optional[str] = None
+    public_key: Optional[str] = None
+
+
+class VaultResolutionError(RuntimeError):
+    """A configured native Vault credential could not be resolved safely."""
 
 
 class SshRefResolver:
@@ -81,11 +112,13 @@ class SshRefResolver:
         team_service: object,
         ssh_service: object,
         teams_supplier: Optional[Callable[[], List[dict]]] = None,
+        vault_runtime: object | None = None,
     ) -> None:
         self._bw = bw_ssh_config_service
         self._team_svc = team_service
         self._ssh_svc = ssh_service
         self._teams_supplier = teams_supplier
+        self._vault_runtime = vault_runtime
 
     async def resolve(self, instance: dict) -> Optional[ResolvedSshRef]:
         """Resolve an SSH credential for *instance*.
@@ -102,12 +135,17 @@ class SshRefResolver:
             :class:`ResolvedSshRef` from the first tier that matches, or
             ``None`` if no tier could resolve a credential.
         """
-        # --- Tier 1: personal BW ref ---
+        # --- Tier 1/2: certificate then native-vault binding ---
+        ref = await self._try_native(instance)
+        if ref is not None:
+            return ref
+
+        # --- Tier 3: personal BW ref ---
         ref = await self._try_personal(instance)
         if ref is not None:
             return ref
 
-        # --- Tier 2: team BW ref ---
+        # --- Tier 4: team BW ref ---
         ref = await self._try_team(instance)
         if ref is not None:
             return ref
@@ -122,6 +160,75 @@ class SshRefResolver:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _try_native(self, instance: dict) -> Optional[ResolvedSshRef]:
+        """Ask the Vault runtime to resolve a verified CA or native binding.
+
+        The runtime owns network reads, identity pins, ciphertext decryption,
+        and the private-agent lifetime.  A shared-server row's
+        ``credential_binding`` is supplied in *instance*, so this path never
+        performs a second Team-service fetch merely to discover it.
+        """
+        binding = instance.get("credential_binding")
+        binding_present = (
+            isinstance(binding, Mapping)
+            and binding.get("source") == "servonaut_vault"
+        )
+        if self._vault_runtime is None:
+            if binding_present:
+                raise VaultResolutionError("native Vault runtime is unavailable")
+            return None
+        resolver = getattr(self._vault_runtime, "resolve_ssh", None)
+        if not callable(resolver):
+            if binding_present:
+                raise VaultResolutionError("native Vault runtime is unavailable")
+            return None
+        try:
+            result = resolver(instance)
+            lease = await result if inspect.isawaitable(result) else result
+        except Exception as exc:  # A configured native binding fails closed.
+            raise VaultResolutionError("Native Vault SSH credential could not be verified") from exc
+        if lease is None:
+            if binding_present:
+                raise VaultResolutionError("Native Vault SSH credential is unavailable")
+            return None
+        source = getattr(lease, "source", None)
+        if isinstance(lease, dict):
+            source = lease.get("source", source)
+        if source not in {"ca", "vault"}:
+            if binding_present:
+                raise VaultResolutionError("Native Vault SSH credential returned an invalid source")
+            logger.warning("Native Vault SSH resolution returned an invalid source")
+            return None
+
+        def value(name: str, default: Any = None) -> Any:
+            return lease.get(name, default) if isinstance(lease, dict) else getattr(lease, name, default)
+
+        identity_file = value("identity_file")
+        if not isinstance(identity_file, str) or not identity_file:
+            raise VaultResolutionError("Native Vault SSH credential is missing its public identity file")
+        binding = value("binding")
+        if binding is not None and not isinstance(binding, dict):
+            if binding_present:
+                raise VaultResolutionError("Native Vault SSH credential returned an invalid binding")
+            logger.warning("Native Vault SSH resolution returned an invalid binding")
+            return None
+        return ResolvedSshRef(
+            source=source,
+            vault_id=value("vault_id"),
+            vault_item_id=value("vault_item_id", value("item_id")),
+            login_user=value("login_user"),
+            host_keys=list(value("host_keys", []) or []),
+            binding=binding,
+            team_slug=value("team_slug", instance.get("team_slug")),
+            server_id=value("server_id", instance.get("shared_server_id") or instance.get("id")),
+            lease=lease,
+            identity_agent=value("identity_agent"),
+            identity_file=identity_file,
+            certificate_path=value("certificate_path"),
+            known_hosts_path=value("known_hosts_path"),
+            public_key=value("public_key"),
+        )
 
     async def _try_personal(self, instance: dict) -> Optional[ResolvedSshRef]:
         """Attempt resolution via the personal BW ref endpoint.
@@ -193,7 +300,15 @@ class SshRefResolver:
             # 404 → no ref stored; advance to next tier
             return None
 
+        # Old server payloads did not carry a provider.  They remain valid
+        # Bitwarden refs; a present non-Bitwarden provider must never invoke
+        # the ``bw`` binary, because its item id is not a Bitwarden item.
+        provider_name = payload.get("ssh_credential_provider")
+        if provider_name is not None and provider_name != "bitwarden_pm":
+            return None
         cred_ref = payload.get("ssh_credential_ref") or {}
+        if not isinstance(cred_ref, dict) or not cred_ref.get("item_id"):
+            return None
         return ResolvedSshRef(
             source="personal",
             item_id=cred_ref.get("item_id"),
@@ -261,7 +376,12 @@ class SshRefResolver:
             if payload is None:
                 continue
 
+            provider_name = payload.get("ssh_credential_provider")
+            if provider_name is not None and provider_name != "bitwarden_pm":
+                continue
             cred_ref = payload.get("ssh_credential_ref") or {}
+            if not isinstance(cred_ref, dict) or not cred_ref.get("item_id"):
+                continue
             return ResolvedSshRef(
                 source="team",
                 item_id=cred_ref.get("item_id"),

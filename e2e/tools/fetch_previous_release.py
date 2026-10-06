@@ -69,6 +69,7 @@ class PinnedRelease:
 SCHEMA_BOUNDARY_RELEASES: dict[int, PinnedRelease] = {
     2: PinnedRelease("2.6.0", "00ebfc8e2e8a62c19ceb9069f20cbecbd79bda51a659a5479e95253f9e0dc749"),
     5: PinnedRelease("2.25.4", "dbc8f1cb81439f2daf857ded1279b10362e6b4eaa92f79d5e689b9edecef5304"),
+    6: PinnedRelease("2.28.0", "b26f38c77cee8bd9d44519dde4e4060d1ebe3815a60ccb23370bfe1d1ce64f30"),
 }
 
 _FINAL_VERSION = re.compile(r"^\d+(\.\d+)*$")

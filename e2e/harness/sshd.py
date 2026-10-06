@@ -18,12 +18,14 @@ with ephemeral ports:
 The application reaches them with the real OpenSSH client: the ``ssh`` and
 ``scp`` programs on the journey's PATH are replaced by a guarded pass-through
 (:mod:`e2e.harness.openssh_shim`) that runs ``/usr/bin/ssh -F <sandbox
-config>``. The sandbox config supplies defaults: the bastion alias and its
-key, a default identity and known-hosts files inside the test root, and no
-agent. Options on the application's own command line take precedence (the
-application currently turns known-hosts checking off with
-``UserKnownHostsFile=/dev/null``), so the config pins nothing by itself; the
-pass-through checks the settings OpenSSH will actually use before it runs.
+config>``. A second narrow pass-through permits only the private Vault
+agent's ``ssh-agent`` and ``ssh-add`` operations. The sandbox config supplies
+defaults: the bastion alias and its key, a default identity and known-hosts
+files inside the test root, and no agent. Options on the application's own
+command line take precedence (the application currently turns known-hosts
+checking off with ``UserKnownHostsFile=/dev/null``), so the config pins
+nothing by itself; the pass-through checks the settings OpenSSH will actually
+use before it runs.
 
 Every session is recorded in a JSON-lines command log (how remote commands
 are confined, user, command, exit status, file transfers, forwards), which
@@ -67,18 +69,18 @@ class OpenSshMissing(RuntimeError):
 
 
 def find_openssh() -> dict[str, str]:
-    """Real paths of the OpenSSH ``ssh`` and ``scp`` clients.
+    """Real paths of the OpenSSH clients and private-agent tools.
 
     Looked up in the fixed system directories only, never on the invoking
     PATH (the suite replaces PATH anyway).
     """
     found: dict[str, str] = {}
     search = os.pathsep.join(SYSTEM_TOOL_DIRS)
-    for tool in ("ssh", "scp"):
+    for tool in ("ssh", "scp", "ssh-agent", "ssh-add"):
         path = shutil.which(tool, path=search)
         if path is None:
             raise OpenSshMissing(
-                f"the OpenSSH client ({tool}) was not found in {', '.join(SYSTEM_TOOL_DIRS)}; "
+                f"the OpenSSH tool ({tool}) was not found in {', '.join(SYSTEM_TOOL_DIRS)}; "
                 "install openssh-client, or deselect these journeys with -m 'not needs_sshd'"
             )
         found[tool] = os.path.realpath(path)
@@ -576,7 +578,7 @@ class SshWorld:
     # -- the pass-through clients ------------------------------------------
 
     def install_clients(self, shim_dir: Path) -> None:
-        """Replace the fake ``ssh``/``scp`` in *shim_dir* with the real clients.
+        """Install guarded real OpenSSH clients and narrow Vault-agent tools.
 
         Only the pass-through these scripts run may start the real clients;
         nothing is exported to other processes.
@@ -586,6 +588,15 @@ class SshWorld:
             words = [
                 sys.executable, "-s", str(shim), str(shim_dir), tool, self.openssh[tool],
                 self.openssh["ssh"], str(self.config_path), str(self.test_root),
+            ]
+            script = shim_dir / tool
+            script.write_text(f'#!/bin/sh\nexec {shlex.join(words)} "$@"\n', encoding="utf-8")
+            script.chmod(0o755)
+        agent_shim = HARNESS_DIR / "openssh_agent_shim.py"
+        for tool in ("ssh-agent", "ssh-add"):
+            words = [
+                sys.executable, "-s", str(agent_shim), str(shim_dir), tool,
+                self.openssh[tool], str(self.test_root),
             ]
             script = shim_dir / tool
             script.write_text(f'#!/bin/sh\nexec {shlex.join(words)} "$@"\n', encoding="utf-8")

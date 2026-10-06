@@ -5,7 +5,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
@@ -17,6 +17,7 @@ from servonaut.services.ssh_host_keys import (
     HostKeyPolicy,
     HostKeyTarget,
     detect_host_key_problem,
+    pinned_host_key_option_values,
 )
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ class RelayExecutors:
 
     def __init__(self, config_manager, aws_service, custom_server_service,
                  ssh_service, connection_service, scp_service,
-                 accounts=None) -> None:
+                 accounts=None, vault_runtime: Any | None = None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -62,11 +63,19 @@ class RelayExecutors:
         self._ssh_service = ssh_service
         self._connection_service = connection_service
         self._scp_service = scp_service
+        # The runtime owns verified native-vault binding/CA resolution and
+        # private-agent lifetime.  It is optional for older sessions, but a
+        # native target must fail closed when it cannot resolve a lease.
+        self._vault_runtime = vault_runtime
         # Load additional blocklist patterns from config
         mcp_config = config_manager.get().mcp
         self._extra_blocklist: List[re.Pattern] = [
             re.compile(p) for p in mcp_config.command_blocklist
         ] if hasattr(mcp_config, 'command_blocklist') else []
+
+    def set_vault_runtime(self, service: Any | None) -> None:
+        """Install the composed native-vault runtime after relay construction."""
+        self._vault_runtime = service
 
     async def execute(self, request: CommandRequest) -> CommandResponse:
         """Dispatch a CommandRequest to the appropriate executor."""
@@ -303,13 +312,89 @@ class RelayExecutors:
             return None, CommandResponse(
                 request_id=request.id, status="error", error_message=str(exc),
             )
-        if not instance:
+        if not instance and self._vault_runtime is not None:
+            resolver = getattr(self._vault_runtime, "resolve_relay_target", None)
+            if resolver is not None:
+                try:
+                    instance = await resolver(request.target_server_id)
+                except Exception as exc:
+                    return None, CommandResponse(
+                        request_id=request.id, status="error", error_message=str(exc),
+                    )
+        if not isinstance(instance, Mapping):
             return None, CommandResponse(
                 request_id=request.id,
                 status="error",
                 error_message=f"Instance not found: {request.target_server_id}",
             )
-        return instance, None
+        return dict(instance), None
+
+    async def _vault_lease(self, instance: Mapping[str, Any]) -> Any | None:
+        """Resolve a connection-only native credential lease when applicable.
+
+        A runtime exception is deliberately allowed to escape.  In particular,
+        a failed binding signature or an agent setup failure must reach the
+        relay error response instead of falling through to a local key.
+        """
+        binding = instance.get("credential_binding")
+        requires_lease = (
+            isinstance(binding, Mapping)
+            and binding.get("source") == "servonaut_vault"
+        )
+        runtime = self._vault_runtime
+        if runtime is None:
+            if requires_lease:
+                raise RuntimeError("native vault SSH binding has no active vault runtime")
+            return None
+        resolver = getattr(runtime, "resolve_ssh", None)
+        if resolver is None:
+            if requires_lease:
+                raise RuntimeError("native vault SSH binding cannot resolve an SSH lease")
+            return None
+        lease = await resolver(dict(instance))
+        if lease is None and requires_lease:
+            raise RuntimeError("native vault SSH binding did not return an SSH lease")
+        return lease
+
+    @staticmethod
+    def _lease_options(lease: Any | None) -> list[str]:
+        """Return strict, per-command options for an agent-held vault lease."""
+        if lease is None:
+            return []
+        agent = getattr(lease, "identity_agent", None)
+        identity_file = getattr(lease, "identity_file", None)
+        known_hosts = getattr(lease, "known_hosts_path", None)
+        if (
+            not isinstance(agent, str) or not agent
+            or not isinstance(identity_file, str) or not identity_file
+            or not isinstance(known_hosts, str) or not known_hosts
+        ):
+            raise RuntimeError("native vault SSH lease is missing strict connection metadata")
+        options = [f"IdentityAgent={agent}", "IdentitiesOnly=yes", *pinned_host_key_option_values(known_hosts)]
+        certificate = getattr(lease, "certificate_path", None)
+        if certificate is not None:
+            if not isinstance(certificate, str) or not certificate:
+                raise RuntimeError("native vault SSH lease has an invalid certificate path")
+            options.append(f"CertificateFile={certificate}")
+        return options
+
+    @staticmethod
+    def _lease_login(lease: Any | None, fallback: str) -> str:
+        if lease is None:
+            return fallback
+        login = getattr(lease, "login_user", None)
+        if not isinstance(login, str) or not login:
+            raise RuntimeError("native vault SSH lease has no login user")
+        return login
+
+    @staticmethod
+    def _close_lease(lease: Any | None) -> None:
+        if lease is None:
+            return
+        close = getattr(lease, "close", None)
+        if not callable(close):
+            raise RuntimeError("native vault SSH lease cannot be cleaned up")
+        close()
 
     def _host_key_policy(self) -> HostKeyPolicy:
         """The host-key policy the SSH/SCP commands were built with."""
@@ -366,19 +451,27 @@ class RelayExecutors:
         if failure is not None:
             return failure
 
-        conn = self._resolve_connection(instance)
-        ssh_cmd = self._ssh_service.build_ssh_command(
-            host=conn['host'],
-            username=conn['username'],
-            key_path=conn['key_path'],
-            proxy_args=conn['proxy_args'],
-            remote_command=command,
-            port=conn.get('port'),
-            # Nobody can answer a prompt here.
-            extra_options=["BatchMode=yes", *(conn.get('extra_options') or [])],
-        )
-
+        lease = await self._vault_lease(instance)
         try:
+            # Validate all native lease metadata before command construction.
+            # SSH consumes it through explicit arguments; SCP also receives
+            # the same values through its explicit builder arguments.
+            self._lease_options(lease)
+            conn = self._resolve_connection(instance)
+            ssh_cmd = self._ssh_service.build_ssh_command(
+                host=conn['host'],
+                username=self._lease_login(lease, conn['username']),
+                key_path=None if lease is not None else conn['key_path'],
+                proxy_args=conn['proxy_args'],
+                remote_command=command,
+                port=conn.get('port'),
+                identity_agent=getattr(lease, "identity_agent", None),
+                identity_file=getattr(lease, "identity_file", None),
+                certificate_file=getattr(lease, "certificate_path", None),
+                known_hosts_file=getattr(lease, "known_hosts_path", None),
+                # Nobody can answer a prompt here.
+                extra_options=["BatchMode=yes", *(conn.get('extra_options') or [])],
+            )
             ssh_output = await run_ssh_subprocess(ssh_cmd, timeout=request.ttl_seconds)
             stdout, stderr = ssh_output
         except asyncio.TimeoutError:
@@ -393,6 +486,8 @@ class RelayExecutors:
                 status="error",
                 error_message=str(e),
             )
+        finally:
+            self._close_lease(lease)
 
         host_key_problem = detect_host_key_problem(
             ssh_diagnostics(ssh_output), ssh_returncode(ssh_output),
@@ -494,46 +589,43 @@ class RelayExecutors:
         if failure is not None:
             return failure
 
-        conn = self._resolve_connection(instance)
-        host = conn['host']
-        username = conn['username']
-        key_path = conn['key_path']
-        proxy_args = conn['proxy_args']
-        profile = conn['profile']
-        port = conn.get('port')
-        # Nobody can answer a prompt here.
-        extra_options = ["BatchMode=yes", *(conn.get('extra_options') or [])]
+        lease = await self._vault_lease(instance)
+        try:
+            conn = self._resolve_connection(instance)
+            host = conn['host']
+            username = self._lease_login(lease, conn['username'])
+            key_path = None if lease is not None else conn['key_path']
+            proxy_args = conn['proxy_args']
+            profile = conn['profile']
+            port = conn.get('port')
+            # Nobody can answer a prompt here.
+            extra_options = ["BatchMode=yes", *(conn.get('extra_options') or [])]
 
-        proxy_jump = (
-            self._connection_service.get_proxy_jump_string(profile) if profile else None
-        )
+            proxy_jump = self._connection_service.get_proxy_jump_string(profile) if profile else None
 
-        if direction == "upload":
-            scp_cmd = self._scp_service.build_upload_command(
-                local_path=local_path,
-                remote_path=remote_path,
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_jump=proxy_jump,
-                proxy_args=proxy_args or None,
-                port=port,
-                extra_options=extra_options,
-            )
-        else:
-            scp_cmd = self._scp_service.build_download_command(
-                remote_path=remote_path,
-                local_path=local_path,
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_jump=proxy_jump,
-                proxy_args=proxy_args or None,
-                port=port,
-                extra_options=extra_options,
-            )
-
-        returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+            if direction == "upload":
+                scp_cmd = self._scp_service.build_upload_command(
+                    local_path=local_path, remote_path=remote_path, host=host, username=username,
+                    key_path=key_path, proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                    port=port, extra_options=extra_options,
+                    identity_agent=getattr(lease, "identity_agent", None),
+                    identity_file=getattr(lease, "identity_file", None),
+                    certificate_file=getattr(lease, "certificate_path", None),
+                    known_hosts_file=getattr(lease, "known_hosts_path", None),
+                )
+            else:
+                scp_cmd = self._scp_service.build_download_command(
+                    remote_path=remote_path, local_path=local_path, host=host, username=username,
+                    key_path=key_path, proxy_jump=proxy_jump, proxy_args=proxy_args or None,
+                    port=port, extra_options=extra_options,
+                    identity_agent=getattr(lease, "identity_agent", None),
+                    identity_file=getattr(lease, "identity_file", None),
+                    certificate_file=getattr(lease, "certificate_path", None),
+                    known_hosts_file=getattr(lease, "known_hosts_path", None),
+                )
+            returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
+        finally:
+            self._close_lease(lease)
 
         if returncode == 0:
             output = f"Transfer successful: {direction} complete"

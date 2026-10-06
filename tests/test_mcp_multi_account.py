@@ -647,6 +647,28 @@ def test_build_headless_tools_serves_the_registry(monkeypatch, tmp_path):
     assert tools._cloudwatch_service is registry.aws_services().cloudwatch
 
 
+def test_build_headless_tools_reuses_the_relay_vault_runtime(monkeypatch, tmp_path):
+    from servonaut.mcp.server import build_headless_tools
+    from servonaut.services.vault.command_service import VaultCommandService
+    from servonaut.services.vault.identity_store import IdentityStoreError
+
+    registry_config = build_registry(monkeypatch, hetzner={"hetzner": []})[0].config
+    manager = MagicMock()
+    manager.get.return_value = registry_config
+    registry_config.mcp.audit_path = str(tmp_path / "audit.jsonl")
+    runtime = MagicMock()
+    runtime.unlock_existing_identity.side_effect = IdentityStoreError("locked")
+    factory = MagicMock(side_effect=AssertionError("duplicate custody runtime"))
+    monkeypatch.setattr(VaultCommandService, "__new__", factory)
+
+    tools = build_headless_tools(manager, vault_runtime=runtime)
+
+    assert tools._vault_runtime is runtime
+    runtime.unlock_existing_identity.assert_called_once()
+    factory.assert_not_called()
+    assert tools.account_registry.accounts("hetzner")
+
+
 # ---------------------------------------------------------------------------
 # The primary account cannot be used, another one can
 # ---------------------------------------------------------------------------

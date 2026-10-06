@@ -1617,3 +1617,26 @@ def test_hangup_ends_tracked_processes_then_hangs_up_as_before(monkeypatch):
 
     terminate.assert_called_once()
     previous.assert_called_once_with(1, None)
+
+
+def test_trusted_host_keys_reads_servonaut_and_user_known_hosts_including_hashed(tmp_path, monkeypatch):
+    from servonaut.services import ssh_host_keys
+
+    if shutil.which("ssh-keygen") is None:
+        pytest.skip("ssh-keygen is not installed")
+    own = tmp_path / "own_known_hosts"
+    user = tmp_path / "user_known_hosts"
+    key_one = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHm1Vi6P5lT5QHixEuipi6eQH4U65pW+1+DjkQutBJZk"
+    key_two = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICx/t9nRWkRxMml0iunlsAKMRQ5/iQQaey4bd9NIOOKt"
+    own.write_text(f"[127.0.0.1]:2222 {key_one}\n@cert-authority * {key_two}\n", encoding="ascii")
+    user.write_text(f"[127.0.0.1]:2222 {key_two}\nother.example {key_one}\n", encoding="ascii")
+    subprocess.run(["ssh-keygen", "-H", "-f", str(user)], check=True, capture_output=True)
+    for path in (own, user):
+        path.chmod(0o600)
+    monkeypatch.setattr(ssh_host_keys, "servonaut_known_hosts_path", lambda: own)
+    monkeypatch.setattr(ssh_host_keys, "user_known_hosts_path", lambda: user)
+
+    keys = ssh_host_keys.trusted_host_keys({"id": "shared-1", "is_shared": True}, "127.0.0.1", 2222)
+
+    assert keys == [key_one, key_two]
+    assert ssh_host_keys.trusted_host_keys({}, "unknown.example", 22) == []

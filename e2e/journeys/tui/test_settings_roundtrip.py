@@ -110,6 +110,7 @@ async def test_config_from_the_previous_release_is_upgraded(tui, seed):
         ],
     )
     assert written["version"] == CONFIG_VERSION - 1
+    assert "vault" not in written
 
     async with tui() as t:
         await t.wait_until(

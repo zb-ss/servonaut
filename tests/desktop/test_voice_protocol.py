@@ -7,7 +7,11 @@ validation, error taxonomy, stream codecs, and error recovery.
 from __future__ import annotations
 
 import io
+import json
+import subprocess
 import sys
+from pathlib import Path
+
 import pytest
 
 from servonaut.desktop.voice.protocol import (
@@ -68,6 +72,7 @@ class TestPureStdlibBoundary:
     """Verify that protocol module does not import heavy audio or third-party packages."""
 
     def test_no_native_voice_imports(self) -> None:
+        """Check a fresh interpreter, not imports retained by other tests."""
         forbidden = [
             "sounddevice",
             "sherpa_onnx",
@@ -76,8 +81,20 @@ class TestPureStdlibBoundary:
             "numpy",
             "torch",
         ]
-        for mod in forbidden:
-            assert mod not in sys.modules, f"Forbidden module {mod} was imported!"
+        src_root = Path(__file__).resolve().parents[2] / "src"
+        code = (
+            "import json, sys\n"
+            "startup = set(sys.modules)\n"
+            f"sys.path.insert(0, {str(src_root)!r})\n"
+            "import servonaut.desktop.voice.protocol\n"
+            f"forbidden = {forbidden!r}\n"
+            "print(json.dumps(sorted(set(forbidden) & (set(sys.modules) - startup))))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == []
 
 
 class TestFramingCodec:

@@ -8,7 +8,7 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from servonaut.services.interfaces import SCPServiceInterface
-from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args
+from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.config.schema import SSHConfig
 
@@ -51,6 +51,10 @@ class SCPService(SCPServiceInterface):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        identity_agent: Optional[str] = None,
+        identity_file: Optional[str] = None,
+        certificate_file: Optional[str] = None,
+        known_hosts_file: Optional[str] = None,
     ) -> List[str]:
         """Build SCP upload command.
 
@@ -65,11 +69,21 @@ class SCPService(SCPServiceInterface):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments (takes precedence over proxy_jump).
             extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
+            identity_agent: Explicit private-agent socket for a native Vault
+                key. The environment is never modified.
+            identity_file: Public key corresponding to the private-agent
+                identity, used to select it under ``IdentitiesOnly=yes``.
+            certificate_file: Public OpenSSH certificate for the agent key.
+            known_hosts_file: Verified Vault host-key pins. When set, the
+                configurable host-key policy is deliberately omitted.
 
         Returns:
             List of command arguments for subprocess.
         """
-        cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port, extra_options)
+        cmd = self._build_base_args(
+            key_path, proxy_jump, proxy_args, port, extra_options,
+            identity_agent, identity_file, certificate_file, known_hosts_file,
+        )
         # "--" keeps a path that starts with "-" from being read as an scp
         # option (such as "-oProxyCommand=...", which runs a local program).
         cmd.append('--')
@@ -89,6 +103,10 @@ class SCPService(SCPServiceInterface):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        identity_agent: Optional[str] = None,
+        identity_file: Optional[str] = None,
+        certificate_file: Optional[str] = None,
+        known_hosts_file: Optional[str] = None,
     ) -> List[str]:
         """Build SCP download command.
 
@@ -103,11 +121,21 @@ class SCPService(SCPServiceInterface):
             proxy_jump: ProxyJump string (user@host).
             proxy_args: List of SSH proxy arguments (takes precedence over proxy_jump).
             extra_options: Extra ``-o KEY=VALUE`` entries for the target connection.
+            identity_agent: Explicit private-agent socket for a native Vault
+                key. The environment is never modified.
+            identity_file: Public key corresponding to the private-agent
+                identity, used to select it under ``IdentitiesOnly=yes``.
+            certificate_file: Public OpenSSH certificate for the agent key.
+            known_hosts_file: Verified Vault host-key pins. When set, the
+                configurable host-key policy is deliberately omitted.
 
         Returns:
             List of command arguments for subprocess.
         """
-        cmd = self._build_base_args(key_path, proxy_jump, proxy_args, port, extra_options)
+        cmd = self._build_base_args(
+            key_path, proxy_jump, proxy_args, port, extra_options,
+            identity_agent, identity_file, certificate_file, known_hosts_file,
+        )
         cmd.append('--')  # see build_upload_command
         cmd.append(f'{username}@{host}:{remote_path}')
         cmd.append(os.path.expanduser(local_path))
@@ -163,6 +191,10 @@ class SCPService(SCPServiceInterface):
         proxy_args: Optional[List[str]] = None,
         port: Optional[int] = None,
         extra_options: Optional[List[str]] = None,
+        identity_agent: Optional[str] = None,
+        identity_file: Optional[str] = None,
+        certificate_file: Optional[str] = None,
+        known_hosts_file: Optional[str] = None,
     ) -> List[str]:
         """Build base SCP command arguments.
 
@@ -175,9 +207,13 @@ class SCPService(SCPServiceInterface):
         Returns:
             List of base command arguments.
         """
-        # Host-key options come first, as in SSHService.build_ssh_command:
-        # OpenSSH honours the first value of an option.
-        cmd = ['scp', *HostKeyPolicy.from_ssh_config(self._ssh_config).ssh_options()]
+        # OpenSSH honours the first value of an option. A Vault lease must
+        # omit the configurable policy: emitting ``accept-new`` or ordinary
+        # known-hosts paths first would defeat the verified pin file.
+        if known_hosts_file:
+            cmd = ['scp', *pinned_host_key_options(known_hosts_file)]
+        else:
+            cmd = ['scp', *HostKeyPolicy.from_ssh_config(self._ssh_config).ssh_options()]
 
         # SSH keepalive options — same values as build_ssh_command, guarding
         # against NAT/firewall drops during long transfers.
@@ -209,5 +245,11 @@ class SCPService(SCPServiceInterface):
         if key_path:
             expanded = os.path.expanduser(key_path)
             cmd.extend(['-o', 'IdentitiesOnly=yes', *identity_file_args(expanded)])
+        elif identity_agent:
+            cmd.extend(['-o', f'IdentityAgent={identity_agent}', '-o', 'IdentitiesOnly=yes'])
+            if identity_file:
+                cmd.extend(['-o', f'IdentityFile={os.path.expanduser(identity_file)}'])
+            if certificate_file:
+                cmd.extend(['-o', f'CertificateFile={certificate_file}'])
 
         return cmd

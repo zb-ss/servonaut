@@ -101,6 +101,178 @@ def run(coro):
     return asyncio.run(coro)
 
 
+class _VaultLease:
+    identity_agent = "/tmp/servonaut-agent.sock"
+    identity_file = "/tmp/servonaut-agent-key.pub"
+    certificate_path = "/tmp/servonaut-cert.pub"
+    known_hosts_path = "/tmp/servonaut-known-hosts"
+    login_user = "vault-login"
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _VaultRuntime:
+    def __init__(self, lease=None, target=None, error=None) -> None:
+        self.lease = lease
+        self.target = target
+        self.error = error
+        self.resolved = []
+
+    async def resolve_ssh(self, instance):
+        self.resolved.append(instance)
+        if self.error is not None:
+            raise self.error
+        return self.lease
+
+    async def resolve_relay_target(self, identifier):
+        if self.target is None:
+            return None
+        assert identifier == self.target["id"]
+        return self.target
+
+
+class TestNativeVaultRelay:
+    def test_native_lease_uses_strict_agent_options_and_closes_after_command(self):
+        executor = make_executors()
+        lease = _VaultLease()
+        runtime = _VaultRuntime(lease=lease)
+        executor.set_vault_runtime(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(payload={"command": "id"})))
+
+        assert response.status == "success"
+        call = executor._ssh_service.build_ssh_command.call_args.kwargs
+        assert call["username"] == "vault-login"
+        assert call["key_path"] is None
+        assert call["identity_agent"] == "/tmp/servonaut-agent.sock"
+        assert call["identity_file"] == "/tmp/servonaut-agent-key.pub"
+        assert call["certificate_file"] == "/tmp/servonaut-cert.pub"
+        assert call["known_hosts_file"] == "/tmp/servonaut-known-hosts"
+        assert call["extra_options"] == ["BatchMode=yes"]
+        assert lease.closed == 1
+
+    def test_native_runtime_failure_never_falls_back_to_local_key(self):
+        executor = make_executors()
+        executor.set_vault_runtime(_VaultRuntime(error=ValueError("binding signature invalid")))
+
+        response = run(executor.execute(make_request(payload={"command": "id"})))
+
+        assert response.status == "error"
+        assert "binding signature invalid" in response.error_message
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_native_binding_without_runtime_never_uses_local_key(self):
+        executor = make_executors(instances=[{
+            "id": "i-native", "name": "native", "hostname": "native.example.test",
+            "credential_binding": {"source": "servonaut_vault"},
+        }])
+
+        response = run(executor.execute(make_request(
+            target="i-native", payload={"command": "id"},
+        )))
+
+        assert response.status == "error"
+        assert "no active vault runtime" in response.error_message
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_native_binding_without_lease_never_uses_local_key(self):
+        executor = make_executors(instances=[{
+            "id": "i-native", "name": "native", "hostname": "native.example.test",
+            "credential_binding": {"source": "servonaut_vault"},
+        }])
+        executor.set_vault_runtime(_VaultRuntime())
+
+        response = run(executor.execute(make_request(
+            target="i-native", payload={"command": "id"},
+        )))
+
+        assert response.status == "error"
+        assert "did not return an SSH lease" in response.error_message
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_native_lease_without_public_identity_file_never_uses_local_key(self):
+        executor = make_executors()
+        lease = _VaultLease()
+        lease.identity_file = ""
+        executor.set_vault_runtime(_VaultRuntime(lease=lease))
+
+        response = run(executor.execute(make_request(payload={"command": "id"})))
+
+        assert response.status == "error"
+        assert "strict connection metadata" in response.error_message
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_command_error_still_closes_native_lease(self):
+        executor = make_executors()
+        lease = _VaultLease()
+        executor.set_vault_runtime(_VaultRuntime(lease=lease))
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(side_effect=RuntimeError("connection lost")),
+        ):
+            response = run(executor.execute(make_request(payload={"command": "id"})))
+
+        assert response.status == "error"
+        assert "connection lost" in response.error_message
+        assert lease.closed == 1
+
+    def test_runtime_discovers_shared_target_for_a_signed_lease(self):
+        shared = {
+            "id": "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f",
+            "name": "shared-web", "is_shared": True, "team_slug": "example-team",
+            "hostname": "shared.example.test", "port": 22,
+        }
+        executor = make_executors(instances=[])
+        lease = _VaultLease()
+        runtime = _VaultRuntime(lease=lease, target=shared)
+        executor.set_vault_runtime(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                target=shared["id"], payload={"command": "hostname"},
+            )))
+
+        assert response.status == "success"
+        assert runtime.resolved == [shared]
+        assert lease.closed == 1
+
+    def test_native_scp_uses_agent_metadata_and_closes_lease(self, tmp_path, monkeypatch):
+        import servonaut.services.relay_executors as executors_module
+
+        transfers = tmp_path / "transfers"
+        transfers.mkdir()
+        local = transfers / "file.txt"
+        local.write_text("payload", encoding="utf-8")
+        monkeypatch.setattr(executors_module, "_TRANSFERS_DIR", transfers)
+        executor = make_executors()
+        lease = _VaultLease()
+        executor.set_vault_runtime(_VaultRuntime(lease=lease))
+        response = run(executor.execute(make_request(
+            cmd_type=CommandType.TRANSFER_FILE,
+            payload={"local_path": str(local), "remote_path": "/tmp/file.txt", "direction": "upload"},
+        )))
+
+        assert response.status == "success"
+        call = executor._scp_service.build_upload_command.call_args.kwargs
+        assert call["key_path"] is None
+        assert call["username"] == "vault-login"
+        assert call["identity_agent"] == "/tmp/servonaut-agent.sock"
+        assert call["identity_file"] == "/tmp/servonaut-agent-key.pub"
+        assert call["certificate_file"] == "/tmp/servonaut-cert.pub"
+        assert call["known_hosts_file"] == "/tmp/servonaut-known-hosts"
+        assert call["extra_options"] == ["BatchMode=yes"]
+        assert lease.closed == 1
+
+
 # ---------------------------------------------------------------------------
 # Blocklist tests
 # ---------------------------------------------------------------------------

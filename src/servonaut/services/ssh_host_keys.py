@@ -46,6 +46,17 @@ logger = logging.getLogger(__name__)
 HOST_KEY_CHECKING_OFF = "off"
 KNOWN_HOSTS_FILENAME = "known_hosts"
 
+
+def pinned_host_key_option_values(known_hosts_file: str | Path) -> List[str]:
+    """Strict host-key values for an already verified, connection-specific pin file."""
+    return [f"UserKnownHostsFile={known_hosts_file}", "StrictHostKeyChecking=yes"]
+
+
+def pinned_host_key_options(known_hosts_file: str | Path) -> List[str]:
+    """Render strict verified-pin values as OpenSSH ``-o`` argument pairs."""
+    values = pinned_host_key_option_values(known_hosts_file)
+    return [item for value in values for item in ("-o", value)]
+
 # ``off`` reproduces what each command sent before verification existed:
 # the ssh/scp commands discarded keys, the bastion hop and the connectivity
 # probe only disabled the check.
@@ -364,6 +375,43 @@ def known_hosts_name(host: str, port: Optional[int] = None) -> str:
     if port is None or port == 22:
         return host
     return f"[{host}]:{port}"
+
+
+def trusted_host_keys(instance: Any, host: str, port: Optional[int] = None) -> List[str]:
+    """Return the host keys already trusted for a server, as ``"<type> <base64>"``.
+
+    Reads Servonaut's own known_hosts file and the user's, under the names
+    OpenSSH would look up for this connection (the stable alias for a cloud
+    instance, otherwise ``host`` or ``[host]:port``). Hashed entries are found
+    through ``ssh-keygen -F``; CA and revoked markers are ignored.
+    """
+    import shutil
+    import subprocess
+
+    keygen = shutil.which("ssh-keygen")
+    if keygen is None:
+        return []
+    names = [name for name in (host_key_alias(instance), known_hosts_name(host, port)) if name]
+    keys: List[str] = []
+    for path in (servonaut_known_hosts_path(), user_known_hosts_path()):
+        if not path.is_file() or not _is_trusted_file(path):
+            continue
+        for name in names:
+            try:
+                found = subprocess.run(
+                    [keygen, "-F", name, "-f", str(path)],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            for line in found.stdout.splitlines():
+                fields = line.split()
+                if not fields or line.startswith(("#", "@")) or len(fields) < 3:
+                    continue
+                key = f"{fields[1]} {fields[2]}"
+                if key not in keys:
+                    keys.append(key)
+    return keys
 
 
 def _instance_provider(instance: dict) -> Optional[str]:

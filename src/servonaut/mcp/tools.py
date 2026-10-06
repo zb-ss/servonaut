@@ -13,7 +13,7 @@ import secrets
 import shlex
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Mapping, Optional
 
 from servonaut.config.accounts import PROVIDER_TITLES, primary_label
 from servonaut.utils.endpoints import EndpointOverrideError
@@ -210,7 +210,9 @@ class ServonautTools:
                  secret_provider=None,
                  ip_enrichment_service=None,
                  bw_ssh_config_service=None,
-                 account_registry=None) -> None:
+                 team_service=None,
+                 account_registry=None,
+                 vault_runtime=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -249,6 +251,8 @@ class ServonautTools:
         # Bitwarden SSH-ref client (personal tier). None → SSH tools resolve
         # keys from local sources only, byte-for-byte the historical behavior.
         self._bw_ssh_config_service = bw_ssh_config_service
+        self._team_service = team_service
+        self._vault_runtime = vault_runtime
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -360,6 +364,16 @@ class ServonautTools:
         memoized) under the previous binding cannot bleed into the new one.
         """
         self._bw_ssh_config_service = service
+        self._bw_ref_memo.clear()
+
+    def set_team_service(self, service) -> None:
+        """Bind the Team SSH-ref client after authenticated startup."""
+        self._team_service = service
+        self._bw_ref_memo.clear()
+
+    def set_vault_runtime(self, service) -> None:
+        """Install the optional native Vault SSH boundary."""
+        self._vault_runtime = service
         self._bw_ref_memo.clear()
 
     # ------------------------------------------------------------------
@@ -541,6 +555,31 @@ class ServonautTools:
             return None, self._ambiguous(tool_name, args, exc)
         except UnknownAccountError as exc:
             return None, self._account_refused(tool_name, args, exc)
+        if not instance and self._vault_runtime is not None:
+            resolve_relay_target = getattr(
+                self._vault_runtime, 'resolve_relay_target', None,
+            )
+            if callable(resolve_relay_target):
+                try:
+                    shared_target = await resolve_relay_target(instance_id)
+                except Exception as exc:  # noqa: BLE001 - authenticated lookup must fail closed
+                    logger.warning(
+                        "Native Vault shared-target lookup failed for %s (%s)",
+                        instance_id, type(exc).__name__,
+                    )
+                    self._audit.log(
+                        tool_name, args, audit_result, False,
+                        'shared_target_resolution_failed',
+                    )
+                    return None, "Unable to resolve the shared server through Native Vault"
+                if shared_target is not None:
+                    if not isinstance(shared_target, dict):
+                        self._audit.log(
+                            tool_name, args, audit_result, False,
+                            'shared_target_resolution_failed',
+                        )
+                        return None, "Native Vault returned an invalid shared server target"
+                    instance = shared_target
         if not instance:
             self._audit.log(
                 tool_name, args, audit_result, False, 'instance_not_found',
@@ -771,6 +810,18 @@ class ServonautTools:
             )
             return msg
 
+        if key_source and key_source.startswith('vault_'):
+            msg = (
+                "Error: Native Vault SSH connection failed (host not reachable "
+                "/ sshd refused). Verify the shared-server endpoint and host "
+                "pins before retrying."
+            )
+            self._audit.log(
+                'run_command', args, '', False,
+                'native_vault_ssh_conn_failed', **key_extras,
+            )
+            return msg
+
         # transport == auto → fall back to SSM when possible.
         if not is_aws:
             self._audit.log(
@@ -859,6 +910,10 @@ class ServonautTools:
                 port=conn.get('port'),
                 # Nobody can answer a prompt here.
                 extra_options=["BatchMode=yes", *(conn.get('extra_options') or [])],
+                identity_agent=conn.get('identity_agent'),
+                identity_file=conn.get('identity_file'),
+                certificate_file=conn.get('certificate_path'),
+                known_hosts_file=conn.get('known_hosts_path'),
             )
 
         output = await run_ssh_subprocess(
@@ -1167,12 +1222,20 @@ class ServonautTools:
                         host=host, username=username, key_path=candidate_key_path,
                         proxy_jump=proxy_jump, proxy_args=proxy_args or None,
                         port=port, extra_options=extra_options,
+                        identity_agent=conn.get('identity_agent'),
+                        identity_file=conn.get('identity_file'),
+                        certificate_file=conn.get('certificate_path'),
+                        known_hosts_file=conn.get('known_hosts_path'),
                     )
                 return self._scp_service.build_download_command(
                     remote_path=remote_path, local_path=local_path,
                     host=host, username=username, key_path=candidate_key_path,
                     proxy_jump=proxy_jump, proxy_args=proxy_args or None,
                     port=port, extra_options=extra_options,
+                    identity_agent=conn.get('identity_agent'),
+                    identity_file=conn.get('identity_file'),
+                    certificate_file=conn.get('certificate_path'),
+                    known_hosts_file=conn.get('known_hosts_path'),
                 )
 
             scp_cmd = _build_scp(key_path)
@@ -4150,19 +4213,21 @@ class ServonautTools:
         )
 
     async def _resolve_connection_with_vault(self, instance: Dict):
-        """Resolve connection params, preferring a stored Bitwarden ref.
+        """Resolve connection params through the canonical SSH-ref chain.
 
         Wraps :meth:`_resolve_connection` (unchanged) with the same
-        personal-tier Bitwarden resolution the TUI connect flow uses: if the
-        user stored a vault ref for this instance, resolve the key body via
-        the ``bw`` CLI (ambient ``BW_SESSION`` is the headless session
-        source) and point ``key_path`` at a 0600 temp file.
+        CA/native Vault resolution is attempted first and fails closed for an
+        authenticated binding.  The remaining personal → shared-team → local
+        resolution is delegated to :class:`SshRefResolver`, so MCP uses the
+        same ordering as the CLI and TUI.  A Bitwarden item body is resolved
+        through the ``bw`` CLI (ambient ``BW_SESSION`` is the headless session
+        source) and pointed at by a 0600 temporary file.
 
         Returns ``(conn, cleanup)``:
 
-        - ``conn`` — the connection dict. When the vault key was used it is a
-          copy with ``key_path`` set to the temp file and
-          ``key_source='bw_personal'``; otherwise the untouched local result.
+        - ``conn`` — the connection dict. When a Bitwarden ref wins it is a
+          copy with ``key_path`` set to the temp file and a source-specific
+          ``key_source``; otherwise the untouched local result.
         - ``cleanup`` — ``None``, or a zero-arg ASYNC callable that
           best-effort removes the temp key file (the zero-overwrite +
           ``fsync`` runs in a thread so it never stalls the event loop).
@@ -4171,41 +4236,119 @@ class ServonautTools:
           lifetime is strictly per-call.
 
         The ssh-ref lookup (positive and negative results alike) is memoized
-        per ``(provider, instance_id)`` for :data:`_BW_REF_MEMO_TTL_SECONDS`
-        so fleet-wide tools don't pay one backend GET per instance per call.
+        per target for :data:`_BW_REF_MEMO_TTL_SECONDS` so fleet-wide tools
+        don't pay one backend GET per instance per call.
         Key material is never memoized — the ``bw`` CLI resolve and the temp
         file lifecycle stay strictly per-call.
 
-        Failure policy: ANY error in the Bitwarden tier (API errors, locked
-        vault, missing CLI, unexpected) is logged WITHOUT key material or
-        session tokens and falls back to the unmodified local resolution —
-        the vault tier must never break a working local-key setup.
-
-        Team-tier refs are not resolved on this surface yet (personal refs
-        only).
+        Failure policy: authenticated Native Vault failures never fall back.
+        BYO Bitwarden lookup and key-resolution failures are logged without
+        key material or session tokens and preserve the local connection.
         """
         conn = self._resolve_connection(instance)
 
-        if self._bw_ssh_config_service is None:
-            return conn, None
+        binding = instance.get('credential_binding')
+        requires_native = (
+            isinstance(binding, Mapping)
+            and binding.get('source') == 'servonaut_vault'
+        )
+        if self._vault_runtime is not None:
+            try:
+                lease = await self._vault_runtime.resolve_ssh(instance)
+            except Exception as exc:
+                # Native bindings are authenticated credentials; never bypass
+                # an integrity/authentication failure with a local key.
+                raise RuntimeError("Native Vault SSH credential could not be verified") from exc
+            if lease is not None:
+                identity_agent = getattr(lease, 'identity_agent', None)
+                identity_file = getattr(lease, 'identity_file', None)
+                known_hosts_path = getattr(lease, 'known_hosts_path', None)
+                if not isinstance(identity_agent, str) or not identity_agent:
+                    raise RuntimeError(
+                        "Native Vault SSH credential is missing its private identity agent"
+                    )
+                if not isinstance(identity_file, str) or not identity_file:
+                    raise RuntimeError(
+                        "Native Vault SSH credential is missing its public identity file"
+                    )
+                if not isinstance(known_hosts_path, str) or not known_hosts_path:
+                    raise RuntimeError(
+                        "Native Vault SSH credential is missing its strict host-key file"
+                    )
+                conn = dict(conn)
+                profile = self._connection_service.resolve_profile(instance)
+                proxy_args = conn['proxy_args']
+                if profile is not None:
+                    proxy_args = self._connection_service.get_proxy_args(
+                        profile, identity_agent=getattr(lease, 'identity_agent', None)
+                    )
+                conn.update(
+                    {
+                        'username': getattr(lease, 'login_user', None) or conn['username'],
+                        # A Native Vault lease owns the sole private-key
+                        # source.  Leaving the locally resolved key here
+                        # would let SSH offer it before the private agent.
+                        'key_path': None,
+                        'identity_agent': identity_agent,
+                        'identity_file': identity_file,
+                        'certificate_path': getattr(lease, 'certificate_path', None),
+                        'known_hosts_path': known_hosts_path,
+                        'proxy_args': proxy_args,
+                        'key_source': f"vault_{getattr(lease, 'source', 'vault')}",
+                    }
+                )
+
+                async def _close_lease() -> None:
+                    close = getattr(lease, 'close', None)
+                    if callable(close):
+                        close()
+
+                return conn, _close_lease
+            if requires_native:
+                raise RuntimeError("Native Vault SSH credential is unavailable")
+        elif requires_native:
+            raise RuntimeError("Native Vault SSH credential has no active runtime")
+
         instance_id = instance.get('id', '')
         if not instance_id:
             return conn, None
         provider = str(instance.get('provider', 'aws') or 'aws').lower()
-
-        memo_key = (provider, instance_id)
+        team_slug = instance.get('team_slug') if instance.get('is_shared') is True else None
+        memo_key = ('ssh-ref', provider, str(instance_id), team_slug)
         now = time.monotonic()
         memo_hit = self._bw_ref_memo.get(memo_key)
         if memo_hit is not None and memo_hit[0] > now:
             ref = memo_hit[1]
         else:
             try:
-                ref = await self._bw_ssh_config_service.get_personal_instance_ref(
-                    provider, instance_id,
+                from servonaut.services.ssh_ref_resolver import SshRefResolver
+
+                class _NoPersonalRefs:
+                    async def get_personal_instance_ref(self, _provider, _instance_id):
+                        return None
+
+                class _NoTeamRefs:
+                    async def get_team_server_ssh_ref(self, _team_slug, _server_id):
+                        return None
+
+                team_service = self._team_service or getattr(
+                    self._vault_runtime, 'teams', None,
                 )
+                teams_supplier = None
+                if isinstance(team_slug, str) and team_slug:
+                    # The shared row is already the selected target.  The
+                    # Team endpoint still enforces membership for its ref.
+                    teams_supplier = lambda: [{'slug': team_slug}]
+                resolver = SshRefResolver(
+                    self._bw_ssh_config_service or _NoPersonalRefs(),
+                    team_service or _NoTeamRefs(),
+                    self._ssh_service,
+                    teams_supplier=teams_supplier,
+                )
+                ref = await resolver.resolve(instance)
             except Exception as exc:  # noqa: BLE001 — vault tier is best-effort
                 logger.debug(
-                    "BW ref lookup skipped for %s/%s (%s); using local key",
+                    "SSH-ref lookup skipped for %s/%s (%s); using local key",
                     provider, instance_id, type(exc).__name__,
                 )
                 # Memoize the failure as a negative result so a degraded API
@@ -4216,10 +4359,9 @@ class ServonautTools:
                 return conn, None
             self._bw_ref_memo[memo_key] = (now + _BW_REF_MEMO_TTL_SECONDS, ref)
 
-        if not ref:
+        if ref is None or ref.source not in {'personal', 'team'}:
             return conn, None
-        cred_ref = ref.get('ssh_credential_ref') or {}
-        item_id = cred_ref.get('item_id')
+        item_id = ref.item_id
         if not item_id:
             # Partial roll-up row (ref exists but item_id unknown on this
             # device) — nothing resolvable, keep the local key.
@@ -4249,7 +4391,7 @@ class ServonautTools:
 
         conn = dict(conn)
         conn['key_path'] = key_path
-        conn['key_source'] = 'bw_personal'
+        conn['key_source'] = f'bw_{ref.source}'
 
         async def _cleanup() -> None:
             # zero-overwrite + fsync + unlink can stall on slow/contended

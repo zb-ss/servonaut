@@ -1,6 +1,7 @@
 """Main Textual application for Servonaut v2.0."""
 
 from __future__ import annotations
+import asyncio
 import importlib
 import logging
 from pathlib import Path
@@ -124,6 +125,8 @@ class ServonautApp(App):
     entitlement_guard = None
     config_sync_service = None
     team_service = None
+    vault_command_service = None
+    vault_available = False
     remote_audit_service = None
     findings_service = None  # proactive-monitoring thin client (paid, gated)
     gcp_service = None
@@ -973,6 +976,8 @@ class ServonautApp(App):
 
     async def on_unmount(self) -> None:
         """Cancel the relay listener cleanly as the app exits."""
+        if self.vault_command_service is not None:
+            self.vault_command_service.close()
         if self.relay_manager is not None:
             try:
                 await self.relay_manager.stop(grace_seconds=1.0)
@@ -1007,7 +1012,10 @@ class ServonautApp(App):
             )
             slug = await auth.active_team_slug()
             await refresh_all_secrets_configs(auth, api, slug=slug)
-            provider = resolve_secret_provider(auth, guard)
+            service = self.vault_command_service
+            provider = resolve_secret_provider(
+                auth, guard, native_provider=(service.native_provider if service else None),
+            )
             self.ssh_service.set_secret_provider(provider)
             if getattr(self, "servonaut_tools", None) is not None:
                 self.servonaut_tools.set_secret_provider(provider)
@@ -1017,6 +1025,55 @@ class ServonautApp(App):
             )
         except Exception as e:  # noqa: BLE001 — never break boot
             logger.debug("Boot secrets-config refresh failed: %s", e)
+
+    async def _run_vault_background(self) -> None:
+        """Discover native Vault support and process verified grant hints."""
+        from httpx import TransportError
+        from servonaut.services.api_client import APIError
+        from servonaut.services.vault.identity_store import IdentityStoreError
+        from servonaut.services.vault.crypto import VaultCryptoError
+        from servonaut.services.vault.background import poll_vault
+
+        service = self.vault_command_service
+        if service is None:
+            return
+        try:
+            self.vault_available = await service.discover()
+            for sidebar in self.query("Sidebar"):
+                for selector in ("#nav_vault", "#nav_ca"):
+                    for button in sidebar.query(selector):
+                        button.display = self.vault_available
+            if not self.vault_available:
+                return
+            # Discovery keeps Vault navigation available to a new device, but
+            # there is nothing to poll until custody has an unlocked identity.
+            # Avoid leaving an idle infinite worker behind during ordinary
+            # signed-in startup.
+            if not service.unlock_existing_identity():
+                return
+            await poll_vault(service, discovered=True)
+        except TransportError as exc:
+            # An optional Vault endpoint can be temporarily unavailable while
+            # the rest of an authenticated session still works. There is no
+            # trusted remote state to act on, so leave Vault unavailable and
+            # wait for a later explicit access or application restart.
+            self.vault_available = False
+            logger.debug("Vault background endpoint is unavailable: %s", type(exc).__name__)
+        except (APIError, IdentityStoreError, VaultCryptoError) as exc:
+            # A locked store or unverified server state must never grant keys.
+            logger.warning("Vault background processing stopped: %s", type(exc).__name__)
+            self.notify(
+                "Vault background access needs attention. Open Vault to review it.",
+                severity="warning", markup=False,
+            )
+
+    async def _on_vault_device_pending(self, device) -> None:
+        """Offer approval review over the currently active TUI screen."""
+        from servonaut.screens.vault import show_pending_device
+
+        service = self.vault_command_service
+        if service is not None:
+            await show_pending_device(self, service, device)
 
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
@@ -1036,6 +1093,29 @@ class ServonautApp(App):
             self.entitlement_guard = EntitlementGuard(self.auth_service)
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
             self.team_service = TeamService(self.api_client)
+            from servonaut.services.vault.command_service import VaultCommandService
+            if self.vault_command_service is not None:
+                self.vault_command_service.close()
+            self.vault_command_service = VaultCommandService(
+                self.api_client, self.auth_service, self.config_manager.get(),
+                team_service=self.team_service, ssh_service=self.ssh_service,
+                connection_service=self.connection_service,
+            )
+            self.vault_command_service.set_device_pending_callback(
+                self._on_vault_device_pending,
+            )
+            if getattr(self, "servonaut_tools", None) is not None:
+                self.servonaut_tools.set_vault_runtime(self.vault_command_service)
+            self.run_worker(
+                self._run_vault_background(),
+                group="vault_background",
+                exclusive=True,
+                # Vault availability is optional at TUI boot.  Expected
+                # transport failures are handled in the worker; this also
+                # keeps an unexpected background failure from taking down
+                # unrelated authenticated services.
+                exit_on_error=False,
+            )
             self.remote_audit_service = RemoteAuditService(self.api_client)
             from servonaut.services.findings_service import FindingsService
             self.findings_service = FindingsService(self.api_client)
@@ -1059,6 +1139,14 @@ class ServonautApp(App):
                     )
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug("BwSshConfigService init skipped: %s", e)
+            from servonaut.services.ssh_ref_resolver import SshRefResolver
+            self.vault_command_service.ssh_ref_resolver = SshRefResolver(
+                getattr(self, "bw_ssh_config_service", None), self.team_service,
+                self.ssh_service, teams_supplier=lambda: getattr(self, "teams", []),
+                vault_runtime=self.vault_command_service,
+            )
+            from servonaut.services.vault.background import unlock_vault_for_startup
+            unlock_vault_for_startup(self.vault_command_service)
             # Step 6 — wire the active :class:`SecretProvider` into the
             # SSH service. Resolver consults auth + entitlement + cached
             # team SecretsConfig and returns None for Free / unauthed
@@ -1072,6 +1160,7 @@ class ServonautApp(App):
                 )
                 provider = resolve_secret_provider(
                     self.auth_service, self.entitlement_guard,
+                    native_provider=self.vault_command_service.native_provider,
                 )
                 self.ssh_service.set_secret_provider(provider)
                 # Same provider feeds the DB introspection tools (db_processlist
@@ -2344,6 +2433,8 @@ class ServonautApp(App):
         ("Sync Config", "nav_sync_config", "Push or pull your config across devices"),
         ("Memory Sync", "nav_memory_sync", "Encrypted server-memory backup across devices"),
         ("Secrets", "nav_secrets", "Secrets provider and DB-credential vault"),
+        ("Vault", "nav_vault", "Encrypted vault identities, SSH keys and secrets"),
+        ("SSH Certificates", "nav_ca", "Team SSH certificate authority and audit"),
         ("BW SSH Vault", "nav_bw_vault", "Bitwarden SSH-key items and the servers using them"),
         ("Findings", "nav_findings", "Proactive monitoring findings across the fleet"),
         ("Drift Events", "nav_drift", "Configuration drift and anomaly events"),
@@ -2380,6 +2471,8 @@ class ServonautApp(App):
             if target_id.startswith("nav_ovh") and not self.provider_available("ovh"):
                 continue
             if target_id.startswith("nav_hetzner") and not self.provider_available("hetzner"):
+                continue
+            if target_id in {"nav_vault", "nav_ca"} and not getattr(self, "vault_available", False):
                 continue
             yield SystemCommand(
                 f"Go to {title}",
@@ -2532,6 +2625,12 @@ class ServonautApp(App):
         elif target_id == "nav_secrets":
             from servonaut.screens.secrets import SecretsScreen
             self.switch_screen(SecretsScreen())
+        elif target_id == "nav_vault":
+            from servonaut.screens.vault import VaultScreen
+            self.switch_screen(VaultScreen())
+        elif target_id == "nav_ca":
+            from servonaut.screens.ca import CaScreen
+            self.switch_screen(CaScreen())
         elif target_id == "nav_bw_vault":
             from servonaut.screens.bw_vault_manager import BwVaultManagerScreen
             self.switch_screen(BwVaultManagerScreen())

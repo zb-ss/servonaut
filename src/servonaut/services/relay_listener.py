@@ -315,6 +315,12 @@ class RelayListener:
     # event ids, so event.id-based dedup would NOT work — domain-level
     # dedup is the only reliable path.
     _TOPIC_SUFFIXES = ("commands", "ai-tool-calls")
+    _VAULT_EVENT_TYPES = frozenset({
+        "vault.recipient_pending", "vault.grant_received", "vault.rotation_required",
+        "vault.rotated", "vault.item_changed", "vault.exposure_opened",
+        "vault.device_pending", "vault.device_approval_progress",
+        "ssh_ca.enrollment_requested", "ssh_ca.krl_updated",
+    })
 
     # Bounded LRU dedup. 256 entries × ~50 bytes ≈ 13 KB worst-case.
     # TTL of 5 minutes is wildly more than enough for the microsecond
@@ -344,6 +350,9 @@ class RelayListener:
                  accounts: Union[
                      None, Dict[str, List[str]],
                      Callable[[], Optional[Dict[str, List[str]]]],
+                 ] = None,
+                 vault_event_handler: Optional[
+                     Callable[[dict], Awaitable[None]]
                  ] = None) -> None:
         if not HAS_HTTPX_SSE:
             raise ImportError(
@@ -364,6 +373,8 @@ class RelayListener:
             captured = auth_token
             self._token_provider = lambda: captured
         self._user_id = user_id
+        self._vault_event_handler = vault_event_handler
+        self._vault_topic_advertised = False
         self._heartbeat_interval = heartbeat_interval
         self._last_event_id: str | None = None
         self._running = False
@@ -501,6 +512,8 @@ class RelayListener:
             "client_id": self._client_id,
         }
         accounts = self._account_labels()
+        if self._vault_event_handler is not None:
+            handshake["capabilities"]["supports_vault_events"] = True
         if accounts is not None:
             # Which accounts servers can be addressed by ("<account>/<name>").
             handshake["accounts"] = accounts
@@ -693,6 +706,11 @@ class RelayListener:
                 f"mercure-token endpoint returned no token (payload keys: {list(payload.keys())})"
             )
         self._mercure_jwt = token
+        topics = payload.get("topics")
+        self._vault_topic_advertised = (
+            isinstance(topics, list)
+            and f"/cli/{self._user_id}/vault-events" in topics
+        )
         self._mercure_jwt_fetched_at = time.monotonic()
         return token
 
@@ -705,8 +723,11 @@ class RelayListener:
 
     def _topic_urls(self) -> list[str]:
         """Return every Mercure topic URL this listener subscribes to."""
+        suffixes = self._TOPIC_SUFFIXES
+        if self._vault_event_handler is not None and self._vault_topic_advertised:
+            suffixes += ("vault-events",)
         return [
-            f"/cli/{self._user_id}/{suffix}" for suffix in self._TOPIC_SUFFIXES
+            f"/cli/{self._user_id}/{suffix}" for suffix in suffixes
         ]
 
     async def _listen_forever(self) -> None:
@@ -724,12 +745,12 @@ class RelayListener:
         backoff = 1
         max_backoff = 30
         hub_401_streak = 0  # 401s since the hub last accepted a subscription
-        topics = self._topic_urls()
 
         while self._running:
             retry_now = False
             try:
                 mercure_jwt = await self._ensure_mercure_jwt()
+                topics = self._topic_urls()
 
                 # Mercure accepts the subscriber JWT via the `authorization`
                 # query parameter (not HTTP Bearer). Caddy's Mercure module
@@ -853,6 +874,9 @@ class RelayListener:
         rid = raw.get("id")
         if isinstance(rid, str) and rid:
             return f"id:{rid}"
+        event_id = raw.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            return f"event:{event_id}"
         return None
 
     def _dedup_should_process(self, key: Optional[str]) -> bool:
@@ -888,6 +912,8 @@ class RelayListener:
         """Parse an SSE event payload and dispatch to executor."""
         try:
             raw = json.loads(data)
+            if not isinstance(raw, dict):
+                return
 
             # Dual-publish dedup. The server publishes the same payload to
             # /commands AND /ai-tool-calls during the transition window;
@@ -898,6 +924,13 @@ class RelayListener:
                     "Skipping duplicate event (dedup_key=%s) — dual-publish "
                     "transition window", dedup_key,
                 )
+                return
+
+            # Vault envelopes are scoped by the authenticated private topic;
+            # they have no top-level user_id. Their data is only a hint for
+            # signed REST reads, never a command or a consent decision.
+            if raw.get("type") in self._VAULT_EVENT_TYPES:
+                await self._handle_vault_hint(raw)
                 return
 
             # Validate user_id matches the authenticated identity (mandatory).
@@ -1010,6 +1043,19 @@ class RelayListener:
             await self._post_result(response)
         except Exception as e:
             logger.error("Failed to handle event: %s — data length: %d", e, len(data))
+
+    async def _handle_vault_hint(self, raw: dict) -> None:
+        handler = self._vault_event_handler
+        if handler is None or not isinstance(raw.get("data"), dict):
+            return
+        if "user_id" in raw and str(raw["user_id"]) != str(self._user_id):
+            return
+        try:
+            await handler(raw)
+        except Exception as exc:
+            # A verification error must not expose decrypted data or kill the
+            # command subscription. Polling retries verified reads separately.
+            logger.warning("Vault event refresh failed: %s", type(exc).__name__)
 
     async def _handle_proactive_probe(self, raw: dict) -> None:
         """Execute one monitoring probe and ALWAYS post a command-result.

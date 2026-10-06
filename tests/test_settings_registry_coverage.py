@@ -97,6 +97,7 @@ _FIELD_TO_PANEL = {
     "sync_encryption_enabled": "memory",
     "memory": "memory",
     "memory_first_connect_dismissed_count": "_no_ui",  # dismissal counter
+    "vault": "vault",  # local vault verification, custody and polling policy
 }
 
 

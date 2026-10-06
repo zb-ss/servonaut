@@ -175,6 +175,21 @@ def _migrate_v5_to_v6(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _migrate_v6_to_v7(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Add native-vault policy while keeping file storage opt-in."""
+    from dataclasses import asdict
+    from .schema import VaultConfig
+
+    out = dict(data)
+    out['version'] = 7
+    configured = out.get('vault')
+    vault = asdict(VaultConfig())
+    if isinstance(configured, dict):
+        vault.update(configured)
+    out['vault'] = vault
+    return out
+
+
 def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     """Run every migration step needed to bring ``data`` up to ``CONFIG_VERSION``.
 
@@ -188,6 +203,7 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
       - ``version == 3`` → run :func:`_migrate_v3_to_v4` then chain.
       - ``version == 4`` → run :func:`_migrate_v4_to_v5` then chain.
       - ``version == 5`` → run :func:`_migrate_v5_to_v6`.
+      - ``version == 6`` → run :func:`_migrate_v6_to_v7`.
       - ``version >= CONFIG_VERSION`` → return as-is.
     """
     out = data
@@ -213,4 +229,6 @@ def migrate_to_latest(data: Dict[str, Any]) -> Dict[str, Any]:
     if current == 5:
         out = _migrate_v5_to_v6(out)
         current = out.get('version')
+    if current == 6:
+        out = _migrate_v6_to_v7(out)
     return out

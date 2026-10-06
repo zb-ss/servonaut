@@ -1,13 +1,18 @@
 """HTTP client for servonaut.dev API."""
 from __future__ import annotations
 
+import base64
+import json as json_module
 import logging
+import os
 import re
+import time
 from importlib.metadata import version as pkg_version
 from typing import Any, AsyncIterator, Dict, Mapping, Optional, Tuple, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
+    from servonaut.services.vault.identity_store import DeviceSigner
 
 from servonaut.utils.endpoints import (
     API_URL_ENV,
@@ -163,6 +168,10 @@ class ForbiddenError(APIError):
     """
 
 
+class DeviceSignatureExpiredError(APIError):
+    """403 device signature timestamp is outside the server's skew window."""
+
+
 class EndpointConfigError(APIError, EndpointOverrideError):
     """``SERVONAUT_API_URL`` holds a URL the client refuses to use.
 
@@ -208,6 +217,7 @@ _CODE_TO_EXC: Dict[str, Type[APIError]] = {
     "weak_passphrase": WeakPassphraseError,
     "payment_required": PaymentRequiredError,
     "forbidden": ForbiddenError,
+    "device_signature_expired": DeviceSignatureExpiredError,
 }
 
 
@@ -363,6 +373,103 @@ class APIClient(APIClientInterface):
                 raise self._parse_error(response)
 
             return response
+
+    async def request_signed(
+        self,
+        method: str,
+        path: str,
+        body: bytes | Dict[str, Any] | None = None,
+        device: "DeviceSigner" | None = None,
+        *,
+        json: Optional[Any] = None,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        accept: str = "application/json",
+    ) -> Any:
+        """Send an exact-byte Team Vault request signed by *device*.
+
+        This route is deliberately separate from :meth:`_request`: httpx's
+        ``json=`` parameter would serialise a second time after the signature
+        was calculated.  A token refresh gets one fresh signed request; a
+        timestamp refusal gets one server-clock-corrected request.  Neither
+        condition enables generic retries.
+        """
+        if not HAS_HTTPX:
+            raise RuntimeError(
+                "httpx not installed. Install with: pip install 'servonaut[pro]'"
+            )
+        if device is None:
+            raise ValueError("request_signed requires a device signer")
+        if isinstance(body, dict):
+            if json is not None:
+                raise ValueError("request_signed accepts one JSON body")
+            json, body = body, None
+        if json is not None and body is not None:
+            raise ValueError("request_signed accepts either json or body, not both")
+        if not isinstance(path, str) or not path.startswith("/") or "#" in path:
+            raise ValueError("request_signed path must be an absolute request target")
+        if "%" in path:
+            raise ValueError("signed request targets may not be percent-encoded")
+        raw_body = (
+            body
+            if body is not None
+            else json_module.dumps(
+                json, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            if json is not None
+            else b""
+        )
+        if not isinstance(raw_body, bytes):
+            raise TypeError("request_signed body must be bytes")
+        from servonaut.services.vault.crypto import request_message
+
+        url = f"{_api_base()}{path}"
+        clock_offset = 0
+        refreshed = False
+        corrected_clock = False
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if self.transport is not None:
+            client_kwargs["transport"] = self.transport
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            while True:
+                timestamp = int(time.time() + clock_offset)
+                nonce = os.urandom(16)
+                headers = self._get_headers()
+                headers.update(
+                    {
+                        "X-Servonaut-Device": device.device_id,
+                        "X-Servonaut-Timestamp": str(timestamp),
+                        "X-Servonaut-Nonce": base64.b64encode(nonce).decode("ascii"),
+                        "X-Servonaut-Signature": base64.b64encode(
+                            device.sign(
+                                request_message(
+                                    method, path, timestamp, nonce,
+                                    device.device_id, raw_body,
+                                )
+                            )
+                        ).decode("ascii"),
+                    }
+                )
+                if accept != "application/json":
+                    headers["Accept"] = accept
+                response = await client.request(
+                    method, url, headers=headers, content=raw_body
+                )
+                if response.status_code == 401 and not refreshed:
+                    refreshed = True
+                    if await self._auth.refresh_token():
+                        continue
+                if response.status_code >= 400:
+                    error = self._parse_error(response)
+                    if (
+                        isinstance(error, DeviceSignatureExpiredError)
+                        and not corrected_clock
+                        and type((error.details or {}).get("server_time")) is int
+                    ):
+                        corrected_clock = True
+                        clock_offset = int((error.details or {})["server_time"]) - int(time.time())
+                        continue
+                    raise error
+                return _json_or_success(response)
 
     async def get(self, path: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS, params: Optional[Dict[str, Any]] = None, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(

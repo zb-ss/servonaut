@@ -9,7 +9,7 @@ from typing import Any, List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
 
 # Known :class:`SecretProviderInterface` implementations the CLI
 # recognises. Any value outside this set, however received (server
@@ -1385,6 +1385,38 @@ class SecretsConfig:
 
 
 @dataclass
+class VaultConfig:
+    """Local native-vault policy; server policy still controls access."""
+
+    strict_verification: bool = False
+    auto_grant: bool = True
+    allow_file_key_store: bool = False
+    agent_key_ttl_seconds: int = 3600
+    poll_after_seconds: int = 300
+    approval_poll_initial_seconds: float = 2.0
+    approval_poll_max_seconds: float = 10.0
+    request_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        for name in ("strict_verification", "auto_grant", "allow_file_key_store"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"vault.{name} must be a boolean")
+        for name in ("agent_key_ttl_seconds", "poll_after_seconds"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"vault.{name} must be a positive integer")
+        for name in (
+            "approval_poll_initial_seconds", "approval_poll_max_seconds",
+            "request_timeout_seconds",
+        ):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not 0 < value < float("inf"):
+                raise ValueError(f"vault.{name} must be a positive finite number")
+        if self.approval_poll_initial_seconds > self.approval_poll_max_seconds:
+            raise ValueError("vault approval polling maximum is below its initial delay")
+
+
+@dataclass
 class AppConfig:
     """Main application configuration.
 
@@ -1516,6 +1548,7 @@ class AppConfig:
     chat_inject_server_memory_decision: str = "unset"
     sync_encryption_enabled: bool = True
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    vault: VaultConfig = field(default_factory=VaultConfig)
     # SSH keepalive and timeout settings applied to every SSH/SCP command.
     # Additive default — old configs without this key load cleanly (uses
     # SSHConfig() defaults) and no config migration is required.

@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import sys
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import ANY, AsyncMock, MagicMock, patch, call
 
 import pytest
 
@@ -287,7 +287,84 @@ class TestHandleSshCommand:
         result = self._run(args, headless, instances, None)
         assert result == _EXIT_NO_CREDENTIAL
 
-    def test_local_source_calls_subprocess_with_local_key(self):
+    def test_shared_server_is_loaded_before_cli_target_resolution(self):
+        """A shared native-Vault binding is selectable without CachedFleet."""
+        args = _make_args(instance="shared-web")
+        headless, ssh_svc, _ = _patch_headless(instances=[])
+        team_service = MagicMock()
+        team_service.list_teams = AsyncMock(return_value=[{"slug": "team-a"}])
+        shared = {
+            "id": "shared-1",
+            "name": "shared-web",
+            "provider": "aws",
+            "public_ip": "1.1.1.1",
+            "credential_binding": {"vault_id": "vault-1"},
+        }
+        team_service.list_shared_servers = AsyncMock(return_value=[shared])
+        headless = (*headless[:4], team_service, *headless[5:])
+        resolved = _resolved_local("/home/user/.ssh/id_rsa")
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[]),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            resolver_instance = MagicMock()
+            resolver_instance.resolve = AsyncMock(return_value=resolved)
+            MockResolver.return_value = resolver_instance
+
+            from servonaut.cli.ssh import handle_ssh_command
+
+            assert handle_ssh_command(args) == _EXIT_SUCCESS
+
+        team_service.list_shared_servers.assert_awaited_once_with("team-a")
+        assert resolver_instance.resolve.await_args.args[0]["credential_binding"] == {"vault_id": "vault-1"}
+
+    def test_vault_login_to_a_shared_server_goes_to_the_pinned_destination(self):
+        """A shared row from the API carries ``hostname``, not an IP field."""
+        args = _make_args(instance="qa-host")
+        headless, _ssh_svc, _ = _patch_headless(instances=[])
+        team_service = MagicMock()
+        team_service.list_teams = AsyncMock(return_value=[{"slug": "team-a"}])
+        shared = {
+            "id": "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f", "name": "qa-host",
+            "hostname": "web-1.example.com", "port": 2222, "username": "deploy",
+        }
+        team_service.list_shared_servers = AsyncMock(return_value=[shared])
+        headless = (*headless[:4], team_service, *headless[5:])
+        lease = MagicMock(target_host="web-1.example.com", target_port=2222)
+        resolved = ResolvedSshRef(
+            source="vault", lease=lease, login_user="deploy", identity_agent="/agent.sock",
+            identity_file="/key.pub", known_hosts_path="/known_hosts",
+        )
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[]),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            resolver_instance = MagicMock()
+            resolver_instance.resolve = AsyncMock(return_value=resolved)
+            MockResolver.return_value = resolver_instance
+            ssh_svc = headless[5]
+            ssh_svc.build_ssh_command.return_value = ["ssh", "-l", "deploy", "-p", "2222", "web-1.example.com"]
+
+            from servonaut.cli.ssh import handle_ssh_command
+
+            assert handle_ssh_command(args) == _EXIT_SUCCESS
+
+        kwargs = ssh_svc.build_ssh_command.call_args.kwargs
+        assert (kwargs["host"], kwargs["port"]) == ("web-1.example.com", 2222)
+        assert kwargs["identity_agent"] == "/agent.sock"
+        lease.close.assert_called_once()
+
+    def test_local_source_calls_subprocess_with_local_key_and_reports_fallback(self, capsys):
         args = _make_args(instance="i-abc")
         instances = [_make_instance("i-abc")]
         headless, ssh_svc, _ = _patch_headless(instances=instances)
@@ -319,6 +396,94 @@ class TestHandleSshCommand:
         call_kwargs = ssh_svc.build_ssh_command.call_args
         assert call_kwargs.kwargs.get("key_path") == "/home/user/.ssh/id_rsa"
         mock_subproc.assert_called_once()
+        notice = capsys.readouterr().err
+        assert "SSH resolution tier: local" in notice
+        assert "local ~/.ssh fallback" in notice
+
+    def test_successful_connection_reports_personal_winning_tier_after_ssh(self):
+        args = _make_args(instance="i-abc")
+        instances = [_make_instance("i-abc")]
+        headless, ssh_svc, _ = _patch_headless(instances=instances)
+        bw_service = headless[3]
+        bw_service.report_personal_instance_verify = AsyncMock()
+        resolved = _resolved_local("/home/user/.ssh/id_rsa")
+        events = []
+
+        def successful_ssh(command):
+            events.append("ssh")
+            return MagicMock(returncode=0)
+
+        async def report(*args, **kwargs):
+            events.append("report")
+
+        bw_service.report_personal_instance_verify.side_effect = report
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=instances),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", side_effect=successful_ssh),
+        ):
+            MockResolver.return_value.resolve = AsyncMock(return_value=resolved)
+            assert ssh_mod.handle_ssh_command(args) == _EXIT_SUCCESS
+
+        assert events == ["ssh", "report"]
+        bw_service.report_personal_instance_verify.assert_awaited_once_with(
+            "aws", "i-abc", "verified",
+            checked_by_client=ANY,
+            resolution_tier="local",
+        )
+
+    def test_failed_connection_does_not_report_verification(self):
+        args = _make_args(instance="i-abc")
+        instances = [_make_instance("i-abc")]
+        headless, ssh_svc, _ = _patch_headless(instances=instances)
+        bw_service = headless[3]
+        bw_service.report_personal_instance_verify = AsyncMock()
+        resolved = _resolved_local("/home/user/.ssh/id_rsa")
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=instances),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=255)),
+        ):
+            MockResolver.return_value.resolve = AsyncMock(return_value=resolved)
+            assert ssh_mod.handle_ssh_command(args) == 255
+
+        bw_service.report_personal_instance_verify.assert_not_awaited()
+
+    def test_successful_shared_connection_reports_team_winning_tier(self):
+        args = _make_args(instance="shared-1")
+        shared = {
+            **_make_instance("shared-1", "shared-web"),
+            "is_shared": True,
+            "team_slug": "team-a",
+            "shared_server_id": "shared-1",
+        }
+        headless, ssh_svc, _ = _patch_headless(instances=[shared])
+        team_service = headless[4]
+        team_service.list_teams = AsyncMock(return_value=[])
+        team_service.report_team_server_ssh_verify = AsyncMock()
+        resolved = _resolved_local("/home/user/.ssh/id_rsa")
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[shared]),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            MockResolver.return_value.resolve = AsyncMock(return_value=resolved)
+            assert ssh_mod.handle_ssh_command(args) == _EXIT_SUCCESS
+
+        team_service.report_team_server_ssh_verify.assert_awaited_once_with(
+            "team-a", "shared-1", "verified",
+            checked_by_client=ANY,
+            resolution_tier="local",
+        )
 
     def test_personal_source_calls_bw_resolver_and_ephemeral_key(self):
         """BW source: BwResolver.resolve_ssh_key called, subprocess called with tmpfile."""

@@ -38,6 +38,7 @@ from e2e.harness.fake_cloud import (
     routes_pypi,
     routes_relay,
     routes_secrets,
+    routes_vault,
 )
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
@@ -47,6 +48,7 @@ from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
 from e2e.harness.fake_cloud.routes_findings import FindingsCloud
 from e2e.harness.fake_cloud.routes_memory import MemoryCloud
 from e2e.harness.fake_cloud.routes_secrets import SecretsData
+from e2e.harness.fake_cloud.routes_vault import VaultCloud
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
 from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
@@ -72,6 +74,7 @@ class FakeCloud(LoopbackServer):
         self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
+        self.vault = VaultCloud(lambda: self._store.snapshot().user_id)
         self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
@@ -102,6 +105,7 @@ class FakeCloud(LoopbackServer):
         self.memory.reset()
         self.configs.reset()
         self.secrets.reset()
+        self.vault.reset()
         self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
@@ -194,6 +198,7 @@ class FakeCloud(LoopbackServer):
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)
         routes_secrets.add_routes(app, self._store, self.secrets)
+        routes_vault.add_routes(app, self._store, self.vault)
         routes_findings.add_routes(app, self._store, self.findings)
         routes_pypi.add_routes(app, self._store)
         routes_misc.add_routes(app, lambda: self.url)

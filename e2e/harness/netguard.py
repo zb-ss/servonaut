@@ -24,7 +24,8 @@ Programs
     journeys, in its own process only (:func:`allow_ssh_clients`): the real
     ``ssh`` and ``scp`` may start as ``<client> -F <sandbox config> ...``,
     with no other config, and ``scp`` only with an ``ssh`` from the fake
-    tools.
+    tools. The Vault-agent pass-through has a separate one-exec allowance for
+    an already validated ``ssh-agent`` or ``ssh-add`` command.
 
 Every refusal is recorded. Children write their records as JSON lines to the
 file named by ``SERVONAUT_E2E_GUARD_LOG`` and, once armed, one line to
@@ -112,6 +113,8 @@ _spawn_dirs: tuple[str, ...] = ()
 _spawn_programs: frozenset[str] = frozenset()
 _ssh_programs: dict[str, str] = {}  # resolved path -> "ssh" or "scp"
 _ssh_config: Optional[str] = None
+_ssh_agent_program: Optional[str] = None
+_ssh_agent_argv: tuple[str, ...] = ()
 
 # OpenSSH's own option strings (ssh.c, scp.c): a letter followed by ":" takes
 # a value. scp's server-mode flags (d, f, t) are parsed so they can be refused.
@@ -529,6 +532,18 @@ def allow_ssh_clients(programs: dict[str, str], config: Optional[str]) -> None:
     _ssh_config = config or None
 
 
+def allow_ssh_agent_tool(program: str, argv: list[str]) -> None:
+    """Allow one exact, pre-validated real Vault-agent command to exec.
+
+    Only ``openssh_agent_shim`` calls this immediately before ``os.execv``.
+    The audit hook still compares both the resolved executable and every
+    argument, so this permission cannot be reused for a different command.
+    """
+    global _ssh_agent_program, _ssh_agent_argv
+    _ssh_agent_program = _resolve(program)
+    _ssh_agent_argv = tuple(os.fsdecode(arg) for arg in argv)
+
+
 def _ssh_client_allowed(program: str, argv: object) -> bool:
     """True for an allowed OpenSSH client started only with the sandbox config."""
     tool = _ssh_programs.get(_resolve(program)) if os.sep in program else None
@@ -553,6 +568,14 @@ def _ssh_client_allowed(program: str, argv: object) -> bool:
     return True
 
 
+def _ssh_agent_tool_allowed(program: str, argv: object) -> bool:
+    """True only for the one real agent-tool exec its shim approved."""
+    if _ssh_agent_program is None or not isinstance(argv, (list, tuple)):
+        return False
+    words = tuple(os.fsdecode(arg) if isinstance(arg, bytes) else str(arg) for arg in argv)
+    return _resolve(program) == _ssh_agent_program and words == _ssh_agent_argv
+
+
 def _spawn_argv(event: str, args: tuple[Any, ...]) -> object:
     position = {"os.spawn": 2, "pty.spawn": 0}.get(event, 1)
     return args[position] if position < len(args) else None
@@ -572,7 +595,11 @@ def _check_spawn_event(event: str, args: tuple[Any, ...]) -> None:
         return
     program = os.fsdecode(os.fspath(program))
     env = args[env_position] if env_position is not None and env_position < len(args) else None
-    if program_allowed(program, env) or _ssh_client_allowed(program, _spawn_argv(event, args)):
+    if (
+        program_allowed(program, env)
+        or _ssh_client_allowed(program, _spawn_argv(event, args))
+        or _ssh_agent_tool_allowed(program, _spawn_argv(event, args))
+    ):
         return
     _record("spawn", f"{event} {program}")
     raise SpawnEscapeError(errno.EACCES, f"e2e guard refused to start {program}")
@@ -637,9 +664,12 @@ def set_spawn_dirs(directories: Iterable[str]) -> None:
 def disarm_filesystem_and_spawns() -> None:
     """Stop checking paths and program starts (the network guard stays)."""
     global _protected, _allowed, _write_roots, _spawn_dirs, _spawn_programs
+    global _ssh_agent_program, _ssh_agent_argv
     _protected = _allowed = _write_roots = _spawn_dirs = ()
     _spawn_programs = frozenset()
     allow_ssh_clients({}, None)
+    _ssh_agent_program = None
+    _ssh_agent_argv = ()
 
 
 def restrict_writes(write_roots: Iterable[str]) -> None:

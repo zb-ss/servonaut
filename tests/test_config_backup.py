@@ -418,7 +418,14 @@ class TestLegacyPreUpgradeBackups:
         cm = ConfigManager()
         cm.load()
 
-        assert cm.list_backups() == []
+        # Loading the v6 config legitimately creates a v6 pre-upgrade backup.
+        # The legacy symlink remains excluded and therefore cannot alter what
+        # is offered for restore.
+        backups = cm.list_backups()
+        assert len(backups) == 1
+        assert backups[0]["kind"] == "pre-upgrade"
+        assert backups[0]["from_version"] == 6
+        assert backups[0]["path"] != link
         assert stat.S_IMODE(target.stat().st_mode) == 0o644
         with pytest.raises(ValueError, match="outside"):
             cm.restore_backup(link)

@@ -117,6 +117,39 @@ class TestPersonalTier:
         assert result.source == "local"
         assert result.local_key_path == "/home/user/.ssh/my-key.pem"
 
+    def test_unconfigured_vault_runtime_falls_through_to_personal_ref(self):
+        """A legacy binding marker does not turn a target into a native key."""
+        class UnconfiguredRuntime:
+            async def resolve_ssh(self, _instance: dict) -> None:
+                return None
+
+        resolver = _make_resolver(
+            bw_get_ref={"ssh_credential_ref": {"item_id": "uuid-personal"}},
+        )
+        resolver._vault_runtime = UnconfiguredRuntime()
+        instance = _aws_instance()
+        instance["credential_binding"] = {"source": "bitwarden_pm"}
+
+        result = _run(resolver.resolve(instance))
+
+        assert result is not None
+        assert result.source == "personal"
+        assert result.item_id == "uuid-personal"
+
+    def test_non_bitwarden_provider_never_returns_a_bw_item_ref(self):
+        """A non-Bitwarden provider id must not reach a ``bw`` consumer."""
+        resolver = _make_resolver(
+            bw_get_ref={
+                "ssh_credential_provider": "native_vault",
+                "ssh_credential_ref": {"item_id": "not-a-bitwarden-item"},
+            },
+            ssh_key_path="/home/user/.ssh/fallback",
+        )
+        result = _run(resolver.resolve(_aws_instance()))
+        assert result is not None
+        assert result.source == "local"
+        assert result.item_id is None
+
     def test_personal_api_error_logs_warning_and_cascades(self, caplog):
         """403/5xx from personal tier: logs WARNING, chain continues."""
         bw_svc = MagicMock(spec=BwSshConfigService)

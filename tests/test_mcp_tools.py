@@ -73,7 +73,7 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
                ovh_instances=None, ovh_ip_service=None,
                ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
                ovh_service=None, aws_service=None, aws_object_storage_service=None,
-               bw_ssh_config_service=None):
+               bw_ssh_config_service=None, team_service=None, vault_runtime=None):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -132,6 +132,8 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         ovh_billing_service=ovh_billing_service,
         aws_object_storage_service=aws_object_storage_service,
         bw_ssh_config_service=bw_ssh_config_service,
+        team_service=team_service,
+        vault_runtime=vault_runtime,
     )
     return tools
 
@@ -338,6 +340,85 @@ class TestRunCommand:
         audit_call = tools._audit.log.call_args
         assert audit_call.args[3] is True
         assert audit_call.kwargs["key_source"] == "ssh_agent"
+
+    def test_shared_vault_target_uses_native_lease_after_local_lookup_misses(self):
+        shared_target = {
+            "id": "shared-server-1",
+            "name": "team-web-1",
+            "is_shared": True,
+            "team_slug": "team-a",
+            "public_ip": "192.0.2.25",
+            "port": 22,
+        }
+        lease = MagicMock(
+            source="vault",
+            identity_agent="/tmp/native-agent.sock",
+            identity_file="/tmp/native-agent-key.pub",
+            certificate_path=None,
+            known_hosts_path="/tmp/native-known-hosts",
+            login_user="deploy",
+        )
+        runtime = MagicMock()
+        runtime.resolve_relay_target = AsyncMock(return_value=shared_target)
+        runtime.resolve_ssh = AsyncMock(return_value=lease)
+        tools = make_tools(
+            guard_level=GuardLevel.STANDARD,
+            vault_runtime=runtime,
+        )
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"native output", b"")),
+        ):
+            result = run(tools.run_command("team-web-1", "ls"))
+
+        assert "native output" in result
+        runtime.resolve_relay_target.assert_awaited_once_with("team-web-1")
+        runtime.resolve_ssh.assert_awaited_once_with(shared_target)
+        command = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert command["key_path"] is None
+        assert command["identity_agent"] == "/tmp/native-agent.sock"
+        assert command["identity_file"] == "/tmp/native-agent-key.pub"
+        assert command["known_hosts_file"] == "/tmp/native-known-hosts"
+        assert command["username"] == "deploy"
+        assert tools._ssh_service.get_key_path.call_count == 1
+        lease.close.assert_called_once()
+
+    def test_shared_vault_connection_failure_never_falls_back_to_ssm(self):
+        shared_target = {
+            "id": "shared-server-1",
+            "name": "team-web-1",
+            "is_shared": True,
+            "team_slug": "team-a",
+            "public_ip": "192.0.2.25",
+            "port": 22,
+        }
+        lease = MagicMock(
+            source="vault",
+            identity_agent="/tmp/native-agent.sock",
+            identity_file="/tmp/native-agent-key.pub",
+            certificate_path=None,
+            known_hosts_path="/tmp/native-known-hosts",
+            login_user="deploy",
+        )
+        runtime = MagicMock()
+        runtime.resolve_relay_target = AsyncMock(return_value=shared_target)
+        runtime.resolve_ssh = AsyncMock(return_value=lease)
+        tools = make_tools(
+            guard_level=GuardLevel.STANDARD,
+            vault_runtime=runtime,
+        )
+        tools._run_command_via_ssm = AsyncMock(return_value="SSM fallback")
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"", b"Connection refused")),
+        ):
+            result = run(tools.run_command("team-web-1", "ls"))
+
+        assert "Native Vault SSH connection failed" in result
+        tools._run_command_via_ssm.assert_not_awaited()
+        assert tools._audit.log.call_args.args[4] == "native_vault_ssh_conn_failed"
 
 
 class TestGetLogs:
@@ -1011,6 +1092,92 @@ class TestBwVaultKeyResolution:
         real ~/.servonaut/tmp."""
         from pathlib import Path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def test_shared_team_ref_is_resolved_after_personal_miss(self):
+        team = MagicMock()
+        team.get_team_server_ssh_ref = AsyncMock(return_value={
+            "ssh_credential_provider": "bitwarden_pm",
+            "ssh_credential_ref": {"item_id": self.ITEM_ID},
+        })
+        bw = self._bw_service(None)
+        shared = {
+            "id": "shared-server-1", "name": "team-web-1", "provider": "aws",
+            "public_ip": "192.0.2.25", "is_shared": True, "team_slug": "team-a",
+        }
+        tools = make_tools(
+            guard_level=GuardLevel.STANDARD, instances=[shared],
+            bw_ssh_config_service=bw, team_service=team,
+        )
+
+        async def immediate_thread(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch("servonaut.services.bw_resolver.BwResolver") as resolver_cls,
+            patch(
+                "servonaut.utils.ephemeral_key.persistent_bw_ssh_key",
+                return_value="/tmp/bw-team-key",
+            ),
+            patch("servonaut.utils.ephemeral_key.remove_bw_ssh_key"),
+            patch("servonaut.mcp.tools.asyncio.to_thread", new=immediate_thread),
+            patch(
+                "servonaut.mcp.tools.run_ssh_subprocess",
+                new=AsyncMock(return_value=(b"team key", b"")),
+            ),
+        ):
+            resolver_cls.return_value.resolve_ssh_key.return_value = self.FAKE_KEY
+            result = run(tools.run_command("team-web-1", "ls"))
+
+        assert "team key" in result
+        bw.get_personal_instance_ref.assert_awaited_once_with("aws", "shared-server-1")
+        team.get_team_server_ssh_ref.assert_awaited_once_with("team-a", "shared-server-1")
+        resolver_cls.return_value.resolve_ssh_key.assert_called_once_with(self.ITEM_ID)
+        assert tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"] == "/tmp/bw-team-key"
+        assert tools._audit.log.call_args.kwargs["key_source"] == "bw_team"
+
+    def test_native_lease_precedes_shared_team_ref(self):
+        team = MagicMock()
+        team.get_team_server_ssh_ref = AsyncMock()
+        lease = MagicMock(
+            source="vault", identity_agent="/tmp/agent.sock",
+            identity_file="/tmp/agent.pub", known_hosts_path="/tmp/known-hosts",
+            certificate_path=None, login_user="deploy",
+        )
+        runtime = MagicMock()
+        runtime.resolve_ssh = AsyncMock(return_value=lease)
+        shared = {
+            "id": "shared-server-1", "name": "team-web-1", "provider": "aws",
+            "public_ip": "192.0.2.25", "is_shared": True, "team_slug": "team-a",
+        }
+        tools = make_tools(
+            instances=[shared], team_service=team, vault_runtime=runtime,
+        )
+
+        connection, cleanup = run(tools._resolve_connection_with_vault(shared))
+
+        assert connection["key_source"] == "vault_vault"
+        assert connection["key_path"] is None
+        team.get_team_server_ssh_ref.assert_not_awaited()
+        run(cleanup())
+        lease.close.assert_called_once()
+
+    def test_native_lease_without_strict_host_keys_fails_closed(self):
+        lease = MagicMock(
+            source="vault", identity_agent="/tmp/agent.sock",
+            identity_file="/tmp/agent.pub", known_hosts_path=None,
+            certificate_path=None, login_user="deploy",
+        )
+        runtime = MagicMock()
+        runtime.resolve_ssh = AsyncMock(return_value=lease)
+        shared = {
+            "id": "shared-server-1", "name": "team-web-1", "provider": "aws",
+            "public_ip": "192.0.2.25", "is_shared": True, "team_slug": "team-a",
+            "credential_binding": {"source": "servonaut_vault"},
+        }
+        tools = make_tools(instances=[shared], vault_runtime=runtime)
+
+        with pytest.raises(RuntimeError, match="strict host-key file"):
+            run(tools._resolve_connection_with_vault(shared))
 
     def test_run_command_uses_vault_temp_key_and_removes_it(self, tmp_path, monkeypatch):
         import os

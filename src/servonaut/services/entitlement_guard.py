@@ -33,6 +33,9 @@ FEATURE_PLANS = {
     # tells us so.
     "secrets_management": "solo",
     "secrets_team_shared": "teams",
+    "personal_vault": "solo",
+    "team_vault": "teams",
+    "ssh_ca": "teams",
     # Proactive monitoring (findings inbox + manual scans). Included
     # on Solo + Teams with an instance cap; server enforces via 402.
     "proactive_monitoring": "solo",

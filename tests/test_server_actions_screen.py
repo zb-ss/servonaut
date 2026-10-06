@@ -438,6 +438,7 @@ class TestVerifySshFlowWithRef:
         bw.report_personal_instance_verify.assert_awaited_once()
         call_kwargs = bw.report_personal_instance_verify.call_args
         assert call_kwargs.kwargs["status"] == "verified"
+        assert call_kwargs.kwargs["resolution_tier"] == "personal"
 
     def test_not_found_status_posts_not_found(self):
         bw = self._make_bw()
@@ -449,6 +450,23 @@ class TestVerifySshFlowWithRef:
         _run(screen._verify_ssh_flow())
         call_kwargs = bw.report_personal_instance_verify.call_args
         assert call_kwargs.kwargs["status"] == "not_found"
+
+    def test_local_verify_fallback_reports_local_resolution_tier(self):
+        bw = self._make_bw()
+        bw.get_personal_instance_ref.return_value = {"ssh_credential_ref": {}}
+        fake_app = _FakeApp(bw_service=bw)
+
+        async def _fast_probe(item_id, host):
+            assert item_id is None
+            return "verified"
+
+        screen = _make_screen(app=fake_app)
+        screen._run_ssh_probe = _fast_probe
+        _run(screen._verify_ssh_flow())
+
+        call_kwargs = bw.report_personal_instance_verify.call_args
+        assert call_kwargs.kwargs["resolution_tier"] == "local"
+        assert any("local fallback" in n["message"] for n in fake_app._notifications)
 
     def test_auth_failed_status_posts_auth_failed(self):
         bw = self._make_bw()
@@ -716,6 +734,10 @@ class TestSshConnectResolverChain:
         mock_persistent.assert_not_called()
         mock_bw.assert_not_called()
         app.terminal_service.launch_ssh_in_terminal.assert_called_once()
+        assert any(
+            "Local SSH fallback selected" in notification["message"]
+            for notification in app._notifications
+        )
 
     def test_no_match_notifies_user(self):
         """When resolver returns None, user gets a warning and terminal is not launched."""

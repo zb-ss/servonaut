@@ -184,6 +184,13 @@ PANELS: List[PanelSpec] = [
         keywords=["relay", "mercure", "heartbeat", "listener", "auto-approve"],
         factory=_panel("relay", "RelayPanel"),
     ),
+    PanelSpec(
+        id='vault',
+        title="Team Vault",
+        group="Security & Network",
+        keywords=["vault", "identity", "recovery", "grant", "verification", "ssh agent"],
+        factory=_panel("vault", "VaultPanel"),
+    ),
     # ------------------------------------------------------------------- AI
     PanelSpec(
         id="ai_provider",

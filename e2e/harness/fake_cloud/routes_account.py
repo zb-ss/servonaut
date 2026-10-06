@@ -28,6 +28,17 @@ _DEFAULT_TEAMS: tuple[dict[str, Any], ...] = (
     {"slug": "ops", "name": "Ops", "role": "owner", "member_count": 2},
 )
 
+_VAULT_SHARED_SERVER = {
+    "id": "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f",
+    "name": "server-1",
+    "hostname": "server-1.example.test",
+    "port": 22,
+    "login_user": "deploy",
+}
+
+# The shared server's host key, as a user verifies and passes it with --host-key.
+VAULT_SHARED_SERVER_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHm1Vi6P5lT5QHixEuipi6eQH4U65pW+1+DjkQutBJZk"
+
 
 class AccountData:
     """Thread-safe account records the routes serve."""
@@ -101,6 +112,15 @@ def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) ->
             return web.json_response({"error": {"code": "not_found"}}, status=404)
         return web.json_response({**team, "members": team.get("members", [])})
 
+    async def team_servers(request: web.Request) -> web.Response:
+        slug = request.match_info["slug"]
+        if not any(team.get("slug") == slug for team in data.teams()):
+            return web.json_response({"error": {"code": "not_found"}}, status=404)
+        # The team inventory API uses account authentication; native-vault
+        # mutations against a selected server are separately device-signed.
+        servers = [_VAULT_SHARED_SERVER] if slug == "example-team" else []
+        return web.json_response({"data": servers})
+
     async def verify_list(request: web.Request) -> web.Response:
         return web.json_response({"instances": data.verify_rows()})
 
@@ -122,6 +142,7 @@ def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) ->
 
     instance = "/api/v1/me/instances/{provider}/{instance_id}"
     app.router.add_get("/api/v1/teams", guarded(list_teams))
+    app.router.add_get("/api/v1/teams/{slug}/servers", guarded(team_servers))
     app.router.add_get("/api/v1/teams/{slug}", guarded(team_detail))
     app.router.add_get("/api/v1/me/instances", guarded(verify_list))
     app.router.add_get(f"{instance}/ssh-verify-status", guarded(verify_status))

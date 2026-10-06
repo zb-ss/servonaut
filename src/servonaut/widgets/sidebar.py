@@ -46,6 +46,8 @@ _SCREEN_TO_NAV: dict[str, str] = {
     "FleetMemoryScreen": "nav_memory",
     "MemorySyncSetupScreen": "nav_memory_sync",
     "SecretsScreen": "nav_secrets",
+    "VaultScreen": "nav_vault",
+    "CaScreen": "nav_ca",
     "BwVaultManagerScreen": "nav_bw_vault",
     "FindingsScreen": "nav_findings",
     "FindingDetailScreen": "nav_findings",
@@ -159,6 +161,10 @@ class Sidebar(Widget):
                 self._nav("🔐 Secrets", "nav_secrets",
                           tooltip="Manage secrets-management backend — Bitwarden / "
                                   "local store / install bws / refresh team config"),
+                self._nav("Vault", "nav_vault",
+                          tooltip="Encrypted vault identities, SSH keys and secrets"),
+                self._nav("SSH Certificates", "nav_ca",
+                          tooltip="Team SSH certificate authority and audit"),
                 self._nav("🗝 BW SSH Vault", "nav_bw_vault",
                           tooltip="Browse your Bitwarden SSH-key items joined with the "
                                   "servers that reference them (local-only; Solo/Teams)"),
@@ -310,6 +316,9 @@ class Sidebar(Widget):
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----
         auth = getattr(self.app, "auth_service", None)
+        if not getattr(self.app, "vault_available", False):
+            self._hide_button("nav_vault")
+            self._hide_button("nav_ca")
         if not auth or not auth.has_feature("team_workspaces"):
             self._hide_button("nav_teams")
 

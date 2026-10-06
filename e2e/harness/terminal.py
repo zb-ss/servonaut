@@ -106,11 +106,15 @@ def run_in_terminal(
 
 
 def _start_on_pty(
-    argv: Sequence[str], *, env: Mapping[str, str], cwd: Path, size: tuple[int, int]
+    argv: Sequence[str], *, env: Mapping[str, str], cwd: Path, size: tuple[int, int],
 ) -> tuple[subprocess.Popen, int]:
     master, slave = os.openpty()
     columns, rows = size
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+    def claim_controlling_terminal() -> None:
+        """Make ``/dev/tty`` refer to the pty used for interactive prompts."""
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
     try:
         process = subprocess.Popen(
             list(argv),
@@ -120,6 +124,7 @@ def _start_on_pty(
             env=dict(env),
             cwd=str(cwd),
             start_new_session=True,
+            preexec_fn=claim_controlling_terminal,
             close_fds=True,
         )
     except OSError:

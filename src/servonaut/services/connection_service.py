@@ -238,7 +238,9 @@ class ConnectionService(ConnectionServiceInterface):
         logger.debug("Built ProxyJump string: %s", proxy_jump)
         return proxy_jump
 
-    def get_proxy_args(self, profile: ConnectionProfile) -> List[str]:
+    def get_proxy_args(
+        self, profile: ConnectionProfile, identity_agent: Optional[str] = None
+    ) -> List[str]:
         """Build SSH proxy arguments for bastion connection.
 
         The bastion hop is a second ssh process. OpenSSH applies
@@ -272,7 +274,9 @@ class ConnectionService(ConnectionServiceInterface):
         ssh_cfg = self._ssh_config()
         policy = HostKeyPolicy.from_ssh_config(ssh_cfg)
         if profile.bastion_key or self._hop_uses_proxy_command(policy):
-            proxy_cmd = self._bastion_proxy_command(profile, ssh_cfg, policy)
+            proxy_cmd = self._bastion_proxy_command(
+                profile, ssh_cfg, policy, identity_agent=identity_agent
+            )
             logger.debug("Using ProxyCommand for the bastion hop: %s", proxy_cmd)
             return ['-o', f'ProxyCommand={proxy_cmd}']
 
@@ -304,6 +308,8 @@ class ConnectionService(ConnectionServiceInterface):
         profile: ConnectionProfile,
         ssh_cfg: SSHConfig,
         policy: HostKeyPolicy,
+        *,
+        identity_agent: Optional[str] = None,
     ) -> str:
         """Return the ProxyCommand that reaches the target via the bastion.
 
@@ -333,6 +339,12 @@ class ConnectionService(ConnectionServiceInterface):
         )
         if profile.bastion_key:
             parts.extend(['-o', 'IdentitiesOnly=yes'])
+        elif identity_agent:
+            # The ProxyCommand is a separate SSH process. Give it the same
+            # process-scoped agent explicitly; do not alter SSH_AUTH_SOCK.
+            parts.extend(
+                ['-o', shlex.quote(f'IdentityAgent={identity_agent}'), '-o', 'IdentitiesOnly=yes']
+            )
         # Add keepalive options on the bastion hop so long operations
         # don't get reaped by the gateway firewall before the inner
         # connection completes.

@@ -43,8 +43,8 @@ def test_all_css_files_under_styles_root():
 
 
 def test_css_files_list_has_expected_count():
-    """CSS_FILES must list exactly 31 entries (one per split slice)."""
-    assert len(CSS_FILES) == 31, f"Expected 31 CSS files, got {len(CSS_FILES)}"
+    """CSS_FILES must list the 32 maintained split stylesheet slices."""
+    assert len(CSS_FILES) == 32, f"Expected 32 CSS files, got {len(CSS_FILES)}"
 
 
 # ---------------------------------------------------------------------------
