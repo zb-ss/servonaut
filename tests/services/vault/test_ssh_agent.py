@@ -361,3 +361,51 @@ def test_private_agent_authenticates_with_public_identity_file_only(tmp_path, mo
         sshd.terminate()
         sshd.wait(timeout=10)
         shutil.rmtree(servonaut_home, ignore_errors=True)
+
+
+def test_default_start_with_a_long_home_uses_a_private_temporary_socket_directory(tmp_path, monkeypatch):
+    home = tmp_path / ("home-" + "h" * 90)
+    home.mkdir(mode=0o700)
+    started = []
+
+    def run(command, **_):
+        if command[:2] == ["ssh-agent", "-a"]:
+            started.append(Path(command[2]))
+            return SimpleNamespace(returncode=0, stdout=f"SSH_AUTH_SOCK={command[2]}; SSH_AGENT_PID=123;")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.Path.home", lambda: home)
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.shutil.which", lambda _: "/usr/bin/ssh-agent")
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.subprocess.run", run)
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.os.kill", lambda *_: None)
+
+    agent = PrivateSshAgent.start()
+
+    (socket_path,) = started
+    directory = socket_path.parent
+    assert len(os.fsencode(socket_path)) <= 107
+    assert directory.parent == Path(os.path.realpath(tempfile.gettempdir()))
+    assert directory.name.startswith("svn-agent-")
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert directory.stat().st_uid == os.getuid()
+    agent.close()
+    assert not directory.exists()
+
+
+def test_a_failed_start_removes_its_temporary_socket_directory(tmp_path, monkeypatch):
+    home = tmp_path / ("home-" + "h" * 90)
+    home.mkdir(mode=0o700)
+    seen = []
+
+    def run(command, **_):
+        seen.append(Path(command[2]).parent)
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.Path.home", lambda: home)
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.shutil.which", lambda _: "/usr/bin/ssh-agent")
+    monkeypatch.setattr("servonaut.services.vault.ssh_agent.subprocess.run", run)
+
+    with pytest.raises(PrivateSshAgentError, match="Could not start"):
+        PrivateSshAgent.start()
+
+    assert seen and not seen[0].exists()
