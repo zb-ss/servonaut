@@ -2297,3 +2297,33 @@ def test_public_docs_describe_preview_without_download_instructions() -> None:
     assert "not installers, signed releases, or supported downloads" in guide
     assert "Desktop rendering" in guide
     assert "voice runtimes" in guide
+
+
+def test_qualification_builds_with_the_python_version_its_baseline_records() -> None:
+    # A floating "3.12" picks up each runner image's newest patch release,
+    # which the size baseline's exact toolchain match then refuses.
+    qualify = WORKFLOW.split("\n  qualify:\n", 1)[1]
+    assert "python-version: ${{ steps.baseline-python.outputs.version }}" in qualify
+    assert "python-version: '3.12'" not in qualify
+    assert qualify.index("Read the baseline Python version") < qualify.index("actions/setup-python@")
+
+
+@pytest.mark.skipif(
+    not any(Path(directory, "jq").exists() for directory in os.defpath.split(os.pathsep)),
+    reason="jq is not installed",
+)
+def test_baseline_python_step_reads_each_targets_exact_version(tmp_path: Path) -> None:
+    block = f"cd {shlex.quote(str(ROOT))}\n" + _workflow_run_block("Read the baseline Python version")
+    baselines = json.loads(
+        (ROOT / "packaging" / "standalone_cli" / "size-baselines.json").read_text(encoding="utf-8")
+    )["baselines"]
+
+    for baseline in baselines.values():
+        output = tmp_path / f"{baseline['target']}.out"
+        completed = _run_workflow_block(block, {"TARGET": baseline["target"], "GITHUB_OUTPUT": str(output)})
+        assert completed.returncode == 0, completed.stderr
+        assert output.read_text(encoding="utf-8") == f"version={baseline['toolchain']['python_version']}\n"
+
+    refused = _run_workflow_block(block, {"TARGET": "no-such-target", "GITHUB_OUTPUT": str(tmp_path / "none.out")})
+    assert refused.returncode == 1
+    assert "expected exactly one Python 3.12.x size baseline for no-such-target" in refused.stderr

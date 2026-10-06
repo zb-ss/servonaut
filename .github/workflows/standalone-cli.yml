@@ -54,9 +54,29 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - name: Read the baseline Python version
+        id: baseline-python
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # The size baseline records the exact interpreter it was measured
+          # with, and qualification refuses any other patch release. Build
+          # with that version instead of whatever 3.12.x the runner image
+          # carries; moving to a new patch release is a baseline update.
+          VERSIONS="$(jq -r --arg target "${TARGET}" \
+            '[.baselines[] | select(.target == $target) | .toolchain.python_version] | .[]' \
+            packaging/standalone_cli/size-baselines.json | tr -d '\r')"
+          if [[ "$(printf '%s\n' "${VERSIONS}" | grep -c .)" != "1" || ! "${VERSIONS}" =~ ^3\.12\.[0-9]+$ ]]; then
+            echo "expected exactly one Python 3.12.x size baseline for ${TARGET}" >&2
+            exit 1
+          fi
+          echo "version=${VERSIONS}" >> "${GITHUB_OUTPUT}"
+      - name: Set up the baseline Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ steps.baseline-python.outputs.version }}
           architecture: ${{ matrix.python-architecture }}
       - name: Assert target runtime
         id: runtime
