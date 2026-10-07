@@ -37,6 +37,7 @@ from .identity_client import IdentityClient
 from .identity_store import IdentityStore
 from .items import VaultItemService
 from .local_state import VaultLocalState
+from . import onboarding
 from .known_hosts import TeamKnownHosts
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
@@ -145,6 +146,9 @@ class VaultCommandService:
         self.auth = auth
         self.config = config
         settings = config.vault
+        # A store built here follows the Team Vault setting as it changes; an
+        # injected one keeps its own key-storage policy.
+        self._owns_store = store is None
         self.store = store or IdentityStore(allow_file_key_store=settings.allow_file_key_store)
         self.identity = IdentityClient(api, self.store, timeout=settings.request_timeout_seconds)
         self.state = VaultLocalState()
@@ -198,6 +202,11 @@ class VaultCommandService:
     def store_path(self) -> Path:
         return Path(getattr(self.store, "_path", Path.home() / ".servonaut" / "vault" / "vault_keys.json"))
 
+    def _apply_key_store_setting(self) -> None:
+        """Pick up a Settings change to file key storage without a restart."""
+        if self._owns_store:
+            self.store.allow_file_key_store = bool(self.config.vault.allow_file_key_store)
+
     def unlock_existing_identity(self) -> bool:
         """Unlock persisted custody only after the caller opts into vault use.
 
@@ -205,6 +214,7 @@ class VaultCommandService:
         can still offer setup.  A present but invalid or account-mismatched
         store is a hard failure and must never be treated as a new device.
         """
+        self._apply_key_store_setting()
         local = self.store.identity
         if local is None:
             if not self.store.has_persisted_identity():
@@ -362,6 +372,7 @@ class VaultCommandService:
         self, *, device_name: str | None, platform: str | None,
         recovery_confirmation: Callable[[str], bool | Awaitable[bool]],
     ) -> dict[str, Any]:
+        self._apply_key_store_setting()
         if self.store.identity is not None:
             raise VaultUserError("a vault identity is already unlocked")
         # A new facade starts locked. Never replace that ciphertext based on a
@@ -375,13 +386,25 @@ class VaultCommandService:
             raise VaultUserError("a vault identity already exists; add this device instead")
         user_id = await self._user_id()
         local = self.store.create(identity_id=str(uuid.uuid4()), user_id=user_id)
-        recovery = crypto.format_recovery_key(secrets.token_bytes(32))
-        if not await self._confirmed(recovery_confirmation, recovery):
+        try:
+            recovery = crypto.format_recovery_key(secrets.token_bytes(32))
+            confirmed = await self._confirmed(recovery_confirmation, recovery)
+        except BaseException:
+            # Cancelled or failed before anything was saved: forget the generated
+            # identity, or every later setup in this session is refused.
+            self.store.wipe()
+            raise
+        if not confirmed:
             self.store.wipe()
             raise VaultUserError("recovery key was not confirmed")
         # Persist before the remote mutation so a successful enrolment cannot
         # leave the only device without durable encrypted custody.
-        self.store.save(local)
+        try:
+            self.store.save(local)
+        except BaseException:
+            # For example no keyring yet: nothing was enrolled, so start clean.
+            self.store.wipe()
+            raise
         try:
             return await self.identity.enroll(
                 recovery_key=recovery, device_name=device_name or platform_module.node() or "Servonaut",
@@ -389,6 +412,7 @@ class VaultCommandService:
             )
         except APIError as exc:
             if exc.code != "identity_exists":
+                await self._discard_unenrolled(local)
                 raise
             # The status preflight can race another first-device enrolment.
             # This store contains only the local identity generated above, so
@@ -397,8 +421,29 @@ class VaultCommandService:
             raise VaultUserError(
                 "a vault identity was created on another device; add this device instead"
             ) from exc
+        except Exception:
+            await self._discard_unenrolled(local)
+            raise
+
+    async def _discard_unenrolled(self, local: Any) -> None:
+        """Drop saved custody once the service shows it never received this identity.
+
+        An enrolment error can arrive after the service stored the identity, so
+        custody stays unless a fresh status read proves the enrolment did not
+        happen; otherwise the next setup would refuse forever.
+        """
+        try:
+            remote = await self.identity.status()
+        except Exception:
+            return
+        identity = remote.get("identity") if isinstance(remote, Mapping) else None
+        if isinstance(identity, Mapping) and identity.get("identity_id") == local.identity_id:
+            return
+        self.store.wipe()
 
     async def confirm_identity(self) -> dict[str, Any]:
+        if self.store.identity is None:
+            raise VaultUserError(NO_LOCAL_IDENTITY)
         return await self.identity.confirm_identity()
 
     async def list_devices(self) -> list[dict[str, Any]]:
@@ -411,6 +456,7 @@ class VaultCommandService:
         self, *, recovery_key: str, device_name: str | None, platform: str | None,
     ) -> dict[str, Any]:
         """Restore an identity bundle into a freshly registered local device."""
+        self._apply_key_store_setting()
         user_id = await self._user_id()
         self.identity.begin_pending_device()
         registered = await self.identity.register_pending_device(
@@ -439,6 +485,7 @@ class VaultCommandService:
         new device keys stay in this process until approval succeeds or a
         terminal response destroys them.
         """
+        self._apply_key_store_setting()
         user_id = await self._user_id()
         pending = self.identity.begin_pending_device()
         try:
@@ -585,6 +632,42 @@ class VaultCommandService:
 
     async def list_vaults(self) -> list[dict[str, Any]]:
         return await self.vaults.list_vaults()
+
+    def can_create_personal_vault(self) -> bool:
+        """Whether this account's plan includes a personal vault."""
+        has_feature = getattr(self.auth, "has_feature", None)
+        return bool(callable(has_feature) and has_feature("personal_vault"))
+
+    async def next_step(self, status: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """What this user should do next with their vault (fixed text, safe to show)."""
+        if status is None:
+            status = await self.status()
+        step = onboarding.identity_step(status)
+        if step is None:
+            step = onboarding.vault_step(
+                await self.list_vaults(), can_create_personal=self.can_create_personal_vault()
+            )
+        return step.to_dict()
+
+    async def creatable_vaults(self, vaults: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Vaults this user may create now: a personal one, and one per team they run.
+
+        The service allows one personal vault per account and one vault per team,
+        so targets that already have a vault are left out.
+        """
+        options: list[dict[str, Any]] = []
+        if self.can_create_personal_vault() and not any(row.get("kind") == "personal" for row in vaults):
+            options.append({"team": None, "label": "Personal vault"})
+        teams_with_vault = {
+            team.get("slug") for row in vaults
+            if row.get("kind") == "team" and isinstance(team := row.get("team"), Mapping)
+        }
+        for team in await self.teams.list_teams():
+            slug = team.get("slug") if isinstance(team, Mapping) else None
+            if not isinstance(slug, str) or slug in teams_with_vault or team.get("role") not in {"owner", "admin"}:
+                continue
+            options.append({"team": slug, "label": f"Team vault for {team.get('name') or slug}"})
+        return options
 
     async def get_vault(self, *, vault_id: str) -> dict[str, Any]:
         return await self.vaults.get_vault(vault_id)
@@ -1953,7 +2036,12 @@ class VaultCommandService:
 
     async def _team_id(self, team: str) -> str:
         """The canonical id of the team with this slug (vault and CA hashes bind the id)."""
-        detail = await self.teams.get_team(team)
+        try:
+            detail = await self.teams.get_team(team)
+        except APIError as exc:
+            if exc.status in {403, 404}:
+                raise VaultUserError(f"team {team!r} was not found among your teams") from exc
+            raise
         team_id = detail.get("id") or detail.get("team_id")
         if not isinstance(team_id, str):
             raise RuntimeError("team response did not include a canonical id")

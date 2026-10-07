@@ -193,6 +193,10 @@ class VaultCloud:
             self._enrolments: dict[str, dict[str, Any]] = {}
             # Serials count from 1 per team; user and host certificates share them.
             self._serial = 0
+            # How a new identity is confirmed: "auto" (confirmed at enrolment),
+            # "email" (pending until the e-mailed link is opened) or "mfa"
+            # (pending until the confirmation request, made with a fresh second factor).
+            self.identity_confirmation = "auto"
 
     # Controls are intentionally not routes. They provide generic, public-safe
     # fixture names and reveal only public/key-management data to journeys.
@@ -484,18 +488,56 @@ class VaultCloud:
             except BadSignatureError:
                 return 422, {"error": {"code": "invalid_signature", "message": "Identity enrolment signature did not verify"}}
             fingerprint = _digest("svn-vi-fp-v1", sig_pk, enc_pk)
+            confirmed = self.identity_confirmation == "auto"
             identity = {"identity_id": identity_id, "user_id": user_id, "sig_public_key": _b64(sig_pk),
                         "enc_public_key": _b64(enc_pk), "fingerprint": fingerprint.hex(),
                         "self_signature": _b64(self_sig), "alg": "svn-v1", "status": "active",
-                        "trust_status": "confirmed", "grantable": True, "confirmed_via": "fixture", "created_at": _now()}
+                        "trust_status": "confirmed" if confirmed else "pending_confirmation",
+                        "grantable": confirmed, "confirmed_via": "fixture" if confirmed else None, "created_at": _now()}
             device = _Device(user_id, device_id, str(device_body.get("name") or "device"),
                              str(device_body.get("platform") or "other"), str(device_body.get("client") or "cli"),
                              device_sig, device_enc, status="active", activation_method="first_device",
                              created_at=_now(), activated_at=_now())
             self._identities[user_id], self._devices[device_id] = identity, device
             self._recovery_wraps[user_id] = {"blob": blob, "created_at": _now(), "last_fetched_at": None}
+            confirmation = {"state": "confirmed", "expires_at": None} if confirmed else self._link_sent("pending_confirmation")
             return 201, {"identity": self._public_identity(identity), "device": self._public_device(device, device_id),
-                         "confirmation": {"state": "confirmed", "expires_at": None}}
+                         "confirmation": confirmation}
+
+    @staticmethod
+    def _link_sent(state: str) -> dict[str, Any]:
+        expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=24)
+        return {"state": state, "expires_at": expires.isoformat()}
+
+    def require_confirmation(self, user_id: int) -> None:
+        """Control: put an existing identity back to waiting for confirmation."""
+        with self._lock:
+            identity = self._identity(user_id)
+            if identity is None:
+                raise KeyError(user_id)
+            identity.update({"trust_status": "pending_confirmation", "grantable": False, "confirmed_via": None})
+
+    def confirm_identity(self, user_id: int, *, via: str = "email") -> None:
+        """Control: the user opened the e-mailed link (or confirmed with MFA)."""
+        with self._lock:
+            identity = self._identity(user_id)
+            if identity is None:
+                raise KeyError(user_id)
+            identity.update({"trust_status": "confirmed", "grantable": True, "confirmed_via": via})
+
+    def request_confirmation(self, user_id: int) -> tuple[int, dict[str, Any]]:
+        """``POST …/identity/me/confirmation``: confirm with fresh MFA, else e-mail a new link."""
+        with self._lock:
+            identity = self._identity(user_id)
+            if identity is None:
+                return 409, {"error": {"code": "no_identity", "message": "No active identity"}}
+            if identity.get("trust_status") == "compromised":
+                return 409, {"error": {"code": "identity_compromised", "message": "Identity is compromised"}}
+            if identity.get("trust_status") != "confirmed" and self.identity_confirmation in {"mfa", "auto"}:
+                identity.update({"trust_status": "confirmed", "grantable": True, "confirmed_via": "mfa"})
+            if identity.get("trust_status") == "confirmed":
+                return 200, {"identity": self._public_identity(identity), "confirmation": {"state": "confirmed", "expires_at": None}}
+            return 200, {"identity": self._public_identity(identity), "confirmation": self._link_sent("email_sent")}
 
     def register_device(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         with self._lock:
@@ -721,6 +763,11 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
     async def identity_me(request: web.Request, device: Optional[_Device]) -> web.Response:
         return web.json_response(vault.identity_payload(request.headers.get("X-Servonaut-Device")))
 
+    async def identity_confirmation(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
+        status, body = vault.request_confirmation(device.user_id)
+        return web.json_response(body, status=status)
+
     async def identity_enrol(request: web.Request, device: Optional[_Device]) -> web.Response:
         body = await json_body(request)
         candidate = body.get("device")
@@ -907,11 +954,19 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
             return _not_found()
         return web.json_response(vault._vault_payload(item, device.user_id))
 
+    def _no_grant(vault_row: dict[str, Any], user_id: int) -> Optional[web.Response]:
+        # The service refuses item reads to a team member who holds no grant yet.
+        if vault_row["kind"] == "team" and vault_row["grants"].get(user_id) is None:
+            return _error("forbidden", "You have not been granted access to this vault yet.", 403)
+        return None
+
     async def item_list(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
         vault_id = request.match_info["vault_id"]
         if vault_id not in vault._vaults or not vault._role(vault._vaults[vault_id], device.user_id):
             return _not_found()
+        if (refused := _no_grant(vault._vaults[vault_id], device.user_id)) is not None:
+            return refused
         include_deleted = request.query.get("include_deleted") == "1"
         items = [copy.deepcopy(item) for item in vault._items.get(vault_id, {}).values() if include_deleted or not item.get("deleted_at")]
         return web.json_response({"data": items, "meta": {"next_cursor": None}})
@@ -921,6 +976,8 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
         vault_id, item_id = request.match_info["vault_id"], request.match_info["item_id"]
         if vault_id not in vault._vaults or not vault._role(vault._vaults[vault_id], device.user_id):
             return _not_found()
+        if (refused := _no_grant(vault._vaults[vault_id], device.user_id)) is not None:
+            return refused
         item = vault._items.get(vault_id, {}).get(item_id)
         return web.json_response(copy.deepcopy(item)) if item else _not_found()
 
@@ -1234,6 +1291,7 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
     # Bootstrap identity read is the only unsigned vault route.
     router.add_get(f"{VAULT}/identity/me", route(identity_me, unsigned=True))
     router.add_post(f"{VAULT}/identity", route(identity_enrol, unsigned=True))
+    router.add_post(f"{VAULT}/identity/me/confirmation", route(identity_confirmation))
     router.add_get(f"{VAULT}/identity/me/recovery-wrap", route(recovery_get, pending=True))
     router.add_put(f"{VAULT}/identity/me/recovery-wrap", route(recovery_put))
     # The registering device is not stored yet; its registration signature is

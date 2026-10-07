@@ -55,6 +55,8 @@ def test_inactive_device_with_unknown_status_falls_back_to_code() -> None:
     ("identity_unconfirmed", "vault identity is not confirmed yet"),
     ("mfa_required", "needs a recent MFA sign-in"),
     ("step_up_required", "needs a recent MFA sign-in"),
+    ("vault_exists", "one personal vault per account and one vault per team"),
+    ("no_identity", "does not hold your current vault identity"),
 ])
 def test_actionable_refusals_say_what_to_do(code: str, expected: str) -> None:
     exc = APIError(code=code, message="server text", status=409)
@@ -88,3 +90,16 @@ def test_a_generic_wrapper_shows_the_user_safe_reason_it_was_raised_from() -> No
             raise RuntimeError("wrapper") from inner
     except RuntimeError as outer:
         assert vault_failure_reason(outer) == "RuntimeError"
+
+
+@pytest.mark.parametrize(("feature", "expected"), [
+    ("personal_vault", "your plan does not include a personal vault"),
+    ("team_vault", "your plan does not include a team vault"),
+    ("ssh_ca", "your plan does not include SSH certificates"),
+    ("<b>other</b>", "your plan does not include this feature"),
+])
+def test_plan_refusal_names_the_missing_feature(feature: str, expected: str) -> None:
+    exc = APIError(code="entitlement_required", message="server text", status=402,
+                   details={"feature": feature, "upgrade_url": "https://example.com/upgrade"})
+
+    assert vault_failure_reason(exc) == expected
