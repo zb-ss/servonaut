@@ -254,18 +254,30 @@ async def test_import_refreshes_selected_vault_counts_before_bitwarden_binding_o
 
 @pytest.mark.asyncio
 async def test_setup_result_is_purposeful_metadata_not_raw_identity_payload() -> None:
-    class Service:
+    class Service(_OnboardingService):
+        def __init__(self) -> None:
+            super().__init__(trust="pending_confirmation")
+            self.enrolled = False
+
+        async def status(self):
+            if not self.enrolled:
+                return {"remote": {"identity": None}, "local_identity": None}
+            return await super().status()
+
         async def setup(self, **_kwargs):
-            return {"identity": {"identity_id": "not-for-status", "sig_public_key": "public-data"}}
+            self.enrolled = True
+            return {"identity": {"identity_id": "not-for-status", "sig_public_key": "public-data"},
+                    "confirmation": {"state": "pending_confirmation"}}
 
     app = _VaultHost(Service())
     async with app.run_test(size=(160, 50)) as pilot:
-        await pilot.pause()
         screen = app.screen
         assert isinstance(screen, VaultScreen)
+        await wait_until(lambda: "No vault identity exists yet" in _status_text(screen))
         await screen._setup(lambda _key: True)
-        status = str(screen.query_one("#vault_status", Static).render())
-        assert "Vault identity setup completed" in status
+        status = _status_text(screen)
+        # Setup goes straight on to the next step instead of asking for a refresh.
+        assert "Confirm your vault identity" in status
         assert "not-for-status" not in status
         assert not screen.query_one("#vault_items", Button).disabled
 
@@ -409,3 +421,204 @@ def test_recovery_modal_challenges_only_secret_groups(monkeypatch) -> None:
 def test_recovery_modal_requires_two_secret_groups() -> None:
     assert VaultRecoveryConfirmModal("SVRK1-ABCDE")._checks == []
 
+
+
+class _OnboardingService:
+    """A signed-in user with a local identity, for the onboarding steps."""
+
+    def __init__(self, *, trust="confirmed", vaults=None, can_create_personal=True, options=None, confirm_state="confirmed"):
+        self.trust = trust
+        self.vaults = list(vaults or [])
+        self.can_create = can_create_personal
+        self.options = list(options if options is not None else [{"team": None, "label": "Personal vault"}])
+        self.confirm_state = confirm_state
+        self.created: list[dict] = []
+        self.item_calls = 0
+
+    async def status(self):
+        return {"remote": {"identity": {"identity_id": "i", "trust_status": self.trust}},
+                "local_identity": "local-fingerprint", "fingerprint": "local-fingerprint"}
+
+    async def list_vaults(self):
+        return list(self.vaults)
+
+    def can_create_personal_vault(self):
+        return self.can_create
+
+    async def confirm_identity(self):
+        if self.confirm_state == "confirmed":
+            self.trust = "confirmed"
+        return {"confirmation": {"state": self.confirm_state, "expires_at": None}}
+
+    async def creatable_vaults(self, *, vaults):
+        return list(self.options)
+
+    async def create_vault(self, *, team, name, grant_policy):
+        self.created.append({"team": team, "name": name, "grant_policy": grant_policy})
+        self.vaults.append({"vault_id": "v-new", "kind": "personal", "name": "Personal", "my_role": "owner",
+                            "my_grant": {"version": 1}, "counts": {"items": 0, "open_exposures": 0}})
+        return self.vaults[-1]
+
+    async def list_items(self, **_kwargs):
+        self.item_calls += 1
+        return {"data": []}
+
+
+def _status_text(screen) -> str:
+    return str(screen.query_one("#vault_status", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_identity_shows_how_to_confirm_it_and_confirms_here() -> None:
+    service = _OnboardingService(trust="pending_confirmation")
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Confirm your vault identity" in _status_text(screen))
+        assert not screen.query_one("#vault_confirm_identity", Button).disabled
+
+        screen.query_one("#vault_confirm_identity", Button).press()
+
+        await wait_until(lambda: "Confirm your vault identity" not in _status_text(screen)
+                         and "Create your personal vault" in _status_text(screen))
+
+
+@pytest.mark.asyncio
+async def test_confirmation_by_e_mail_says_to_open_the_link_then_refresh() -> None:
+    service = _OnboardingService(trust="pending_confirmation", confirm_state="email_sent")
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Confirm your vault identity" in _status_text(screen))
+
+        screen.query_one("#vault_confirm_identity", Button).press()
+
+        await wait_until(lambda: "We e-mailed you a new confirmation link" in _status_text(screen))
+
+
+@pytest.mark.asyncio
+async def test_create_vault_offers_the_personal_vault_and_creates_it() -> None:
+    from servonaut.screens.vault import VaultCreateModal
+
+    service = _OnboardingService()
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Create your personal vault" in _status_text(screen))
+
+        screen.query_one("#vault_create", Button).press()
+        # The modal focuses its picker once its widgets are mounted; press, not
+        # click, because a click aimed while it lays out can land elsewhere.
+        await wait_until(lambda: isinstance(app.screen, VaultCreateModal) and app.screen.focused is not None
+                         and app.screen.focused.id == "vault_create_target")
+        app.screen.query_one("#vault_create_confirm", Button).press()
+
+        await wait_until(lambda: service.created == [{"team": None, "name": None, "grant_policy": "auto"}])
+        await wait_until(lambda: app.screen is screen and screen.query_one("#vault_table", DataTable).row_count == 1)
+        assert "Create your personal vault" not in _status_text(screen)
+
+
+@pytest.mark.asyncio
+async def test_create_vault_with_nothing_to_create_explains_why() -> None:
+    service = _OnboardingService(options=[], vaults=[{"vault_id": "v", "kind": "personal", "my_grant": {"version": 1}}])
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Identity fingerprint" in _status_text(screen))
+
+        screen.query_one("#vault_create", Button).press()
+
+        await wait_until(lambda: "There is no vault to create" in _status_text(screen))
+        assert service.created == []
+
+
+@pytest.mark.asyncio
+async def test_member_without_a_grant_is_told_access_is_pending_instead_of_a_refusal() -> None:
+    vault_row = {"vault_id": "team-v", "kind": "team", "name": "Ops", "my_role": "member", "my_grant": None,
+                 "counts": {"items": 2, "open_exposures": 0}}
+    service = _OnboardingService(vaults=[vault_row])
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Waiting for access to your team's vault" in _status_text(screen))
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 1)
+
+        await pilot.click("#vault_items")
+        await pilot.pause()
+
+        assert "Waiting for access to your team's vault" in _status_text(screen)
+        assert service.item_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_pressing_setup_twice_keeps_one_setup_and_one_recovery_dialog() -> None:
+    from servonaut.screens.vault import VaultRecoveryConfirmModal
+
+    class Service(_VaultStatusService):
+        def __init__(self) -> None:
+            super().__init__(remote_identity=None)
+            self.setup_calls = 0
+            self.outcomes: list[bool] = []
+
+        async def setup(self, *, device_name, platform, recovery_confirmation):
+            self.setup_calls += 1
+            confirmed = await recovery_confirmation("SVRK1-AAAAA-BBBBB-CCCCC")
+            self.outcomes.append(confirmed)
+            if not confirmed:
+                raise RuntimeError("recovery key was not confirmed")
+            return {"confirmation": {"state": "confirmed"}}
+
+    service = Service()
+    app = _VaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "No vault identity exists yet" in _status_text(screen))
+        setup = screen.query_one("#vault_setup", Button)
+
+        setup.press()
+        setup.press()
+        await wait_until(lambda: isinstance(app.screen, VaultRecoveryConfirmModal))
+        await pilot.pause()
+
+        assert service.setup_calls == 1
+        assert sum(isinstance(item, VaultRecoveryConfirmModal) for item in app.screen_stack) == 1
+        app.screen.dismiss(False)
+        await wait_until(lambda: service.outcomes == [False])
+        # Once that setup has finished, Setup works again.
+        await wait_until(lambda: not screen._setup_running)
+        setup.press()
+        await wait_until(lambda: service.setup_calls == 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_recovery_key_breaks_only_between_groups(size) -> None:
+    from servonaut.screens.vault import VaultRecoveryConfirmModal
+    from servonaut.services.vault.crypto import format_recovery_key
+
+    key = format_recovery_key(bytes(range(32)))
+
+    class Host(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.push_screen(VaultRecoveryConfirmModal(key))
+
+    app = Host()
+    async with app.run_test(size=size) as pilot:
+        await wait_until(lambda: isinstance(app.screen, VaultRecoveryConfirmModal))
+        await pilot.pause()
+        shown = app.screen.query_one("#vault_recovery_key", Static)
+        rows = ["".join(segment.text for segment in line) for line in shown.render_lines(shown.region.reset_offset)]
+        text_rows = [row.strip("│ ") for row in rows if any(character.isalnum() for character in row)]
+        groups = key.split("-")
+        assert "".join(text_rows) == key
+        for row in text_rows:
+            # Every visual line holds whole groups only.
+            assert all(part in groups for part in row.strip("-").split("-")), row

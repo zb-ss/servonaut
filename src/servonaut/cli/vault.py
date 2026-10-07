@@ -306,6 +306,40 @@ def _human_lines(value: Any, *, revealed: bool, prefix: str = "") -> list[str]:
     return [f"{prefix.rstrip('.')}: {value}"]
 
 
+async def _next_step(services: Any, status: Any) -> Optional[dict[str, Any]]:
+    """The user's next vault step; a status read never fails because of it."""
+    try:
+        step = await _invoke(services, "next_step", status=status)
+    except Exception:
+        return None
+    return dict(step) if isinstance(step, Mapping) else None
+
+
+def _print_next_step(step: Optional[Mapping[str, Any]]) -> None:
+    if not step or step.get("code") == "ready":
+        return
+    print(f"Next step: {step.get('message')}")
+    if step.get("command"):
+        print(f"  Run: {step['command']}")
+
+
+def _print_confirmation(result: Any, *, after_setup: bool) -> None:
+    """Say whether the identity is confirmed, and how to confirm it if not."""
+    confirmation = result.get("confirmation") if isinstance(result, Mapping) else None
+    state = confirmation.get("state") if isinstance(confirmation, Mapping) else None
+    if state == "confirmed":
+        print("Your vault identity is confirmed.")
+    elif state == "email_sent":
+        expires = confirmation.get("expires_at")
+        until = f" (valid until {expires})" if isinstance(expires, str) and expires else ""
+        print(f"We e-mailed you a new confirmation link{until}. Open it to confirm your vault identity.")
+        print("  To confirm here instead, sign in again with two-factor (`servonaut login`) "
+              "and run `servonaut vault identity confirm`.")
+    elif state == "pending_confirmation" and after_setup:
+        print("Confirm your vault identity: open the link we e-mailed to you, or run `servonaut login` "
+              "again (with two-factor) and then `servonaut vault identity confirm`.")
+
+
 def _confirm(args: argparse.Namespace, prompt: str) -> bool:
     if getattr(args, "yes", False):
         return True
@@ -377,7 +411,13 @@ async def _handle(args: argparse.Namespace) -> int:
     try:
         services = _services()
         if command == "status":
-            _print(await _invoke(services, "status"), json_output=output)
+            status = await _invoke(services, "status")
+            step = await _next_step(services, status)
+            if output:
+                _print({**status, "next_step": step} if isinstance(status, Mapping) else status, json_output=True)
+            else:
+                _print(status, json_output=False)
+                _print_next_step(step)
         elif command == "setup":
             result = await _invoke(
                 services,
@@ -387,11 +427,16 @@ async def _handle(args: argparse.Namespace) -> int:
                 recovery_confirmation=_confirm_recovery_key,
             )
             _print(result, json_output=output)
+            if not output:
+                _print_confirmation(result, after_setup=True)
         elif command == "recover":
             recovery_key = _read_secret("Vault recovery key: ")
             _print(await _invoke(services, "recover", recovery_key=recovery_key, device_name=args.device_name, platform=args.platform), json_output=output)
         elif command == "identity":
-            _print(await _invoke(services, "confirm_identity"), json_output=output)
+            result = await _invoke(services, "confirm_identity")
+            _print(result, json_output=output)
+            if not output:
+                _print_confirmation(result, after_setup=False)
         elif command == "reset-identity":
             if not _confirm(args, "Resetting an identity can remove vault access"):
                 return _EXIT_ABORTED

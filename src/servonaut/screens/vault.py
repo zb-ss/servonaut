@@ -17,10 +17,11 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Footer, Input, SelectionList, Static
+from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.services.vault import onboarding
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -103,6 +104,13 @@ class VaultSecretPromptModal(ModalScreen[Optional[str]]):
             self.dismiss(None)
 
 
+def _grouped_key(key: str, per_line: int = 6) -> str:
+    """Break a recovery key only between groups, so no group is split across lines."""
+    groups = [group for group in key.split("-") if group]
+    lines = ["-".join(groups[index : index + per_line]) for index in range(0, len(groups), per_line)]
+    return "-\n".join(lines)
+
+
 class VaultRecoveryConfirmModal(ModalScreen[bool]):
     """Show a recovery key once and require two randomly selected groups."""
 
@@ -123,7 +131,8 @@ class VaultRecoveryConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         fields = [
             Static("[bold]Record this recovery key offline. It will not be shown again.[/bold]"),
-            Static(escape(self._recovery_key), id="vault_recovery_key"),
+            Static(escape(_grouped_key(self._recovery_key)), id="vault_recovery_key"),
+            Static("Groups are counted from the left; the first group is group 1.", id="vault_recovery_hint"),
         ]
         for index in self._checks:
             fields.append(Input(placeholder=f"Re-enter group {index + 1}", password=True, id=f"vault_recovery_group_{index}"))
@@ -304,6 +313,41 @@ class VaultImportedTeamBindingModal(ModalScreen[Optional[dict[str, str]]]):
         self.dismiss({"team": team, "server_id": server_id, "login": login} if team and server_id else None)
 
 
+class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
+    """Pick which vault to create: a personal one, or one for a team you run."""
+
+    def __init__(self, options: list[Mapping[str, Any]]) -> None:
+        super().__init__()
+        self._options = list(options)
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield Vertical(
+            Static("[bold]Create a vault[/bold]", id="vault_create_title"),
+            Static(
+                "Your Servonaut creates the vault key on this device and encrypts everything with it; "
+                "the service only stores what it cannot read.",
+                id="vault_create_text",
+            ),
+            Select(
+                [(escape(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
+                value=0, allow_blank=False, id="vault_create_target",
+            ),
+            Horizontal(Button("Cancel", id="vault_create_cancel"), Button("Create", id="vault_create_confirm")),
+            id="vault_create_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#vault_create_target", Select).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "vault_create_confirm":
+            self.dismiss(None)
+            return
+        index = self.query_one("#vault_create_target", Select).value
+        self.dismiss(self._options[index] if isinstance(index, int) and 0 <= index < len(self._options) else None)
+
+
 class VaultScreen(Screen):
     """Full-screen vault metadata, device state, and exposure entry point."""
 
@@ -317,13 +361,14 @@ class VaultScreen(Screen):
     ]
 
     _READY_ACTIONS = (
-        "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
+        "vault_confirm_identity", "vault_create", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
         "vault_rotate_exposure", "vault_devices", "vault_approve", "vault_recovery_rotate",
         "vault_reset", "vault_import", "vault_roster", "vault_grants", "vault_rotate",
     )
 
     def __init__(self) -> None:
         super().__init__()
+        self._setup_running = False
         self._vaults: list[dict[str, Any]] = []
         self._items: list[dict[str, Any]] = []
         self._devices: list[dict[str, Any]] = []
@@ -347,6 +392,8 @@ class VaultScreen(Screen):
                     with Horizontal(id="vault_actions"):
                         yield Button("Refresh", id="vault_refresh")
                         yield Button("Setup", id="vault_setup")
+                        yield Button("Confirm identity", id="vault_confirm_identity")
+                        yield Button("Create vault", id="vault_create")
                         yield Button("Items", id="vault_items")
                         yield Button("Reveal", id="vault_reveal")
                         yield Button("Exposures", id="vault_exposures")
@@ -550,9 +597,30 @@ class VaultScreen(Screen):
         fingerprint = getattr(status, "fingerprint", None)
         if fingerprint is None and isinstance(status, Mapping):
             fingerprint = status.get("fingerprint") or status.get("local_identity")
-        self._status(f"Identity fingerprint: {fingerprint or 'not enrolled'}")
+        line = f"Identity fingerprint: {fingerprint or 'not enrolled'}"
+        if isinstance(status, Mapping):
+            step = onboarding.next_step(
+                status, self._vaults, can_create_personal=await self._can_create_personal(service)
+            )
+            if step.code != "ready":
+                line += f" · {step.message}"
+        self._status(line)
         self._table_mode = "vaults"
         self._render_vaults()
+
+    @staticmethod
+    async def _can_create_personal(service: Any) -> bool:
+        try:
+            return bool(await _invoke(service, "can_create_personal_vault"))
+        except Exception:
+            return False
+
+    def _refuse_without_access(self, vault: Mapping[str, Any]) -> bool:
+        """Explain a team vault this user holds no key for, instead of a server refusal."""
+        if not onboarding.is_awaiting_access(vault):
+            return False
+        self._status(onboarding.AWAITING_ACCESS.message)
+        return True
 
     def _selected_vault(self) -> Optional[dict[str, Any]]:
         table = self.query_one("#vault_table", DataTable)
@@ -565,6 +633,8 @@ class VaultScreen(Screen):
         actions = {
             "vault_refresh": self.action_refresh,
             "vault_setup": self.action_setup,
+            "vault_confirm_identity": self.action_confirm_identity,
+            "vault_create": self.action_create,
             "vault_items": self.action_items,
             "vault_reveal": self.action_reveal,
             "vault_exposures": self.action_exposures,
@@ -591,11 +661,22 @@ class VaultScreen(Screen):
     def action_setup(self) -> None:
         if not self._allows_identity_action("first_user"):
             return
+        # A second press would cancel the running setup while its recovery-key
+        # dialog is open (vault workers are exclusive), stranding that dialog.
+        if self._setup_running:
+            return
+        self._setup_running = True
         async def confirm(recovery_key: str) -> bool:
             return bool(await self.app.push_screen_wait(VaultRecoveryConfirmModal(recovery_key)))
         self.run_worker(self._setup(confirm), group="vault", exclusive=True)
 
     async def _setup(self, confirmation: Any) -> None:
+        try:
+            await self._run_setup(confirmation)
+        finally:
+            self._setup_running = False
+
+    async def _run_setup(self, confirmation: Any) -> None:
         service = self._service()
         if service is None:
             return
@@ -605,7 +686,65 @@ class VaultScreen(Screen):
             self.app.notify(f"Vault setup failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         self._set_identity_state("ready")
-        self._status("Vault identity setup completed. Select Refresh to load vault metadata.")
+        self.app.notify("Vault identity created.", markup=False)
+        # Reload so the status line shows the next step (confirm, create a vault…).
+        await self._load()
+
+    def action_confirm_identity(self) -> None:
+        if not self._allows_identity_action("ready"):
+            return
+        self.run_worker(self._confirm_identity(), group="vault", exclusive=True)
+
+    async def _confirm_identity(self) -> None:
+        service = self._service()
+        if service is None:
+            return
+        try:
+            result = await _invoke(service, "confirm_identity")
+        except Exception as exc:
+            self.app.notify(f"Could not confirm the vault identity ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        confirmation = result.get("confirmation") if isinstance(result, Mapping) else None
+        state = confirmation.get("state") if isinstance(confirmation, Mapping) else None
+        if state == "email_sent":
+            self._status(
+                "We e-mailed you a new confirmation link. Open it, then choose Refresh. "
+                "To confirm here instead, sign in again with two-factor and choose Confirm identity."
+            )
+            return
+        self.app.notify("Your vault identity is confirmed.", markup=False)
+        await self._load()
+
+    def action_create(self) -> None:
+        if not self._allows_identity_action("ready"):
+            return
+        self.run_worker(self._create_vault(), group="vault", exclusive=True)
+
+    async def _create_vault(self) -> None:
+        service = self._service()
+        if service is None:
+            return
+        try:
+            options = await _invoke(service, "creatable_vaults", vaults=self._vaults)
+        except Exception as exc:
+            self.app.notify(f"Could not check which vaults you can create ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        if not options:
+            self._status(
+                "There is no vault to create: you already have a personal vault or your plan does not include one, "
+                "and each team you own or administer already has a vault."
+            )
+            return
+        choice = await self.app.push_screen_wait(VaultCreateModal(options))
+        if not isinstance(choice, Mapping):
+            return
+        try:
+            await _invoke(service, "create_vault", team=choice.get("team"), name=None, grant_policy="auto")
+        except Exception as exc:
+            self.app.notify(f"Could not create the vault ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        self.app.notify("Vault created.", markup=False)
+        await self._load()
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -616,6 +755,8 @@ class VaultScreen(Screen):
         selected = self._selected_vault()
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
+            return
+        if self._refuse_without_access(selected):
             return
         self._selected_vault_id = str(selected.get("vault_id") or "")
         self.run_worker(self._load_items(), group="vault", exclusive=True)
@@ -955,6 +1096,8 @@ class VaultScreen(Screen):
         selected = self._selected_vault()
         if selected is None:
             self.app.notify("Select a vault first.", severity="warning", markup=False)
+            return
+        if self._refuse_without_access(selected):
             return
         vault_id = str(selected.get("vault_id") or "")
         service = self._service()
