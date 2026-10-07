@@ -165,8 +165,9 @@ class IdentityStore:
         if identity is None:
             raise IdentityStoreError(NO_LOCAL_IDENTITY)
         replacement = replace(identity, device_ssh_private_key=bytearray(private_key))
+        # ``save`` zeroes what the old bundle held but the replacement does not
+        # share: here only the previous device SSH key, never the signing keys.
         self.save(replacement)
-        self._zero_identity(identity)
 
     def adopt(self, identity: LocalIdentity) -> None:
         """Make an already verified recovered/approved identity the current one."""
@@ -224,7 +225,7 @@ class IdentityStore:
         _write_private_json(self._path, document)
         self._identity = identity
         if previous is not None and previous is not identity:
-            self._zero_identity(previous)
+            self._zero_identity(previous, keep=identity)
 
     def load(self) -> LocalIdentity:
         """Unlock stored material and verify all public metadata before use."""
@@ -304,13 +305,21 @@ class IdentityStore:
         self.wipe_memory()
 
     @staticmethod
-    def _zero_identity(identity: LocalIdentity) -> None:
-        secure_zero(identity.signing_seed)
-        secure_zero(identity.encryption_secret_key)
-        secure_zero(identity.device.signing_seed)
-        secure_zero(identity.device.encryption_secret_key)
-        if identity.device_ssh_private_key is not None:
-            secure_zero(identity.device_ssh_private_key)
+    def _zero_identity(identity: LocalIdentity, *, keep: LocalIdentity | None = None) -> None:
+        """Zero *identity*'s secrets, except buffers still used by *keep*.
+
+        A replacement made with ``dataclasses.replace`` shares the unchanged
+        buffers (and the device) with the bundle it replaces; zeroing those
+        would wipe the identity that stays current.
+        """
+        def buffers(value: LocalIdentity) -> list[Any]:
+            return [value.signing_seed, value.encryption_secret_key, value.device.signing_seed,
+                    value.device.encryption_secret_key, value.device_ssh_private_key]
+
+        kept = [] if keep is None else buffers(keep)
+        for buffer in buffers(identity):
+            if buffer is not None and not any(buffer is other for other in kept):
+                secure_zero(buffer)
 
     def _load_or_create_kek(self, user_id: int, device_id: str, *, create: bool = True) -> tuple[bytes, str]:
         env_key = self._environment_key

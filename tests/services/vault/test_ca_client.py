@@ -309,3 +309,35 @@ def _store(private_key: bytes) -> _KeyStore:
     store = _KeyStore()
     store.key = private_key
     return store
+
+
+@pytest.mark.asyncio
+async def test_first_device_key_registration_keeps_later_requests_signed_validly(tmp_path: Path):
+    # The CA client holds the device it was built with. Creating the device
+    # SSH key on first use must not wipe that device's signing key.
+    from nacl.signing import VerifyKey
+
+    from servonaut.services.vault.identity_store import IdentityStore
+
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=base64.b64encode(b"\0" * 32).decode())
+    identity = store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    store.save()
+    device_public = identity.device.signing_public_key
+
+    class SigningApi:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def request_signed(self, method, path, body, device):
+            VerifyKey(device_public).verify(path.encode(), device.sign(path.encode()))  # raises if wiped
+            self.calls.append(f"{method} {path}")
+            return {}
+
+    api = SigningApi()
+    client = CertificateAuthorityClient(api, TEAM, identity.device, identity.device.device_id, store,
+                                        pins=CaPinStore(tmp_path / "pins.json"), certificate_dir=tmp_path / "certs")
+
+    await client.register_device_key()
+    await client.register_device_key()
+
+    assert len(api.calls) == 2
