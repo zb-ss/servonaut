@@ -422,6 +422,43 @@ def test_recovery_modal_requires_two_secret_groups() -> None:
     assert VaultRecoveryConfirmModal("SVRK1-ABCDE")._checks == []
 
 
+def test_rotation_summary_says_what_happened_to_the_exposure() -> None:
+    from servonaut.screens.vault import _rotation_summary
+
+    assert _rotation_summary({"resolved": ["e-1"], "needs_owner": False, "failed": []}).endswith(
+        "1 exposure resolved as rotated."
+    )
+    assert "Ask an owner or admin to resolve the exposure." in _rotation_summary(
+        {"resolved": [], "needs_owner": True, "failed": []}
+    )
+    assert "could not be marked resolved (HTTP 500)" in _rotation_summary(
+        {"resolved": [], "needs_owner": False, "failed": [{"exposure_id": "e-1", "reason": "HTTP 500"}]}
+    )
+    assert _rotation_summary(None) == "SSH key rotation completed on all selected hosts."
+
+
+@pytest.mark.asyncio
+async def test_exposure_table_notes_a_key_replaced_in_the_vault() -> None:
+    class Service(_VaultStatusService):
+        async def list_exposures(self, *, vault_id):
+            return {"data": [
+                {"exposure_id": "e-1", "item_id": "i", "subject": "member", "reason": "member_removed", "key_replaced": True},
+                {"exposure_id": "e-2", "item_id": "j", "subject": "member", "reason": "member_removed", "key_replaced": False},
+            ]}
+
+    service = Service(remote_identity={"identity_id": "remote"}, local_identity="local-fingerprint")
+    app = _VaultHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: "Identity fingerprint" in str(screen.query_one("#vault_status", Static).render()))
+        screen._selected_vault_id = "vault-1"
+        await screen._load_exposures()
+        table = screen.query_one("#vault_table", DataTable)
+        rows = [table.get_row_at(index) for index in range(table.row_count)]
+
+    assert rows[0][2] == "Key replaced in vault; old key may still be on servers"
+    assert rows[1][2] == ""
+
 
 class _OnboardingService:
     """A signed-in user with a local identity, for the onboarding steps."""

@@ -736,13 +736,14 @@ class VaultCommandService:
     async def rotate_ssh_key(
         self, *, vault_id: str, item_id: str, team: str, servers: Sequence[str],
     ) -> dict[str, Any]:
-        """Rotate one bound SSH item across hosts without resolving exposure state.
+        """Rotate one bound SSH item across hosts, then close its exposures.
 
         Every target first receives and proves the new key while its old key
         remains usable. The encrypted item and every signed binding are
         persisted before any exact old key line is removed. Any failure keeps
-        at least one working key on every prepared host and deliberately
-        leaves the server-side exposure open for a user to review.
+        at least one working key on every prepared host and leaves the
+        server-side exposure open for a user to review; only when every host
+        has dropped the old key are the item's open exposures resolved.
         """
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
@@ -852,8 +853,11 @@ class VaultCommandService:
                         if outcome["server_id"] == str(shared["id"]):
                             outcome["status"] = "old_key_removed"
                             break
+                exposures = await self._resolve_rotated_exposures(
+                    vault_id, item_id, [shared for shared, _binding, _executor, _lease in prepared],
+                )
                 return {"rotated": True, "public_fingerprint": new_fingerprint,
-                        "hosts": outcomes, "item": written, "bindings": bindings}
+                        "hosts": outcomes, "item": written, "bindings": bindings, "exposures": exposures}
             except Exception as exc:
                 return {"rotated": False, "public_fingerprint": new_fingerprint,
                         "hosts": outcomes, "error": str(exc)}
@@ -863,6 +867,59 @@ class VaultCommandService:
         finally:
             for index in range(len(new_private)):
                 new_private[index] = 0
+
+    async def _resolve_rotated_exposures(
+        self, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve the item's open exposures as rotated, saying where the old key went.
+
+        The service no longer resolves an exposure when the key is replaced,
+        because the old key may still be on a server. This runs only after
+        every selected host dropped it. Never raises: the rotation itself has
+        already succeeded.
+        """
+        outcome: dict[str, Any] = {"resolved": [], "needs_owner": False, "failed": []}
+        note = "; ".join(
+            f"old key removed from {server.get('name') or server.get('id')} ({str(server.get('id'))[:8]}), "
+            "new-key login verified"
+            for server in servers
+        )[:500]
+        try:
+            listed = await self.list_exposures(vault_id=vault_id)
+        except APIError as exc:
+            if exc.status == 403:
+                outcome["needs_owner"] = True
+            else:
+                outcome["failed"].append({"exposure_id": None, "reason": vault_failure_reason(exc)})
+            return outcome
+        except Exception as exc:
+            outcome["failed"].append({"exposure_id": None, "reason": vault_failure_reason(exc)})
+            return outcome
+        rows = listed.get("data", []) if isinstance(listed, Mapping) else []
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("item_id") != item_id:
+                continue
+            if row.get("status", "open") != "open":
+                continue
+            exposure_id = str(row.get("exposure_id") or "")
+            if not exposure_id:
+                continue
+            try:
+                await self.rotation.resolve_exposure(vault_id, exposure_id, resolution="rotated", note=note)
+            except APIError as exc:
+                if exc.status == 409 and exc.code == "already_resolved":
+                    # Older services resolve on the item write.
+                    outcome["resolved"].append(exposure_id)
+                elif exc.status == 403:
+                    outcome["needs_owner"] = True
+                else:
+                    outcome["failed"].append({"exposure_id": exposure_id, "reason": vault_failure_reason(exc)})
+                continue
+            except Exception as exc:
+                outcome["failed"].append({"exposure_id": exposure_id, "reason": vault_failure_reason(exc)})
+                continue
+            outcome["resolved"].append(exposure_id)
+        return outcome
 
     async def _rotation_targets(
         self, team: str, servers: Sequence[str], vault: Mapping[str, Any], vault_id: str,

@@ -491,7 +491,7 @@ def test_incomplete_ssh_rotation_warns_and_exits_non_zero(capsys) -> None:
 
     error = capsys.readouterr().err
     assert "did not finish" in error and "server-1" in error
-    assert "Do not treat the exposure as closed" in error
+    assert "The exposure stays open" in error
 
 
 def test_break_glass_import_requires_a_source_network_and_vice_versa(capsys) -> None:
@@ -531,6 +531,69 @@ def test_vault_command_without_a_local_identity_says_how_to_get_one(capsys) -> N
 
     error = capsys.readouterr().err
     assert "servonaut vault setup" in error and "vault devices add" in error and "vault recover" in error
+
+
+def _rotate_with(outcome: dict, capsys) -> tuple[int, str, str]:
+    class Service:
+        close = MagicMock()
+        rotate_ssh_key = AsyncMock(return_value={
+            "rotated": True, "hosts": [{"server_id": "server-1", "status": "old_key_removed"}], "exposures": outcome,
+        })
+
+    vault.set_vault_service_factory(Service)
+    try:
+        args = _parser().parse_args([
+            "vault", "exposures", "--vault", "vault-1", "--rotate-ssh", "item-1",
+            "--team", "team-a", "--server", "server-1", "--yes",
+        ])
+        code = vault.handle_vault_command(args)
+    finally:
+        vault.set_vault_service_factory(None)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_completed_rotation_reports_the_resolved_exposure(capsys) -> None:
+    code, out, _err = _rotate_with({"resolved": ["e-1"], "needs_owner": False, "failed": []}, capsys)
+
+    assert code == 0
+    assert "Exposure e-1 resolved as rotated." in out
+
+
+def test_completed_rotation_asks_an_owner_to_resolve_when_not_allowed(capsys) -> None:
+    code, _out, err = _rotate_with({"resolved": [], "needs_owner": True, "failed": []}, capsys)
+
+    assert code == 0
+    assert "Rotation done; ask an owner or admin to resolve the exposure." in err
+
+
+def test_completed_rotation_with_an_unresolved_exposure_says_how_to_resolve_it(capsys) -> None:
+    code, _out, err = _rotate_with(
+        {"resolved": [], "needs_owner": False, "failed": [{"exposure_id": "e-1", "reason": "HTTP 500, server_error"}]},
+        capsys,
+    )
+
+    assert code == 1
+    assert "could not be marked resolved (HTTP 500, server_error)" in err
+    assert "servonaut vault exposures --vault vault-1 --resolve e-1 --resolution rotated" in err
+
+
+def test_exposure_listing_notes_a_key_replaced_in_the_vault(capsys) -> None:
+    class Service:
+        close = MagicMock()
+        list_exposures = AsyncMock(return_value={"data": [
+            {"exposure_id": "e-1", "key_replaced": True}, {"exposure_id": "e-2", "key_replaced": False},
+        ]})
+
+    vault.set_vault_service_factory(Service)
+    try:
+        assert vault.handle_vault_command(_parser().parse_args(["vault", "exposures", "--vault", "vault-1"])) == 0
+    finally:
+        vault.set_vault_service_factory(None)
+
+    out = capsys.readouterr().out
+    assert "Note: exposure e-1: key replaced in the vault; the old key may still be on servers." in out
+    assert "exposure e-2: key replaced" not in out
 
 
 def _run_vault(service_class, argv: list[str]) -> int:

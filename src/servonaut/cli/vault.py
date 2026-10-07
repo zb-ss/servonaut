@@ -46,10 +46,46 @@ def _warn_incomplete_rotation(rotation: Any) -> None:
     print(
         "Warning: the SSH key rotation did not finish. The exposed key may still log in to: "
         + (", ".join(unfinished) or "the selected servers")
-        + ". Do not treat the exposure as closed, even if it shows as resolved; "
-        "remove the old key from those servers, then run the rotation again.",
+        + ". The exposure stays open; remove the old key from those servers, "
+        "then run the rotation again.",
         file=sys.stderr,
     )
+
+
+def _report_exposure_resolution(rotation: Mapping[str, Any], vault_id: str) -> bool:
+    """Say what happened to the rotated item's exposures; ``False`` when one needs attention."""
+    outcome = rotation.get("exposures")
+    if not isinstance(outcome, Mapping):
+        return True
+    for exposure_id in outcome.get("resolved") or []:
+        print(f"Exposure {exposure_id} resolved as rotated.")
+    if outcome.get("needs_owner"):
+        print("Rotation done; ask an owner or admin to resolve the exposure.", file=sys.stderr)
+    failed = [entry for entry in outcome.get("failed") or [] if isinstance(entry, Mapping)]
+    for entry in failed:
+        exposure_id = entry.get("exposure_id")
+        target = f"exposure {exposure_id}" if exposure_id else "the exposure"
+        how = (
+            f"`servonaut vault exposures --vault {vault_id} --resolve {exposure_id} --resolution rotated`"
+            if exposure_id else f"`servonaut vault exposures --vault {vault_id}`"
+        )
+        print(
+            f"Warning: the rotation is done, but {target} could not be marked resolved "
+            f"({entry.get('reason')}); resolve it with {how}.",
+            file=sys.stderr,
+        )
+    return not failed
+
+
+def _note_replaced_keys(listed: Any) -> None:
+    """An exposure whose key was replaced in the vault is not closed yet."""
+    rows = listed.get("data", []) if isinstance(listed, Mapping) else []
+    for row in rows:
+        if isinstance(row, Mapping) and row.get("key_replaced") is True:
+            print(
+                f"Note: exposure {row.get('exposure_id')}: key replaced in the vault; "
+                "the old key may still be on servers."
+            )
 
 
 def _host_keys_are_well_formed(host_keys: list[str] | None) -> bool:
@@ -580,13 +616,18 @@ async def _handle(args: argparse.Namespace) -> int:
                 if not (isinstance(rotation, Mapping) and rotation.get("rotated") is True):
                     _warn_incomplete_rotation(rotation)
                     return _EXIT_ERROR
+                if not _report_exposure_resolution(rotation, args.vault):
+                    return _EXIT_ERROR
             elif args.resolve:
                 if not args.resolution:
                     print("Error: --resolution is required with --resolve.", file=sys.stderr)
                     return _EXIT_USAGE
                 _print(await _invoke(services, "resolve_exposure", vault_id=args.vault, exposure_id=args.resolve, resolution=args.resolution, note=args.note), json_output=output)
             else:
-                _print(await _invoke(services, "list_exposures", vault_id=args.vault), json_output=output)
+                listed = await _invoke(services, "list_exposures", vault_id=args.vault)
+                _print(listed, json_output=output)
+                if not output:
+                    _note_replaced_keys(listed)
         elif command == "grants":
             _print(await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes), json_output=output)
         elif command == "verify-member":

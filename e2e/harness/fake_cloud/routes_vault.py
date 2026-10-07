@@ -198,6 +198,16 @@ class VaultCloud:
             # (pending until the confirmation request, made with a fresh second factor).
             self.identity_confirmation = "auto"
 
+    def open_exposure(self, vault_id: str, item_id: str, *, public_fingerprint: str, subject: str = "member") -> str:
+        """Control: record that a removed member had fetched this item's key."""
+        with self._lock:
+            exposure_id = str(uuid.uuid4())
+            self._exposures.setdefault(vault_id, []).append({
+                "exposure_id": exposure_id, "item_id": item_id, "public_fingerprint": public_fingerprint,
+                "subject": subject, "reason": "member_removed", "status": "open", "created_at": _now(),
+            })
+            return exposure_id
+
     # Controls are intentionally not routes. They provide generic, public-safe
     # fixture names and reveal only public/key-management data to journeys.
     def personas(self) -> dict[str, dict[str, Any]]:
@@ -1006,7 +1016,19 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
         vault_id = request.match_info["vault_id"]
         if vault_id not in vault._vaults or vault._role(vault._vaults[vault_id], device.user_id) not in {"owner", "admin"}:
             return _not_found()
-        return web.json_response({"data": copy.deepcopy(vault._exposures.get(vault_id, [])), "meta": {"next_cursor": None}})
+        wanted = request.query.get("status", "open")
+        rows = []
+        for exposure in vault._exposures.get(vault_id, []):
+            if wanted != "all" and exposure.get("status", "open") != wanted:
+                continue
+            row = copy.deepcopy(exposure)
+            # The service names the key the vault holds now; replacing it
+            # does not close the exposure (the old key may still be deployed).
+            current = vault._items.get(vault_id, {}).get(exposure.get("item_id"), {}).get("public_fingerprint")
+            row["current_public_fingerprint"] = current
+            row["key_replaced"] = current is not None and current != exposure.get("public_fingerprint")
+            rows.append(row)
+        return web.json_response({"data": rows, "meta": {"next_cursor": None}})
 
     async def exposure_resolve(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
@@ -1018,7 +1040,10 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
             return _problem("resolution")
         for exposure in vault._exposures.get(vault_id, []):
             if exposure.get("exposure_id") == exposure_id:
-                exposure.update({"status": "resolved", "resolution": body["resolution"], "resolved_at": _now()})
+                if exposure.get("status", "open") != "open":
+                    return _error("already_resolved", "This exposure is already resolved", 409)
+                exposure.update({"status": "resolved", "resolution": body["resolution"],
+                                 "note": body.get("note", ""), "resolved_at": _now()})
                 return web.json_response(copy.deepcopy(exposure))
         return _not_found()
 

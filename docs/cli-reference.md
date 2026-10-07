@@ -573,9 +573,13 @@ unverified server record. For a cloud instance, `bind-personal` takes
 needs a new binding.
 
 The exposure rotation command installs and proves the replacement on every
-selected host, then removes the old key. If any host does not complete, it
-exits non-zero and names the servers where the old key may still log in:
-treat the exposure as open there, even if it shows as resolved.
+selected host, then removes the old key. When every host completes, the
+item's open exposures are resolved as rotated, with a note naming the hosts;
+if you are not an owner or admin, ask one to resolve them. If any host does
+not complete, it exits non-zero, names the servers where the old key may still
+log in, and the exposure stays open. Replacing a key in the vault alone does
+not close an exposure: `vault exposures` notes when the key was replaced but
+may still be on servers.
 
 After importing a Bitwarden SSH item in the Vault screen, you can choose a
 team server that already uses that same Bitwarden reference. Servonaut checks

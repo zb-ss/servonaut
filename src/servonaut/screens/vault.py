@@ -313,6 +313,22 @@ class VaultImportedTeamBindingModal(ModalScreen[Optional[dict[str, str]]]):
         self.dismiss({"team": team, "server_id": server_id, "login": login} if team and server_id else None)
 
 
+def _rotation_summary(exposures: Any) -> str:
+    """Status text after a rotation finished on every host."""
+    done = "SSH key rotation completed on all selected hosts."
+    if not isinstance(exposures, Mapping):
+        return done
+    failed = [entry for entry in exposures.get("failed") or [] if isinstance(entry, Mapping)]
+    if failed:
+        return f"{done} The exposure could not be marked resolved ({failed[0].get('reason')}); resolve it from Exposures."
+    if exposures.get("needs_owner"):
+        return f"{done} Ask an owner or admin to resolve the exposure."
+    resolved = exposures.get("resolved") or []
+    if resolved:
+        return f"{done} {len(resolved)} exposure{'s' if len(resolved) != 1 else ''} resolved as rotated."
+    return done
+
+
 class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
     """Pick which vault to create: a personal one, or one for a team you run."""
 
@@ -472,9 +488,10 @@ class VaultScreen(Screen):
 
     def _render_exposures(self) -> None:
         table = self.query_one("#vault_table", DataTable)
-        table.clear(columns=True); table.add_columns("Subject", "Reason", "Item ID", "Exposure ID")
+        table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
-            table.add_row(escape(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), escape(self.scrub_for_display(row.get("reason") or "")), escape(self.scrub_for_display(row.get("item_id") or "")), escape(self.scrub_for_display(row.get("exposure_id") or "")))
+            note = "Key replaced in vault; old key may still be on servers" if row.get("key_replaced") is True else ""
+            table.add_row(escape(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), escape(self.scrub_for_display(row.get("reason") or "")), note, escape(self.scrub_for_display(row.get("item_id") or "")), escape(self.scrub_for_display(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
         table = self.query_one("#vault_table", DataTable)
@@ -921,12 +938,12 @@ class VaultScreen(Screen):
         self._render_rotation()
         rotated = result.get("rotated") if isinstance(result, Mapping) else False
         if rotated:
-            self._status("SSH key rotation completed on all selected hosts.")
+            self._status(_rotation_summary(result.get("exposures")))
             return
         message = (
             "SSH key rotation did not finish. The exposed key may still log in to the hosts "
-            "not marked old_key_removed: treat the exposure as open even if it shows as "
-            "resolved, remove the old key there, then rotate again."
+            "not marked old_key_removed, so the exposure stays open: remove the old key "
+            "there, then rotate again."
         )
         self._status(message)
         self.app.notify(message, severity="error", markup=False)
