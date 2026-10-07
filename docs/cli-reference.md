@@ -509,9 +509,28 @@ servonaut vault devices list|approve|revoke
 
 `setup` displays a recovery key once. Record it offline before continuing.
 `recover` and escrow recovery read recovery material with a hidden terminal
-prompt; do not place recovery keys in shell arguments or scripts. A newly
-created identity can require confirmation after an MFA login; use
-`servonaut vault identity confirm` after completing that login.
+prompt; do not place recovery keys in shell arguments or scripts.
+
+A new identity must be confirmed before team owners and admins share vault
+keys with it. Open the link Servonaut e-mails after `setup`, or sign in again
+with two-factor (`servonaut login`) and run `servonaut vault identity confirm`.
+Without a recent two-factor sign-in, `identity confirm` e-mails a new link
+instead.
+
+`servonaut vault status` ends with your next step, and the Vault screen shows
+the same step:
+
+- **On your own (a plan with a personal vault):** set up your identity,
+  confirm it, then create your personal vault (`servonaut vault create`, or
+  Create vault on the Vault screen) and import SSH keys into it.
+- **Joining a team:** accept the invitation on the web, sign in, set up and
+  confirm your identity. An owner's or admin's Servonaut then gives you access
+  to the team vault while it is open or running `servonaut connect`:
+  automatically, or after their approval if the vault requires it. Until then
+  the Vault screen says you are waiting for access.
+- **On another device:** run `servonaut vault devices add` there and approve it
+  from a device you already use, or `servonaut vault recover` with your
+  recovery key.
 
 Use `servonaut vault devices approve <device-id>` only while comparing the
 six-digit safety code on both devices. A mismatch rejects that registration;
@@ -548,7 +567,10 @@ per flag, without a host name or comment, for example from `ssh-keyscan`
 output). With `--pin-host-key` instead, it pins the keys this machine already
 trusts for the server from an earlier `servonaut ssh` login. `bind-personal`
 always requires explicit `--host-key` pins. Neither copies trust from an
-unverified server record.
+unverified server record. For a cloud instance, `bind-personal` takes
+`--provider aws|ovh|hetzner` and its instance id; for a custom server, use
+`--provider custom` and the custom server's name. Renaming a custom server
+needs a new binding.
 
 The exposure rotation command installs and proves the replacement on every
 selected host, then removes the old key. When every host completes, the

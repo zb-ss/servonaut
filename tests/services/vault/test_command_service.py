@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import datetime as datetime_module
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -158,25 +160,85 @@ async def test_setup_identity_exists_race_discards_only_generated_custody(tmp_pa
     assert not path.exists()
 
 
+def _setup_service(tmp_path, *, status_after_failure):
+    path = tmp_path / "vault" / "vault_keys.json"
+    store = IdentityStore(path, environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    identity = MagicMock()
+    calls = {"n": 0}
+
+    async def status():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"identity": None}  # the setup preflight
+        return status_after_failure(store)
+
+    identity.status = status
+    identity.enroll = AsyncMock(side_effect=APIError(code="server_error", message="temporary", status=500))
+    service.identity = identity
+    return service, store, path
+
+
 @pytest.mark.asyncio
-async def test_setup_non_conflict_error_retains_generated_custody(tmp_path) -> None:
+async def test_setup_enrolment_error_retains_custody_the_service_already_holds(tmp_path) -> None:
+    service, store, path = _setup_service(
+        tmp_path, status_after_failure=lambda store: {"identity": {"identity_id": store.identity.identity_id}},
+    )
+
+    with pytest.raises(APIError, match="temporary"):
+        await service.setup(device_name="new device", platform="linux", recovery_confirmation=lambda _key: True)
+
+    assert store.identity is not None
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_setup_enrolment_error_retains_custody_when_the_outcome_is_unknown(tmp_path) -> None:
+    def unreachable(_store):
+        raise APIError(code="server_error", message="down", status=503)
+
+    service, store, path = _setup_service(tmp_path, status_after_failure=unreachable)
+
+    with pytest.raises(APIError, match="temporary"):
+        await service.setup(device_name="new device", platform="linux", recovery_confirmation=lambda _key: True)
+
+    assert store.identity is not None
+    assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_setup_enrolment_error_discards_custody_the_service_never_received(tmp_path) -> None:
+    service, store, path = _setup_service(tmp_path, status_after_failure=lambda _store: {"identity": None})
+
+    with pytest.raises(APIError, match="temporary"):
+        await service.setup(device_name="new device", platform="linux", recovery_confirmation=lambda _key: True)
+
+    assert store.identity is None
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError(), RuntimeError("modal failed")])
+async def test_setup_forgets_the_generated_identity_when_confirmation_does_not_finish(tmp_path, failure) -> None:
     path = tmp_path / "vault" / "vault_keys.json"
     store = IdentityStore(path, environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
     identity = MagicMock()
     identity.status = AsyncMock(return_value={"identity": None})
-    identity.enroll = AsyncMock(side_effect=APIError(
-        code="server_error", message="temporary", status=500,
-    ))
+    identity.enroll = AsyncMock(return_value={"confirmation": {"state": "confirmed"}})
     service.identity = identity
 
-    with pytest.raises(APIError, match="temporary"):
-        await service.setup(
-            device_name="new device", platform="linux", recovery_confirmation=lambda _key: True,
-        )
+    async def interrupted(_key):
+        raise failure
 
-    assert store.identity is not None
-    assert path.exists()
+    with pytest.raises(type(failure)):
+        await service.setup(device_name="d", platform="linux", recovery_confirmation=interrupted)
+
+    assert store.identity is None
+    assert not path.exists()
+    # A second attempt is not refused as "already unlocked".
+    result = await service.setup(device_name="d", platform="linux", recovery_confirmation=lambda _key: True)
+    assert result == {"confirmation": {"state": "confirmed"}}
 
 
 @pytest.mark.asyncio
@@ -504,7 +566,7 @@ async def test_explicit_native_custom_binding_remains_fail_closed_when_unlocked(
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
     service._resolve_ca_ssh = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
-    with pytest.raises(ValidationError, match="Unknown provider"):
+    with pytest.raises(ValueError, match="custom server needs a name"):
         await service.resolve_ssh({
             "provider": "colo", "id": "web-1", "is_custom": True,
             "public_ip": "192.0.2.10",
@@ -775,10 +837,11 @@ async def test_personal_binding_uses_canonical_target_and_advances_verified_revi
     service.items = Items()  # type: ignore[assignment]
     service.bindings = Bindings()  # type: ignore[assignment]
 
-    async def existing(_instance):
+    async def existing(provider, instance_id):
+        assert (provider, instance_id) == ("aws", "i-abc")
         return ({"binding_revision": 4}, "instance:aws:i-abc")
 
-    service._credential_binding = existing  # type: ignore[method-assign]
+    service._personal_binding = existing  # type: ignore[method-assign]
     result = await service.bind_personal(
         vault_id=vault_id, item_id=item_id, provider="AWS", instance_id="i-abc",
         hostname="server.example.test", port=2222, login="deploy", host_keys=["ssh-ed25519 AAAA"],
@@ -1101,7 +1164,6 @@ async def test_claimed_enrollment_that_fails_is_reported_so_the_job_closes() -> 
     assert job_id == "job-1"
     assert report["status"] == "failed"
     assert "known_hosts" in report["error_code"]
-
 
 
 @pytest.mark.asyncio
@@ -1434,3 +1496,180 @@ async def test_rotated_exposure_resolution_when_exposures_cannot_be_listed() -> 
     outcome = await service._resolve_rotated_exposures("vault", "item", [{"id": "server-1"}])
 
     assert outcome == {"resolved": [], "needs_owner": True, "failed": []}
+
+
+@pytest.mark.asyncio
+async def test_custom_server_ssh_looks_up_its_personal_binding_by_name(tmp_path) -> None:
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    api = _Api({})
+    paths: list[str] = []
+
+    async def request_signed(method, path, **_kwargs):
+        paths.append(path)
+        raise APIError(code="not_found", message="none", status=404)
+
+    api.request_signed = request_signed
+    service = VaultCommandService(api, SimpleNamespace(user_id=1), _config(), store=store)
+    service._resolve_ca_ssh = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    lease = await service.resolve_ssh({
+        "provider": "DigitalOcean", "id": "custom-Web 1", "name": "Web 1", "is_custom": True,
+        "host": "192.0.2.10",
+    })
+
+    # No binding yet: the local-key path continues.
+    assert lease is None
+    assert paths == [f"/api/v1/me/instances/custom/{custom_binding_id('Web 1')}/credential-binding"]
+
+
+@pytest.mark.asyncio
+async def test_bind_personal_for_a_custom_server_signs_the_custom_target() -> None:
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    vault = {"scope": "user:1"}
+    service.vaults.get_vault = AsyncMock(return_value=vault)  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = AsyncMock(return_value={"ok": True})  # type: ignore[method-assign]
+
+    await service.bind_personal(
+        vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+        provider="custom", instance_id="Web 1", hostname="192.0.2.10", port=2222, login="deploy",
+        host_keys=["ssh-ed25519 AAAA"],
+    )
+
+    route_id = custom_binding_id("Web 1")
+    service._personal_binding.assert_awaited_once_with("custom", route_id)
+    provider, instance_id, binding = service.bindings.put_personal_binding.await_args.args
+    assert (provider, instance_id) == ("custom", route_id)
+    assert binding["target"] == f"instance:custom:{route_id}"
+
+
+@pytest.mark.asyncio
+async def test_binding_a_custom_server_on_a_service_without_support_says_so() -> None:
+    from servonaut.services.vault.errors import VaultUserError
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = AsyncMock(  # type: ignore[method-assign]
+        side_effect=APIError(code="not_found", message="x", status=404),
+    )
+
+    with pytest.raises(VaultUserError, match="does not accept vault keys for custom servers yet"):
+        await service.bind_personal(
+            vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+            provider="custom", instance_id="Web 1", hostname="192.0.2.10", port=22, login="deploy",
+            host_keys=["ssh-ed25519 AAAA"],
+        )
+
+@pytest.mark.asyncio
+async def test_next_step_reads_vaults_only_once_the_identity_is_confirmed() -> None:
+    auth = SimpleNamespace(user_id=1, has_feature=lambda feature: feature == "personal_vault")
+    service = VaultCommandService(_Api({}), auth, _config())
+    service.list_vaults = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    pending = {"remote": {"identity": {"trust_status": "pending_confirmation"}}, "local_identity": "fp"}
+    confirmed = {"remote": {"identity": {"trust_status": "confirmed"}}, "local_identity": "fp"}
+
+    assert (await service.next_step(pending))["code"] == "confirm_identity"
+    service.list_vaults.assert_not_awaited()
+    assert (await service.next_step(confirmed))["code"] == "create_vault"
+
+
+@pytest.mark.asyncio
+async def test_creatable_vaults_offer_personal_and_teams_the_user_runs_without_a_vault() -> None:
+    auth = SimpleNamespace(user_id=1, has_feature=lambda feature: feature == "personal_vault")
+    teams = MagicMock()
+    teams.list_teams = AsyncMock(return_value=[
+        {"slug": "ops", "name": "Ops", "role": "owner"},
+        {"slug": "web", "name": "Web", "role": "admin"},
+        {"slug": "data", "name": "Data", "role": "member"},
+    ])
+    service = VaultCommandService(_Api({}), auth, _config(), team_service=teams)
+
+    options = await service.creatable_vaults([{"kind": "team", "team": {"slug": "web"}}])
+
+    assert options == [{"team": None, "label": "Personal vault"}, {"team": "ops", "label": "Team vault for Ops"}]
+
+
+@pytest.mark.asyncio
+async def test_creatable_vaults_skip_personal_when_the_plan_lacks_it_or_one_exists() -> None:
+    teams = MagicMock()
+    teams.list_teams = AsyncMock(return_value=[])
+    no_plan = VaultCommandService(_Api({}), SimpleNamespace(user_id=1, has_feature=lambda _f: False), _config(), team_service=teams)
+    has_one = VaultCommandService(_Api({}), SimpleNamespace(user_id=1, has_feature=lambda _f: True), _config(), team_service=teams)
+
+    assert await no_plan.creatable_vaults([]) == []
+    assert await has_one.creatable_vaults([{"kind": "personal"}]) == []
+
+
+@pytest.mark.asyncio
+async def test_create_vault_for_an_unknown_team_names_the_team() -> None:
+    from servonaut.services.vault.errors import VaultUserError
+
+    teams = MagicMock()
+    teams.get_team = AsyncMock(side_effect=APIError(code="not_found", message="x", status=404))
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), team_service=teams)
+
+    with pytest.raises(VaultUserError, match="team 'no-such-team' was not found among your teams"):
+        await service.create_vault(team="no-such-team", name=None, grant_policy="auto")
+
+
+@pytest.mark.asyncio
+async def test_setup_can_be_retried_after_custody_could_not_be_saved(tmp_path) -> None:
+    path = tmp_path / "vault" / "vault_keys.json"
+    store = IdentityStore(path, environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=")
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    identity = MagicMock()
+    identity.status = AsyncMock(return_value={"identity": None})
+    identity.enroll = AsyncMock(return_value={"confirmation": {"state": "confirmed"}})
+    service.identity = identity
+    save = store.save
+    store.save = MagicMock(side_effect=RuntimeError("No trusted OS keyring is available"))  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="keyring"):
+        await service.setup(device_name="d", platform="linux", recovery_confirmation=lambda _key: True)
+
+    assert store.identity is None
+    identity.enroll.assert_not_awaited()
+    store.save = save  # type: ignore[method-assign]
+    assert await service.setup(device_name="d", platform="linux", recovery_confirmation=lambda _key: True) == {
+        "confirmation": {"state": "confirmed"}
+    }
+
+
+def test_file_key_storage_setting_applies_without_a_restart() -> None:
+    config = _config()
+    config.vault.allow_file_key_store = False
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), config)
+    assert service.store.allow_file_key_store is False
+
+    config.vault.allow_file_key_store = True  # Settings > Team Vault saved in the running app
+    service.unlock_existing_identity()
+
+    assert service.store.allow_file_key_store is True
+
+
+def test_an_injected_store_keeps_its_own_key_storage_policy(tmp_path) -> None:
+    store = IdentityStore(tmp_path / "vault" / "vault_keys.json", allow_file_key_store=True)
+    config = _config()
+    config.vault.allow_file_key_store = False
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), config, store=store)
+
+    service.unlock_existing_identity()
+
+    assert store.allow_file_key_store is True

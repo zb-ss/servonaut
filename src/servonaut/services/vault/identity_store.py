@@ -134,6 +134,14 @@ class IdentityStore:
         """The encrypted custody path, including caller-supplied test paths."""
         return self._path
 
+    @property
+    def allow_file_key_store(self) -> bool:
+        return self._allow_file_key_store
+
+    @allow_file_key_store.setter
+    def allow_file_key_store(self, value: bool) -> None:
+        self._allow_file_key_store = bool(value)
+
     def has_persisted_identity(self) -> bool:
         """Whether durable custody is present without unlocking or modifying it."""
         return self._path.exists()
@@ -325,7 +333,9 @@ class IdentityStore:
         if self._allow_file_key_store:
             return self._load_or_create_file_kek(key, create=True), "file"
         raise IdentityStoreError(
-            "No trusted OS keyring is available; enable the explicit file-key-store setting or provide the CI key"
+            "no trusted OS keyring is available; turn on Settings > Team Vault > "
+            "Allow encrypted file key storage (`vault.allow_file_key_store` in config.json), "
+            "or provide SERVONAUT_VAULT_DEVICE_KEY"
         )
 
     def _load_or_create_file_kek(self, generated: bytes, *, create: bool) -> bytes:

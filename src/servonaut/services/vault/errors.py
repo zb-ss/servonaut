@@ -45,6 +45,18 @@ _ACTIONABLE_CODES = {
     "mfa_required": "this needs a recent MFA sign-in; run `servonaut login` and try again",
     "step_up_required": "this needs a recent MFA sign-in; run `servonaut login` and try again",
     "mfa_enrollment_required": "turn on two-factor authentication for your account first",
+    "vault_exists": "that vault already exists: there is one personal vault per account and one vault per team",
+    "no_identity": (
+        "this device does not hold your current vault identity; add it from an active device "
+        "(`servonaut vault devices add`) or recover it (`servonaut vault recover`)"
+    ),
+}
+
+# ``entitlement_required`` names the missing plan feature in ``details.feature``.
+_PLAN_FEATURES = {
+    "personal_vault": "a personal vault",
+    "team_vault": "a team vault",
+    "ssh_ca": "SSH certificates",
 }
 
 
@@ -66,6 +78,10 @@ def vault_failure_reason(exc: BaseException) -> str:
             return reason
     if isinstance(exc, APIError) and exc.code in _ACTIONABLE_CODES:
         return _ACTIONABLE_CODES[exc.code]
+    if isinstance(exc, APIError) and exc.code == "entitlement_required":
+        details = exc.details if isinstance(exc.details, dict) else {}
+        feature = _PLAN_FEATURES.get(str(details.get("feature")))
+        return f"your plan does not include {feature}" if feature else "your plan does not include this feature"
     if isinstance(exc, APIError):
         code = exc.code if isinstance(exc.code, str) and _SAFE_CODE.fullmatch(exc.code) else None
         status = f"HTTP {exc.status}" if exc.status else "request error"

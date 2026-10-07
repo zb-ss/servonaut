@@ -43,6 +43,8 @@
 
 #vault_actions #vault_refresh,
 #vault_actions #vault_setup,
+#vault_actions #vault_confirm_identity,
+#vault_actions #vault_create,
 #vault_actions #vault_items,
 #vault_actions #vault_reveal,
 #vault_actions #vault_exposures,
@@ -101,6 +103,7 @@ VaultExposureActionModal,
 VaultImportedReferenceModal,
 VaultImportedTeamBindingModal,
 VaultBindingModal,
+VaultCreateModal,
 CaEnrollmentConfirmModal {
     align: center middle;
 }
@@ -113,6 +116,7 @@ CaEnrollmentConfirmModal {
 #vault_import_bind_reference_modal,
 #vault_import_bind_target_modal,
 #vault_bind_modal,
+#vault_create_modal,
 #vault_import_modal,
 #ca_confirm_modal {
     width: 72;
@@ -149,9 +153,14 @@ CaEnrollmentConfirmModal {
 #ca_team,
 #ca_server,
 #ca_break_glass,
+#vault_create_target,
 #vault_recovery_confirm_modal Input {
     width: 100%;
     margin-top: 1;
+}
+
+#vault_recovery_hint {
+    color: $text-muted;
 }
 
 #vault_recovery_key,
@@ -163,8 +172,13 @@ CaEnrollmentConfirmModal {
     text-style: bold;
 }
 
-#vault_import_title {
+#vault_import_title,
+#vault_create_title {
     text-style: bold;
+}
+
+#vault_create_text {
+    margin-top: 1;
 }
 
 #vault_import_intro {
@@ -217,6 +231,8 @@ CaEnrollmentConfirmModal {
 #vault_exposure_confirm,
 #vault_bind_cancel,
 #vault_bind_confirm,
+#vault_create_cancel,
+#vault_create_confirm,
 #vault_import_go,
 #ca_cancel,
 #ca_confirm {

@@ -594,3 +594,93 @@ def test_exposure_listing_notes_a_key_replaced_in_the_vault(capsys) -> None:
     out = capsys.readouterr().out
     assert "Note: exposure e-1: key replaced in the vault; the old key may still be on servers." in out
     assert "exposure e-2: key replaced" not in out
+
+
+def _run_vault(service_class, argv: list[str]) -> int:
+    vault.set_vault_service_factory(service_class)
+    try:
+        return vault.handle_vault_command(_parser().parse_args(argv))
+    finally:
+        vault.set_vault_service_factory(None)
+
+
+_CONFIRM_STEP = {"code": "confirm_identity", "message": "Confirm your vault identity: open the link.",
+                 "command": "servonaut vault identity confirm", "action": "vault_confirm_identity"}
+
+
+def test_vault_status_ends_with_the_next_step(capsys) -> None:
+    class Service:
+        async def status(self):
+            return {"fingerprint": "abc", "remote": {"identity": {"trust_status": "pending_confirmation"}}}
+
+        async def next_step(self, *, status):
+            assert status["fingerprint"] == "abc"
+            return _CONFIRM_STEP
+
+    assert _run_vault(Service, ["vault", "status"]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[-2:] == ["Next step: Confirm your vault identity: open the link.",
+                        "  Run: servonaut vault identity confirm"]
+
+
+def test_vault_status_json_carries_the_next_step(capsys) -> None:
+    class Service:
+        async def status(self):
+            return {"fingerprint": "abc"}
+
+        async def next_step(self, *, status):
+            return _CONFIRM_STEP
+
+    assert _run_vault(Service, ["vault", "status", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out)["next_step"]["code"] == "confirm_identity"
+
+
+def test_vault_status_still_works_when_the_next_step_cannot_be_read(capsys) -> None:
+    class Service:
+        async def status(self):
+            return {"fingerprint": "abc"}
+
+        async def next_step(self, *, status):
+            raise APIError(code="server_error", message="x", status=500)
+
+    assert _run_vault(Service, ["vault", "status"]) == 0
+
+    out = capsys.readouterr().out
+    assert "fingerprint: abc" in out
+    assert "Next step" not in out
+
+
+def test_vault_setup_says_how_to_confirm_a_new_identity(capsys) -> None:
+    class Service:
+        async def setup(self, **_kwargs):
+            return {"identity": {"fingerprint": "abc"}, "confirmation": {"state": "pending_confirmation"}}
+
+    assert _run_vault(Service, ["vault", "setup"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Confirm your vault identity: open the link we e-mailed to you" in out
+    assert "servonaut vault identity confirm" in out
+
+
+def test_vault_identity_confirm_explains_an_e_mailed_link(capsys) -> None:
+    class Service:
+        async def confirm_identity(self):
+            return {"confirmation": {"state": "email_sent", "expires_at": "2026-10-07T10:00:00Z"}}
+
+    assert _run_vault(Service, ["vault", "identity", "confirm"]) == 0
+
+    out = capsys.readouterr().out
+    assert "We e-mailed you a new confirmation link (valid until 2026-10-07T10:00:00Z)" in out
+    assert "sign in again with two-factor" in out
+
+
+def test_vault_identity_confirm_reports_a_confirmed_identity(capsys) -> None:
+    class Service:
+        async def confirm_identity(self):
+            return {"confirmation": {"state": "confirmed", "expires_at": None}}
+
+    assert _run_vault(Service, ["vault", "identity", "confirm"]) == 0
+
+    assert "Your vault identity is confirmed." in capsys.readouterr().out
