@@ -406,3 +406,49 @@ async def test_pending_registration_rejects_noncanonical_user_id_before_transpor
         with pytest.raises(ValueError, match="positive integer"):
             await client.register_pending_device(user_id=value, name="device", platform="linux", client="cli")
     api.request_signed.assert_not_called()
+
+
+def _signs_validly(device, public_key: bytes) -> bool:
+    from nacl.exceptions import BadSignatureError
+    from nacl.signing import VerifyKey
+
+    try:
+        VerifyKey(public_key).verify(b"message", device.sign(b"message"))
+    except BadSignatureError:
+        return False
+    return True
+
+
+def test_storing_a_device_ssh_key_keeps_this_process_able_to_sign(tmp_path) -> None:
+    # The first CA login on a device creates its SSH key. Signing must keep
+    # working in the same process afterwards (it used to wipe the device key).
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=base64.b64encode(b"\0" * 32).decode())
+    identity = store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    store.save()
+    device = identity.device
+    device_public, identity_seed = device.signing_public_key, bytes(identity.signing_seed)
+
+    store.store_device_ssh_private_key(b"first device ssh key")
+
+    current = store.identity
+    assert current is not None and current.device_ssh_private_key == bytearray(b"first device ssh key")
+    assert bytes(current.signing_seed) == identity_seed and any(identity_seed)
+    assert _signs_validly(device, device_public)  # a signer captured earlier still works
+    assert _signs_validly(store.signer(), device_public)
+
+
+def test_replacing_the_device_ssh_key_wipes_only_the_old_ssh_key(tmp_path) -> None:
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=base64.b64encode(b"\0" * 32).decode())
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    store.save()
+    store.store_device_ssh_private_key(b"old ssh key")
+    old_buffer = store.identity.device_ssh_private_key
+    device_public = store.identity.device.signing_public_key
+
+    store.store_device_ssh_private_key(b"new ssh key")
+
+    assert old_buffer == bytearray(len(b"old ssh key"))  # zeroed in place
+    assert store.identity.device_ssh_private_key == bytearray(b"new ssh key")
+    assert _signs_validly(store.signer(), device_public)
+    reloaded = IdentityStore(tmp_path / "vault_keys.json", environment_key=base64.b64encode(b"\0" * 32).decode())
+    assert reloaded.load().device_ssh_private_key == bytearray(b"new ssh key")
