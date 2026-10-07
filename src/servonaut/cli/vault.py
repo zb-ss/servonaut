@@ -14,17 +14,22 @@ import math
 import secrets
 import sys
 import unicodedata
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
-from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
 
 _EXIT_OK = 0
 _EXIT_ERROR = 1
 _EXIT_USAGE = 2
 _EXIT_ABORTED = 5
+_VAULT_HELP = "Vault id, or the vault's name as `servonaut vault list` shows it."
+# Wrong passphrases accepted before an import gives up.
+_PASSPHRASE_ATTEMPTS = 3
 
 VaultServiceFactory = Callable[[], Any]
 _service_factory: Optional[VaultServiceFactory] = None
@@ -152,19 +157,22 @@ def add_vault_parser(subparsers: Any) -> None:
     create.add_argument("--grant-policy", choices=("auto", "approval"), default="auto")
     commands.add_parser("list", help="List readable vaults.")
     items = commands.add_parser("items", help="List item metadata only.")
-    items.add_argument("--vault", required=True)
+    items.add_argument("--vault", required=True, help=_VAULT_HELP)
     items.add_argument("--include-deleted", action="store_true")
     show = commands.add_parser("show", help="Show item metadata; --reveal requires confirmation.")
     show.add_argument("item_id")
-    show.add_argument("--vault", required=True)
+    show.add_argument("--vault", required=True, help=_VAULT_HELP)
     show.add_argument("--reveal", action="store_true")
     show.add_argument("--yes", action="store_true")
 
     imports = commands.add_parser("import", help="Import SSH material into the encrypted vault.")
     import_sub = imports.add_subparsers(dest="vault_import_command", required=True)
-    import_ssh = import_sub.add_parser("ssh", help="Import selected local SSH keys.")
-    import_ssh.add_argument("--vault", required=True)
-    import_ssh.add_argument("--path", default=None)
+    import_ssh = import_sub.add_parser("ssh", help="Import a local SSH private key file.")
+    import_ssh.add_argument("--vault", required=True, help=_VAULT_HELP)
+    import_ssh.add_argument(
+        "--path", required=True,
+        help="Private key file, e.g. ~/.ssh/id_ed25519; asks for its passphrase when it has one.",
+    )
     import_ssh.add_argument(
         "--break-glass", action="store_true",
         help="Store the key as the team's emergency root key for SSH CA enrollment.",
@@ -174,13 +182,13 @@ def add_vault_parser(subparsers: Any) -> None:
         help="Source network allowed to use the break-glass key; repeat for each. Required with --break-glass.",
     )
     import_bw = import_sub.add_parser("bitwarden", help="Import SSH keys from Bitwarden without deleting them.")
-    import_bw.add_argument("--vault", required=True)
+    import_bw.add_argument("--vault", required=True, help=_VAULT_HELP)
     import_bw.add_argument("--item", required=True, help="Existing Bitwarden SSH item UUID.")
     bind = commands.add_parser("bind", help="Bind a vault SSH item to a server.")
     bind.add_argument("server")
     bind.add_argument("item_id")
-    bind.add_argument("--vault", required=True)
-    bind.add_argument("--team", default=None)
+    bind.add_argument("--vault", required=True, help=_VAULT_HELP)
+    bind.add_argument("--team", required=True, help="Team the server is shared with.")
     bind.add_argument("--login", default=None)
     bind.add_argument("--pin-host-key", action="store_true",
                       help="Pin the host key this machine already trusts for the server.")
@@ -188,7 +196,7 @@ def add_vault_parser(subparsers: Any) -> None:
                       help="Verified OpenSSH host key to pin; repeat for each key.")
     bind.add_argument("--yes", action="store_true")
     bind_personal = commands.add_parser("bind-personal", help="Bind a vault SSH item to a personal server with explicit host pins.")
-    bind_personal.add_argument("--vault", required=True)
+    bind_personal.add_argument("--vault", required=True, help=_VAULT_HELP)
     bind_personal.add_argument("--item", required=True)
     bind_personal.add_argument(
         "--provider", required=True, help="aws, ovh, hetzner, or custom for a custom server.",
@@ -203,10 +211,10 @@ def add_vault_parser(subparsers: Any) -> None:
     bind_personal.add_argument("--host-key", action="append", required=True, help="Verified OpenSSH host key; repeat for each pin.")
     bind_personal.add_argument("--yes", action="store_true")
     rotate = commands.add_parser("rotate", help="Rotate a vault encryption version.")
-    rotate.add_argument("--vault", required=True)
+    rotate.add_argument("--vault", required=True, help=_VAULT_HELP)
     rotate.add_argument("--yes", action="store_true")
     exposures = commands.add_parser("exposures", help="List, remediate, or resolve key exposure warnings.")
-    exposures.add_argument("--vault", required=True)
+    exposures.add_argument("--vault", required=True, help=_VAULT_HELP)
     exposure_action = exposures.add_mutually_exclusive_group()
     exposure_action.add_argument("--resolve", default=None, metavar="EXPOSURE_ID")
     exposure_action.add_argument("--rotate-ssh", default=None, metavar="ITEM_ID", help="Rotate an exposed SSH item on selected servers.")
@@ -218,7 +226,7 @@ def add_vault_parser(subparsers: Any) -> None:
     grants = commands.add_parser("grants", help="Process pending eligible member grants.")
     grant_sub = grants.add_subparsers(dest="vault_grants_command", required=True)
     process = grant_sub.add_parser("process", help="Process grants for one vault or all readable vaults.")
-    process.add_argument("--vault", default=None)
+    process.add_argument("--vault", default=None, help=_VAULT_HELP)
     process.add_argument("--yes", action="store_true")
     verify = commands.add_parser("verify-member", help="Display a member safety number for out-of-band comparison.")
     verify.add_argument("member")
@@ -226,10 +234,10 @@ def add_vault_parser(subparsers: Any) -> None:
     escrow = commands.add_parser("escrow", help="Set up or recover a sole-owner escrow key.")
     escrow_sub = escrow.add_subparsers(dest="vault_escrow_command", required=True)
     escrow_setup = escrow_sub.add_parser("setup", help="Create an offline escrow recovery key.")
-    escrow_setup.add_argument("--vault", required=True)
+    escrow_setup.add_argument("--vault", required=True, help=_VAULT_HELP)
     escrow_setup.add_argument("--label", required=True)
     escrow_recover = escrow_sub.add_parser("recover", help="Recover a locked sole-owner vault with an escrow key.")
-    escrow_recover.add_argument("--vault", required=True)
+    escrow_recover.add_argument("--vault", required=True, help=_VAULT_HELP)
     escrow_recover.add_argument("--yes", action="store_true")
 
     vault.add_argument("--json", action="store_true", help="Emit safe metadata JSON; never emits revealed secret values.")
@@ -393,6 +401,53 @@ def _read_secret(prompt: str) -> str:
     return value
 
 
+async def _vault_id(services: Any, reference: str) -> str:
+    """A vault id as given, or the id of the vault with that name."""
+    try:
+        uuid.UUID(reference)
+    except ValueError:
+        return await _invoke(services, "resolve_vault_id", reference=reference)
+    return reference
+
+
+def _wipe(buffer: bytearray) -> None:
+    for index in range(len(buffer)):
+        buffer[index] = 0
+
+
+def _read_import_key(path: Path) -> Optional[bytearray]:
+    """The private key at *path* as unencrypted OpenSSH text, or ``None`` when cancelled.
+
+    Same normalisation as the TUI import, so PEM and passphrase-protected keys
+    work too. The passphrase is asked for on the terminal and never stored.
+    """
+    from servonaut.services.bw_key_import import (
+        KeyImportError, WrongPassphraseError, decrypt_private_key, is_encrypted_key,
+        load_unencrypted_key, read_key_bytes,
+    )
+
+    raw = bytearray()
+    try:
+        raw = bytearray(read_key_bytes(path))
+        if not is_encrypted_key(bytes(raw)):
+            return bytearray(load_unencrypted_key(bytes(raw)).private_key.encode("utf-8"))
+        if not sys.stdin.isatty():
+            raise VaultUserError("this SSH key has a passphrase; run the import in a terminal to enter it")
+        for _attempt in range(_PASSPHRASE_ATTEMPTS):
+            passphrase = getpass.getpass(f"Passphrase for {path.name} (Enter to cancel): ", stream=sys.stderr)
+            if not passphrase:
+                return None
+            try:
+                return bytearray(decrypt_private_key(bytes(raw), passphrase).private_key.encode("utf-8"))
+            except WrongPassphraseError:
+                print("Wrong passphrase.", file=sys.stderr)
+        raise VaultUserError("the passphrase was wrong three times; nothing was imported")
+    except KeyImportError as exc:
+        raise VaultUserError(f"could not import {path.name}: {exc.message}") from exc
+    finally:
+        _wipe(raw)
+
+
 def _confirm_recovery_key(recovery_key: str) -> bool:
     """Display a generated recovery key once and prove the user recorded it."""
     if not sys.stdin.isatty():
@@ -446,6 +501,8 @@ async def _handle(args: argparse.Namespace) -> int:
     services: Any = None
     try:
         services = _services()
+        if getattr(args, "vault", None):
+            args.vault = await _vault_id(services, args.vault)
         if command == "status":
             status = await _invoke(services, "status")
             step = await _next_step(services, status)
@@ -563,10 +620,19 @@ async def _handle(args: argparse.Namespace) -> int:
                 if args.break_glass and not args.from_cidr:
                     print("Error: --break-glass needs at least one --from-cidr source network.", file=sys.stderr)
                     return _EXIT_USAGE
-                _print(await _invoke(
-                    services, "import_keys", source="ssh", vault_id=args.vault, path=args.path,
-                    break_glass_from_cidrs=args.from_cidr if args.break_glass else None,
-                ), json_output=output)
+                key_path = Path(args.path).expanduser()
+                private_key = _read_import_key(key_path)
+                if private_key is None:
+                    print("Import cancelled; nothing was stored.", file=sys.stderr)
+                    return _EXIT_ABORTED
+                try:
+                    _print(await _invoke(
+                        services, "import_keys", source="ssh", vault_id=args.vault, path=str(key_path),
+                        private_key=private_key,
+                        break_glass_from_cidrs=args.from_cidr if args.break_glass else None,
+                    ), json_output=output)
+                finally:
+                    _wipe(private_key)
         elif command == "bind":
             if not _host_keys_are_well_formed(args.host_key):
                 return _EXIT_USAGE

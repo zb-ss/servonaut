@@ -633,6 +633,31 @@ class VaultCommandService:
     async def list_vaults(self) -> list[dict[str, Any]]:
         return await self.vaults.list_vaults()
 
+    async def resolve_vault_id(self, reference: str) -> str:
+        """The id of the vault *reference* names: its id, or its name as `vault list` shows it.
+
+        An exact name wins over a case-insensitive one; a name shared by several
+        vaults is refused rather than guessed.
+        """
+        try:
+            uuid.UUID(reference)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        else:
+            return reference
+        vaults = await self.list_vaults()
+        matches = [vault for vault in vaults if vault.get("name") == reference]
+        if not matches:
+            folded = reference.casefold()
+            matches = [vault for vault in vaults if str(vault.get("name") or "").casefold() == folded]
+        if not matches:
+            raise VaultUserError(
+                "no vault you can read has that name; `servonaut vault list` shows your vaults and their ids"
+            )
+        if len(matches) > 1:
+            raise VaultUserError("several vaults have that name; pass the vault id from `servonaut vault list`")
+        return str(matches[0]["vault_id"])
+
     def can_create_personal_vault(self) -> bool:
         """Whether this account's plan includes a personal vault."""
         has_feature = getattr(self.auth, "has_feature", None)

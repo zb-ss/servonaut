@@ -55,6 +55,7 @@ __all__ = [
     "scan_directory",
     "read_key_bytes",
     "decrypt_private_key",
+    "is_encrypted_key",
     "load_unencrypted_key",
 ]
 
@@ -195,6 +196,11 @@ def _is_encrypted(data: bytes) -> bool:
             return False
         return cipher != b"none"
     return False
+
+
+def is_encrypted_key(data: bytes) -> bool:
+    """Whether *data* is a passphrase-protected private key, judged by its markers."""
+    return _is_encrypted(data)
 
 
 def _load_any_private_key(data: bytes, passphrase: Optional[bytes]) -> object:

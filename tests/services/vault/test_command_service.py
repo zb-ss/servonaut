@@ -10,6 +10,7 @@ import pytest
 
 from servonaut.services.api_client import APIError
 from servonaut.services.vault.command_service import VaultCommandService, VaultSshLease
+from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.identity_store import IdentityStore
 from servonaut.services.vault.team_vault_client import VaultStateError
 from servonaut.utils.validation import ValidationError
@@ -1673,3 +1674,41 @@ def test_an_injected_store_keeps_its_own_key_storage_policy(tmp_path) -> None:
     service.unlock_existing_identity()
 
     assert store.allow_file_key_store is True
+
+
+_VAULTS_BY_NAME = [
+    {"vault_id": "11111111-1111-4111-8111-111111111111", "name": "Personal", "kind": "personal"},
+    {"vault_id": "33333333-3333-4333-8333-333333333333", "name": "Team", "kind": "team"},
+    {"vault_id": "44444444-4444-4444-8444-444444444444", "name": "team", "kind": "team"},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_vault_id_is_used_as_given_without_listing_vaults() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_vaults = AsyncMock(return_value=_VAULTS_BY_NAME)  # type: ignore[method-assign]
+
+    assert await service.resolve_vault_id("33333333-3333-4333-8333-333333333333") == "33333333-3333-4333-8333-333333333333"
+    service.list_vaults.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_vault_name_resolves_exactly_first_then_ignoring_case() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_vaults = AsyncMock(return_value=_VAULTS_BY_NAME)  # type: ignore[method-assign]
+
+    assert await service.resolve_vault_id("Personal") == "11111111-1111-4111-8111-111111111111"
+    assert await service.resolve_vault_id("personal") == "11111111-1111-4111-8111-111111111111"
+    # Two vaults fold to "team"; the exact spelling still picks one.
+    assert await service.resolve_vault_id("team") == "44444444-4444-4444-8444-444444444444"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_or_ambiguous_vault_name_is_refused_with_a_way_forward() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_vaults = AsyncMock(return_value=_VAULTS_BY_NAME)  # type: ignore[method-assign]
+
+    with pytest.raises(VaultUserError, match="no vault you can read has that name; `servonaut vault list`"):
+        await service.resolve_vault_id("Missing")
+    with pytest.raises(VaultUserError, match="several vaults have that name; pass the vault id"):
+        await service.resolve_vault_id("TEAM")
