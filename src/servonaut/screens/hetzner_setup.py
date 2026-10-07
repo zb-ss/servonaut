@@ -130,7 +130,7 @@ class HetznerSetupScreen(Screen):
                 "Add a Hetzner Cloud Project" if self._add_extra else "Hetzner Cloud Project"
             )
             rows: List[Widget] = [
-                Static(f"[bold cyan]{title}[/bold cyan]", id="hetzner_setup_header"),
+                Static(f"[bold $text-accent]{title}[/bold $text-accent]", id="hetzner_setup_header"),
                 Static(
                     "[dim]Each Hetzner Cloud project has its own API token. Its "
                     "servers join the instance list next to your other projects; "
@@ -143,7 +143,7 @@ class HetznerSetupScreen(Screen):
         else:
             rows = [
                 Static(
-                    "[bold cyan]Hetzner Cloud Setup[/bold cyan]",
+                    "[bold $text-accent]Hetzner Cloud Setup[/bold $text-accent]",
                     id="hetzner_setup_header",
                 ),
                 Static(
@@ -634,7 +634,7 @@ class HetznerSetupScreen(Screen):
     async def _do_test_connection(self, values: dict, save: bool = False) -> bool:
         if not await self._install_hcloud_if_needed():
             self.query_one("#hetzner_test_result", Static).update(
-                "[red]hcloud SDK not installed. See notification.[/red]"
+                "[$text-error]hcloud SDK not installed. See notification.[/$text-error]"
             )
             return False
 
@@ -654,7 +654,7 @@ class HetznerSetupScreen(Screen):
         except Exception as exc:
             logger.error("Hetzner connection test failed: %s", exc)
             self.query_one("#hetzner_test_result", Static).update(
-                "[red]Connection test failed. Check credentials and try again.[/red]"
+                "[$text-error]Connection test failed. Check credentials and try again.[/$text-error]"
             )
             # markup=False because exc message can carry server-controlled text.
             self.app.notify(
@@ -687,7 +687,7 @@ class HetznerSetupScreen(Screen):
                 f" {detail}" if detail else ""
             )
             self.query_one("#hetzner_test_result", Static).update(
-                f"[green]{escape(label)}[/green]"
+                f"[$text-success]{escape(label)}[/$text-success]"
             )
             self.app.notify("Hetzner connection OK.", severity="information")
             await self._populate_dropdowns_from_api(svc)
@@ -695,7 +695,7 @@ class HetznerSetupScreen(Screen):
                 await self._store_extra_project(self._collect_form_values())
             return True
         self.query_one("#hetzner_test_result", Static).update(
-            f"[red]Connection failed: {escape(detail or 'no detail')}[/red]"
+            f"[$text-error]Connection failed: {escape(detail or 'no detail')}[/$text-error]"
         )
         self.app.notify(
             f"Hetzner connection failed: {detail or 'no detail'}",

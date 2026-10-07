@@ -26,7 +26,7 @@ from typing import Iterator, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from rich.text import Text
+from textual.content import Content
 from textual.app import App
 
 from servonaut.cli import servers as cli_servers
@@ -1112,7 +1112,7 @@ def test_command_overlay_explains_a_changed_key(known_hosts):
     shown = widget.append_error.call_args.args[0]
     # Escaped: Rich would otherwise read "[web-1.example.com]" as a style tag.
     assert "\\[web-1.example.com]:2222 has changed" in shown
-    assert Text.from_markup(shown).plain.startswith(
+    assert Content.from_markup(shown).plain.startswith(
         "SSH host key for [web-1.example.com]:2222 has changed"
     )
     assert overlay._output_lines[-1].startswith(
@@ -1320,7 +1320,7 @@ def test_transfer_screen_explains_a_changed_key(known_hosts):
     assert message.startswith("Transfer failed: SSH host key for [web-1.example.com]:2222 has changed")
     assert "@@@" not in message
     assert kwargs["markup"] is False
-    shown = Text.from_markup(status.update.call_args.args[0]).plain
+    shown = Content.from_markup(status.update.call_args.args[0]).plain
     assert "ssh-keygen -R '[web-1.example.com]:2222'" in shown
 
 

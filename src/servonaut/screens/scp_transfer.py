@@ -49,7 +49,7 @@ class SCPTransferScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]SCP File Transfer[/bold cyan]\n"
+                    f"[bold $text-accent]SCP File Transfer[/bold $text-accent]\n"
                     f"Instance: {self._instance.get('name') or self._instance.get('id')}",
                     id="transfer_banner"
                 ),
@@ -142,11 +142,11 @@ class SCPTransferScreen(Screen):
             if not expanded_local_path.exists():
                 self.app.notify(f"Local path not found: {local_path}", severity="error")
                 logger.error("Upload failed: local path does not exist: %s", local_path)
-                status_output.update(f"[red]Error:[/red] Local path not found: {_s(local_path)}")
+                status_output.update(f"[$text-error]Error:[/$text-error] Local path not found: {_s(local_path)}")
                 return
 
         # Update status
-        status_output.update(f"[yellow]Preparing {self._transfer_direction}...[/yellow]")
+        status_output.update(f"[$text-warning]Preparing {self._transfer_direction}...[/$text-warning]")
 
         # Demo mode redacts the row we display, so transfer against the real
         # record.
@@ -154,7 +154,7 @@ class SCPTransferScreen(Screen):
         command = self._build_transfer_command(conn, local_path, remote_path)
 
         # Execute transfer in worker
-        status_output.update(f"[yellow]Transferring...[/yellow]")
+        status_output.update(f"[$text-warning]Transferring...[/$text-warning]")
         self.run_worker(
             self.app.scp_service.execute_transfer(command),
             name="scp_transfer",
@@ -225,13 +225,13 @@ class SCPTransferScreen(Screen):
 
                 if event.worker.error:
                     error_msg = _s(str(event.worker.error))
-                    status_output.update(f"[red]Transfer failed:[/red] {error_msg}")
+                    status_output.update(f"[$text-error]Transfer failed:[/$text-error] {error_msg}")
                     self.app.notify(f"Transfer failed: {error_msg}", severity="error", markup=False)
                 else:
                     returncode, stdout, stderr = event.worker.result
 
                     if returncode == 0:
-                        status_output.update("[green]Transfer completed successfully![/green]")
+                        status_output.update("[$text-success]Transfer completed successfully![/$text-success]")
                         self.app.notify("Transfer completed", severity="information")
                     else:
                         # A refused host key gets the one-line explanation
@@ -246,7 +246,7 @@ class SCPTransferScreen(Screen):
                         error_msg = _s(
                             problem.message if problem else (stderr or "Unknown error")
                         )
-                        status_output.update(f"[red]Transfer failed:[/red] {escape(error_msg)}")
+                        status_output.update(f"[$text-error]Transfer failed:[/$text-error] {escape(error_msg)}")
                         self.app.notify(
                             f"Transfer failed: {error_msg}", severity="error", markup=False,
                         )

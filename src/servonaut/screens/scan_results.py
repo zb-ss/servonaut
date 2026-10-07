@@ -46,7 +46,7 @@ class ScanResultsScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]Scan Results[/bold cyan]\n"
+                    f"[bold $text-accent]Scan Results[/bold $text-accent]\n"
                     f"Instance: {escape(str(display_name(self._instance) or self._instance.get('id')))}",
                     id="scan_banner"
                 ),
@@ -83,10 +83,10 @@ class ScanResultsScreen(Screen):
         if self._results:
             self._populate_table()
             status = self.query_one("#scan_status", Static)
-            status.update(f"[green]Loaded {len(self._results)} cached results[/green]")
+            status.update(f"[$text-success]Loaded {len(self._results)} cached results[/$text-success]")
         else:
             status = self.query_one("#scan_status", Static)
-            status.update("[yellow]No scan results. Run a scan first.[/yellow]")
+            status.update("[$text-warning]No scan results. Run a scan first.[/$text-warning]")
 
     def _populate_table(self) -> None:
         """Populate DataTable with scan results."""
@@ -129,10 +129,10 @@ class ScanResultsScreen(Screen):
         if not is_scannable(self._instance):
             state = escape(str(self._instance.get('state') or 'not running'))
             status.update(
-                f"[yellow]Instance is {state}; only running servers can be scanned.[/yellow]"
+                f"[$text-warning]Instance is {state}; only running servers can be scanned.[/$text-warning]"
             )
             return
-        status.update("[yellow]Scanning server...[/yellow]")
+        status.update("[$text-warning]Scanning server...[/$text-warning]")
         self.app.notify("Starting server scan...", severity="information")
 
         # exit_on_error=False: an unreachable server is reported in
@@ -185,7 +185,7 @@ class ScanResultsScreen(Screen):
                         error_msg = self._scrub(str(error))
                         label = "Scan failed"
                         severity = "error"
-                    status.update(f"[red]{label}:[/red] {escape(error_msg)}")
+                    status.update(f"[$text-error]{label}:[/$text-error] {escape(error_msg)}")
                     self.app.notify(f"{label}: {error_msg}", severity=severity, markup=False)
                 else:
                     results = event.worker.result or []
@@ -199,10 +199,10 @@ class ScanResultsScreen(Screen):
                     # Update display
                     if results:
                         self._populate_table()
-                        status.update(f"[green]Scan completed: {len(results)} results found[/green]")
+                        status.update(f"[$text-success]Scan completed: {len(results)} results found[/$text-success]")
                         self.app.notify(f"Scan completed: {len(results)} results", severity="information")
                     else:
-                        status.update("[yellow]Scan completed: No matches found[/yellow]")
+                        status.update("[$text-warning]Scan completed: No matches found[/$text-warning]")
                         self.app.notify("Scan completed: No matches found", severity="information")
 
     def action_back(self) -> None:

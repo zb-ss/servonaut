@@ -35,12 +35,12 @@
     .terminal-r1 { fill: #c5c8c6 }
 .terminal-r2 { fill: #0a1621;font-weight: bold }
 .terminal-r3 { fill: #e1e3e5 }
-.terminal-r4 { fill: #00ffff;font-weight: bold }
+.terminal-r4 { fill: #00f2fe;font-weight: bold }
 .terminal-r5 { fill: #9fa3a9 }
 .terminal-r6 { fill: #a5a9af }
 .terminal-r7 { fill: #777d86;font-style: italic; }
 .terminal-r8 { fill: #6e737c;font-style: italic; }
-.terminal-r9 { fill: #f9fafb }
+.terminal-r9 { fill: #ffffff }
 .terminal-r10 { fill: #344455 }
 .terminal-r11 { fill: #e0e0e2;font-weight: bold }
 .terminal-r12 { fill: #e0e0e2 }
@@ -52,8 +52,8 @@
 .terminal-r18 { fill: #001f21;font-weight: bold }
 .terminal-r19 { fill: #6e737c }
 .terminal-r20 { fill: #f77171;font-weight: bold }
-.terminal-r21 { fill: #00f2fe;font-weight: bold }
-.terminal-r22 { fill: #4facfe }
+.terminal-r21 { fill: #4facfe }
+.terminal-r22 { fill: #f9fafb }
 .terminal-r23 { fill: #3f4551 }
     </style>
 
@@ -254,7 +254,7 @@
 </text><text class="terminal-r11" x="73.2" y="776.4" textLength="134.2" clip-path="url(#terminal-line-31)">&#160;🧾&#160;Billing&#160;</text><text class="terminal-r1" x="1952" y="776.4" textLength="12.2" clip-path="url(#terminal-line-31)">
 </text><text class="terminal-r1" x="1952" y="800.8" textLength="12.2" clip-path="url(#terminal-line-32)">
 </text><text class="terminal-r1" x="1952" y="825.2" textLength="12.2" clip-path="url(#terminal-line-33)">
-</text><text class="terminal-r21" x="73.2" y="849.6" textLength="146.4" clip-path="url(#terminal-line-34)">&#160;🔑&#160;SSH&#160;Keys&#160;</text><text class="terminal-r1" x="1952" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
+</text><text class="terminal-r4" x="73.2" y="849.6" textLength="146.4" clip-path="url(#terminal-line-34)">&#160;🔑&#160;SSH&#160;Keys&#160;</text><text class="terminal-r1" x="1952" y="849.6" textLength="12.2" clip-path="url(#terminal-line-34)">
 </text><text class="terminal-r1" x="1952" y="874" textLength="12.2" clip-path="url(#terminal-line-35)">
 </text><text class="terminal-r10" x="0" y="898.4" textLength="305" clip-path="url(#terminal-line-36)">╭───────────────────────╮</text><text class="terminal-r1" x="1952" y="898.4" textLength="12.2" clip-path="url(#terminal-line-36)">
 </text><text class="terminal-r10" x="0" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r11" x="85.4" y="922.8" textLength="134.2" clip-path="url(#terminal-line-37)">&#160;▶&#160;Hetzner&#160;</text><text class="terminal-r10" x="292.8" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">│</text><text class="terminal-r1" x="1952" y="922.8" textLength="12.2" clip-path="url(#terminal-line-37)">
@@ -268,8 +268,8 @@
 </text><text class="terminal-r20" x="97.6" y="1118" textLength="97.6" clip-path="url(#terminal-line-45)">&#160;👋&#160;Quit&#160;</text><text class="terminal-r1" x="1952" y="1118" textLength="12.2" clip-path="url(#terminal-line-45)">
 </text><text class="terminal-r1" x="1952" y="1142.4" textLength="12.2" clip-path="url(#terminal-line-46)">
 </text><text class="terminal-r1" x="1952" y="1166.8" textLength="12.2" clip-path="url(#terminal-line-47)">
-</text><text class="terminal-r22" x="0" y="1191.2" textLength="1952" clip-path="url(#terminal-line-48)">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text><text class="terminal-r1" x="1952" y="1191.2" textLength="12.2" clip-path="url(#terminal-line-48)">
-</text><text class="terminal-r21" x="0" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">&#160;esc&#160;</text><text class="terminal-r9" x="61" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Back&#160;</text><text class="terminal-r21" x="122" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;n&#160;</text><text class="terminal-r9" x="158.6" y="1215.6" textLength="48.8" clip-path="url(#terminal-line-49)">Add&#160;</text><text class="terminal-r21" x="207.4" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;d&#160;</text><text class="terminal-r9" x="244" y="1215.6" textLength="85.4" clip-path="url(#terminal-line-49)">Delete&#160;</text><text class="terminal-r21" x="329.4" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;r&#160;</text><text class="terminal-r9" x="366" y="1215.6" textLength="97.6" clip-path="url(#terminal-line-49)">Refresh&#160;</text><text class="terminal-r21" x="463.6" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;q&#160;</text><text class="terminal-r9" x="500.2" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Quit&#160;</text><text class="terminal-r21" x="561.2" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;?&#160;</text><text class="terminal-r9" x="597.8" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Help&#160;</text><text class="terminal-r21" x="658.8" y="1215.6" textLength="48.8" clip-path="url(#terminal-line-49)">&#160;f2&#160;</text><text class="terminal-r9" x="707.6" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Chat&#160;</text><text class="terminal-r23" x="1805.6" y="1215.6" textLength="12.2" clip-path="url(#terminal-line-49)">▏</text><text class="terminal-r21" x="1817.8" y="1215.6" textLength="24.4" clip-path="url(#terminal-line-49)">^p</text><text class="terminal-r9" x="1842.2" y="1215.6" textLength="97.6" clip-path="url(#terminal-line-49)">&#160;palette</text>
+</text><text class="terminal-r21" x="0" y="1191.2" textLength="1952" clip-path="url(#terminal-line-48)">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text><text class="terminal-r1" x="1952" y="1191.2" textLength="12.2" clip-path="url(#terminal-line-48)">
+</text><text class="terminal-r4" x="0" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">&#160;esc&#160;</text><text class="terminal-r22" x="61" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Back&#160;</text><text class="terminal-r4" x="122" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;n&#160;</text><text class="terminal-r22" x="158.6" y="1215.6" textLength="48.8" clip-path="url(#terminal-line-49)">Add&#160;</text><text class="terminal-r4" x="207.4" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;d&#160;</text><text class="terminal-r22" x="244" y="1215.6" textLength="85.4" clip-path="url(#terminal-line-49)">Delete&#160;</text><text class="terminal-r4" x="329.4" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;r&#160;</text><text class="terminal-r22" x="366" y="1215.6" textLength="97.6" clip-path="url(#terminal-line-49)">Refresh&#160;</text><text class="terminal-r4" x="463.6" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;q&#160;</text><text class="terminal-r22" x="500.2" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Quit&#160;</text><text class="terminal-r4" x="561.2" y="1215.6" textLength="36.6" clip-path="url(#terminal-line-49)">&#160;?&#160;</text><text class="terminal-r22" x="597.8" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Help&#160;</text><text class="terminal-r4" x="658.8" y="1215.6" textLength="48.8" clip-path="url(#terminal-line-49)">&#160;f2&#160;</text><text class="terminal-r22" x="707.6" y="1215.6" textLength="61" clip-path="url(#terminal-line-49)">Chat&#160;</text><text class="terminal-r23" x="1805.6" y="1215.6" textLength="12.2" clip-path="url(#terminal-line-49)">▏</text><text class="terminal-r4" x="1817.8" y="1215.6" textLength="24.4" clip-path="url(#terminal-line-49)">^p</text><text class="terminal-r22" x="1842.2" y="1215.6" textLength="97.6" clip-path="url(#terminal-line-49)">&#160;palette</text>
     </g>
     </g>
 </svg>

@@ -124,7 +124,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]Hetzner Cloud Manager[/bold cyan]",
+                    "[bold $text-accent]Hetzner Cloud Manager[/bold $text-accent]",
                     id="hetzner_mgr_header",
                 ),
                 Static(
@@ -190,8 +190,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             return
         if inventory(self.app, "hetzner") is None:
             self._set_status(
-                "[red]Hetzner Cloud is not configured. "
-                "Visit Settings → Hetzner Cloud to set up a token.[/red]"
+                "[$text-error]Hetzner Cloud is not configured. "
+                "Visit Settings → Hetzner Cloud to set up a token.[/$text-error]"
             )
             return
         self._loading = True
@@ -229,7 +229,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Failed to load servers: {err_msg}[/red]"
+                f"[$text-error]Failed to load servers: {err_msg}[/$text-error]"
             )
         finally:
             self._loading = False
@@ -314,7 +314,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             return ""
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        return f"\n[yellow]⚠ {escape(error)}[/yellow]"
+        return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
 
     def _display_id(self, api_id: str) -> str:
         """An API id as the table shows it (a placeholder in demo mode)."""
@@ -460,7 +460,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]{method} failed: {err_msg}[/red]"
+                f"[$text-error]{method} failed: {err_msg}[/$text-error]"
             )
             self.notify(
                 f"{method} failed: {err_msg}",
@@ -513,7 +513,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Delete failed: {err_msg}[/red]"
+                f"[$text-error]Delete failed: {err_msg}[/$text-error]"
             )
             self.notify(
                 f"Delete failed: {err_msg}",

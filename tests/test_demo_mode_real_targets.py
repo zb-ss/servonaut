@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
-from rich.text import Text
+from textual.content import Content
 
 from servonaut.app import ServonautApp
 from servonaut.services.redaction_service import RedactionService
@@ -49,7 +49,7 @@ def _demo_app(row: dict, *, demo: bool = True, **services):
 
 
 def _plain(markup: str) -> str:
-    return Text.from_markup(markup).plain
+    return Content.from_markup(markup).plain
 
 
 # ---------------------------------------------------------------------------

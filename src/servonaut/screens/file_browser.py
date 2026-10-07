@@ -115,7 +115,7 @@ class FileBrowserScreen(Screen):
             conn_text = "Direct"
 
         return (
-            f"[bold cyan]File Browser:[/bold cyan] {name}\n"
+            f"[bold $text-accent]File Browser:[/bold $text-accent] {name}\n"
             f"[dim]Connection:[/dim] {conn_text}"
         )
 

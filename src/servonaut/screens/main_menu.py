@@ -64,9 +64,9 @@ class MainMenuScreen(Screen):
         
         # Update UI safely
         try:
-            self.query_one("#stat-total", Static).update(f"[bold cyan]{total}[/bold cyan]\nTotal Servers")
-            self.query_one("#stat-running", Static).update(f"[bold green]{running}[/bold green]\nRunning")
-            self.query_one("#stat-stopped", Static).update(f"[bold yellow]{stopped}[/bold yellow]\nStopped")
+            self.query_one("#stat-total", Static).update(f"[bold $text-accent]{total}[/bold $text-accent]\nTotal Servers")
+            self.query_one("#stat-running", Static).update(f"[bold $text-success]{running}[/bold $text-success]\nRunning")
+            self.query_one("#stat-stopped", Static).update(f"[bold $text-warning]{stopped}[/bold $text-warning]\nStopped")
         except Exception:
             pass
 
@@ -81,7 +81,7 @@ class MainMenuScreen(Screen):
             # Right Content Area (Dashboard)
             with Vertical(id="dashboard-content"):
                 with Container(id="dashboard-header"):
-                    yield Static(f"Welcome to [bold cyan]Servonaut[/bold cyan]", id="dashboard-title")
+                    yield Static(f"Welcome to [bold $text-accent]Servonaut[/bold $text-accent]", id="dashboard-title")
                     yield Static("Select a tool or view to get started.", id="dashboard-subtitle")
                 
                 # Stats Row

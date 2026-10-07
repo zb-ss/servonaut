@@ -34,7 +34,7 @@ class CustomServersScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Custom Servers[/bold cyan]", id="custom_servers_header"),
+                Static("[bold $text-accent]Custom Servers[/bold $text-accent]", id="custom_servers_header"),
             Static(
                 "[dim]Manage non-AWS servers (DigitalOcean, Hetzner, bare-metal, etc.)[/dim]",
                 classes="note",

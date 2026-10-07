@@ -85,7 +85,7 @@ class BwVaultManagerScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Bitwarden SSH Vault[/bold cyan]", id="bw_vault_mgr_header"),
+                Static("[bold $text-accent]Bitwarden SSH Vault[/bold $text-accent]", id="bw_vault_mgr_header"),
                 Static(
                     "[dim]SSH-key items in your Servonaut vault folder, joined with the "
                     "servers that reference them. Local-only — your vault never leaves this "
@@ -126,18 +126,18 @@ class BwVaultManagerScreen(Screen):
         guard = getattr(self.app, "entitlement_guard", None)
         if guard is None:
             self._set_status(
-                "[yellow]Sign in to Servonaut to use the Bitwarden SSH vault manager.[/yellow]"
+                "[$text-warning]Sign in to Servonaut to use the Bitwarden SSH vault manager.[/$text-warning]"
             )
             return
         allowed, reason = guard.check(_ENTITLEMENT_FEATURE)
         if not allowed:
             self._set_status(
-                f"[yellow]Upgrade required.[/yellow] The Bitwarden SSH vault is a Solo/Teams "
+                f"[$text-warning]Upgrade required.[/$text-warning] The Bitwarden SSH vault is a Solo/Teams "
                 f"feature. [dim]{escape(reason)}[/dim]"
             )
             return
         if self._service() is None:
-            self._set_status("[red]Bitwarden session service unavailable.[/red]")
+            self._set_status("[$text-error]Bitwarden session service unavailable.[/$text-error]")
             return
         self._loading = True
         self._set_status("[dim]Loading vault items…[/dim]")
@@ -152,7 +152,7 @@ class BwVaultManagerScreen(Screen):
             if state is not BwAuthState.UNLOCKED:
                 unlocked = await self.app.push_screen_wait(BwUnlockModal(svc))
                 if not unlocked:
-                    self._set_status("[yellow]Vault locked — unlock to view your SSH keys.[/yellow]")
+                    self._set_status("[$text-warning]Vault locked — unlock to view your SSH keys.[/$text-warning]")
                     return
 
             from servonaut.utils.bw_folder import resolved_bw_vault_folder
@@ -177,11 +177,11 @@ class BwVaultManagerScreen(Screen):
                 f"{linked} referenced by a server.[/dim]"
             )
         except BwError as exc:
-            self._set_status(f"[red]{escape(self._demo_safe(exc.message))}[/red]")
+            self._set_status(f"[$text-error]{escape(self._demo_safe(exc.message))}[/$text-error]")
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load BW vault manager: %s", exc)
             self._set_status(
-                f"[red]Failed to load vault items: {escape(self._demo_safe(str(exc)))}[/red]"
+                f"[$text-error]Failed to load vault items: {escape(self._demo_safe(str(exc)))}[/$text-error]"
             )
         finally:
             self._loading = False

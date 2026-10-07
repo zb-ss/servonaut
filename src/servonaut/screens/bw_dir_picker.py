@@ -135,7 +135,7 @@ class BwDirPickerModal(ModalScreen[Optional[Path]]):
             scrub = self.app.redaction_service.scrub_stream
         yield Container(
             Static(
-                "[bold cyan]Import SSH keys — pick a directory[/bold cyan]",
+                "[bold $text-accent]Import SSH keys — pick a directory[/bold $text-accent]",
                 id="bw_dir_picker_title",
             ),
             Static(

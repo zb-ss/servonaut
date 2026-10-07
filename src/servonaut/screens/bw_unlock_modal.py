@@ -52,7 +52,7 @@ class BwUnlockModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static("[bold cyan]Unlock Bitwarden Vault[/bold cyan]", id="bw_unlock_title"),
+            Static("[bold $text-accent]Unlock Bitwarden Vault[/bold $text-accent]", id="bw_unlock_title"),
             Vertical(
                 Static("[dim]Checking Bitwarden status…[/dim]"),
                 id="bw_unlock_body",

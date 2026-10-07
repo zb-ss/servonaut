@@ -60,8 +60,8 @@ _MODEL_OPTIONS = [
 
 # Glyphs for the readiness rows. Plain characters only: emoji carrying a
 # VS16 variant selector corrupt row rendering in some terminals.
-_OK = "[green]OK[/green]"
-_MISSING = "[red]--[/red]"
+_OK = "[$text-success]OK[/$text-success]"
+_MISSING = "[$text-error]--[/$text-error]"
 
 _MAX_RECORDING_CEILING = 600
 
@@ -1181,7 +1181,7 @@ class VoicePanel(SettingsPanel):
         message = "Voice setup is unavailable in this build."
         if detail:
             message = f"{message} ({escape(detail)})"
-        banner.update(f"[yellow]{message}[/yellow]")
+        banner.update(f"[$text-warning]{message}[/$text-warning]")
 
     def _render_banner(self) -> None:
         """Summarise readiness in one line at the top of the panel."""
@@ -1197,9 +1197,9 @@ class VoicePanel(SettingsPanel):
 
         enabled = self.query_one("#voice_enabled", Switch).value
         if readiness.is_ready and enabled:
-            banner.update("[green]Ready — press the microphone in the chat panel, or ctrl+t.[/green]")
+            banner.update("[$text-success]Ready — press the microphone in the chat panel, or ctrl+t.[/$text-success]")
         elif readiness.is_ready:
-            banner.update("[yellow]Set up, but switched off. Enable it above and save.[/yellow]")
+            banner.update("[$text-warning]Set up, but switched off. Enable it above and save.[/$text-warning]")
         else:
             labels = {
                 "packages": "the Python packages are not installed",
@@ -1208,7 +1208,7 @@ class VoicePanel(SettingsPanel):
                 "model": "the speech model is not downloaded yet",
             }
             reason = labels.get(readiness.next_step, "setup is incomplete")
-            banner.update(f"[yellow]Not ready — {escape(reason)}.[/yellow]")
+            banner.update(f"[$text-warning]Not ready — {escape(reason)}.[/$text-warning]")
 
     def _render_requirements(self) -> None:
         """Rebuild the per-requirement rows and their action buttons."""

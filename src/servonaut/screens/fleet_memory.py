@@ -163,9 +163,9 @@ class FleetScanSummaryModal(ModalScreen[None]):
         total = len(self._succeeded) + len(self._failed)
         yield Container(
             Static(
-                f"[bold cyan]Fleet scan complete[/bold cyan] — "
-                f"[green]{len(self._succeeded)} succeeded[/green], "
-                f"[red]{len(self._failed)} failed[/red] "
+                f"[bold $text-accent]Fleet scan complete[/bold $text-accent] — "
+                f"[$text-success]{len(self._succeeded)} succeeded[/$text-success], "
+                f"[$text-error]{len(self._failed)} failed[/$text-error] "
                 f"({total} total)",
                 id="fleet-scan-title",
             ),
@@ -194,12 +194,12 @@ class FleetScanSummaryModal(ModalScreen[None]):
 
         lines: List[str] = []
         if self._succeeded:
-            lines.append("[green]Succeeded[/green]:")
+            lines.append("[$text-success]Succeeded[/$text-success]:")
             for name in self._succeeded:
                 lines.append(f"  • {escape(name)}")
             lines.append("")
         if self._failed:
-            lines.append("[red]Failed[/red]:")
+            lines.append("[$text-error]Failed[/$text-error]:")
             for entry in self._failed:
                 reason = _s(entry.get("reason", "unknown"))
                 lines.append(
@@ -350,7 +350,7 @@ class FleetMemoryScreen(Screen):
         # going in the background and routes progress here while mounted.
         if getattr(self.app, "_fleet_manual_scan_in_progress", False):
             self._scanning = True
-            self._set_progress("[cyan]Fleet scan in progress…[/cyan]")
+            self._set_progress("[$text-accent]Fleet scan in progress…[/$text-accent]")
 
     # ------------------------------------------------------------------
     # Data / populate
@@ -595,10 +595,10 @@ class FleetMemoryScreen(Screen):
         total = len(rows)
         return (
             f"[dim]{total} instances  ·  "
-            f"[green]{fresh} fresh[/green]  ·  "
-            f"[yellow]{stale} stale[/yellow]  ·  "
+            f"[$text-success]{fresh} fresh[/$text-success]  ·  "
+            f"[$text-warning]{stale} stale[/$text-warning]  ·  "
             f"{none_count} not probed  ·  "
-            f"[red]{opt_out} opted-out[/red][/dim]"
+            f"[$text-error]{opt_out} opted-out[/$text-error][/dim]"
         )
 
     def _selected_row(self) -> Optional[Dict[str, Any]]:
@@ -753,7 +753,7 @@ class FleetMemoryScreen(Screen):
             return
 
         self._set_progress(
-            f"[cyan]Scanning 0 / {len(instances)}[/cyan]  "
+            f"[$text-accent]Scanning 0 / {len(instances)}[/$text-accent]  "
             f"[dim](parallel: {_MAX_PARALLEL_FLEET_PROBES})[/dim]"
         )
         logger.info("Fleet scan launched: %d instance(s), stale_only=%s",
@@ -805,9 +805,9 @@ class FleetMemoryScreen(Screen):
                 name = self.app.redaction_service.redact_name(name)
             except Exception:
                 pass
-        colour = "green" if progress.succeeded else "red"
+        colour = "$text-success" if progress.succeeded else "$text-error"
         self._set_progress(
-            f"[cyan]Scanning {progress.completed} / {progress.total}[/cyan]  "
+            f"[$text-accent]Scanning {progress.completed} / {progress.total}[/$text-accent]  "
             f"·  [{colour}]last: {escape(name)} "
             f"{'✓' if progress.succeeded else '✗'}[/{colour}]"
         )
@@ -999,9 +999,9 @@ class FleetMemoryScreen(Screen):
     # ------------------------------------------------------------------
 
     def _auto_scan_status_text(self) -> str:
-        """Return the Rich-markup string describing current auto-scan state.
+        """Return the markup string describing current auto-scan state.
 
-        ON:  ``[green]● Auto-scan on · next in ~Xh[/green]``
+        ON:  ``[$text-success]● Auto-scan on · next in ~Xh[/$text-success]``
              (or ``· scheduled`` when never run).
         OFF: ``[dim]○ Auto-scan off[/dim]``.
 
@@ -1020,11 +1020,11 @@ class FleetMemoryScreen(Screen):
         interval = getattr(memory_cfg, "auto_scan_interval_seconds", 86400)
 
         if last_run == 0.0:
-            return "[green]● Auto-scan on · scheduled[/green]"
+            return "[$text-success]● Auto-scan on · scheduled[/$text-success]"
 
         seconds_until = max(0.0, (last_run + interval) - time.time())
         hours_until = int(seconds_until // 3600)
-        return f"[green]● Auto-scan on · next in ~{hours_until}h[/green]"
+        return f"[$text-success]● Auto-scan on · next in ~{hours_until}h[/$text-success]"
 
     def _refresh_auto_scan_status(self) -> None:
         """Update the ``#fleet-auto-scan-status`` widget with current state."""

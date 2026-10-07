@@ -53,6 +53,15 @@ def test_text_colours_read_at_wcag_aa(theme, role) -> None:
 
 
 @pytest.mark.parametrize("theme", [SERVONAUT_DARK, SERVONAUT_LIGHT], ids=lambda t: t.name)
+@pytest.mark.parametrize("role", ["primary", "secondary", "accent", "warning", "error", "success"])
+def test_coloured_text_variables_read_at_wcag_aa(theme, role) -> None:
+    """Markup like [$text-warning] uses these; they must not be left to Textual's tint."""
+    colour = theme.variables[f"text-{role}"]
+    for fill in (theme.background, theme.surface):
+        assert _contrast(colour, fill) >= 4.5
+
+
+@pytest.mark.parametrize("theme", [SERVONAUT_DARK, SERVONAUT_LIGHT], ids=lambda t: t.name)
 def test_text_on_highlights_reads_at_wcag_aa(theme) -> None:
     """Buttons and the table cursor print their own foreground on these fills."""
     for fill in (theme.primary, theme.accent):

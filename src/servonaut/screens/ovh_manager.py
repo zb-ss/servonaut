@@ -130,7 +130,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]OVHcloud Manager[/bold cyan]",
+                    "[bold $text-accent]OVHcloud Manager[/bold $text-accent]",
                     id="ovh_mgr_header",
                 ),
                 Static(
@@ -190,8 +190,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return
         if inventory(self.app, "ovh") is None:
             self._set_status(
-                "[red]OVHcloud is not configured. "
-                "Visit Settings → OVHcloud to set up credentials.[/red]"
+                "[$text-error]OVHcloud is not configured. "
+                "Visit Settings → OVHcloud to set up credentials.[/$text-error]"
             )
             return
         self._loading = True
@@ -223,7 +223,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                         cred_error = self.app.redaction_service.scrub_stream(
                             cred_error
                         )
-                    self._set_status(f"[red]⚠ {escape(cred_error)}[/red]")
+                    self._set_status(f"[$text-error]⚠ {escape(cred_error)}[/$text-error]")
                 else:
                     self._set_status(
                         "[dim]No OVH instances. Press [b]n[/b] to create a "
@@ -238,7 +238,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             logger.error("Failed to load OVH instances: %s", exc)
             err_msg = escape(self._provider_error(exc))
             self._set_status(
-                f"[red]Failed to load instances: {err_msg}[/red]"
+                f"[$text-error]Failed to load instances: {err_msg}[/$text-error]"
             )
         finally:
             self._loading = False
@@ -269,7 +269,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             return ""
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        return f"\n[yellow]⚠ {escape(error)}[/yellow]"
+        return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
@@ -524,7 +524,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             )
             err_msg = escape(self._provider_error(exc))
             self._set_status(
-                f"[red]{method} failed: {err_msg}[/red]"
+                f"[$text-error]{method} failed: {err_msg}[/$text-error]"
             )
             self.notify(
                 f"{method} failed: {self._provider_error(exc)}",
@@ -600,7 +600,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                                error=str(exc)[:200], account=account)
             err_msg = escape(self._provider_error(exc))
             self._set_status(
-                f"[red]Delete failed: {err_msg}[/red]"
+                f"[$text-error]Delete failed: {err_msg}[/$text-error]"
             )
             self.notify(
                 f"Delete failed: {self._provider_error(exc)}",

@@ -87,7 +87,7 @@ class OVHCloudCreateScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]Create Cloud Instance[/bold cyan]",
+                    "[bold $text-accent]Create Cloud Instance[/bold $text-accent]",
                     id="cloud_create_title",
                 ),
                 # Hidden unless several OVH accounts are configured.
@@ -168,8 +168,8 @@ class OVHCloudCreateScreen(Screen):
                 return
             self.query_one("#cloud_create_container", ScrollableContainer).mount(
                 Static(
-                    "[red]No OVH cloud project IDs configured. "
-                    "Add them in Settings under OVH.[/red]",
+                    "[$text-error]No OVH cloud project IDs configured. "
+                    "Add them in Settings under OVH.[/$text-error]",
                     id="no_project_error",
                 )
             )
@@ -420,11 +420,11 @@ class OVHCloudCreateScreen(Screen):
                 # Surface a hint pointing at the OVH SSH Keys screen
                 # so the user knows where to add one.
                 hint.update(
-                    "[yellow]No SSH keys configured on this OVH "
+                    "[$text-warning]No SSH keys configured on this OVH "
                     "project. Add one via [b]OVH → SSH Keys[/b] "
                     "(sidebar) — without a key the new instance "
                     "boots without your public key in "
-                    "authorized_keys.[/yellow]"
+                    "authorized_keys.[/$text-warning]"
                 )
                 hint.display = True
             else:
