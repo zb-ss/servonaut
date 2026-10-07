@@ -154,8 +154,13 @@ def add_vault_parser(subparsers: Any) -> None:
     bind_personal = commands.add_parser("bind-personal", help="Bind a vault SSH item to a personal server with explicit host pins.")
     bind_personal.add_argument("--vault", required=True)
     bind_personal.add_argument("--item", required=True)
-    bind_personal.add_argument("--provider", required=True)
-    bind_personal.add_argument("--instance-id", required=True)
+    bind_personal.add_argument(
+        "--provider", required=True, help="aws, ovh, hetzner, or custom for a custom server.",
+    )
+    bind_personal.add_argument(
+        "--instance-id", required=True,
+        help="The instance id; for --provider custom, the custom server's name as shown in Servonaut.",
+    )
     bind_personal.add_argument("--hostname", required=True)
     bind_personal.add_argument("--port", type=int, default=22)
     bind_personal.add_argument("--login", required=True)

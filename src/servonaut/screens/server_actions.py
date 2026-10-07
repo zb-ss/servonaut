@@ -1314,7 +1314,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                             markup=False,
                         )
                         return
-                    provider = str(instance.get("provider") or "")
+                    # A custom server is addressed by name (provider "custom").
+                    custom = instance.get("is_custom") is True
+                    provider = "custom" if custom else str(instance.get("provider") or "")
                     hostname = str(
                         instance.get("hostname") or instance.get("host") or instance.get("public_ip") or ""
                     )
@@ -1331,7 +1333,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         vault_id=values["vault_id"],
                         item_id=values["item_id"],
                         provider=provider,
-                        instance_id=server,
+                        instance_id=str(instance.get("name") or "") if custom else server,
                         hostname=hostname,
                         port=port,
                         login=login,

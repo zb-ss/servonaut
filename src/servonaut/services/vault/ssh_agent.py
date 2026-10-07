@@ -48,9 +48,11 @@ class PrivateSshAgent:
     _instances: ClassVar[set["PrivateSshAgent"]] = set()
     _cleanup_registered: ClassVar[bool] = False
 
-    def __init__(self, socket_path: Path, pid: int) -> None:
+    def __init__(self, socket_path: Path, pid: int, private_directory: Path | None = None) -> None:
         self.socket_path = socket_path
         self.pid = pid
+        # A per-agent directory created for this socket, removed on close.
+        self._private_directory = private_directory
         self._closed = False
 
     @classmethod
@@ -74,8 +76,17 @@ class PrivateSshAgent:
         cls._ensure_private_socket_directory(socket_dir, private_parent=private_parent)
         cls.cleanup_stale_sockets(socket_dir)
 
-        socket_path = socket_dir / f"agent-{os.getpid()}-{secrets.token_hex(8)}.sock"
+        socket_name = f"agent-{os.getpid()}-{secrets.token_hex(8)}.sock"
+        socket_path = socket_dir / socket_name
+        private_directory: Path | None = None
+        if len(os.fsencode(socket_path)) > _UNIX_SOCKET_PATH_MAX and directory is None:
+            # A long home directory leaves no room for a Unix socket name.
+            # Like OpenSSH's own agent, use a fresh private directory in the
+            # system temporary directory instead.
+            private_directory = cls._private_temporary_directory(socket_name)
+            socket_path = private_directory / socket_name
         if len(os.fsencode(socket_path)) > _UNIX_SOCKET_PATH_MAX:
+            cls._remove_private_directory(private_directory)
             raise PrivateSshAgentError(
                 "Private SSH agent socket path is too long; choose a shorter socket directory"
             )
@@ -87,21 +98,58 @@ class PrivateSshAgent:
             timeout=10,
         )
         if result.returncode != 0:
+            cls._remove_private_directory(private_directory)
             raise PrivateSshAgentError("Could not start the private SSH agent")
         socket_match = _AGENT_SOCKET_RE.search(result.stdout)
         pid_match = _AGENT_PID_RE.search(result.stdout)
         if socket_match is None or pid_match is None:
             cls._terminate_agent(int(pid_match.group(1)) if pid_match else None)
+            cls._remove_private_directory(private_directory)
             raise PrivateSshAgentError("ssh-agent returned an invalid response")
         reported_socket = Path(socket_match.group(1))
         if reported_socket != socket_path:
             cls._terminate_agent(int(pid_match.group(1)))
+            cls._remove_private_directory(private_directory)
             raise PrivateSshAgentError("ssh-agent returned an unexpected socket")
 
-        agent = cls(socket_path=socket_path, pid=int(pid_match.group(1)))
+        agent = cls(socket_path=socket_path, pid=int(pid_match.group(1)), private_directory=private_directory)
         cls._instances.add(agent)
         cls._register_cleanup()
         return agent
+
+    @classmethod
+    def _private_temporary_directory(cls, socket_name: str) -> Path:
+        """A new 0700 directory, created atomically, under the real temporary directory.
+
+        The temporary directory is resolved first because on some systems it
+        lies behind a symbolic link, which the socket checks refuse. When even
+        that is too long for a socket (a long ``TMPDIR``), ``/tmp`` is used.
+        """
+        # "svn-agent-" plus mkdtemp's eight random characters and a separator.
+        room = len("svn-agent-") + 8 + 2 + len(socket_name)
+        base = os.path.realpath(tempfile.gettempdir())
+        if len(os.fsencode(base)) + room > _UNIX_SOCKET_PATH_MAX and os.path.isdir("/tmp"):
+            base = os.path.realpath("/tmp")
+        try:
+            created = Path(tempfile.mkdtemp(prefix="svn-agent-", dir=base))
+        except OSError as exc:
+            raise PrivateSshAgentError("Private SSH agent directory cannot be created") from exc
+        try:
+            cls._assert_no_symlink_components(created)
+            cls._assert_private_socket_directory(created)
+        except PrivateSshAgentError:
+            cls._remove_private_directory(created)
+            raise
+        return created
+
+    @staticmethod
+    def _remove_private_directory(directory: Path | None) -> None:
+        if directory is None:
+            return
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
     @classmethod
     def _ensure_private_socket_directory(
@@ -327,6 +375,7 @@ class PrivateSshAgent:
             self.socket_path.unlink(missing_ok=True)
         except OSError:
             pass
+        self._remove_private_directory(self._private_directory)
         self._instances.discard(self)
 
     def __enter__(self) -> "PrivateSshAgent":
