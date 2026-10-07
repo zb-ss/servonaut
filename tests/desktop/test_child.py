@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,8 @@ from servonaut.desktop.model import (
     StartRequest,
 )
 from servonaut.runtime import RuntimeLayout, detect_runtime
+
+SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 
 
 @pytest.fixture
@@ -177,3 +181,33 @@ def test_child_main_logs_startup_failure_to_data_root(
         handler.flush()
     log_file = source_runtime.data_root / "logs" / "servonaut.log"
     assert "Desktop start frame was rejected" in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("restore_root_logging")
+def test_child_main_asks_textual_for_24_bit_colour(
+    source_runtime: RuntimeLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A desktop-menu launch has no TERM/COLORTERM for Textual to guess from."""
+    # setenv (not delenv) records the original, so the suite gets it back.
+    monkeypatch.setenv("TEXTUAL_COLOR_SYSTEM", "auto")
+    main(
+        argv=[],
+        stdin_stream=io.BytesIO(b"\x00\x00\x00\x05junk!"),
+        stdout_stream=io.BytesIO(),
+        runtime_layout=source_runtime,
+        platform_name="posix",
+    )
+    assert os.environ["TEXTUAL_COLOR_SYSTEM"] == "truecolor"
+
+
+def test_child_module_leaves_textual_unimported(tmp_path: Path) -> None:
+    """Textual reads TEXTUAL_COLOR_SYSTEM once, on import, so main() must run first."""
+    code = "import sys, servonaut.desktop.child; print('textual' in sys.modules)"
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "HOME": str(tmp_path), "PYTHONPATH": str(SRC_DIR)},
+    )
+    assert result.stdout.strip() == "False"
