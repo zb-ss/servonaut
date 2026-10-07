@@ -1441,7 +1441,8 @@ class AppConfig:
         custom_servers: List of non-AWS custom servers
         terminal_emulator: Terminal emulator preference (default: auto)
         keyword_store_path: Path to keyword store file
-        theme: UI theme preference (default: dark)
+        theme: Colour theme name, any registered Textual theme (default:
+            servonaut). Legacy ``dark``/``light`` read as the Servonaut pair.
     """
     version: int = CONFIG_VERSION
     default_key: str = ""
@@ -1459,7 +1460,7 @@ class AppConfig:
     keyword_store_path: str = "~/.servonaut/keywords.json"
     command_history_path: str = "~/.servonaut/command_history.json"
     max_command_history: int = 50
-    theme: str = "dark"
+    theme: str = "servonaut"
     log_viewer_default_paths: List[str] = field(default_factory=lambda: [
         "/var/log/syslog",
         "/var/log/auth.log",
