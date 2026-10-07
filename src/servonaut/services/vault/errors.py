@@ -46,10 +46,19 @@ _ACTIONABLE_CODES = {
     "step_up_required": "this needs a recent MFA sign-in; run `servonaut login` and try again",
     "mfa_enrollment_required": "turn on two-factor authentication for your account first",
     "vault_exists": "that vault already exists: there is one personal vault per account and one vault per team",
+    "ssh_ca_unavailable": (
+        "the Servonaut service cannot issue SSH certificates right now; "
+        "nothing is wrong with your setup, so try again later"
+    ),
     "no_identity": (
         "this device does not hold your current vault identity; add it from an active device "
         "(`servonaut vault devices add`) or recover it (`servonaut vault recover`)"
     ),
+}
+
+# ``feature_disabled`` names the feature switched off on the service in ``details.feature``.
+_DISABLED_FEATURES = {
+    "ssh_ca": "SSH certificates are not available on this Servonaut service",
 }
 
 # ``entitlement_required`` names the missing plan feature in ``details.feature``.
@@ -78,6 +87,11 @@ def vault_failure_reason(exc: BaseException) -> str:
             return reason
     if isinstance(exc, APIError) and exc.code in _ACTIONABLE_CODES:
         return _ACTIONABLE_CODES[exc.code]
+    if isinstance(exc, APIError) and exc.code == "feature_disabled":
+        details = exc.details if isinstance(exc.details, dict) else {}
+        return _DISABLED_FEATURES.get(
+            str(details.get("feature")), "this feature is switched off on this Servonaut service right now",
+        )
     if isinstance(exc, APIError) and exc.code == "entitlement_required":
         details = exc.details if isinstance(exc.details, dict) else {}
         feature = _PLAN_FEATURES.get(str(details.get("feature")))

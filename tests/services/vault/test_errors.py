@@ -103,3 +103,26 @@ def test_plan_refusal_names_the_missing_feature(feature: str, expected: str) -> 
                    details={"feature": feature, "upgrade_url": "https://example.com/upgrade"})
 
     assert vault_failure_reason(exc) == expected
+
+
+def test_switched_off_ssh_certificates_are_named_plainly() -> None:
+    exc = APIError(
+        code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
+    )
+
+    assert vault_failure_reason(exc) == "SSH certificates are not available on this Servonaut service"
+
+
+def test_another_switched_off_feature_gets_a_generic_reason() -> None:
+    exc = APIError(code="feature_disabled", message="server text", status=503, details={"feature": "other"})
+
+    assert vault_failure_reason(exc) == "this feature is switched off on this Servonaut service right now"
+
+
+def test_a_service_that_cannot_sign_certificates_does_not_blame_the_user() -> None:
+    exc = APIError(code="ssh_ca_unavailable", message="server text", status=503)
+
+    assert vault_failure_reason(exc) == (
+        "the Servonaut service cannot issue SSH certificates right now; "
+        "nothing is wrong with your setup, so try again later"
+    )

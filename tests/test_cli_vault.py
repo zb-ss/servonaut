@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 from servonaut.cli import vault
 from servonaut.services.api_client import APIError
 
+VAULT_ID = "5a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -26,10 +28,10 @@ def test_vault_parser_accepts_identity_confirm() -> None:
 
 
 def test_vault_parser_requires_explicit_reveal_flag() -> None:
-    args = _parser().parse_args(["vault", "show", "item-1", "--vault", "vault-1"])
+    args = _parser().parse_args(["vault", "show", "item-1", "--vault", VAULT_ID])
 
     assert args.reveal is False
-    assert args.vault == "vault-1"
+    assert args.vault == VAULT_ID
 
 
 def test_vault_parser_accepts_pending_device_add() -> None:
@@ -61,7 +63,7 @@ def test_vault_json_redacts_revealed_value(capsys) -> None:
 
     vault.set_vault_service_factory(Service)
     try:
-        args = _parser().parse_args(["vault", "--json", "show", "item-1", "--vault", "v", "--reveal", "--yes"])
+        args = _parser().parse_args(["vault", "--json", "show", "item-1", "--vault", VAULT_ID, "--reveal", "--yes"])
         assert vault.handle_vault_command(args) == 0
     finally:
         vault.set_vault_service_factory(None)
@@ -227,7 +229,7 @@ def test_escrow_setup_requires_one_time_recovery_confirmation_and_redacts_json(m
     vault.set_vault_service_factory(Service)
     try:
         args = _parser().parse_args(
-            ["vault", "escrow", "setup", "--vault", "vault-1", "--label", "offline", "--json"]
+            ["vault", "escrow", "setup", "--vault", VAULT_ID, "--label", "offline", "--json"]
         )
         assert vault.handle_vault_command(args) == 0
     finally:
@@ -279,7 +281,7 @@ def test_exposure_rotation_requires_explicit_hosts_and_dispatches_remediation(ca
     try:
         args = _parser().parse_args(
             [
-                "vault", "exposures", "--vault", "vault-1", "--rotate-ssh", "item-1",
+                "vault", "exposures", "--vault", VAULT_ID, "--rotate-ssh", "item-1",
                 "--team", "ops", "--server", "server-1", "--server", "server-2", "--yes",
             ]
         )
@@ -288,7 +290,7 @@ def test_exposure_rotation_requires_explicit_hosts_and_dispatches_remediation(ca
         vault.set_vault_service_factory(None)
 
     assert service.kwargs == {
-        "vault_id": "vault-1",
+        "vault_id": VAULT_ID,
         "item_id": "item-1",
         "team": "ops",
         "servers": ["server-1", "server-2"],
@@ -310,7 +312,7 @@ def test_personal_binding_requires_explicit_host_pins_and_dispatches(capsys) -> 
     try:
         args = _parser().parse_args(
             [
-                "vault", "bind-personal", "--vault", "vault-1", "--item", "item-1",
+                "vault", "bind-personal", "--vault", VAULT_ID, "--item", "item-1",
                 "--provider", "aws", "--instance-id", "i-123", "--hostname", "host.example",
                 "--login", "ubuntu", "--host-key", "ssh-ed25519 AAAA", "--yes",
             ]
@@ -320,7 +322,7 @@ def test_personal_binding_requires_explicit_host_pins_and_dispatches(capsys) -> 
         vault.set_vault_service_factory(None)
 
     assert service.kwargs == {
-        "vault_id": "vault-1",
+        "vault_id": VAULT_ID,
         "item_id": "item-1",
         "provider": "aws",
         "instance_id": "i-123",
@@ -461,7 +463,7 @@ def test_bind_refuses_a_host_key_line_with_a_host_field_before_any_request(capsy
     vault.set_vault_service_factory(Service)
     try:
         args = _parser().parse_args([
-            "vault", "bind", "server-1", "item-1", "--vault", "vault-1", "--team", "team-a",
+            "vault", "bind", "server-1", "item-1", "--vault", VAULT_ID, "--team", "team-a",
             "--host-key", "[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDkr", "--yes",
         ])
         assert vault.handle_vault_command(args) == 2
@@ -482,7 +484,7 @@ def test_incomplete_ssh_rotation_warns_and_exits_non_zero(capsys) -> None:
     vault.set_vault_service_factory(Service)
     try:
         args = _parser().parse_args([
-            "vault", "exposures", "--vault", "vault-1", "--rotate-ssh", "item-1",
+            "vault", "exposures", "--vault", VAULT_ID, "--rotate-ssh", "item-1",
             "--team", "team-a", "--server", "server-1", "--yes",
         ])
         assert vault.handle_vault_command(args) == 1
@@ -501,8 +503,8 @@ def test_break_glass_import_requires_a_source_network_and_vice_versa(capsys) -> 
 
     vault.set_vault_service_factory(Service)
     try:
-        without_network = _parser().parse_args(["vault", "import", "ssh", "--vault", "v", "--path", "k", "--break-glass"])
-        without_flag = _parser().parse_args(["vault", "import", "ssh", "--vault", "v", "--path", "k", "--from-cidr", "10.0.0.0/8"])
+        without_network = _parser().parse_args(["vault", "import", "ssh", "--vault", VAULT_ID, "--path", "k", "--break-glass"])
+        without_flag = _parser().parse_args(["vault", "import", "ssh", "--vault", VAULT_ID, "--path", "k", "--from-cidr", "10.0.0.0/8"])
         assert vault.handle_vault_command(without_network) == 2
         assert vault.handle_vault_command(without_flag) == 2
     finally:
@@ -543,7 +545,7 @@ def _rotate_with(outcome: dict, capsys) -> tuple[int, str, str]:
     vault.set_vault_service_factory(Service)
     try:
         args = _parser().parse_args([
-            "vault", "exposures", "--vault", "vault-1", "--rotate-ssh", "item-1",
+            "vault", "exposures", "--vault", VAULT_ID, "--rotate-ssh", "item-1",
             "--team", "team-a", "--server", "server-1", "--yes",
         ])
         code = vault.handle_vault_command(args)
@@ -575,7 +577,7 @@ def test_completed_rotation_with_an_unresolved_exposure_says_how_to_resolve_it(c
 
     assert code == 1
     assert "could not be marked resolved (HTTP 500, server_error)" in err
-    assert "servonaut vault exposures --vault vault-1 --resolve e-1 --resolution rotated" in err
+    assert f"servonaut vault exposures --vault {VAULT_ID} --resolve e-1 --resolution rotated" in err
 
 
 def test_exposure_listing_notes_a_key_replaced_in_the_vault(capsys) -> None:
@@ -587,7 +589,7 @@ def test_exposure_listing_notes_a_key_replaced_in_the_vault(capsys) -> None:
 
     vault.set_vault_service_factory(Service)
     try:
-        assert vault.handle_vault_command(_parser().parse_args(["vault", "exposures", "--vault", "vault-1"])) == 0
+        assert vault.handle_vault_command(_parser().parse_args(["vault", "exposures", "--vault", VAULT_ID])) == 0
     finally:
         vault.set_vault_service_factory(None)
 
@@ -684,3 +686,145 @@ def test_vault_identity_confirm_reports_a_confirmed_identity(capsys) -> None:
     assert _run_vault(Service, ["vault", "identity", "confirm"]) == 0
 
     assert "Your vault identity is confirmed." in capsys.readouterr().out
+
+
+def _encrypted_key(path, passphrase: bytes) -> str:
+    """Write a passphrase-protected OpenSSH key; return its public line."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import (
+        BestAvailableEncryption, Encoding, PrivateFormat, PublicFormat,
+    )
+
+    key = Ed25519PrivateKey.generate()
+    path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, BestAvailableEncryption(passphrase)))
+    return key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+
+
+class _ImportService:
+    def __init__(self) -> None:
+        self.imported: list[dict] = []
+
+    async def import_keys(self, **kwargs):
+        # Copy before the CLI wipes its buffer after the call.
+        self.imported.append({**kwargs, "private_key": bytes(kwargs["private_key"])})
+        return {"item_id": "item-1", "type": "ssh_key"}
+
+
+def _run_import(service, *argv: str) -> int:
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        return vault.handle_vault_command(_parser().parse_args(["vault", "import", "ssh", "--vault", VAULT_ID, *argv]))
+    finally:
+        vault.set_vault_service_factory(None)
+
+
+def test_import_ssh_names_the_key_file_and_bind_names_the_team(capsys) -> None:
+    for argv in (
+        ["vault", "import", "ssh", "--vault", VAULT_ID],
+        ["vault", "bind", "server-1", "item-1", "--vault", VAULT_ID],
+    ):
+        try:
+            _parser().parse_args(argv)
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"{argv} parsed without its required option")
+    err = capsys.readouterr().err
+    assert "the following arguments are required: --path" in err
+    assert "the following arguments are required: --team" in err
+
+
+def test_import_asks_for_the_passphrase_and_stores_the_unlocked_key(tmp_path, monkeypatch, capsys) -> None:
+    from servonaut.services.bw_key_import import is_encrypted_key, load_unencrypted_key
+
+    key_path = tmp_path / "web_ed25519"
+    public_line = _encrypted_key(key_path, b"correct horse")
+    answers = iter(["wrong", "correct horse"])
+    prompts: list[str] = []
+    monkeypatch.setattr(vault.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(vault.getpass, "getpass", lambda prompt, stream=None: prompts.append(prompt) or next(answers))
+    service = _ImportService()
+
+    assert _run_import(service, "--path", str(key_path)) == 0
+
+    assert prompts == ["Passphrase for web_ed25519 (Enter to cancel): "] * 2
+    assert "Wrong passphrase." in capsys.readouterr().err
+    stored = service.imported[0]
+    assert stored["path"] == str(key_path) and stored["source"] == "ssh"
+    assert not is_encrypted_key(stored["private_key"])
+    assert load_unencrypted_key(stored["private_key"]).public_key.split()[:2] == public_line.split()[:2]
+
+
+def test_import_of_a_passphrase_key_outside_a_terminal_says_why(tmp_path, monkeypatch, capsys) -> None:
+    key_path = tmp_path / "web_ed25519"
+    _encrypted_key(key_path, b"correct horse")
+    monkeypatch.setattr(vault.sys.stdin, "isatty", lambda: False)
+    service = _ImportService()
+
+    assert _run_import(service, "--path", str(key_path)) == 1
+
+    assert "this SSH key has a passphrase; run the import in a terminal to enter it" in capsys.readouterr().err
+    assert service.imported == []
+
+
+def test_import_cancelled_at_the_passphrase_prompt_stores_nothing(tmp_path, monkeypatch, capsys) -> None:
+    key_path = tmp_path / "web_ed25519"
+    _encrypted_key(key_path, b"correct horse")
+    monkeypatch.setattr(vault.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(vault.getpass, "getpass", lambda prompt, stream=None: "")
+    service = _ImportService()
+
+    assert _run_import(service, "--path", str(key_path)) == 5
+
+    assert "Import cancelled; nothing was stored." in capsys.readouterr().err
+    assert service.imported == []
+
+
+def test_import_gives_up_after_three_wrong_passphrases(tmp_path, monkeypatch, capsys) -> None:
+    key_path = tmp_path / "web_ed25519"
+    _encrypted_key(key_path, b"correct horse")
+    monkeypatch.setattr(vault.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(vault.getpass, "getpass", lambda prompt, stream=None: "wrong")
+    service = _ImportService()
+
+    assert _run_import(service, "--path", str(key_path)) == 1
+
+    assert "the passphrase was wrong three times; nothing was imported" in capsys.readouterr().err
+    assert service.imported == []
+
+
+def test_import_normalises_a_pem_key_and_reports_an_unreadable_file(tmp_path, capsys) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+
+    pem_path = tmp_path / "legacy.pem"
+    pem_path.write_bytes(Ed25519PrivateKey.generate().private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
+    service = _ImportService()
+
+    assert _run_import(service, "--path", str(pem_path)) == 0
+    assert service.imported[0]["private_key"].startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+
+    assert _run_import(service, "--path", str(tmp_path / "missing")) == 1
+    assert "could not import missing: Could not read file." in capsys.readouterr().err
+
+
+def test_a_vault_name_is_resolved_once_before_the_command_runs(capsys) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Service:
+        async def resolve_vault_id(self, *, reference):
+            calls.append(("resolve", reference))
+            return VAULT_ID
+
+        async def list_items(self, *, vault_id, include_deleted=False):
+            calls.append(("items", vault_id))
+            return {"data": []}
+
+    vault.set_vault_service_factory(Service)
+    try:
+        assert vault.handle_vault_command(_parser().parse_args(["vault", "items", "--vault", "Personal"])) == 0
+        assert vault.handle_vault_command(_parser().parse_args(["vault", "items", "--vault", VAULT_ID])) == 0
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert calls == [("resolve", "Personal"), ("items", VAULT_ID), ("items", VAULT_ID)]
