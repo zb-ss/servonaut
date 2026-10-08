@@ -429,6 +429,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "cw_select_log_group",
         "cw_select_region",
         "cw_select_time_range",
+        # ---- Use Vault Key dialog ----
+        "vault_bind_message",      # Reason: styled in VaultBindingModal.DEFAULT_CSS
+        "vault_bind_scope",        # Reason: styled in VaultBindingModal.DEFAULT_CSS
+        "vault_bind_trusted",      # Reason: styled in VaultBindingModal.DEFAULT_CSS
+        "vault_bind_use_trusted",  # Reason: styled in VaultBindingModal.DEFAULT_CSS
         # ---- Dangerous-confirm modal ----
         "dangerous_confirm_args",
         "dangerous_confirm_body",

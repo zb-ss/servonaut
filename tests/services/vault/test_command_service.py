@@ -2060,3 +2060,148 @@ def test_the_tui_shows_the_waiting_jobs_notice_as_plain_text() -> None:
 
     assert shown == [("[b]1 job[/b] waiting", {"title": "SSH certificates", "severity": "information",
                                                  "timeout": 30, "markup": False})]
+
+
+@pytest.mark.asyncio
+async def test_vault_choices_offer_readable_vaults_personal_first_and_by_team() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_vaults = AsyncMock(return_value=[  # type: ignore[method-assign]
+        {"vault_id": "v-team", "kind": "team", "name": "Ops", "team": {"slug": "ops"}, "my_grant": {"version": 1}},
+        {"vault_id": "v-wait", "kind": "team", "name": "Other", "team": {"slug": "other"}, "my_grant": None},
+        {"vault_id": "v-me", "kind": "personal", "name": "Mine\x1b[2K", "team": None, "my_grant": {"version": 1}},
+    ])
+
+    every = await service.vault_choices()
+    for_team = await service.vault_choices(team="ops")
+
+    assert [choice["vault_id"] for choice in every] == ["v-me", "v-team"]  # waiting-for-access left out
+    assert every[0]["label"] == "Mine[2K (your personal vault)" and every[1]["label"] == "Ops (team ops)"
+    assert [choice["vault_id"] for choice in for_team] == ["v-team"]
+
+
+@pytest.mark.asyncio
+async def test_ssh_key_choices_name_keys_from_the_decrypted_item_and_keep_nothing_else() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": [  # type: ignore[method-assign]
+        {"item_id": "k1", "type": "ssh_key", "public_fingerprint": "SHA256:aaa"},
+        {"item_id": "k2", "type": "ssh_key", "public_fingerprint": "SHA256:bbb"},
+        {"item_id": "s1", "type": "secret", "public_fingerprint": None},
+        {"item_id": "k3", "type": "ssh_key", "public_fingerprint": "SHA256:ccc", "deleted": True},
+    ]})
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={"vault_id": "v1"})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(side_effect=lambda vault_id, item_id: {"item_id": item_id})
+    payloads: list[dict] = []
+
+    def read_item(_vault, item):
+        if item["item_id"] == "k2":
+            raise ValueError("cannot open")
+        payload = {"name": "web1_ed25519", "private_key_openssh": "-----BEGIN OPENSSH PRIVATE KEY-----"}
+        payloads.append(payload)
+        return payload
+
+    service.items.read_item = read_item
+
+    choices = await service.ssh_key_choices(vault_id="v1")
+
+    # A key that fails verification says so; it is not passed off as an unnamed one.
+    assert choices == [{"item_id": "k2", "label": "SHA256:bbb (could not be verified)"},
+                       {"item_id": "k1", "label": "web1_ed25519 · SHA256:aaa"}]
+    assert payloads == [{}]  # the decrypted item was emptied once its name was read
+
+
+@pytest.mark.asyncio
+async def test_team_and_shared_server_choices_are_labelled_and_sorted() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[
+        {"slug": "zeta", "name": "Zeta"}, {"slug": "ops", "name": "ops"}, {"name": "no slug"},
+    ])
+    service.teams.list_shared_servers = AsyncMock(return_value=[
+        {"id": "s2", "name": "web-2", "hostname": "198.51.100.2"}, {"id": "s1", "name": "db\x07"}, {"name": "no id"},
+    ])
+
+    assert await service.team_choices() == [{"slug": "ops", "label": "ops"}, {"slug": "zeta", "label": "Zeta (zeta)"}]
+    assert await service.shared_server_choices(team="ops") == [
+        {"server_id": "s1", "label": "db"}, {"server_id": "s2", "label": "web-2 (198.51.100.2)"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_named_key_shows_a_short_fingerprint_and_an_unnamed_one_the_full() -> None:
+    long_print = "SHA256:" + "A" * 43
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": [  # type: ignore[method-assign]
+        {"item_id": "k1", "type": "ssh_key", "public_fingerprint": long_print},
+        {"item_id": "k2", "type": "ssh_key", "public_fingerprint": long_print},
+    ]})
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(side_effect=lambda vault_id, item_id: {"item_id": item_id})
+    service.items.read_item = lambda _vault, item: {"name": "web1"} if item["item_id"] == "k1" else {}
+
+    labels = {choice["item_id"]: choice["label"] for choice in await service.ssh_key_choices(vault_id="v1")}
+
+    assert labels == {"k1": "web1 · SHA256:AAAAAAAAAAAA…", "k2": long_print}
+
+
+
+@pytest.mark.asyncio
+async def test_key_names_are_cached_per_revision_capped_and_unreachable_items_retried() -> None:
+    rows = [{"item_id": f"k{index}", "type": "ssh_key", "public_fingerprint": f"SHA256:{index}", "revision": 1}
+            for index in range(52)]
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": rows})  # type: ignore[method-assign]
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={})
+    service.items = MagicMock()
+    fetched: list[str] = []
+
+    async def get_item(_vault_id, item_id):
+        fetched.append(item_id)
+        if item_id == "k0":
+            raise OSError("network")
+        return {"item_id": item_id}
+
+    service.items.get_item = get_item
+    service.items.read_item = lambda _vault, item: {"name": f"name-{item['item_id']}"}
+
+    first = {choice["item_id"]: choice["label"] for choice in await service.ssh_key_choices(vault_id="v1")}
+    assert len(fetched) == 50  # only the first 50 are opened for names
+    assert first["k0"] == "SHA256:0"  # unreachable: by fingerprint, not marked unverified
+    assert first["k1"] == "name-k1 · SHA256:1" and first["k51"] == "SHA256:51"
+
+    fetched.clear()
+    await service.ssh_key_choices(vault_id="v1")
+    assert fetched == ["k0"]  # the rest came from the cache; the unreachable one is tried again
+
+    rows[1]["revision"] = 2
+    fetched.clear()
+    await service.ssh_key_choices(vault_id="v1")
+    assert sorted(fetched) == ["k0", "k1"]  # a new revision is read again
+
+
+@pytest.mark.asyncio
+async def test_a_verification_failure_is_not_remembered() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": [  # type: ignore[method-assign]
+        {"item_id": "k1", "type": "ssh_key", "public_fingerprint": "SHA256:aaa", "revision": 1},
+    ]})
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(side_effect=lambda vault_id, item_id: {"item_id": item_id})
+    granted = {"yet": False}
+
+    def read_item(_vault, _item):
+        if not granted["yet"]:
+            raise ValueError("no grant for this vault version yet")
+        return {"name": "web1"}
+
+    service.items.read_item = read_item
+
+    assert (await service.ssh_key_choices(vault_id="v1"))[0]["label"] == "SHA256:aaa (could not be verified)"
+    granted["yet"] = True  # the grant arrived
+    assert (await service.ssh_key_choices(vault_id="v1"))[0]["label"] == "web1 · SHA256:aaa"
