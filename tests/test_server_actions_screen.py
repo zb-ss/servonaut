@@ -127,9 +127,9 @@ class TestLiveStatsPanel:
 
     def test_bar_thresholds(self):
         from servonaut.utils.live_stats_panel import stats_bar
-        assert "green" in stats_bar(10.0)
-        assert "yellow" in stats_bar(80.0)
-        assert "red" in stats_bar(95.0)
+        assert "$text-success" in stats_bar(10.0)
+        assert "$text-warning" in stats_bar(80.0)
+        assert "$text-error" in stats_bar(95.0)
         assert "dim" in stats_bar(None)
 
     def test_provider_for_memory_scans_all(self):

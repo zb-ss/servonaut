@@ -34,7 +34,7 @@ class LabelInputModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static(f"[bold cyan]{self._title}[/bold cyan]", id="label_modal_title"),
+            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="label_modal_title"),
             Static(
                 "[dim]1–100 characters. Visible server-side.[/dim]",
                 id="label_modal_hint",
@@ -70,10 +70,10 @@ class LabelInputModal(ModalScreen[Optional[str]]):
         value = self.query_one("#label_input", Input).value.strip()
         error = self.query_one("#label_modal_error", Static)
         if not value:
-            error.update("[red]Label cannot be empty[/red]")
+            error.update("[$text-error]Label cannot be empty[/$text-error]")
             return
         if len(value) > 100:
-            error.update("[red]Label must be 100 characters or fewer[/red]")
+            error.update("[$text-error]Label must be 100 characters or fewer[/$text-error]")
             return
         self.dismiss(value)
 
@@ -98,7 +98,7 @@ class ConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static(f"[bold cyan]{self._title}[/bold cyan]", id="confirm_modal_title"),
+            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="confirm_modal_title"),
             Static(self._message, id="confirm_modal_message"),
             Horizontal(
                 Button(
@@ -148,7 +148,7 @@ class SnapshotManagerScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Config Snapshots[/bold cyan]", id="snapshots_header"),
+                Static("[bold $text-accent]Config Snapshots[/bold $text-accent]", id="snapshots_header"),
                 Static(
                     "[dim]Click a row, then use the keys below or the buttons. "
                     "Restore pulls a snapshot and replaces your local config. "
@@ -190,7 +190,7 @@ class SnapshotManagerScreen(Screen):
         try:
             sync = self._sync_service()
             if sync is None:
-                self._set_status("[red]Config sync is not available on this plan.[/red]")
+                self._set_status("[$text-error]Config sync is not available on this plan.[/$text-error]")
                 return
             snapshots = await sync.list_snapshots(limit=100)
             self._snapshots = snapshots
@@ -204,7 +204,7 @@ class SnapshotManagerScreen(Screen):
                 self._set_status(f"[dim]{n} snapshot{'s' if n != 1 else ''}.[/dim]")
         except Exception as exc:
             logger.error("Failed to list snapshots: %s", exc)
-            self._set_status(f"[red]Failed to load snapshots: {self._short_err(exc)}[/red]")
+            self._set_status(f"[$text-error]Failed to load snapshots: {self._short_err(exc)}[/$text-error]")
         finally:
             self._loading = False
 
@@ -303,14 +303,14 @@ class SnapshotManagerScreen(Screen):
             sync.apply_remote_config(config_data)
             self.notify("Snapshot restored. Restart Servonaut to apply fully.",
                         severity="information")
-            self._set_status("[green]Snapshot restored.[/green]")
+            self._set_status("[$text-success]Snapshot restored.[/$text-success]")
         except config_crypto.DecryptionError:
             self.notify("Wrong passphrase or corrupted snapshot.", severity="error")
-            self._set_status("[red]Decryption failed.[/red]")
+            self._set_status("[$text-error]Decryption failed.[/$text-error]")
         except Exception as exc:
             logger.error("Restore failed: %s", exc)
             self.notify(f"Restore failed: {self._short_err(exc)}", severity="error", markup=False)
-            self._set_status(f"[red]Restore failed: {self._short_err(exc)}[/red]")
+            self._set_status(f"[$text-error]Restore failed: {self._short_err(exc)}[/$text-error]")
 
     def action_rename(self) -> None:
         snap = self._selected()
@@ -343,7 +343,7 @@ class SnapshotManagerScreen(Screen):
         except Exception as exc:
             logger.error("Rename failed: %s", exc)
             self.notify(f"Rename failed: {self._short_err(exc)}", severity="error", markup=False)
-            self._set_status(f"[red]Rename failed: {self._short_err(exc)}[/red]")
+            self._set_status(f"[$text-error]Rename failed: {self._short_err(exc)}[/$text-error]")
 
     def action_delete(self) -> None:
         snap = self._selected()
@@ -383,7 +383,7 @@ class SnapshotManagerScreen(Screen):
         except Exception as exc:
             logger.error("Delete failed: %s", exc)
             self.notify(f"Delete failed: {self._short_err(exc)}", severity="error", markup=False)
-            self._set_status(f"[red]Delete failed: {self._short_err(exc)}[/red]")
+            self._set_status(f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]")
 
     def action_push_new(self) -> None:
         import socket
@@ -427,7 +427,7 @@ class SnapshotManagerScreen(Screen):
         except Exception as exc:
             logger.error("Push failed: %s", exc)
             self.notify(f"Push failed: {self._short_err(exc)}", severity="error", markup=False)
-            self._set_status(f"[red]Push failed: {self._short_err(exc)}[/red]")
+            self._set_status(f"[$text-error]Push failed: {self._short_err(exc)}[/$text-error]")
 
     # ------------------------------------------------------------------
     # Helpers

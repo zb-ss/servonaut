@@ -200,7 +200,7 @@ class CommandOverlay(ModalScreen):
             Rich-formatted header string.
         """
         name = self._instance.get('name') or self._instance.get('id', 'unknown')
-        return f"[bold cyan]Command Execution:[/bold cyan] {name}"
+        return f"[bold $text-accent]Command Execution:[/bold $text-accent] {name}"
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle command input submission.

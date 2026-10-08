@@ -69,7 +69,7 @@ class PassphraseModal(ModalScreen[Optional[str]]):
             "Warning: if you forget this passphrase, synced data cannot be recovered."
         )
         widgets: list = [
-            Static(f"[bold cyan]{self._title}[/bold cyan]", id="passphrase_title"),
+            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="passphrase_title"),
             Static(hint, id="passphrase_hint"),
             Input(placeholder="passphrase", id="input_passphrase", password=True),
         ]
@@ -109,14 +109,14 @@ class PassphraseModal(ModalScreen[Optional[str]]):
 
         if len(value) < config_crypto.MIN_PASSPHRASE_LEN:
             error_widget.update(
-                f"[red]Passphrase must be at least {config_crypto.MIN_PASSPHRASE_LEN} characters.[/red]"
+                f"[$text-error]Passphrase must be at least {config_crypto.MIN_PASSPHRASE_LEN} characters.[/$text-error]"
             )
             return
 
         if self._confirm:
             confirm_value = self.query_one("#input_passphrase_confirm", Input).value
             if value != confirm_value:
-                error_widget.update("[red]Passphrases do not match.[/red]")
+                error_widget.update("[$text-error]Passphrases do not match.[/$text-error]")
                 return
 
         self.dismiss(value)
@@ -156,11 +156,11 @@ class LoginScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Container(
-                    Static("[bold cyan]👤 Servonaut Account[/bold cyan]", id="login_title"),
+                    Static("[bold $text-accent]👤 Servonaut Account[/bold $text-accent]", id="login_title"),
 
                     # No httpx / service unavailable
                     Static(
-                        "[yellow]Authentication is unavailable.[/yellow]\n"
+                        "[$text-warning]Authentication is unavailable.[/$text-warning]\n"
                         "Install httpx to enable: [dim]pip install 'servonaut[pro]'[/dim]",
                         id="no_httpx_notice",
                         classes="login_notice"
@@ -170,8 +170,8 @@ class LoginScreen(Screen):
                     Container(
                         Static(
                             "Log in to unlock cloud features:\n\n"
-                            "  [green]✓[/green] Config sync across machines\n"
-                            "  [green]✓[/green] MCP relay — let AI agents "
+                            "  [$text-success]✓[/$text-success] Config sync across machines\n"
+                            "  [$text-success]✓[/$text-success] MCP relay — let AI agents "
                             "dispatch commands to this machine",
                             id="login_description",
                         ),
@@ -345,7 +345,7 @@ class LoginScreen(Screen):
                 continue
             label = feature_labels.get(feat, feat)
             if enabled:
-                feature_lines.append(f"  [green]✓[/green] {label}")
+                feature_lines.append(f"  [$text-success]✓[/$text-success] {label}")
             else:
                 feature_lines.append(f"  [dim]✗ {label}[/dim]")
         if not feature_lines:
@@ -468,7 +468,7 @@ class LoginScreen(Screen):
         # The URL has to be quoted because Rich's markup parser treats the
         # ':' after 'https' as a style separator otherwise.
         self.query_one("#device_url", Static).update(
-            f'[link="{verification_uri}"][cyan]{verification_uri}[/cyan][/link]'
+            f'[link="{verification_uri}"][$text-accent]{verification_uri}[/$text-accent][/link]'
         )
         self.query_one("#device_code", Static).update(f"[bold]Code: {user_code}[/bold]")
         self.query_one("#device_status", Static).update(

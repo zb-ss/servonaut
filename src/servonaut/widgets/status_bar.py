@@ -57,12 +57,12 @@ class StatusBar(Static):
 
         # Filter status
         if self._filter_active:
-            parts.append("[yellow]Filter: active[/yellow]")
+            parts.append("[$text-warning]Filter: active[/$text-warning]")
 
         # Demo mode badge
         try:
             if self.app.demo_mode:
-                parts.append("[bold red on yellow] DEMO [/bold red on yellow]")
+                parts.append("[bold $background on $warning] DEMO [/bold $background on $warning]")
         except Exception:
             # app may not be mounted yet during early initialization
             pass

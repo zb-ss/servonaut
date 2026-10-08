@@ -552,7 +552,7 @@ class CloudWatchBrowserScreen(Screen):
         """Cycle through All / Allowed / Blocked filter for Top IPs."""
         self._ip_filter_index = (self._ip_filter_index + 1) % len(self._IP_FILTERS)
         label = self._IP_FILTERS[self._ip_filter_index]
-        colors = {"All": "dim", "Allowed": "green", "Blocked": "red"}
+        colors = {"All": "dim", "Allowed": "$text-success", "Blocked": "$text-error"}
         color = colors.get(label, "dim")
         toggle = self.query_one("#cw_btn_ip_filter", Static)
         toggle.update(f"[{color}]\\[{label}][/{color}]")

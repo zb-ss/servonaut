@@ -122,7 +122,7 @@ class Sidebar(Widget):
         # ABOUT the app's connection, not a navigation action, so it
         # belongs with the identity header.
         yield Static(
-            f"  [bold cyan]Servonaut[/bold cyan] [dim]v{get_version()}[/dim]",
+            f"  [bold $text-accent]Servonaut[/bold $text-accent] [dim]v{get_version()}[/dim]",
             id="sidebar-logo",
         )
         yield Static(

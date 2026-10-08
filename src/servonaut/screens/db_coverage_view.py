@@ -238,7 +238,7 @@ class DbCoverageScreen(Screen):
         guard = getattr(self.app, "entitlement_guard", None)
         cm = getattr(self.app, "config_manager", None)
         if auth is None or guard is None or cm is None:
-            self._set_summary("[red]Not ready — sign in first.[/red]")
+            self._set_summary("[$text-error]Not ready — sign in first.[/$text-error]")
             return
         names: List[str] = []
         try:

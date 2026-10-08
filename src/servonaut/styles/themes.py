@@ -41,6 +41,14 @@ SERVONAUT_DARK = Theme(
         "button-color-foreground": "#070B14",
         "footer-key-foreground": "#00F2FE",
         "input-selection-background": "#4FACFE 35%",
+        # Text set in colour ($text-accent, $text-warning, ...) uses the
+        # theme colours as they are: they already read at AA here.
+        "text-primary": "#4FACFE",
+        "text-secondary": "#00F2FE",
+        "text-accent": "#00F2FE",
+        "text-warning": "#FBB024",
+        "text-error": "#F87171",
+        "text-success": "#22C55E",
     },
 )
 
@@ -64,6 +72,12 @@ SERVONAUT_LIGHT = Theme(
         "button-color-foreground": "#FFFFFF",
         "footer-key-foreground": "#0369A1",
         "input-selection-background": "#0369A1 25%",
+        "text-primary": "#0369A1",
+        "text-secondary": "#0E7490",
+        "text-accent": "#0E7490",
+        "text-warning": "#A1460A",
+        "text-error": "#B91C1C",
+        "text-success": "#137333",
     },
 )
 

@@ -50,7 +50,7 @@ class OVHReinstallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             yield Sidebar()
             with ScrollableContainer(id="reinstall_container"):
                 yield Static(
-                    f"[bold cyan]Reinstall VPS: {escape(str(name))}[/bold cyan]",
+                    f"[bold $text-accent]Reinstall VPS: {escape(str(name))}[/bold $text-accent]",
                     id="reinstall_title",
                 )
                 yield Static(

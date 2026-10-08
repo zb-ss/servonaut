@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, Sequence, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
+from e2e.harness import markup_guard
 from e2e.harness.bootstrap import DEAD_HTTP_URL, Sandbox, load_guard
 from e2e.harness.processes import require_armed
 
@@ -553,15 +554,19 @@ async def in_process_host(artifact_dir: Path) -> AsyncIterator[InProcessDesktop]
     host = DesktopHost(token=token, listener=bind_loopback_listener(), app_factory=app_factory)
     origin = await host.start()
     desktop = InProcessDesktop(host, token, origin, artifact_dir, notifications)
-    try:
-        yield desktop
-    except BaseException:
-        if desktop.app is not None:
-            with contextlib.suppress(Exception):
-                desktop.tui.capture("failure")
-        raise
-    finally:
-        await host.stop()
+    with markup_guard.watch() as markup:
+        try:
+            yield desktop
+        except BaseException:
+            if desktop.app is not None:
+                with contextlib.suppress(Exception):
+                    desktop.tui.capture("failure")
+            raise
+        finally:
+            await host.stop()
+    # Text the journey drew that no theme can colour (see markup_guard).
+    if markup.findings:
+        raise AssertionError("markup a theme cannot colour:\n" + markup.report())
 
 
 # ---------------------------------------------------------------------------

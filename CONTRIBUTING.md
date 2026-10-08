@@ -246,6 +246,22 @@ a draft, uploading the files, and then publishing it.
 ## Development Setup
 Please refer to the `README.md` for instructions on setting up your development environment and installing dependencies.
 
+## Colours in TUI text
+
+Servonaut ships its own themes next to Textual's built-in ones, so colour in
+text comes from the theme:
+
+- Text that Textual draws (`Static`, `Label`, `Button`, `notify`, option
+  lists) takes theme variables: `[$text-accent]`, `[$text-success]`,
+  `[$text-warning]`, `[$text-error]`, `[$text-primary]`, `[$text-muted]`. A
+  colour name such as `[cyan]` or `[yellow]` is a fixed web colour there and
+  cannot be read on a light theme.
+- Table cells, tree labels and `RichLog` lines are read as Rich markup. They
+  keep colour names (`[green]`, `[red]`): the theme's ANSI palette draws them,
+  and Rich does not know theme variables.
+- The screenshot tests and the TUI end-to-end journeys fail on either mistake
+  (`e2e/harness/markup_guard.py`).
+
 ## Screenshot tests
 
 `tests/snapshots/` renders the main screens with the real app and its real

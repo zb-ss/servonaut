@@ -94,7 +94,7 @@ class LogPickerModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Log Picker[/bold cyan]  "
+                "[bold $text-accent]Log Picker[/bold $text-accent]  "
                 "[dim]Type to filter, Enter to select, Escape to cancel[/dim]",
                 id="log_picker_header",
             ),
@@ -176,7 +176,7 @@ class LogPickerModal(ModalScreen[str]):
             for path in filtered_available:
                 option_id = f"avail:{path}"
                 self._option_map[option_id] = path
-                marker = " [bold green]●[/bold green]" if path == self._current_log else ""
+                marker = " [bold $text-success]●[/bold $text-success]" if path == self._current_log else ""
                 all_options.append(Option(f"  {path}{marker}", id=option_id))
                 if self._first_selectable is None:
                     self._first_selectable = idx
@@ -192,8 +192,8 @@ class LogPickerModal(ModalScreen[str]):
             for path in filtered_custom:
                 option_id = f"custom:{path}"
                 self._option_map[option_id] = path
-                marker = " [bold green]●[/bold green]" if path == self._current_log else ""
-                all_options.append(Option(f"  {path} [cyan]\\[saved][/cyan]{marker}", id=option_id))
+                marker = " [bold $text-success]●[/bold $text-success]" if path == self._current_log else ""
+                all_options.append(Option(f"  {path} [$text-accent]\\[saved][/$text-accent]{marker}", id=option_id))
                 if self._first_selectable is None:
                     self._first_selectable = idx
                 idx += 1
@@ -217,7 +217,7 @@ class LogPickerModal(ModalScreen[str]):
                 if self._classify_fn:
                     classification = self._classify_fn(path)
                     if classification == "compressed":
-                        tag = " [yellow]\\[zip][/yellow]"
+                        tag = " [$text-warning]\\[zip][/$text-warning]"
                     elif classification == "rotated":
                         tag = " [dim]\\[rot][/dim]"
                 all_options.append(Option(f"  {path}{tag}", id=option_id))
@@ -354,7 +354,7 @@ class AddPathModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Add Custom Log Path[/bold cyan]",
+                "[bold $text-accent]Add Custom Log Path[/bold $text-accent]",
                 id="add_path_header",
             ),
             Static(
@@ -402,7 +402,7 @@ class AddDirectoryModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Add Log Directory[/bold cyan]",
+                "[bold $text-accent]Add Log Directory[/bold $text-accent]",
                 id="add_dir_header",
             ),
             Static(
@@ -471,7 +471,7 @@ class ManagePathsModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Manage Custom Paths[/bold cyan]",
+                "[bold $text-accent]Manage Custom Paths[/bold $text-accent]",
                 id="manage_paths_header",
             ),
             Static(
@@ -502,7 +502,7 @@ class ManagePathsModal(ModalScreen[str]):
         for path in self._custom_paths:
             if path.startswith("dir:"):
                 display = path[4:]
-                label = f"  {display} [cyan]\\[dir][/cyan]"
+                label = f"  {display} [$text-accent]\\[dir][/$text-accent]"
             else:
                 label = f"  {path} [dim]\\[file][/dim]"
             options.append(Option(label, id=f"path:{path}"))
@@ -601,7 +601,7 @@ class EditPathModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Edit Custom Log Path[/bold cyan]",
+                "[bold $text-accent]Edit Custom Log Path[/bold $text-accent]",
                 id="edit_path_header",
             ),
             Static(
@@ -667,7 +667,7 @@ class BrowseRemoteScreen(Screen[str]):
         yield SafeHeader()
         yield Container(
             Static(
-                "[bold cyan]Browse Remote Server[/bold cyan]  "
+                "[bold $text-accent]Browse Remote Server[/bold $text-accent]  "
                 "[dim]Enter: add file or open directory · D: add directory[/dim]",
                 id="browse_header",
             ),

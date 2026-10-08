@@ -26,23 +26,23 @@ from servonaut.widgets.sidebar import Sidebar
 
 # Enum → (dot, color, label) mapping, kept here so the indicator stays tiny.
 _STATE_DISPLAY = {
-    RelayState.CONNECTED: ("●", "green", "connected"),
-    RelayState.CONNECTING: ("○", "yellow", "connecting…"),
-    RelayState.EXTERNAL: ("●", "cyan", "external listener"),
-    RelayState.NO_ENTITLEMENT: ("○", "magenta", "upgrade to connect"),
-    RelayState.NOT_CONFIGURED: ("○", "red", "not configured"),
-    RelayState.ERROR: ("○", "red", "error"),
-    RelayState.STOPPED: ("○", "grey50", "disconnected"),
-    RelayState.DISABLED: ("○", "grey50", "not logged in"),
-    RelayState.SESSION_EXPIRED: ("○", "red", "session expired"),
+    RelayState.CONNECTED: ("●", "$text-success", "connected"),
+    RelayState.CONNECTING: ("○", "$text-warning", "connecting…"),
+    RelayState.EXTERNAL: ("●", "$text-accent", "external listener"),
+    RelayState.NO_ENTITLEMENT: ("○", "$text-primary", "upgrade to connect"),
+    RelayState.NOT_CONFIGURED: ("○", "$text-error", "not configured"),
+    RelayState.ERROR: ("○", "$text-error", "error"),
+    RelayState.STOPPED: ("○", "$text-muted", "disconnected"),
+    RelayState.DISABLED: ("○", "$text-muted", "not logged in"),
+    RelayState.SESSION_EXPIRED: ("○", "$text-error", "session expired"),
 }
 
 
 def _format(state: Optional[RelayState]) -> str:
     if state is None:
-        return "[grey50]○ relay[/grey50]"
+        return "[$text-muted]○ relay[/$text-muted]"
     dot, color, label = _STATE_DISPLAY.get(
-        state, ("○", "grey50", state.value),
+        state, ("○", "$text-muted", state.value),
     )
     return f"[{color}]{dot}[/{color}] [dim]{label}[/dim]"
 
@@ -164,7 +164,7 @@ class RelayStatusScreen(Screen):
             yield ScrollableContainer(
                 Container(
                     Static(
-                        "[bold cyan]MCP relay connection[/bold cyan]",
+                        "[bold $text-accent]MCP relay connection[/bold $text-accent]",
                         id="relay_title",
                     ),
                     Static("Local:  loading…", id="local_status"),
@@ -209,7 +209,7 @@ class RelayStatusScreen(Screen):
         reason = getattr(manager, "last_error", None)
         if isinstance(reason, str) and reason:
             # Why it failed (for example a refused relay URL), not just "error".
-            text += f"\n[red]{escape(reason)}[/red]"
+            text += f"\n[$text-error]{escape(reason)}[/$text-error]"
         self.query_one("#local_status", Static).update(text)
 
     async def _refresh_backend(self) -> None:
@@ -237,7 +237,7 @@ class RelayStatusScreen(Screen):
         connected = payload.get("connected") if isinstance(payload, dict) else None
         last_hb = payload.get("last_heartbeat_at") if isinstance(payload, dict) else None
         clients = payload.get("client_ids") if isinstance(payload, dict) else None
-        flag = "[green]connected[/green]" if connected else "[yellow]disconnected[/yellow]"
+        flag = "[$text-success]connected[/$text-success]" if connected else "[$text-warning]disconnected[/$text-warning]"
         parts = [f"Backend: {flag}"]
         if last_hb:
             parts.append(f"last heartbeat {last_hb}")

@@ -220,7 +220,7 @@ class DbCredentialScanScreen(Screen):
         # in a demo recording).
         if self.app.demo_mode and self.app.redaction_service:
             message = self.app.redaction_service.scrub_stream(message)
-        colour = "red" if error else ""
+        colour = "$text-error" if error else ""
         markup = f"[{colour}]{escape(message)}[/{colour}]" if colour else escape(message)
         try:
             self.query_one("#db_scan_status", Static).update(markup)

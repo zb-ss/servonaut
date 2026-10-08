@@ -17,7 +17,7 @@ import os
 import re
 
 import pytest
-from rich.text import Text
+from textual.content import Content
 
 from e2e.harness import fleet
 from e2e.harness.session_seed import read_session, seed_relay_config, seed_session
@@ -45,7 +45,8 @@ def _indicator(t):
 
 
 def _indicator_text(t) -> str:
-    return Text.from_markup(str(_indicator(t).render())).plain
+    # The indicator's render() is Textual markup.
+    return Content.from_markup(str(_indicator(t).render())).plain
 
 
 async def _relay_shows(t, label: str) -> None:

@@ -493,7 +493,7 @@ class TestAWSManagerDoLifecycle:
              patch.object(screen, "notify"):
             asyncio.run(screen._do_lifecycle("stop_instance", "i-0abc12345678def90", "us-east-1", "stopped"))
 
-        assert any("[red]" in s for s in status_set)
+        assert any("[$text-error]" in s for s in status_set)
 
     def test_do_terminate_confirmed_terminates(self) -> None:
         mock_svc = MagicMock()
@@ -1049,7 +1049,7 @@ class TestObjectStorageLoadObjects:
              patch.object(screen, "_set_status", side_effect=lambda t: status_set.append(t)):
             asyncio.run(screen._load_objects())
 
-        assert any("[red]" in s for s in status_set)
+        assert any("[$text-error]" in s for s in status_set)
 
     def test_load_objects_is_truncated_shows_warning(self) -> None:
         svc = _s3_mock_storage_service()
@@ -1720,7 +1720,7 @@ class TestAWSManagerLoadInstancesErrorPath:
              patch.object(screen, "_sync_action_buttons", create=True):
             asyncio.run(screen._load_instances())
 
-        assert any("[red]" in m for m in status_msgs)
+        assert any("[$text-error]" in m for m in status_msgs)
         assert screen._loading is False
 
     def test_load_instances_error_with_demo_redaction(self) -> None:
@@ -1963,7 +1963,7 @@ class TestAWSManagerDoTerminateAuditAndFailure:
              patch.object(screen, "notify"):
             asyncio.run(screen._do_terminate(inst))
 
-        assert any("[red]" in m for m in status_msgs)
+        assert any("[$text-error]" in m for m in status_msgs)
 
     def test_do_terminate_failure_with_demo_redaction(self) -> None:
         mock_svc = MagicMock()
@@ -2500,7 +2500,7 @@ class TestObjectStorageLoadBucketsEdgeCases:
              patch.object(screen, "_set_status", side_effect=lambda t: status_msgs.append(t)):
             asyncio.run(screen._load_buckets())
 
-        assert any("[red]" in m for m in status_msgs)
+        assert any("[$text-error]" in m for m in status_msgs)
 
 
 class TestObjectStorageLoadObjectsNoService:

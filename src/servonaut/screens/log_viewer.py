@@ -136,7 +136,7 @@ class LogViewerScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]Log Viewer:[/bold cyan] {name}  [dim]Probing available logs...[/dim]",
+                    f"[bold $text-accent]Log Viewer:[/bold $text-accent] {name}  [dim]Probing available logs...[/dim]",
                     id="log_header",
                 ),
                 RichLog(id="log_output", highlight=True, markup=True),
@@ -214,10 +214,11 @@ class LogViewerScreen(Screen):
         log_label = self._current_log or "none"
         status_parts = []
         if self._is_paused:
-            status_parts.append("[yellow][PAUSED][/yellow]")
+            # Brackets that are text, not markup, are escaped.
+            status_parts.append("[$text-warning]\\[PAUSED][/$text-warning]")
         if self._is_static_view:
             classification = self.app.log_viewer_service.classify_log_file(log_label)
-            status_parts.append(f"[dim][{classification}][/dim]")
+            status_parts.append(f"[dim]\\[{classification}][/dim]")
         # T10: "from cache" indicator when memory.logs supplied the paths.
         source = getattr(self.app.log_viewer_service, "last_probe_source", None)
         if source == "cache":
@@ -225,11 +226,11 @@ class LogViewerScreen(Screen):
                 self.app.log_viewer_service, "last_probe_probed_at", None
             )
             age = _format_cache_age(probed_at)
-            status_parts.append(f"[dim green][cached{age}][/dim green]")
+            status_parts.append(f"[dim $text-success]\\[cached{age}][/dim $text-success]")
         status = "  " + " ".join(status_parts) if status_parts else ""
         self.query_one("#log_header", Static).update(
-            f"[bold cyan]Log Viewer:[/bold cyan] {name}  "
-            f"[dim]Viewing:[/dim] {log_label}{status}"
+            f"[bold $text-accent]Log Viewer:[/bold $text-accent] {escape(str(name))}  "
+            f"[dim]Viewing:[/dim] {escape(log_label)}{status}"
         )
 
     # ------------------------------------------------------------------
@@ -337,9 +338,8 @@ class LogViewerScreen(Screen):
                             if not l.startswith("Warning:") and l.strip()
                         ]
                         if err_lines:
-                            self._line_queue.put(
-                                f"[red]SSH error: {escape(err_lines[-1])}[/red]"
-                            )
+                            # Queued lines are written as plain text.
+                            self._line_queue.put(f"SSH error: {err_lines[-1]}")
                 except Exception:
                     pass
             self._line_queue.put(_EOF)

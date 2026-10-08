@@ -73,7 +73,9 @@ def test_bootstrap_js_protocol_and_security() -> None:
 
 def test_style_css_properties() -> None:
     css = (_FRONTEND_ROOT / "style.css").read_text(encoding="utf-8")
-    assert "#0c181f" in css
+    # The page takes the app's screen colour once the session names it.
+    assert "--servonaut-page: #111827" in css
+    assert "background: var(--servonaut-page)" in css
     assert "Roboto Mono" in css
     assert "url('/mono.ttf')" in css
     assert "overflow: hidden" in css

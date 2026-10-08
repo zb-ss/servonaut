@@ -35,7 +35,7 @@ class BackupConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static("[bold cyan]Restore Local Backup[/bold cyan]", id="bkp_confirm_title"),
+            Static("[bold $text-accent]Restore Local Backup[/bold $text-accent]", id="bkp_confirm_title"),
             Static(self._message, id="bkp_confirm_message"),
             Horizontal(
                 Button("Restore", variant="primary", id="btn_bkp_yes"),
@@ -76,7 +76,7 @@ class BackupRestoreScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Local Config Backups[/bold cyan]", id="backups_header"),
+                Static("[bold $text-accent]Local Config Backups[/bold $text-accent]", id="backups_header"),
                 Static(
                     "[dim]Every time the config is saved (settings edit, sync pull, "
                     "setup wizard…) the previous version is snapshotted here. The "
@@ -107,13 +107,13 @@ class BackupRestoreScreen(Screen):
     def _refresh(self) -> None:
         cm = getattr(self.app, "config_manager", None)
         if cm is None:
-            self._set_status("[red]Config manager unavailable.[/red]")
+            self._set_status("[$text-error]Config manager unavailable.[/$text-error]")
             return
         try:
             self._backups = cm.list_backups()
         except Exception as exc:
             logger.error("Failed to list backups: %s", exc)
-            self._set_status(f"[red]Failed to list backups: {exc}[/red]")
+            self._set_status(f"[$text-error]Failed to list backups: {exc}[/$text-error]")
             return
         self._render_table()
         n = len(self._backups)

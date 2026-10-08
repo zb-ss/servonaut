@@ -29,6 +29,8 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, RichLog
 
+from e2e.harness import markup_guard
+
 T = TypeVar("T")
 
 DEFAULT_SIZE = (160, 50)
@@ -598,12 +600,16 @@ async def tui_session(
 
     app = ServonautApp(runtime_layout=detect_runtime())
     opened = _record_pushed_screens(app)
-    async with app.run_test(size=size, notifications=True, message_hook=hook) as pilot:
-        driver = TuiDriver(app, pilot, notifications, artifact_dir, opened)
-        try:
-            if wait_for_fleet:
-                await driver.wait_for_screen("InstanceListScreen")
-            yield driver
-        except BaseException:
-            driver.capture("failure")
-            raise
+    with markup_guard.watch() as markup:
+        async with app.run_test(size=size, notifications=True, message_hook=hook) as pilot:
+            driver = TuiDriver(app, pilot, notifications, artifact_dir, opened)
+            try:
+                if wait_for_fleet:
+                    await driver.wait_for_screen("InstanceListScreen")
+                yield driver
+            except BaseException:
+                driver.capture("failure")
+                raise
+    # Text the journey drew that no theme can colour (see markup_guard).
+    if markup.findings:
+        raise AssertionError("markup a theme cannot colour:\n" + markup.report())

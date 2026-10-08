@@ -49,7 +49,7 @@ class OVHResizeScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             yield Sidebar()
             with ScrollableContainer(id="resize_container"):
                 yield Static(
-                    f"[bold cyan]Resize VPS: {name}[/bold cyan]",
+                    f"[bold $text-accent]Resize VPS: {name}[/bold $text-accent]",
                     id="resize_title",
                 )
                 yield Static(

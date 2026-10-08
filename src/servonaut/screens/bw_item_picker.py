@@ -89,7 +89,7 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static("[bold cyan]Pick SSH key from Bitwarden[/bold cyan]", id="bw_picker_title"),
+            Static("[bold $text-accent]Pick SSH key from Bitwarden[/bold $text-accent]", id="bw_picker_title"),
             Vertical(
                 Static("[dim]Loading…[/dim]"),
                 id="bw_picker_body",
@@ -195,7 +195,7 @@ class BwItemPickerModal(ModalScreen[Optional[dict]]):
 
     def _render_upgrade_card(self, reason: str) -> None:
         self._body().mount(
-            Static("[bold yellow]Upgrade required[/bold yellow]"),
+            Static("[bold $text-warning]Upgrade required[/bold $text-warning]"),
             Static(
                 "The Bitwarden SSH key picker is available on the Solo and Teams plans."
             ),

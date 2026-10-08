@@ -295,12 +295,12 @@ class BwSshPanel(SettingsPanel):
             return
 
         messages = {
-            BwAuthState.NOT_INSTALLED: "[yellow]Bitwarden CLI not installed.[/yellow]",
+            BwAuthState.NOT_INSTALLED: "[$text-warning]Bitwarden CLI not installed.[/$text-warning]",
             BwAuthState.UNAUTHENTICATED: (
-                "[yellow]Not logged in.[/yellow] Run `bw login` in your terminal."
+                "[$text-warning]Not logged in.[/$text-warning] Run `bw login` in your terminal."
             ),
-            BwAuthState.LOCKED: "[yellow]Vault locked.[/yellow] Use “Unlock now”.",
-            BwAuthState.UNLOCKED: "[green]Vault unlocked for this session.[/green]",
+            BwAuthState.LOCKED: "[$text-warning]Vault locked.[/$text-warning] Use “Unlock now”.",
+            BwAuthState.UNLOCKED: "[$text-success]Vault unlocked for this session.[/$text-success]",
         }
         status_widget.update(messages.get(state, "[dim]Bitwarden CLI: unknown.[/dim]"))
 
@@ -467,10 +467,10 @@ class BwSshPanel(SettingsPanel):
         if updated_at:
             ts_display = escape(str(updated_at))
             status.update(
-                f"[green]Configured.[/green] Vault: {url_display} · Updated {ts_display}"
+                f"[$text-success]Configured.[/$text-success] Vault: {url_display} · Updated {ts_display}"
             )
         else:
-            status.update(f"[green]Configured.[/green] Vault: {url_display}")
+            status.update(f"[$text-success]Configured.[/$text-success] Vault: {url_display}")
 
     # ------------------------------------------------------------------
     # Dirty tracking (override: snapshot after form toggles)

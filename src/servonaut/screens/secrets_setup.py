@@ -112,7 +112,7 @@ class SecretsSetupScreen(Screen):
         # (bws error text can echo a project host / path).
         if self.app.demo_mode and self.app.redaction_service:
             message = self.app.redaction_service.scrub_stream(message)
-        colour = "red" if error else "green"
+        colour = "$text-error" if error else "$text-success"
         try:
             self.query_one("#setup_status", Static).update(
                 f"[{colour}]{escape(message)}[/{colour}]"

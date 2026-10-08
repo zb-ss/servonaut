@@ -411,7 +411,7 @@ class AiProviderPanel(SettingsPanel):
             return
 
         if auth is None or not getattr(auth, "is_authenticated", False):
-            status.update("Servonaut AI: [yellow]locked[/yellow] [dim]Login required[/dim]")
+            status.update("Servonaut AI: [$text-warning]locked[/$text-warning] [dim]Login required[/dim]")
             upgrade_btn.display = True
             return
 
@@ -421,12 +421,12 @@ class AiProviderPanel(SettingsPanel):
             has_premium = False
 
         if not has_premium:
-            status.update("Servonaut AI: [yellow]locked[/yellow] [dim]Solo or Teams required[/dim]")
+            status.update("Servonaut AI: [$text-warning]locked[/$text-warning] [dim]Solo or Teams required[/dim]")
             upgrade_btn.display = True
             return
 
         upgrade_btn.display = False
-        status.update("Servonaut AI: [green]ready[/green]")
+        status.update("Servonaut AI: [$text-success]ready[/$text-success]")
 
     # ------------------------------------------------------------------
     # Action handlers

@@ -72,7 +72,7 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             yield Sidebar()
             with ScrollableContainer(id="firewall_container"):
                 yield Static(
-                    f"[bold cyan]Firewall: {instance_name}[/bold cyan]",
+                    f"[bold $text-accent]Firewall: {instance_name}[/bold $text-accent]",
                     id="firewall_title",
                 )
                 yield Static(
@@ -262,15 +262,15 @@ class OVHFirewallScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         # The displayed row is redacted and restored in place by the app.
         name = self._instance.get("name") or self._instance.get("id") or "Unknown"
         self.query_one("#firewall_title", Static).update(
-            f"[bold cyan]Firewall: {escape(str(name))}[/bold cyan]"
+            f"[bold $text-accent]Firewall: {escape(str(name))}[/bold $text-accent]"
         )
 
     def _update_status_widget(self) -> None:
         status_widget = self.query_one("#firewall_status", Static)
         if self._firewall_enabled:
-            status_widget.update("[green]Firewall: Enabled[/green]")
+            status_widget.update("[$text-success]Firewall: Enabled[/$text-success]")
         else:
-            status_widget.update("[red]Firewall: Disabled[/red]")
+            status_widget.update("[$text-error]Firewall: Disabled[/$text-error]")
 
     def _populate_rules_table(self) -> None:
         table = self.query_one("#rules_table", DataTable)

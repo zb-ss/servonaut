@@ -45,7 +45,7 @@ class CommandPickerModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Command Picker[/bold cyan]  "
+                "[bold $text-accent]Command Picker[/bold $text-accent]  "
                 "[dim]Type to filter, Enter to select, Escape to cancel[/dim]",
                 id="picker_header",
             ),
@@ -177,7 +177,7 @@ class SaveCommandModal(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Save Command[/bold cyan]",
+                "[bold $text-accent]Save Command[/bold $text-accent]",
                 id="save_header",
             ),
             Static(f"[dim]Command:[/dim] {self._command}", id="save_command_preview"),

@@ -12,7 +12,7 @@ def stats_bar(pct: float | None, width: int = 12) -> str:
     if pct is None:
         return "[dim]" + "·" * width + "[/dim]"
     filled = max(0, min(width, round(pct / 100 * width)))
-    color = "green" if pct < 70 else ("yellow" if pct < 90 else "red")
+    color = "$text-success" if pct < 70 else ("$text-warning" if pct < 90 else "$text-error")
     return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (width - filled)}[/dim]"
 
 

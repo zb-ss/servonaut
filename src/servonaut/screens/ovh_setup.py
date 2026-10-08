@@ -127,7 +127,7 @@ class OVHSetupScreen(Screen):
         if self._account_mode:
             title = "Add an OVHcloud Account" if self._add_extra else "OVHcloud Account"
             rows: List[Widget] = [
-                Static(f"[bold cyan]{title}[/bold cyan]", id="ovh_setup_header"),
+                Static(f"[bold $text-accent]{title}[/bold $text-accent]", id="ovh_setup_header"),
                 Static(
                     "[dim]Each OVHcloud account has its own API credentials. Its "
                     "servers join the instance list next to your other accounts.[/dim]",
@@ -137,7 +137,7 @@ class OVHSetupScreen(Screen):
             placeholder = "e.g. client-a (servers are shown as client-a/<name>)"
         else:
             rows = [
-                Static("[bold cyan]OVHcloud Setup[/bold cyan]", id="ovh_setup_header"),
+                Static("[bold $text-accent]OVHcloud Setup[/bold $text-accent]", id="ovh_setup_header"),
                 Static(
                     "[dim]Configure OVHcloud API credentials to manage dedicated servers, "
                     "VPS, and Public Cloud instances.[/dim]",
@@ -714,9 +714,9 @@ class OVHSetupScreen(Screen):
             if ck:
                 self.query_one("#ovh_input_consumer_key", Input).value = ck
                 self.query_one("#ovh_validation_url", Static).update(
-                    f"[bold green]Consumer Key received![/bold green]\n"
+                    f"[bold $text-success]Consumer Key received![/bold $text-success]\n"
                     f"[dim]Validation URL (open in browser to activate):[/dim]\n"
-                    f"[cyan]{url}[/cyan]\n"
+                    f"[$text-accent]{url}[/$text-accent]\n"
                     f"[dim]After granting access, click 'Test Connection'.[/dim]"
                 )
                 self.app.notify(
@@ -726,12 +726,12 @@ class OVHSetupScreen(Screen):
                 )
             else:
                 self.query_one("#ovh_validation_url", Static).update(
-                    "[red]Failed to obtain Consumer Key[/red]"
+                    "[$text-error]Failed to obtain Consumer Key[/$text-error]"
                 )
         except Exception as e:
             logger.error("Consumer key request failed: %s", e)
             self.query_one("#ovh_validation_url", Static).update(
-                "[red]Failed to request Consumer Key. Check credentials and try again.[/red]"
+                "[$text-error]Failed to request Consumer Key. Check credentials and try again.[/$text-error]"
             )
             self.app.notify("Consumer Key request failed. Check credentials.", severity="error")
 
@@ -803,7 +803,7 @@ class OVHSetupScreen(Screen):
             result = await svc.test_connection()
             if result['success']:
                 self.query_one("#ovh_test_result", Static).update(
-                    f"[green]Connection successful! Account: {escape(result['account'])}[/green]"
+                    f"[$text-success]Connection successful! Account: {escape(result['account'])}[/$text-success]"
                 )
                 self.app.notify(
                     f"OVH connected as: {result['account']}",
@@ -812,7 +812,7 @@ class OVHSetupScreen(Screen):
                 )
             else:
                 self.query_one("#ovh_test_result", Static).update(
-                    f"[red]Connection failed: {escape(result['message'])}[/red]"
+                    f"[$text-error]Connection failed: {escape(result['message'])}[/$text-error]"
                 )
                 self.app.notify(
                     f"OVH connection failed: {result['message']}",
@@ -822,7 +822,7 @@ class OVHSetupScreen(Screen):
         except Exception as e:
             logger.error("OVH connection test failed: %s", e)
             self.query_one("#ovh_test_result", Static).update(
-                "[red]Connection test failed. Check credentials and try again.[/red]"
+                "[$text-error]Connection test failed. Check credentials and try again.[/$text-error]"
             )
             self.app.notify("OVH connection test failed. Check credentials.", severity="error")
             result = {'success': False}

@@ -40,7 +40,7 @@ class BwPassphraseModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Encrypted SSH key[/bold cyan]",
+                "[bold $text-accent]Encrypted SSH key[/bold $text-accent]",
                 id="bw_passphrase_title",
             ),
             Static(

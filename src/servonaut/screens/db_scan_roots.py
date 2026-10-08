@@ -140,11 +140,11 @@ class DbScanRootsScreen(Screen):
             return
         if not path.startswith("/") and not path.startswith("~"):
             self._set_status(
-                "[yellow]Enter an absolute path (starting with / or ~).[/yellow]"
+                "[$text-warning]Enter an absolute path (starting with / or ~).[/$text-warning]"
             )
             return
         if path in self._roots:
-            self._set_status("[yellow]That path is already in the list.[/yellow]")
+            self._set_status("[$text-warning]That path is already in the list.[/$text-warning]")
             return
         self._roots.append(path)
         self._render_roots()
@@ -160,8 +160,8 @@ class DbScanRootsScreen(Screen):
         data = getattr(node, "data", None) if node is not None else None
         if not data or data.get("type") != "directory" or not data.get("path"):
             self._set_status(
-                "[yellow]Select a directory in the tree first (files can't be "
-                "roots).[/yellow]"
+                "[$text-warning]Select a directory in the tree first (files can't be "
+                "roots).[/$text-warning]"
             )
             return
         self._add_root(str(data["path"]))
@@ -170,7 +170,7 @@ class DbScanRootsScreen(Screen):
         option_list = self.query_one("#db_roots_list", OptionList)
         idx = option_list.highlighted
         if idx is None or idx < 0 or idx >= len(self._roots):
-            self._set_status("[yellow]Highlight a root in the list to remove it.[/yellow]")
+            self._set_status("[$text-warning]Highlight a root in the list to remove it.[/$text-warning]")
             return
         del self._roots[idx]
         self._render_roots()
@@ -181,7 +181,7 @@ class DbScanRootsScreen(Screen):
             self._instance.get("id") or self._instance.get("name") or ""
         )
         if not instance_id:
-            self._set_status("[red]Cannot save — instance has no id.[/red]")
+            self._set_status("[$text-error]Cannot save — instance has no id.[/$text-error]")
             return
         if self._roots:
             config.db_scan_roots[instance_id] = list(self._roots)
@@ -192,7 +192,7 @@ class DbScanRootsScreen(Screen):
             self.app.config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to save db_scan_roots: %s", exc)
-            self._set_status(f"[red]Save failed: {escape(str(exc))}[/red]")
+            self._set_status(f"[$text-error]Save failed: {escape(str(exc))}[/$text-error]")
             return
         self.dismiss(list(self._roots))
 
