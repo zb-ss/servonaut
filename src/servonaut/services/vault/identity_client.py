@@ -44,6 +44,13 @@ class PendingDevice:
     commitment: bytes
 
 
+def _destroy_pending(pending: PendingDevice) -> None:
+    """Zero the keys and nonce of a registration that will never be used."""
+    secure_zero(pending.device.signing_seed)
+    secure_zero(pending.device.encryption_secret_key)
+    secure_zero(pending.device_nonce)
+
+
 @dataclass(frozen=True)
 class ApprovalPin:
     """Values pinned before an approver sends its secret nonce."""
@@ -183,6 +190,8 @@ class IdentityClient:
 
     def begin_pending_device(self) -> PendingDevice:
         """Generate a registration exactly once; replacement needs a new call."""
+        # A registration that was never finished must not outlive its replacement.
+        self._discard_pending()
         device = LocalDevice(str(uuid.uuid4()), os.urandom(32), os.urandom(32))
         nonce = bytearray(os.urandom(32))
         pending = PendingDevice(
@@ -448,7 +457,7 @@ class IdentityClient:
             timeout=self._timeout, json={"endorsement_signature": _b64(endorsement), "method": "recovery_key"},
         )
         self._store.save(recovered)
-        self._discard_pending()
+        self._hand_pending_to_identity()
         return result
 
     def finish_pending_approval(
@@ -486,7 +495,7 @@ class IdentityClient:
             self._discard_pending()
             raise IdentityProtocolError("Approved bundle does not authenticate the server identity")
         self._store.save(recovered)
-        self._discard_pending()
+        self._hand_pending_to_identity()
         return recovered
 
     def _required_identity(self) -> LocalIdentity:
@@ -504,8 +513,41 @@ class IdentityClient:
 
     def _discard_pending(self) -> None:
         if self._pending is not None:
-            secure_zero(self._pending.device.signing_seed)
-            secure_zero(self._pending.device.encryption_secret_key)
+            _destroy_pending(self._pending)
+        self._pending = None
+        self._revealed_to_approver_nonce = None
+        self._pending_state = None
+
+    async def withdraw_pending_device(self) -> None:
+        """Cancel this computer's unapproved device at the service, then destroy its keys.
+
+        The request is signed by the pending device itself, which the service
+        accepts for its own registration. The keys are destroyed even when the
+        service cannot be reached; the request then expires on its own. Only
+        the registration current at the call is touched, so a newer one started
+        meanwhile keeps its keys.
+        """
+        pending = self._pending
+        if pending is None:
+            return
+        try:
+            await self._api.request_signed(
+                "POST", f"/api/v1/vault/devices/{pending.device.device_id}/reject", device=pending.device,
+                timeout=self._timeout, json={"reason": "cancelled"},
+            )
+        finally:
+            if self._pending is pending:
+                self._discard_pending()
+            else:
+                _destroy_pending(pending)
+
+    def _hand_pending_to_identity(self) -> None:
+        """Forget the pending state once its device belongs to the saved identity.
+
+        The device keys are now the identity's own (the same buffers), so
+        they must stay intact; only the approval nonce is destroyed.
+        """
+        if self._pending is not None:
             secure_zero(self._pending.device_nonce)
         self._pending = None
         self._revealed_to_approver_nonce = None
