@@ -14,11 +14,11 @@ from typing import Any, Dict
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.theme import Theme
 from textual.widgets import Input, Select, Static
 
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
-
-_THEME_OPTIONS = [("Dark", "dark"), ("Light", "light")]
+from servonaut.styles.themes import resolve_theme_name, theme_options
 
 
 class GeneralPanel(SettingsPanel):
@@ -58,8 +58,8 @@ class GeneralPanel(SettingsPanel):
         yield Horizontal(
             Static("Theme", classes="label"),
             Select(
-                _THEME_OPTIONS,
-                value="dark",
+                theme_options(self.app.available_themes),
+                value=self.app.theme,
                 allow_blank=False,
                 id="general_theme",
             ),
@@ -70,6 +70,10 @@ class GeneralPanel(SettingsPanel):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def on_mount(self) -> None:
+        """Follow themes picked elsewhere (Ctrl+P); the base class loads."""
+        self.app.theme_changed_signal.subscribe(self, self._follow_app_theme)
+
     def load(self) -> None:
         """Populate widgets from config and snapshot for dirty tracking."""
         config = self.app.config_manager.get()
@@ -77,8 +81,7 @@ class GeneralPanel(SettingsPanel):
         self._show_field("general_default_key", config.default_key)
         self.query_one("#general_cache_ttl", Input).value = str(config.cache_ttl_seconds)
         self.query_one("#general_terminal", Input).value = config.terminal_emulator
-        theme = config.theme if config.theme in ("dark", "light") else "dark"
-        self.query_one("#general_theme", Select).value = theme
+        self.query_one("#general_theme", Select).value = self._saved_theme(config.theme)
         self._snapshot_now()
 
     def current_values(self) -> Dict[str, Any]:
@@ -128,7 +131,26 @@ class GeneralPanel(SettingsPanel):
         """Validate via :meth:`collect` then write top-level scalar fields."""
         fields = self.collect()
         self.app.config_manager.update(**fields)
+        self.app.theme = fields["theme"]
         self._finish_save()
+
+    def _follow_app_theme(self, theme: Theme) -> None:
+        """Show a theme picked elsewhere unless the picker holds an unsaved one.
+
+        Without this, saving another field here would put back the theme
+        that was showing when the panel opened.
+        """
+        select = self.query_one("#general_theme", Select)
+        if select.value != self._snapshot.get("theme"):
+            return
+        self._snapshot["theme"] = theme.name
+        select.value = theme.name
+
+    def _saved_theme(self, configured: str) -> str:
+        """The picker entry for the saved theme, or the active one if unknown."""
+        available = self.app.available_themes
+        theme = resolve_theme_name(configured, available)
+        return theme if theme in available else self.app.theme
 
     # ------------------------------------------------------------------
     # Dirty marker refresh

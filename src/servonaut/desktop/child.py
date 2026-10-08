@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import socket
 import sys
 from collections.abc import Sequence
@@ -149,6 +150,11 @@ def main(
     platform_name: str | None = None,
 ) -> int:
     """CLI entry point for the private desktop child."""
+    # The window's terminal draws 24-bit colour. Textual otherwise guesses the
+    # colour system from TERM/COLORTERM, which a launch from a desktop menu
+    # does not set, and draws every theme in 16 colours. Textual reads this
+    # once, when it is first imported (later, by the host).
+    os.environ["TEXTUAL_COLOR_SYSTEM"] = "truecolor"
     parser = argparse.ArgumentParser(
         prog="servonaut-desktop-child",
         description="Private desktop host child process (internal use only).",
