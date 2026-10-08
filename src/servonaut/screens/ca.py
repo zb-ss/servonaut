@@ -13,7 +13,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
-from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -81,9 +81,14 @@ class CaScreen(Screen):
 
     BINDINGS = [Binding("escape", "back", "Back", show=True), Binding("r", "refresh", "Refresh", show=True)]
 
+    # Actions that need the team's CA; Refresh stays usable to re-check it.
+    _CA_ACTION_IDS = ("ca_audit", "ca_enroll", "ca_krl", "ca_break_glass_scan")
+
     def __init__(self) -> None:
         super().__init__()
         self._status_raw = "Enter a team slug to inspect its CA status."
+        # The team whose CA the service reported as not switched on yet.
+        self._switched_off_team: str | None = None
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -123,6 +128,32 @@ class CaScreen(Screen):
 
     def _team(self) -> str:
         return self.query_one("#ca_team", Input).value.strip()
+
+    def _set_ca_actions_enabled(self, enabled: bool) -> None:
+        for button_id in self._CA_ACTION_IDS:
+            self.query_one(f"#{button_id}", Button).disabled = not enabled
+
+    def _show_switched_off(self, team: str) -> None:
+        """Present certificates that are not switched on yet as information, not a failure."""
+        self._switched_off_team = team
+        self._set_ca_actions_enabled(False)
+        self._set_status(SSH_CA_COMING_SOON)
+
+    def _clear_switched_off(self) -> None:
+        self._switched_off_team = None
+        self._set_ca_actions_enabled(True)
+
+    def _notify_failure(self, team: str, action: str, exc: Exception) -> None:
+        if is_feature_disabled(exc, "ssh_ca"):
+            self._show_switched_off(team)
+            self.app.notify(SSH_CA_COMING_SOON, severity="information", markup=False)
+            return
+        self.app.notify(f"{action} failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "ca_team" and self._switched_off_team is not None:
+            if event.value.strip() != self._switched_off_team:
+                self._clear_switched_off()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "ca_refresh":
@@ -172,8 +203,12 @@ class CaScreen(Screen):
             result = method(team=team)
             result = await result if hasattr(result, "__await__") else result
         except Exception as exc:
+            if is_feature_disabled(exc, "ssh_ca"):
+                self._show_switched_off(team)
+                return
             self._set_status(f"Could not load CA status ({vault_failure_reason(exc)}).")
             return
+        self._clear_switched_off()
         if isinstance(result, Mapping):
             summary = ", ".join(
                 f"{key}: {value}" for key, value in result.items()
@@ -193,7 +228,7 @@ class CaScreen(Screen):
             result = method(team=team)
             result = await result if hasattr(result, "__await__") else result
         except Exception as exc:
-            self.app.notify(f"CA audit failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            self._notify_failure(team, "CA audit", exc)
             return
         self._set_status(self.scrub_for_display(result))
 
@@ -212,7 +247,7 @@ class CaScreen(Screen):
             result = method(team=team, server=server, break_glass_item_id=break_glass_item, confirmation=confirmation)
             result = await result if hasattr(result, "__await__") else result
         except Exception as exc:
-            self.app.notify(f"CA enrollment failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            self._notify_failure(team, "CA enrollment", exc)
             return
         self._set_status(self.scrub_for_display(result))
 
@@ -226,7 +261,7 @@ class CaScreen(Screen):
             result = method(team=team, servers=servers)
             result = await result if hasattr(result, "__await__") else result
         except Exception as exc:
-            self.app.notify(f"KRL delivery failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            self._notify_failure(team, "KRL delivery", exc)
             return
         self._set_status(self.scrub_for_display(result))
 
@@ -240,7 +275,7 @@ class CaScreen(Screen):
             result = method(team=team, servers=servers or None)
             result = await result if hasattr(result, "__await__") else result
         except Exception as exc:
-            self.app.notify(f"Break-glass scan failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            self._notify_failure(team, "Break-glass scan", exc)
             return
         reported = result.get("reported", 0) if isinstance(result, Mapping) else 0
         self._set_status(self.scrub_for_display(result))

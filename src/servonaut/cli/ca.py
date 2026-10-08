@@ -11,7 +11,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
-from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
 
 _EXIT_OK = 0
 _EXIT_ERROR = 1
@@ -212,12 +212,31 @@ async def _handle(args: argparse.Namespace) -> int:
             raise ValueError(f"Unknown CA command: {args.ca_command}")
         _print(value, bool(args.json))
     except APIError as exc:
+        if is_feature_disabled(exc, "ssh_ca"):
+            return _report_ca_switched_off(args)
         print(f"CA request failed ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR
     except Exception as exc:
+        if is_feature_disabled(exc, "ssh_ca"):
+            return _report_ca_switched_off(args)
         print(f"CA operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR
     return _EXIT_OK
+
+
+def _report_ca_switched_off(args: argparse.Namespace) -> int:
+    """Certificates not yet switched on is an answer for ``status``; any other command did nothing."""
+    if args.ca_command == "status":
+        if args.json:
+            _print(
+                {"enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_COMING_SOON},
+                True,
+            )
+        else:
+            print(SSH_CA_COMING_SOON)
+        return _EXIT_OK
+    print(f"{SSH_CA_COMING_SOON} Nothing was changed.", file=sys.stderr)
+    return _EXIT_ERROR
 
 
 def handle_ca_command(args: argparse.Namespace) -> int:
