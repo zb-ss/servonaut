@@ -387,6 +387,11 @@ only sign in once per machine. After signing in, entitlements are fetched
 and cached — the `premium_ai` and `allow_dangerous_ai_tools` flags become
 available immediately.
 
+The sign-in request says which client is asking (the CLI, the terminal app
+or the desktop app) and gives a coarse operating-system name such as
+`macOS 15` or `Ubuntu 24.04`, so the approval page can show which of your
+machines wants to sign in. It never includes the host name or user name.
+
 Prefer the TUI? **Account → Login** in the sidebar runs the same flow.
 
 ---

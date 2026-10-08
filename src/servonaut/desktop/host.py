@@ -131,6 +131,7 @@ class DesktopHost:
         return ServonautApp(
             runtime_layout=self.runtime_layout,
             driver_class=driver_cls,
+            client_kind="desktop",
         )
 
     async def start(self) -> str:

@@ -12,7 +12,9 @@ from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import AsyncIterator, Callable, Dict, List, Optional, Set
 
+from servonaut import get_version
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_or_default
+from servonaut.utils.platform_utils import describe_platform
 
 from .interfaces import AuthServiceInterface
 from .relay_lock import try_lock_exclusive, unlock
@@ -29,6 +31,9 @@ except ImportError:
 AUTH_FILE = Path.home() / '.servonaut' / 'auth.json'
 _DEFAULT_API_BASE = "https://api.servonaut.dev"
 CLIENT_ID = "servonaut-cli"
+# The Servonaut clients that sign in with the device flow; the sign-in review
+# page names the one asking.
+CLIENT_KINDS = ("cli", "tui", "desktop")
 
 
 def _api_base() -> str:
@@ -43,6 +48,16 @@ def _api_base() -> str:
             credential is sent, and never falls back to production.
     """
     return endpoint_or_default(API_URL_ENV, _DEFAULT_API_BASE)
+
+
+def _device_flow_headers(client_kind: str) -> Dict[str, str]:
+    """The User-Agent a device-flow request carries, e.g. ``servonaut-tui/2.28.0 (macOS 15)``."""
+    return {"User-Agent": f"servonaut-{client_kind}/{get_version()} ({describe_platform()})"}
+
+
+def _check_client_kind(client_kind: str) -> None:
+    if client_kind not in CLIENT_KINDS:
+        raise ValueError(f"Unknown client kind {client_kind!r}: expected one of {CLIENT_KINDS}.")
 
 
 # Seconds allowed for one whole ``/api/oauth/refresh`` round-trip (enforced
@@ -693,8 +708,14 @@ class AuthService(AuthServiceInterface):
             return False
         return bool(self.get_plan_features().get(feature, False))
 
-    async def start_device_flow(self) -> dict:
-        """Initiate device flow. Returns user_code, verification_uri, etc."""
+    async def start_device_flow(self, *, client_kind: str = "cli") -> dict:
+        """Initiate device flow. Returns user_code, verification_uri, etc.
+
+        ``client_kind`` (one of :data:`CLIENT_KINDS`) and a coarse platform
+        name go with the request, so the sign-in review page can say which
+        client, on which kind of machine, is asking.
+        """
+        _check_client_kind(client_kind)
         if not HAS_HTTPX:
             raise RuntimeError(
                 "httpx not installed. Install with: pip install 'servonaut[pro]'"
@@ -702,7 +723,12 @@ class AuthService(AuthServiceInterface):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 f"{_api_base()}/api/oauth/device",
-                json={"client_id": CLIENT_ID},
+                json={
+                    "client_id": CLIENT_ID,
+                    "client_kind": client_kind,
+                    "client_platform": describe_platform(),
+                },
+                headers=_device_flow_headers(client_kind),
             )
             if response.status_code >= 400:
                 # Try to extract a meaningful error; avoid dumping raw HTML
@@ -730,14 +756,18 @@ class AuthService(AuthServiceInterface):
         device_code: str,
         interval: int = 5,
         max_wait_seconds: int = 120,
+        *,
+        client_kind: str = "cli",
     ) -> bool:
         """Poll until user authorizes or timeout. Returns True on success.
 
         ``max_wait_seconds`` bounds the total poll budget (default 120 —
         the TUI's historical window). Headless ``servonaut login`` passes
         the device code's ``expires_in`` so users have the full lifetime
-        to approve from another device.
+        to approve from another device. ``client_kind`` is the one the flow
+        was started with.
         """
+        _check_client_kind(client_kind)
         if not HAS_HTTPX:
             raise RuntimeError("httpx not installed")
 
@@ -755,6 +785,7 @@ class AuthService(AuthServiceInterface):
                             "device_code": device_code,
                             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                         },
+                        headers=_device_flow_headers(client_kind),
                     )
                     if response.status_code == 200:
                         data = response.json()

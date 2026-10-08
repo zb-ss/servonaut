@@ -140,7 +140,7 @@ def handle_login_command(args: argparse.Namespace) -> int:
 async def _do_login(auth: Any, *, no_browser: bool) -> int:
     """Run the device flow: print URL + code, poll until approved."""
     try:
-        flow = await auth.start_device_flow()
+        flow = await auth.start_device_flow(client_kind="cli")
     except Exception as exc:  # noqa: BLE001 — single-line CLI error
         print(f"Error: {exc}", file=sys.stderr)
         return _EXIT_ERROR
@@ -191,6 +191,7 @@ async def _do_login(auth: Any, *, no_browser: bool) -> int:
 
     success = await auth.poll_for_token(
         device_code, interval=interval, max_wait_seconds=wait_seconds,
+        client_kind="cli",
     )
     if not success:
         print(

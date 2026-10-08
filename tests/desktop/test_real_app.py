@@ -37,6 +37,17 @@ def host_listener() -> socket.socket:
     return sock
 
 
+def test_default_app_signs_in_as_the_desktop(host_listener: socket.socket) -> None:
+    """The window's app names itself "desktop" to sign-in; a terminal app stays "tui"."""
+    host = DesktopHost(token=SecretToken.generate(), listener=host_listener)
+
+    app = host._default_app_factory(DesktopDriverTransport())
+
+    assert isinstance(app, ServonautApp)
+    assert app.client_kind == "desktop"
+    assert ServonautApp().client_kind == "tui"
+
+
 @pytest.mark.asyncio
 async def test_real_servonaut_app_boot_and_initial_screen(
     host_listener: socket.socket, isolated_config: Path

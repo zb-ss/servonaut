@@ -446,9 +446,10 @@ class LoginScreen(Screen):
         auth = getattr(self.app, "auth_service", None)
         if auth is None:
             return
+        client_kind = getattr(self.app, "client_kind", "tui")
 
         try:
-            flow = await auth.start_device_flow()
+            flow = await auth.start_device_flow(client_kind=client_kind)
         except Exception as exc:
             logger.error("Device flow initiation failed: %s", exc)
             msg = str(exc)[:200]
@@ -478,7 +479,9 @@ class LoginScreen(Screen):
         if not self._polling:
             return
 
-        success = await auth.poll_for_token(device_code, interval=interval)
+        success = await auth.poll_for_token(
+            device_code, interval=interval, client_kind=client_kind
+        )
 
         if not self._polling:
             # User cancelled while we were polling

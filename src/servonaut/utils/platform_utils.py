@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -71,6 +72,54 @@ def get_ssh_dir() -> Path:
         '.ssh'
     """
     return Path.home() / '.ssh'
+
+
+# The longest platform name describe_platform() returns.
+_PLATFORM_NAME_MAX = 40
+_PLATFORM_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/+-]")
+# The first Windows 11 build; Python before 3.12 reports Windows 11 as release "10".
+_WINDOWS_11_BUILD = 22000
+
+
+def describe_platform() -> str:
+    """A coarse name for this operating system, such as 'macOS 15' or 'Ubuntu 24.04'.
+
+    Major versions only, and never the host name, user name or kernel build:
+    the sign-in review page shows it so a person can tell which of their
+    machines is asking to sign in.
+    """
+    os_name = get_os()
+    if os_name == 'darwin':
+        major = platform.mac_ver()[0].split('.')[0]
+        name = f"macOS {major}" if major else "macOS"
+    elif os_name == 'windows':
+        name = _windows_name()
+    elif os_name == 'linux':
+        name = _linux_name()
+    else:
+        name = platform.system()
+    name = _PLATFORM_NAME_UNSAFE.sub('', name).strip()[:_PLATFORM_NAME_MAX].strip()
+    return name or "unknown"
+
+
+def _windows_name() -> str:
+    release = platform.release()
+    try:
+        build = int(platform.version().split('.')[2])
+    except (IndexError, ValueError):
+        build = 0
+    if release == '10' and build >= _WINDOWS_11_BUILD:
+        release = '11'
+    return f"Windows {release}" if release else "Windows"
+
+
+def _linux_name() -> str:
+    try:
+        release = platform.freedesktop_os_release()
+    except OSError:
+        return "Linux"
+    name = release.get('NAME') or "Linux"
+    return f"{name} {release.get('VERSION_ID', '')}".strip()
 
 
 def copy_to_clipboard(text: str) -> bool:

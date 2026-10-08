@@ -209,6 +209,7 @@ class ServonautApp(App):
         config_path=None,
         *,
         runtime_layout: RuntimeLayout | None = None,
+        client_kind: str = "tui",
         **kwargs,
     ) -> None:
         """Initialize the application.
@@ -219,6 +220,8 @@ class ServonautApp(App):
             config_path: Alternative config file (``--config``); every other
                 runtime file keeps its usual location under ``~/.servonaut``.
             runtime_layout: Immutable runtime layout shared by all app services.
+            client_kind: How this app is shown, ``"tui"`` in a terminal or
+                ``"desktop"`` in the desktop window; sign-in names it.
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
@@ -231,6 +234,7 @@ class ServonautApp(App):
         self._initial_screen = initial_screen
         self._config_path = config_path
         self.runtime_layout = runtime_layout or detect_runtime()
+        self.client_kind = client_kind
 
     def notify(
         self,
