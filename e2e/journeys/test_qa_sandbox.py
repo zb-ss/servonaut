@@ -184,7 +184,12 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
             "() => document.activeElement.classList.contains('xterm-helper-textarea')"
         )
         await page.page.evaluate("() => window.servonautQa.waitForText('app-1')")
-        screen = await _screen(page)
+        # The footer follows the terminal's focus, which the browser may still
+        # give or take away while the page starts: Textual blurs the focused
+        # widget while the terminal is unfocused, and the fleet table's Enter
+        # shortcut then shows instead of `o`. Settle it, unfocused, first.
+        await page.page.evaluate("() => document.activeElement.blur()")
+        screen = await _screen_until(page, lambda text: "⏎ Actions" in text, "footer without focus")
         assert len(screen.splitlines()) == started["rows"] and "cache-1" in screen
 
         # Running the snippet again changes nothing and says why.
@@ -194,6 +199,8 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
         )
         assert rerun.startswith("this page already started its session")
         assert await _screen(page) == screen
+        await page.page.evaluate("() => window.servonautQa.focus()")
+        await _screen_until(page, lambda text: "o Actions" in text, "the fleet table focused again")
         # Without a captured terminal, waitForText says so at once.
         unavailable = await page.page.evaluate(
             """async () => {
