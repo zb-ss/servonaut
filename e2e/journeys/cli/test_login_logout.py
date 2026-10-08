@@ -42,8 +42,15 @@ def test_login_quota_and_logout(journey, fake_cloud, cli):
     assert session["plan"] == "solo"
     assert session["user_id"] == 4242
 
+    # The sign-in review page can name the client and the kind of machine asking.
+    [device] = fake_cloud.requests("/api/oauth/device")
+    assert device["body"]["client_kind"] == "cli"
+    assert device["body"]["client_platform"]
+    assert device["user_agent"].startswith("servonaut-cli/")
+
     polls = fake_cloud.requests("/api/oauth/token")
     assert [p["status"] for p in polls] == [400, 400, 400, 200]
+    assert {p["user_agent"] for p in polls} == {device["user_agent"]}
     assert fake_cloud.requests("/api/entitlements")[-1]["bearer_ok"]
 
     quota = cli(sandbox, "ai", "quota", "--json")

@@ -88,6 +88,9 @@ async def test_login_starts_the_relay_and_unlocks_account_features(tui, seed, fa
         await t.nav("nav_login")
         await t.wait_for_screen("LoginScreen")
         await _sign_in(t)
+        [device] = fake_cloud.requests("/api/oauth/device")
+        assert device["body"]["client_kind"] == "tui"
+        assert device["user_agent"].startswith("servonaut-tui/")
 
         await t.wait_for_toast("Connecting to Servonaut relay")
         await _relay_shows(t, CONNECTED)

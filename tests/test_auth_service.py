@@ -1567,3 +1567,75 @@ def test_failed_replace_removes_the_temporary_file(tmp_path, monkeypatch):
 
     assert auth_file.read_text() == before
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Device flow: the client and platform a sign-in names
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def device_flow_requests(monkeypatch):
+    """Answer every device-flow POST with *answer*; return the requests sent."""
+    import servonaut.services.auth_service as auth_mod
+
+    requests: list[httpx.Request] = []
+    answers = {
+        "/api/oauth/device": httpx.Response(200, json={"device_code": "dc", "user_code": "UC"}),
+        "/api/oauth/token": httpx.Response(410, json={"error": "expired_token"}),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return answers[request.url.path]
+
+    real_client = httpx.AsyncClient
+
+    class _RecordingClient(real_client):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RecordingClient)
+    monkeypatch.setattr(auth_mod, "describe_platform", lambda: "macOS 15")
+    monkeypatch.setattr(auth_mod, "get_version", lambda: "9.9.9")
+    return requests
+
+
+@pytest.mark.parametrize("client_kind", ["cli", "tui", "desktop"])
+def test_device_flow_names_the_client_and_platform(auth_service, device_flow_requests, client_kind):
+    run(auth_service.start_device_flow(client_kind=client_kind))
+
+    [request] = device_flow_requests
+    assert json.loads(request.content) == {
+        "client_id": "servonaut-cli",
+        "client_kind": client_kind,
+        "client_platform": "macOS 15",
+    }
+    assert request.headers["User-Agent"] == f"servonaut-{client_kind}/9.9.9 (macOS 15)"
+
+
+def test_device_flow_defaults_to_the_cli(auth_service, device_flow_requests):
+    run(auth_service.start_device_flow())
+
+    assert json.loads(device_flow_requests[0].content)["client_kind"] == "cli"
+
+
+def test_token_poll_carries_the_client_user_agent(auth_service, device_flow_requests):
+    assert run(auth_service.poll_for_token("dc", interval=0, max_wait_seconds=1, client_kind="desktop")) is False
+
+    [request] = device_flow_requests
+    assert request.url.path == "/api/oauth/token"
+    assert request.headers["User-Agent"] == "servonaut-desktop/9.9.9 (macOS 15)"
+
+
+@pytest.mark.parametrize("call", ["start", "poll"])
+def test_unknown_client_kind_is_refused_before_any_request(auth_service, device_flow_requests, call):
+    flow = (
+        auth_service.start_device_flow(client_kind="browser")
+        if call == "start"
+        else auth_service.poll_for_token("dc", interval=0, client_kind="browser")
+    )
+    with pytest.raises(ValueError, match="Unknown client kind 'browser'"):
+        run(flow)
+    assert device_flow_requests == []

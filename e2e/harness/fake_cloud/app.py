@@ -277,6 +277,7 @@ class FakeCloud(LoopbackServer):
                     "body": body,
                     "authorization": "Bearer <redacted>" if authorization else None,
                     "bearer_ok": bearer_ok,
+                    "user_agent": request.headers.get("User-Agent"),
                     "status": response.status,
                 }
             )

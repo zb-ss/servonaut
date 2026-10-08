@@ -73,8 +73,9 @@ def test_login_force_runs_flow_despite_session(monkeypatch, capsys):
     rc = cli_login.handle_login_command(_ns(force=True))
 
     assert rc == 0
-    auth.start_device_flow.assert_awaited_once()
+    auth.start_device_flow.assert_awaited_once_with(client_kind="cli")
     auth.poll_for_token.assert_awaited_once()
+    assert auth.poll_for_token.await_args.kwargs["client_kind"] == "cli"
 
 
 def test_login_success_prints_url_code_and_plan(monkeypatch, capsys):

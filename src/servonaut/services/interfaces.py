@@ -929,7 +929,7 @@ class AuthServiceInterface(ABC):
     """Interface for OAuth2 device flow authentication."""
 
     @abstractmethod
-    async def start_device_flow(self) -> dict:
+    async def start_device_flow(self, *, client_kind: str = "cli") -> dict:
         pass
 
     @abstractmethod
@@ -938,6 +938,8 @@ class AuthServiceInterface(ABC):
         device_code: str,
         interval: int = 5,
         max_wait_seconds: int = 120,
+        *,
+        client_kind: str = "cli",
     ) -> bool:
         pass
 

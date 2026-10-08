@@ -168,7 +168,7 @@ class TestLoginScreenDeviceFlow:
         # inspect the intermediate UI state before polling completes.
         import asyncio
 
-        async def _slow_poll(device_code, interval=5):
+        async def _slow_poll(device_code, interval=5, *, client_kind):
             await asyncio.sleep(60)  # effectively never returns in test
             return False
 
@@ -191,6 +191,32 @@ class TestLoginScreenDeviceFlow:
             assert "ABCD-1234" in str(code_widget.content)
 
 
+class TestLoginScreenClientKind:
+    """Sign-in tells the server which client asks: the terminal TUI or the desktop window."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("client_kind", [None, "desktop"])
+    async def test_device_flow_names_the_client(self, client_kind):
+        auth = _make_auth_service(authenticated=False)
+        app = _WrapperApp(auth_service=auth)
+        if client_kind is not None:
+            app.client_kind = client_kind
+        expected = client_kind or "tui"
+
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            await pilot.click("#btn_login")
+            for _ in range(50):
+                if auth.poll_for_token.await_count:
+                    break
+                await pilot.pause()
+
+        auth.start_device_flow.assert_awaited_once_with(client_kind=expected)
+        auth.poll_for_token.assert_awaited_once_with(
+            "dev-code-abc", interval=5, client_kind=expected
+        )
+
+
 # ---------------------------------------------------------------------------
 # Successful auth → UI update
 # ---------------------------------------------------------------------------
@@ -202,7 +228,7 @@ class TestLoginScreenAuthSuccess:
         auth = _make_auth_service(authenticated=False)
 
         # After poll succeeds, mark as authenticated so _show_logged_in_state works
-        async def _poll_and_authenticate(device_code, interval=5):
+        async def _poll_and_authenticate(device_code, interval=5, *, client_kind):
             auth.is_authenticated = True
             auth._get_cached_entitlements.return_value = {
                 "email": "user@example.com",
@@ -296,7 +322,7 @@ class TestLoginTriggersRelayHook:
     async def test_hook_called_exactly_once_on_success(self):
         auth = _make_auth_service(authenticated=False)
 
-        async def _poll_and_authenticate(device_code, interval=5):
+        async def _poll_and_authenticate(device_code, interval=5, *, client_kind):
             auth.is_authenticated = True
             auth._get_cached_entitlements.return_value = {
                 "email": "user@example.com",
