@@ -639,9 +639,12 @@ reads each enrolled host's SSH log over your existing access and reports any
 login with a break-glass key to the team, once per event; the team owner is
 notified.
 
-SSH certificates need the Servonaut service to have them switched on and able
-to sign. When they are not available there, the `ca` commands say so and
-nothing is changed; vault keys keep working.
+SSH certificates are coming soon. Until they are switched on for your
+Servonaut service, the `ca` commands say so and nothing is changed:
+`ca status` reports it and exits 0, and the other `ca` commands exit 1. Vault
+keys keep working, so team members connect to shared servers as before. If
+the service cannot sign certificates for a while, the commands say that
+instead; try again later.
 
 ---
 
