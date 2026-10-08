@@ -12,7 +12,9 @@ import datetime as datetime_module
 import logging
 import os
 import platform as platform_module
+import re
 import secrets
+import shlex
 import stat
 import tempfile
 import uuid
@@ -29,7 +31,9 @@ from servonaut.services.team_service import TeamService
 from . import crypto
 from .bindings import VaultBindingService
 from .ca_client import CertificateAuthorityClient
+from .ca_pins import CaPins
 from .ca_enrollment import CaEnrollmentExecutor, EnrollmentResult, deliver_krl, enrollment_error_code
+from .display import terminal_safe
 from .errors import NO_LOCAL_IDENTITY, VaultUserError, vault_failure_reason
 from .grant_processor import GrantProcessor
 from .identity_client import IdentityClient
@@ -56,6 +60,44 @@ from .team_vault_client import (
 
 
 logger = logging.getLogger(__name__)
+
+# Work an SSH CA enrolment job can do on a host.
+_ENROLLMENT_KINDS = frozenset({"enroll", "refresh", "unenroll"})
+_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
+
+
+def _is_id(value: Any) -> bool:
+    return isinstance(value, str) and _ID.fullmatch(value) is not None
+
+
+def _job_params(fetched: Mapping[str, Any]) -> Mapping[str, Any]:
+    params = fetched.get("params") or fetched.get("enrollment") or fetched
+    if not isinstance(params, Mapping):
+        raise RuntimeError("CA enrollment has invalid parameters")
+    return params
+
+
+def _closed_job_error(exc: APIError | None = None, *, job_status: Any = None) -> VaultUserError | None:
+    """What to tell the user about a job that can no longer be carried out."""
+    if exc is not None:
+        details = exc.details if isinstance(exc.details, Mapping) else {}
+        if exc.status == 410:
+            job_status = "expired"
+        elif exc.status == 409 and exc.code == "already_claimed":
+            job_status = details.get("status") or "claimed"
+        else:
+            return None
+    if job_status == "cancelled":
+        return VaultUserError("this SSH certificate job was cancelled in the web app; run the command again to start a new one")
+    if job_status == "expired":
+        return VaultUserError("this SSH certificate job expired; run the command again to start a new one")
+    if job_status == "claimed":
+        return VaultUserError(
+            "this SSH certificate job is already being carried out; it finishes from the device that claimed it"
+        )
+    if job_status in {"succeeded", "failed", "rolled_back"}:
+        return VaultUserError("this SSH certificate job has already finished; run the command again to start a new one")
+    return None
 
 
 def _normalized_cidrs(values: Sequence[str]) -> list[str]:
@@ -173,6 +215,10 @@ class VaultCommandService:
         self._pending_identity_reset: PendingIdentityReset | None = None
         self._device_pending_events: list[dict[str, Any]] = []
         self._device_pending_callback: Callable[[Mapping[str, Any]], Any] | None = None
+        self._enrollment_requested_callback: Callable[[Mapping[str, Any]], Any] | None = None
+        # SSH CA jobs already announced, per team: a rollover sends one event per
+        # host, and one read of the job list covers them all.
+        self._announced_enrollments: dict[str, set[str]] = {}
 
     @classmethod
     def from_local_session(cls) -> "VaultCommandService":
@@ -283,6 +329,16 @@ class VaultCommandService:
         """Install a UI notification hook fed only by a REST-reread device."""
         self._device_pending_callback = callback
 
+    def set_enrollment_requested_callback(
+        self, callback: Callable[[Mapping[str, Any]], Any] | None,
+    ) -> None:
+        """Install the hook told about a waiting SSH CA job, re-read over REST.
+
+        The job itself never runs from the event: carrying it out changes the
+        host's sshd configuration and needs the user's typed confirmation.
+        """
+        self._enrollment_requested_callback = callback
+
     def drain_device_pending_events(self) -> list[dict[str, Any]]:
         """Return verified pending-device notifications accumulated from event hints."""
         events, self._device_pending_events = self._device_pending_events, []
@@ -331,6 +387,21 @@ class VaultCommandService:
                 ]
                 if drifted:
                     await self.ca_deliver_krl(team=team, servers=drifted)
+            return
+        if event_type == "ssh_ca.enrollment_requested":
+            notice = await self._waiting_enrollments_notice(data)
+            if notice is None:
+                return
+            if self._enrollment_requested_callback is None:
+                logger.info("%s", notice["message"])
+            else:
+                result = self._enrollment_requested_callback(notice)
+                if hasattr(result, "__await__"):
+                    await result
+            # Only a notice that reached the user stops later hints from repeating it.
+            self._announced_enrollments.setdefault(notice["team"], set()).update(
+                job["enrollment_id"] for job in notice["jobs"]
+            )
             return
         if event_type == "vault.device_pending":
             device_id = data.get("device_id")
@@ -2013,26 +2084,41 @@ class VaultCommandService:
         client = self._ca(team)
         status = await client.get_status()  # pin CA keys before any remote host write
         shared = await self._shared_server(team, server)
-        created = await client.create_enrollment(str(shared["id"]), kind, break_glass_item_id=break_glass_item_id)
-        enrollment_id = created.get("enrollment_id") or created.get("id")
-        if not isinstance(enrollment_id, str):
-            raise RuntimeError("CA enrollment response did not include an id")
-        fetched = await client.get_enrollment(enrollment_id)
-        params = fetched.get("params") or fetched.get("enrollment") or fetched
-        if not isinstance(params, Mapping):
-            raise RuntimeError("CA enrollment has invalid parameters")
+        server_id = str(shared["id"])
+        enrollment_id, resumed = await self._open_enrollment(client, server_id, kind, break_glass_item_id)
+        try:
+            fetched = await client.get_enrollment(enrollment_id)
+        except APIError as exc:
+            # Only the job's executor may read it; anyone else gets a 404.
+            if resumed and exc.status == 404:
+                raise VaultUserError(
+                    "this server already has an open SSH certificate job that another owner or admin "
+                    "started; it runs from their Servonaut, or cancel it in the web app"
+                ) from exc
+            raise
+        params = _job_params(fetched)
+        self._check_job(
+            params, kind=kind, server_id=server_id, break_glass_item_id=break_glass_item_id, resumed=resumed,
+        )
         self._validate_enrollment_ca_keys(params, status)
         params = await self._fill_break_glass(team, params)
-        confirmed = confirmation({"hostname": params.get("server", {}).get("hostname"), "params": params})
+        confirmed = confirmation({
+            "hostname": params.get("server", {}).get("hostname"), "params": params, "kind": kind,
+            "user_ca_roles": status.user_ca_roles,
+        })
         if hasattr(confirmed, "__await__"):
             confirmed = await confirmed
         if confirmed != params.get("server", {}).get("hostname"):
             raise ValueError("host name confirmation did not match")
-        claimed = await client.claim_enrollment(enrollment_id)
         try:
-            return await self._execute_claimed_enrollment(
+            claimed = await client.claim_enrollment(enrollment_id)
+        except APIError as exc:
+            raise _closed_job_error(exc) or exc
+        try:
+            outcome = await self._execute_claimed_enrollment(
                 client, status, shared, team, enrollment_id, fetched, claimed, params, confirmed,
             )
+            return {**outcome, "resumed": resumed}
         except BaseException as exc:
             # A claimed job stays open until its executor reports; always report.
             failure = EnrollmentResult("failed", (), _enrollment_error_code(exc)).to_dict()
@@ -2042,14 +2128,160 @@ class VaultCommandService:
                 logger.warning("Could not report the failed SSH CA enrollment %s", enrollment_id)
             raise
 
+    @staticmethod
+    async def _open_enrollment(
+        client: Any, server_id: str, kind: str, break_glass_item_id: str | None,
+    ) -> tuple[str, bool]:
+        """The job to carry out: a new one, or the open one the service names.
+
+        Jobs created on the web (a Refresh, or a CA rollover's refresh of every
+        host) wait for their executor's CLI; asking for the same work again
+        carries that job out instead of failing on it.
+        """
+        try:
+            created = await client.create_enrollment(server_id, kind, break_glass_item_id=break_glass_item_id)
+        except APIError as exc:
+            details = exc.details if isinstance(exc.details, Mapping) else {}
+            open_id = details.get("enrollment_id")
+            if exc.status == 409 and exc.code == "enrollment_in_progress" and isinstance(open_id, str):
+                return open_id, True
+            raise
+        enrollment_id = created.get("enrollment_id") or created.get("id")
+        if not isinstance(enrollment_id, str):
+            raise RuntimeError("CA enrollment response did not include an id")
+        return enrollment_id, False
+
+    @staticmethod
+    def _check_job(
+        params: Mapping[str, Any], *, kind: str, server_id: str, break_glass_item_id: str | None, resumed: bool,
+    ) -> None:
+        """Carry out a job only when it is the work the user asked for, still open."""
+        server = params.get("server")
+        if not isinstance(server, Mapping) or server.get("id") != server_id:
+            raise VaultStateError("the SSH CA job belongs to another server")
+        open_kind = params.get("kind")
+        if open_kind not in _ENROLLMENT_KINDS:
+            raise VaultStateError("the SSH CA job has an invalid kind")
+        if open_kind != kind:
+            if not resumed:
+                raise VaultStateError("the SSH CA job is not the kind that was requested")
+            raise VaultUserError(
+                f"this server already has an open SSH certificate {open_kind} job; carry it out with "
+                f"`servonaut ca {open_kind}`, or cancel it in the web app first"
+            )
+        job_status = params.get("status")
+        if job_status is not None and job_status != "requested":
+            raise _closed_job_error(job_status=job_status) or VaultStateError("the SSH CA job is not open")
+        spec = params.get("break_glass")
+        job_item = spec.get("item_id") if isinstance(spec, Mapping) else None
+        if spec is not None and not isinstance(spec, Mapping):
+            raise VaultStateError("the SSH CA job has an invalid break-glass key")
+        if break_glass_item_id is None:
+            # A job created on the web may carry the owner's break-glass key; the
+            # confirmation shows it. A job created here asked for none.
+            if job_item is not None and not resumed:
+                raise VaultStateError("the SSH CA job added a break-glass key that was not requested")
+            return
+        if job_item == break_glass_item_id:
+            return
+        if not resumed:
+            raise VaultStateError("the SSH CA job uses a different break-glass key than requested")
+        raise VaultUserError(
+            "the open enroll job for this server has no break-glass key; cancel it in the web app to start one with a key"
+            if job_item is None else
+            "the open enroll job for this server uses a different break-glass key; cancel it in the web app to start a new one"
+        )
+
+    async def ca_jobs(self, *, team: str) -> dict[str, Any]:
+        """Open SSH CA jobs this user carries out, with the command for each."""
+        rows = await self._ca(team).list_enrollments(status="requested")
+        me = str(await self._user_id())
+        names = {
+            str(server.get("id")): str(server.get("name") or server.get("id"))
+            for server in await self.teams.list_shared_servers(team)
+        }
+        jobs = []
+        for row in rows:
+            if str(row.get("executor_user_id")) != me:
+                continue
+            kind, server_id, enrollment_id = row.get("kind"), row.get("server_id"), row.get("enrollment_id")
+            if kind not in _ENROLLMENT_KINDS or not _is_id(server_id) or not _is_id(enrollment_id):
+                logger.info("Skipped an SSH CA job this Servonaut version does not recognise")
+                continue
+            # Names come from whoever shared the server: show them inert, and
+            # address the server by its id, which names exactly one server.
+            jobs.append({
+                "enrollment_id": enrollment_id, "kind": kind, "server_id": server_id,
+                "server": terminal_safe(names.get(server_id, server_id)), "team": team,
+                "expires_at": row.get("expires_at"),
+                "command": f"servonaut ca {kind} {shlex.quote(server_id)} --team {shlex.quote(team)}",
+            })
+        return {"team": team, "jobs": jobs}
+
+    async def _waiting_enrollments_notice(self, data: Mapping[str, Any]) -> dict[str, Any] | None:
+        """One notice for the jobs an ``ssh_ca.enrollment_requested`` hint points at."""
+        team, enrollment_id = data.get("team_slug"), data.get("enrollment_id")
+        if not isinstance(team, str) or not isinstance(enrollment_id, str):
+            return None
+        announced = self._announced_enrollments.setdefault(team, set())
+        if enrollment_id in announced:
+            return None
+        jobs = [job for job in (await self.ca_jobs(team=team))["jobs"] if job["enrollment_id"] not in announced]
+        if len(announced) > 1000:
+            announced.clear()
+        if not jobs:
+            announced.add(enrollment_id)  # gone already, or not this user's: nothing to say
+            return None
+        if len(jobs) == 1:
+            job = jobs[0]
+            message = f"SSH certificate {job['kind']} job waiting for {job['server']}. Run: {job['command']}"
+        else:
+            message = (
+                f"{len(jobs)} SSH certificate jobs are waiting for you in team {team}. "
+                f"See them with: servonaut ca jobs --team {shlex.quote(team)}"
+            )
+        return {"team": team, "jobs": jobs, "message": message}
+
+    async def ca_trust(
+        self, *, team: str, confirmation: Callable[[Mapping[str, Any]], bool | Awaitable[bool]],
+    ) -> dict[str, Any]:
+        """Re-pin a team CA that changed, after the user compared fingerprints."""
+        client = self._ca(team)
+        status = await client.get_status(enforce_pins=False)
+        if not status.enabled or status.user_ca_fingerprint is None or status.host_ca_fingerprint is None:
+            raise VaultUserError("SSH certificates are not enabled for this team")
+        presented = CaPins(status.user_ca_fingerprint, status.host_ca_fingerprint)
+        pinned = client.pins.pinned(team)
+        summary = {
+            "team": team,
+            "pinned": None if pinned is None else {
+                "user_ca_fingerprint": pinned.user_ca_fingerprint,
+                "host_ca_fingerprint": pinned.host_ca_fingerprint,
+            },
+            "presented": {
+                "user_ca_fingerprint": presented.user_ca_fingerprint,
+                "host_ca_fingerprint": presented.host_ca_fingerprint,
+            },
+        }
+        if pinned == presented:
+            return {**summary, "changed": False}
+        summary["host_ca_changed"] = pinned is not None and pinned.host_ca_fingerprint != presented.host_ca_fingerprint
+        accepted = confirmation(summary)
+        if hasattr(accepted, "__await__"):
+            accepted = await accepted
+        if accepted is not True:
+            return {**summary, "changed": False, "declined": True}
+        client.pins.replace_after_confirmation(team, presented, user_ca_generation=status.user_ca_generation)
+        return {**summary, "changed": True}
+
     async def _execute_claimed_enrollment(
         self, client: Any, status: Any, shared: Mapping[str, Any], team: str, enrollment_id: str,
         fetched: Mapping[str, Any], claimed: Mapping[str, Any], params: Mapping[str, Any], confirmed: str,
     ) -> dict[str, Any]:
-        if isinstance(claimed.get("params"), Mapping):
-            params = claimed["params"]
-        self._validate_enrollment_ca_keys(params, status)
-        params = await self._fill_break_glass(team, params)
+        claimed_params = claimed.get("params")
+        if claimed_params is not None and claimed_params != _job_params(fetched):
+            # The user confirmed the fetched job; never run different work.
+            raise VaultStateError("the claimed SSH CA job differs from the one you confirmed")
         executor = self._remote_executor(shared, None)
 
         async def proof_certificate_supplier() -> VaultSshLease:
@@ -2302,11 +2534,8 @@ class VaultCommandService:
             raise VaultStateError("CA enrollment parameters contain invalid CA keys")
         if crypto.ssh_public_fingerprint(host_key) != status.host_ca_fingerprint:
             raise VaultStateError("CA enrollment host CA does not match the pinned team CA")
-        trusted_user_fingerprints = {status.user_ca_fingerprint}
-        previous = status.raw.get("user_ca_previous", []) if isinstance(status.raw, Mapping) else []
-        if isinstance(previous, list):
-            for entry in previous:
-                if isinstance(entry, Mapping) and isinstance(entry.get("fingerprint"), str):
-                    trusted_user_fingerprints.add(entry["fingerprint"])
+        # During a rollover a refresh installs the announced next CA beside the
+        # active one; both come from the same pinned status read.
+        trusted_user_fingerprints = status.trusted_user_ca_fingerprints
         if any(crypto.ssh_public_fingerprint(key) not in trusted_user_fingerprints for key in user_keys):
             raise VaultStateError("CA enrollment user CA does not match a pinned team CA")

@@ -1087,6 +1087,10 @@ class ServonautApp(App):
         if service is not None:
             await show_pending_device(self, service, device)
 
+    def _on_ca_enrollment_requested(self, notice) -> None:
+        """Point the user at waiting SSH CA jobs; carrying one out needs their confirmation."""
+        self.notify(notice["message"], title="SSH certificates", severity="information", timeout=30, markup=False)
+
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
 
@@ -1115,6 +1119,9 @@ class ServonautApp(App):
             )
             self.vault_command_service.set_device_pending_callback(
                 self._on_vault_device_pending,
+            )
+            self.vault_command_service.set_enrollment_requested_callback(
+                self._on_ca_enrollment_requested,
             )
             if getattr(self, "servonaut_tools", None) is not None:
                 self.servonaut_tools.set_vault_runtime(self.vault_command_service)

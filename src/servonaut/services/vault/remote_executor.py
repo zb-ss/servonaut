@@ -262,10 +262,12 @@ class SshHostExecutor(HostExecutor):
             identity_file = getattr(lease, "identity_file", None)
             if not isinstance(identity_file, str) or not Path(identity_file).is_file():
                 raise EnrollmentError("Native SSH lease has no public identity file")
+            # The lease alone authenticates: an ``-i`` key would replace its
+            # agent and certificate, so a CA proof would log in with the old key.
             kwargs.update(identity_agent=lease.identity_agent, certificate_file=lease.certificate_path,
-                          identity_file=identity_file, known_hosts_file=str(lease_known_hosts))
+                          identity_file=identity_file, known_hosts_file=str(lease_known_hosts), key_path=None)
             kwargs["username"] = lease.login_user
-        with self._bw_key(resolved) as bw_key:
+        with self._bw_key(None if lease is not None else resolved) as bw_key:
             if bw_key is not None:
                 kwargs["key_path"] = bw_key
             command = self.ssh_service.build_ssh_command(**kwargs)

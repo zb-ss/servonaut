@@ -21,6 +21,22 @@ from .errors import VaultUserError
 SCRIPT_VERSION = "1"
 MANAGED_DIR = PurePosixPath("/etc/ssh/servonaut")
 DROP_IN = PurePosixPath("/etc/ssh/sshd_config.d/50-servonaut.conf")
+_SCRIPT_TOKEN = "script"
+_MANAGED_HEADER = "# Managed by Servonaut ("
+
+
+def _owner_tokens(header: str) -> set[str]:
+    """The ``team …`` and ``server …`` an owner header names (any script version)."""
+    inside = header.partition("(")[2].partition(")")[0]
+    return {_SCRIPT_TOKEN if part.strip().startswith("script ") else part.strip() for part in inside.split(",")}
+
+
+# What ``sshd -T`` reports for the settings the managed drop-in writes.
+_MANAGED_SSHD_VALUES = {
+    "trustedusercakeys": f"{MANAGED_DIR}/user_ca_keys.pub",
+    "authorizedprincipalsfile": f"{MANAGED_DIR}/principals/%u",
+    "revokedkeys": f"{MANAGED_DIR}/revoked.krl",
+}
 HOST_CERTIFICATE = PurePosixPath("/etc/ssh/ssh_host_ed25519_key-cert.pub")
 BREAK_GLASS_AUTHORIZED_KEYS = PurePosixPath("/root/.ssh/authorized_keys")
 # What an enrolment writes, shown on the confirmation screens.
@@ -136,7 +152,7 @@ class CaEnrollmentExecutor:
         steps: list[EnrollmentStep] = []
         snapshot: dict[PurePosixPath, bytes | None] = {}
         try:
-            await self._precheck()
+            await self._precheck(params)
             steps.append(EnrollmentStep("precheck", "ok"))
             snapshot = await self._snapshot(params)
             await self._write_managed_files(params)
@@ -196,17 +212,39 @@ class CaEnrollmentExecutor:
         if certificate.valid_after > now + 120 or certificate.valid_before <= now:
             raise EnrollmentError("Host certificate has an invalid validity window")
 
-    async def _precheck(self) -> None:
+    async def _precheck(self, params: Mapping[str, Any]) -> None:
         version = await self.executor.run(["sshd", "-V"])
         effective = await self.executor.run(["sshd", "-T"])
         version_text = version.stdout + version.stderr
         if version.returncode != 0 or effective.returncode != 0 or not _openssh_at_least_82(version_text):
             raise EnrollmentError("sshd_precheck_failed")
         values = _effective_config(effective.stdout)
-        for key in ("trustedusercakeys", "authorizedprincipalsfile", "revokedkeys"):
+        managed_here = False
+        for key, managed in _MANAGED_SSHD_VALUES.items():
             value = values.get(key, "none")
-            if value.lower() not in {"none", ""}:
+            if value.lower() in {"none", ""}:
+                continue
+            if value != managed:
                 raise EnrollmentError("foreign_ca_config")
+            managed_here = True
+        # A host Servonaut already manages carries exactly its own paths. They
+        # are the same for every team, so the drop-in must also name this
+        # team and server: another team's enrolment is not ours to replace.
+        if managed_here and not await self._managed_by_this_job(params):
+            raise EnrollmentError("foreign_ca_config")
+
+    async def _managed_by_this_job(self, params: Mapping[str, Any]) -> bool:
+        try:
+            header = (await self.executor.read_file(DROP_IN)).decode("utf-8").splitlines()[0]
+        except Exception:
+            return False
+        owners = _owner_tokens(header) - {_SCRIPT_TOKEN}
+        if owners == _owner_tokens(self._drop_in(params).splitlines()[0]) - {_SCRIPT_TOKEN}:
+            return True
+        # Hosts enrolled by earlier versions carry a header without owners.
+        # The service only asks for a refresh of a host it holds as enrolled
+        # for this team, and the refresh rewrites the header with its owners.
+        return not owners and header.startswith(_MANAGED_HEADER) and params.get("kind") == "refresh"
 
     async def _write_managed_files(self, params: Mapping[str, Any]) -> None:
         await self.executor.write_atomic(
@@ -398,6 +436,9 @@ def enrollment_error_code(error: BaseException) -> str:
     Client-authored reasons become a slug of their text; anything else is
     named only by its class, so server text never reaches the report.
     """
+    fixed = getattr(error, "code", None)
+    if isinstance(error, VaultUserError) and isinstance(fixed, str) and _ERROR_CODE_RE.fullmatch(fixed):
+        return fixed
     if isinstance(error, VaultUserError):
         text = str(error)
         if _ERROR_CODE_RE.fullmatch(text):

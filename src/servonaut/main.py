@@ -422,6 +422,15 @@ def _relay_session_expired_message(uses_env_token: bool) -> str:
     )
 
 
+def _print_waiting_ca_job(notice) -> None:
+    """Tell the person running ``connect`` that SSH CA jobs wait for them.
+
+    A job changes a host's sshd configuration, so it never runs from the
+    relay: it needs the typed host-name confirmation of ``servonaut ca``.
+    """
+    print(notice["message"], flush=True)
+
+
 def _report_relay_session_expired(uses_env_token: bool) -> None:
     """Report a rejected session where both run modes can see it.
 
@@ -653,6 +662,7 @@ def _relay_run_foreground() -> None:
             )
             from servonaut.services.vault.background import unlock_vault_for_startup
             unlock_vault_for_startup(vault_runtime)
+            vault_runtime.set_enrollment_requested_callback(_print_waiting_ca_job)
             executors.set_vault_runtime(vault_runtime)
             mcp_audit = AuditTrail(config.mcp.audit_path)
             headless_tools = build_headless_tools(

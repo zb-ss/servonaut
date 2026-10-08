@@ -143,6 +143,125 @@ def test_ca_revoke_serial_must_be_positive(capsys) -> None:
     assert "serial must be a positive number" in capsys.readouterr().err
 
 
+def _run_with(service: object, *argv: str) -> int:
+    ca.set_ca_service_factory(lambda: service)
+    try:
+        return ca.handle_ca_command(_parser().parse_args(["ca", *argv]))
+    finally:
+        ca.set_ca_service_factory(None)
+
+
+def test_ca_jobs_names_each_waiting_job_with_its_command(capsys) -> None:
+    class Service:
+        async def ca_jobs(self, *, team):
+            return {"team": team, "jobs": [{"kind": "refresh", "server": "web-1",
+                                            "command": f"servonaut ca refresh web-1 --team {team}"}]}
+
+    assert _run_with(Service(), "jobs", "--team", "ops") == 0
+    assert "refresh web-1: run `servonaut ca refresh web-1 --team ops`" in capsys.readouterr().out
+
+    class Empty:
+        async def ca_jobs(self, *, team):
+            return {"team": team, "jobs": []}
+
+    assert _run_with(Empty(), "jobs", "--team", "ops") == 0
+    assert "No SSH certificate jobs are waiting for you in this team." in capsys.readouterr().out
+
+
+class _TrustService:
+    def __init__(self, *, host_changed: bool = False) -> None:
+        self.host_changed = host_changed
+
+    async def ca_trust(self, *, team, confirmation):
+        summary = {
+            "team": team, "host_ca_changed": self.host_changed,
+            "pinned": {"user_ca_fingerprint": "SHA256:old", "host_ca_fingerprint": "SHA256:h-old-12345678"},
+            "presented": {"user_ca_fingerprint": "SHA256:new",
+                          "host_ca_fingerprint": "SHA256:h-new-87654321" if self.host_changed else "SHA256:h-old-12345678"},
+        }
+        if confirmation(summary) is not True:
+            return {**summary, "changed": False, "declined": True}
+        return {**summary, "changed": True}
+
+
+def test_ca_trust_needs_a_person_and_has_no_yes_flag(capsys, monkeypatch) -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["ca", "trust", "--team", "ops", "--yes"])
+    capsys.readouterr()
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: False)
+
+    assert _run_with(_TrustService(), "trust", "--team", "ops") == 5
+    err = capsys.readouterr().err
+    assert "trusting a changed SSH CA needs a person" in err and "Nothing changed." in err
+
+
+def test_ca_trust_shows_both_fingerprints_and_asks(capsys, monkeypatch) -> None:
+    import io
+
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(ca.sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+
+    assert _run_with(_TrustService(), "trust", "--team", "ops", "--json") == 0
+    captured = capsys.readouterr()
+    assert "User CA: pinned SHA256:old" in captured.err and "now    SHA256:new" in captured.err
+    assert '"changed": true' in captured.out and "[y/N]" not in captured.out  # stdout stays JSON
+
+
+def test_a_changed_host_ca_needs_its_new_fingerprint_typed(capsys, monkeypatch) -> None:
+    import io
+
+    for typed, expected in (("y\n", 5), ("87654321\n", 0)):
+        monkeypatch.setattr(ca.sys, "stdin", io.StringIO(typed))
+        monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+        assert _run_with(_TrustService(host_changed=True), "trust", "--team", "ops") == expected
+        assert "The HOST CA changed" in capsys.readouterr().err
+
+
+def test_ca_refresh_says_when_it_carried_out_a_waiting_job(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+    class Service:
+        async def ca_refresh(self, *, team, server, confirmation):
+            return {"result": {"status": "succeeded"}, "resumed": True}
+
+    assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 0
+    assert "Carried out the refresh job that was waiting for this server." in capsys.readouterr().err
+
+
+def test_a_refresh_that_rolled_back_is_not_reported_as_done(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+    class Service:
+        async def ca_refresh(self, *, team, server, confirmation):
+            return {"result": {"status": "rolled_back", "error_code": "sshd_test_failed"}, "resumed": True}
+
+    assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 1
+    err = capsys.readouterr().err
+    assert "did not complete (rolled_back)" in err and "Carried out" not in err
+
+
+def test_a_failed_rollback_does_not_claim_the_host_is_unchanged(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+    class Service:
+        async def ca_refresh(self, *, team, server, confirmation):
+            return {"result": {"status": "failed", "error_code": "rollback_failed"}}
+
+    assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 1
+    err = capsys.readouterr().err
+    assert "may be partly changed" in err and "keeps its previous setup" not in err
+
+
+def test_a_host_job_without_a_terminal_is_refused_before_any_job_exists(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: False)
+
+    class Service:
+        async def ca_refresh(self, **_kwargs):
+            raise AssertionError("no job may be created without a terminal")
+
+    assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 5
+    assert "needs the host name typed" in capsys.readouterr().err
+
+
+
 def _ssh_ca_switched_off() -> FeatureDisabledError:
     return FeatureDisabledError(
         code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
@@ -196,7 +315,9 @@ def test_status_json_reports_certificates_as_not_available(capsys) -> None:
     ["ca", "audit", "--team", "ops"],
     ["ca", "audit", "--team", "ops", "--json"],
 ])
-def test_other_commands_say_coming_soon_and_that_nothing_changed(argv, capsys) -> None:
+def test_other_commands_say_coming_soon_and_that_nothing_changed(argv, capsys, monkeypatch) -> None:
+    # Host jobs only reach the service from a terminal; nothing is typed here.
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
     assert _run_switched_off(argv) == 1
 
     captured = capsys.readouterr()

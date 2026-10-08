@@ -8,6 +8,13 @@ device and carry an unexpired, unique Ed25519 request signature.
 It stores only opaque vault ciphertext and sealed keys.  The small control
 surface is intentionally Python-only (``FakeCloud.vault``), so test personas
 cannot be manufactured through an unguarded HTTP endpoint.
+
+The SSH certificate authority signs real OpenSSH certificates and KRLs.
+Generation 1 of a team's user CA is Ed25519; a rollover's next generation is
+ECDSA P-256, so journeys cover a change of CA key type as well as of key.
+Controls stand in for what the web UI does (start or complete a rollover,
+request an enrolment job) and for another member's device
+(``issue_member_certificate``).
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from aiohttp import web
 from nacl.exceptions import BadSignatureError
 from nacl.public import PrivateKey, PublicKey, SealedBox
 from nacl.signing import SigningKey, VerifyKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
@@ -42,7 +50,6 @@ from cryptography.hazmat.primitives.serialization import (
 
 from e2e.harness.fake_cloud.routes_auth import bearer_ok, json_body, unauthorized
 from e2e.harness.fake_cloud.state import ScenarioStore
-from servonaut.services.vault.crypto import build_krl
 
 VAULT = "/api/v1/vault"
 VAULTS = "/api/v1/vaults"
@@ -58,6 +65,29 @@ MAX_SKEW_SECONDS = 300
 TEAM_SLUG = "example-team"
 TEAM_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 SERVER_ID = "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f"
+# The shared server the CA knows, when no inventory is wired in.
+DEFAULT_SHARED_SERVER = {"id": SERVER_ID, "name": "server-1", "hostname": "server-1.example.test", "port": 22}
+
+# SSH certificate authority.
+CA_COMMENT = f"servonaut-team-{TEAM_ID[:4]}"
+CA_LOGINS = ("deploy",)
+# The fixture "other member" whose device a control issues certificates for.
+MEMBER_USER_ID = 4243
+ENROLLMENT_INFO = {"script_version": "1", "managed_dir": "/etc/ssh/servonaut",
+                   "drop_in": "/etc/ssh/sshd_config.d/50-servonaut.conf"}
+ENROLLMENT_TTL_SECONDS = 24 * 3600
+HOST_CERT_TTL_SECONDS = 365 * 24 * 3600
+KRL_EXPIRY_GRACE_SECONDS = 300
+KRL_MAGIC = 0x5353484B524C0A00
+MIN_CERT_TTL_SECONDS = 60
+MAX_CERT_TTL_SECONDS = 57_600
+MAX_AUTOMATION_TTL_SECONDS = 600
+OPEN_ENROLLMENT = frozenset({"requested", "claimed"})
+ENROLLMENT_KINDS = frozenset({"enroll", "refresh", "unenroll"})
+DEFAULT_CA_POLICY = {
+    "interactive_ttl_seconds": 28_800, "automation_ttl_seconds": 600,
+    "max_ttl_seconds": 57_600, "require_member_mfa": False,
+}
 
 
 def _now() -> str:
@@ -135,6 +165,18 @@ def _error(code: str, message: str, status: int, **details: Any) -> web.Response
     return web.json_response({"error": error}, status=status)
 
 
+def _refusal(status: int, code: str, message: str, **details: Any) -> tuple[int, dict[str, Any]]:
+    """The (status, body) form of :func:`_error`, for state methods shared with controls."""
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        error["details"] = details
+    return status, {"error": error}
+
+
+def _iso(moment: float) -> str:
+    return dt.datetime.fromtimestamp(int(moment), tz=dt.timezone.utc).isoformat()
+
+
 def _not_found() -> web.Response:
     return _error("not_found", "Not found", 404)
 
@@ -172,8 +214,15 @@ class _Device:
 class VaultCloud:
     """Thread-safe opaque Vault state with strict device authentication."""
 
-    def __init__(self, user_id: Callable[[], int]) -> None:
+    def __init__(
+        self, user_id: Callable[[], int], *,
+        shared_servers: Optional[Callable[[str], list[dict[str, Any]]]] = None,
+    ) -> None:
         self._user_id = user_id
+        # The team inventory (``AccountData.shared_servers``): where a CA host is.
+        self._shared_servers = shared_servers or (
+            lambda slug: [dict(DEFAULT_SHARED_SERVER)] if slug == TEAM_SLUG else []
+        )
         self._lock = threading.RLock()
         self.reset()
 
@@ -189,7 +238,8 @@ class VaultCloud:
             self._bindings: dict[tuple[str, str], dict[str, Any]] = {}
             self._exposures: dict[str, list[dict[str, Any]]] = {}
             self._ca: dict[str, dict[str, Any]] = {}
-            self._ca_keys: dict[str, tuple[Ed25519PrivateKey, Ed25519PrivateKey]] = {}
+            # Per team: {"user": {generation: private key}, "host": private key}.
+            self._ca_keys: dict[str, dict[str, Any]] = {}
             self._enrolments: dict[str, dict[str, Any]] = {}
             # Serials count from 1 per team; user and host certificates share them.
             self._serial = 0
@@ -750,6 +800,587 @@ class VaultCloud:
             item["revision"] += 1
             return 200, {"item_id": item_id, "revision": item["revision"], "deleted_at": item["deleted_at"]}
 
+    # ------------------------------------------------------------------
+    # SSH certificate authority. Routes and the Python-only
+    # controls share these methods, so a control acts on the state exactly
+    # as the web UI would.
+    # ------------------------------------------------------------------
+
+    def _server_row(self, slug: str, server_id: str) -> Optional[dict[str, Any]]:
+        return next((row for row in self._shared_servers(slug) if str(row.get("id")) == server_id), None)
+
+    def _ca_state(self, slug: str) -> Optional[dict[str, Any]]:
+        state = self._ca.get(slug)
+        return state if state is not None and state["enabled"] else None
+
+    @staticmethod
+    def _generation(state: dict[str, Any], status: str) -> Optional[dict[str, Any]]:
+        return next((row for row in state["user_cas"] if row["status"] == status), None)
+
+    @staticmethod
+    def _has_live_certificate(state: dict[str, Any], generation: int, now: float) -> bool:
+        if generation in state["expired_generations"]:
+            return False
+        return any(
+            entry["cert_type"] == "user" and entry["_generation"] == generation and entry["_valid_before"] > now
+            for entry in state["issued"]
+        )
+
+    def _previous_generations(self, state: dict[str, Any], now: float) -> list[dict[str, Any]]:
+        """Retired user CAs that still have an unexpired certificate."""
+        return [
+            row for row in state["user_cas"]
+            if row["status"] == "previous" and self._has_live_certificate(state, row["generation"], now)
+        ]
+
+    def _installable_generations(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """The user CAs a host job installs: the active one and, during a rollover, the next.
+
+        Retired CAs are never listed, so a host refreshed after a rollover
+        stops trusting the old generation.
+        """
+        rows = [self._generation(state, "active"), self._generation(state, "next")]
+        return sorted((row for row in rows if row is not None), key=lambda row: row["generation"])
+
+    def ca_payload(self, slug: str) -> dict[str, Any]:
+        """``GET …/ssh-ca``; a team that never enabled a CA gets the disabled shape."""
+        with self._lock:
+            state = self._ca.get(slug)
+            if state is None:
+                return {"enabled": False, "signer": None, "user_ca": None, "user_ca_next": None,
+                        "user_ca_previous": [], "host_ca": None, "policy": None,
+                        "enrollment": dict(ENROLLMENT_INFO), "krl_version": 0,
+                        "issuance": {"count": 0, "head_hash": None}, "my_logins_by_server": {}}
+            now = time.time()
+            issued = state["issued"]
+            return {
+                "enabled": state["enabled"], "signer": {"kind": "software"},
+                "user_ca": copy.deepcopy(self._generation(state, "active")),
+                "user_ca_next": copy.deepcopy(self._generation(state, "next")),
+                "user_ca_previous": copy.deepcopy(self._previous_generations(state, now)),
+                "host_ca": copy.deepcopy(state["host_ca"]), "policy": copy.deepcopy(state["policy"]),
+                "enrollment": dict(ENROLLMENT_INFO), "krl_version": state["krl_version"],
+                "issuance": {"count": len(issued), "head_hash": issued[-1]["entry_hash"] if issued else None},
+                "my_logins_by_server": {SERVER_ID: list(CA_LOGINS)},
+            }
+
+    def ca_enable(self, slug: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            if self._ca_state(slug) is not None:
+                return _refusal(409, "ca_already_enabled", "The SSH CA is already enabled")
+            user_key, host_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+            supplied = body.get("policy") if isinstance(body.get("policy"), dict) else {}
+            self._ca_keys[slug] = {"user": {1: user_key}, "host": host_key}
+            state = {
+                "enabled": True, "policy": {**DEFAULT_CA_POLICY, **supplied},
+                "user_cas": [_ca_generation(user_key, 1, "active", f"{CA_COMMENT}-gen1")],
+                "host_ca": _ca_generation(host_key, 1, "active", f"{CA_COMMENT}-host-gen1"),
+                # krl_version starts at 1 with an empty KRL.
+                "krl_version": 1, "issued": [], "hosts": {},
+                # Retired generations whose certificates a control declared expired.
+                "expired_generations": set(),
+            }
+            self._ca[slug] = state
+            self._build_krl(state)
+            return 201, self.ca_payload(slug)
+
+    # -- certificates -------------------------------------------------
+
+    def ca_issue_certificate(self, slug: str, device: _Device, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST …/ssh-ca/certs`` for the signing device's registered SSH key."""
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
+            if not device.ssh_public_key:
+                return _refusal(403, "no_device_ssh_key", "Register a device SSH key before issuing a certificate")
+            server_ids = body.get("server_ids")
+            if not isinstance(server_ids, list) or not server_ids:
+                return _refusal(422, "validation_failed", "server_ids is required", field="server_ids")
+            selected = [SERVER_ID] if server_ids == ["*"] else [str(value) for value in server_ids]
+            unknown = next((value for value in selected if self._server_row(slug, value) is None), None)
+            if unknown is not None:
+                return _refusal(404, "server_not_found", "Server not found", server_id=unknown)
+            # Deviation: the service answers 409 server_not_enrolled for a host
+            # that is neither enrolled nor being enrolled by the caller. The fake
+            # certifies any known server, which the fake-only journeys rely on.
+            purpose = str(body.get("purpose") or "interactive")
+            ttl = self._certificate_ttl(state, purpose, body.get("requested_ttl_seconds"))
+            if isinstance(ttl, tuple):
+                return ttl
+            return 201, self._sign_user_certificate(
+                state, slug, user_id=device.user_id, device_id=device.device_id,
+                public_key_line=device.ssh_public_key, purpose=purpose, ttl=ttl,
+            )
+
+    def issue_member_certificate(self, public_key: str, *, purpose: str = "interactive",
+                                 ttl_seconds: Optional[int] = None) -> dict[str, Any]:
+        """Control: another member's device asked for a certificate for its own key.
+
+        Signed by the active user CA and logged in the issuance chain exactly
+        like ``POST …/certs``; the journey holds the private key.
+        """
+        with self._lock:
+            state = self._ca_state(TEAM_SLUG)
+            if state is None:
+                raise ValueError("enable the team SSH CA first")
+            ttl = self._certificate_ttl(state, purpose, ttl_seconds)
+            if isinstance(ttl, tuple):
+                raise ValueError(ttl[1]["error"]["message"])
+            return self._sign_user_certificate(
+                state, TEAM_SLUG, user_id=MEMBER_USER_ID, device_id=str(uuid.uuid4()),
+                public_key_line=public_key, purpose=purpose, ttl=ttl,
+            )
+
+    @staticmethod
+    def _certificate_ttl(state: dict[str, Any], purpose: str, requested: object) -> "int | tuple[int, dict[str, Any]]":
+        if purpose not in {"interactive", "automation"}:
+            return _refusal(422, "validation_failed", "Unknown certificate purpose", field="purpose")
+        policy = state["policy"]
+        if purpose == "automation":
+            maximum = min(int(policy.get("automation_ttl_seconds", MAX_AUTOMATION_TTL_SECONDS)), MAX_AUTOMATION_TTL_SECONDS)
+            default = maximum
+        else:
+            maximum = min(int(policy.get("max_ttl_seconds", MAX_CERT_TTL_SECONDS)), MAX_CERT_TTL_SECONDS)
+            default = int(policy.get("interactive_ttl_seconds", 28_800))
+        ttl = default if requested is None else requested
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or not MIN_CERT_TTL_SECONDS <= ttl <= maximum:
+            return _refusal(422, "ttl_out_of_range", "Requested certificate lifetime is not allowed",
+                            min=MIN_CERT_TTL_SECONDS, max=maximum)
+        return ttl
+
+    def _sign_user_certificate(self, state: dict[str, Any], slug: str, *, user_id: int, device_id: str,
+                               public_key_line: str, purpose: str, ttl: int) -> dict[str, Any]:
+        """Build, sign and log one user certificate with the service's profile."""
+        active = self._generation(state, "active")
+        assert active is not None
+        signer = self._ca_keys[slug]["user"][active["generation"]]
+        public_key = load_ssh_public_key(public_key_line.encode("ascii"))
+        self._serial += 1
+        serial, now = self._serial, int(time.time())
+        principals = [f"svn:{SERVER_ID}:{login}" for login in CA_LOGINS]
+        key_id = f"u:{user_id} d:{device_id} t:{TEAM_ID} r:{uuid.uuid4()}"
+        builder = (SSHCertificateBuilder().public_key(public_key).serial(serial)
+                   .type(SSHCertificateType.USER).key_id(key_id.encode("ascii"))
+                   .valid_principals([value.encode("ascii") for value in principals])
+                   .valid_after(now).valid_before(now + ttl))
+        policy = state["policy"]
+        if purpose == "interactive":
+            builder = builder.add_extension(b"permit-pty", b"")
+            if policy.get("permit_port_forwarding"):
+                builder = builder.add_extension(b"permit-port-forwarding", b"")
+            if policy.get("permit_agent_forwarding"):
+                builder = builder.add_extension(b"permit-agent-forwarding", b"")
+        if policy.get("source_address_cidrs"):
+            builder = builder.add_critical_option(
+                b"source-address", ",".join(policy["source_address_cidrs"]).encode("ascii"))
+        # The certificate line's comment is the key id, as the service sends it.
+        line = f"{builder.sign(signer).public_bytes().decode('ascii')} {key_id}"
+        entry_hash = _log_issuance(state, serial, "user", key_id, user_id, device_id, principals, now, now + ttl,
+                                   line, generation=active["generation"], purpose=purpose)
+        valid_after, valid_before = now, now + ttl
+        return {"certificate": line, "serial": serial, "key_id": key_id, "principals": principals,
+                "logins_by_server": {SERVER_ID: list(CA_LOGINS)}, "valid_after": _iso(valid_after),
+                "valid_before": _iso(valid_before), "renew_after": _iso(valid_after + (valid_before - valid_after) * 0.8),
+                "ca_fingerprint": active["fingerprint"], "issuance_entry_hash": _b64(entry_hash)}
+
+    def ca_revoke(self, slug: str, serial: int, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST …/certs/{serial}/revoke``: idempotent, host certificates refused."""
+        with self._lock:
+            state = self._ca.get(slug)
+            if state is None:
+                return _refusal(404, "not_found", "Not found")
+            entry = next((row for row in state["issued"] if row["serial"] == serial), None)
+            if entry is None:
+                return _refusal(404, "not_found", "Certificate not found")
+            if entry["cert_type"] != "user":
+                return _refusal(422, "validation_failed", "Host certificates cannot be revoked", field="serial")
+            if entry["revoked_at"] is None:
+                entry["revoked_at"], entry["revoke_reason"] = _now(), "manual"
+                if entry["_valid_before"] + KRL_EXPIRY_GRACE_SECONDS > time.time():
+                    self._bump_krl(state)
+            return 200, {"certificate": _public_issued(entry), "krl_version": state["krl_version"]}
+
+    def _bump_krl(self, state: dict[str, Any]) -> None:
+        state["krl_version"] += 1
+        self._build_krl(state)
+
+    def _build_krl(self, state: dict[str, Any]) -> None:
+        """Store this version's KRL: one serial section per user CA generation with revocations.
+
+        A generation without a still-listed revoked serial gets no section (a
+        new CA's KRL has none). A revoked certificate drops out a grace period
+        after it expires. Built only when a revocation bumps the version, so a
+        version always has the same bytes; completing a rollover publishes none.
+        """
+        now = int(time.time())
+        sections: list[tuple[bytes, list[int]]] = []
+        listed: list[int] = []
+        for generation in sorted(state["user_cas"], key=lambda row: row["generation"]):
+            if generation["generation"] in state["expired_generations"]:
+                continue
+            serials = sorted(
+                row["serial"] for row in state["issued"]
+                if row["cert_type"] == "user" and row["_generation"] == generation["generation"]
+                and row["revoked_at"] is not None and row["_valid_before"] + KRL_EXPIRY_GRACE_SECONDS > now
+            )
+            if serials:
+                sections.append((_public_blob(generation["public_key"]), serials))
+                listed.extend(serials)
+        state["krl"] = _krl_bytes(sections, state["krl_version"], now)
+        state["krl_serials"] = sorted(listed)
+        state["krl_generated_at"] = _iso(now)
+
+    def ca_deliveries(self, slug: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """``POST …/krl-deliveries``: a manager device's attestation per host."""
+        with self._lock:
+            state = self._ca_state(slug)
+            version, results = body.get("krl_version"), body.get("results")
+            if state is None:
+                return _refusal(404, "not_found", "Not found")
+            if isinstance(version, bool) or not isinstance(version, int) or not isinstance(results, list):
+                return _refusal(422, "validation_failed", "krl_version and results are required", field="krl_version")
+            if version > state["krl_version"]:
+                return _refusal(422, "validation_failed", "KRL version is newer than the team's", field="krl_version")
+            for result in results:
+                server_id = str(result.get("server_id")) if isinstance(result, dict) else ""
+                if self._server_row(slug, server_id) is None:
+                    return _refusal(404, "server_not_found", "Server not found", field="server_id")
+                host = state["hosts"].get(server_id)
+                if host is not None and result.get("status") == "delivered":
+                    host["krl_version_delivered"] = max(host.get("krl_version_delivered") or 0, version)
+            return 200, {"accepted": len(results)}
+
+    # -- hosts and rollover -------------------------------------------
+
+    def _host_status(self, state: dict[str, Any], server_id: str) -> str:
+        host = state["hosts"].get(server_id)
+        if host is not None:
+            return host["status"]
+        enrolling = any(
+            job["server_id"] == server_id and job["kind"] == "enroll" and self._is_open(job)
+            for job in self._enrolments.values()
+        )
+        return "enrolling" if enrolling else "unenrolled"
+
+    def _needs_refresh(self, state: dict[str, Any], host: Optional[dict[str, Any]]) -> bool:
+        upcoming = self._generation(state, "next")
+        return bool(host and host["status"] == "enrolled" and upcoming is not None
+                    and upcoming["generation"] not in host["user_ca_generations"])
+
+    def ca_hosts(self, slug: str = TEAM_SLUG) -> dict[str, Any]:
+        """``GET …/ssh-ca/hosts``, also a journey-side read."""
+        with self._lock:
+            state = self._ca.get(slug)
+            if state is None:
+                return {"data": []}
+            rows = []
+            for server in self._shared_servers(slug):
+                server_id = str(server.get("id"))
+                host = state["hosts"].get(server_id)
+                status = self._host_status(state, server_id)
+                if host is None and status != "enrolling":
+                    continue
+                row = copy.deepcopy(host) if host is not None else {
+                    "server_id": server_id, "status": status, "script_version": "1", "user_ca_generations": [],
+                    "host_cert_serial": None, "host_cert_valid_before": None, "host_key_fingerprint": None,
+                    "krl_version_delivered": None, "enrolled_at": None, "last_verified_at": None, "last_error": None,
+                }
+                row["needs_refresh"] = self._needs_refresh(state, host)
+                rows.append(row)
+            return {"data": rows}
+
+    def server_ca_field(self, slug: str, server_id: str) -> Optional[dict[str, Any]]:
+        """A shared server's ``ssh_ca`` field; ``None`` while the CA is off."""
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                return None
+            status = self._host_status(state, server_id)
+            return {"enrolled": status == "enrolled", "status": status,
+                    "login_users_for_me": list(CA_LOGINS) if server_id == SERVER_ID else [],
+                    "host_ca_public_key": state["host_ca"]["public_key"],
+                    "needs_refresh": self._needs_refresh(state, state["hosts"].get(server_id))}
+
+    def start_ca_rollover(self, slug: str = TEAM_SLUG, *, user_id: Optional[int] = None) -> tuple[int, dict[str, Any]]:
+        """``POST …/ssh-ca/rollover``; also the control for the web UI's button.
+
+        The next user CA is ECDSA P-256 (generation 1 is Ed25519).
+        Every enrolled host without an open job gets a ``refresh`` job whose
+        executor is the caller.
+        """
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
+            if self._generation(state, "next") is not None:
+                return _refusal(409, "rollover_in_progress", "A user CA rollover is already in progress")
+            caller = self._user_id() if user_id is None else user_id
+            generation = max(row["generation"] for row in state["user_cas"]) + 1
+            key = ec.generate_private_key(ec.SECP256R1())
+            self._ca_keys[slug]["user"][generation] = key
+            state["user_cas"].append(_ca_generation(key, generation, "next", f"{CA_COMMENT}-gen{generation}"))
+            for server_id, host in state["hosts"].items():
+                if host["status"] == "enrolled" and self._open_enrollment(server_id) is None:
+                    self._new_enrollment(slug, server_id, "refresh", caller, None)
+            return 201, self.ca_payload(slug)
+
+    def expire_retired_user_cas(self, slug: str = TEAM_SLUG) -> list[int]:
+        """Control: every retired user CA's certificates have expired.
+
+        The service then stops listing those CAs in ``user_ca_previous`` and
+        their revoked serials in the next KRL, as it does once a retired CA's
+        last certificate expires. Returns the generations affected.
+        """
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                raise ValueError("enable the team SSH CA first")
+            retired = [row["generation"] for row in state["user_cas"] if row["status"] == "previous"]
+            state["expired_generations"].update(retired)
+            return retired
+
+    def complete_ca_rollover(self, slug: str = TEAM_SLUG) -> tuple[int, dict[str, Any]]:
+        """``POST …/ssh-ca/rollover/complete``; also the web UI's control."""
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
+            upcoming = self._generation(state, "next")
+            if upcoming is None:
+                return _refusal(409, "rollover_not_started", "No user CA rollover is in progress")
+            waiting = sorted(
+                server_id for server_id, host in state["hosts"].items()
+                if host["status"] == "enrolled" and upcoming["generation"] not in host["user_ca_generations"]
+            )
+            if waiting:
+                return _refusal(409, "hosts_not_ready", "Some enrolled hosts do not trust the new CA yet",
+                                server_ids=waiting)
+            current = self._generation(state, "active")
+            assert current is not None
+            current.update({"status": "previous", "retired_at": _now()})
+            upcoming.update({"status": "active", "activated_at": _now()})
+            return 200, self.ca_payload(slug)
+
+    # -- enrolment jobs ------------------------------------------------
+
+    @staticmethod
+    def _is_open(job: dict[str, Any]) -> bool:
+        return job["status"] in OPEN_ENROLLMENT and job["_expires"] > time.time()
+
+    def _open_enrollment(self, server_id: str) -> Optional[dict[str, Any]]:
+        return next((job for job in self._enrolments.values() if job["server_id"] == server_id and self._is_open(job)), None)
+
+    def _new_enrollment(self, slug: str, server_id: str, kind: str, executor: int,
+                        break_glass: Optional[dict[str, Any]]) -> dict[str, Any]:
+        created = time.time()
+        job = {
+            "enrollment_id": str(uuid.uuid4()), "team_slug": slug, "server_id": server_id, "kind": kind,
+            "status": "requested", "executor_user_id": executor, "requested_by_user_id": executor,
+            "executor_device_id": None, "created_at": _iso(created), "claimed_at": None, "finished_at": None,
+            "expires_at": _iso(created + ENROLLMENT_TTL_SECONDS), "error_code": None, "host_cert_serial": None,
+            "_created": created, "_expires": created + ENROLLMENT_TTL_SECONDS, "_break_glass": break_glass,
+            "_params": None,
+        }
+        self._enrolments[job["enrollment_id"]] = job
+        return job
+
+    def _enrollment_summary(self, job: dict[str, Any]) -> dict[str, Any]:
+        summary = {key: copy.deepcopy(value) for key, value in job.items() if not key.startswith("_") and key != "team_slug"}
+        if job["status"] in OPEN_ENROLLMENT and not self._is_open(job):
+            summary["status"] = "expired"
+        return summary
+
+    def _break_glass_reference(self, slug: str, item_id: object) -> Optional[dict[str, Any]]:
+        for vault_id, vault in self._vaults.items():
+            if vault["kind"] != "team" or (vault.get("team") or {}).get("slug") != slug:
+                continue
+            item = self._items.get(vault_id, {}).get(str(item_id))
+            if item is not None and item.get("type") == "break_glass" and not item.get("deleted_at"):
+                return {"item_id": str(item_id), "public_fingerprint": item.get("public_fingerprint"),
+                        "public_key": None, "login": None, "from_cidrs": None}
+        return None
+
+    def create_enrollment(self, slug: str, user_id: int, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
+            server_id, kind = str(body.get("server_id")), body.get("kind")
+            if kind not in ENROLLMENT_KINDS:
+                return _refusal(422, "validation_failed", "Unknown enrolment kind", field="kind")
+            if self._server_row(slug, server_id) is None:
+                return _refusal(404, "server_not_found", "Server not found", field="server_id")
+            open_job = self._open_enrollment(server_id)
+            if open_job is not None:
+                return _refusal(409, "enrollment_in_progress", "An enrolment job is already open for this server",
+                                enrollment_id=open_job["enrollment_id"])
+            if kind != "enroll" and self._host_status(state, server_id) != "enrolled":
+                return _refusal(409, "server_not_enrolled", "The server is not enrolled", server_id=server_id)
+            break_glass = None
+            if body.get("break_glass_item_id") is not None:
+                break_glass = self._break_glass_reference(slug, body["break_glass_item_id"])
+                if break_glass is None:
+                    return _refusal(422, "validation_failed", "Not a live break-glass item of the team vault",
+                                    field="break_glass_item_id")
+            job = self._new_enrollment(slug, server_id, str(kind), user_id, break_glass)
+            return 201, {key: job[key] for key in ("enrollment_id", "status", "executor_user_id", "expires_at",
+                                                   "server_id", "kind")}
+
+    def request_enrollment(self, kind: str, *, server_id: str = SERVER_ID, slug: str = TEAM_SLUG,
+                           user_id: Optional[int] = None) -> tuple[int, dict[str, Any]]:
+        """Control: an owner asks for an enrolment job on the web (executor = that owner)."""
+        caller = self._user_id() if user_id is None else user_id
+        return self.create_enrollment(slug, caller, {"server_id": server_id, "kind": kind})
+
+    def list_enrollments(self, slug: str, status: Optional[str]) -> dict[str, Any]:
+        with self._lock:
+            jobs = sorted((job for job in self._enrolments.values() if job["team_slug"] == slug),
+                          key=lambda job: job["_created"], reverse=True)
+            rows = [self._enrollment_summary(job) for job in jobs]
+            return {"data": [row for row in rows if status is None or row["status"] == status][:200]}
+
+    def _executor_job(self, slug: str, enrollment_id: str, user_id: int) -> Optional[dict[str, Any]]:
+        job = self._enrolments.get(enrollment_id)
+        if job is None or job["team_slug"] != slug or job["executor_user_id"] != user_id:
+            return None
+        return job
+
+    def _enrollment_params(self, state: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+        server = self._server_row(job["team_slug"], job["server_id"]) or {}
+        hostname = str(server.get("hostname") or "")
+        binding = self._bindings.get(("team", job["server_id"]))
+        return {
+            "enrollment_id": job["enrollment_id"], "kind": job["kind"], "status": self._enrollment_summary(job)["status"],
+            "expires_at": job["expires_at"], "script_version": ENROLLMENT_INFO["script_version"],
+            "server": {"id": job["server_id"], "name": server.get("name"), "hostname": hostname,
+                       "port": server.get("port", 22)},
+            "connect_via": {"credential_binding": copy.deepcopy(binding)},
+            "user_ca_public_keys": [row["public_key"] for row in self._installable_generations(state)],
+            "host_ca_public_key": state["host_ca"]["public_key"],
+            "principals_by_login": {login: [f"svn:{job['server_id']}:{login}"] for login in CA_LOGINS},
+            "host_principals": [hostname, f"{job['server_id']}.servonaut"],
+            "krl": _b64(state["krl"]), "krl_version": state["krl_version"],
+            "break_glass": copy.deepcopy(job["_break_glass"]),
+            "managed_dir": ENROLLMENT_INFO["managed_dir"], "drop_in": ENROLLMENT_INFO["drop_in"],
+        }
+
+    def enrollment_params(self, slug: str, enrollment_id: str, user_id: int) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            state = self._ca.get(slug)
+            job = self._executor_job(slug, enrollment_id, user_id)
+            if state is None or job is None:
+                return _refusal(404, "not_found", "Not found")
+            return 200, self._enrollment_params(state, job)
+
+    def claim_enrollment(self, slug: str, enrollment_id: str, device: _Device) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            state = self._ca_state(slug)
+            job = self._executor_job(slug, enrollment_id, device.user_id)
+            if state is None or job is None:
+                return _refusal(404, "not_found", "Not found")
+            if job["status"] in OPEN_ENROLLMENT and not self._is_open(job):
+                job["status"] = "expired"
+                return _refusal(410, "enrollment_expired", "The enrolment job expired")
+            if job["status"] != "requested":
+                return _refusal(409, "already_claimed", "The enrolment job is no longer claimable",
+                                status=job["status"])
+            params = self._enrollment_params(state, job)
+            job.update({"status": "claimed", "executor_device_id": device.device_id, "claimed_at": _now(),
+                        "_params": params})
+            params["status"] = "claimed"
+            return 200, {"status": "claimed", "params_hash": _b64(hashlib.sha256(json_dumps(params)).digest())}
+
+    def enrollment_host_certificate(self, slug: str, enrollment_id: str, device: _Device,
+                                    body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            state = self._ca_state(slug)
+            job = self._executor_job(slug, enrollment_id, device.user_id)
+            if state is None or job is None:
+                return _refusal(404, "not_found", "Not found")
+            if job["status"] != "claimed" or job["executor_device_id"] != device.device_id:
+                return _refusal(409, "enrollment_not_claimed", "Only the claiming device may ask for the host certificate",
+                                status=job["status"])
+            if not self._is_open(job):
+                return _refusal(410, "enrollment_expired", "The enrolment job expired")
+            value = body.get("host_public_key")
+            if not isinstance(value, str) or not value.startswith(("ssh-ed25519 ", "ecdsa-sha2-nistp256 ")):
+                return _refusal(422, "validation_failed", "Unsupported host key", field="host_public_key")
+            try:
+                public = load_ssh_public_key(value.encode("ascii"))
+            except (ValueError, UnicodeEncodeError):
+                return _refusal(422, "validation_failed", "Invalid host key", field="host_public_key")
+            principals = job["_params"]["host_principals"]
+            self._serial += 1
+            serial, now = self._serial, int(time.time())
+            valid_before = now + HOST_CERT_TTL_SECONDS
+            key_id = f"h:{job['server_id']} t:{TEAM_ID} r:{uuid.uuid4()}"
+            certificate = (SSHCertificateBuilder().public_key(public).serial(serial).type(SSHCertificateType.HOST)
+                           .key_id(key_id.encode("ascii")).valid_principals([value.encode("ascii") for value in principals])
+                           .valid_after(now).valid_before(valid_before).sign(self._ca_keys[slug]["host"]))
+            line = certificate.public_bytes().decode("ascii")
+            _log_issuance(state, serial, "host", key_id, None, None, list(principals), now, valid_before, line,
+                          generation=state["host_ca"]["generation"], purpose="host", server_id=job["server_id"])
+            job["host_cert_serial"], job["_host_key"] = serial, value
+            job["_host_cert_valid_before"] = _iso(valid_before)
+            return 200, {"host_certificate": line, "serial": serial, "valid_before": _iso(valid_before)}
+
+    def enrollment_result(self, slug: str, enrollment_id: str, device: _Device,
+                          body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            state = self._ca.get(slug)
+            job = self._executor_job(slug, enrollment_id, device.user_id)
+            # Only the claimed executor's exact device may finish a job.
+            if state is None or job is None or job["executor_device_id"] != device.device_id:
+                return _refusal(404, "not_found", "Not found")
+            if job["status"] != "claimed":
+                return _refusal(409, "enrollment_not_claimed", "The enrolment job is not claimed", status=job["status"])
+            if body.get("status") not in {"succeeded", "failed", "rolled_back"} or not isinstance(body.get("steps"), list):
+                return _refusal(422, "validation_failed", "Invalid enrolment result", field="status")
+            job.update({"status": body["status"], "finished_at": _now(), "error_code": body.get("error_code")})
+            self._record_host_result(state, job, body)
+            return 200, self._enrollment_summary(job)
+
+    def _record_host_result(self, state: dict[str, Any], job: dict[str, Any], body: dict[str, Any]) -> None:
+        host = state["hosts"].get(job["server_id"])
+        if body["status"] != "succeeded":
+            if host is None:
+                state["hosts"][job["server_id"]] = _host_row(job["server_id"], "failed", last_error=body.get("error_code"))
+            else:
+                host["last_error"] = body.get("error_code")
+            return
+        if job["kind"] == "unenroll":
+            if host is not None:
+                host.update({"status": "unenrolled", "user_ca_generations": [], "last_verified_at": _now(),
+                             "last_error": None})
+            return
+        installed = {_public_blob(line) for line in job["_params"]["user_ca_public_keys"]}
+        generations = sorted(row["generation"] for row in state["user_cas"] if _public_blob(row["public_key"]) in installed)
+        if host is None or host["status"] != "enrolled":
+            host = state["hosts"][job["server_id"]] = _host_row(job["server_id"], "enrolled")
+            host["enrolled_at"] = _now()
+        host.update({
+            "status": "enrolled", "user_ca_generations": generations, "last_verified_at": _now(), "last_error": None,
+            "krl_version_delivered": max(host.get("krl_version_delivered") or 0, job["_params"]["krl_version"]),
+        })
+        if job.get("host_cert_serial") is not None:
+            host.update({"host_cert_serial": job["host_cert_serial"],
+                         "host_cert_valid_before": job.get("_host_cert_valid_before"),
+                         "host_key_fingerprint": self._ssh_fingerprint(job.get("_host_key"))})
+
+    def cancel_enrollment(self, slug: str, enrollment_id: str) -> tuple[int, dict[str, Any]]:
+        with self._lock:
+            job = self._enrolments.get(enrollment_id)
+            if job is None or job["team_slug"] != slug:
+                return _refusal(404, "not_found", "Not found")
+            if job["status"] == "claimed" and self._is_open(job):
+                return _refusal(409, "enrollment_claimed", "A claimed job finishes with its result", status="claimed")
+            if not self._is_open(job):
+                return _refusal(409, "enrollment_not_open", "The enrolment job is not open",
+                                status=self._enrollment_summary(job)["status"])
+            job.update({"status": "cancelled", "finished_at": _now()})
+            return 200, self._enrollment_summary(job)
+
 
 def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) -> None:
     """Register strict Vault routes. Fixed paths come before parameter paths."""
@@ -1083,52 +1714,39 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
                                 "source": "servonaut_vault", "valid": True, "updated_at": _now()}
         return web.json_response(copy.deepcopy(vault._bindings[key]))
 
-    # The CA routes are intentionally strict about device ownership and SSH-key
-    # registration. Certificate material is added once ca_client's payload shape
-    # lands; until then a request receives the same explicit contract refusal as
-    # an unenrolled real host rather than a fake certificate.
-    async def ca_get(request: web.Request, device: Optional[_Device]) -> web.Response:
-        if request.match_info["slug"] != TEAM_SLUG:
-            return _not_found()
-        state = vault._ca.get(TEAM_SLUG)
-        return web.json_response(_ca_public(state) if state else {"enabled": False, "team_slug": TEAM_SLUG, "krl_version": 0})
+    # The CA routes verify device ownership and the signing device's SSH key;
+    # the state rules live on VaultCloud so the controls share them. Reads
+    # take the bearer token alone; every ssh-ca mutation is device-signed.
+    def _answer(result: tuple[int, dict[str, Any]]) -> web.Response:
+        status, body = result
+        return web.json_response(body, status=status)
 
-    async def ca_get_bearer(request: web.Request) -> web.Response:
-        if not bearer_ok(request, store):
-            return unauthorized()
-        return await ca_get(request, None)
+    def _team(request: web.Request) -> Optional[str]:
+        slug = request.match_info["slug"]
+        return slug if slug == TEAM_SLUG else None
+
+    def bearer_read(handler: Any) -> Any:
+        async def endpoint(request: web.Request) -> web.Response:
+            if not bearer_ok(request, store):
+                return unauthorized()
+            if _team(request) is None:
+                return _not_found()
+            return await handler(request)
+        return endpoint
+
+    async def ca_get(request: web.Request) -> web.Response:
+        return web.json_response(vault.ca_payload(TEAM_SLUG))
 
     async def ca_enable(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        if request.match_info["slug"] != TEAM_SLUG:
+        if _team(request) is None:
             return _not_found()
-        user_key, host_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
-        vault._ca_keys[TEAM_SLUG] = (user_key, host_key)
-        user_public = user_key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
-        host_public = host_key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
-        krl_version = 1
-        policy = (await json_body(request)).get("policy") or {
-            "interactive_ttl_seconds": 28_800, "automation_ttl_seconds": 600,
-            "max_ttl_seconds": 57_600, "require_member_mfa": False,
-        }
-        vault._ca[TEAM_SLUG] = {
-            "enabled": True, "team_slug": TEAM_SLUG,
-            "user_ca": {"public_key": user_public, "fingerprint": vault._ssh_fingerprint(user_public)},
-            "host_ca": {"public_key": host_public, "fingerprint": vault._ssh_fingerprint(host_public)},
-            "policy": policy, "krl_version": krl_version,
-            "my_logins_by_server": {SERVER_ID: ["deploy"]}, "issued": [], "hosts": [],
-            "krl": build_krl(
-                user_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
-                krl_version, int(time.time()), [],
-            ),
-            "revoked_serials": [],
-        }
-        return web.json_response(_ca_public(vault._ca[TEAM_SLUG]), status=201)
+        return _answer(vault.ca_enable(TEAM_SLUG, await json_body(request)))
 
     async def ca_policy_put(request: web.Request, device: Optional[_Device]) -> web.Response:
         """Like the real endpoint: top-level fields, omitted ones kept, then validated."""
         assert device is not None
-        state = vault._ca.get(request.match_info["slug"])
+        state = vault._ca_state(request.match_info["slug"])
         if state is None:
             return _error("ca_disabled", "The SSH CA is not enabled", 403)
         body = await json_body(request)
@@ -1151,173 +1769,107 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
 
     async def ca_cert(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        if request.match_info["slug"] != TEAM_SLUG:
+        if _team(request) is None:
             return _not_found()
-        if not vault._ca.get(TEAM_SLUG, {}).get("enabled"):
-            return _error("ca_disabled", "The team SSH certificate authority is disabled", 403)
-        if not device.ssh_public_key:
-            return _error("no_device_ssh_key", "Register a device SSH key before issuing a certificate", 403)
-        state = vault._ca[TEAM_SLUG]
-        body = await json_body(request)
-        server_ids = body.get("server_ids")
-        if not isinstance(server_ids, list) or not server_ids:
-            return _problem("server_ids")
-        selected = [SERVER_ID] if server_ids == ["*"] else list(map(str, server_ids))
-        if selected != [SERVER_ID]:
-            return _error("server_not_enrolled", "The requested server is not enrolled", 409)
-        purpose = str(body.get("purpose", "interactive"))
-        ttl = int(body.get("requested_ttl_seconds") or state["policy"].get(f"{purpose}_ttl_seconds", 28_800))
-        maximum = int(state["policy"].get("max_ttl_seconds", 57_600))
-        if purpose not in {"interactive", "automation"} or ttl <= 0 or ttl > maximum:
-            return _error("ttl_out_of_range", "Requested certificate lifetime is not allowed", 422)
+        return _answer(vault.ca_issue_certificate(TEAM_SLUG, device, await json_body(request)))
+
+    async def ca_cert_revoke(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
         try:
-            public_key = load_ssh_public_key(device.ssh_public_key.encode("ascii"))
-        except (ValueError, UnicodeEncodeError):
-            return _problem("ssh_public_key")
-        vault._serial += 1
-        now = int(time.time())
-        principals = [f"svn:{SERVER_ID}:deploy".encode("ascii")]
-        key_id = f"u:{device.user_id} d:{device.device_id} t:{TEAM_ID} r:{vault._serial}".encode("ascii")
-        certificate = (SSHCertificateBuilder().public_key(public_key).serial(vault._serial)
-                       .type(SSHCertificateType.USER).key_id(key_id).valid_principals(principals)
-                       .valid_after(now).valid_before(now + ttl).sign(vault._ca_keys[TEAM_SLUG][0]))
-        raw_certificate = certificate.public_bytes().decode("ascii")
-        valid_after = dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
-        valid_before = dt.datetime.fromtimestamp(now + ttl, tz=dt.timezone.utc)
-        entry_hash = _log_issuance(state, vault._serial, "user", key_id.decode("ascii"), device.user_id, device.device_id,
-                      [value.decode() for value in principals], now, now + ttl, raw_certificate)
-        return web.json_response({"certificate": raw_certificate, "serial": vault._serial,
-                                  "key_id": key_id.decode("ascii"), "principals": [value.decode() for value in principals],
-                                  "logins_by_server": {SERVER_ID: ["deploy"]}, "valid_after": valid_after.isoformat(),
-                                  "valid_before": valid_before.isoformat(),
-                                  "renew_after": (valid_after + (valid_before - valid_after) * 0.8).isoformat(),
-                                  "ca_fingerprint": state["user_ca"]["fingerprint"], "issuance_entry_hash": _b64(entry_hash)}, status=201)
+            serial = int(request.match_info["serial"])
+        except ValueError:
+            return _not_found()
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.ca_revoke(TEAM_SLUG, serial, await json_body(request)))
 
     async def ca_issued(request: web.Request) -> web.Response:
-        if not bearer_ok(request, store):
-            return unauthorized()
-        if request.match_info["slug"] != TEAM_SLUG:
-            return _not_found()
-        state = vault._ca.get(TEAM_SLUG)
-        if not state or not state.get("enabled"):
+        state = vault._ca_state(TEAM_SLUG)
+        if state is None:
             return _error("ca_disabled", "The team SSH certificate authority is disabled", 403)
-        rows = [{key: value for key, value in row.items() if key != "entry_hash_raw"} for row in state["issued"]]
+        rows = [_public_issued(row) for row in state["issued"]]
         head = state["issued"][-1]["entry_hash"] if state["issued"] else _b64(b"\0" * KEY_BYTES)
-        return web.json_response({"data": rows, "meta": {"next_cursor": None, "head_hash": head}})
+        return web.json_response({"data": rows, "meta": {"next_cursor": None, "head_hash": head, "count": len(rows)}})
+
+    async def ca_hosts(request: web.Request) -> web.Response:
+        return web.json_response(vault.ca_hosts(TEAM_SLUG))
+
+    async def ca_rollover(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.start_ca_rollover(TEAM_SLUG, user_id=device.user_id))
+
+    async def ca_rollover_complete(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.complete_ca_rollover(TEAM_SLUG))
 
     async def enrollments_create(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        if request.match_info["slug"] != TEAM_SLUG or not vault._ca.get(TEAM_SLUG, {}).get("enabled"):
+        if _team(request) is None:
             return _not_found()
-        body = await json_body(request)
-        if body.get("server_id") != SERVER_ID or body.get("kind") not in {"enroll", "refresh", "unenroll"}:
-            return _problem("enrollment")
-        enrollment_id = str(uuid.uuid4())
-        vault._enrolments[enrollment_id] = {"enrollment_id": enrollment_id, "status": "requested",
-                                            "kind": body["kind"], "server_id": SERVER_ID,
-                                            "executor_user_id": device.user_id, "executor_device_id": device.device_id,
-                                            "break_glass_item_id": body.get("break_glass_item_id"), "created_at": _now()}
-        return web.json_response({"enrollment_id": enrollment_id, "status": "requested", "executor_user_id": device.user_id, "expires_at": _now()}, status=201)
-
-    def _enrollment(request: web.Request, device: _Device) -> Optional[dict[str, Any]]:
-        row = vault._enrolments.get(request.match_info["enrollment_id"])
-        if row is None or row["executor_user_id"] != device.user_id:
-            return None
-        return row
+        return _answer(vault.create_enrollment(TEAM_SLUG, device.user_id, await json_body(request)))
 
     async def enrollments_list(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        rows = [copy.deepcopy(row) for row in vault._enrolments.values() if row["executor_user_id"] == device.user_id]
-        return web.json_response({"data": rows, "meta": {"next_cursor": None}})
+        if _team(request) is None:
+            return _not_found()
+        return web.json_response(vault.list_enrollments(TEAM_SLUG, request.query.get("status")))
 
     async def enrollment_get(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        row = _enrollment(request, device)
-        state = vault._ca.get(TEAM_SLUG)
-        if row is None or state is None:
+        if _team(request) is None:
             return _not_found()
-        params = {"enrollment_id": row["enrollment_id"], "kind": row["kind"], "script_version": "1",
-                  "server": {"id": SERVER_ID, "name": "server-1", "hostname": "server-1.example.test", "port": 22},
-                  "connect_via": {"credential_binding": None},
-                  "user_ca_public_keys": [state["user_ca"]["public_key"]], "host_ca_public_key": state["host_ca"]["public_key"],
-                  "principals_by_login": {"deploy": [f"svn:{SERVER_ID}:deploy"]},
-                  "host_principals": ["server-1.example.test", f"{SERVER_ID}.example.test"],
-                  "krl": _b64(state["krl"]), "break_glass": None,
-                  "managed_dir": "/etc/ssh/servonaut", "drop_in": "/etc/ssh/sshd_config.d/50-servonaut.conf"}
-        row["params"] = params
-        return web.json_response(params)
+        return _answer(vault.enrollment_params(TEAM_SLUG, request.match_info["enrollment_id"], device.user_id))
 
     async def enrollment_claim(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        row = _enrollment(request, device)
-        if row is None:
+        if _team(request) is None:
             return _not_found()
-        if row["status"] not in {"requested", "claimed"}:
-            return _error("already_claimed", "Enrollment is no longer claimable", 409)
-        row["status"] = "claimed"
-        params = row.get("params") or {}
-        return web.json_response({"status": "claimed", "params_hash": _b64(hashlib.sha256(json_dumps(params)).digest())})
+        return _answer(vault.claim_enrollment(TEAM_SLUG, request.match_info["enrollment_id"], device))
 
     async def enrollment_host_cert(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        row = _enrollment(request, device)
-        state = vault._ca.get(TEAM_SLUG)
-        value = (await json_body(request)).get("host_public_key")
-        if row is None or state is None or not isinstance(value, str):
+        if _team(request) is None:
             return _not_found()
-        try:
-            public = load_ssh_public_key(value.encode("ascii"))
-        except (ValueError, UnicodeEncodeError):
-            return _problem("host_public_key")
-        vault._serial += 1
-        now = int(time.time())
-        valid_before = now + 365 * 24 * 3600
-        certificate = (SSHCertificateBuilder().public_key(public).serial(vault._serial).type(SSHCertificateType.HOST)
-                       .key_id(f"host:{SERVER_ID}".encode()).valid_principals([b"server-1.example.test"])
-                       .valid_after(now).valid_before(valid_before).sign(vault._ca_keys[TEAM_SLUG][1]))
-        _log_issuance(state, vault._serial, "host", f"host:{SERVER_ID}", None, None, ["server-1.example.test"], now, valid_before,
-                      certificate.public_bytes().decode("ascii"))
-        return web.json_response({"host_certificate": certificate.public_bytes().decode("ascii"), "serial": vault._serial,
-                                  "valid_before": dt.datetime.fromtimestamp(valid_before, tz=dt.timezone.utc).isoformat()})
+        return _answer(vault.enrollment_host_certificate(
+            TEAM_SLUG, request.match_info["enrollment_id"], device, await json_body(request)))
 
     async def enrollment_result(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        row = _enrollment(request, device)
-        body = await json_body(request)
-        if row is None or body.get("status") not in {"succeeded", "failed", "rolled_back"} or not isinstance(body.get("steps"), list):
-            return _problem("result")
-        row["status"], row["result"] = body["status"], copy.deepcopy(body)
-        state = vault._ca[TEAM_SLUG]
-        state["hosts"] = [{"server_id": SERVER_ID, "status": "enrolled" if body["status"] == "succeeded" else "failed",
-                           "script_version": "1", "user_ca_generations": [1], "host_cert_serial": vault._serial,
-                           "host_cert_valid_before": None, "krl_version_delivered": state["krl_version"],
-                           "enrolled_at": _now(), "last_verified_at": _now(), "last_error": body.get("error_code"), "needs_refresh": False}]
-        return web.json_response({"status": row["status"]})
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.enrollment_result(
+            TEAM_SLUG, request.match_info["enrollment_id"], device, await json_body(request)))
+
+    async def enrollment_cancel(request: web.Request, device: Optional[_Device]) -> web.Response:
+        assert device is not None
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.cancel_enrollment(TEAM_SLUG, request.match_info["enrollment_id"]))
 
     async def ca_krl(request: web.Request) -> web.Response:
-        if not bearer_ok(request, store):
-            return unauthorized()
         state = vault._ca.get(TEAM_SLUG)
         if state is None:
             return _not_found()
-        return web.Response(body=state["krl"], content_type="application/octet-stream", headers={"X-Servonaut-KRL-Version": str(state["krl_version"])})
+        return web.Response(body=state["krl"], content_type="application/octet-stream",
+                            headers={"X-Servonaut-KRL-Version": str(state["krl_version"])})
 
     async def ca_revocations(request: web.Request) -> web.Response:
-        if not bearer_ok(request, store):
-            return unauthorized()
         state = vault._ca.get(TEAM_SLUG)
         if state is None:
             return _not_found()
-        return web.json_response({"krl_version": state["krl_version"], "generated_at": _now(), "serials": state["revoked_serials"],
-                                  "krl": _b64(state["krl"]), "sha256": _b64(hashlib.sha256(state["krl"]).digest())})
+        return web.json_response({"krl_version": state["krl_version"], "generated_at": state["krl_generated_at"],
+                                  "serials": state["krl_serials"], "krl": _b64(state["krl"]),
+                                  "sha256": _b64(hashlib.sha256(state["krl"]).digest())})
 
     async def ca_delivery(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None
-        state = vault._ca.get(TEAM_SLUG)
-        body = await json_body(request)
-        if state is None or int(body.get("krl_version", -1)) != state["krl_version"] or not isinstance(body.get("results"), list):
-            return _problem("krl_delivery")
-        return web.json_response({"accepted": len(body["results"])})
+        if _team(request) is None:
+            return _not_found()
+        return _answer(vault.ca_deliveries(TEAM_SLUG, await json_body(request)))
 
     router = app.router
     # Bootstrap identity read is the only unsigned vault route.
@@ -1353,20 +1905,26 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
     router.add_get("/api/v1/me/instances/{provider}/{instance_id}/credential-binding", route(binding_get))
     router.add_put("/api/v1/me/instances/{provider}/{instance_id}/credential-binding", route(binding_put))
     router.add_put("/api/v1/teams/{slug}/servers/{server_id}/credential-binding", route(team_binding_put))
-    router.add_get("/api/v1/teams/{slug}/ssh-ca", ca_get_bearer)
-    router.add_post("/api/v1/teams/{slug}/ssh-ca", route(ca_enable))
-    router.add_put("/api/v1/teams/{slug}/ssh-ca/policy", route(ca_policy_put))
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/certs", route(ca_cert))
-    router.add_get("/api/v1/teams/{slug}/ssh-ca/issued", ca_issued)
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/enrollments", route(enrollments_create))
-    router.add_get("/api/v1/teams/{slug}/ssh-ca/enrollments", route(enrollments_list))
-    router.add_get("/api/v1/teams/{slug}/ssh-ca/enrollments/{enrollment_id}", route(enrollment_get))
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/enrollments/{enrollment_id}/claim", route(enrollment_claim))
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/enrollments/{enrollment_id}/host-cert", route(enrollment_host_cert))
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/enrollments/{enrollment_id}/result", route(enrollment_result))
-    router.add_get("/api/v1/teams/{slug}/ssh-ca/krl", ca_krl)
-    router.add_get("/api/v1/teams/{slug}/ssh-ca/revocations", ca_revocations)
-    router.add_post("/api/v1/teams/{slug}/ssh-ca/krl-deliveries", route(ca_delivery))
+    ssh_ca = "/api/v1/teams/{slug}/ssh-ca"
+    router.add_get(ssh_ca, bearer_read(ca_get))
+    router.add_post(ssh_ca, route(ca_enable))
+    router.add_put(f"{ssh_ca}/policy", route(ca_policy_put))
+    router.add_post(f"{ssh_ca}/certs", route(ca_cert))
+    router.add_post(f"{ssh_ca}/certs/{{serial}}/revoke", route(ca_cert_revoke))
+    router.add_get(f"{ssh_ca}/issued", bearer_read(ca_issued))
+    router.add_get(f"{ssh_ca}/hosts", bearer_read(ca_hosts))
+    router.add_post(f"{ssh_ca}/rollover", route(ca_rollover))
+    router.add_post(f"{ssh_ca}/rollover/complete", route(ca_rollover_complete))
+    router.add_post(f"{ssh_ca}/enrollments", route(enrollments_create))
+    router.add_get(f"{ssh_ca}/enrollments", route(enrollments_list))
+    router.add_get(f"{ssh_ca}/enrollments/{{enrollment_id}}", route(enrollment_get))
+    router.add_post(f"{ssh_ca}/enrollments/{{enrollment_id}}/claim", route(enrollment_claim))
+    router.add_post(f"{ssh_ca}/enrollments/{{enrollment_id}}/host-cert", route(enrollment_host_cert))
+    router.add_post(f"{ssh_ca}/enrollments/{{enrollment_id}}/result", route(enrollment_result))
+    router.add_post(f"{ssh_ca}/enrollments/{{enrollment_id}}/cancel", route(enrollment_cancel))
+    router.add_get(f"{ssh_ca}/krl", bearer_read(ca_krl))
+    router.add_get(f"{ssh_ca}/revocations", bearer_read(ca_revocations))
+    router.add_post(f"{ssh_ca}/krl-deliveries", route(ca_delivery))
 
 
 def _approval_state(device: _Device) -> str:
@@ -1426,24 +1984,62 @@ def _issuance_hash(prev: bytes, team_id: str, serial: int, key_id: str, user_id:
 
 def _log_issuance(state: dict[str, Any], serial: int, cert_type: str, key_id: str, user_id: Optional[int],
                   device_id: Optional[str], principals: list[str], valid_after: int, valid_before: int,
-                  certificate: str) -> bytes:
-    """Append one hash-chained row to the team's issuance log, as the service does."""
-    previous = state["issued"][-1]["entry_hash_raw"] if state["issued"] else b"\0" * KEY_BYTES
+                  certificate: str, *, generation: int, purpose: str, server_id: str = SERVER_ID) -> bytes:
+    """Append one hash-chained row to the team's issuance log, as the service does.
+
+    Keys starting with ``_`` are fake bookkeeping, never sent.
+    """
+    previous = state["issued"][-1]["_entry_hash"] if state["issued"] else b"\0" * KEY_BYTES
     # The log hashes the binary blob, not the "<type> <base64>" wire line.
     certificate_hash = hashlib.sha256(base64.b64decode(certificate.split()[1])).digest()
     entry_hash = _issuance_hash(previous, TEAM_ID, serial, key_id, user_id or 0, device_id or "", principals,
                                 valid_after, valid_before, certificate_hash, valid_after)
-    issued_at = dt.datetime.fromtimestamp(valid_after, tz=dt.timezone.utc).isoformat()
+    issued_at = _iso(valid_after)
     state["issued"].append({
         "serial": serial, "cert_type": cert_type, "key_id": key_id, "user_id": user_id, "device_id": device_id,
-        "server_id": SERVER_ID, "principals": principals, "valid_after": issued_at,
-        "valid_before": dt.datetime.fromtimestamp(valid_before, tz=dt.timezone.utc).isoformat(),
-        "certificate_sha256": _b64(certificate_hash), "issued_at": issued_at,
-        "prev_hash": _b64(previous), "entry_hash": _b64(entry_hash), "entry_hash_raw": entry_hash, "revoked_at": None,
+        "server_id": server_id, "principals": principals, "valid_after": issued_at,
+        "valid_before": _iso(valid_before), "certificate_sha256": _b64(certificate_hash), "client_ip": "127.0.0.1",
+        "issued_at": issued_at, "purpose": purpose, "prev_hash": _b64(previous), "entry_hash": _b64(entry_hash),
+        "revoked_at": None, "revoke_reason": None,
+        "_entry_hash": entry_hash, "_generation": generation, "_valid_before": valid_before,
     })
     return entry_hash
 
 
-def _ca_public(state: dict[str, Any]) -> dict[str, Any]:
-    """Drop private/opaque fake-only material from a JSON API response."""
-    return {key: copy.deepcopy(value) for key, value in state.items() if key not in {"krl", "issued"}}
+def _public_issued(entry: dict[str, Any]) -> dict[str, Any]:
+    return {key: copy.deepcopy(value) for key, value in entry.items() if not key.startswith("_")}
+
+
+def _ca_generation(private_key: Any, generation: int, status: str, comment: str) -> dict[str, Any]:
+    """A CA key object as the service shapes it; the public key carries its comment."""
+    public = private_key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    line = f"{public} {comment}"
+    return {"generation": generation, "alg": public.split()[0], "public_key": line,
+            "fingerprint": VaultCloud._ssh_fingerprint(line), "status": status, "created_at": _now(),
+            "activated_at": _now() if status == "active" else None, "retired_at": None}
+
+
+def _public_blob(line: str) -> bytes:
+    return base64.b64decode(line.split()[1])
+
+
+def _host_row(server_id: str, status: str, *, last_error: Optional[str] = None) -> dict[str, Any]:
+    return {"server_id": server_id, "status": status, "script_version": "1", "user_ca_generations": [],
+            "host_cert_serial": None, "host_cert_valid_before": None, "host_key_fingerprint": None,
+            "krl_version_delivered": None, "enrolled_at": None, "last_verified_at": None, "last_error": last_error}
+
+
+def _krl_bytes(sections: list[tuple[bytes, list[int]]], version: int, generated: int) -> bytes:
+    """An OpenSSH KRL revoking certificates by serial, built here, not by the client.
+
+    One KRL_SECTION_CERTIFICATES per CA key blob, each with one
+    KRL_SECTION_CERT_SERIAL_LIST of ascending serials; no sections is an empty KRL.
+    """
+    def string(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    out = struct.pack(">QIQQQ", KRL_MAGIC, 1, version, generated, 0) + string(b"") + string(b"")
+    for ca_blob, serials in sections:
+        serial_list = b"".join(struct.pack(">Q", serial) for serial in sorted(serials))
+        out += b"\x01" + string(string(ca_blob) + string(b"") + b"\x20" + string(serial_list))
+    return out

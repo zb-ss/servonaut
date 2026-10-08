@@ -341,3 +341,138 @@ async def test_first_device_key_registration_keeps_later_requests_signed_validly
     await client.register_device_key()
 
     assert len(api.calls) == 2
+
+
+def _ecdsa_ca() -> tuple[Any, str]:
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    return key, key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+
+
+def _generation(line: str, generation: int, status: str) -> dict[str, Any]:
+    return {"generation": generation, "alg": line.split()[0], "public_key": line,
+            "fingerprint": _fingerprint(line), "status": status}
+
+
+@pytest.mark.asyncio
+async def test_status_reports_and_pins_an_announced_ecdsa_next_ca(tmp_path: Path):
+    status, response, private_key = _fixture_response()
+    _, next_line = _ecdsa_ca()
+    status["user_ca_next"] = _generation(next_line, 2, "next")
+    pins = CaPinStore(tmp_path / "pins.json")
+    client = CertificateAuthorityClient(_Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=pins)
+
+    read = await client.get_status()
+
+    assert read.user_ca_next_fingerprint == _fingerprint(next_line)
+    assert read.trusted_user_ca_fingerprints == {status["user_ca"]["fingerprint"], _fingerprint(next_line)}
+    assert read.to_dict()["user_ca_next_fingerprint"] == _fingerprint(next_line)
+
+
+@pytest.mark.asyncio
+async def test_a_next_ca_whose_fingerprint_does_not_match_its_key_is_refused(tmp_path: Path):
+    status, response, private_key = _fixture_response()
+    _, next_line = _ecdsa_ca()
+    status["user_ca_next"] = {**_generation(next_line, 2, "next"), "fingerprint": status["user_ca"]["fingerprint"]}
+    client = CertificateAuthorityClient(
+        _Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=CaPinStore(tmp_path / "pins.json"),
+    )
+
+    with pytest.raises(CertificateValidationError, match="does not match its key"):
+        await client.get_status()
+
+
+@pytest.mark.asyncio
+async def test_after_a_rollover_to_an_ecdsa_ca_certificates_it_signs_are_accepted(tmp_path: Path):
+    from cryptography.hazmat.primitives.serialization import load_ssh_private_key
+    from cryptography.hazmat.primitives.serialization.ssh import SSHCertificateBuilder, SSHCertificateType
+
+    status, response, private_key = _fixture_response()
+    pins = CaPinStore(tmp_path / "pins.json")
+    await CertificateAuthorityClient(
+        _Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=pins,
+    ).get_status()  # pinned the Ed25519 generation 1
+
+    ca_key, ca_line = _ecdsa_ca()
+    old = status["user_ca"]
+    status["user_ca"] = _generation(ca_line, 2, "active")
+    status["user_ca_previous"] = [{**_generation(old["public_key"], 1, "previous")}]
+    valid_after = int(datetime.fromisoformat(response["valid_after"]).timestamp())
+    valid_before = int(datetime.fromisoformat(response["valid_before"]).timestamp())
+    certificate = (
+        SSHCertificateBuilder()
+        .public_key(load_ssh_private_key(private_key, None).public_key())
+        .serial(7).type(SSHCertificateType.USER).key_id(b"test-lease")
+        .valid_principals([f"svn:{SERVER}:deploy".encode()])
+        .valid_after(valid_after).valid_before(valid_before)
+        .add_extension(b"permit-pty", b"")
+        .sign(ca_key)
+    )
+    response["certificate"] = certificate.public_bytes().decode("ascii") + " test"
+    response["ca_fingerprint"] = _fingerprint(ca_line)
+    client = CertificateAuthorityClient(
+        _Api(status, response), TEAM, object(), DEVICE, _store(private_key),
+        pins=pins, certificate_dir=tmp_path / "certs",
+    )
+
+    issued = await client.issue_certificate([SERVER], requested_ttl_seconds=3600)
+
+    assert issued.ca_fingerprint == _fingerprint(ca_line)
+    assert issued.certificate_path.read_text(encoding="ascii").startswith("ssh-ed25519-cert-v01@openssh.com ")
+    assert pins.pinned(TEAM).user_ca_fingerprint == _fingerprint(ca_line)
+
+
+@pytest.mark.asyncio
+async def test_showing_a_changed_ca_for_trust_does_not_touch_the_pins(tmp_path: Path):
+    status, response, private_key = _fixture_response()
+    pins = CaPinStore(tmp_path / "pins.json")
+    await CertificateAuthorityClient(_Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=pins).get_status()
+    _, other = _ecdsa_ca()
+    status["user_ca"] = _generation(other, 2, "active")
+    client = CertificateAuthorityClient(_Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=pins)
+
+    shown = await client.get_status(enforce_pins=False)
+
+    assert shown.user_ca_fingerprint == _fingerprint(other)
+    with pytest.raises(CaPinMismatchError):
+        await client.get_status()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["next_not_newer", "previous_not_older", "previous_not_a_list"])
+async def test_ca_generations_out_of_order_or_malformed_are_refused(tmp_path: Path, change: str):
+    status, response, private_key = _fixture_response()
+    status["user_ca"]["generation"] = 2
+    _, other = _ecdsa_ca()
+    if change == "next_not_newer":
+        status["user_ca_next"] = _generation(other, 2, "next")
+    elif change == "previous_not_older":
+        status["user_ca_previous"] = [_generation(other, 3, "previous")]
+    else:
+        status["user_ca_previous"] = {"fingerprint": _fingerprint(other)}
+    client = CertificateAuthorityClient(
+        _Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=CaPinStore(tmp_path / "pins.json"),
+    )
+
+    with pytest.raises(CertificateValidationError):
+        await client.get_status()
+    assert not (tmp_path / "pins.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_installable_user_cas_are_labelled_for_the_confirmation(tmp_path: Path):
+    status, response, private_key = _fixture_response()
+    status["user_ca"]["generation"] = 2
+    _, upcoming = _ecdsa_ca()
+    _, retired = _ecdsa_ca()
+    status["user_ca_next"] = _generation(upcoming, 3, "next")
+    status["user_ca_previous"] = [_generation(retired, 1, "previous")]
+    client = CertificateAuthorityClient(
+        _Api(status, response), TEAM, object(), DEVICE, _store(private_key), pins=CaPinStore(tmp_path / "pins.json"),
+    )
+
+    roles = (await client.get_status()).user_ca_roles
+
+    assert roles == {status["user_ca"]["fingerprint"]: "active (pinned)",
+                     _fingerprint(upcoming): "next (new)", _fingerprint(retired): "retired"}

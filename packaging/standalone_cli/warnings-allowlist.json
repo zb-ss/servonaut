@@ -22184,7 +22184,7 @@
           "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
         },
         "expires_on": "2027-09-18",
-        "fingerprint": "6faea3bc0ae8b6b1425cf2202eb48903d2fd134cbdaaa99186fa69f04b8bfe2c",
+        "fingerprint": "49abe228997bffa068d8dff36c5e608aa265e0426360982342425a617adb85ae",
         "importers": [
           {
             "module": "pty",
@@ -22203,6 +22203,12 @@
             "module": "servonaut.services.relay_lock",
             "qualifiers": [
               "delayed"
+            ]
+          },
+          {
+            "module": "servonaut.services.vault.ca_pins",
+            "qualifiers": [
+              "optional"
             ]
           },
           {
