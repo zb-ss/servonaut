@@ -13,9 +13,12 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from rich.markup import escape
+from rich.text import Text
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
@@ -35,6 +38,15 @@ async def _invoke(service: Any, method: str, /, **kwargs: Any) -> Any:
         raise RuntimeError(f"Vault service does not provide {method}().")
     result = target(**kwargs)
     return await result if hasattr(result, "__await__") else result
+
+
+def scrub_for_demo(app: Any, value: object) -> str:
+    """Redact rendered server/user metadata in demo mode; values stay real."""
+    text = str(value)
+    redactor = getattr(app, "redaction_service", None)
+    if getattr(app, "demo_mode", False) and redactor is not None:
+        return str(redactor.scrub_stream(text))
+    return text
 
 
 def _approval_poll_delay(service: Any, attempt: int) -> float:
@@ -209,35 +221,307 @@ async def show_pending_device(app: Any, service: Any, device: Mapping[str, Any])
     app.push_screen(VaultPendingDeviceModal(device), reviewed)
 
 
-class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
-    """Collect an explicit exposure resolution or per-host rotation request."""
+_NO_SHARED_SERVERS = "No shared servers in this team: share one from Team Management."
 
-    def __init__(self, *, rotation: bool) -> None:
+
+class VaultSharedServerPicker(Vertical):
+    """A team picker and that team's shared servers, loaded from the vault service.
+
+    With ``multiple`` the servers are a checklist; otherwise one server is
+    chosen. A list with a single entry is chosen for the user. Labels are shown
+    as plain text, never as markup. Posts :class:`VaultSharedServerPicker.Changed`
+    whenever the choice or the loaded lists change.
+    """
+
+    DEFAULT_CSS = """
+    VaultSharedServerPicker {
+        height: auto;
+    }
+    VaultSharedServerPicker SelectionList {
+        height: auto;
+        max-height: 8;
+    }
+    """
+
+    class Changed(Message):
+        """The chosen team or servers changed."""
+
+        def __init__(self, picker: "VaultSharedServerPicker") -> None:
+            super().__init__()
+            self.picker = picker
+
+        @property
+        def control(self) -> "VaultSharedServerPicker":
+            return self.picker
+
+    def __init__(self, service: Any, *, team_id: str, server_id: str, message_id: str, multiple: bool) -> None:
+        super().__init__()
+        self._service = service
+        self._team_id = team_id
+        self._server_id = server_id
+        self._message_id = message_id
+        self._multiple = multiple
+        # The team whose servers are listed: a choice only counts for that team,
+        # even before this picker has handled a newer team change.
+        self._servers_team: Optional[str] = None
+        # The team whose servers were last asked for. A redraw re-posts
+        # Select.Changed for the same team; this keeps it from reloading.
+        self._servers_requested: Optional[str] = None
+        # Unredacted labels and message, so a demo-mode toggle can redraw them.
+        self._team_choices: list[tuple[str, str]] = []
+        self._server_choices: list[tuple[str, str]] = []
+        self._message: Optional[str] = "Loading your teams…"
+
+    def compose(self) -> ComposeResult:
+        yield Select([], prompt="Loading teams…", disabled=True, id=self._team_id)
+        if self._multiple:
+            servers = SelectionList[str](id=self._server_id, disabled=True)
+            servers.display = False
+            yield servers
+        else:
+            yield Select([], prompt="Choose a team first", disabled=True, id=self._server_id)
+        yield Static("Loading your teams…", markup=False, id=self._message_id)
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load_teams(), group="vault-picker-teams", exclusive=True)
+
+    @property
+    def team(self) -> Optional[str]:
+        value = self._team_select().value
+        return value if isinstance(value, str) else None
+
+    @property
+    def server_ids(self) -> list[str]:
+        if self._servers_team is None or self._servers_team != self.team:
+            return []
+        servers = self._servers()
+        if isinstance(servers, SelectionList):
+            return [value for value in servers.selected if isinstance(value, str)]
+        return [servers.value] if isinstance(servers.value, str) else []
+
+    def _team_select(self) -> Select[str]:
+        return self.query_one(f"#{self._team_id}", Select)
+
+    def _servers(self) -> Select[str] | SelectionList[str]:
+        return self.query_one(f"#{self._server_id}")  # type: ignore[return-value]
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw names and the message under the current demo mode, keeping the choices."""
+        if self._team_choices:
+            self._relabel(self._team_select(), self._team_choices)
+        servers = self._servers()
+        if isinstance(servers, SelectionList):
+            for index, (label, _value) in enumerate(self._server_choices):
+                servers.replace_option_prompt_at_index(index, self._label(label))
+        elif self._server_choices:
+            self._relabel(servers, self._server_choices)
+        self._say(self._message)
+
+    def _relabel(self, select: Select[str], choices: list[tuple[str, str]]) -> None:
+        kept = select.value
+        select.set_options(self._labelled(choices))
+        if any(value == kept for _label, value in choices):
+            select.value = kept
+
+    def _say(self, message: Optional[str]) -> None:
+        self._message = message
+        note = self.query_one(f"#{self._message_id}", Static)
+        note.update(scrub_for_demo(self.app, message or ""))
+        note.display = bool(message)
+
+    def _label(self, label: str) -> Text:
+        return Text(scrub_for_demo(self.app, label))
+
+    def _labelled(self, choices: list[tuple[str, str]]) -> list[tuple[Text, str]]:
+        return [(self._label(label), value) for label, value in choices]
+
+    @staticmethod
+    def _choices(rows: Any, key: str) -> list[tuple[str, str]]:
+        """Unredacted ``(label, value)`` pairs, without blank or repeated values."""
+        choices: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            value = row.get(key) if isinstance(row, Mapping) else None
+            if not isinstance(value, str) or not value or value in seen:
+                continue
+            seen.add(value)
+            choices.append((str(row.get("label") or value), value))
+        return choices
+
+    async def _load_teams(self) -> None:
+        select = self._team_select()
+        if self._service is None:
+            select.prompt = "No teams"
+            self._say("Vault services are unavailable in this session.")
+            return
+        try:
+            choices = self._choices(await _invoke(self._service, "team_choices"), "slug")
+        except Exception as exc:
+            select.prompt = "Teams unavailable"
+            self._say(f"Could not load your teams ({vault_failure_reason(exc)}).")
+            return
+        if not choices:
+            select.prompt = "No teams"
+            self._say("No teams yet: create or join one from Team Management.")
+            return
+        self._team_choices = choices
+        select.prompt = "Choose a team"
+        select.set_options(self._labelled(choices))
+        select.disabled = False
+        self._say(None)
+        if self.screen.focused is None:
+            select.focus()
+        if len(choices) == 1:
+            select.value = choices[0][1]
+
+    @on(Select.Changed)
+    def _choice_changed(self, event: Select.Changed) -> None:
+        event.stop()
+        if event.select.id == self._team_id and self.team != self._servers_requested:
+            self._reload_servers(self.team)
+        self.post_message(self.Changed(self))
+
+    @on(SelectionList.SelectedChanged)
+    def _servers_toggled(self, event: SelectionList.SelectedChanged) -> None:
+        event.stop()
+        self.post_message(self.Changed(self))
+
+    def _reload_servers(self, team: Optional[str]) -> None:
+        self._servers_requested = team
+        self._clear_servers("Loading servers…" if team else "Choose a team first")
+        if team is None:
+            self._say(None)
+            return
+        self._say("Loading this team's shared servers…")
+        self.run_worker(self._load_servers(team), group="vault-picker-servers", exclusive=True)
+
+    def _clear_servers(self, prompt: str) -> None:
+        self._servers_team = None
+        self._server_choices = []
+        servers = self._servers()
+        if isinstance(servers, SelectionList):
+            servers.clear_options()
+            servers.display = False
+        else:
+            servers.prompt = prompt
+            servers.set_options([])
+        servers.disabled = True
+
+    async def _load_servers(self, team: str) -> None:
+        try:
+            choices = self._choices(await _invoke(self._service, "shared_server_choices", team=team), "server_id")
+        except Exception as exc:
+            if self.team == team:
+                self._clear_servers("Servers unavailable")
+                self._say(f"Could not load this team's servers ({vault_failure_reason(exc)}).")
+            return
+        if self.team != team:  # the user chose another team meanwhile
+            return
+        if not choices:
+            self._clear_servers("No shared servers")
+            self._say(_NO_SHARED_SERVERS)
+            return
+        self._say(None)
+        self._show_servers(team, choices)
+        self.post_message(self.Changed(self))
+
+    def _show_servers(self, team: str, choices: list[tuple[str, str]]) -> None:
+        self._servers_team = team
+        self._server_choices = choices
+        servers = self._servers()
+        only_one = len(choices) == 1
+        if isinstance(servers, SelectionList):
+            servers.add_options([Selection(label, value, only_one) for label, value in self._labelled(choices)])
+            servers.display = True
+        else:
+            servers.prompt = "Choose a server"
+            servers.set_options(self._labelled(choices))
+            if only_one:
+                servers.value = choices[0][1]
+        servers.disabled = False
+        if self.screen.focused in (None, self._team_select()):
+            servers.focus()
+
+
+_EXPOSURE_RESOLUTIONS: tuple[tuple[str, str], ...] = (
+    ("Rotated: the key has been replaced", "rotated"),
+    ("Accepted risk: keep using this key", "accepted_risk"),
+    ("Not deployed: the key is not on any server", "not_deployed"),
+)
+
+
+class VaultExposureActionModal(ModalScreen[Optional[dict[str, str]]]):
+    """Collect an explicit exposure resolution or per-host rotation request.
+
+    Dismisses with ``{"resolution", "note"}``, or for a rotation with
+    ``{"team", "servers"}`` where ``servers`` is the chosen server IDs joined
+    by commas; ``None`` when cancelled.
+    """
+
+    AUTO_FOCUS = ""  # the pickers focus themselves once their options load
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    VaultExposureActionModal #vault_exposure_modal > Horizontal {
+        height: auto;
+    }
+    VaultExposureActionModal #vault_exposure_message {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, *, rotation: bool, service: Any = None) -> None:
         super().__init__()
         self._rotation = rotation
+        self._service = service
 
     def compose(self) -> ComposeResult:
         fields: list[Any] = [Static("[bold]Rotate exposed SSH key[/bold]" if self._rotation else "[bold]Resolve exposure[/bold]")]
         if self._rotation:
-            fields.extend((Input(placeholder="Team slug", id="vault_exposure_team"), Input(placeholder="Server IDs, comma separated", id="vault_exposure_servers")))
+            fields.append(VaultSharedServerPicker(
+                self._service, team_id="vault_exposure_team", server_id="vault_exposure_servers",
+                message_id="vault_exposure_message", multiple=True,
+            ))
         else:
-            fields.extend((Input(placeholder="rotated, accepted_risk, or not_deployed", id="vault_exposure_resolution"), Input(placeholder="Note (optional)", id="vault_exposure_note")))
-        fields.append(Horizontal(Button("Cancel", id="vault_exposure_cancel"), Button("Continue", id="vault_exposure_confirm")))
+            fields.extend((
+                Select(_EXPOSURE_RESOLUTIONS, prompt="Choose how it was resolved", id="vault_exposure_resolution"),
+                Input(placeholder="Note (optional)", id="vault_exposure_note"),
+            ))
+        fields.append(Horizontal(Button("Cancel", id="vault_exposure_cancel"), Button("Continue", id="vault_exposure_confirm", disabled=True)))
         yield SafeHeader()
         yield Vertical(*fields, id="vault_exposure_modal")
+
+    def on_mount(self) -> None:
+        if not self._rotation:
+            self.query_one("#vault_exposure_resolution", Select).focus()
+
+    def _values(self) -> Optional[dict[str, str]]:
+        if self._rotation:
+            picker = self.query_one(VaultSharedServerPicker)
+            team, servers = picker.team, picker.server_ids
+            return {"team": team, "servers": ",".join(servers)} if team and servers else None
+        resolution = self.query_one("#vault_exposure_resolution", Select).value
+        note = self.query_one("#vault_exposure_note", Input).value.strip()
+        valid = isinstance(resolution, str) and resolution in {value for _label, value in _EXPOSURE_RESOLUTIONS}
+        return {"resolution": resolution, "note": note} if valid else None
+
+    @on(Select.Changed)
+    @on(VaultSharedServerPicker.Changed)
+    def _sync_confirm(self) -> None:
+        self.query_one("#vault_exposure_confirm", Button).disabled = self._values() is None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "vault_exposure_confirm":
             self.dismiss(None)
-            return
-        if self._rotation:
-            team = self.query_one("#vault_exposure_team", Input).value.strip()
-            servers = self.query_one("#vault_exposure_servers", Input).value.strip()
-            self.dismiss({"team": team, "servers": servers} if team and servers else None)
-            return
-        resolution = self.query_one("#vault_exposure_resolution", Input).value.strip()
-        note = self.query_one("#vault_exposure_note", Input).value.strip()
-        self.dismiss({"resolution": resolution, "note": note} if resolution in {"rotated", "accepted_risk", "not_deployed"} else None)
+        elif (values := self._values()) is not None:
+            self.dismiss(values)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw team and server names under the current demo mode."""
+        for picker in self.query(VaultSharedServerPicker):
+            picker.refresh_after_demo_toggle()
 
 
 class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
@@ -280,37 +564,62 @@ class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
 
 
 class VaultImportedTeamBindingModal(ModalScreen[Optional[dict[str, str]]]):
-    """Collect an explicit team target for a matching imported reference."""
+    """Collect an explicit team target for a matching imported reference.
+
+    Dismisses with ``{"team", "server_id", "login"}``, or ``None`` when cancelled.
+    """
+
+    AUTO_FOCUS = ""  # the pickers focus themselves once their options load
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    VaultImportedTeamBindingModal #vault_import_bind_message {
+        color: $text-muted;
+    }
+    """
+
+    def __init__(self, service: Any) -> None:
+        super().__init__()
+        self._service = service
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Connect imported key to team server[/bold]"),
-            Static(
-                "Enter the team slug and server ID that currently use the selected Bitwarden key. "
-                "The service checks that exact legacy reference before creating a native binding."
+            Static("Choose the team server that still uses this Bitwarden key."),
+            VaultSharedServerPicker(
+                self._service, team_id="vault_import_bind_team", server_id="vault_import_bind_server",
+                message_id="vault_import_bind_message", multiple=False,
             ),
-            Input(placeholder="Team slug", id="vault_import_bind_team"),
-            Input(placeholder="Shared server ID", id="vault_import_bind_server"),
             Input(placeholder="SSH login (optional)", id="vault_import_bind_login"),
             Horizontal(
                 Button("Cancel", id="vault_import_bind_target_cancel"),
-                Button("Review binding", id="vault_import_bind_target_continue"),
+                Button("Review binding", id="vault_import_bind_target_continue", disabled=True),
             ),
             id="vault_import_bind_target_modal",
         )
 
-    def on_mount(self) -> None:
-        self.query_one("#vault_import_bind_team", Input).focus()
+    def _values(self) -> Optional[dict[str, str]]:
+        picker = self.query_one(VaultSharedServerPicker)
+        team, servers = picker.team, picker.server_ids
+        login = self.query_one("#vault_import_bind_login", Input).value.strip()
+        return {"team": team, "server_id": servers[0], "login": login} if team and servers else None
+
+    @on(VaultSharedServerPicker.Changed)
+    def _sync_continue(self) -> None:
+        self.query_one("#vault_import_bind_target_continue", Button).disabled = self._values() is None
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "vault_import_bind_target_continue":
             self.dismiss(None)
-            return
-        team = self.query_one("#vault_import_bind_team", Input).value.strip()
-        server_id = self.query_one("#vault_import_bind_server", Input).value.strip()
-        login = self.query_one("#vault_import_bind_login", Input).value.strip()
-        self.dismiss({"team": team, "server_id": server_id, "login": login} if team and server_id else None)
+        elif (values := self._values()) is not None:
+            self.dismiss(values)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw team and server names under the current demo mode."""
+        self.query_one(VaultSharedServerPicker).refresh_after_demo_toggle()
 
 
 def _rotation_summary(exposures: Any) -> str:
@@ -450,11 +759,7 @@ class VaultScreen(Screen):
 
     def scrub_for_display(self, value: object) -> str:
         """Redact rendered server/user metadata while preserving local state."""
-        text = str(value)
-        redactor = getattr(self.app, "redaction_service", None)
-        if getattr(self.app, "demo_mode", False) and redactor is not None:
-            return str(redactor.scrub_stream(text))
-        return text
+        return scrub_for_demo(self.app, value)
 
     def _status(self, message: str) -> None:
         self._status_raw = message
@@ -920,7 +1225,7 @@ class VaultScreen(Screen):
                 ),
                 confirmed,
             )
-        self.app.push_screen(VaultExposureActionModal(rotation=True), callback)
+        self.app.push_screen(VaultExposureActionModal(rotation=True, service=self._service()), callback)
 
     async def _rotate_exposure(self, exposure: Mapping[str, Any], values: Mapping[str, str]) -> None:
         service = self._service()
@@ -1005,7 +1310,7 @@ class VaultScreen(Screen):
         self._devices = [dict(row) for row in rows if isinstance(row, Mapping)]
         self._table_mode = "devices"
         self._render_devices()
-        self._status("Device list loaded. Approve a pending device from `servonaut vault devices approve` after comparing its safety number.")
+        self._status("Device list loaded. To approve a pending device, select it and choose Approve device, then compare its safety number.")
 
     def action_approve(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1191,10 +1496,13 @@ class VaultScreen(Screen):
 
         Local SSH imports have no remote Bitwarden reference to migrate.  For
         imported Bitwarden keys this surface never guesses a target from the
-        inventory: the user supplies the shared-server route, and the facade
+        inventory: the user picks the team and shared server, and the facade
         verifies the old reference, native binding, and SSH login before a
         separate explicit request can clear the legacy pointer.
         """
+        service = self._service()
+        if service is None:
+            return
         normalized: list[dict[str, str]] = []
         for reference in references:
             if not isinstance(reference, Mapping) or reference.get("source") != "bitwarden":
@@ -1208,7 +1516,7 @@ class VaultScreen(Screen):
         selected = await self.app.push_screen_wait(VaultImportedReferenceModal(normalized))
         if not selected:
             return
-        target = await self.app.push_screen_wait(VaultImportedTeamBindingModal())
+        target = await self.app.push_screen_wait(VaultImportedTeamBindingModal(service))
         if not target:
             return
         team = target["team"]
@@ -1228,9 +1536,6 @@ class VaultScreen(Screen):
             )
         )
         if not approved:
-            return
-        service = self._service()
-        if service is None:
             return
         try:
             result = await _invoke(

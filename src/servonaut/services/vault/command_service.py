@@ -61,6 +61,14 @@ from .team_vault_client import (
 
 logger = logging.getLogger(__name__)
 
+# SSH keys whose names a picker decrypts; beyond this they show by fingerprint.
+_NAMED_KEY_CHOICES = 50
+# Items a picker fetches at once, and the longest key name it shows.
+_KEY_NAME_FETCHES = 6
+_KEY_NAME_MAX = 80
+# A picker's mark for a key whose item failed verification.
+_UNVERIFIED_KEY = object()
+
 # Work an SSH CA enrolment job can do on a host.
 _ENROLLMENT_KINDS = frozenset({"enroll", "refresh", "unenroll"})
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
@@ -219,6 +227,8 @@ class VaultCommandService:
         # SSH CA jobs already announced, per team: a rollover sends one event per
         # host, and one read of the job list covers them all.
         self._announced_enrollments: dict[str, set[str]] = {}
+        # SSH key names for pickers, per (vault, item, revision): never key material.
+        self._key_names: dict[tuple[str, str, Any], Any] = {}
 
     @classmethod
     def from_local_session(cls) -> "VaultCommandService":
@@ -788,6 +798,122 @@ class VaultCommandService:
                 raise VaultStateError("vault item list cursor is invalid")
             seen.add(next_cursor)
             cursor = next_cursor
+
+    async def vault_choices(self, *, team: str | None = None) -> list[dict[str, str]]:
+        """Vaults this user can read, as ``{"vault_id", "label"}`` for a picker.
+
+        With *team*, only that team's vault; otherwise every readable vault,
+        the personal one first. A vault still waiting for this user's access
+        is left out: nothing in it can be used yet.
+        """
+        choices: list[tuple[int, dict[str, str]]] = []
+        for vault in await self.list_vaults():
+            vault_id = vault.get("vault_id")
+            owner = vault.get("team") if isinstance(vault.get("team"), Mapping) else {}
+            if not isinstance(vault_id, str) or vault.get("my_grant") is None:
+                continue
+            if team is not None and owner.get("slug") != team:
+                continue
+            personal = vault.get("kind") == "personal"
+            where = "your personal vault" if personal else f"team {owner.get('slug') or '?'}"
+            label = f"{terminal_safe(vault.get('name') or 'Vault')} ({terminal_safe(where)})"
+            choices.append((0 if personal else 1, {
+                "vault_id": vault_id, "label": label, "kind": "personal" if personal else "team",
+            }))
+        return [choice for _, choice in sorted(choices, key=lambda pair: (pair[0], pair[1]["label"]))]
+
+    async def ssh_key_choices(self, *, vault_id: str) -> list[dict[str, str]]:
+        """SSH keys in *vault_id*, as ``{"item_id", "label"}`` for a picker.
+
+        The service only knows each key's fingerprint; its name is inside the
+        encrypted item, so up to ``_NAMED_KEY_CHOICES`` keys are decrypted
+        locally for their names and nothing else is kept. Names are cached per
+        item revision, and the items are fetched a few at a time.
+        """
+        rows = [
+            row for row in (await self.list_items(vault_id=vault_id))["data"]
+            if row.get("type") == "ssh_key" and not row.get("deleted") and isinstance(row.get("item_id"), str)
+        ]
+        named = rows[:_NAMED_KEY_CHOICES]
+        missing = [row for row in named if self._key_name_cache_key(vault_id, row) not in self._key_names]
+        unverified: set[tuple[str, str, Any]] = set()
+        if missing:
+            vault = await self.vaults.get_vault(vault_id)
+            gate = asyncio.Semaphore(_KEY_NAME_FETCHES)
+
+            async def fetch(row: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
+                async with gate:
+                    try:
+                        return row, await self.items.get_item(vault_id, row["item_id"])
+                    except Exception:  # unreachable now: shown by fingerprint, tried again next time
+                        logger.info("Could not fetch an SSH key for the picker")
+                        return row, None
+
+            # Decryption stays on this task, one item at a time: it records each
+            # item's revision in the local state file. A verification failure is
+            # shown now but not cached: it can clear, e.g. once a vault grant arrives.
+            for row, item in await asyncio.gather(*(fetch(row) for row in missing)):
+                if item is not None:
+                    name = self._ssh_key_name(vault, item)
+                    key = self._key_name_cache_key(vault_id, row)
+                    if name is _UNVERIFIED_KEY:
+                        unverified.add(key)
+                    else:
+                        self._key_names[key] = name
+        choices = []
+        for index, row in enumerate(rows):
+            fingerprint = str(row.get("public_fingerprint") or "")
+            key = self._key_name_cache_key(vault_id, row)
+            name = None if index >= _NAMED_KEY_CHOICES else (_UNVERIFIED_KEY if key in unverified else self._key_names.get(key))
+            if name is _UNVERIFIED_KEY:
+                label = f"{fingerprint or row['item_id']} (could not be verified)"
+            elif name:
+                # A name identifies the key, so its fingerprint is shortened to keep one line.
+                short = fingerprint if len(fingerprint) <= 24 else fingerprint[:19] + "…"
+                label = f"{name} · {short}"
+            else:
+                label = fingerprint or row["item_id"]
+            choices.append({"item_id": row["item_id"], "label": terminal_safe(label)})
+        return sorted(choices, key=lambda choice: choice["label"].lower())
+
+    @staticmethod
+    def _key_name_cache_key(vault_id: str, row: Mapping[str, Any]) -> tuple[str, str, Any]:
+        return vault_id, str(row["item_id"]), row.get("revision")
+
+    def _ssh_key_name(self, vault: Any, item: Mapping[str, Any]) -> Any:
+        """The key's name from its decrypted item, ``None``, or ``_UNVERIFIED_KEY``."""
+        try:
+            payload = self.items.read_item(vault, item)
+        except Exception:  # a signature, trust or rollback failure: say so instead of hiding it
+            logger.info("An SSH key for the picker could not be verified")
+            return _UNVERIFIED_KEY
+        name = payload.get("name") if isinstance(payload, Mapping) else None
+        if isinstance(payload, dict):
+            payload.clear()  # drop the decrypted key material as soon as the name is out
+        return name[:_KEY_NAME_MAX] if isinstance(name, str) and name else None
+
+    async def team_choices(self) -> list[dict[str, str]]:
+        """Teams this user belongs to, as ``{"slug", "label"}`` for a picker."""
+        choices = []
+        for team in await self.teams.list_teams():
+            slug = team.get("slug") if isinstance(team, Mapping) else None
+            if isinstance(slug, str) and slug:
+                name = terminal_safe(team.get("name") or slug)
+                choices.append({"slug": slug, "label": name if name == slug else f"{name} ({slug})"})
+        return sorted(choices, key=lambda choice: choice["label"].lower())
+
+    async def shared_server_choices(self, *, team: str) -> list[dict[str, str]]:
+        """A team's shared servers, as ``{"server_id", "label"}`` for a picker."""
+        choices = []
+        for server in await self.teams.list_shared_servers(team):
+            raw_id = server.get("id") if isinstance(server, Mapping) else None
+            if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)) or raw_id == "":
+                continue
+            server_id = str(raw_id)
+            host = server.get("hostname") or server.get("host")
+            name = terminal_safe(server.get("name") or server_id)
+            choices.append({"server_id": server_id, "label": f"{name} ({terminal_safe(host)})" if host else name})
+        return sorted(choices, key=lambda choice: choice["label"].lower())
 
     async def show_item(self, *, vault_id: str, item_id: str, reveal: bool) -> dict[str, Any]:
         item = await self.items.get_item(vault_id, item_id)

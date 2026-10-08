@@ -10,7 +10,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Input, Static
+from textual.widgets import Button, DataTable, Select, Static
 
 from servonaut.screens.ca import CaScreen
 from servonaut.screens.vault import (
@@ -345,25 +345,31 @@ _CA_ACTIONS = ("#ca_audit", "#ca_enroll", "#ca_krl", "#ca_break_glass_scan")
 
 
 class _SwitchableCaService:
-    """CA calls answered the way a service without SSH certificates answers, until switched on."""
+    """CA calls answered the way a service without SSH certificates answers, for the teams in ``switched_off``."""
 
     def __init__(self) -> None:
-        self.switched_on = False
+        self.switched_off = {"ops"}
         self.audits = 0
 
-    def _refuse(self) -> None:
-        if not self.switched_on:
+    def _refuse(self, team: str) -> None:
+        if team in self.switched_off:
             raise FeatureDisabledError(
                 code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
             )
 
+    async def team_choices(self):
+        return [{"slug": "ops", "label": "Ops (ops)"}, {"slug": "platform", "label": "Platform (platform)"}]
+
+    async def shared_server_choices(self, *, team: str):
+        return [{"server_id": f"{team}-web", "label": "web-1"}]
+
     async def ca_status(self, *, team: str):
-        self._refuse()
+        self._refuse(team)
         return {"team": team, "enabled": True}
 
     async def ca_audit(self, *, team: str):
         self.audits += 1
-        self._refuse()
+        self._refuse(team)
         return {"ok": True}
 
 
@@ -384,6 +390,20 @@ def _ca_actions_disabled(screen: Screen) -> list[bool]:
     return [screen.query_one(selector, Button).disabled for selector in _CA_ACTIONS]
 
 
+async def _ca_team_picker(screen: Screen) -> Select:
+    """The CA screen's team picker once its teams have loaded."""
+    team = screen.query_one("#ca_team", Select)
+    await wait_until(lambda: not team.disabled)
+    return team
+
+
+async def _ca_team_options_loaded(pilot, screen: Screen) -> None:
+    """Wait until the chosen team's server and break-glass pickers are filled and the layout settles."""
+    pickers = [screen.query_one(selector, Select) for selector in ("#ca_server", "#ca_break_glass")]
+    await wait_until(lambda: not any("Loading" in picker.prompt for picker in pickers))
+    await pilot.pause()  # a guidance line may have moved the buttons
+
+
 @pytest.mark.asyncio
 async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actions() -> None:
     service = _SwitchableCaService()
@@ -393,9 +413,9 @@ async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actio
         screen = app.screen
         assert isinstance(screen, CaScreen)
         status = screen.query_one("#ca_status", Static)
-        screen.query_one("#ca_team", Input).value = "ops"
-        await pilot.click("#ca_refresh")
+        (await _ca_team_picker(screen)).value = "ops"  # choosing a team loads its CA status
         await wait_until(lambda: "coming soon" in str(status.render()))
+        await _ca_team_options_loaded(pilot, screen)
 
         assert str(status.render()) == SSH_CA_COMING_SOON
         assert "Could not load" not in str(status.render())
@@ -407,9 +427,10 @@ async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actio
         await pilot.pause()
         assert service.audits == 0
 
-        service.switched_on = True
+        service.switched_off.clear()
         await pilot.click("#ca_refresh")
         await wait_until(lambda: "enabled: True" in str(status.render()))
+        await _ca_team_options_loaded(pilot, screen)
         assert _ca_actions_disabled(screen) == [False, False, False, False]
 
 
@@ -419,17 +440,15 @@ async def test_another_team_offers_the_ca_actions_again() -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause()
         screen = app.screen
-        team = screen.query_one("#ca_team", Input)
+        status = screen.query_one("#ca_status", Static)
+        team = await _ca_team_picker(screen)
         team.value = "ops"
-        await screen._load("ops")
-        assert _ca_actions_disabled(screen) == [True, True, True, True]
-
-        team.value = "ops "
-        await pilot.pause()
-        assert _ca_actions_disabled(screen) == [True, True, True, True]
+        await wait_until(lambda: _ca_actions_disabled(screen) == [True, True, True, True])
 
         team.value = "platform"
-        await wait_until(lambda: _ca_actions_disabled(screen) == [False, False, False, False])
+        await wait_until(lambda: "team: platform" in str(status.render()))
+        await _ca_team_options_loaded(pilot, screen)
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
 
 
 @pytest.mark.asyncio
@@ -439,7 +458,11 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause()
         screen = app.screen
-        screen.query_one("#ca_team", Input).value = "ops"
+        status = screen.query_one("#ca_status", Static)
+        (await _ca_team_picker(screen)).value = "platform"
+        await wait_until(lambda: "team: platform" in str(status.render()))
+        await _ca_team_options_loaded(pilot, screen)
+        service.switched_off.add("platform")  # switched off after the status was read
         await pilot.click("#ca_audit")
         await wait_until(lambda: bool(app.notes))
 
@@ -451,14 +474,19 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
 
 @pytest.mark.asyncio
 async def test_other_ca_action_failures_still_notify_an_error() -> None:
-    class Service:
+    class Service(_SwitchableCaService):
         async def ca_audit(self, *, team: str):
             raise APIError(code="ssh_ca_unavailable", message="server text", status=503)
 
-    app = _CaHost(Service())  # type: ignore[arg-type]
+    service = Service()
+    service.switched_off.clear()
+    app = _CaHost(service)
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause()
         screen = app.screen
+        (await _ca_team_picker(screen)).value = "ops"
+        await wait_until(lambda: "enabled: True" in str(screen.query_one("#ca_status", Static).render()))
+        await _ca_team_options_loaded(pilot, screen)
         await screen._audit("ops")
 
         [(message, kwargs)] = app.notes

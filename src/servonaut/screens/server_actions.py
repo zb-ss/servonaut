@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from rich.markup import escape
+from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Static, Button, Footer, Input
+from textual.widgets import Static, Button, Checkbox, Footer, Input, Label, Select
 
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_KEEP_KNOWN_HOSTS,
@@ -21,6 +22,7 @@ from servonaut.services.ssh_host_keys import (
     detect_host_key_problem,
     host_key_alias_options,
     identity_file_args,
+    trusted_host_keys,
 )
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
@@ -126,33 +128,238 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
 
 
 class VaultBindingModal(ModalScreen[Optional[dict]]):
-    """Collect explicit native-vault binding identifiers without exposing a key."""
+    """Pick the vault SSH key for this server from what the user can read.
+
+    A shared server belongs to its team, so only that team's vault is offered;
+    any other server is bound for the user alone. Nothing secret is shown: keys
+    are listed by name and fingerprint, and the result carries identifiers only.
+    """
+
+    DEFAULT_CSS = """
+    #vault_bind_scope { color: $text-muted; }
+    #vault_bind_trusted { margin: 1 0 0 0; }
+    #vault_bind_use_trusted { margin: 0 0 1 0; }
+    #vault_bind_message { color: $warning; margin: 1 0 0 0; }
+    #vault_bind_modal > Horizontal { height: auto; margin-top: 1; }
+    #vault_bind_use_trusted.-hidden { display: none; }
+    #vault_bind_message { display: none; }
+    """
+    AUTO_FOCUS = ""
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, service: Any, instance: Dict[str, Any]) -> None:
+        super().__init__()
+        self._service = service
+        self._instance = instance
+        self._team = instance.get("team_slug") if instance.get("is_shared") is True else None
+        self._trusted_keys: list[str] = []
+        # What is on screen, kept raw so a demo-mode toggle can redraw it.
+        self._vault_choices: list[dict[str, str]] = []
+        self._key_choices: list[dict[str, str]] = []
+        self._keys_for: str | None = None
+        self._message = ""
+        self._trusted_text = ""
 
     def compose(self) -> ComposeResult:
-        yield Container(
+        login = str(self._instance.get("login_user") or self._instance.get("username") or "")
+        rows: list[Any] = [
             Static("[bold]Use vault key[/bold]"),
-            Static("Enter a team slug for a shared server. Personal servers require explicit host-key pins."),
-            Input(placeholder="Team slug (shared server only)", id="vault_bind_team"),
-            Input(placeholder="Vault ID", id="vault_bind_vault"),
-            Input(placeholder="Vault SSH item ID", id="vault_bind_item"),
-            Input(placeholder="Login user (optional)", id="vault_bind_login"),
-            Input(placeholder="Verified OpenSSH host keys, comma separated (shared: optional)", id="vault_bind_host_keys"),
-            Horizontal(Button("Cancel", id="vault_bind_cancel"), Button("Bind", id="vault_bind_confirm")),
-            id="vault_bind_modal",
-        )
+            Static(escape(self.scrub_for_display(self._scope_text())), id="vault_bind_scope"),
+            Label("Vault"),
+            Select([], prompt="Loading vaults…", id="vault_bind_vault", disabled=True),
+            Label("SSH key"),
+            Select([], prompt="Choose a vault first", id="vault_bind_item", disabled=True),
+            Label("Login user"),
+            Input(value=login, placeholder="Login user", id="vault_bind_login"),
+        ]
+        if self._team:
+            rows.append(Input(placeholder="Verified OpenSSH host keys, comma separated (optional)", id="vault_bind_host_keys"))
+        else:
+            rows.extend((
+                Static("Checking the host keys this machine trusts…", id="vault_bind_trusted"),
+                Checkbox("I checked these fingerprints: pin them", value=False, id="vault_bind_use_trusted",
+                         disabled=True, classes="-hidden"),
+                Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
+            ))
+        rows.extend((
+            Static("", id="vault_bind_message"),
+            Horizontal(Button("Cancel", id="vault_bind_cancel"), Button("Bind", variant="primary", id="vault_bind_confirm")),
+        ))
+        yield Container(*rows, id="vault_bind_modal")
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load_vaults(), group="vault_bind_choices", exclusive=True)
+        if not self._team:
+            self.run_worker(self._load_trusted_host_keys(), group="vault_bind_host_keys")
+
+    def _scope_text(self) -> str:
+        if self._team:
+            return f"Shared server in team {self._team}: everyone in the team uses this key."
+        return "Your server: the key is used only by you."
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def scrub_for_display(self, value: object) -> str:
+        """Demo-safe text: vault, key and host names are hidden in demo mode."""
+        text = str(value)
+        redactor = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redactor is not None:
+            return str(redactor.scrub_stream(text))
+        return text
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw names and messages under the current demo mode, keeping the choices."""
+        self._show_options("#vault_bind_vault", self._vault_choices, "vault_id")
+        self._show_options("#vault_bind_item", self._key_choices, "item_id")
+        self.query_one("#vault_bind_scope", Static).update(escape(self.scrub_for_display(self._scope_text())))
+        self._say(self._message)
+        if not self._team:
+            self._show_trusted(self._trusted_text)
+
+    def _show_options(self, selector: str, choices: list[dict[str, str]], key: str) -> None:
+        select = self.query_one(selector, Select)
+        kept = select.value
+        # Names come from other team members: inert text, never parsed as markup.
+        select.set_options([(Text(self.scrub_for_display(choice["label"])), choice[key]) for choice in choices])
+        if any(choice[key] == kept for choice in choices):
+            select.value = kept
+
+    def _show_trusted(self, text: str) -> None:
+        self._trusted_text = text
+        self.query_one("#vault_bind_trusted", Static).update(escape(self.scrub_for_display(text)))
+
+    def _say(self, text: str) -> None:
+        self._message = text
+        message = self.query_one("#vault_bind_message", Static)
+        message.update(escape(self.scrub_for_display(text)))
+        message.display = bool(text)
+
+    async def _load_vaults(self) -> None:
+        select = self.query_one("#vault_bind_vault", Select)
+        try:
+            choices = await self._service.vault_choices(team=self._team)
+        except Exception as exc:
+            from servonaut.services.vault.errors import vault_failure_reason
+
+            select.set_options([])
+            select.prompt = "Vaults could not be loaded"
+            self._say(f"Could not load your vaults ({vault_failure_reason(exc)}).")
+            return
+        if not choices:
+            select.prompt = "No vault available"
+            self._say(
+                f"Team {self._team} has no vault you can read yet: an owner or admin creates it, "
+                "or grants your access, on the Vault screen."
+                if self._team else "You have no vault yet: create one on the Vault screen first."
+            )
+            return
+        self._vault_choices = choices
+        self._show_options("#vault_bind_vault", choices, "vault_id")
+        select.prompt = "Choose a vault"
+        select.disabled = False
+        personal = [choice for choice in choices if choice.get("kind") == "personal"]
+        obvious = choices[0] if self._team and len(choices) == 1 else (personal[0] if not self._team and personal else None)
+        if obvious is not None:
+            select.value = obvious["vault_id"]
+        else:
+            select.focus()
+
+    async def _load_keys(self, vault_id: str) -> None:
+        self._keys_for = vault_id
+        self._key_choices = []
+        select = self.query_one("#vault_bind_item", Select)
+        select.set_options([])
+        select.prompt = "Loading SSH keys…"
+        select.disabled = True
+        try:
+            choices = await self._service.ssh_key_choices(vault_id=vault_id)
+        except Exception as exc:
+            from servonaut.services.vault.errors import vault_failure_reason
+
+            select.prompt = "SSH keys could not be loaded"
+            self._keys_for = None
+            # Clear the vault so choosing it again (even the only one) retries.
+            self.query_one("#vault_bind_vault", Select).clear()
+            self._say(f"Could not load the SSH keys ({vault_failure_reason(exc)}). Choose the vault again to retry.")
+            return
+        if not choices:
+            select.prompt = "No SSH key in this vault"
+            self._say("This vault has no SSH key yet: import one with Import SSH on the Vault screen.")
+            return
+        self._say("")
+        self._key_choices = choices
+        self._show_options("#vault_bind_item", choices, "item_id")
+        select.prompt = "Choose an SSH key"
+        select.disabled = False
+        if len(choices) == 1:
+            select.value = choices[0]["item_id"]
+        select.focus()
+
+    async def _load_trusted_host_keys(self) -> None:
+        import asyncio
+
+        from servonaut.services.vault import crypto
+
+        host = str(self._instance.get("hostname") or self._instance.get("host") or self._instance.get("public_ip") or "")
+        port = self._instance.get("port") if isinstance(self._instance.get("port"), int) else None
+        try:
+            keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
+        except Exception:
+            keys = []
+        box = self.query_one("#vault_bind_use_trusted", Checkbox)
+        if not keys:
+            self._show_trusted("This machine does not trust a host key for this server yet: connect once "
+                               "with SSH and check its fingerprint, or paste verified host keys below.")
+            box.value = False
+            return
+        self._trusted_keys = list(keys)
+        self._show_trusted(f"Host keys this machine trusts for {host}:\n" + "\n".join(
+            f"  {crypto.ssh_public_fingerprint(key)}" for key in keys
+        ))
+        box.disabled = False
+        box.remove_class("-hidden")
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        # A redraw that restores the same vault is not a new choice.
+        if event.select.id == "vault_bind_vault" and isinstance(event.value, str) and event.value != self._keys_for:
+            self.run_worker(self._load_keys(event.value), group="vault_bind_choices", exclusive=True)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "vault_bind_confirm":
             self.dismiss(None)
             return
-        values = {
-            "team": self.query_one("#vault_bind_team", Input).value.strip(),
-            "vault_id": self.query_one("#vault_bind_vault", Input).value.strip(),
-            "item_id": self.query_one("#vault_bind_item", Input).value.strip(),
-            "login": self.query_one("#vault_bind_login", Input).value.strip() or None,
-            "host_keys": self.query_one("#vault_bind_host_keys", Input).value.strip(),
-        }
-        self.dismiss(values if all(values[key] for key in ("vault_id", "item_id")) else None)
+        vault_id = self.query_one("#vault_bind_vault", Select).value
+        item_id = self.query_one("#vault_bind_item", Select).value
+        offered_vaults = {choice["vault_id"] for choice in self._vault_choices}
+        offered_keys = {choice["item_id"] for choice in self._key_choices}
+        if (
+            not isinstance(vault_id, str) or not isinstance(item_id, str)
+            or vault_id not in offered_vaults or vault_id != self._keys_for or item_id not in offered_keys
+        ):
+            self._say("Choose a vault and an SSH key first.")
+            return
+        login = self.query_one("#vault_bind_login", Input).value.strip()
+        if not self._team and not login:
+            self._say("A server of your own needs the login user the key is for.")
+            return
+        port = self._instance.get("port", 22)
+        if not self._team and (isinstance(port, bool) or not isinstance(port, int)):
+            self._say("This server's SSH port is not a number: fix it in Custom Servers first.")
+            return
+        typed = [key.strip() for key in self.query_one("#vault_bind_host_keys", Input).value.split(",") if key.strip()]
+        use_trusted = not self._team and self.query_one("#vault_bind_use_trusted", Checkbox).value
+        host_keys = [*(self._trusted_keys if use_trusted else []), *typed]
+        if not self._team and not host_keys:
+            self._say("A server of your own needs its host keys pinned: tick the trusted keys or paste them.")
+            return
+        self.dismiss({
+            "team": self._team or "",
+            "vault_id": vault_id,
+            "item_id": item_id,
+            "login": login or None,
+            "host_keys": ",".join(host_keys),
+        })
 
 
 class ServerActionsScreen(ServerAccountMixin, Screen):
@@ -1285,9 +1492,6 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
 
         async def flow() -> None:
-            values = await self.app.push_screen_wait(VaultBindingModal())
-            if not values:
-                return
             service = getattr(self.app, "vault_command_service", None)
             if service is None:
                 self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
@@ -1296,6 +1500,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             server = str(instance.get("id") or "")
             if not server:
                 self.app.notify("This server has no usable identifier.", severity="error", markup=False)
+                return
+            values = await self.app.push_screen_wait(VaultBindingModal(service, instance))
+            if not values:
                 return
             host_keys = [key.strip() for key in values["host_keys"].split(",") if key.strip()]
             try:

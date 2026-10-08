@@ -7,7 +7,7 @@
     padding: 1 2;
 }
 
-/* The CA actions stack below three inputs: let them scroll into reach on short terminals. */
+/* The CA actions stack below three pickers: let them scroll into reach on short terminals. */
 #ca_content {
     overflow-y: auto;
 }
@@ -143,7 +143,6 @@ CaEnrollmentConfirmModal {
 #vault_import_bind_team,
 #vault_import_bind_server,
 #vault_import_bind_login,
-#vault_bind_team,
 #vault_bind_vault,
 #vault_bind_item,
 #vault_bind_login,
@@ -192,7 +191,7 @@ CaEnrollmentConfirmModal {
 }
 
 #vault_import_bind_reference_modal Horizontal,
-#vault_import_bind_target_modal Horizontal {
+#vault_import_bind_target_modal > Horizontal {
     height: auto;
     margin-top: 1;
 }
@@ -249,7 +248,12 @@ CaEnrollmentConfirmModal {
     margin-top: 1;
 }
 
+/* Accent text only: a border of its own hid the label in the one-line narrow
+   and short layouts, and focus keeps the readable text of every other button. */
 #action_buttons #btn_use_vault_key {
-    border: tall $accent;
     color: $accent;
+}
+
+#action_buttons #btn_use_vault_key:focus {
+    color: $text;
 }
