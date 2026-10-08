@@ -18,6 +18,7 @@ is never written to the failure artifacts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import ssl
@@ -85,6 +86,8 @@ class FakeCloud(LoopbackServer):
         # The hosted service can ship with SSH certificates switched off (Settings
         # feature.ssh_ca_enabled); see :meth:`switch_off_ssh_ca`.
         self.ssh_ca_switched_off = False
+        # Seconds every /api response waits; see :meth:`slow_down`.
+        self.api_delay_seconds = 0.0
         self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
@@ -117,6 +120,7 @@ class FakeCloud(LoopbackServer):
         self.secrets.reset()
         self.vault.reset()
         self.ssh_ca_switched_off = False
+        self.api_delay_seconds = 0.0
         self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
@@ -206,11 +210,23 @@ class FakeCloud(LoopbackServer):
         """
         self.ssh_ca_switched_off = True
 
+    def slow_down(self, seconds: float) -> None:
+        """Answer every ``/api`` request only after *seconds*, like a slow network.
+
+        For walking the product by hand: slow work then stays on screen long
+        enough to see what the user sees while it runs.
+        """
+        if seconds < 0:
+            raise ValueError("the API delay cannot be negative")
+        self.api_delay_seconds = float(seconds)
+
     def ssl_context(self) -> ssl.SSLContext:
         return self._tls.server_context()
 
     def build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._log_middleware, self._ssh_ca_switch_middleware])
+        app = web.Application(
+            middlewares=[self._log_middleware, self._delay_middleware, self._ssh_ca_switch_middleware]
+        )
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field)
@@ -225,6 +241,12 @@ class FakeCloud(LoopbackServer):
         control.add_routes(app, self._store, self._log)
         require_unique_routes(app)
         return app
+
+    @web.middleware
+    async def _delay_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        if self.api_delay_seconds and request.path.startswith("/api/"):
+            await asyncio.sleep(self.api_delay_seconds)
+        return await handler(request)
 
     @web.middleware
     async def _ssh_ca_switch_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
