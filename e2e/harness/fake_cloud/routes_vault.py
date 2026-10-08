@@ -819,6 +819,8 @@ class VaultCloud:
 
     @staticmethod
     def _has_live_certificate(state: dict[str, Any], generation: int, now: float) -> bool:
+        if generation in state["expired_generations"]:
+            return False
         return any(
             entry["cert_type"] == "user" and entry["_generation"] == generation and entry["_valid_before"] > now
             for entry in state["issued"]
@@ -831,9 +833,13 @@ class VaultCloud:
             if row["status"] == "previous" and self._has_live_certificate(state, row["generation"], now)
         ]
 
-    def _trusted_generations(self, state: dict[str, Any], now: float) -> list[dict[str, Any]]:
-        """Every user CA a host must trust: the active one, the next one and live previous ones."""
-        rows = [self._generation(state, "active"), self._generation(state, "next"), *self._previous_generations(state, now)]
+    def _installable_generations(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        """The user CAs a host job installs: the active one and, during a rollover, the next.
+
+        Retired CAs are never listed, so a host refreshed after a rollover
+        stops trusting the old generation.
+        """
+        rows = [self._generation(state, "active"), self._generation(state, "next")]
         return sorted((row for row in rows if row is not None), key=lambda row: row["generation"])
 
     def ca_payload(self, slug: str) -> dict[str, Any]:
@@ -871,6 +877,8 @@ class VaultCloud:
                 "host_ca": _ca_generation(host_key, 1, "active", f"{CA_COMMENT}-host-gen1"),
                 # krl_version starts at 1 with an empty KRL.
                 "krl_version": 1, "issued": [], "hosts": {},
+                # Retired generations whose certificates a control declared expired.
+                "expired_generations": set(),
             }
             self._ca[slug] = state
             self._build_krl(state)
@@ -998,21 +1006,27 @@ class VaultCloud:
         self._build_krl(state)
 
     def _build_krl(self, state: dict[str, Any]) -> None:
-        """Store this version's KRL: one serial section per trusted user CA.
+        """Store this version's KRL: one serial section per user CA generation with revocations.
 
-        Built when the version changes, so a version always has the same bytes.
+        A generation without a still-listed revoked serial gets no section (a
+        new CA's KRL has none). A revoked certificate drops out a grace period
+        after it expires. Built only when a revocation bumps the version, so a
+        version always has the same bytes; completing a rollover publishes none.
         """
         now = int(time.time())
         sections: list[tuple[bytes, list[int]]] = []
         listed: list[int] = []
-        for generation in self._trusted_generations(state, now):
+        for generation in sorted(state["user_cas"], key=lambda row: row["generation"]):
+            if generation["generation"] in state["expired_generations"]:
+                continue
             serials = sorted(
                 row["serial"] for row in state["issued"]
                 if row["cert_type"] == "user" and row["_generation"] == generation["generation"]
                 and row["revoked_at"] is not None and row["_valid_before"] + KRL_EXPIRY_GRACE_SECONDS > now
             )
-            sections.append((_public_blob(generation["public_key"]), serials))
-            listed.extend(serials)
+            if serials:
+                sections.append((_public_blob(generation["public_key"]), serials))
+                listed.extend(serials)
         state["krl"] = _krl_bytes(sections, state["krl_version"], now)
         state["krl_serials"] = sorted(listed)
         state["krl_generated_at"] = _iso(now)
@@ -1110,6 +1124,21 @@ class VaultCloud:
                 if host["status"] == "enrolled" and self._open_enrollment(server_id) is None:
                     self._new_enrollment(slug, server_id, "refresh", caller, None)
             return 201, self.ca_payload(slug)
+
+    def expire_retired_user_cas(self, slug: str = TEAM_SLUG) -> list[int]:
+        """Control: every retired user CA's certificates have expired.
+
+        The service then stops listing those CAs in ``user_ca_previous`` and
+        their revoked serials in the next KRL, as it does once a retired CA's
+        last certificate expires. Returns the generations affected.
+        """
+        with self._lock:
+            state = self._ca_state(slug)
+            if state is None:
+                raise ValueError("enable the team SSH CA first")
+            retired = [row["generation"] for row in state["user_cas"] if row["status"] == "previous"]
+            state["expired_generations"].update(retired)
+            return retired
 
     def complete_ca_rollover(self, slug: str = TEAM_SLUG) -> tuple[int, dict[str, Any]]:
         """``POST …/ssh-ca/rollover/complete``; also the web UI's control."""
@@ -1227,7 +1256,7 @@ class VaultCloud:
             "server": {"id": job["server_id"], "name": server.get("name"), "hostname": hostname,
                        "port": server.get("port", 22)},
             "connect_via": {"credential_binding": copy.deepcopy(binding)},
-            "user_ca_public_keys": [row["public_key"] for row in self._trusted_generations(state, time.time())],
+            "user_ca_public_keys": [row["public_key"] for row in self._installable_generations(state)],
             "host_ca_public_key": state["host_ca"]["public_key"],
             "principals_by_login": {login: [f"svn:{job['server_id']}:{login}"] for login in CA_LOGINS},
             "host_principals": [hostname, f"{job['server_id']}.servonaut"],
@@ -2004,7 +2033,7 @@ def _krl_bytes(sections: list[tuple[bytes, list[int]]], version: int, generated:
     """An OpenSSH KRL revoking certificates by serial, built here, not by the client.
 
     One KRL_SECTION_CERTIFICATES per CA key blob, each with one
-    KRL_SECTION_CERT_SERIAL_LIST of ascending serials (possibly none).
+    KRL_SECTION_CERT_SERIAL_LIST of ascending serials; no sections is an empty KRL.
     """
     def string(value: bytes) -> bytes:
         return struct.pack(">I", len(value)) + value

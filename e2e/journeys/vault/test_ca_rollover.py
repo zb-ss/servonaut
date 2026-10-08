@@ -95,6 +95,9 @@ done
 exec "$@"
 """
 CA_CHANGED = "The team SSH CA changed"
+TRUST_PROMPT = "Trust this SSH CA for team {team}? [y/N]"
+# Another owner or admin of the team, with a device of their own.
+OTHER_ADMIN_USER_ID = 4244
 WAIT_SECONDS = 120.0
 
 
@@ -544,8 +547,13 @@ class _PtyRun:
     prompted: bool
 
 
-def _confirmed(journey: Any, home: Any, servonaut_cmd: list[str], *args: str, answer: str) -> _PtyRun:
-    """Run a CA host command on a terminal and type *answer* at the host-name prompt."""
+def _confirmed(journey: Any, home: Any, servonaut_cmd: list[str], *args: str, answer: str,
+               prompt: Optional[str] = None) -> _PtyRun:
+    """Run a CA command on a terminal and type *answer* at its prompt.
+
+    The prompt defaults to the typed host-name confirmation of host jobs.
+    """
+    expected = f"Type {answer} to continue:" if prompt is None else prompt
     process, master = _start_on_pty(
         [*servonaut_cmd, *args], env=journey.child_env(home), cwd=home.base, size=(160, 50),
     )
@@ -553,8 +561,7 @@ def _confirmed(journey: Any, home: Any, servonaut_cmd: list[str], *args: str, an
     prompted = False
     try:
         prompted = _read_until(
-            master, screen, lambda text: f"Type {answer} to continue:" in text,
-            time.monotonic() + WAIT_SECONDS, "the typed host-name confirmation",
+            master, screen, lambda text: expected in text, time.monotonic() + WAIT_SECONDS, repr(expected),
         )
         if prompted:
             os.write(master, (answer + "\n").encode("ascii"))
@@ -640,6 +647,36 @@ def _ca_roles(text: str) -> dict[str, str]:
     return roles
 
 
+def _pins_file(home: Any) -> Any:
+    return home.home / ".servonaut" / "vault" / "ca_pins.json"
+
+
+def _held_certificates(home: Any) -> list[str]:
+    directory = home.home / ".servonaut" / "certs" / TEAM_SLUG
+    return sorted(path.name for path in directory.iterdir()) if directory.is_dir() else []
+
+
+def _refresh_as_other_admin(fake_cloud: Any, host: _SshdHost, device: Any, enrollment_id: str) -> None:
+    """Another admin's CLI carries out a refresh job, as the v1 template does.
+
+    A refresh rewrites the CA keys, principals and KRL; sshd reads those files
+    at every authentication, so the loaded drop-in and host certificate stay.
+    """
+    vault = fake_cloud.vault
+    status, params = vault.enrollment_params(TEAM_SLUG, enrollment_id, device.user_id)
+    assert status == 200, params
+    status, claimed = vault.claim_enrollment(TEAM_SLUG, enrollment_id, device)
+    assert status == 200, claimed
+    host.remote.write("/etc/ssh/servonaut/revoked.krl", base64.b64decode(params["krl"]))
+    host.remote.write("/etc/ssh/servonaut/user_ca_keys.pub", "\n".join(params["user_ca_public_keys"]) + "\n")
+    for login, principals in params["principals_by_login"].items():
+        host.remote.write(f"/etc/ssh/servonaut/principals/{login}", "\n".join(principals) + "\n")
+    status, done = vault.enrollment_result(TEAM_SLUG, enrollment_id, device, {
+        "status": "succeeded", "steps": [{"name": "managed_files", "status": "ok", "detail": ""}],
+    })
+    assert status == 200 and done["status"] == "succeeded", done
+
+
 def _installed_ca_keys(host: _SshdHost) -> set[str]:
     text = host.remote.read_bytes("/etc/ssh/servonaut/user_ca_keys.pub").decode("ascii")
     return {_fingerprint(line) for line in _key_lines(text)}
@@ -722,11 +759,13 @@ def test_a_user_ca_rollover_is_carried_through_by_ca_refresh(journey, fake_cloud
     assert _host_row(fake_cloud)["user_ca_generations"] == [1, 2]
     assert _member_login(server_1, member_key, member_gen1["certificate"], host_ca) == HOST_NAME
 
-    # 4. The owner completes the rollover on the web.
+    # 4. The owner completes the rollover on the web. That publishes no KRL.
+    krl_before = fake_cloud.vault.ca_payload(TEAM_SLUG)["krl_version"]
     status, completed = fake_cloud.vault.complete_ca_rollover()
     assert status == 200, completed
-    assert completed["user_ca"]["fingerprint"] == gen2["fingerprint"]
+    assert completed["user_ca"]["fingerprint"] == gen2["fingerprint"] and completed["user_ca_next"] is None
     assert [ca["fingerprint"] for ca in completed["user_ca_previous"]] == [gen1["fingerprint"]]
+    assert completed["krl_version"] == krl_before
 
     # 5. Logins now use certificates signed by the ECDSA P-256 CA, and the CLI
     # follows the announced CA instead of refusing a changed pin.
@@ -783,6 +822,8 @@ def test_a_user_ca_rollover_is_carried_through_by_ca_refresh(journey, fake_cloud
     failed = _confirmed(journey, owner, servonaut_cmd, "ca", "refresh", HOST_NAME, "--team", TEAM_SLUG,
                         "--yes", answer=LOOPBACK)
     assert failed.prompted, failed.text
+    # After the rollover a host job installs only the active CA.
+    assert set(_ca_roles(failed.text)) == {gen2["fingerprint"]}, failed.text
     assert failed.returncode == 1, failed.text
     assert "result.status: rolled_back" in failed.text and "did not complete (rolled_back)" in failed.text, failed.text
     assert not server_1.config_test_failures
@@ -794,3 +835,69 @@ def test_a_user_ca_rollover_is_carried_through_by_ca_refresh(journey, fake_cloud
     again = cli(owner, "ssh", HOST_NAME, stdin="hostname\n")
     assert again.returncode == 0, again.describe()
     assert again.stdout.splitlines()[0] == HOST_NAME
+
+    # 9. Another admin rolls the CA over again (gen3) while this device is not
+    # looking, and the retired CAs' certificates expire: nothing links the
+    # pinned gen2 to gen3, so the CLI refuses it until a person trusts it.
+    other_admin = fake_cloud.vault.seed_identity(OTHER_ADMIN_USER_ID, name="other admin device")
+    other_device = fake_cloud.vault._devices[other_admin["device"]["device_id"]]
+    status, rolled = fake_cloud.vault.start_ca_rollover(user_id=OTHER_ADMIN_USER_ID)
+    assert status == 201, rolled
+    gen3 = rolled["user_ca_next"]
+    assert gen3["generation"] == 3 and gen3["alg"] == "ecdsa-sha2-nistp256", gen3
+    (job,) = fake_cloud.vault.list_enrollments(TEAM_SLUG, "requested")["data"]
+    assert job["executor_user_id"] == OTHER_ADMIN_USER_ID, job
+    _refresh_as_other_admin(fake_cloud, server_1, other_device, job["enrollment_id"])
+    # A host job lists the active and the next CA only, never a retired one.
+    assert _installed_ca_keys(server_1) == {gen2["fingerprint"], gen3["fingerprint"]}
+    assert _host_row(fake_cloud)["user_ca_generations"] == [2, 3]
+    assert _member_login(server_1, member_key, member_gen1["certificate"], host_ca) == "refused"
+    assert server_1.certificate_logins()[-1].reason == "CA not trusted"
+    status, completed = fake_cloud.vault.complete_ca_rollover()
+    assert status == 200 and completed["user_ca"]["fingerprint"] == gen3["fingerprint"], completed
+    assert fake_cloud.vault.expire_retired_user_cas() == [1, 2]
+    payload = fake_cloud.vault.ca_payload(TEAM_SLUG)
+    assert payload["user_ca_previous"] == [] and payload["user_ca_next"] is None, payload
+
+    pins_before = _pins_file(owner).read_bytes()
+    assert json.loads(pins_before)["teams"][TEAM_SLUG]["user_ca_fingerprint"] == gen2["fingerprint"]
+    held_before = _held_certificates(owner)
+    logins_before = len(server_1.certificate_logins())
+    changed = cli(owner, "ssh", HOST_NAME, stdin="hostname\n")
+    assert changed.returncode != 0, changed.describe()
+    assert CA_CHANGED in changed.stderr, changed.describe()
+    assert f"servonaut ca trust --team {TEAM_SLUG}" in changed.stderr, changed.describe()
+    assert _pins_file(owner).read_bytes() == pins_before
+    assert _held_certificates(owner) == held_before
+    assert len(server_1.certificate_logins()) == logins_before
+
+    # Trusting a changed CA needs a person at a terminal.
+    piped_trust = cli(owner, "ca", "trust", "--team", TEAM_SLUG)
+    assert piped_trust.returncode == 5, piped_trust.describe()
+    assert "needs a person" in piped_trust.stderr, piped_trust.describe()
+    assert _pins_file(owner).read_bytes() == pins_before
+
+    prompt = TRUST_PROMPT.format(team=TEAM_SLUG)
+    declined = _confirmed(journey, owner, servonaut_cmd, "ca", "trust", "--team", TEAM_SLUG, answer="n", prompt=prompt)
+    assert declined.prompted, declined.text
+    assert gen2["fingerprint"] in declined.text and gen3["fingerprint"] in declined.text, declined.text
+    assert declined.returncode == 5, declined.text
+    assert "Nothing changed." in declined.text, declined.text
+    assert _pins_file(owner).read_bytes() == pins_before
+
+    trusted = _confirmed(journey, owner, servonaut_cmd, "ca", "trust", "--team", TEAM_SLUG, answer="y", prompt=prompt)
+    assert trusted.prompted, trusted.text
+    assert gen2["fingerprint"] in trusted.text and gen3["fingerprint"] in trusted.text, trusted.text
+    assert trusted.returncode == 0, trusted.text
+    assert "changed: True" in trusted.text, trusted.text
+    pinned = json.loads(_pins_file(owner).read_bytes())["teams"][TEAM_SLUG]
+    assert pinned["user_ca_fingerprint"] == gen3["fingerprint"], pinned
+    assert pinned["host_ca_fingerprint"] == _fingerprint(host_ca), pinned
+
+    # The other admin's refresh installed gen3, so the owner logs in again.
+    trusted_login = cli(owner, "ssh", HOST_NAME, stdin="hostname\n")
+    assert CA_CHANGED not in trusted_login.stderr, trusted_login.describe()
+    assert trusted_login.returncode == 0, trusted_login.describe()
+    assert trusted_login.stdout.splitlines()[0] == HOST_NAME
+    assert _fingerprint(_openssh_line(_newest_certificate(owner).signature_key())) == gen3["fingerprint"]
+    assert server_1.certificate_logins()[-1].accepted
