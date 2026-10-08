@@ -1,8 +1,10 @@
-"""Account data routes: teams and the SSH-verify sidecar.
+"""Account data routes: teams, their shared servers and the SSH-verify sidecar.
 
 The data is neutral and scenario-driven through :class:`AccountData`
 (``FakeCloud.account``). Every route needs the current access token, so a
 client with an expired token has to refresh before it sees anything.
+A shared-server row carries the team SSH CA's view of that server
+(``ssh_ca``), which the Vault fake supplies.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from aiohttp import web
 
@@ -50,12 +52,36 @@ class AccountData:
     def reset(self) -> None:
         with self._lock:
             self._teams = copy.deepcopy(list(_DEFAULT_TEAMS))
+            self._shared: dict[str, list[dict[str, Any]]] = {
+                "example-team": [copy.deepcopy(_VAULT_SHARED_SERVER)],
+            }
             self._verify: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def configure(self, *, teams: Optional[list[dict[str, Any]]] = None) -> None:
+    def configure(
+        self,
+        *,
+        teams: Optional[list[dict[str, Any]]] = None,
+        shared_servers: Optional[dict[str, list[dict[str, Any]]]] = None,
+    ) -> None:
+        """Replace the teams and/or the shared-server inventory (per team slug)."""
         with self._lock:
             if teams is not None:
                 self._teams = copy.deepcopy(teams)
+            if shared_servers is not None:
+                self._shared = copy.deepcopy(shared_servers)
+
+    def place_shared_server(self, slug: str, server_id: str, **changes: Any) -> None:
+        """Change one shared server's row (e.g. point it at a loopback host and port)."""
+        with self._lock:
+            for row in self._shared.get(slug, []):
+                if row.get("id") == server_id:
+                    row.update(copy.deepcopy(changes))
+                    return
+        raise KeyError(server_id)
+
+    def shared_servers(self, slug: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._shared.get(slug, []))
 
     def set_verify_status(
         self, provider: str, instance_id: str, status: str, *, verified_at: Optional[str] = None
@@ -91,8 +117,17 @@ class AccountData:
             return dict(row) if row else None
 
 
-def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) -> None:
-    """Register the account data routes on *app*."""
+def add_routes(
+    app: web.Application,
+    store: ScenarioStore,
+    data: AccountData,
+    ssh_ca: Optional[Callable[[str, str], Optional[dict[str, Any]]]] = None,
+) -> None:
+    """Register the account data routes on *app*.
+
+    *ssh_ca* answers a shared server's ``ssh_ca`` field from the team's SSH
+    CA state; without it every row says ``null`` (no CA).
+    """
 
     def guarded(handler: Any) -> Any:
         async def wrapper(request: web.Request) -> web.StreamResponse:
@@ -118,7 +153,9 @@ def add_routes(app: web.Application, store: ScenarioStore, data: AccountData) ->
             return web.json_response({"error": {"code": "not_found"}}, status=404)
         # The team inventory API uses account authentication; native-vault
         # mutations against a selected server are separately device-signed.
-        servers = [_VAULT_SHARED_SERVER] if slug == "example-team" else []
+        servers = data.shared_servers(slug)
+        for row in servers:
+            row["ssh_ca"] = ssh_ca(slug, str(row.get("id"))) if ssh_ca is not None else None
         return web.json_response({"data": servers})
 
     async def verify_list(request: web.Request) -> web.Response:

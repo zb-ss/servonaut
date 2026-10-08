@@ -1140,9 +1140,9 @@ async def test_claimed_enrollment_that_fails_is_reported_so_the_job_closes() -> 
 
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     client = MagicMock()
-    client.get_status = AsyncMock(return_value=SimpleNamespace(host_ca_public_key="ssh-ed25519 AAAA"))
+    client.get_status = AsyncMock(return_value=SimpleNamespace(host_ca_public_key="ssh-ed25519 AAAA", user_ca_roles={}))
     client.create_enrollment = AsyncMock(return_value={"enrollment_id": "job-1"})
-    params = {"server": {"hostname": "web-1.example.com"}}
+    params = {"kind": "enroll", "server": {"id": "server-1", "hostname": "web-1.example.com"}}
     client.get_enrollment = AsyncMock(return_value={"params": params})
     client.claim_enrollment = AsyncMock(return_value={"params": params})
     client.report_enrollment_result = AsyncMock(return_value={"status": "failed"})
@@ -1712,3 +1712,351 @@ async def test_an_unknown_or_ambiguous_vault_name_is_refused_with_a_way_forward(
         await service.resolve_vault_id("Missing")
     with pytest.raises(VaultUserError, match="several vaults have that name; pass the vault id"):
         await service.resolve_vault_id("TEAM")
+
+
+def _resuming_service(params: dict, *, create_error: APIError | None = None) -> tuple[VaultCommandService, MagicMock]:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    client = MagicMock()
+    client.get_status = AsyncMock(return_value=SimpleNamespace(host_ca_public_key="ssh-ed25519 AAAA", user_ca_roles={}))
+    client.create_enrollment = AsyncMock(side_effect=create_error or APIError(
+        code="enrollment_in_progress", message="server text", status=409, details={"enrollment_id": "job-open"},
+    ))
+    client.get_enrollment = AsyncMock(return_value=params)
+    client.claim_enrollment = AsyncMock(return_value={"status": "claimed"})
+    service._ca = lambda _team: client  # type: ignore[method-assign]
+    service._shared_server = AsyncMock(return_value={"id": "server-1", "hostname": "web-1.example.com"})  # type: ignore[method-assign]
+    service._validate_enrollment_ca_keys = lambda *_args: None  # type: ignore[method-assign]
+    service._execute_claimed_enrollment = AsyncMock(return_value={"result": {"status": "succeeded"}})  # type: ignore[method-assign]
+    return service, client
+
+
+_OPEN_REFRESH = {"kind": "refresh", "server": {"id": "server-1", "hostname": "web-1.example.com"}}
+
+
+@pytest.mark.asyncio
+async def test_refresh_carries_out_the_job_a_rollover_left_waiting() -> None:
+    service, client = _resuming_service(_OPEN_REFRESH)
+
+    result = await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+    assert result["resumed"] is True
+    client.get_enrollment.assert_awaited_once_with("job-open")
+    client.claim_enrollment.assert_awaited_once_with("job-open")
+
+
+@pytest.mark.asyncio
+async def test_an_open_job_of_another_kind_is_named_instead_of_carried_out() -> None:
+    service, client = _resuming_service({**_OPEN_REFRESH, "kind": "unenroll"})
+
+    with pytest.raises(VaultUserError, match=r"open SSH certificate unenroll job; carry it out with `servonaut ca unenroll`"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+    client.claim_enrollment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_open_job_for_another_server_or_break_glass_key_is_not_carried_out() -> None:
+    from servonaut.services.vault.team_vault_client import VaultStateError as StateError
+
+    service, client = _resuming_service({**_OPEN_REFRESH, "server": {"id": "server-2"}})
+    with pytest.raises(StateError, match="another server"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+    enroll = {**_OPEN_REFRESH, "kind": "enroll", "break_glass": {"item_id": "item-a"}}
+    service, client = _resuming_service(enroll)
+    with pytest.raises(VaultUserError, match="different break-glass key"):
+        await service.ca_enroll(team="team-a", server="server-1", break_glass_item_id="item-b",
+                                confirmation=lambda s: s["hostname"])
+    client.claim_enrollment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_open_job_that_runs_from_another_admin_or_is_claimed_is_explained() -> None:
+    service, client = _resuming_service(_OPEN_REFRESH)
+    client.get_enrollment = AsyncMock(side_effect=APIError(code="not_found", message="x", status=404))
+    with pytest.raises(VaultUserError, match="another owner or admin started"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+    service, client = _resuming_service(_OPEN_REFRESH)
+    client.claim_enrollment = AsyncMock(side_effect=APIError(code="already_claimed", message="x", status=409))
+    with pytest.raises(VaultUserError, match="already being carried out"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+
+@pytest.mark.asyncio
+async def test_other_enrollment_conflicts_are_not_mistaken_for_a_waiting_job() -> None:
+    conflict = APIError(code="server_not_enrolled", message="x", status=409)
+    service, client = _resuming_service(_OPEN_REFRESH, create_error=conflict)
+
+    with pytest.raises(APIError):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+    client.get_enrollment.assert_not_awaited()
+
+
+def test_a_refresh_may_install_the_announced_next_user_ca_but_no_other() -> None:
+    from servonaut.services.vault import crypto as vault_crypto
+    from servonaut.services.vault.ca_client import CaStatus
+    from servonaut.services.vault.team_vault_client import VaultStateError as StateError
+
+    def line(seed: int) -> str:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+        return Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32).public_key().public_bytes(
+            Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+
+    active, upcoming, stranger, host = line(1), line(2), line(3), line(4)
+    status = CaStatus(
+        enabled=True, user_ca_public_key=active, host_ca_public_key=host,
+        user_ca_fingerprint=vault_crypto.ssh_public_fingerprint(active),
+        host_ca_fingerprint=vault_crypto.ssh_public_fingerprint(host),
+        policy={}, logins_by_server={}, krl_version=1, raw={},
+        user_ca_next_fingerprint=vault_crypto.ssh_public_fingerprint(upcoming),
+    )
+
+    VaultCommandService._validate_enrollment_ca_keys(
+        {"host_ca_public_key": host, "user_ca_public_keys": [active, upcoming]}, status,
+    )
+    with pytest.raises(StateError, match="does not match a pinned team CA"):
+        VaultCommandService._validate_enrollment_ca_keys(
+            {"host_ca_public_key": host, "user_ca_public_keys": [active, stranger]}, status,
+        )
+
+
+def _jobs_service(rows: list[dict]) -> tuple[VaultCommandService, MagicMock]:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    client = MagicMock()
+    client.list_enrollments = AsyncMock(return_value=rows)
+    service._ca = lambda _team: client  # type: ignore[method-assign]
+    service.teams = MagicMock()
+    service.teams.list_shared_servers = AsyncMock(return_value=[{"id": "server-1", "name": "web 1"}])
+    return service, client
+
+
+_WAITING = {"enrollment_id": "job-1", "kind": "refresh", "server_id": "server-1", "executor_user_id": 1}
+
+
+@pytest.mark.asyncio
+async def test_waiting_jobs_list_only_this_users_with_a_quoted_command() -> None:
+    service, client = _jobs_service([
+        _WAITING,
+        {**_WAITING, "enrollment_id": "job-2", "executor_user_id": 2},
+        {**_WAITING, "enrollment_id": "job-3", "executor_user_id": 2, "kind": "rotate_host_cert"},
+        {**_WAITING, "enrollment_id": "job-4", "kind": "rotate_host_cert"},
+        {**_WAITING, "enrollment_id": "job-5", "executor_user_id": "1"},
+        {**_WAITING, "enrollment_id": "job-6", "executor_user_id": None},
+    ])
+
+    jobs = (await service.ca_jobs(team="team-a"))["jobs"]
+
+    client.list_enrollments.assert_awaited_once_with(status="requested")
+    # Other admins' jobs, unknown kinds and unassigned rows are left out, not fatal.
+    assert [job["enrollment_id"] for job in jobs] == ["job-1", "job-5"]
+    assert jobs[0]["command"] == "servonaut ca refresh server-1 --team team-a"
+    assert jobs[0]["server"] == "web 1"
+
+
+@pytest.mark.asyncio
+async def test_a_shared_server_name_cannot_write_to_the_terminal() -> None:
+    service, _client = _jobs_service([_WAITING])
+    service.teams.list_shared_servers = AsyncMock(
+        return_value=[{"id": "server-1", "name": "web\x1b[2K\r\x1b]0;owned\x07\u202e1"}],
+    )
+
+    job = (await service.ca_jobs(team="team-a"))["jobs"][0]
+
+    assert all(ord(char) >= 32 and char != "\u202e" for char in job["server"])
+    assert "\x1b" not in job["command"] and "owned" not in job["command"]
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_job_event_is_announced_but_never_carried_out() -> None:
+    service, client = _jobs_service([_WAITING])
+    seen: list[dict] = []
+    service.set_enrollment_requested_callback(seen.append)
+    service.ca_refresh = AsyncMock(side_effect=AssertionError("an event must not change a host"))  # type: ignore[method-assign]
+
+    await service.handle_event({"type": "ssh_ca.enrollment_requested",
+                                "data": {"enrollment_id": "job-1", "team_slug": "team-a", "server_id": "server-1"}})
+    await service.handle_event({"type": "ssh_ca.enrollment_requested",
+                                "data": {"enrollment_id": "job-gone", "team_slug": "team-a", "server_id": "server-1"}})
+
+    assert [[job["enrollment_id"] for job in notice["jobs"]] for notice in seen] == [["job-1"]]
+    assert seen[0]["message"] == (
+        "SSH certificate refresh job waiting for web 1. Run: servonaut ca refresh server-1 --team team-a"
+    )
+    client.claim_enrollment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_rollover_s_burst_of_events_is_read_once_and_announced_once() -> None:
+    rows = [{**_WAITING, "enrollment_id": f"job-{index}"} for index in range(50)]
+    service, client = _jobs_service(rows)
+    seen: list[dict] = []
+    service.set_enrollment_requested_callback(seen.append)
+
+    for row in rows:
+        await service.handle_event({"type": "ssh_ca.enrollment_requested",
+                                    "data": {"enrollment_id": row["enrollment_id"], "team_slug": "team-a"}})
+
+    assert client.list_enrollments.await_count == 1
+    assert len(seen) == 1 and len(seen[0]["jobs"]) == 50
+    assert seen[0]["message"] == (
+        "50 SSH certificate jobs are waiting for you in team team-a. See them with: servonaut ca jobs --team team-a"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trusting_a_changed_ca_needs_a_yes_and_then_re_pins() -> None:
+    from servonaut.services.vault.ca_pins import CaPins
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    client = MagicMock()
+    client.get_status = AsyncMock(return_value=SimpleNamespace(
+        enabled=True, user_ca_fingerprint="SHA256:new-user", host_ca_fingerprint="SHA256:host", user_ca_generation=2))
+    client.pins.pinned = MagicMock(return_value=CaPins("SHA256:old-user", "SHA256:host"))
+    service._ca = lambda _team: client  # type: ignore[method-assign]
+
+    declined = await service.ca_trust(team="team-a", confirmation=lambda _summary: False)
+    assert declined["declined"] is True and declined["changed"] is False
+    client.pins.replace_after_confirmation.assert_not_called()
+
+    shown: list[dict] = []
+    result = await service.ca_trust(team="team-a", confirmation=lambda summary: shown.append(summary) or True)
+
+    client.get_status.assert_awaited_with(enforce_pins=False)
+    assert shown[0]["pinned"]["user_ca_fingerprint"] == "SHA256:old-user"
+    assert shown[0]["presented"]["user_ca_fingerprint"] == "SHA256:new-user"
+    assert shown[0]["host_ca_changed"] is False
+    client.pins.replace_after_confirmation.assert_called_once_with(
+        "team-a", CaPins("SHA256:new-user", "SHA256:host"), user_ca_generation=2,
+    )
+    assert result["changed"] is True
+
+
+def _fresh_service(params: dict) -> tuple[VaultCommandService, MagicMock]:
+    service, client = _resuming_service(params)
+    client.create_enrollment = AsyncMock(return_value={"enrollment_id": "job-new"})
+    return service, client
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_claim_brings_other_work_is_reported_failed_before_any_host_change() -> None:
+    service, client = _resuming_service(_OPEN_REFRESH)
+    client.claim_enrollment = AsyncMock(return_value={"params": {**_OPEN_REFRESH, "kind": "unenroll"}})
+    client.report_enrollment_result = AsyncMock(return_value={"status": "failed"})
+    del service._execute_claimed_enrollment  # the real one, to see it refuse
+    service._remote_executor = MagicMock(side_effect=AssertionError("must not reach the host"))  # type: ignore[method-assign]
+
+    from servonaut.services.vault.team_vault_client import VaultStateError as StateError
+    with pytest.raises(StateError, match="differs from the one you confirmed"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+    job_id, report = client.report_enrollment_result.await_args.args
+    assert job_id == "job-open" and report["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_new_job_must_be_the_kind_server_and_key_that_was_requested() -> None:
+    from servonaut.services.vault.team_vault_client import VaultStateError as StateError
+
+    for params, match in (
+        ({**_OPEN_REFRESH, "kind": "unenroll"}, "not the kind"),
+        ({**_OPEN_REFRESH, "server": {"id": "server-2"}}, "another server"),
+        ({**_OPEN_REFRESH, "break_glass": {"item_id": "item-a"}}, "not requested"),
+    ):
+        service, client = _fresh_service(params)
+        with pytest.raises(StateError, match=match):
+            await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+        client.claim_enrollment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_closed_is_explained_before_asking_for_the_host_name() -> None:
+    asked: list[dict] = []
+    service, client = _resuming_service({**_OPEN_REFRESH, "status": "cancelled"})
+    with pytest.raises(VaultUserError, match="cancelled in the web app; run the command again"):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=asked.append)
+    assert asked == []
+
+    for error, match in (
+        (APIError(code="already_claimed", message="x", status=409, details={"status": "cancelled"}), "was cancelled"),
+        (APIError(code="enrollment_expired", message="x", status=410), "expired"),
+    ):
+        service, client = _resuming_service(_OPEN_REFRESH)
+        client.claim_enrollment = AsyncMock(side_effect=error)
+        with pytest.raises(VaultUserError, match=match):
+            await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+
+@pytest.mark.asyncio
+async def test_a_refused_read_of_an_open_job_is_not_blamed_on_another_admin() -> None:
+    service, client = _resuming_service(_OPEN_REFRESH)
+    client.get_enrollment = AsyncMock(side_effect=APIError(code="device_not_active", message="x", status=403))
+
+    with pytest.raises(APIError):
+        await service.ca_refresh(team="team-a", server="server-1", confirmation=lambda s: s["hostname"])
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_names_the_job_kind_and_each_user_ca_role() -> None:
+    service, client = _resuming_service(_OPEN_REFRESH)
+    client.get_status = AsyncMock(return_value=SimpleNamespace(
+        host_ca_public_key="ssh-ed25519 AAAA", user_ca_roles={"SHA256:a": "active (pinned)"}))
+    shown: list[dict] = []
+
+    await service.ca_refresh(team="team-a", server="server-1",
+                             confirmation=lambda summary: shown.append(summary) or summary["hostname"])
+
+    assert shown[0]["kind"] == "refresh"
+    assert shown[0]["user_ca_roles"] == {"SHA256:a": "active (pinned)"}
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_failed_to_show_is_offered_again() -> None:
+    service, client = _jobs_service([_WAITING])
+    calls: list[dict] = []
+
+    def flaky(notice: dict) -> None:
+        calls.append(notice)
+        if len(calls) == 1:
+            raise RuntimeError("display unavailable")
+
+    service.set_enrollment_requested_callback(flaky)
+    event = {"type": "ssh_ca.enrollment_requested", "data": {"enrollment_id": "job-1", "team_slug": "team-a"}}
+
+    with pytest.raises(RuntimeError):
+        await service.handle_event(event)
+    await service.handle_event(event)
+    await service.handle_event(event)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_ids_that_are_not_ids_never_reach_a_suggested_command() -> None:
+    service, _client = _jobs_service([
+        {**_WAITING, "server_id": "s1\x1b]0;x\x07"},
+        {**_WAITING, "enrollment_id": "job 2; rm"},
+    ])
+
+    assert (await service.ca_jobs(team="team-a"))["jobs"] == []
+
+
+def test_connect_prints_the_waiting_jobs_notice(capsys) -> None:
+    from servonaut.main import _print_waiting_ca_job
+
+    _print_waiting_ca_job({"team": "team-a", "jobs": [], "message": "2 SSH certificate jobs are waiting for you"})
+
+    assert capsys.readouterr().out == "2 SSH certificate jobs are waiting for you\n"
+
+
+def test_the_tui_shows_the_waiting_jobs_notice_as_plain_text() -> None:
+    from servonaut.app import ServonautApp
+
+    shown: list[tuple[str, dict]] = []
+    host = SimpleNamespace(notify=lambda message, **kwargs: shown.append((message, kwargs)))
+
+    ServonautApp._on_ca_enrollment_requested(host, {"team": "t", "jobs": [], "message": "[b]1 job[/b] waiting"})
+
+    assert shown == [("[b]1 job[/b] waiting", {"title": "SSH certificates", "severity": "information",
+                                                 "timeout": 30, "markup": False})]

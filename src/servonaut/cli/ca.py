@@ -11,6 +11,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
+from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import vault_failure_reason
 
 _EXIT_OK = 0
@@ -71,6 +72,14 @@ def add_ca_parser(subparsers: Any) -> None:
     revoke.add_argument("--yes", action="store_true")
     audit = commands.add_parser("audit", help="Verify the CA issuance audit chain.")
     audit.add_argument("--team", required=True)
+    jobs = commands.add_parser(
+        "jobs", help="List SSH certificate jobs waiting for you to carry them out, such as a rollover's refreshes.",
+    )
+    jobs.add_argument("--team", required=True)
+    trust = commands.add_parser(
+        "trust", help="Accept the team's changed SSH CA after comparing its fingerprints.",
+    )
+    trust.add_argument("--team", required=True)
     ca.add_argument("--json", action="store_true", help="Emit metadata JSON.")
     _add_json_to_subcommands(ca)
 
@@ -191,6 +200,17 @@ async def _handle(args: argparse.Namespace) -> int:
                     services, f"ca_{args.ca_command}", team=args.team, server=args.server,
                     confirmation=_confirm_hostname,
                 )
+            outcome = _job_outcome(value)
+            if outcome != "succeeded":
+                _print(value, bool(args.json))
+                consequence = (
+                    "the host keeps its previous setup" if outcome == "rolled_back" else
+                    "the host may be partly changed; check its SSH configuration (sshd -t) before you rely on it"
+                )
+                print(f"The {args.ca_command} did not complete ({outcome}); {consequence}.", file=sys.stderr)
+                return _EXIT_ERROR
+            if isinstance(value, Mapping) and value.get("resumed") is True:
+                print(f"Carried out the {args.ca_command} job that was waiting for this server.", file=sys.stderr)
         elif args.ca_command == "krl":
             value = await _invoke(services, "ca_deliver_krl", team=args.team, servers=args.server)
         elif args.ca_command == "break-glass-scan":
@@ -208,6 +228,16 @@ async def _handle(args: argparse.Namespace) -> int:
             )
         elif args.ca_command == "audit":
             value = await _invoke(services, "ca_audit", team=args.team)
+        elif args.ca_command == "jobs":
+            value = await _invoke(services, "ca_jobs", team=args.team)
+            if not args.json:
+                _print_jobs(value)
+                return _EXIT_OK
+        elif args.ca_command == "trust":
+            value = await _invoke(services, "ca_trust", team=args.team, confirmation=_confirm_trust)
+            if isinstance(value, Mapping) and value.get("declined") is True:
+                print("Nothing changed.", file=sys.stderr)
+                return _EXIT_ABORTED
         else:
             raise ValueError(f"Unknown CA command: {args.ca_command}")
         _print(value, bool(args.json))
@@ -224,6 +254,53 @@ def handle_ca_command(args: argparse.Namespace) -> int:
     return _run(_handle(args))
 
 
+def _job_outcome(value: Any) -> str:
+    result = value.get("result") if isinstance(value, Mapping) else None
+    status = result.get("status") if isinstance(result, Mapping) else None
+    return status if isinstance(status, str) and status else "unknown"
+
+
+def _print_jobs(value: Any) -> None:
+    jobs = value.get("jobs") if isinstance(value, Mapping) else None
+    if not jobs:
+        print("No SSH certificate jobs are waiting for you in this team.")
+        return
+    for job in jobs:
+        print(f"{job['kind']} {job['server']}: run `{job['command']}`")
+
+
+def _confirm_trust(summary: Mapping[str, Any]) -> bool:
+    """A person compares the pinned and presented CA fingerprints, then decides.
+
+    There is deliberately no ``--yes``: a changed CA must be checked by a human,
+    and a changed host CA needs part of its new fingerprint typed back.
+    """
+    if not sys.stdin.isatty():
+        print("Refusing in a non-interactive shell: trusting a changed SSH CA needs a person.", file=sys.stderr)
+        return False
+    pinned = summary.get("pinned") if isinstance(summary.get("pinned"), Mapping) else {}
+    presented = summary.get("presented") if isinstance(summary.get("presented"), Mapping) else {}
+    for label, key in (("User CA", "user_ca_fingerprint"), ("Host CA", "host_ca_fingerprint")):
+        print(f"{label}: pinned {pinned.get(key) or 'none'}", file=sys.stderr)
+        print(f"{' ' * len(label)}  now    {presented.get(key)}", file=sys.stderr)
+    print(
+        "Compare these with the User CA and Host CA fingerprints on the team's SSH access page "
+        "in the web app before you continue.",
+        file=sys.stderr,
+    )
+    if summary.get("host_ca_changed") is True:
+        expected = str(presented.get("host_ca_fingerprint") or "")[-8:]
+        print(
+            "The HOST CA changed. Servers prove who they are with it, so only accept this if the team "
+            "owner confirms the change outside Servonaut.",
+            file=sys.stderr,
+        )
+        print("Type the last 8 characters of the new host CA fingerprint: ", end="", file=sys.stderr, flush=True)
+        return bool(expected) and sys.stdin.readline().strip() == expected
+    print(f"Trust this SSH CA for team {summary.get('team')}? [y/N] ", end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower() in {"y", "yes"}
+
+
 def _confirm_hostname(summary: Mapping[str, Any]) -> str:
     """Require typed hostname after the service fetched verified enrollment data."""
     hostname = str(summary.get("hostname") or "")
@@ -236,14 +313,18 @@ def _confirm_hostname(summary: Mapping[str, Any]) -> str:
     host_ca = params.get("host_ca_public_key") or ""
     principals = params.get("principals_by_login") if isinstance(params.get("principals_by_login"), Mapping) else {}
     break_glass = params.get("break_glass") if isinstance(params.get("break_glass"), Mapping) else None
-    print(f"Enrollment target: {hostname}")
+    roles = summary.get("user_ca_roles") if isinstance(summary.get("user_ca_roles"), Mapping) else {}
+    print(f"SSH certificate job: {terminal_safe(summary.get('kind') or params.get('kind') or 'enroll')}")
+    print(f"Enrollment target: {terminal_safe(hostname)}")
     print("User CA fingerprints:")
     for key in user_cas:
-        print(f"  {_fingerprint_line(str(key))}")
+        fingerprint = _fingerprint_line(str(key))
+        role = roles.get(fingerprint)
+        print(f"  {fingerprint}" + (f"  ({role})" if role else "  (not a known team CA)"))
     print(f"Host CA fingerprint: {_fingerprint_line(str(host_ca))}")
     print("Login principals:")
     for login, values in principals.items():
-        print(f"  {login}: {', '.join(str(value) for value in values)}")
+        print(f"  {terminal_safe(login)}: {', '.join(terminal_safe(value) for value in values)}")
     from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
 
     print(f"Managed paths: {MANAGED_PATHS_SUMMARY}")
@@ -255,7 +336,7 @@ def _confirm_hostname(summary: Mapping[str, Any]) -> str:
         )
     else:
         print("Break-glass key: none")
-    return input(f"Type {hostname} to continue: ").strip()
+    return input(f"Type {terminal_safe(hostname)} to continue: ").strip()
 
 
 def _fingerprint_line(public_line: str) -> str:

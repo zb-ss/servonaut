@@ -38,14 +38,22 @@ class CaEnrollmentConfirmModal(ModalScreen[str]):
         self._summary = summary
 
     def compose(self) -> ComposeResult:
+        from servonaut.services.vault.display import terminal_safe
+
         params = self._summary.get("params") if isinstance(self._summary.get("params"), Mapping) else {}
         server = params.get("server") if isinstance(params.get("server"), Mapping) else {}
-        hostname = str(server.get("hostname") or self._summary.get("hostname") or "")
+        hostname = terminal_safe(server.get("hostname") or self._summary.get("hostname") or "")
         principals = params.get("principals_by_login") if isinstance(params.get("principals_by_login"), Mapping) else {}
         break_glass = params.get("break_glass") if isinstance(params.get("break_glass"), Mapping) else None
+        kind = str(self._summary.get("kind") or params.get("kind") or "enroll")
+        roles = self._summary.get("user_ca_roles") if isinstance(self._summary.get("user_ca_roles"), Mapping) else {}
+        user_cas = [_fingerprint(str(key)) for key in params.get("user_ca_public_keys") or []]
         details = [
+            f"Job: {kind}",
             f"Host: {hostname}",
-            f"User CA fingerprints: {', '.join(_fingerprint(str(key)) for key in params.get('user_ca_public_keys') or []) or 'missing'}",
+            "User CA fingerprints: " + (", ".join(
+                f"{fingerprint} ({roles.get(fingerprint, 'not a known team CA')})" for fingerprint in user_cas
+            ) or "missing"),
             f"Host CA fingerprint: {_fingerprint(str(params.get('host_ca_public_key') or ''))}",
             f"Managed paths: {MANAGED_PATHS_SUMMARY}",
             (
@@ -55,10 +63,12 @@ class CaEnrollmentConfirmModal(ModalScreen[str]):
                 if break_glass else "Break-glass: none"
             ),
         ]
-        details.extend(f"Login {login}: {', '.join(map(str, values))}" for login, values in principals.items())
+        details.extend(
+            f"Login {terminal_safe(login)}: {', '.join(map(terminal_safe, values))}" for login, values in principals.items()
+        )
         yield SafeHeader()
         yield Vertical(
-            Static("[bold]Confirm SSH CA enrollment[/bold]"),
+            Static(f"[bold]Confirm SSH CA {escape(kind)}[/bold]"),
             *(Static(escape(detail)) for detail in details),
             Input(placeholder=f"Type {hostname}", id="ca_confirm_host"),
             Horizontal(Button("Cancel", id="ca_cancel"), Button("Enroll", id="ca_confirm")),

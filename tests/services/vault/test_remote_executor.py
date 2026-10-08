@@ -266,3 +266,31 @@ def test_write_template_never_changes_an_existing_directory(tmp_path: Path):
     assert oct(existing.stat().st_mode & 0o777) == "0o755"
     assert oct(created.stat().st_mode & 0o777) == "0o700"
     assert oct((existing / "file").stat().st_mode & 0o777) == "0o644"
+
+
+@pytest.mark.asyncio
+async def test_a_certificate_lease_is_not_overridden_by_the_bootstrap_key(tmp_path: Path, monkeypatch):
+    # A first enrolment connects with a local key, then proves a certificate
+    # login: the proof must use the lease, not the local key it replaces.
+    executor = _executor(tmp_path)
+    identity_file = tmp_path / "identity.pub"
+    identity_file.write_text(_public_key("lease") + "\n", encoding="ascii")
+    lease_pins = tmp_path / "lease-pins"
+    lease_pins.write_text("host ssh-ed25519 AAAA\n", encoding="ascii")
+    lease_pins.chmod(0o600)
+    executor.lease = SimpleNamespace(
+        identity_agent="/agent", certificate_path="/certificate", identity_file=str(identity_file),
+        known_hosts_path=str(lease_pins), login_user="deploy",
+    )
+
+    class _Process:
+        returncode = 0
+        async def communicate(self, _): return b"", b""
+
+    async def spawn(*_, **__): return _Process()
+    monkeypatch.setattr("servonaut.services.vault.remote_executor.asyncio.create_subprocess_exec", spawn)
+
+    await executor._exec(("true",))
+
+    assert executor.ssh_service.kwargs["key_path"] is None
+    assert executor.ssh_service.kwargs["certificate_file"] == "/certificate"

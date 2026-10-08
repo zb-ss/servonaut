@@ -343,3 +343,65 @@ async def test_drop_in_header_names_the_team_and_server_that_own_the_host():
     assert header == (
         f"# Managed by Servonaut (script v1, team example-team, server {params['server']['id']}). Do not edit."
     )
+
+
+class _EnrolledHost(_Host):
+    """A host Servonaut already enrolled: ``sshd -T`` reports its managed paths."""
+
+    def __init__(self, *, revoked_keys: str = f"{MANAGED_DIR}/revoked.krl", team: str = "team-a") -> None:
+        super().__init__()
+        self.revoked_keys = revoked_keys
+        drop_in = CaEnrollmentExecutor(self, host_ca_public_key=HOST_CA_PUBLIC, team=team)._drop_in(_params())
+        self.files[DROP_IN] = drop_in.encode()
+
+    async def run(self, argv):
+        if argv == ["sshd", "-T"]:
+            self.commands.append(list(argv))
+            return CommandResult(0, stdout=(
+                f"trustedusercakeys {MANAGED_DIR}/user_ca_keys.pub\n"
+                f"authorizedprincipalsfile {MANAGED_DIR}/principals/%u\n"
+                f"revokedkeys {self.revoked_keys}\n"
+            ))
+        return await super().run(argv)
+
+
+@pytest.mark.asyncio
+async def test_refreshing_an_enrolled_host_accepts_its_own_managed_configuration():
+    result = await CaEnrollmentExecutor(_EnrolledHost(), host_ca_public_key=HOST_CA_PUBLIC, team="team-a").execute(
+        _params(), confirmed_host_name="web-1.example.test",
+        request_host_certificate=lambda key: _return(_host_certificate()), prove_certificate_login=lambda: _return(True),
+    )
+
+    assert result.error_code != "foreign_ca_config"
+    assert result.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_managed_host_with_one_foreign_setting_is_still_refused():
+    host = _EnrolledHost(revoked_keys="/etc/ssh/other.krl")
+    result = await CaEnrollmentExecutor(host, host_ca_public_key=HOST_CA_PUBLIC, team="team-a").execute(
+        _params(), confirmed_host_name="web-1.example.test",
+        request_host_certificate=lambda key: _return("unused"), prove_certificate_login=lambda: _return(True),
+    )
+
+    assert result.error_code == "foreign_ca_config"
+    assert not host.writes
+
+
+def test_a_pin_mismatch_is_reported_with_a_fixed_code():
+    from servonaut.services.vault.ca_enrollment import enrollment_error_code
+    from servonaut.services.vault.ca_pins import CaPinMismatchError
+
+    assert enrollment_error_code(CaPinMismatchError("The team SSH CA changed; compare …")) == "ca_pin_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_a_host_another_team_enrolled_is_not_taken_over():
+    host = _EnrolledHost(team="team-b")
+    result = await CaEnrollmentExecutor(host, host_ca_public_key=HOST_CA_PUBLIC, team="team-a").execute(
+        _params(), confirmed_host_name="web-1.example.test",
+        request_host_certificate=lambda key: _return("unused"), prove_certificate_login=lambda: _return(True),
+    )
+
+    assert result.error_code == "foreign_ca_config"
+    assert not host.writes

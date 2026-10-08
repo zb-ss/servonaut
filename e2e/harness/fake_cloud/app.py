@@ -74,7 +74,9 @@ class FakeCloud(LoopbackServer):
         self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
-        self.vault = VaultCloud(lambda: self._store.snapshot().user_id)
+        self.vault = VaultCloud(
+            lambda: self._store.snapshot().user_id, shared_servers=self.account.shared_servers
+        )
         self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
@@ -193,7 +195,7 @@ class FakeCloud(LoopbackServer):
         app = web.Application(middlewares=[self._log_middleware])
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
-        routes_account.add_routes(app, self._store, self.account)
+        routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field)
         routes_ai.add_routes(app, self._store, self.ai)
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)

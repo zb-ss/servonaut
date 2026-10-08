@@ -659,3 +659,39 @@ async def test_recovery_key_breaks_only_between_groups(size) -> None:
         for row in text_rows:
             # Every visual line holds whole groups only.
             assert all(part in groups for part in row.strip("-").split("-")), row
+
+
+@pytest.mark.asyncio
+async def test_ca_confirmation_names_the_job_and_each_user_ca_role_without_terminal_controls() -> None:
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from servonaut.screens.ca import CaEnrollmentConfirmModal
+    from servonaut.services.vault.crypto import openssh_fingerprint
+
+    def line() -> str:
+        return Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode()
+
+    active, upcoming = line(), line()
+    fingerprint = lambda key: openssh_fingerprint(base64.b64decode(key.split()[1]))  # noqa: E731
+    summary = {
+        "kind": "refresh",
+        "user_ca_roles": {fingerprint(active): "active (pinned)", fingerprint(upcoming): "next (new)"},
+        "params": {"server": {"hostname": "web-1\x1b]0;x\x07.example.test"}, "user_ca_public_keys": [active, upcoming],
+                   "host_ca_public_key": line(), "principals_by_login": {"deploy": ["svn:s:deploy"]}},
+    }
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(CaEnrollmentConfirmModal(summary))
+
+    app = Host()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        text = "\n".join(str(widget.render()) for widget in app.screen.query(Static))
+        assert "Confirm SSH CA refresh" in text and "Job: refresh" in text
+        assert f"{fingerprint(active)} (active (pinned))" in text
+        assert f"{fingerprint(upcoming)} (next (new))" in text
+        assert "\x1b" not in text and "\x07" not in text

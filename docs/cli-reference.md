@@ -623,7 +623,32 @@ servonaut ca unenroll SERVER --team TEAM --yes
 servonaut ca krl --team TEAM [--server SERVER]
 servonaut ca audit --team TEAM
 servonaut ca break-glass-scan --team TEAM [--server SERVER ...] [--hours 24]
+servonaut ca jobs --team TEAM
+servonaut ca trust --team TEAM
 ```
+
+A refresh, enrollment or unenrollment started in the web app, including the
+refresh of every host during a CA rollover, waits for you to carry it out:
+`ca jobs` lists the waiting jobs with the command for each, and running that
+`ca refresh`, `ca enroll` or `ca unenroll` carries out the waiting job instead
+of starting another. A connected Servonaut tells you when jobs arrive; it never
+changes a host without your typed confirmation, which shows the kind of job and
+marks each user CA as active, new or retired. During a rollover the refresh
+installs the new user CA next to the current one, so certificates from both
+work. After the rollover is completed, certificates from the old CA keep
+working until they expire. `ca enroll`, `ca refresh` and `ca unenroll` exit
+with status 1 when they did not complete: after a clean rollback the host keeps
+its previous setup; otherwise the message asks you to check the host's SSH
+configuration.
+
+Servonaut remembers each team's CA fingerprints. A rollover is accepted
+automatically when it moves forward and Servonaut can link it to the CA it
+remembers: the old CA is still listed as retired, or this device saw the new CA
+announced during the rollover. Otherwise, and whenever the host CA changes, the
+`ca` commands refuse until you compare the new fingerprints with the ones on the
+team's SSH access page in the web app and accept them with `ca trust`. It asks
+you directly and has no `--yes`; for a changed host CA you type part of its new
+fingerprint.
 
 The enrollment path uses a versioned local script and structured enrollment
 data. It refuses unrecognised script versions and does not execute server

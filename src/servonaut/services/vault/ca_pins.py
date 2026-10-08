@@ -6,12 +6,37 @@ import json
 import os
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None  # type: ignore[assignment]
+
+from .errors import VaultUserError
 
 
-class CaPinMismatchError(RuntimeError):
-    """A server presented a different CA than the locally pinned CA."""
+class CaPinMismatchError(VaultUserError):
+    """A server presented a different CA than the locally pinned CA.
+
+    Its messages are fixed client text, so every surface shows them as-is.
+    """
+
+    # Reported to the service as an enrolment result's error code.
+    code = "ca_pin_mismatch"
+
+
+# Retired user CA fingerprints remembered per team, to refuse a key's return.
+_RETIRED_KEPT = 32
+
+# After a changed-CA refusal: how the user re-establishes trust on purpose.
+CA_CHANGED = (
+    "The team SSH CA changed; compare the new fingerprints with the ones on the team's "
+    "SSH access page in the web app, then accept them with `servonaut ca trust --team {team}`"
+)
 
 
 @dataclass(frozen=True)
@@ -26,36 +51,131 @@ class CaPinStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or Path.home() / ".servonaut" / "vault" / "ca_pins.json"
 
-    def verify_or_pin(self, team_slug: str, pins: CaPins) -> CaPins:
-        """Pin first sight, or reject a changed user or host CA fingerprint."""
-        data = self._read()
-        teams = data.setdefault("teams", {})
-        previous = teams.get(team_slug)
-        if previous is not None:
-            old = CaPins(
-                user_ca_fingerprint=str(previous.get("user_ca_fingerprint", "")),
-                host_ca_fingerprint=str(previous.get("host_ca_fingerprint", "")),
-            )
-            if old != pins:
-                raise CaPinMismatchError(
-                    "The team SSH CA changed; verify the new fingerprint before replacing the pin"
-                )
-            return old
-        teams[team_slug] = {
-            "user_ca_fingerprint": pins.user_ca_fingerprint,
-            "host_ca_fingerprint": pins.host_ca_fingerprint,
-        }
-        self._write(data)
+    def verify_or_pin(
+        self,
+        team_slug: str,
+        pins: CaPins,
+        *,
+        user_ca_generation: int | None = None,
+        previous_user_fingerprints: Iterable[str] = (),
+        next_user_fingerprint: str | None = None,
+    ) -> CaPins:
+        """Pin first sight, or reject a CA that changed outside a rollover.
+
+        A user CA rollover replaces the user CA on purpose. The change is
+        accepted only when it moves forward and is continuous with the pin:
+        - the generation number grows (when both are known), and the key was
+          never this team's user CA before, so a retired key cannot return;
+        - the service lists the pinned user CA as retired, or this device saw
+          the new key (or one now retired) announced as the next generation.
+        The host CA has no rollover, so any change to it still fails.
+        """
+        previous_fingerprints = set(previous_user_fingerprints)
+        with self._locked():
+            data = self._read()
+            teams = data.setdefault("teams", {})
+            stored = teams.get(team_slug)
+            if stored is not None and not isinstance(stored, dict):
+                raise CaPinMismatchError("Local SSH CA pins have an unsupported format")
+            record = dict(stored or {})
+            retired = self._retired(stored or {})
+            if stored is not None:
+                self._check_continuity(team_slug, stored, pins, user_ca_generation, previous_fingerprints)
+                if stored.get("user_ca_fingerprint") != pins.user_ca_fingerprint:
+                    retired.append(str(stored.get("user_ca_fingerprint", "")))
+            # Every key seen retired stays retired, even one this device never pinned.
+            retired.extend(sorted(previous_fingerprints))
+            retired = list(dict.fromkeys(key for key in retired if key and key != pins.user_ca_fingerprint))
+            if retired:
+                record["retired_user_ca_fingerprints"] = retired[-_RETIRED_KEPT:]
+            record.update(user_ca_fingerprint=pins.user_ca_fingerprint, host_ca_fingerprint=pins.host_ca_fingerprint)
+            if user_ca_generation is not None:
+                record["user_ca_generation"] = user_ca_generation
+            if next_user_fingerprint is None:
+                record.pop("user_ca_next_fingerprint", None)
+            else:
+                record["user_ca_next_fingerprint"] = next_user_fingerprint
+            if record != stored:
+                teams[team_slug] = record
+                self._write(data)
         return pins
 
-    def replace_after_confirmation(self, team_slug: str, pins: CaPins) -> None:
+    @classmethod
+    def _check_continuity(
+        cls, team_slug: str, stored: dict, pins: CaPins, generation: int | None, previous: set[str],
+    ) -> None:
+        if stored.get("host_ca_fingerprint") != pins.host_ca_fingerprint:
+            raise CaPinMismatchError(CA_CHANGED.format(team=team_slug))
+        pinned_user = stored.get("user_ca_fingerprint")
+        pinned_generation = stored.get("user_ca_generation")
+        if pinned_user == pins.user_ca_fingerprint:
+            # The same key cannot move to an earlier generation.
+            if isinstance(pinned_generation, int) and generation is not None and generation != pinned_generation:
+                raise CaPinMismatchError(CA_CHANGED.format(team=team_slug))
+            return
+        moved_backwards = (
+            pins.user_ca_fingerprint in cls._retired(stored)
+            or (isinstance(pinned_generation, int) and (generation is None or generation <= pinned_generation))
+        )
+        announced = stored.get("user_ca_next_fingerprint")
+        continuous = pinned_user in previous or (
+            isinstance(announced, str) and (announced == pins.user_ca_fingerprint or announced in previous)
+        )
+        if moved_backwards or not continuous:
+            raise CaPinMismatchError(CA_CHANGED.format(team=team_slug))
+
+    @staticmethod
+    def _retired(stored: dict) -> list[str]:
+        retired = stored.get("retired_user_ca_fingerprints")
+        return [item for item in retired if isinstance(item, str)] if isinstance(retired, list) else []
+
+    def pinned(self, team_slug: str) -> CaPins | None:
+        """The pins held for *team_slug*, or ``None`` before first sight."""
+        entry = self._read().get("teams", {}).get(team_slug)
+        if not isinstance(entry, dict):
+            return None
+        return CaPins(
+            user_ca_fingerprint=str(entry.get("user_ca_fingerprint", "")),
+            host_ca_fingerprint=str(entry.get("host_ca_fingerprint", "")),
+        )
+
+    def replace_after_confirmation(
+        self, team_slug: str, pins: CaPins, *, user_ca_generation: int | None = None,
+    ) -> None:
         """Replace a pin only after the caller has completed an explicit UI check."""
-        data = self._read()
-        data.setdefault("teams", {})[team_slug] = {
-            "user_ca_fingerprint": pins.user_ca_fingerprint,
-            "host_ca_fingerprint": pins.host_ca_fingerprint,
-        }
-        self._write(data)
+        with self._locked():
+            data = self._read()
+            teams = data.setdefault("teams", {})
+            stored = teams.get(team_slug) if isinstance(teams.get(team_slug), dict) else {}
+            retired = self._retired(stored)
+            if stored.get("user_ca_fingerprint") not in (None, pins.user_ca_fingerprint):
+                retired.append(str(stored["user_ca_fingerprint"]))
+            # Keep fields this version does not know; the trusted CA starts afresh.
+            record: dict[str, object] = {
+                key: value for key, value in stored.items()
+                if key not in {"user_ca_next_fingerprint", "user_ca_generation", "retired_user_ca_fingerprints"}
+            }
+            record.update(user_ca_fingerprint=pins.user_ca_fingerprint, host_ca_fingerprint=pins.host_ca_fingerprint)
+            if retired:
+                record["retired_user_ca_fingerprints"] = [item for item in retired if item != pins.user_ca_fingerprint][-_RETIRED_KEPT:]
+            if user_ca_generation is not None:
+                record["user_ca_generation"] = user_ca_generation
+            teams[team_slug] = record
+            self._write(data)
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Serialise read-modify-write between the TUI, ``connect`` and the CLI."""
+        if fcntl is None:  # pragma: no cover - platforms without flock
+            yield
+            return
+        parent = self._ensure_private_parent(create=True)
+        fd = os.open(parent / ".ca_pins.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def _read(self) -> dict[str, object]:
         self._ensure_private_parent(create=False)

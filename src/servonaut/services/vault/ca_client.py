@@ -11,6 +11,7 @@ import tempfile
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -66,11 +67,36 @@ class CaStatus:
     logins_by_server: Mapping[str, tuple[str, ...]]
     krl_version: int | None
     raw: Mapping[str, Any]
+    # During a rollover: the announced next user CA, and the retired ones a
+    # host may still list. Both come from the same pinned status read, and
+    # their generations were checked to sit after and before the active one.
+    user_ca_next_fingerprint: str | None = None
+    user_ca_previous_fingerprints: tuple[str, ...] = ()
+    user_ca_generation: int | None = None
+
+    @property
+    def trusted_user_ca_fingerprints(self) -> frozenset[str]:
+        """User CA keys an enrolment may install: active, next and retired."""
+        return frozenset(self.user_ca_roles)
+
+    @property
+    def user_ca_roles(self) -> dict[str, str]:
+        """Each installable user CA fingerprint and what it is, for confirmation screens."""
+        roles = {fingerprint: "retired" for fingerprint in self.user_ca_previous_fingerprints}
+        if self.user_ca_next_fingerprint is not None:
+            roles[self.user_ca_next_fingerprint] = "next (new)"
+        if self.user_ca_fingerprint is not None:
+            roles[self.user_ca_fingerprint] = "active (pinned)"
+        return roles
 
     def to_dict(self) -> dict[str, Any]:
+        rollover = {} if self.user_ca_next_fingerprint is None else {
+            "user_ca_next_fingerprint": self.user_ca_next_fingerprint,
+        }
         return {
             "enabled": self.enabled,
             "user_ca_fingerprint": self.user_ca_fingerprint,
+            **rollover,
             "host_ca_fingerprint": self.host_ca_fingerprint,
             "policy": dict(self.policy),
             "logins_by_server": {key: list(value) for key, value in self.logins_by_server.items()},
@@ -140,7 +166,9 @@ class CertificateAuthorityClient:
     def _base_path(self) -> str:
         return f"/api/v1/teams/{self.team_slug}/ssh-ca"
 
-    async def get_status(self) -> CaStatus:
+    async def get_status(self, *, enforce_pins: bool = True) -> CaStatus:
+        """Read and verify the team CA. ``enforce_pins=False`` is only for
+        showing a changed CA to the user before they choose to trust it."""
         response = await self.api_client.get(self._base_path)
         enabled = bool(response.get("enabled", False))
         user_ca = response.get("user_ca") or {}
@@ -149,6 +177,21 @@ class CertificateAuthorityClient:
         host_key = str(host_ca.get("public_key", "")) or None
         user_fingerprint = str(user_ca.get("fingerprint", "")) or None
         host_fingerprint = str(host_ca.get("fingerprint", "")) or None
+        generation = _generation_number(user_ca.get("generation"))
+        next_fingerprint, next_generation = _verified_generation(response.get("user_ca_next"))
+        previous = response.get("user_ca_previous") or []
+        if not isinstance(previous, list):
+            raise CertificateValidationError("SSH CA previous generations have an invalid shape")
+        retired = [_verified_generation(entry) for entry in previous]
+        # Generations only move forward: the next CA comes after the active one
+        # and retired ones before it, so the service cannot pass an old key off
+        # as new, or a new one as retired.
+        if generation is not None and (
+            (next_generation is not None and next_generation <= generation)
+            or any(number is not None and number >= generation for _, number in retired)
+        ):
+            raise CertificateValidationError("SSH CA generations are out of order")
+        previous_fingerprints = tuple(fingerprint for fingerprint, _ in retired if fingerprint is not None)
         if enabled:
             if not all((user_key, host_key, user_fingerprint, host_fingerprint)):
                 raise CertificateValidationError("Enabled SSH CA response is incomplete")
@@ -158,9 +201,13 @@ class CertificateAuthorityClient:
                 raise CertificateValidationError("SSH CA response fingerprint does not match its key")
             # Never persist a first-seen pin until both untrusted keys passed
             # independent local fingerprint verification.
-            self.pins.verify_or_pin(
-                self.team_slug, CaPins(user_fingerprint, host_fingerprint)
-            )
+            if enforce_pins:
+                self.pins.verify_or_pin(
+                    self.team_slug, CaPins(user_fingerprint, host_fingerprint),
+                    user_ca_generation=generation,
+                    previous_user_fingerprints=previous_fingerprints,
+                    next_user_fingerprint=next_fingerprint,
+                )
         logins = response.get("my_logins_by_server") or {}
         if not isinstance(logins, Mapping):
             raise CertificateValidationError("SSH CA logins have an invalid shape")
@@ -174,6 +221,9 @@ class CertificateAuthorityClient:
             logins_by_server={str(key): tuple(map(str, value)) for key, value in logins.items()},
             krl_version=int(response["krl_version"]) if response.get("krl_version") is not None else None,
             raw=response,
+            user_ca_next_fingerprint=next_fingerprint,
+            user_ca_previous_fingerprints=previous_fingerprints,
+            user_ca_generation=generation,
         )
 
     async def enable(self, policy: Mapping[str, Any] | None = None) -> CaStatus:
@@ -310,6 +360,15 @@ class CertificateAuthorityClient:
         if break_glass_item_id is not None:
             body["break_glass_item_id"] = break_glass_item_id
         return await self._signed("POST", f"{self._base_path}/enrollments", body)
+
+    async def list_enrollments(self, *, status: str | None = None) -> list[Mapping[str, Any]]:
+        """Enrolment jobs this owner/admin can see, optionally only one status."""
+        query = "" if status is None else "?" + urlencode({"status": status})
+        response = await self._signed("GET", f"{self._base_path}/enrollments{query}", None)
+        rows = response.get("data", []) if isinstance(response, Mapping) else None
+        if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
+            raise CertificateValidationError("SSH CA enrolment list has an invalid shape")
+        return list(rows)
 
     async def get_enrollment(self, enrollment_id: str) -> Mapping[str, Any]:
         return await self._signed("GET", f"{self._base_path}/enrollments/{_path_id(enrollment_id)}", None)
@@ -486,6 +545,29 @@ def _fingerprint(public_key: str) -> str:
     except (IndexError, ValueError, UnicodeError) as exc:
         raise CertificateValidationError("Invalid OpenSSH public key") from exc
     return openssh_fingerprint(blob)
+
+
+def _verified_generation(entry: Any) -> tuple[str | None, int | None]:
+    """A next/previous CA generation's fingerprint, checked against its key, and number."""
+    if entry is None:
+        return None, None
+    if not isinstance(entry, Mapping):
+        raise CertificateValidationError("SSH CA generation has an invalid shape")
+    public_key, fingerprint = entry.get("public_key"), entry.get("fingerprint")
+    if not isinstance(public_key, str) or not isinstance(fingerprint, str):
+        raise CertificateValidationError("SSH CA generation is incomplete")
+    validate_openssh_public_key(public_key)
+    if _fingerprint(public_key) != fingerprint:
+        raise CertificateValidationError("SSH CA generation fingerprint does not match its key")
+    return fingerprint, _generation_number(entry.get("generation"))
+
+
+def _generation_number(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise CertificateValidationError("SSH CA generation number is invalid")
+    return value
 
 
 def validate_openssh_public_key(value: str) -> str:
