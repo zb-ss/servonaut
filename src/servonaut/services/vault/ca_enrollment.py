@@ -22,6 +22,7 @@ SCRIPT_VERSION = "1"
 MANAGED_DIR = PurePosixPath("/etc/ssh/servonaut")
 DROP_IN = PurePosixPath("/etc/ssh/sshd_config.d/50-servonaut.conf")
 _SCRIPT_TOKEN = "script"
+_MANAGED_HEADER = "# Managed by Servonaut ("
 
 
 def _owner_tokens(header: str) -> set[str]:
@@ -237,8 +238,13 @@ class CaEnrollmentExecutor:
             header = (await self.executor.read_file(DROP_IN)).decode("utf-8").splitlines()[0]
         except Exception:
             return False
-        expected = self._drop_in(params).splitlines()[0]
-        return _owner_tokens(header) - {_SCRIPT_TOKEN} == _owner_tokens(expected) - {_SCRIPT_TOKEN}
+        owners = _owner_tokens(header) - {_SCRIPT_TOKEN}
+        if owners == _owner_tokens(self._drop_in(params).splitlines()[0]) - {_SCRIPT_TOKEN}:
+            return True
+        # Hosts enrolled by earlier versions carry a header without owners.
+        # The service only asks for a refresh of a host it holds as enrolled
+        # for this team, and the refresh rewrites the header with its owners.
+        return not owners and header.startswith(_MANAGED_HEADER) and params.get("kind") == "refresh"
 
     async def _write_managed_files(self, params: Mapping[str, Any]) -> None:
         await self.executor.write_atomic(

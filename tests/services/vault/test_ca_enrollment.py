@@ -405,3 +405,34 @@ async def test_a_host_another_team_enrolled_is_not_taken_over():
 
     assert result.error_code == "foreign_ca_config"
     assert not host.writes
+
+
+def _legacy_drop_in() -> bytes:
+    lines = CaEnrollmentExecutor(_Host(), host_ca_public_key=HOST_CA_PUBLIC)._drop_in(_params()).splitlines()
+    return ("# Managed by Servonaut (script v1). Do not edit.\n" + "\n".join(lines[1:]) + "\n").encode()
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_migrates_a_host_enrolled_before_owners_were_recorded():
+    host = _EnrolledHost()
+    host.files[DROP_IN] = _legacy_drop_in()
+    result = await CaEnrollmentExecutor(host, host_ca_public_key=HOST_CA_PUBLIC, team="team-a").execute(
+        {**_params(), "kind": "refresh"}, confirmed_host_name="web-1.example.test",
+        request_host_certificate=lambda key: _return(_host_certificate()), prove_certificate_login=lambda: _return(True),
+    )
+
+    assert result.status == "succeeded", result
+    assert DROP_IN in host.writes  # rewritten with this team and server as owners
+
+
+@pytest.mark.asyncio
+async def test_an_enroll_does_not_adopt_a_host_whose_owner_is_unknown():
+    host = _EnrolledHost()
+    host.files[DROP_IN] = _legacy_drop_in()
+    result = await CaEnrollmentExecutor(host, host_ca_public_key=HOST_CA_PUBLIC, team="team-a").execute(
+        _params(), confirmed_host_name="web-1.example.test",
+        request_host_certificate=lambda key: _return("unused"), prove_certificate_login=lambda: _return(True),
+    )
+
+    assert result.error_code == "foreign_ca_config"
+    assert not host.writes

@@ -760,9 +760,14 @@ def test_a_user_ca_rollover_is_carried_through_by_ca_refresh(journey, fake_cloud
     # creates no second job.
     status, other = fake_cloud.vault.request_enrollment("unenroll")
     assert status == 201, other
-    second = cli(owner, "ca", "refresh", HOST_NAME, "--team", TEAM_SLUG, "--yes")
-    assert second.returncode == 1, second.describe()
-    assert "unenroll" in second.stderr and "Traceback" not in second.stderr, second.describe()
+    # Without a terminal nobody can type the host name: refused before any job.
+    piped = cli(owner, "ca", "refresh", HOST_NAME, "--team", TEAM_SLUG, "--yes")
+    assert piped.returncode == 5, piped.describe()
+    assert "needs the host name typed" in piped.stderr, piped.describe()
+    second = _confirmed(journey, owner, servonaut_cmd, "ca", "refresh", HOST_NAME, "--team", TEAM_SLUG, "--yes",
+                        answer=LOOPBACK)
+    assert not second.prompted and second.returncode == 1, second.text
+    assert "open SSH certificate unenroll job" in second.text and "Traceback" not in second.text, second.text
     open_jobs = [job for job in fake_cloud.vault.list_enrollments(TEAM_SLUG, None)["data"]
                  if job["status"] in {"requested", "claimed"}]
     assert [job["enrollment_id"] for job in open_jobs] == [other["enrollment_id"]]

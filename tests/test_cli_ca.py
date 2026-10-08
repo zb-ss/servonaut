@@ -215,7 +215,8 @@ def test_a_changed_host_ca_needs_its_new_fingerprint_typed(capsys, monkeypatch) 
         assert "The HOST CA changed" in capsys.readouterr().err
 
 
-def test_ca_refresh_says_when_it_carried_out_a_waiting_job(capsys) -> None:
+def test_ca_refresh_says_when_it_carried_out_a_waiting_job(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
     class Service:
         async def ca_refresh(self, *, team, server, confirmation):
             return {"result": {"status": "succeeded"}, "resumed": True}
@@ -224,7 +225,8 @@ def test_ca_refresh_says_when_it_carried_out_a_waiting_job(capsys) -> None:
     assert "Carried out the refresh job that was waiting for this server." in capsys.readouterr().err
 
 
-def test_a_refresh_that_rolled_back_is_not_reported_as_done(capsys) -> None:
+def test_a_refresh_that_rolled_back_is_not_reported_as_done(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
     class Service:
         async def ca_refresh(self, *, team, server, confirmation):
             return {"result": {"status": "rolled_back", "error_code": "sshd_test_failed"}, "resumed": True}
@@ -234,7 +236,8 @@ def test_a_refresh_that_rolled_back_is_not_reported_as_done(capsys) -> None:
     assert "did not complete (rolled_back)" in err and "Carried out" not in err
 
 
-def test_a_failed_rollback_does_not_claim_the_host_is_unchanged(capsys) -> None:
+def test_a_failed_rollback_does_not_claim_the_host_is_unchanged(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
     class Service:
         async def ca_refresh(self, *, team, server, confirmation):
             return {"result": {"status": "failed", "error_code": "rollback_failed"}}
@@ -242,3 +245,14 @@ def test_a_failed_rollback_does_not_claim_the_host_is_unchanged(capsys) -> None:
     assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 1
     err = capsys.readouterr().err
     assert "may be partly changed" in err and "keeps its previous setup" not in err
+
+
+def test_a_host_job_without_a_terminal_is_refused_before_any_job_exists(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: False)
+
+    class Service:
+        async def ca_refresh(self, **_kwargs):
+            raise AssertionError("no job may be created without a terminal")
+
+    assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 5
+    assert "needs the host name typed" in capsys.readouterr().err

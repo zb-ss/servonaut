@@ -184,6 +184,14 @@ async def _handle(args: argparse.Namespace) -> int:
                 policy = parsed
             value = await _invoke(services, "ca_policy", team=args.team, policy=policy)
         elif args.ca_command in {"enroll", "refresh", "unenroll"}:
+            if not sys.stdin.isatty():
+                # Checked before any job exists: the host name has to be typed.
+                print(
+                    f"Refusing in a non-interactive shell: an SSH certificate {args.ca_command} "
+                    "needs the host name typed to confirm it.",
+                    file=sys.stderr,
+                )
+                return _EXIT_ABORTED
             if args.ca_command == "enroll":
                 value = await _invoke(
                     services,
