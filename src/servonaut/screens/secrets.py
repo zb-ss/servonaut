@@ -201,7 +201,7 @@ class SecretsScreen(Screen):
 
         summary = self._summary()
         if summary is None:
-            pill.update("[bold red]✕ Unavailable[/bold red]")
+            pill.update("[bold $text-error]✕ Unavailable[/bold $text-error]")
             body.mount(self._card(
                 "Unavailable",
                 Static(
@@ -227,7 +227,7 @@ class SecretsScreen(Screen):
             return
         # Fallback — resolver returned None but the user IS entitled
         # (e.g. transient resolver hiccup). Surface what we can.
-        pill.update("[bold yellow]⚠ No active provider[/bold yellow]")
+        pill.update("[bold $text-warning]⚠ No active provider[/bold $text-warning]")
         body.mount(self._card(
             "No active provider",
             Static(
@@ -247,7 +247,7 @@ class SecretsScreen(Screen):
     # --- variants -----------------------------------------------------
 
     def _render_unauthenticated(self, pill: Static, body: VerticalScroll) -> None:
-        pill.update("[bold yellow]⚪ Not signed in[/bold yellow]")
+        pill.update("[bold $text-warning]⚪ Not signed in[/bold $text-warning]")
         body.mount(self._card(
             "Sign in required",
             Static(
@@ -267,7 +267,7 @@ class SecretsScreen(Screen):
     def _render_free_tier(
         self, pill: Static, body: VerticalScroll, s: SecretsStatusSummary,
     ) -> None:
-        pill.update("[bold yellow]⚠ Upgrade required[/bold yellow]")
+        pill.update("[bold $text-warning]⚠ Upgrade required[/bold $text-warning]")
         body.mount(self._card(
             "Upgrade required",
             Static(
@@ -316,22 +316,22 @@ class SecretsScreen(Screen):
         scope = self._scope_suffix(s)
         if s.has_health_warning:
             pill.update(
-                f"[bold yellow]⚠ Bitwarden{scope} — needs attention[/bold yellow]"
+                f"[bold $text-warning]⚠ Bitwarden{scope} — needs attention[/bold $text-warning]"
             )
         else:
-            pill.update(f"[bold green]● Bitwarden{scope} — active[/bold green]")
+            pill.update(f"[bold $text-success]● Bitwarden{scope} — active[/bold $text-success]")
         # All server-supplied strings escaped before interpolation.
         proj = escape(s.bitwarden_project_id or "(none)")
         env_var = escape(s.bitwarden_token_env_var or "(none)")
-        token_state = "[green]set[/green]" if s.bws_token_set else "[red]NOT SET[/red]"
+        token_state = "[$text-success]set[/$text-success]" if s.bws_token_set else "[$text-error]NOT SET[/$text-error]"
         bws_state = (
-            escape(s.bws_path) if s.bws_path else "[red]not installed[/red]"
+            escape(s.bws_path) if s.bws_path else "[$text-error]not installed[/$text-error]"
         )
         fetched_age = format_relative_age(s.cache_fetched_at)
 
         project_cell = f"[dim]{proj}[/dim]"
         if s.project_id_invalid:
-            project_cell = f"[red]{proj} — not a valid project UUID[/red]"
+            project_cell = f"[$text-error]{proj} — not a valid project UUID[/$text-error]"
 
         rows = [
             ("Active provider", f"Bitwarden{self._scope_suffix(s)}"),
@@ -344,15 +344,15 @@ class SecretsScreen(Screen):
             rows.insert(2, (
                 "Personal (shadowed)",
                 f"[dim]{escape(s.shadowed_user_project_id)}[/dim] "
-                "[yellow]— hidden by team config[/yellow]",
+                "[$text-warning]— hidden by team config[/$text-warning]",
             ))
         if s.team_config_broken and s.broken_team_project_id:
             # A broken team config was skipped in favour of this (personal)
             # config — show the team id that's being ignored.
             rows.insert(2, (
                 "Team (ignored)",
-                f"[red]{escape(s.broken_team_project_id)}[/red] "
-                "[yellow]— invalid, using your personal config[/yellow]",
+                f"[$text-error]{escape(s.broken_team_project_id)}[/$text-error] "
+                "[$text-warning]— invalid, using your personal config[/$text-warning]",
             ))
 
         body.mount(self._card(
@@ -395,7 +395,7 @@ class SecretsScreen(Screen):
             )
             body.mount(self._card(
                 "Needs attention",
-                Static("[yellow]" + lead + "; ".join(problems) + ".[/yellow]"),
+                Static("[$text-warning]" + lead + "; ".join(problems) + ".[/$text-warning]"),
                 warning=True,
             ))
         body.mount(self._card(
@@ -418,12 +418,12 @@ class SecretsScreen(Screen):
             # A broken Bitwarden config forced this fallback — signal it in the
             # pill rather than reading as a clean, healthy Local setup.
             pill.update(
-                "[bold yellow]⚠ Local (fallback) — Bitwarden config needs "
-                "attention[/bold yellow]"
+                "[bold $text-warning]⚠ Local (fallback) — Bitwarden config needs "
+                "attention[/bold $text-warning]"
             )
         else:
             pill.update(
-                f"[bold green]● Local{self._scope_suffix(s)} — active[/bold green]"
+                f"[bold $text-success]● Local{self._scope_suffix(s)} — active[/bold $text-success]"
             )
         path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
         children = [
@@ -447,11 +447,11 @@ class SecretsScreen(Screen):
             body.mount(self._card(
                 "Needs attention",
                 Static(
-                    f"[yellow]A Bitwarden config exists but its project id "
-                    f"([red]{invalid_id}[/red]) is not a valid project UUID — "
+                    f"[$text-warning]A Bitwarden config exists but its project id "
+                    f"([$text-error]{invalid_id}[/$text-error]) is not a valid project UUID — "
                     "using the local store until it's fixed. Repair it via the "
                     "guided setup (g) or the team settings, or clear the "
-                    "cached config (c).[/yellow]",
+                    "cached config (c).[/$text-warning]",
                 ),
                 warning=True,
             ))

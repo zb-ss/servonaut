@@ -102,7 +102,7 @@ class MemorySummaryScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]{escape(self._title)}[/bold cyan]",
+                    f"[bold $text-accent]{escape(self._title)}[/bold $text-accent]",
                     id="memory-summary-title",
                 ),
                 Static(

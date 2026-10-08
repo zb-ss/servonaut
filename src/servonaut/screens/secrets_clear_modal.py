@@ -55,12 +55,12 @@ class ConfirmClearCacheModal(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold yellow]Clear the cached team secrets-config?[/bold yellow]\n\n"
+                "[bold $text-warning]Clear the cached team secrets-config?[/bold $text-warning]\n\n"
                 + self._fallback_text()
                 + "  No on-disk secrets are deleted — only the cached "
                 "team-config metadata.\n\n"
-                "  [bold cyan]y[/bold cyan] confirm   "
-                "[bold cyan]n[/bold cyan] / [bold cyan]esc[/bold cyan] cancel",
+                "  [bold $text-accent]y[/bold $text-accent] confirm   "
+                "[bold $text-accent]n[/bold $text-accent] / [bold $text-accent]esc[/bold $text-accent] cancel",
                 id="confirm_clear_text",
             ),
             Horizontal(

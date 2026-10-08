@@ -83,7 +83,7 @@ class HetznerSSHKeysScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]Hetzner SSH Keys[/bold cyan]",
+                    "[bold $text-accent]Hetzner SSH Keys[/bold $text-accent]",
                     id="hetzner_ssh_keys_header",
                 ),
                 Static(
@@ -201,8 +201,8 @@ class HetznerSSHKeysScreen(Screen):
     def _refresh(self) -> None:
         if inventory(self.app, "hetzner") is None:
             self._set_status(
-                "[red]Hetzner Cloud is not configured. "
-                "Visit Settings → Hetzner Cloud first.[/red]"
+                "[$text-error]Hetzner Cloud is not configured. "
+                "Visit Settings → Hetzner Cloud first.[/$text-error]"
             )
             return
         self._set_status("[dim]Loading keys…[/dim]")
@@ -227,7 +227,7 @@ class HetznerSSHKeysScreen(Screen):
             logger.error("Failed to load Hetzner SSH keys: %s", exc)
             if load == self._loads:
                 self._set_status(
-                    f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
+                    f"[$text-error]Failed to load keys: {self._short_err(exc)}[/$text-error]"
                 )
             return
         if load != self._loads:
@@ -403,7 +403,7 @@ class HetznerSSHKeysScreen(Screen):
         except Exception as exc:
             logger.error("Hetzner SSH key add failed for %s: %s", name, exc)
             self._set_status(
-                f"[red]Add failed: {self._short_err(exc)}[/red]"
+                f"[$text-error]Add failed: {self._short_err(exc)}[/$text-error]"
             )
             self.notify(
                 f"Add failed: {exc}", severity="error", markup=False,
@@ -450,7 +450,7 @@ class HetznerSSHKeysScreen(Screen):
                 "Hetzner SSH key delete failed for %s: %s", identifier, exc,
             )
             self._set_status(
-                f"[red]Delete failed: {self._short_err(exc)}[/red]"
+                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
             )
             self.notify(
                 f"Delete failed: {exc}", severity="error", markup=False,

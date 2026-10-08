@@ -56,7 +56,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
             yield Sidebar()
             with ScrollableContainer(id="snapshots_container"):
                 yield Static(
-                    f"[bold cyan]Snapshots: {instance_name}[/bold cyan]",
+                    f"[bold $text-accent]Snapshots: {instance_name}[/bold $text-accent]",
                     id="snapshots_title",
                 )
                 yield DataTable(id="snapshots_table")
@@ -218,7 +218,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         except Exception as e:
             logger.error("Error fetching backup options: %s", e)
             backup_status_widget.update(
-                f"[red]Error loading backup status: {escape(self._display_error(e))}[/red]"
+                f"[$text-error]Error loading backup status: {escape(self._display_error(e))}[/$text-error]"
             )
             return
 
@@ -230,7 +230,7 @@ class OVHSnapshotsScreen(ServerAuditMixin, ServerAccountMixin, Screen):
         schedule = options.get("schedule") or options.get("cron") or ""
         if schedule:
             backup_status_widget.update(
-                f"[green]Enabled[/green] — Schedule: [bold]{schedule}[/bold] — State: {state}"
+                f"[$text-success]Enabled[/$text-success] — Schedule: [bold]{schedule}[/bold] — State: {state}"
             )
         else:
             backup_status_widget.update(f"State: {state}")

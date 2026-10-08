@@ -68,7 +68,7 @@ class MemorySyncSetupScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
-                Static("[bold cyan]Memory Sync[/bold cyan]", id="msync_title"),
+                Static("[bold $text-accent]Memory Sync[/bold $text-accent]", id="msync_title"),
                 Static(
                     "[dim]Encrypted, AI-queryable backup of every server's "
                     "memory across your devices.[/dim]",

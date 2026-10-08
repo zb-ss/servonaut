@@ -71,7 +71,7 @@ class OVHIPManagementScreen(Screen):
             yield Sidebar()
             with ScrollableContainer(id="ip_mgmt_container"):
                 yield Static(
-                    "[bold cyan]OVH IP Management[/bold cyan]",
+                    "[bold $text-accent]OVH IP Management[/bold $text-accent]",
                     id="ip_mgmt_title",
                 )
                 # Hidden unless several OVH accounts are configured.

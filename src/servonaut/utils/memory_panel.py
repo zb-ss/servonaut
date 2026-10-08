@@ -108,7 +108,7 @@ def render_memory_panel(modules: Dict[str, Dict[str, Any]]) -> str:
     partial = any(data.get("partial") for data in modules.values())
     header = f"[bold]Server Memory[/bold]  [dim]· {escape(age)}[/dim]"
     if partial:
-        header += "  [yellow]⚠ partial[/yellow]"
+        header += "  [$text-warning]⚠ partial[/$text-warning]"
 
     rows: List[str] = []
 

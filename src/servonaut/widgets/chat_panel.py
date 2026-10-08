@@ -62,12 +62,12 @@ logger = logging.getLogger(__name__)
 
 # Minimal AI Logo (Matches Website)
 SERVONAUT_LOGO = (
-    "[bold bright_cyan]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
-    "   [bold bright_green]●[/] [dim bright_green]MCP Server Online[/]"
+    "[bold $text-accent]🖧[/]  [bold]Servonaut AI Assistant[/]\n"
+    "   [bold $text-success]●[/] [dim $text-success]MCP Server Online[/]"
 )
 
 # Inline bot marker for assistant messages
-BOT_MARKER = "[bold bright_cyan]\u25c9[/]"
+BOT_MARKER = "[bold $text-accent]\u25c9[/]"
 
 # T10 watcher: the second ``upstream_unavailable`` within this window
 # triggers either an auto-fallback (when ``ai.local_fallback_provider``
@@ -159,13 +159,13 @@ def conversation_status_markup(state: str) -> str:
     """
     glyph = _CONVO_STATE_GLYPHS.get(state, "")
     if state == "listening":
-        return f"[green]{glyph} Listening — {_CONVO_TOGGLE_KEY} stops[/green]"
+        return f"[$text-success]{glyph} Listening — {_CONVO_TOGGLE_KEY} stops[/$text-success]"
     if state == "thinking":
-        return f"[yellow]{glyph} Conversation — waiting for the reply[/yellow]"
+        return f"[$text-warning]{glyph} Conversation — waiting for the reply[/$text-warning]"
     if state == "speaking":
         return (
-            f"[cyan]{glyph} Conversation — speaking, "
-            f"{_CONVO_TOGGLE_KEY} interrupts[/cyan]"
+            f"[$text-accent]{glyph} Conversation — speaking, "
+            f"{_CONVO_TOGGLE_KEY} interrupts[/$text-accent]"
         )
     return ""
 
@@ -552,8 +552,8 @@ class ChatPanel(Widget):
             # PINNED_ERROR_NO_PROVIDER fires.
             with Horizontal(id="chat-pinned-error-banner", classes="hidden"):
                 yield Static(
-                    "[red]Servonaut AI subscription ended and no other "
-                    "provider is configured.[/red]\n"
+                    "[$text-error]Servonaut AI subscription ended and no other "
+                    "provider is configured.[/$text-error]\n"
                     "Resubscribe or add an OpenAI / Anthropic / Gemini / "
                     "Ollama provider to keep chatting.",
                     id="chat-pinned-error-text",
@@ -794,7 +794,7 @@ class ChatPanel(Widget):
             stored_modules = {}
         if not stored_modules:
             banner.update(
-                f"[cyan]🧠 No memory yet for[/cyan] "
+                f"[$text-accent]🧠 No memory yet for[/$text-accent] "
                 f"[bold]{_rich_escape(instance_id)}[/bold]. "
                 f"Build one and I can answer instantly without SSH round-trips. "
                 f"[@click=action_build_memory]Build now[/]"
@@ -821,7 +821,7 @@ class ChatPanel(Widget):
 
         module_list = ", ".join(_rich_escape(m) for m in stale)
         banner.update(
-            f"[yellow]Memory is stale for[/yellow] [bold]{_rich_escape(instance_id)}[/bold] "
+            f"[$text-warning]Memory is stale for[/$text-warning] [bold]{_rich_escape(instance_id)}[/bold] "
             f"(modules: {module_list}). "
             f"[@click=action_refresh_memory]Refresh[/]"
         )
@@ -949,10 +949,10 @@ class ChatPanel(Widget):
         # method rebuilds the whole one-row bar, so an imperatively pushed
         # indicator would be wiped by the next caller.
         if self._recording:
-            parts.insert(0, "[bold red]● REC[/bold red]")
+            parts.insert(0, "[bold $text-error]● REC[/bold $text-error]")
         elif self._transcribing:
             frame = _SPINNER_FRAMES[self._spinner_frame % len(_SPINNER_FRAMES)]
-            parts.insert(0, f"[yellow]{frame} Transcribing…[/yellow]")
+            parts.insert(0, f"[$text-warning]{frame} Transcribing…[/$text-warning]")
         # Speaking can overlap either capture state, so it gets its own
         # slot rather than the elif chain — and it names the interrupt
         # key, because an affordance nobody can discover is not one.
@@ -960,7 +960,7 @@ class ChatPanel(Widget):
         # "speaking" — two Speaking badges would read as a glitch.
         if self._speaking and self._conversation_state != "speaking":
             parts.insert(
-                0, f"[cyan]{_SPEAKER_ACTIVE} Speaking — ctrl+o stops[/cyan]"
+                0, f"[$text-accent]{_SPEAKER_ACTIVE} Speaking — ctrl+o stops[/$text-accent]"
             )
         # Conversation-mode state, derived on every repaint like the rest
         # of the voice slots. Inserted last so it renders first — while
@@ -1011,7 +1011,7 @@ class ChatPanel(Widget):
                 self._last_hard_capped,
             )
             if badge:
-                colour = "red" if self._last_hard_capped else "yellow"
+                colour = "$text-error" if self._last_hard_capped else "$text-warning"
                 parts.append(f"[{colour}]{_rich_escape(badge)}[/{colour}]")
         except Exception:  # pragma: no cover \u2014 defensive
             pass
@@ -1227,14 +1227,14 @@ class ChatPanel(Widget):
         for event in decision.events:
             if event == ProviderPreferenceEvent.SHOW_PAYING_TWICE_BANNER:
                 self._set_banner(
-                    "[yellow]You're subscribed to Servonaut AI but using your own key — "
-                    "you may be paying twice.[/yellow]"
+                    "[$text-warning]You're subscribed to Servonaut AI but using your own key — "
+                    "you may be paying twice.[/$text-warning]"
                 )
             elif event == ProviderPreferenceEvent.SHOW_CAPABILITY_BANNER:
                 self._set_banner(
-                    "[cyan]Servonaut AI unlocks deploy / provision / scan + "
+                    "[$text-accent]Servonaut AI unlocks deploy / provision / scan + "
                     "account-level reads (billing, ban status) the local "
-                    "chat doesn't touch — try a chat?[/cyan]"
+                    "chat doesn't touch — try a chat?[/$text-accent]"
                 )
             elif event == ProviderPreferenceEvent.SHOW_FIRST_RUN_MODAL:
                 # B2 — push the first-run choice modal exactly once per
@@ -1817,7 +1817,7 @@ class ChatPanel(Widget):
             title = s["title"]
             session_id = s["id"]
             is_current = self._session is not None and self._session.id == session_id
-            marker = "[bold cyan]▸[/bold cyan] " if is_current else "  "
+            marker = "[bold $text-accent]▸[/bold $text-accent] " if is_current else "  "
 
             # Parse date for display
             updated = s.get("updated_at", "")
@@ -4252,7 +4252,7 @@ class ChatPanel(Widget):
             pass
         safe_reason = _rich_escape(raw_reason)
         rendered = (
-            f"[yellow]⊘ Skipped tool[/yellow] [bold]{safe_tool}[/bold] "
+            f"[$text-warning]⊘ Skipped tool[/$text-warning] [bold]{safe_tool}[/bold] "
             f"[dim]— {safe_reason}[/dim]"
         )
         widget = Static(
@@ -4411,11 +4411,11 @@ class ChatPanel(Widget):
             )
         elif action == UserFacingAction.BANNER_FEATURE_OFF:
             self._set_banner(
-                f"[yellow]{_rich_escape(payload.user_message)}[/yellow]"
+                f"[$text-warning]{_rich_escape(payload.user_message)}[/$text-warning]"
             )
         elif action == UserFacingAction.BANNER_UPSTREAM_FLAKY:
             self._set_banner(
-                f"[yellow]{_rich_escape(payload.user_message)}[/yellow]"
+                f"[$text-warning]{_rich_escape(payload.user_message)}[/$text-warning]"
             )
         elif action == UserFacingAction.TOAST_WARNING:
             self.app.notify(

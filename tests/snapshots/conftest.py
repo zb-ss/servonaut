@@ -21,6 +21,8 @@ import pytest
 import time_machine
 from textual.app import App
 
+from e2e.harness import markup_guard
+
 from .. import _home_isolation
 from . import _harness, _snapshot
 
@@ -141,6 +143,15 @@ def snapshot_mode(request: pytest.FixtureRequest) -> _snapshot.Mode:
     if mode.mismatch and not (mode.update or mode.strict):
         pytest.skip(mode.mismatch)
     return mode
+
+
+@pytest.fixture(autouse=True)
+def theme_coloured_markup() -> Iterator[None]:
+    """Fail a screen that draws text no theme can colour (see markup_guard)."""
+    with markup_guard.watch() as markup:
+        yield
+    if markup.findings:
+        pytest.fail("markup a theme cannot colour:\n" + markup.report())
 
 
 @pytest.fixture(autouse=True)

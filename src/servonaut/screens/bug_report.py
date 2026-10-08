@@ -172,7 +172,7 @@ class BugReportScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             with Container(id="bug-report-content"):
-                yield Static("[bold cyan]Report a bug[/bold cyan]", id="bug-title-header")
+                yield Static("[bold $text-accent]Report a bug[/bold $text-accent]", id="bug-title-header")
                 yield Label("Title", classes="field-label")
                 yield Static(
                     "One sentence describing the problem (5-200 chars).",
@@ -252,7 +252,7 @@ class BugReportScreen(Screen):
         service = getattr(self.app, "bug_report_service", None)
         status = self.query_one("#diagnostics-status", Static)
         if service is None:
-            status.update("[red]Bug report service not available.[/red]")
+            status.update("[$text-error]Bug report service not available.[/$text-error]")
             return
         try:
             # The real records: the service replaces every identifier they
@@ -287,7 +287,7 @@ class BugReportScreen(Screen):
             submit_btn.disabled = False
         except Exception as exc:
             logger.error("Failed to collect diagnostics: %s", exc)
-            status.update(f"[red]Collection failed: {_esc(str(exc))}[/red]")
+            status.update(f"[$text-error]Collection failed: {_esc(str(exc))}[/$text-error]")
 
     # ------------------------------------------------------------------
     # Preview rendering
@@ -386,7 +386,7 @@ class BugReportScreen(Screen):
     def _show_receipt(self, receipt: BugReportReceipt) -> None:
         """Swap buttons area to success state and open URL if applicable."""
         status = self.query_one("#diagnostics-status", Static)
-        status.update("[green]Bug report submitted.[/green]")
+        status.update("[$text-success]Bug report submitted.[/$text-success]")
 
         btn_row = self.query_one("#btn-row", Horizontal)
         btn_row.remove()

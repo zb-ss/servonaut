@@ -97,7 +97,7 @@ class HetznerCreateScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]Create Hetzner Cloud Server[/bold cyan]",
+                    "[bold $text-accent]Create Hetzner Cloud Server[/bold $text-accent]",
                     id="hetzner_create_title",
                 ),
                 # Hidden unless several Hetzner projects are configured.
@@ -180,8 +180,8 @@ class HetznerCreateScreen(Screen):
                 "#hetzner_create_container", ScrollableContainer,
             ).mount(
                 Static(
-                    "[red]Hetzner Cloud is not enabled. Configure a token "
-                    "in Settings → Hetzner Cloud first.[/red]",
+                    "[$text-error]Hetzner Cloud is not enabled. Configure a token "
+                    "in Settings → Hetzner Cloud first.[/$text-error]",
                     id="hetzner_not_configured_error",
                 )
             )

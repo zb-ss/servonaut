@@ -73,7 +73,7 @@ class TeamManagementScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]Team Management[/bold cyan]", id="team_mgmt_header"),
+                Static("[bold $text-accent]Team Management[/bold $text-accent]", id="team_mgmt_header"),
 
                 # No-auth notice (shown when not authenticated)
                 Static(
@@ -190,10 +190,10 @@ class TeamManagementScreen(Screen):
                         Static("[bold]Pull Latest Config[/bold]", classes="section_header"),
                         Static("", id="pull_config_preview"),
                         Static(
-                            "[yellow]Pulling REPLACES your local connection profiles, "
+                            "[$text-warning]Pulling REPLACES your local connection profiles, "
                             "connection rules, scan rules, and custom servers with the "
                             "team's version. AI / cloud-provider / personal settings are "
-                            "untouched.[/yellow]",
+                            "untouched.[/$text-warning]",
                             id="pull_config_warning",
                         ),
                         Horizontal(
@@ -846,8 +846,8 @@ class TeamManagementScreen(Screen):
         )
         if summary["stripped_paths"]:
             preview += (
-                f"\n[yellow]{summary['stripped_paths']} local SSH key path(s) will be "
-                "stripped — teammates must re-bind them locally.[/yellow]"
+                f"\n[$text-warning]{summary['stripped_paths']} local SSH key path(s) will be "
+                "stripped — teammates must re-bind them locally.[/$text-warning]"
             )
         self.query_one("#push_config_preview", Static).update(preview)
         self.query_one("#input_push_description", Input).value = ""
@@ -866,7 +866,7 @@ class TeamManagementScreen(Screen):
         lines = ["Pull will replace these sections (current → after):"]
         for section in ("connection_profiles", "connection_rules", "scan_rules", "custom_servers"):
             d = diff[section]
-            change_hint = "[green]no change[/green]" if d["local"] == d["after"] else f"[bold]{d['local']} → {d['after']}[/bold]"
+            change_hint = "[$text-success]no change[/$text-success]" if d["local"] == d["after"] else f"[bold]{d['local']} → {d['after']}[/bold]"
             lines.append(f"  • {section.replace('_', ' ').title()}: {change_hint}")
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload

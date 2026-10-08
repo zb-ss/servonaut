@@ -153,7 +153,7 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         yield Container(
             Static(
-                "[bold cyan]You're now subscribed to Servonaut AI.[/bold cyan]",
+                "[bold $text-accent]You're now subscribed to Servonaut AI.[/bold $text-accent]",
                 id="ai_picker_title",
             ),
             Static(
@@ -166,7 +166,7 @@ class AIProviderFirstRunModal(ModalScreen[Optional[str]]):
                 id="ai_picker_body",
             ),
             Static(
-                f"Currently configured: [cyan]{self._existing_label}[/cyan]",
+                f"Currently configured: [$text-accent]{self._existing_label}[/$text-accent]",
                 id="ai_picker_existing",
             ),
             Horizontal(
@@ -254,7 +254,7 @@ class AIEmptyStateModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         yield Container(
             Static(
-                "[bold cyan]Servonaut needs an AI provider.[/bold cyan]",
+                "[bold $text-accent]Servonaut needs an AI provider.[/bold $text-accent]",
                 id="ai_empty_title",
             ),
             Static(

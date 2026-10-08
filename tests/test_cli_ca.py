@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
 from servonaut.cli import ca
+from servonaut.services.api_client import FeatureDisabledError
+from servonaut.services.vault.errors import SSH_CA_COMING_SOON
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -256,3 +259,103 @@ def test_a_host_job_without_a_terminal_is_refused_before_any_job_exists(capsys, 
 
     assert _run_with(Service(), "refresh", "web-1", "--team", "ops", "--yes") == 5
     assert "needs the host name typed" in capsys.readouterr().err
+
+
+
+def _ssh_ca_switched_off() -> FeatureDisabledError:
+    return FeatureDisabledError(
+        code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
+    )
+
+
+class _SwitchedOffService:
+    """Every CA call is refused the way a service without SSH certificates answers."""
+
+    def __getattr__(self, name):
+        async def refuse(**_kwargs):
+            raise _ssh_ca_switched_off()
+
+        return refuse
+
+
+def _run_switched_off(argv: list[str]) -> int:
+    ca.set_ca_service_factory(_SwitchedOffService)
+    try:
+        return ca.handle_ca_command(_parser().parse_args(argv))
+    finally:
+        ca.set_ca_service_factory(None)
+
+
+def test_status_says_certificates_are_coming_soon_and_succeeds(capsys) -> None:
+    assert _run_switched_off(["ca", "status", "--team", "ops"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == f"{SSH_CA_COMING_SOON}\n"
+    assert captured.err == ""
+
+
+def test_status_json_reports_certificates_as_not_available(capsys) -> None:
+    assert _run_switched_off(["ca", "status", "--team", "ops", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {
+        "enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_COMING_SOON,
+    }
+
+
+@pytest.mark.parametrize("argv", [
+    ["ca", "enable", "--team", "ops", "--yes"],
+    ["ca", "policy", "--team", "ops"],
+    ["ca", "policy", "--team", "ops", "--set", '{"interactive_ttl_seconds": 3600}'],
+    ["ca", "enroll", "server-1", "--team", "ops"],
+    ["ca", "refresh", "server-1", "--team", "ops", "--yes"],
+    ["ca", "unenroll", "server-1", "--team", "ops", "--yes"],
+    ["ca", "krl", "--team", "ops"],
+    ["ca", "break-glass-scan", "--team", "ops"],
+    ["ca", "revoke", "28", "--team", "ops", "--yes"],
+    ["ca", "audit", "--team", "ops"],
+    ["ca", "audit", "--team", "ops", "--json"],
+])
+def test_other_commands_say_coming_soon_and_that_nothing_changed(argv, capsys, monkeypatch) -> None:
+    # Host jobs only reach the service from a terminal; nothing is typed here.
+    monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
+    assert _run_switched_off(argv) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"{SSH_CA_COMING_SOON} Nothing was changed.\n"
+
+
+def test_a_wrapped_switched_off_refusal_is_reported_the_same_way(capsys) -> None:
+    class Service:
+        async def ca_audit(self, *, team):
+            try:
+                raise _ssh_ca_switched_off()
+            except Exception as exc:
+                raise RuntimeError("wrapper") from exc
+
+    ca.set_ca_service_factory(Service)
+    try:
+        assert ca.handle_ca_command(_parser().parse_args(["ca", "audit", "--team", "ops"])) == 1
+    finally:
+        ca.set_ca_service_factory(None)
+
+    assert capsys.readouterr().err == f"{SSH_CA_COMING_SOON} Nothing was changed.\n"
+
+
+def test_another_switched_off_feature_still_fails_status(capsys) -> None:
+    class Service:
+        async def ca_status(self, *, team):
+            raise FeatureDisabledError(
+                code="feature_disabled", message="server text", status=503, details={"feature": "team_vault"},
+            )
+
+    ca.set_ca_service_factory(Service)
+    try:
+        assert ca.handle_ca_command(_parser().parse_args(["ca", "status", "--team", "ops"])) == 1
+    finally:
+        ca.set_ca_service_factory(None)
+
+    err = capsys.readouterr().err
+    assert err.startswith("CA request failed (")
+    assert "coming soon" not in err
+    assert "server text" not in err

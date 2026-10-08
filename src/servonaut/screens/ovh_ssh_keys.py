@@ -82,7 +82,7 @@ class OVHSSHKeysScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]OVH Public Cloud SSH Keys[/bold cyan]",
+                    "[bold $text-accent]OVH Public Cloud SSH Keys[/bold $text-accent]",
                     id="ovh_ssh_keys_header",
                 ),
                 Static(
@@ -200,15 +200,15 @@ class OVHSSHKeysScreen(Screen):
         cloud_svc = self._cloud_service()
         if cloud_svc is None:
             self._set_status(
-                "[red]OVH Cloud service is not initialised. "
-                "Configure OVHcloud in Settings first.[/red]"
+                "[$text-error]OVH Cloud service is not initialised. "
+                "Configure OVHcloud in Settings first.[/$text-error]"
             )
             return
         project_id = self._resolve_project_id()
         if not project_id:
             self._set_status(
-                "[red]No OVH cloud project ID configured. Add one in "
-                "Settings → OVHcloud → Cloud project IDs.[/red]"
+                "[$text-error]No OVH cloud project ID configured. Add one in "
+                "Settings → OVHcloud → Cloud project IDs.[/$text-error]"
             )
             return
         self._project_id = project_id
@@ -235,7 +235,7 @@ class OVHSSHKeysScreen(Screen):
             logger.error("Failed to load OVH project SSH keys: %s", exc)
             if load == self._loads:
                 self._set_status(
-                    f"[red]Failed to load keys: {self._short_err(exc)}[/red]"
+                    f"[$text-error]Failed to load keys: {self._short_err(exc)}[/$text-error]"
                 )
             return
         if load != self._loads:
@@ -419,7 +419,7 @@ class OVHSSHKeysScreen(Screen):
             logger.error("OVH project SSH key add failed for %s: %s",
                          name, exc)
             self._set_status(
-                f"[red]Add failed: {self._short_err(exc)}[/red]"
+                f"[$text-error]Add failed: {self._short_err(exc)}[/$text-error]"
             )
             self.notify(f"Add failed: {self._short_err(exc)}", severity="error",
                         markup=False)
@@ -472,7 +472,7 @@ class OVHSSHKeysScreen(Screen):
                 key_id, exc,
             )
             self._set_status(
-                f"[red]Delete failed: {self._short_err(exc)}[/red]"
+                f"[$text-error]Delete failed: {self._short_err(exc)}[/$text-error]"
             )
             self.notify(f"Delete failed: {self._short_err(exc)}", severity="error",
                         markup=False)

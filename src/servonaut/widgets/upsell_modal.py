@@ -112,7 +112,7 @@ class UpsellModal(ModalScreen[None]):
         feature_name, description = _UPSELL_COPY.get(self._key, _DEFAULT_UPSELL)
         yield Container(
             Static(
-                f"[bold yellow]Upgrade Required: {feature_name}[/bold yellow]",
+                f"[bold $text-warning]Upgrade Required: {feature_name}[/bold $text-warning]",
                 id="upsell-title",
             ),
             Static(description, id="upsell-body"),
@@ -172,7 +172,7 @@ class BetaWaitlistModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]You're on the Waitlist[/bold cyan]",
+                "[bold $text-accent]You're on the Waitlist[/bold $text-accent]",
                 id="waitlist-title",
             ),
             Static(
@@ -234,7 +234,7 @@ class BackendMaintenanceModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold red]Memory Sync Unavailable[/bold red]",
+                "[bold $text-error]Memory Sync Unavailable[/bold $text-error]",
                 id="maintenance-title",
             ),
             Static(

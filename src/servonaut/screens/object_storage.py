@@ -143,7 +143,7 @@ class ObjectStorageScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    f"[bold cyan]{label}[/bold cyan]",
+                    f"[bold $text-accent]{label}[/bold $text-accent]",
                     id="s3_title",
                 ),
                 # Shown only when the provider has several accounts.
@@ -376,14 +376,14 @@ class ObjectStorageScreen(Screen):
             if len(object_storage_accounts(self.app, self._provider)) > 1:
                 account = shown_label(self.app, self._account)
                 self._set_status(
-                    f"[yellow]{markup_escape(label)} is not configured for "
+                    f"[$text-warning]{markup_escape(label)} is not configured for "
                     f"account {markup_escape(account)}. Add S3 "
-                    "credentials for this account in Settings.[/yellow]"
+                    "credentials for this account in Settings.[/$text-warning]"
                 )
             else:
                 self._set_status(
-                    f"[yellow]{markup_escape(label)} is not configured. "
-                    "Add S3 credentials in Settings.[/yellow]"
+                    f"[$text-warning]{markup_escape(label)} is not configured. "
+                    "Add S3 credentials in Settings.[/$text-warning]"
                 )
             return
         if self._view == _VIEW_BUCKETS:
@@ -411,7 +411,7 @@ class ObjectStorageScreen(Screen):
         except Exception as err:
             logger.error("list_buckets failed: %s", err)
             err_msg = self.scrub(str(err))
-            self._set_status(f"[red]Error loading buckets: {markup_escape(err_msg)}[/red]")
+            self._set_status(f"[$text-error]Error loading buckets: {markup_escape(err_msg)}[/$text-error]")
             self.app.notify(
                 f"Failed to load buckets: {err_msg}",
                 severity="error",
@@ -508,7 +508,7 @@ class ObjectStorageScreen(Screen):
         except Exception as err:
             logger.error("list_objects failed for %s/%s: %s", self._current_bucket, self._prefix, err)
             err_msg = self.scrub(str(err))
-            self._set_status(f"[red]Error: {markup_escape(err_msg)}[/red]")
+            self._set_status(f"[$text-error]Error: {markup_escape(err_msg)}[/$text-error]")
             self.app.notify(
                 f"Failed to list objects: {err_msg}",
                 severity="error",

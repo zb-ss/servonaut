@@ -58,7 +58,7 @@ class OVHStorageScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]OVH Block Storage[/bold cyan]",
+                    "[bold $text-accent]OVH Block Storage[/bold $text-accent]",
                     id="storage_title",
                 ),
                 # Hidden unless several OVH accounts are configured.

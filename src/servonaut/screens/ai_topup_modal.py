@@ -141,7 +141,7 @@ class AITopUpModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         children = [
             Static(
-                "[bold cyan]Top up Servonaut AI[/bold cyan]",
+                "[bold $text-accent]Top up Servonaut AI[/bold $text-accent]",
                 id="ai_topup_title",
             ),
         ]

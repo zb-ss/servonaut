@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -13,6 +14,13 @@ from textual.reactive import reactive
 
 from servonaut.runtime import DistributionKind, RuntimeLayout, detect_runtime
 from servonaut.styles import CSS_FILES
+from servonaut.styles.themes import (
+    SERVONAUT_ANSI_DARK,
+    SERVONAUT_ANSI_LIGHT,
+    SERVONAUT_THEMES,
+    is_servonaut_theme,
+    resolve_theme_name,
+)
 
 from servonaut.utils.instance_resolver import resolve_instance_from_lists
 
@@ -214,6 +222,9 @@ class ServonautApp(App):
             **kwargs: Passed through to Textual App.__init__.
         """
         super().__init__(**kwargs)
+        for theme in SERVONAUT_THEMES:
+            self.register_theme(theme)
+        self._textual_ansi_themes = (self.ansi_theme_dark, self.ansi_theme_light)
         self.instances = []
         self.memory_first_connect_seen = set()
         self.memory_annotations_pulled_seen = set()
@@ -546,6 +557,7 @@ class ServonautApp(App):
         config = self.config_manager.get()
         if self.config_manager.load_error:
             self.notify(self.config_manager.load_error, severity="error", timeout=15)
+        self._apply_configured_theme(config.theme)
         self.cache_service = CacheService(ttl_seconds=config.cache_ttl_seconds)
         # Every provider account and its services. The ``*_service``
         # attributes below stay the default (primary) account of each
@@ -2486,6 +2498,33 @@ class ServonautApp(App):
                 help_text,
                 lambda target=target_id: self.post_message(Sidebar.NavigationRequested(target)),
             )
+
+    def _apply_configured_theme(self, configured: str) -> None:
+        """Switch to the saved theme; TEXTUAL_THEME still wins for one run."""
+        if os.environ.get("TEXTUAL_THEME"):
+            self._match_ansi_palette(self.theme)
+            return
+        self.theme = resolve_theme_name(configured, self.available_themes)
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Remember a theme picked anywhere: Settings or the command palette."""
+        self._match_ansi_palette(theme_name)
+        manager = self.config_manager
+        if manager is None:  # still starting up
+            return
+        if resolve_theme_name(manager.get().theme, self.available_themes) == theme_name:
+            return
+        try:
+            manager.update(theme=theme_name)
+        except OSError as e:  # the theme still applies for this session
+            logger.warning("Could not save the theme: %s", e)
+
+    def _match_ansi_palette(self, theme_name: str) -> None:
+        """Draw ANSI colours (Rich text, command output) in the theme's own hues."""
+        if is_servonaut_theme(theme_name):
+            self.ansi_theme_dark, self.ansi_theme_light = SERVONAUT_ANSI_DARK, SERVONAUT_ANSI_LIGHT
+        else:
+            self.ansi_theme_dark, self.ansi_theme_light = self._textual_ansi_themes
 
     def real_instance_id(self, instance_id: str) -> str:
         """The real id behind a demo-mode fake; identity outside demo mode."""

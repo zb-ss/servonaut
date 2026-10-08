@@ -7,6 +7,15 @@ window.startServonaut = (token) => {
   expected.protocol = "ws:";
   const terminal = document.getElementById("terminal");
   terminal.dataset.sessionWebsocketUrl = expected.href;
+  // The terminal grid rarely fills the window exactly. The app names the
+  // colour of its screens, and the strip left at the edges takes it.
+  const paintPage = (message) => {
+    if (!Array.isArray(message) || message[0] !== "servonaut_theme") return;
+    const colour = message[1] && message[1].background;
+    if (typeof colour === "string" && /^#[0-9a-f]{6}$/.test(colour)) {
+      document.documentElement.style.setProperty("--servonaut-page", colour);
+    }
+  };
   window.WebSocket = class extends NativeWebSocket {
     constructor(url) {
       const target = new URL(url);
@@ -16,6 +25,14 @@ window.startServonaut = (token) => {
       super(url, ["servonaut.desktop.v1", `auth.${token}`]);
       token = "";
       window.WebSocket = NativeWebSocket;
+      this.addEventListener("message", (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          paintPage(JSON.parse(event.data));
+        } catch (error) {
+          // Not JSON: nothing for the page to do.
+        }
+      });
     }
   };
   // Measure bundled glyphs, never the OS fallback font during a cold load.

@@ -56,8 +56,8 @@ def _format_current_usage(usage: dict, *, redact: bool = False) -> str:
                 return f"{float(value):.2f} {currency}".strip()
         return "n/a"
 
-    lines.append(f"  Current spend : [cyan]{_extract_value(current)}[/cyan]")
-    lines.append(f"  Forecast      : [yellow]{_extract_value(forecast)}[/yellow]")
+    lines.append(f"  Current spend : [$text-accent]{_extract_value(current)}[/$text-accent]")
+    lines.append(f"  Forecast      : [$text-warning]{_extract_value(forecast)}[/$text-warning]")
     return "\n".join(lines)
 
 
@@ -121,7 +121,7 @@ class OVHBillingScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]OVH Billing Dashboard[/bold cyan]", id="billing_title"),
+                Static("[bold $text-accent]OVH Billing Dashboard[/bold $text-accent]", id="billing_title"),
                 # Hidden unless several OVH accounts are configured.
                 AccountPicker.for_provider(
                     registry_for(self.app, "ovh"), "ovh", id="billing_account",
@@ -222,7 +222,7 @@ class OVHBillingScreen(Screen):
         if self.app.demo_mode:
             message = "Unable to verify OVH credentials. See logs for details."
         self.query_one("#current_usage", Static).update(
-            f"[red]⚠ {escape(message)}[/red]"
+            f"[$text-error]⚠ {escape(message)}[/$text-error]"
         )
         self.query_one("#spend_history", Static).update("[dim]—[/dim]")
 
@@ -292,27 +292,27 @@ class OVHBillingScreen(Screen):
         svc = self._billing_service()
         widget = self.query_one("#current_usage", Static)
         if svc is None:
-            widget.update("[red]OVH billing service not available.[/red]")
+            widget.update("[$text-error]OVH billing service not available.[/$text-error]")
             return
         try:
             usage = await svc.get_current_usage()
             widget.update(_format_current_usage(usage, redact=self.app.demo_mode))
         except Exception as exc:
             logger.error("Failed to load OVH current usage: %s", exc)
-            widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
+            widget.update(f"[$text-error]Error: {self._display_error(exc)}[/$text-error]")
 
     async def _load_spend_history(self) -> None:
         svc = self._billing_service()
         widget = self.query_one("#spend_history", Static)
         if svc is None:
-            widget.update("[red]OVH billing service not available.[/red]")
+            widget.update("[$text-error]OVH billing service not available.[/$text-error]")
             return
         try:
             history = await svc.get_monthly_spend_history(months=6)
             widget.update(_format_spend_history(history, redact=self.app.demo_mode))
         except Exception as exc:
             logger.error("Failed to load OVH spend history: %s", exc)
-            widget.update(f"[red]Error: {self._display_error(exc)}[/red]")
+            widget.update(f"[$text-error]Error: {self._display_error(exc)}[/$text-error]")
 
     async def _load_invoices(self) -> None:
         svc = self._billing_service()

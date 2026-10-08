@@ -402,7 +402,7 @@ class AwsPanel(SettingsPanel):
             return
         s3 = aws_config.object_storage
         if s3.access_key or s3.secret_key:
-            label.update("[green]Status: S3 credentials configured[/green]")
+            label.update("[$text-success]Status: S3 credentials configured[/$text-success]")
         else:
             label.update(
                 "[dim]Status: Using boto3 default credential chain "

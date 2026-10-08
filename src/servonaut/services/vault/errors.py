@@ -56,9 +56,17 @@ _ACTIONABLE_CODES = {
     ),
 }
 
+# A service can ship with SSH certificates switched off; that is a planned
+# state rather than a failure, so it reads as an announcement, not an error.
+SSH_CA_COMING_SOON = (
+    "SSH certificates are coming soon: they are not switched on for this Servonaut service yet. "
+    "Team members connect with vault keys until then."
+)
+
 # ``feature_disabled`` names the feature switched off on the service in ``details.feature``.
+# Reasons are shown inside "... failed (reason)." so they carry no final stop.
 _DISABLED_FEATURES = {
-    "ssh_ca": "SSH certificates are not available on this Servonaut service",
+    "ssh_ca": SSH_CA_COMING_SOON.rstrip("."),
 }
 
 # ``entitlement_required`` names the missing plan feature in ``details.feature``.
@@ -67,6 +75,17 @@ _PLAN_FEATURES = {
     "team_vault": "a team vault",
     "ssh_ca": "SSH certificates",
 }
+
+
+def is_feature_disabled(exc: BaseException, feature: str) -> bool:
+    """Whether *exc*, or the API refusal a wrapper was raised from, says *feature* is switched off."""
+    cause = exc.__cause__
+    if not isinstance(exc, (VaultUserError, APIError)) and isinstance(cause, APIError):
+        exc = cause
+    if not isinstance(exc, APIError) or exc.code != "feature_disabled":
+        return False
+    details = exc.details if isinstance(exc.details, dict) else {}
+    return details.get("feature") == feature
 
 
 def vault_failure_reason(exc: BaseException) -> str:

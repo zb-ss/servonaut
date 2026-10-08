@@ -167,7 +167,7 @@ class SecretsListScreen(Screen):
             return (
                 "[dim]No secrets stored in this Bitwarden project. Push one "
                 "with [bold]`bws secret create`[/bold] or via the Bitwarden "
-                "web UI; refresh ([cyan]r[/cyan]) to re-read.[/dim]"
+                "web UI; refresh ([$text-accent]r[/$text-accent]) to re-read.[/dim]"
             )
         if provider_label == "local":
             return (
@@ -184,7 +184,7 @@ class SecretsListScreen(Screen):
         body.remove_children()
         body.mount(Container(
             Static(
-                f"[red]Could not list secrets:[/red] {escape(message)}",
+                f"[$text-error]Could not list secrets:[/$text-error] {escape(message)}",
             ),
             Static(
                 "\n[dim]Common causes:[/dim]\n"

@@ -10,7 +10,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 from servonaut.screens.ca import CaScreen
 from servonaut.screens.vault import (
@@ -20,6 +20,8 @@ from servonaut.screens.vault import (
     VaultScreen,
     show_pending_device,
 )
+from servonaut.services.api_client import APIError, FeatureDisabledError
+from servonaut.services.vault.errors import SSH_CA_COMING_SOON
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
@@ -337,6 +339,132 @@ async def test_demo_mode_redacts_ca_status_and_repaints_cached_value() -> None:
         app.demo_mode = False
         screen.refresh_after_demo_toggle()
         assert "private-ca-host" in str(screen.query_one("#ca_status", Static).render())
+
+
+_CA_ACTIONS = ("#ca_audit", "#ca_enroll", "#ca_krl", "#ca_break_glass_scan")
+
+
+class _SwitchableCaService:
+    """CA calls answered the way a service without SSH certificates answers, until switched on."""
+
+    def __init__(self) -> None:
+        self.switched_on = False
+        self.audits = 0
+
+    def _refuse(self) -> None:
+        if not self.switched_on:
+            raise FeatureDisabledError(
+                code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
+            )
+
+    async def ca_status(self, *, team: str):
+        self._refuse()
+        return {"team": team, "enabled": True}
+
+    async def ca_audit(self, *, team: str):
+        self.audits += 1
+        self._refuse()
+        return {"ok": True}
+
+
+class _CaHost(App):
+    def __init__(self, service: _SwitchableCaService) -> None:
+        super().__init__()
+        self.vault_command_service = service
+        self.notes: list[tuple[str, dict]] = []
+
+    def notify(self, message: str, **kwargs) -> None:
+        self.notes.append((message, kwargs))
+
+    def on_mount(self) -> None:
+        self.push_screen(CaScreen())
+
+
+def _ca_actions_disabled(screen: Screen) -> list[bool]:
+    return [screen.query_one(selector, Button).disabled for selector in _CA_ACTIONS]
+
+
+@pytest.mark.asyncio
+async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actions() -> None:
+    service = _SwitchableCaService()
+    app = _CaHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, CaScreen)
+        status = screen.query_one("#ca_status", Static)
+        screen.query_one("#ca_team", Input).value = "ops"
+        await pilot.click("#ca_refresh")
+        await wait_until(lambda: "coming soon" in str(status.render()))
+
+        assert str(status.render()) == SSH_CA_COMING_SOON
+        assert "Could not load" not in str(status.render())
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+        assert screen.query_one("#ca_refresh", Button).disabled is False
+        assert app.notes == []
+
+        await pilot.click("#ca_audit")
+        await pilot.pause()
+        assert service.audits == 0
+
+        service.switched_on = True
+        await pilot.click("#ca_refresh")
+        await wait_until(lambda: "enabled: True" in str(status.render()))
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_another_team_offers_the_ca_actions_again() -> None:
+    app = _CaHost(_SwitchableCaService())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        team = screen.query_one("#ca_team", Input)
+        team.value = "ops"
+        await screen._load("ops")
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+
+        team.value = "ops "
+        await pilot.pause()
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+
+        team.value = "platform"
+        await wait_until(lambda: _ca_actions_disabled(screen) == [False, False, False, False])
+
+
+@pytest.mark.asyncio
+async def test_an_action_that_meets_switched_off_certificates_informs_instead_of_failing() -> None:
+    service = _SwitchableCaService()
+    app = _CaHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#ca_team", Input).value = "ops"
+        await pilot.click("#ca_audit")
+        await wait_until(lambda: bool(app.notes))
+
+        assert service.audits == 1
+        assert app.notes == [(SSH_CA_COMING_SOON, {"severity": "information", "markup": False})]
+        assert str(screen.query_one("#ca_status", Static).render()) == SSH_CA_COMING_SOON
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_other_ca_action_failures_still_notify_an_error() -> None:
+    class Service:
+        async def ca_audit(self, *, team: str):
+            raise APIError(code="ssh_ca_unavailable", message="server text", status=503)
+
+    app = _CaHost(Service())  # type: ignore[arg-type]
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        await screen._audit("ops")
+
+        [(message, kwargs)] = app.notes
+        assert message.startswith("CA audit failed (the Servonaut service cannot issue SSH certificates")
+        assert kwargs == {"severity": "error", "markup": False}
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
 
 
 @pytest.mark.asyncio

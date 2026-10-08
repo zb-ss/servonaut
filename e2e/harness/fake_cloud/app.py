@@ -54,6 +54,11 @@ from e2e.harness.fake_cloud.tls import TlsMaterial
 from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 from e2e.harness.loopback import LoopbackServer
 
+# What the SSH-CA switch covers: every team CA route but the open KRL reads.
+_SSH_CA_ROUTE = re.compile(r"^/api/v1/teams/[^/]+/ssh-ca(?:/|$)")
+_SSH_CA_OPEN_READ = re.compile(r"/ssh-ca/(?:krl|revocations)$")
+_TEAM_SERVERS_ROUTE = re.compile(r"^/api/v1/teams/[^/]+/servers$")
+
 class FakeCloud(LoopbackServer):
     """Local HTTPS stand-in for the Servonaut API and the package index."""
 
@@ -77,6 +82,9 @@ class FakeCloud(LoopbackServer):
         self.vault = VaultCloud(
             lambda: self._store.snapshot().user_id, shared_servers=self.account.shared_servers
         )
+        # The hosted service can ship with SSH certificates switched off (Settings
+        # feature.ssh_ca_enabled); see :meth:`switch_off_ssh_ca`.
+        self.ssh_ca_switched_off = False
         self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
@@ -108,6 +116,7 @@ class FakeCloud(LoopbackServer):
         self.configs.reset()
         self.secrets.reset()
         self.vault.reset()
+        self.ssh_ca_switched_off = False
         self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
@@ -188,11 +197,20 @@ class FakeCloud(LoopbackServer):
         self.relay.drop_streams()  # open subscriptions would hold up shutdown
         self.ai.drop_streams()  # so would an open chat stream
 
+    def switch_off_ssh_ca(self) -> None:
+        """Answer like a service with SSH certificates switched off.
+
+        Every ``/ssh-ca`` route except the KRL and revocation reads answers 503
+        ``feature_disabled`` naming ``ssh_ca``, and shared servers carry
+        ``ssh_ca: null``, as the real service does.
+        """
+        self.ssh_ca_switched_off = True
+
     def ssl_context(self) -> ssl.SSLContext:
         return self._tls.server_context()
 
     def build_app(self) -> web.Application:
-        app = web.Application(middlewares=[self._log_middleware])
+        app = web.Application(middlewares=[self._log_middleware, self._ssh_ca_switch_middleware])
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field)
@@ -207,6 +225,23 @@ class FakeCloud(LoopbackServer):
         control.add_routes(app, self._store, self._log)
         require_unique_routes(app)
         return app
+
+    @web.middleware
+    async def _ssh_ca_switch_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        if not self.ssh_ca_switched_off:
+            return await handler(request)
+        if _SSH_CA_ROUTE.match(request.path) and not _SSH_CA_OPEN_READ.search(request.path):
+            return web.json_response({"error": {
+                "code": "feature_disabled", "message": "SSH certificates are not available right now.",
+                "http": 503, "details": {"feature": "ssh_ca"},
+            }}, status=503)
+        response = await handler(request)
+        if request.method == "GET" and _TEAM_SERVERS_ROUTE.match(request.path) and response.status == 200:
+            payload = json.loads(response.body)
+            for row in payload.get("data", []):
+                row["ssh_ca"] = None
+            return web.json_response(payload, status=response.status)
+        return response
 
     @web.middleware
     async def _log_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:

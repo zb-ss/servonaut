@@ -80,7 +80,7 @@ class IPBanScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
-                Static("[bold cyan]IP Ban Manager[/bold cyan]", id="ip_ban_title"),
+                Static("[bold $text-accent]IP Ban Manager[/bold $text-accent]", id="ip_ban_title"),
             Static("[dim]Ban IP addresses via WAF, Security Groups, or NACLs[/dim]", id="ip_ban_subtitle"),
             Static(
                 "No IP ban method is set up yet. Add a WAF IP set, security "

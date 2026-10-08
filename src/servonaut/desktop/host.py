@@ -12,6 +12,7 @@ import contextlib
 import hmac
 import json
 import logging
+import re
 import socket
 from collections.abc import Callable
 from typing import Any, Final
@@ -19,6 +20,7 @@ from typing import Any, Final
 import aiohttp
 from aiohttp import WSMsgType, web
 from textual.app import App
+from textual.color import Color, ColorParseError
 
 from servonaut.desktop.assets import build_csp_header, load_and_verify_assets
 from servonaut.desktop.driver import (
@@ -46,6 +48,11 @@ PROTOCOL_SUBPROTOCOL: Final[str] = "servonaut.desktop.v1"
 # window smoke waits for this line, so it names no secret and never changes
 # casually.
 SESSION_CONNECTED_MESSAGE: Final[str] = "Desktop session connected"
+# Tells the page which colour the app paints its screens with, so the strip
+# the terminal grid leaves at the window's edges matches it. The page's own
+# script reads it; Textual's ignores messages it does not know.
+THEME_MESSAGE: Final[str] = "servonaut_theme"
+_HEX_COLOUR: Final[re.Pattern[str]] = re.compile(r"#[0-9a-f]{6}")
 
 
 class DesktopHostError(RuntimeError):
@@ -109,6 +116,7 @@ class DesktopHost:
         self._active_websocket: web.WebSocketResponse | None = None
         self._active_app: App[Any] | None = None
         self._active_transport: DesktopDriverTransport | None = None
+        self._theme_sends: set[asyncio.Task[None]] = set()
 
     @property
     def is_used(self) -> bool:
@@ -297,6 +305,7 @@ class DesktopHost:
             await asyncio.wait_for(
                 transport.ready_event.wait(), timeout=self.shutdown_seconds
             )
+            self._follow_theme(ws, app)
             await self._run_bridge(ws, transport, app, app_task)
         except (TimeoutError, asyncio.TimeoutError):
             logger.error("Desktop app did not start within %ss", self.shutdown_seconds)
@@ -317,6 +326,30 @@ class DesktopHost:
                 await app.action_quit()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(app_task, timeout=2.0)
+
+    def _follow_theme(self, ws: web.WebSocketResponse, app: App[Any]) -> None:
+        """Send the page the screen colour now and after every theme change."""
+
+        def send(_theme: object = None) -> None:
+            colour = screen_colour(app)
+            if colour is None or ws.closed:
+                return
+            task = asyncio.ensure_future(
+                self._send_quietly(ws, [THEME_MESSAGE, {"background": colour}])
+            )
+            self._theme_sends.add(task)
+            task.add_done_callback(self._theme_sends.discard)
+
+        send()
+        app.theme_changed_signal.subscribe(app, send)
+
+    @staticmethod
+    async def _send_quietly(ws: web.WebSocketResponse, message: list[Any]) -> None:
+        """Send *message*; a session that is closing just misses it."""
+        with contextlib.suppress(
+            ConnectionResetError, aiohttp.ClientConnectionResetError, OSError
+        ):
+            await ws.send_json(message)
 
     async def _run_bridge(
         self,
@@ -422,3 +455,19 @@ class DesktopHost:
             except (ValueError, TypeError, KeyError, OverflowError):
                 await ws.close(code=1008, message=b"Invalid message")
                 return
+
+
+def screen_colour(app: App[Any]) -> str | None:
+    """The colour the app paints its screens with, as ``#rrggbb``.
+
+    ``None`` for a theme that leaves colours to the terminal (the ANSI themes
+    paint screens transparent).
+    """
+    try:
+        colour = Color.parse(app.get_css_variables()["surface"])
+    except (KeyError, ColorParseError):
+        return None
+    if colour.ansi is not None or colour.a < 1:
+        return None
+    value = colour.hex6.lower()
+    return value if _HEX_COLOUR.fullmatch(value) else None

@@ -66,7 +66,7 @@ class AIAnalysisScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
-                Static("[bold cyan]AI Log Analysis[/bold cyan]", id="ai_header"),
+                Static("[bold $text-accent]AI Log Analysis[/bold $text-accent]", id="ai_header"),
                 Static("", id="ai_provider_info"),
                 TextArea("", id="ai_text_input", tab_behavior="focus", soft_wrap=False),
                 Horizontal(
@@ -161,8 +161,8 @@ class AIAnalysisScreen(Screen):
         key_status = self._key_status_markup(ai_config)
 
         lines.append(
-            f"Provider: [cyan]{provider}[/cyan]  "
-            f"Model: [cyan]{model}[/cyan]  "
+            f"Provider: [$text-accent]{provider}[/$text-accent]  "
+            f"Model: [$text-accent]{model}[/$text-accent]  "
             f"API Key: {key_status}"
         )
         return lines
@@ -180,10 +180,10 @@ class AIAnalysisScreen(Screen):
             return "[dim]OAuth bearer[/dim]"
         api_key = ai_config.key_for(provider)
         if not api_key:
-            return "[dim]n/a[/dim]" if provider == "ollama" else "[red]not set[/red]"
+            return "[dim]n/a[/dim]" if provider == "ollama" else "[$text-error]not set[/$text-error]"
         if is_secret_ref(api_key) and not resolve_secret(api_key):
-            return "[yellow]ref unresolved[/yellow]"
-        return "[green]set[/green]"
+            return "[$text-warning]ref unresolved[/$text-warning]"
+        return "[$text-success]set[/$text-success]"
 
     def _compose_servonaut_row(self, auth) -> str:
         """Render the dedicated "Servonaut AI" row at the top of the picker.
@@ -199,7 +199,7 @@ class AIAnalysisScreen(Screen):
         """
         if auth is None or not getattr(auth, "is_authenticated", False):
             return (
-                "[bold]Servonaut AI[/bold]: [yellow]🔒[/yellow] "
+                "[bold]Servonaut AI[/bold]: [$text-warning]🔒[/$text-warning] "
                 "[dim]Login required[/dim]"
             )
         try:
@@ -208,17 +208,17 @@ class AIAnalysisScreen(Screen):
             has_premium = False
         if not has_premium:
             return (
-                "[bold]Servonaut AI[/bold]: [yellow]🔒[/yellow] "
+                "[bold]Servonaut AI[/bold]: [$text-warning]🔒[/$text-warning] "
                 "[dim]Solo or Teams[/dim]"
             )
 
         quota_str = self._inline_quota_summary(auth)
         if quota_str:
             return (
-                "[bold]Servonaut AI[/bold]: [green]✓[/green] "
+                "[bold]Servonaut AI[/bold]: [$text-success]✓[/$text-success] "
                 f"{quota_str}"
             )
-        return "[bold]Servonaut AI[/bold]: [green]✓[/green] [dim]ready[/dim]"
+        return "[bold]Servonaut AI[/bold]: [$text-success]✓[/$text-success] [dim]ready[/dim]"
 
     @staticmethod
     def _inline_quota_summary(auth) -> str:
@@ -249,7 +249,7 @@ class AIAnalysisScreen(Screen):
         rendered = format_tokens_remaining(used, limit, topup)
         if not rendered or rendered == "—":
             return ""
-        return f"[cyan]{escape(rendered)}[/cyan] tokens left"
+        return f"[$text-accent]{escape(rendered)}[/$text-accent] tokens left"
 
     def _update_token_estimate(self) -> None:
         text = self._get_input_text()
@@ -267,7 +267,7 @@ class AIAnalysisScreen(Screen):
             line_info = ""
 
         self.query_one("#ai_token_estimate", Static).update(
-            f"Input: ~[yellow]{tokens}[/yellow] tokens{chunk_note}{line_info}"
+            f"Input: ~[$text-warning]{tokens}[/$text-warning] tokens{chunk_note}{line_info}"
         )
 
     def _get_input_text(self) -> str:
@@ -403,7 +403,7 @@ class AIAnalysisScreen(Screen):
                 self.app.connection_service,
             )
             if not conn["host"]:
-                status.update("[red]No IP address available for this instance.[/red]")
+                status.update("[$text-error]No IP address available for this instance.[/$text-error]")
                 return
 
             # Probe for readable log files
@@ -415,7 +415,7 @@ class AIAnalysisScreen(Screen):
             self._available_logs = available
 
             if not available:
-                status.update("[yellow]No readable log files found on this server.[/yellow]")
+                status.update("[$text-warning]No readable log files found on this server.[/$text-warning]")
                 return
 
             progress.stop()
@@ -444,7 +444,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[red]Error: {exc_str}[/red]")
+            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -551,8 +551,8 @@ class AIAnalysisScreen(Screen):
                 self._raw_text = display_log_text
                 self._update_token_estimate()
                 status.update(
-                    f"[green]Fetched {len(display_log_text.splitlines())} lines "
-                    f"from {display_log_path}.[/green] "
+                    f"[$text-success]Fetched {len(display_log_text.splitlines())} lines "
+                    f"from {display_log_path}.[/$text-success] "
                     f"Press [bold]Analyze[/bold] to send to AI."
                 )
             else:
@@ -563,15 +563,15 @@ class AIAnalysisScreen(Screen):
                     if self.app.demo_mode and self.app.redaction_service:
                         err_text = self.app.redaction_service.scrub_stream(err_text)
                     status.update(
-                        f"[yellow]No logs fetched.[/yellow] [dim]{err_text}[/dim]"
+                        f"[$text-warning]No logs fetched.[/$text-warning] [dim]{err_text}[/dim]"
                     )
                 else:
                     status.update(
-                        "[yellow]Log file is empty or not readable.[/yellow]"
+                        "[$text-warning]Log file is empty or not readable.[/$text-warning]"
                     )
 
         except asyncio.TimeoutError:
-            status.update("[red]Timed out fetching logs from server.[/red]")
+            status.update("[$text-error]Timed out fetching logs from server.[/$text-error]")
         except Exception as exc:
             logger.error("Error fetching log %s: %s", log_path, exc)
             # Demo-mode: exception messages can carry paths, IPs, or account IDs
@@ -579,7 +579,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[red]Error: {exc_str}[/red]")
+            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)
@@ -621,7 +621,7 @@ class AIAnalysisScreen(Screen):
             result = await self.app.ai_analysis_service.analyze_text(
                 text, system_prompt=system_prompt
             )
-            status.update("[green]Analysis complete.[/green] Select text to copy.")
+            status.update("[$text-success]Analysis complete.[/$text-success] Select text to copy.")
             # Demo-mode: scrub AI output before displaying and before storing
             # in _output_text (which feeds action_copy_output). Display-only.
             ai_content = result['content']
@@ -639,14 +639,14 @@ class AIAnalysisScreen(Screen):
             if cost is None:
                 cost_str = "[dim]pricing unavailable[/dim]"
             elif cost == 0:
-                cost_str = "[green]free (local)[/green]"
+                cost_str = "[$text-success]free (local)[/$text-success]"
             else:
-                cost_str = f"[yellow]${cost:.4f}[/yellow]"
+                cost_str = f"[$text-warning]${cost:.4f}[/$text-warning]"
             cost_info.update(
-                f"Tokens: [yellow]{input_tok}[/yellow] in / "
-                f"[yellow]{output_tok}[/yellow] out "
-                f"([yellow]{total_tok}[/yellow] total)  "
-                f"Model: [cyan]{model}[/cyan]  "
+                f"Tokens: [$text-warning]{input_tok}[/$text-warning] in / "
+                f"[$text-warning]{output_tok}[/$text-warning] out "
+                f"([$text-warning]{total_tok}[/$text-warning] total)  "
+                f"Model: [$text-accent]{model}[/$text-accent]  "
                 f"Est. cost: {cost_str}"
             )
         except Exception as exc:
@@ -656,7 +656,7 @@ class AIAnalysisScreen(Screen):
             exc_str = str(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 exc_str = self.app.redaction_service.scrub_stream(exc_str)
-            status.update(f"[red]Error: {exc_str}[/red]")
+            status.update(f"[$text-error]Error: {exc_str}[/$text-error]")
         finally:
             progress.stop()
             self._set_buttons_disabled(False)

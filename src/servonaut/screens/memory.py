@@ -55,13 +55,13 @@ def _sync_status_label(sync_service: Any) -> str:
         pending = status.pending_envelopes
         last = (status.last_sync_at or "never")[:19].replace("T", " ")
         if state == "running":
-            return f"[cyan]Cloud sync: running[/cyan] · {pending} pending"
+            return f"[$text-accent]Cloud sync: running[/$text-accent] · {pending} pending"
         if state == "halted":
             reason = status.halted_reason or "unknown"
-            return f"[red]Cloud sync: halted ({reason})[/red] · {pending} pending"
+            return f"[$text-error]Cloud sync: halted ({reason})[/$text-error] · {pending} pending"
         if state == "error":
-            return f"[red]Cloud sync: error[/red] · last: {last}"
-        return f"[green]Cloud sync: {state}[/green] · last: {last} · {pending} pending"
+            return f"[$text-error]Cloud sync: error[/$text-error] · last: {last}"
+        return f"[$text-success]Cloud sync: {state}[/$text-success] · last: {last} · {pending} pending"
     except Exception:
         return "[dim]Cloud sync: unknown[/dim]"
 
@@ -109,10 +109,10 @@ def _human_age(probed_at_str: str) -> str:
 
 
 _MEMORY_STATUS_LABELS = {
-    STATUS_FRESH: "[green]● Fresh[/green]",
-    STATUS_STALE: "[yellow]● Stale[/yellow]",
+    STATUS_FRESH: "[$text-success]● Fresh[/$text-success]",
+    STATUS_STALE: "[$text-warning]● Stale[/$text-warning]",
     STATUS_NONE: "[dim]○ Not probed[/dim]",
-    STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
+    STATUS_OPT_OUT: "[$text-error]⛔ Opted-out[/$text-error]",
 }
 
 
@@ -220,7 +220,7 @@ class PinKeyModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                f"[bold cyan]Pin value for [yellow]{self._module}[/yellow].[yellow]{self._key}[/yellow][/bold cyan]",
+                f"[bold $text-accent]Pin value for [$text-warning]{self._module}[/$text-warning].[$text-warning]{self._key}[/$text-warning][/bold $text-accent]",
                 id="pin_modal_title",
             ),
             Static(
@@ -405,7 +405,7 @@ class MemoryScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    f"[bold cyan]Server Memory: {escape(str(instance_name))}[/bold cyan]",
+                    f"[bold $text-accent]Server Memory: {escape(str(instance_name))}[/bold $text-accent]",
                     id="memory-title",
                 ),
                 Static(
@@ -413,7 +413,7 @@ class MemoryScreen(Screen):
                     id="memory-local-status",
                 ),
                 Static(
-                    "[yellow]Memory disabled for this server.[/yellow]",
+                    "[$text-warning]Memory disabled for this server.[/$text-warning]",
                     id="memory-opt-out-banner",
                     classes="hidden",
                 ),
@@ -433,7 +433,7 @@ class MemoryScreen(Screen):
                 # users couldn't tell they needed to press [r] to probe first.
                 Container(
                     Static(
-                        "[bold yellow]No memory captured yet.[/bold yellow]\n\n"
+                        "[bold $text-warning]No memory captured yet.[/bold $text-warning]\n\n"
                         "[dim]Press [b]r[/b] or click below to probe this server.[/dim]",
                         id="memory-empty-state-label",
                     ),
@@ -541,7 +541,7 @@ class MemoryScreen(Screen):
 
         name = display_name(self._instance) or self._instance.get("id") or "unknown"
         self.query_one("#memory-title", Static).update(
-            f"[bold cyan]Server Memory: {escape(str(name))}[/bold cyan]"
+            f"[bold $text-accent]Server Memory: {escape(str(name))}[/bold $text-accent]"
         )
 
     # ------------------------------------------------------------------
@@ -1656,7 +1656,7 @@ class MemoryScreen(Screen):
             message = redaction.scrub_stream(message)
         try:
             self.query_one("#memory-sync-status", Static).update(
-                f"[cyan]Cloud sync: {escape(message)}[/cyan]"
+                f"[$text-accent]Cloud sync: {escape(message)}[/$text-accent]"
             )
         except Exception:
             pass
@@ -1962,7 +1962,7 @@ class MemoryScreen(Screen):
                     # requests cannot be mistaken for this result.
                     previous_id = result.previous_summary_id
                 self.query_one("#memory-hosted-status", Static).update(
-                    f"[cyan]● Hosted summary · {result.status.title()} — waiting[/cyan]"
+                    f"[$text-accent]● Hosted summary · {result.status.title()} — waiting[/$text-accent]"
                 )
                 self.app.notify(
                     "Hosted summary queued. Waiting for the encrypted result…"
@@ -1978,7 +1978,7 @@ class MemoryScreen(Screen):
                 )
                 if envelope is None:
                     self.query_one("#memory-hosted-status", Static).update(
-                        "[yellow]● Hosted summary · Still processing[/yellow]"
+                        "[$text-warning]● Hosted summary · Still processing[/$text-warning]"
                     )
                     self.app.notify(
                         "The hosted summary is still processing. Retry after a "
@@ -1993,7 +1993,7 @@ class MemoryScreen(Screen):
             except Exception as exc:
                 logger.error("Hosted AI summary failed: %s", exc, exc_info=True)
                 self.query_one("#memory-hosted-status", Static).update(
-                    "[red]● Hosted summary · Failed[/red]"
+                    "[$text-error]● Hosted summary · Failed[/$text-error]"
                 )
                 self.app.notify(
                     f"Hosted summary failed: {exc}",
@@ -2033,7 +2033,7 @@ class MemoryScreen(Screen):
             self._instance.get("name") or self._instance.get("id") or "Server"
         )
         self.query_one("#memory-hosted-status", Static).update(
-            "[green]● Hosted summary · Ready[/green]"
+            "[$text-success]● Hosted summary · Ready[/$text-success]"
         )
         self.app.push_screen(
             MemorySummaryScreen(

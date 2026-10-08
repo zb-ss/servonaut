@@ -86,8 +86,8 @@ class MemoryPrompt(Widget):
         # Rich markup escape — instance names come from user/cloud data and
         # must never be interpolated into markup verbatim.
         return (
-            f"[b]Build memory[/b] for [cyan]{escape(str(name))}[/cyan]?  "
-            "Press [bold yellow]y[/bold yellow] to probe, [bold]n[/bold] to dismiss."
+            f"[b]Build memory[/b] for [$text-accent]{escape(str(name))}[/$text-accent]?  "
+            "Press [bold $text-warning]y[/bold $text-warning] to probe, [bold]n[/bold] to dismiss."
         )
 
     def compose(self) -> ComposeResult:

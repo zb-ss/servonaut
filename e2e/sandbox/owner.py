@@ -261,7 +261,7 @@ class Owner:
 
     def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict,
                  lock: state.OwnerLock, stop_request: StopRequest, *,
-                 signed_in: bool, keep: bool) -> None:
+                 signed_in: bool, keep: bool, ssh_ca_off: bool = False) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -270,6 +270,7 @@ class Owner:
         self.stop_request = stop_request
         self.signed_in = signed_in
         self.keep = keep
+        self.ssh_ca_off = ssh_ca_off
         self.logs = root / "logs"
         self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
@@ -350,6 +351,8 @@ class Owner:
         logging.getLogger("werkzeug").setLevel(logging.WARNING)
         material = TlsMaterial(ctx.ca_cert, ctx.server_cert, ctx.server_key)
         self.fake_cloud = self._start(FakeCloud(material, default_pypi_version=get_version()).start())
+        if self.ssh_ca_off:
+            self.fake_cloud.switch_off_ssh_ca()
         self.moto = self._start(MotoAws().start())
         # CloudWatch filter patterns are evaluated as AWS documents them.
         self._monkeypatch = pytest.MonkeyPatch()
@@ -405,6 +408,7 @@ class Owner:
             "schema": state.SCHEMA,
             "scenario": self.scenario,
             "signed_in": self.signed_in,
+            "ssh_ca_off": self.ssh_ca_off,
             "keep": self.keep,
             "started_at": self.claim_record["started_at"],
             "owner_pid": self.claim_record["owner_pid"],
@@ -706,7 +710,7 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
     )
 
 
-def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> int:
+def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool, ssh_ca_off: bool = False) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
     if missing:
@@ -734,7 +738,7 @@ def up(*, root: Optional[Path], scenario: str, signed_in: bool, keep: bool) -> i
                 _say(f"not starting: {exc}")
                 return 2
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
-                          signed_in=signed_in, keep=keep)
+                          signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

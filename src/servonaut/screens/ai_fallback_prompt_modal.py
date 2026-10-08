@@ -146,7 +146,7 @@ class AIFallbackPromptModal(ModalScreen[Optional[str]]):
         yield SafeHeader()
         children = [
             Static(
-                f"[bold yellow]{escape(self._title)}[/bold yellow]",
+                f"[bold $text-warning]{escape(self._title)}[/bold $text-warning]",
                 id="ai_fallback_title",
             ),
         ]

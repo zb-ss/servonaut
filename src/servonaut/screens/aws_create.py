@@ -122,7 +122,7 @@ class AWSCreateScreen(Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]Launch EC2 Instance[/bold cyan]",
+                    "[bold $text-accent]Launch EC2 Instance[/bold $text-accent]",
                     id="aws_create_title",
                 ),
 
@@ -227,9 +227,9 @@ class AWSCreateScreen(Screen):
                     "#aws_create_container", ScrollableContainer,
                 ).mount(
                     Static(
-                        "[red]AWS is not configured. Ensure boto3 credentials "
+                        "[$text-error]AWS is not configured. Ensure boto3 credentials "
                         "are available (env vars, ~/.aws/, or an IAM role) "
-                        "and restart Servonaut.[/red]",
+                        "and restart Servonaut.[/$text-error]",
                         id="aws_not_configured_error",
                     )
                 )

@@ -131,7 +131,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             yield Sidebar()
             yield ScrollableContainer(
                 Static(
-                    "[bold cyan]AWS EC2 Manager[/bold cyan]",
+                    "[bold $text-accent]AWS EC2 Manager[/bold $text-accent]",
                     id="aws_mgr_header",
                 ),
                 Static(
@@ -192,9 +192,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             return
         if inventory(self.app, "aws") is None:
             self._set_status(
-                "[red]AWS is not configured. "
+                "[$text-error]AWS is not configured. "
                 "Ensure boto3 credentials are available (env vars, ~/.aws/, "
-                "or an IAM role).[/red]"
+                "or an IAM role).[/$text-error]"
             )
             return
         self._loading = True
@@ -231,7 +231,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
             self._set_status(
-                f"[red]Failed to load instances: {err_msg}[/red]"
+                f"[$text-error]Failed to load instances: {err_msg}[/$text-error]"
             )
         finally:
             self._loading = False
@@ -248,7 +248,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         error = getattr(fleet, "last_fetch_error", None)
         if getattr(fleet, "multi", False) is not True or not isinstance(error, str):
             return ""
-        return f" [yellow]Refresh incomplete: {markup_escape(error)}[/yellow]" if error else ""
+        return f" [$text-warning]Refresh incomplete: {markup_escape(error)}[/$text-warning]" if error else ""
 
     def _render_table(self) -> None:
         table = self.query_one("#aws_mgr_table", DataTable)
@@ -521,7 +521,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(f"[red]{method} failed: {err_msg}[/red]")
+            self._set_status(f"[$text-error]{method} failed: {err_msg}[/$text-error]")
             self.notify(
                 f"{method} failed: {err_msg}",
                 severity="error", markup=False,
@@ -607,7 +607,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(f"[red]Terminate failed: {err_msg}[/red]")
+            self._set_status(f"[$text-error]Terminate failed: {err_msg}[/$text-error]")
             self.notify(
                 f"Terminate failed: {err_msg}",
                 severity="error", markup=False,

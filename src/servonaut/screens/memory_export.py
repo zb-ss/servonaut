@@ -48,7 +48,7 @@ class MemoryExportScreen(Screen):
             yield VerticalScroll(
                 Container(
                     Static(
-                        "[bold cyan]Compliance Memory Export[/bold cyan]",
+                        "[bold $text-accent]Compliance Memory Export[/bold $text-accent]",
                         id="export-title",
                     ),
                     Static(
@@ -106,7 +106,7 @@ class MemoryExportScreen(Screen):
         export_service = getattr(self.app, "export_service", None)
         status = self.query_one("#export-status", Static)
         if export_service is None:
-            status.update("[red]Export service not available.[/red]")
+            status.update("[$text-error]Export service not available.[/$text-error]")
             return
         self.run_worker(
             self._do_export(),
@@ -127,19 +127,19 @@ class MemoryExportScreen(Screen):
             return x
 
         try:
-            status.update("[yellow]Starting export…[/yellow]")
+            status.update("[$text-warning]Starting export…[/$text-warning]")
             tarball_path = await export_service.export(from_=from_val, to_=to_val)
             display_path = _s(str(tarball_path))
-            status.update(f"[yellow]Verifying signature: {display_path}…[/yellow]")
+            status.update(f"[$text-warning]Verifying signature: {display_path}…[/$text-warning]")
             valid = await export_service.verify_export(tarball_path)
             if valid:
                 status.update(
-                    f"[green]Export verified: {display_path}[/green]"
+                    f"[$text-success]Export verified: {display_path}[/$text-success]"
                 )
                 self.app.notify(f"Export saved and verified: {tarball_path}")
             else:
                 status.update(
-                    f"[red]Signature INVALID: {display_path}[/red]"
+                    f"[$text-error]Signature INVALID: {display_path}[/$text-error]"
                 )
                 self.app.notify(
                     "Export signature verification FAILED — archive may be corrupt.",
@@ -148,7 +148,7 @@ class MemoryExportScreen(Screen):
         except Exception as exc:
             logger.error("Export failed: %s", exc)
             from rich.markup import escape as _esc
-            status.update(f"[red]Export failed: {_esc(str(exc))}[/red]")
+            status.update(f"[$text-error]Export failed: {_esc(str(exc))}[/$text-error]")
             self.app.notify(f"Export failed: {exc}", severity="error", markup=False)
 
     # ------------------------------------------------------------------

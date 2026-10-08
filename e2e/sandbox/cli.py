@@ -48,6 +48,8 @@ def _parser() -> argparse.ArgumentParser:
                          f"<checkout>/{state.DEFAULT_ROOT_NAME}-<name>: git ignores only those")
     up.add_argument("--signed-in", action="store_true",
                     help="start signed in to the local Servonaut API")
+    up.add_argument("--ssh-ca-off", action="store_true",
+                    help="answer like a service with SSH certificates switched off")
     up.add_argument("--keep", action="store_true",
                     help="keep the sandbox directory after it stops, renamed to "
                          "<root>.kept-<time> (for inspection; delete it yourself)")
@@ -84,7 +86,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from e2e.sandbox import owner
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
-                        keep=args.keep)
+                        keep=args.keep, ssh_ca_off=args.ssh_ca_off)
 
     from e2e.sandbox import client
 
