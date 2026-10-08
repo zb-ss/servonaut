@@ -216,15 +216,15 @@ async def test_reinstall_shows_provider_names_literally() -> None:
 def test_server_info_shows_names_literally(instance, heading) -> None:
     from unittest.mock import PropertyMock, patch
 
-    from rich.text import Text
+    from textual.content import Content
 
     app = VpsHostApp(SimpleNamespace())
     screen = ServerActionsScreen(instance)
     with patch.object(ServerActionsScreen, "app", new_callable=PropertyMock, return_value=app):
         info = screen._build_server_info()
 
-    assert f"[bold cyan]{heading}[/bold cyan]" in info
-    plain = Text.from_markup(info).plain
+    assert f"[bold $text-accent]{heading}[/bold $text-accent]" in info
+    plain = Content.from_markup(info).plain
     assert "web-[b]1[/b]" in plain
     if "os" in instance:
         assert "OS: Debian [red]12" in plain

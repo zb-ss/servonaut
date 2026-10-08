@@ -81,7 +81,7 @@ class _ExportPathModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static("[bold cyan]Export Conversation to Markdown[/bold cyan]"),
+            Static("[bold $text-accent]Export Conversation to Markdown[/bold $text-accent]"),
             Static(
                 "[dim]Path is resolved relative to the current directory. "
                 "Must stay inside CWD or ~/Downloads.[/dim]"
@@ -155,7 +155,7 @@ class _ConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static(f"[bold cyan]{self._title}[/bold cyan]"),
+            Static(f"[bold $text-accent]{self._title}[/bold $text-accent]"),
             Static(self._message),
             Horizontal(
                 Button(
@@ -341,7 +341,7 @@ class AIConversationsScreen(Screen):
             yield Sidebar()
             with Vertical(id="convs_container"):
                 yield Static(
-                    "[bold cyan]Previous Chats[/bold cyan]",
+                    "[bold $text-accent]Previous Chats[/bold $text-accent]",
                     id="convs_title",
                 )
                 yield Static(
@@ -468,8 +468,8 @@ class AIConversationsScreen(Screen):
         client = self._client()
         if client is None:
             self._set_status(
-                "[red]AI conversations client is not available. "
-                "Sign in to access hosted AI history.[/red]"
+                "[$text-error]AI conversations client is not available. "
+                "Sign in to access hosted AI history.[/$text-error]"
             )
             return
 
@@ -497,8 +497,8 @@ class AIConversationsScreen(Screen):
                 markup=False,
             )
             self._set_status(
-                f"[red]Failed to load conversations: "
-                f"{_rich_escape(self._short_err(exc))}[/red]"
+                f"[$text-error]Failed to load conversations: "
+                f"{_rich_escape(self._short_err(exc))}[/$text-error]"
             )
             return
         finally:

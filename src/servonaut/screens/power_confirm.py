@@ -66,7 +66,7 @@ class PowerActionConfirmModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static(f"[bold yellow]{escape(self._action)} server[/bold yellow]",
+            Static(f"[bold $text-warning]{escape(self._action)} server[/bold $text-warning]",
                    id="power_confirm_title"),
             Static(self.message, id="power_confirm_message"),
             Horizontal(

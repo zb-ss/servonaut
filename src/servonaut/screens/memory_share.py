@@ -133,7 +133,7 @@ class ShareInstanceScreen(Screen):
             yield ScrollableContainer(
                 Container(
                     Static(
-                        f"[bold cyan]Share Memory: {name}[/bold cyan]",
+                        f"[bold $text-accent]Share Memory: {name}[/bold $text-accent]",
                         id="share-title",
                     ),
                     Static("", id="share-status"),
@@ -233,7 +233,7 @@ class ShareInstanceScreen(Screen):
         team_memory_service = getattr(self.app, "team_memory_service", None)
         status = self.query_one("#share-status", Static)
         if team_memory_service is None:
-            status.update("[red]Team memory service not available.[/red]")
+            status.update("[$text-error]Team memory service not available.[/$text-error]")
             return
         try:
             team_slug = str(self.query_one("#share-team-select", Select).value or "")
@@ -243,12 +243,12 @@ class ShareInstanceScreen(Screen):
             # widen into "share everything".
             modules = list(module_sel.selected)
             if not modules:
-                status.update("[red]Select at least one module to share.[/red]")
+                status.update("[$text-error]Select at least one module to share.[/$text-error]")
                 return
             instance_id = self._instance.get("id") or self._instance.get("name", "")
-            status.update("[yellow]Fetching member keys…[/yellow]")
+            status.update("[$text-warning]Fetching member keys…[/$text-warning]")
             member_keys = await team_memory_service.list_team_member_keys(team_slug)
-            status.update("[yellow]Sharing…[/yellow]")
+            status.update("[$text-warning]Sharing…[/$text-warning]")
             await team_memory_service.share_instance(
                 team_slug=team_slug,
                 instance_id=instance_id,
@@ -256,7 +256,7 @@ class ShareInstanceScreen(Screen):
                 modules=modules,
                 member_pubkeys=member_keys,
             )
-            status.update("[green]Shared successfully.[/green]")
+            status.update("[$text-success]Shared successfully.[/$text-success]")
             self.app.notify(
                 f"Shared {instance_id} with team {team_slug}.",
                 severity="information",
@@ -265,7 +265,7 @@ class ShareInstanceScreen(Screen):
         except Exception as exc:
             logger.error("Share failed: %s", exc)
             from rich.markup import escape as _esc
-            status.update(f"[red]Share failed: {_esc(str(exc))}[/red]")
+            status.update(f"[$text-error]Share failed: {_esc(str(exc))}[/$text-error]")
 
 
 # Back-compat alias — the previous class name lives on so any cached

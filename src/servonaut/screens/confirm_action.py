@@ -113,8 +113,8 @@ class ConfirmActionScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         """Compose the confirmation modal UI."""
-        title_color = "red" if self._severity == "danger" else "yellow"
-        consequence_color = "red" if self._severity == "danger" else "yellow"
+        title_color = "$text-error" if self._severity == "danger" else "$text-warning"
+        consequence_color = "$text-error" if self._severity == "danger" else "$text-warning"
         button_variant = "error" if self._severity == "danger" else "warning"
 
         severity_text = (

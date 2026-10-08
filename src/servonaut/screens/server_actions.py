@@ -349,7 +349,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]Reverse DNS:[/dim] {escape(reverse_dns)}\n" if reverse_dns else ""
             )
             return (
-                f"[bold cyan]OVH Server: {name}[/bold cyan]\n\n"
+                f"[bold $text-accent]OVH Server: {name}[/bold $text-accent]\n\n"
                 f"{account_line}"
                 f"[dim]ID:[/dim] {instance_id}\n"
                 f"[dim]Type:[/dim] {provider_type.upper()} — {server_type}\n"
@@ -361,7 +361,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]OS:[/dim] {os_label}\n"
                 f"[dim]RAM:[/dim] {ram} GB\n\n"
                 f"{credential_line}"
-                f"[cyan]Direct Connection[/cyan]\n"
+                f"[$text-accent]Direct Connection[/$text-accent]\n"
                 f"[dim]Target:[/dim] {public_ip}"
             )
 
@@ -371,7 +371,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             port = escape(str(self._instance.get('port', 22)))
             username = field('username', 'root')
             return (
-                f"[bold cyan]Server: {name}[/bold cyan]\n\n"
+                f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
                 f"[dim]Host:[/dim] {public_ip}\n"
                 f"[dim]Port:[/dim] {port}\n"
                 f"[dim]Username:[/dim] {username}\n"
@@ -379,7 +379,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]Group:[/dim] {group}\n"
                 f"[dim]State:[/dim] [dim]N/A (custom server)[/dim]\n\n"
                 f"{credential_line}"
-                f"[cyan]Direct Connection[/cyan]\n"
+                f"[$text-accent]Direct Connection[/$text-accent]\n"
                 f"[dim]Target:[/dim] {public_ip}"
             )
 
@@ -397,14 +397,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             bastion = str(profile.bastion_host)
             if self.app.demo_mode and self.app.redaction_service:
                 bastion = self.app.redaction_service.redact_host(bastion)
-            connection_info = f"[cyan]via Bastion:[/cyan] {escape(bastion)}"
+            connection_info = f"[$text-accent]via Bastion:[/$text-accent] {escape(bastion)}"
             target_ip = private_ip
         else:
-            connection_info = "[cyan]Direct Connection[/cyan]"
+            connection_info = "[$text-accent]Direct Connection[/$text-accent]"
             target_ip = public_ip
 
         return (
-            f"[bold cyan]Server: {name}[/bold cyan]\n\n"
+            f"[bold $text-accent]Server: {name}[/bold $text-accent]\n\n"
             f"{account_line}"
             f"[dim]Instance ID:[/dim] {instance_id}\n"
             f"[dim]Public IP:[/dim] {public_ip}\n"
@@ -437,10 +437,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             Colorized state string with markup.
         """
         state_colors = {
-            'running': '[green]running[/green]',
-            'stopped': '[red]stopped[/red]',
-            'stopping': '[yellow]stopping[/yellow]',
-            'pending': '[cyan]pending[/cyan]',
+            'running': '[$text-success]running[/$text-success]',
+            'stopped': '[$text-error]stopped[/$text-error]',
+            'stopping': '[$text-warning]stopping[/$text-warning]',
+            'pending': '[$text-accent]pending[/$text-accent]',
             'terminated': '[dim]terminated[/dim]',
         }
         return state_colors.get(state, escape(str(state)))
@@ -650,7 +650,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
         self._live_on = True
         try:
-            self.query_one("#live_stats", Static).update("[cyan]Live stats: connecting…[/cyan]")
+            self.query_one("#live_stats", Static).update("[$text-accent]Live stats: connecting…[/$text-accent]")
         except Exception:  # noqa: BLE001
             pass
         self.run_worker(
@@ -677,7 +677,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             async for stats in service.watch(self._instance):
                 self._set_live_text(format_live_stats(stats))
         except LiveStatsError as exc:
-            self._set_live_text(f"[red]{escape(str(exc))}[/red]\n[dim]Press L to retry.[/dim]")
+            self._set_live_text(f"[$text-error]{escape(str(exc))}[/$text-error]\n[dim]Press L to retry.[/dim]")
             self._live_on = False
 
     def _set_live_text(self, markup: str) -> None:

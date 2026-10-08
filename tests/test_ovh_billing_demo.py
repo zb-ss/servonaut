@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
-from rich.text import Text
+from textual.content import Content
 
 from servonaut.screens.ovh_billing import (
     OVHBillingScreen,
@@ -79,7 +79,7 @@ def test_provider_errors_do_not_disclose_unknown_billing_details(
     ):
         asyncio.run(getattr(screen, method)())
     message = (notify.call_args or widget.update.call_args).args[0]
-    plain = Text.from_markup(message).plain
+    plain = Content.from_markup(message).plain
     assert ("private-bill-123" not in plain) is is_demo
     assert ("123.45" not in plain) is is_demo
 

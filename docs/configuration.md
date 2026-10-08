@@ -14,7 +14,7 @@ All configuration is stored in `~/.servonaut/config.json`. The file is created a
   "default_username": "ec2-user",
   "cache_ttl_seconds": 3600,
   "terminal_emulator": "auto",
-  "theme": "dark",
+  "theme": "servonaut",
   "keyword_store_path": "~/.servonaut/keywords.json",
   "default_scan_paths": ["~/shared/", "/var/log/app.log"],
   "scan_rules": [],
@@ -33,7 +33,7 @@ All configuration is stored in `~/.servonaut/config.json`. The file is created a
 | `account_retry_seconds` | int | `30` | How long an account that failed to answer a server lookup is left alone before lookups try it again: with several accounts of a provider in MCP and AI chat lookups, and in `servonaut ssh`, `servers verify` and `memory` for an account never listed on this machine that did not answer (a timeout or no connection; an error response waits for the cache TTL) |
 | `account_check_timeout_seconds` | int | `10` | `servonaut ssh`, `servers verify` and `memory`: how long, in all, a server lookup waits for the accounts it lists because they were never listed on this machine. Requests start in the first half and get the second half to answer; what was listed by then counts (for the cache TTL). An account not listed in time gets a note and is tried again after `account_retry_seconds`; `0` lists none |
 | `terminal_emulator` | string | `"auto"` | Terminal preference (see [Supported Terminals](#supported-terminals)) |
-| `theme` | string | `"dark"` | UI theme: `dark` or `light` |
+| `theme` | string | `"servonaut"` | Colour theme for the TUI and desktop app: `servonaut`, `servonaut-light`, or any built-in Textual theme (`nord`, `gruvbox`, `tokyo-night`, `dracula`, `catppuccin-mocha`, `solarized-light`, …). Pick one in Settings → General or with Ctrl+P → Theme; the choice is saved. Older values `dark` and `light` mean `servonaut` and `servonaut-light`. The `TEXTUAL_THEME` environment variable overrides it for one run |
 | `keyword_store_path` | string | `"~/.servonaut/keywords.json"` | Path to keyword scan results file |
 | `default_scan_paths` | array | `["~/"]` | Default paths to scan on all instances |
 | `scan_rules` | array | `[]` | Conditional scan rules (see [Scan Rules](#scan-rules)) |

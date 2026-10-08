@@ -24,7 +24,7 @@ from servonaut.desktop.driver import (
     DesktopDriverTransport,
     desktop_driver_class,
 )
-from servonaut.desktop.host import DesktopHost
+from servonaut.desktop.host import THEME_MESSAGE, DesktopHost, screen_colour
 from servonaut.desktop.model import SecretToken
 
 
@@ -344,17 +344,20 @@ async def test_ws_message_bridge_and_rejection(
             f"{origin}/ws", headers=headers, protocols=protocols
         )
 
-        # Receive initial binary data packet
+        # Receive initial binary data packet (the page's theme colour may
+        # arrive first)
         msg = await ws.receive()
+        while msg.type == WSMsgType.TEXT and _is_theme(msg):
+            msg = await ws.receive()
         assert msg.type == WSMsgType.BINARY
         assert len(msg.data) > 0
 
-        # Send ping, expect pong (skipping any concurrent binary data frames)
+        # Send ping, expect pong (skipping any concurrent data and theme frames)
         await ws.send_str(json.dumps(["ping", "12345"]))
         reply = None
         for _ in range(50):
             m = await ws.receive()
-            if m.type == WSMsgType.TEXT:
+            if m.type == WSMsgType.TEXT and not _is_theme(m):
                 reply = json.loads(m.data)
                 break
         assert reply == ["pong", "12345"]
@@ -387,11 +390,16 @@ def _session_headers(
     return headers, protocols
 
 
+def _is_theme(msg: aiohttp.WSMessage) -> bool:
+    """The host's message naming the app's screen colour for the page."""
+    return json.loads(msg.data)[0] == THEME_MESSAGE
+
+
 async def _receive_pong(ws: aiohttp.ClientWebSocketResponse, marker: str) -> list[str]:
     await ws.send_str(json.dumps(["ping", marker]))
     for _ in range(200):
         msg = await ws.receive(timeout=5.0)
-        if msg.type == WSMsgType.TEXT:
+        if msg.type == WSMsgType.TEXT and not _is_theme(msg):
             return json.loads(msg.data)
         if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
             break
@@ -668,3 +676,47 @@ def test_font_size_is_not_a_runtime_option() -> None:
     """The asset lock pins the rendered page, so the size cannot vary at runtime."""
     with pytest.raises(TypeError):
         load_and_verify_assets(font_size=16)  # type: ignore[call-arg]
+
+
+async def _next_theme(ws: aiohttp.ClientWebSocketResponse) -> dict[str, str]:
+    for _ in range(500):
+        msg = await ws.receive(timeout=5.0)
+        if msg.type == WSMsgType.TEXT and _is_theme(msg):
+            return json.loads(msg.data)[1]
+        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
+            break
+    raise AssertionError("no theme message from the host")
+
+
+@pytest.mark.asyncio
+async def test_session_tells_the_page_the_screen_colour(
+    loopback_listener: socket.socket, secret_token: SecretToken
+) -> None:
+    """The page paints the strip around the terminal grid in the app's colour."""
+    apps: list[App[None]] = []
+
+    def factory(transport: DesktopDriverTransport) -> App[None]:
+        app = dummy_app_factory(transport)
+        apps.append(app)
+        return app
+
+    host = DesktopHost(token=secret_token, listener=loopback_listener, app_factory=factory)
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+    async with ClientSession() as session:
+        ws = await session.ws_connect(f"{origin}/ws", headers=headers, protocols=protocols)
+        first = await _next_theme(ws)
+        assert first == {"background": screen_colour(apps[0])}
+
+        apps[0].theme = "nord"
+        assert await _next_theme(ws) == {"background": "#3b4252"}
+        await ws.close()
+    await host.stop()
+
+
+def test_screen_colour_is_left_out_for_terminal_colour_themes() -> None:
+    app = MiniTestApp()
+    app.theme = "nord"
+    assert screen_colour(app) == "#3b4252"
+    app.theme = "ansi-dark"
+    assert screen_colour(app) is None

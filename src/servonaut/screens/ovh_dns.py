@@ -80,7 +80,7 @@ class OVHDNSScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]OVH DNS Management[/bold cyan]", id="dns_title"),
+                Static("[bold $text-accent]OVH DNS Management[/bold $text-accent]", id="dns_title"),
                 # Hidden unless several OVH accounts are configured.
                 AccountPicker.for_provider(
                     registry_for(self.app, "ovh"), "ovh", id="dns_account",
@@ -121,7 +121,7 @@ class OVHDNSScreen(Screen):
                 ),
 
                 # Reverse DNS section
-                Static("[bold cyan]Reverse DNS[/bold cyan]", classes="section_header", id="rdns_section_header"),
+                Static("[bold $text-accent]Reverse DNS[/bold $text-accent]", classes="section_header", id="rdns_section_header"),
                 Static("[dim]PTR records for all IPs on this account[/dim]"),
                 DataTable(id="rdns_table"),
 
@@ -411,7 +411,7 @@ class OVHDNSScreen(Screen):
             return
         if self.app.demo_mode and self.app.redaction_service:
             error = self.app.redaction_service.scrub_stream(error)
-        header.update(f"[bold]Domains[/bold]\n[red]⚠ {escape(error)}[/red]")
+        header.update(f"[bold]Domains[/bold]\n[$text-error]⚠ {escape(error)}[/$text-error]")
 
     async def _load_records(self, zone_name: str) -> None:
         account = self._account

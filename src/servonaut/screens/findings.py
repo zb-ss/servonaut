@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import webbrowser
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.markup import escape
 from textual.binding import Binding
@@ -62,21 +62,23 @@ logger = logging.getLogger(__name__)
 _UPGRADE_URL = "https://servonaut.dev/pricing"
 _DOCS_URL = "https://servonaut.dev/docs/proactive-monitoring"
 
-# Severity → Rich-markup pill (worst first for summary ordering).
-_SEVERITY_CELL: Dict[str, str] = {
-    "critical": "[bold red]critical[/bold red]",
-    "high": "[red]high[/red]",
-    "medium": "[yellow]medium[/yellow]",
-    "low": "[cyan]low[/cyan]",
-    "info": "[dim]info[/dim]",
+# Severity / status → (style in table cells, style everywhere else). Table
+# cells are read as Rich markup, where colour names follow the theme's ANSI
+# palette; other text is Textual markup, which takes the theme's colours.
+_SEVERITY_STYLE: Dict[str, Tuple[str, str]] = {
+    "critical": ("bold red", "bold $text-error"),
+    "high": ("red", "$text-error"),
+    "medium": ("yellow", "$text-warning"),
+    "low": ("cyan", "$text-accent"),
+    "info": ("dim", "dim"),
 }
 
-_STATUS_CELL: Dict[str, str] = {
-    "detected": "[yellow]detected[/yellow]",
-    "acked": "[cyan]acked[/cyan]",
-    "remediating": "[magenta]remediating[/magenta]",
-    "resolved": "[green]resolved[/green]",
-    "suppressed": "[dim]suppressed[/dim]",
+_STATUS_STYLE: Dict[str, Tuple[str, str]] = {
+    "detected": ("yellow", "$text-warning"),
+    "acked": ("cyan", "$text-accent"),
+    "remediating": ("magenta", "$text-primary"),
+    "resolved": ("green", "$text-success"),
+    "suppressed": ("dim", "dim"),
 }
 
 # Severity order for the summary line, worst first.
@@ -149,12 +151,22 @@ def _recon_note(recon: Any) -> str:
     return note
 
 
-def _severity_markup(severity: str) -> str:
-    return _SEVERITY_CELL.get(severity, escape(severity or "unknown"))
+def _styled(styles: Dict[str, Tuple[str, str]], value: str, *, cell: bool) -> str:
+    style = styles.get(value)
+    if style is None:
+        return escape(value or "unknown")
+    tag = style[0] if cell else style[1]
+    return f"[{tag}]{value}[/{tag}]"
 
 
-def _status_markup(status: str) -> str:
-    return _STATUS_CELL.get(status, escape(status or "unknown"))
+def _severity_markup(severity: str, *, cell: bool = False) -> str:
+    """*severity* in its colour; ``cell=True`` for a table cell."""
+    return _styled(_SEVERITY_STYLE, severity, cell=cell)
+
+
+def _status_markup(status: str, *, cell: bool = False) -> str:
+    """*status* in its colour; ``cell=True`` for a table cell."""
+    return _styled(_STATUS_STYLE, status, cell=cell)
 
 
 class FindingsScreen(Screen):
@@ -359,7 +371,7 @@ class FindingsScreen(Screen):
             return
         if svc is None:
             self._set_gate_state("unavailable")
-            pill.update("[bold red]✕ Unavailable[/bold red]")
+            pill.update("[bold $text-error]✕ Unavailable[/bold $text-error]")
             self._show_state_body(True)
             self.query_one("#findings_state_body", VerticalScroll).mount(
                 self._card(
@@ -382,7 +394,7 @@ class FindingsScreen(Screen):
         self.refresh_bindings()
 
     def _render_unauthenticated(self, pill: Static) -> None:
-        pill.update("[bold yellow]⚪ Not signed in[/bold yellow]")
+        pill.update("[bold $text-warning]⚪ Not signed in[/bold $text-warning]")
         self._show_state_body(True)
         body = self.query_one("#findings_state_body", VerticalScroll)
         body.mount(self._card(
@@ -403,7 +415,7 @@ class FindingsScreen(Screen):
 
     def _render_upgrade(self, pill: Static, reason: Optional[str]) -> None:
         """Free-tier empty state — mirrors the secrets upgrade card."""
-        pill.update("[bold yellow]⚠ Upgrade required[/bold yellow]")
+        pill.update("[bold $text-warning]⚠ Upgrade required[/bold $text-warning]")
         self._show_state_body(True)
         body = self.query_one("#findings_state_body", VerticalScroll)
         children = [
@@ -479,7 +491,7 @@ class FindingsScreen(Screen):
             self._handle_payment_required(exc)
             return
         except APIError as exc:
-            pill.update("[bold red]✕ Load failed[/bold red]")
+            pill.update("[bold $text-error]✕ Load failed[/bold $text-error]")
             self.app.notify(
                 f"Could not load findings: {exc}",
                 severity="error", markup=False,
@@ -487,7 +499,7 @@ class FindingsScreen(Screen):
             return
         except Exception as exc:  # noqa: BLE001 — network layer surprises
             logger.exception("Findings load failed: %s", exc)
-            pill.update("[bold red]✕ Load failed[/bold red]")
+            pill.update("[bold $text-error]✕ Load failed[/bold $text-error]")
             self.app.notify(
                 f"Could not load findings: {exc}",
                 severity="error", markup=False,
@@ -518,7 +530,7 @@ class FindingsScreen(Screen):
                 self.app, str(finding.get("title") or "(untitled)"),
             ))
             detected = escape(str(finding.get("detected_at") or ""))
-            row = [_severity_markup(severity), _status_markup(status)]
+            row = [_severity_markup(severity, cell=True), _status_markup(status, cell=True)]
             if self._instance is None:
                 instance_id = str(finding.get("instance_id") or "")
                 label = redact_demo_instance(
@@ -533,7 +545,7 @@ class FindingsScreen(Screen):
     def _update_pill(self) -> None:
         pill = self.query_one("#findings_status_pill", Static)
         if not self._rows:
-            pill.update("[green]● No findings — all clear[/green]")
+            pill.update("[$text-success]● No findings — all clear[/$text-success]")
             return
         counts: Dict[str, int] = {}
         for finding in self._rows:
@@ -621,7 +633,7 @@ class FindingsScreen(Screen):
         if svc is None:
             return
         self._scanning = True
-        self._set_progress("[cyan]Scan requested…[/cyan]")
+        self._set_progress("[$text-accent]Scan requested…[/$text-accent]")
         # CONTRACT: GET /scan/stream is the SSE VARIANT of the scan —
         # opening it STARTS a scan and streams that scan's own progress.
         # It is NOT a passive observer, so scan-now uses the stream XOR
@@ -678,17 +690,17 @@ class FindingsScreen(Screen):
             name = event.get("event")
             data = event.get("data") or {}
             if name == "scan.started":
-                self._set_progress("[cyan]Scan started…[/cyan]")
+                self._set_progress("[$text-accent]Scan started…[/$text-accent]")
             elif name == "probe.started":
                 detector = escape(str(data.get("detector") or ""))
-                self._set_progress(f"[cyan]Probing:[/cyan] {detector}…")
+                self._set_progress(f"[$text-accent]Probing:[/$text-accent] {detector}…")
             elif name == "probe.completed":
                 if data.get("ok") is False:
                     probes_failed += 1
             elif name == "finding.detected":
                 detected += 1
                 self._set_progress(
-                    f"[yellow]{detected} finding(s) so far…[/yellow]"
+                    f"[$text-warning]{detected} finding(s) so far…[/$text-warning]"
                 )
             elif name == "scan.completed":
                 completed = True

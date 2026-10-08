@@ -53,4 +53,4 @@ def test_provider_line_shows_per_provider_key_as_set():
     screen = _Screen.__new__(_Screen)
 
     provider_line = screen._compose_provider_picker_lines()[-1]
-    assert "API Key: [green]set[/green]" in provider_line
+    assert "API Key: [$text-success]set[/$text-success]" in provider_line

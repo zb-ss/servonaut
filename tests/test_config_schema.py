@@ -21,7 +21,7 @@ class TestAppConfig:
         assert config.default_username == "ec2-user"
         assert config.cache_ttl_seconds == 3600
         assert config.terminal_emulator == "auto"
-        assert config.theme == "dark"
+        assert config.theme == "servonaut"
         assert config.default_scan_paths == ["~/"]
 
     def test_custom_values(self):

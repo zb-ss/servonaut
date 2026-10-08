@@ -20,7 +20,7 @@ class ProgressIndicator(Static):
             message: Loading message to display.
         """
         self._active = True
-        self.update(f"[bold cyan]{message}[/bold cyan]")
+        self.update(f"[bold $text-accent]{message}[/bold $text-accent]")
         self.display = True
 
     def stop(self) -> None:

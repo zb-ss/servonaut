@@ -34,7 +34,7 @@ class KeyManagementScreen(Screen):
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield ScrollableContainer(
-                Static("[bold cyan]SSH Key Management[/bold cyan]", id="keys_header"),
+                Static("[bold $text-accent]SSH Key Management[/bold $text-accent]", id="keys_header"),
 
             # Section 1: Default Key
             Static("[bold]Default SSH Key[/bold]", classes="section_header"),
@@ -160,7 +160,7 @@ class KeyManagementScreen(Screen):
 
             if is_running:
                 self.query_one("#agent_status", Static).update(
-                    "Status: [bold green]Running[/bold green]"
+                    "Status: [bold $text-success]Running[/bold $text-success]"
                 )
             else:
                 # Try to auto-start the agent
@@ -168,18 +168,18 @@ class KeyManagementScreen(Screen):
                 started = self.app.ssh_service.start_ssh_agent()
                 if started:
                     self.query_one("#agent_status", Static).update(
-                        "Status: [bold green]Running[/bold green] [dim](auto-started)[/dim]"
+                        "Status: [bold $text-success]Running[/bold $text-success] [dim](auto-started)[/dim]"
                     )
                     self.app.notify("SSH agent started automatically")
                 else:
                     self.query_one("#agent_status", Static).update(
-                        "Status: [bold red]Not Running[/bold red] — "
+                        "Status: [bold $text-error]Not Running[/bold $text-error] — "
                         "could not auto-start. Run: eval $(ssh-agent)"
                     )
         except Exception as e:
             logger.error("Error checking SSH agent status: %s", e)
             self.query_one("#agent_status", Static).update(
-                "Status: [yellow]Unknown[/yellow] — error checking agent"
+                "Status: [$text-warning]Unknown[/$text-warning] — error checking agent"
             )
 
     def _load_available_keys(self) -> None:

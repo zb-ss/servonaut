@@ -95,7 +95,7 @@ class BwKeyImportModal(ModalScreen[Optional[dict]]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                "[bold cyan]Import SSH keys into Bitwarden[/bold cyan]",
+                "[bold $text-accent]Import SSH keys into Bitwarden[/bold $text-accent]",
                 id="bw_import_title",
             ),
             Static(escape(_SEMANTICS_TEXT), id="bw_import_semantics"),

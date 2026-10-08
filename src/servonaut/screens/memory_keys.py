@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 # Strength labels and their CSS colours.  Index == score (0–4).
 _STRENGTH_LABEL = ["Very weak", "Weak", "Fair", "Strong", "Very strong"]
-_STRENGTH_COLOR = ["red", "red", "yellow", "green", "green"]
+_STRENGTH_COLOR = [
+    "$text-error", "$text-error", "$text-warning", "$text-success", "$text-success",
+]
 
 
 @dataclass
@@ -156,13 +158,13 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
     def compose(self) -> ComposeResult:
         is_enrol = self._mode == "enrol"
         title = (
-            "[bold cyan]Enrol Memory Encryption Keypair[/bold cyan]"
+            "[bold $text-accent]Enrol Memory Encryption Keypair[/bold $text-accent]"
             if is_enrol
-            else "[bold cyan]Unlock Memory Encryption Keypair[/bold cyan]"
+            else "[bold $text-accent]Unlock Memory Encryption Keypair[/bold $text-accent]"
         )
         blurb = (
-            "[yellow]Warning: this passphrase cannot be recovered. "
-            "If lost, your synced memory data will be permanently inaccessible.[/yellow]"
+            "[$text-warning]Warning: this passphrase cannot be recovered. "
+            "If lost, your synced memory data will be permanently inaccessible.[/$text-warning]"
             if is_enrol
             else "[dim]Enter your passphrase to decrypt the stored keypair.[/dim]"
         )
@@ -233,7 +235,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
             mismatch = False
             ok = bool(pass1)
         self.query_one("#enrol-mismatch", Static).update(
-            "[red]Passphrases do not match.[/red]" if mismatch else ""
+            "[$text-error]Passphrases do not match.[/$text-error]" if mismatch else ""
         )
         btn = self.query_one("#enrol-btn-confirm", Button)
         btn.disabled = not ok

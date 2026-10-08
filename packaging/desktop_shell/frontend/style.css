@@ -1,3 +1,5 @@
+:root { --servonaut-page: #111827; }
 html, body, #terminal { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-body { background: #0c181f; }
+body { background: var(--servonaut-page); }
+#terminal .xterm-viewport { background-color: var(--servonaut-page) !important; }
 @font-face { font-family: 'Roboto Mono'; src: url('/mono.ttf'); font-weight: 100 900; }

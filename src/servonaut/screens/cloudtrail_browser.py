@@ -96,7 +96,7 @@ class FilterValueModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield Container(
             Static(
-                f"[bold cyan]Filter by {self._field_label}[/bold cyan]",
+                f"[bold $text-accent]Filter by {self._field_label}[/bold $text-accent]",
                 id="ct_value_modal_title",
             ),
             Static(

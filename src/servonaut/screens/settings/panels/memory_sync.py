@@ -378,13 +378,13 @@ class MemorySyncPanel(SettingsPanel):
         """Fetch settings from the backend and populate widgets."""
         svc = getattr(self.app, "memory_settings_service", None)
         if svc is None:
-            self._set_status("[red]Memory settings service unavailable.[/red]")
+            self._set_status("[$text-error]Memory settings service unavailable.[/$text-error]")
             return
         try:
             settings = await svc.get_settings(force_refresh=force)
         except Exception as exc:
             logger.error("Memory Sync settings load failed: %s", exc)
-            self._set_status(f"[red]Could not load: {escape(str(exc))}[/red]")
+            self._set_status(f"[$text-error]Could not load: {escape(str(exc))}[/$text-error]")
             return
         self._populate_from_settings(settings)
         self._set_status("[$success]● Loaded[/$success]")
@@ -416,7 +416,7 @@ class MemorySyncPanel(SettingsPanel):
 
         svc = getattr(self.app, "memory_settings_service", None)
         if svc is None:
-            self._set_status("[red]Memory settings service unavailable.[/red]")
+            self._set_status("[$text-error]Memory settings service unavailable.[/$text-error]")
             return
         try:
             digest_val = self.query_one("#settings_msync_digest", Select).value
@@ -426,7 +426,7 @@ class MemorySyncPanel(SettingsPanel):
             ai_val = self.query_one("#settings_msync_ai_mode", Select).value
             ai_mode = ai_val if ai_val is not _SELECT_BLANK else "off"
         except Exception as exc:
-            self._set_status(f"[red]Could not read form: {escape(str(exc))}[/red]")
+            self._set_status(f"[$text-error]Could not read form: {escape(str(exc))}[/$text-error]")
             return
 
         orig = self._original_settings
@@ -449,11 +449,11 @@ class MemorySyncPanel(SettingsPanel):
             updated = await svc.patch_settings(delta)
         except ValidationFailed as exc:
             self._surface_validation_errors(exc)
-            self._set_status("[red]Save failed: validation error (see notifications).[/red]")
+            self._set_status("[$text-error]Save failed: validation error (see notifications).[/$text-error]")
             return
         except Exception as exc:
             logger.error("Memory Sync settings save failed: %s", exc)
-            self._set_status(f"[red]Save failed: {escape(str(exc))}[/red]")
+            self._set_status(f"[$text-error]Save failed: {escape(str(exc))}[/$text-error]")
             return
 
         self._populate_from_settings(updated)

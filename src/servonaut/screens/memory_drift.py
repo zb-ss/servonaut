@@ -85,7 +85,7 @@ class DriftDiffScreen(ModalScreen[None]):
         old_hash = str(getattr(self._event, "old_hash", "") or "")[:12]
         new_hash = str(getattr(self._event, "new_hash", "") or "")[:12]
         header = (
-            f"[bold cyan]Drift Diff: {instance_id} / {module}[/bold cyan]\n"
+            f"[bold $text-accent]Drift Diff: {instance_id} / {module}[/bold $text-accent]\n"
             f"[dim]old: {escape(old_hash)} → new: {escape(new_hash)}[/dim]"
         )
         yield Container(
@@ -107,7 +107,7 @@ class DriftDiffScreen(ModalScreen[None]):
     async def _fetch_and_render(self) -> None:
         content = self.query_one("#drift-diff-content", Static)
         if self._retrieval_service is None:
-            content.update("[red]Retrieval service unavailable — cannot fetch snapshots.[/red]")
+            content.update("[$text-error]Retrieval service unavailable — cannot fetch snapshots.[/$text-error]")
             return
         try:
             instance_id = getattr(self._event, "instance_id", "")
@@ -115,7 +115,7 @@ class DriftDiffScreen(ModalScreen[None]):
             old_id = getattr(self._event, "old_envelope_id", None)
             new_id = getattr(self._event, "new_envelope_id", None)
             if not new_id:
-                content.update("[red]Drift event missing new_envelope_id.[/red]")
+                content.update("[$text-error]Drift event missing new_envelope_id.[/$text-error]")
                 return
             old_env = None
             if old_id:
@@ -136,7 +136,7 @@ class DriftDiffScreen(ModalScreen[None]):
             content.update(diff_text)
         except Exception as exc:
             logger.exception("Drift diff fetch failed: %s", exc)
-            content.update(f"[red]Diff fetch failed: {escape(str(exc))}[/red]")
+            content.update(f"[$text-error]Diff fetch failed: {escape(str(exc))}[/$text-error]")
 
     def _build_diff_text(self, old_env: Any, new_env: Any) -> str:
         import json
@@ -151,11 +151,11 @@ class DriftDiffScreen(ModalScreen[None]):
         parts: List[str] = []
         for line in diff:
             if line.startswith("+") and not line.startswith("+++"):
-                parts.append(f"[green]{escape(line)}[/green]")
+                parts.append(f"[$text-success]{escape(line)}[/$text-success]")
             elif line.startswith("-") and not line.startswith("---"):
-                parts.append(f"[red]{escape(line)}[/red]")
+                parts.append(f"[$text-error]{escape(line)}[/$text-error]")
             elif line.startswith("@@"):
-                parts.append(f"[cyan]{escape(line)}[/cyan]")
+                parts.append(f"[$text-accent]{escape(line)}[/$text-accent]")
             else:
                 parts.append(escape(line))
         return "\n".join(parts)
@@ -203,7 +203,7 @@ class MemoryDriftScreen(Screen):
             yield Sidebar()
             yield Container(
                 Static(
-                    "[bold cyan]Memory Drift Events[/bold cyan]",
+                    "[bold $text-accent]Memory Drift Events[/bold $text-accent]",
                     id="drift-title",
                 ),
                 Static(

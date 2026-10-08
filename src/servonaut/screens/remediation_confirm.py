@@ -105,9 +105,9 @@ class RemediationConfirmModal(ModalScreen[Optional[str]]):
             p.get("exec_risk") or p.get("risk_tier") or "unknown",
         ))
         reversible = "reversible" if p.get("reversible") else "not reversible"
-        mode = ("[bold cyan]DRY RUN[/bold cyan] — nothing changes on the box"
+        mode = ("[bold $text-accent]DRY RUN[/bold $text-accent] — nothing changes on the box"
                 if self._dry_run
-                else "[bold red]LIVE EXECUTION[/bold red] — this mutates the server")
+                else "[bold $text-error]LIVE EXECUTION[/bold $text-error] — this mutates the server")
         command_block = "\n".join(
             escape(line) for line in preview_command_lines(p)
         )
