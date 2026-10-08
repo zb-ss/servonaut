@@ -67,3 +67,20 @@ def test_granted_and_personal_vaults_are_ready() -> None:
 
     assert step.code == "ready"
     assert step.to_dict() == {"code": "ready", "message": "Your vault is ready.", "command": None, "action": None}
+
+
+def test_a_computer_that_lost_its_key_file_is_sent_to_recover() -> None:
+    status = {**_status(identity=_CONFIRMED, local=None), "custody_missing": True}
+
+    step = onboarding.next_step(status)
+
+    assert step.code == "recover_device"
+    assert step.command == "servonaut vault recover"
+    assert step.action == "vault_recover"
+    assert "key file is missing" in step.message
+
+
+def test_custody_missing_does_not_matter_once_this_computer_is_unlocked() -> None:
+    status = {**_status(identity=_CONFIRMED), "custody_missing": True}
+
+    assert onboarding.next_step(status).code == "ready"

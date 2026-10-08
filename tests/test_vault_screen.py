@@ -95,7 +95,7 @@ class _StyledVaultHost(_VaultHost):
     ("size", "remote_identity", "expected", "enabled"),
     [
         ((160, 50), None, "No vault identity exists yet", {"vault_setup"}),
-        ((70, 30), {"identity_id": "remote-only"}, "vault identity on another device", {"vault_recover", "vault_add_device"}),
+        ((70, 30), {"identity_id": "remote-only"}, "Your vault identity is not on this computer", {"vault_recover", "vault_add_device"}),
     ],
 )
 async def test_status_first_vault_flow_only_enables_safe_next_action(

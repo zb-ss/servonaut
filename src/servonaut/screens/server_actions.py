@@ -28,8 +28,10 @@ from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
 from servonaut.utils.memory_panel import render_memory_panel
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.screens._busy_work import BusyJob, BusyWork
 from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
@@ -127,6 +129,10 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+# Bind is held back while the dialog loads the choices it binds.
+_BIND_BUTTON = ("#vault_bind_confirm",)
+
+
 class VaultBindingModal(ModalScreen[Optional[dict]]):
     """Pick the vault SSH key for this server from what the user can read.
 
@@ -140,7 +146,10 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     #vault_bind_trusted { margin: 1 0 0 0; }
     #vault_bind_use_trusted { margin: 0 0 1 0; }
     #vault_bind_message { color: $warning; margin: 1 0 0 0; }
-    #vault_bind_modal > Horizontal { height: auto; margin-top: 1; }
+    /* Bind stays in reach, and what is loading in view, however far the form scrolls. */
+    #vault_bind_footer { dock: bottom; height: auto; margin-top: 1; }
+    #vault_bind_footer > Horizontal { height: auto; }
+    #vault_bind_busy { margin: 0; }
     #vault_bind_use_trusted.-hidden { display: none; }
     #vault_bind_message { display: none; }
     """
@@ -159,6 +168,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self._keys_for: str | None = None
         self._message = ""
         self._trusted_text = ""
+        self._busy = BusyWork(self, "#vault_bind_busy")
 
     def compose(self) -> ComposeResult:
         login = str(self._instance.get("login_user") or self._instance.get("username") or "")
@@ -183,7 +193,14 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             ))
         rows.extend((
             Static("", id="vault_bind_message"),
-            Horizontal(Button("Cancel", id="vault_bind_cancel"), Button("Bind", variant="primary", id="vault_bind_confirm")),
+            Vertical(
+                BusyIndicator(id="vault_bind_busy"),
+                Horizontal(
+                    Button("Cancel", id="vault_bind_cancel"),
+                    Button("Bind", variant="primary", id="vault_bind_confirm"),
+                ),
+                id="vault_bind_footer",
+            ),
         ))
         yield Container(*rows, id="vault_bind_modal")
 
@@ -238,7 +255,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     async def _load_vaults(self) -> None:
         select = self.query_one("#vault_bind_vault", Select)
         try:
-            choices = await self._service.vault_choices(team=self._team)
+            with self._busy.running("Loading your vaults…", hold=_BIND_BUTTON):
+                choices = await self._service.vault_choices(team=self._team)
         except Exception as exc:
             from servonaut.services.vault.errors import vault_failure_reason
 
@@ -273,7 +291,11 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         select.prompt = "Loading SSH keys…"
         select.disabled = True
         try:
-            choices = await self._service.ssh_key_choices(vault_id=vault_id)
+            # Each key's name is decrypted locally, so a full vault takes a moment.
+            with self._busy.running(
+                "Loading this vault's SSH keys… this can take a few seconds", hold=_BIND_BUTTON,
+            ):
+                choices = await self._service.ssh_key_choices(vault_id=vault_id)
         except Exception as exc:
             from servonaut.services.vault.errors import vault_failure_reason
 
@@ -304,7 +326,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         host = str(self._instance.get("hostname") or self._instance.get("host") or self._instance.get("public_ip") or "")
         port = self._instance.get("port") if isinstance(self._instance.get("port"), int) else None
         try:
-            keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
+            with self._busy.running("Reading the host keys this machine trusts…", hold=_BIND_BUTTON):
+                keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
         except Exception:
             keys = []
         box = self.query_one("#vault_bind_use_trusted", Checkbox)
@@ -426,6 +449,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Markup source of #server_info, so later additions (reverse DNS)
         # edit the text we wrote instead of reading it back from the widget.
         self._server_info_text: str = ""
+        # Slow work started here (binding a vault key, preparing SSH) and the
+        # button that would restart it, held back until it ends.
+        self._busy = BusyWork(self, "#sa_busy")
 
     def on_mount(self) -> None:
         """Focus the first action button and populate the detail pane."""
@@ -517,6 +543,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     # Mount target for inline read-only views (Browse / Logs).
                     # Hidden until an action opens it (see _open_inline).
                     Vertical(id="sa-inline"),
+                    # Pinned to the pane's bottom; hidden while nothing runs.
+                    BusyIndicator(id="sa_busy"),
                     id="sa-detail",
                 )
         yield Footer()
@@ -1024,9 +1052,17 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """SSH Connect — walk SshRefResolver chain then launch in external terminal.
 
         Dispatches to a worker so a double-click or rapid key press cannot
-        double-launch.  The 'ssh_connect' group is distinct from 'ssh_verify'
-        so the two flows don't cancel each other.
+        double-launch: a press while the connection is still being prepared
+        is refused rather than restarting it.  The 'ssh_connect' group is
+        distinct from 'ssh_verify' so the two flows don't cancel each other.
         """
+        if self._busy.holds("#btn_ssh"):
+            self.app.notify(
+                "Still preparing the SSH connection: wait for it to finish.",
+                severity="warning",
+                markup=False,
+            )
+            return
         if not self._validate_instance_connection():
             return
 
@@ -1055,6 +1091,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         ``cleanup_stale_bw_keys()`` is called by ``ServonautApp`` on startup to
         catch crash-left files older than 24 h.
         """
+        # Resolving can unlock a vault key or ask Bitwarden: seconds, not instant.
+        with self._busy.running("Preparing the SSH connection…", hold=("#btn_ssh",)) as job:
+            await self._resolve_and_launch_ssh(job)
+
+    async def _resolve_and_launch_ssh(self, job: BusyJob) -> None:
+        """The connect flow of :meth:`_ssh_connect_flow`; *job* is its busy line."""
         from rich.markup import escape as rich_escape
 
         from servonaut.services.ssh_ref_resolver import SshRefResolver
@@ -1196,6 +1238,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             bw_resolver = BwResolver(
                 session_getter=bw_session.session if bw_session is not None else None
             )
+            self._busy.say(job, "Reading the SSH key from Bitwarden…")
             try:
                 import asyncio
                 key_body = await asyncio.to_thread(
@@ -1488,6 +1531,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
     def action_use_vault_key(self) -> None:
         """Bind a native-vault SSH item with the server's verified host pins."""
+        # Starting again would cancel the binding midway (the worker is exclusive).
+        if self._busy.holds("#btn_use_vault_key"):
+            self.app.notify(
+                "The vault key is still being bound: wait for it to finish.",
+                severity="warning",
+                markup=False,
+            )
+            return
         if self._refuse_if_unresolved():
             return
 
@@ -1505,6 +1556,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             if not values:
                 return
             host_keys = [key.strip() for key in values["host_keys"].split(",") if key.strip()]
+            job = self._busy.begin("Binding the vault key to this server…", hold=("#btn_use_vault_key",))
             try:
                 if values["team"]:
                     # Without typed keys, the keys this machine already trusts are pinned.
@@ -1551,6 +1603,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
                 self.app.notify(f"Vault key binding failed: {vault_failure_reason(exc)}", severity="error", markup=False)
                 return
+            finally:
+                self._busy.end(job)
             source = result.get("source", "servonaut_vault") if isinstance(result, dict) else "servonaut_vault"
             self.app.notify(f"SSH credential source: {source}", markup=False)
 

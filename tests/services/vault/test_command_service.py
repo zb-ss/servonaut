@@ -12,6 +12,7 @@ from servonaut.services.api_client import APIError
 from servonaut.services.vault.command_service import VaultCommandService, VaultSshLease
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.identity_store import IdentityStore
+from servonaut.services.vault.local_state import LocalStateError, VaultLocalState
 from servonaut.services.vault.team_vault_client import VaultStateError
 from servonaut.utils.validation import ValidationError
 
@@ -118,10 +119,12 @@ async def test_add_device_returns_server_deadline_and_discards_on_bad_registrati
     assert result["expires_at"] == expiry
     identity.discard_pending_device.assert_not_called()
 
+    identity.withdraw_pending_device = AsyncMock()
     identity.register_pending_device.return_value = {"identity": {}, "approval": {"expires_at": "not-a-date"}}
     with pytest.raises(Exception, match="expiry"):
         await service.add_device(device_name="new device", platform="linux")
-    identity.discard_pending_device.assert_called_once()
+    # The registration reached the service: withdraw it there, which also destroys the keys.
+    identity.withdraw_pending_device.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -2205,3 +2208,153 @@ async def test_a_verification_failure_is_not_remembered() -> None:
     assert (await service.ssh_key_choices(vault_id="v1"))[0]["label"] == "SHA256:aaa (could not be verified)"
     granted["yet"] = True  # the grant arrived
     assert (await service.ssh_key_choices(vault_id="v1"))[0]["label"] == "web1 · SHA256:aaa"
+
+
+# ---------------------------------------------------------------------------
+# A computer that lost its key file is told so (and sent to Recover)
+# ---------------------------------------------------------------------------
+
+_FILE_KEY = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
+
+def _custody_service(tmp_path, *, user_id: int = 1) -> tuple[VaultCommandService, IdentityStore]:
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=_FILE_KEY)
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=user_id), _config(), store=store)
+    service.state = VaultLocalState(tmp_path / "state.json")
+    return service, store
+
+
+def test_unlocking_here_remembers_this_computer_and_a_deleted_key_file_is_noticed(tmp_path) -> None:
+    writer = IdentityStore(tmp_path / "vault_keys.json", environment_key=_FILE_KEY)
+    writer.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    writer.save()
+    service, _store = _custody_service(tmp_path)
+
+    assert service.unlock_existing_identity() is True
+    marker = service.state.load()["local_custody"]
+    assert marker["user_id"] == 1 and marker["identity_id"] == "11111111-1111-4111-8111-111111111111"
+    assert set(marker) == {"user_id", "identity_id", "device_id"}  # public ids only
+    assert service.local_custody_missing() is False
+
+    (tmp_path / "vault_keys.json").unlink()
+    fresh, _ = _custody_service(tmp_path)
+    assert fresh.local_custody_missing() is True
+
+
+def test_another_accounts_marker_is_not_this_accounts_missing_key(tmp_path) -> None:
+    service, _store = _custody_service(tmp_path, user_id=2)
+    service.state.save({**service.state.load(), "local_custody": {"user_id": 1, "identity_id": "i", "device_id": "d"}})
+
+    assert service.local_custody_missing() is False
+
+
+def test_installs_from_before_the_marker_are_recognised_by_their_vault_heads(tmp_path) -> None:
+    service, _store = _custody_service(tmp_path)
+    assert service.local_custody_missing() is False  # a computer that never used a vault
+
+    service.state.save({**service.state.load(), "vault_heads": {"v-1": {"version": 1, "hash": "h"}}})
+    assert service.local_custody_missing() is True
+
+
+@pytest.mark.asyncio
+async def test_status_reports_missing_custody_only_without_a_local_identity(tmp_path) -> None:
+    service, _store = _custody_service(tmp_path)
+    service.identity = MagicMock()
+    service.identity.status = AsyncMock(return_value={"identity": {"identity_id": "x"}})
+    service.state.save({**service.state.load(), "local_custody": {"user_id": 1, "identity_id": "x", "device_id": "d"}})
+
+    assert (await service.status())["custody_missing"] is True
+
+    writer = IdentityStore(tmp_path / "vault_keys.json", environment_key=_FILE_KEY)
+    writer.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    writer.save()
+    assert (await service.status())["custody_missing"] is False
+
+
+def test_an_unwritable_state_file_never_blocks_unlocking(tmp_path) -> None:
+    writer = IdentityStore(tmp_path / "vault_keys.json", environment_key=_FILE_KEY)
+    writer.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    writer.save()
+    service, _store = _custody_service(tmp_path)
+    service.state = MagicMock()
+    service.state.load.side_effect = LocalStateError("unreadable")
+
+    assert service.unlock_existing_identity() is True
+
+
+@pytest.mark.asyncio
+async def test_add_device_names_this_computer_and_cancel_withdraws_the_request(monkeypatch) -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    monkeypatch.setattr("servonaut.services.vault.command_service.platform_module.node", lambda: "workstation")
+    identity = MagicMock()
+    identity.begin_pending_device.return_value = SimpleNamespace(device=SimpleNamespace(device_id="dev-1"))
+    identity.register_pending_device = AsyncMock(return_value={
+        "identity": {"identity_id": "x"},
+        "approval": {"state": "pending", "expires_at": "2999-01-01T00:00:00+00:00"},
+    })
+    service.identity = identity
+
+    assert service.default_device_name() == "workstation"
+    await service.add_device(device_name=None, platform=None)
+    assert identity.register_pending_device.await_args.kwargs["name"] == "workstation"
+
+    identity.withdraw_pending_device = AsyncMock()
+    await service.cancel_pending_device()
+    identity.withdraw_pending_device.assert_awaited_once_with()
+
+    # Unreachable service: the keys are destroyed anyway (by the withdrawal itself).
+    identity.withdraw_pending_device = AsyncMock(side_effect=OSError("offline"))
+    await service.cancel_pending_device()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_recover_withdraws_its_device_and_leaves_no_keys() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    identity = MagicMock()
+    identity.register_pending_device = AsyncMock(return_value={"identity": {"identity_id": "x"}})
+    identity.fetch_recovery_wrap = AsyncMock(return_value={"blob": "AAAA"})
+    identity.activate_with_recovery = AsyncMock(side_effect=RuntimeError("Recovery bundle could not be verified"))
+    identity.withdraw_pending_device = AsyncMock()
+    service.identity = identity
+
+    with pytest.raises(RuntimeError, match="could not be verified"):
+        await service.recover(recovery_key="SVRK1-WRONG", device_name=None, platform=None)
+
+    identity.withdraw_pending_device.assert_awaited_once_with()
+
+
+def test_an_undecodable_state_file_never_blocks_unlocking(tmp_path) -> None:
+    writer = IdentityStore(tmp_path / "vault_keys.json", environment_key=_FILE_KEY)
+    writer.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    writer.save()
+    service, _store = _custody_service(tmp_path)
+    (tmp_path / "state.json").write_bytes(b"\xff\xfe not utf-8")
+    (tmp_path / "state.json").chmod(0o600)
+
+    assert service.unlock_existing_identity() is True
+    assert service.local_custody_missing() is False
+
+
+def test_without_the_account_id_no_marker_is_taken_as_this_accounts(tmp_path) -> None:
+    service, _store = _custody_service(tmp_path, user_id=None)  # type: ignore[arg-type]
+    service.state.save({**service.state.load(), "local_custody": {"user_id": 1, "identity_id": "i", "device_id": "d"}})
+
+    assert service.local_custody_missing() is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_marker_write_never_undoes_a_confirmed_reset() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    local = SimpleNamespace(fingerprint="fp-new", device=SimpleNamespace(device_id="dev-new"))
+    identity = MagicMock()
+    identity.status = AsyncMock(return_value={"identity": {"identity_id": "new"}})
+    identity.finish_confirmed_reset.return_value = local
+    service.identity = identity
+    replacement = object()
+    from servonaut.services.vault.command_service import PendingIdentityReset
+    service._pending_identity_reset = PendingIdentityReset(replacement, "2999-01-01T00:00:00+00:00")
+    service._remember_local_custody = MagicMock(side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "bad"))  # type: ignore[method-assign]
+
+    with pytest.raises(UnicodeDecodeError):
+        await service.poll_reset_identity()
+    identity.discard_reset_replacement.assert_not_called()
