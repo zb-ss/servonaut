@@ -129,13 +129,25 @@ CaEnrollmentConfirmModal {
     overflow-y: auto;
 }
 
-#vault_secret_input,
-#vault_recovery_group_0,
-#vault_recovery_group_1,
-#vault_recovery_group_2,
-#vault_recovery_group_3,
-#vault_recovery_group_4,
-#vault_recovery_group_5,
+/* A whole recovery key (71 characters) fits beside Show, so a revealed key
+   can be checked at a glance; the buttons sit right under the field. */
+#vault_secret_modal {
+    width: 104;
+    max-width: 96%;
+}
+
+#vault_secret_modal > Horizontal {
+    height: auto;
+    margin-top: 1;
+}
+
+#vault_secret_input_field,
+#vault_recovery_group_0_field,
+#vault_recovery_group_1_field,
+#vault_recovery_group_2_field,
+#vault_recovery_group_3_field,
+#vault_recovery_group_4_field,
+#vault_recovery_group_5_field,
 #vault_exposure_team,
 #vault_exposure_servers,
 #vault_exposure_resolution,
@@ -153,7 +165,7 @@ CaEnrollmentConfirmModal {
 #ca_server,
 #ca_break_glass,
 #vault_create_target,
-#vault_recovery_confirm_modal Input {
+#vault_recovery_confirm_modal SecretInput {
     width: 100%;
     margin-top: 1;
 }

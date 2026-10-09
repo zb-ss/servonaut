@@ -2407,9 +2407,12 @@ class ServonautApp(App):
         screen must be right when the user returns to it, not only the one
         on top. One failing hook must not leave the others showing stale data.
         """
+        from servonaut.widgets.secret_input import SecretInput
         from servonaut.widgets.status_bar import StatusBar
 
         for screen in list(self.screen_stack):
+            for secret in screen.query(SecretInput):
+                secret.refresh_after_demo_toggle()
             hook = getattr(screen, "refresh_after_demo_toggle", None)
             if callable(hook):
                 try:

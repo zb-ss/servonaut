@@ -18,6 +18,8 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Static
 
+from servonaut.widgets.secret_input import SecretInput
+
 
 class EnvVarInput(Vertical):
     """Container that wraps an ``Input`` plus an env-var resolution hint.
@@ -41,7 +43,8 @@ class EnvVarInput(Vertical):
         height: auto;
         width: 1fr;
     }
-    EnvVarInput > Input { width: 1fr; }
+    EnvVarInput > Input,
+    EnvVarInput > SecretInput { width: 1fr; }
     EnvVarInput > .envvar-hint {
         height: auto;
         color: $text-muted;
@@ -62,7 +65,11 @@ class EnvVarInput(Vertical):
         name: Optional[str] = None,
     ) -> None:
         super().__init__(id=id, classes=classes, name=name)
-        self._input = Input(
+        # A secret gets a Show/Hide toggle; the value stays in the inner Input either way.
+        self._secret: Optional[SecretInput] = (
+            SecretInput(value, placeholder) if password else None
+        )
+        self._input = self._secret.input if self._secret is not None else Input(
             value=value,
             placeholder=placeholder,
             password=password,
@@ -70,8 +77,8 @@ class EnvVarInput(Vertical):
         self._hint = Static("", classes="envvar-hint")
 
     def compose(self) -> ComposeResult:
-        """Yield the inner Input and the hint Static as siblings."""
-        yield self._input
+        """Yield the field (with its Show/Hide toggle for a secret) and the hint as siblings."""
+        yield self._secret if self._secret is not None else self._input
         yield self._hint
 
     def on_mount(self) -> None:

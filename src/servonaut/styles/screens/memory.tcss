@@ -329,8 +329,8 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     margin-bottom: 1;
 }
 
-#enrol-pass1,
-#enrol-pass2 {
+#enrol-pass1_field,
+#enrol-pass2_field {
     margin-bottom: 1;
 }
 

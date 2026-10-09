@@ -16,6 +16,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static, Switch
+from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         color: $text-muted;
     }
 
-    #enrol-pass1,
-    #enrol-pass2 {
+    #enrol-pass1_field,
+    #enrol-pass2_field {
         margin: 0 0 1 0;
         width: 1fr;
     }
@@ -113,7 +114,7 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         color: $text-muted;
     }
 
-    #enrol-pass2.hidden,
+    #enrol-pass2_field.hidden,
     #enrol-strength.hidden,
     #enrol-mismatch.hidden,
     #enrol-remember-row.hidden {
@@ -173,10 +174,9 @@ class PassphraseEnrolModal(ModalScreen[Optional[PassphraseResult]]):
         yield Container(
             Static(title, id="enrol-title"),
             Static(blurb, id="enrol-blurb"),
-            Input(placeholder="Passphrase", password=True, id="enrol-pass1"),
-            Input(
+            SecretInput(placeholder="Passphrase", id="enrol-pass1"),
+            SecretInput(
                 placeholder="Confirm passphrase",
-                password=True,
                 id="enrol-pass2",
                 classes="" if is_enrol else "hidden",
             ),
