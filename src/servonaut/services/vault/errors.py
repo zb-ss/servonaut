@@ -20,6 +20,18 @@ class VaultUserError(RuntimeError):
     """A fixed, secret-free message that is safe to show the user as-is."""
 
 
+# Why a recovery key was refused, in the user's terms.
+RECOVERY_KEY_NOT_A_KEY = (
+    "that is not a recovery key: a recovery key starts with SVRK1- and has 11 groups of five characters"
+)
+RECOVERY_KEY_TYPO = (
+    "this recovery key has a typo: compare it character by character with the copy you wrote down"
+)
+RECOVERY_KEY_NOT_THIS_IDENTITY = (
+    "this recovery key does not unlock your current vault identity: it may belong to an earlier "
+    "identity, or it was replaced by Rotate recovery key or Reset identity"
+)
+
 # Shown wherever an operation needs this device's vault identity and there is none.
 NO_LOCAL_IDENTITY = (
     "this device has no vault identity yet; run `servonaut vault setup` on your first device, "

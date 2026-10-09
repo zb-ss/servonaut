@@ -30,6 +30,30 @@ from servonaut.widgets.busy_indicator import BusyIndicator
 pytestmark = [pytest.mark.e2e_pr]
 
 
+class _NotingVaultHost(_VaultHost):
+    def __init__(self, service: Any) -> None:
+        self.notes: list[str] = []
+        super().__init__(service)
+
+    def notify(self, message, *args, **kwargs):  # type: ignore[override]
+        self.notes.append(str(message))
+        return super().notify(message, *args, **kwargs)
+
+
+async def _recover_with(app: App, screen: VaultScreen, recovery_key: str) -> None:
+    """Choose Recover and enter *recovery_key*, as a user would."""
+    await wait_for_async(lambda: not screen.query_one("#vault_recover", Button).disabled, desc="Recover available")
+    screen.query_one("#vault_recover", Button).press()
+    # The prompt mounts its widgets over several frames: wait for the button it is about to press.
+    prompt = await wait_for_async(
+        lambda: app.screen if isinstance(app.screen, VaultSecretPromptModal)
+        and app.screen.query("#vault_secret_input") and app.screen.query("#vault_secret_continue") else None,
+        desc="the recovery-key prompt",
+    )
+    prompt.query_one("#vault_secret_input", Input).value = recovery_key
+    prompt.query_one("#vault_secret_continue", Button).press()
+
+
 def _next_step(result) -> str:
     assert result.returncode == 0, result.describe()
     return "\n".join(line for line in result.stdout.splitlines() if line.startswith(("Next step:", "  Run:")))
@@ -68,7 +92,7 @@ async def test_a_lost_key_file_is_named_and_recover_unlocks_the_vault_again(
         "  Run: servonaut vault recover"
     )
 
-    app = _VaultHost(_service_for(journey, home, monkeypatch))
+    app = _NotingVaultHost(_service_for(journey, home, monkeypatch))
     async with app.run_test(size=(160, 50)):
         screen = await wait_for_async(
             lambda: app.screen if isinstance(app.screen, VaultScreen) else None, desc="the Vault screen",
@@ -76,14 +100,15 @@ async def test_a_lost_key_file_is_named_and_recover_unlocks_the_vault_again(
         await _wait_for_status(app, screen, "vault key file is missing")
         assert not screen.query_one("#vault_recover", Button).disabled
 
-        screen.query_one("#vault_recover", Button).press()
-        prompt = await wait_for_async(
-            lambda: app.screen if isinstance(app.screen, VaultSecretPromptModal)
-            and app.screen.query("#vault_secret_input") else None,
-            desc="the recovery-key prompt",
-        )
-        prompt.query_one("#vault_secret_input", Input).value = recovery_key
-        prompt.query_one("#vault_secret_continue", Button).press()
+        # A mistyped key is refused as a typo, before any device is registered for it.
+        registrations = len(fake_cloud.requests("/api/v1/vault/devices", method="POST"))
+        typo = recovery_key[:-1] + ("0" if recovery_key[-1] != "0" else "1")
+        await _recover_with(app, screen, typo)
+        await wait_for_async(lambda: any("has a typo" in note for note in app.notes), desc="the typo message")
+        assert len(fake_cloud.requests("/api/v1/vault/devices", method="POST")) == registrations
+        assert "vault key file is missing" in _status(screen)
+
+        await _recover_with(app, screen, recovery_key)
 
         await _wait_for_status(app, screen, "Identity fingerprint")
         assert not screen.query_one("#vault_busy", BusyIndicator).is_active

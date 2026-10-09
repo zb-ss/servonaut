@@ -35,6 +35,14 @@ class IdentityProtocolError(RuntimeError):
     """The server response violated a client-side identity invariant."""
 
 
+class NoLocalIdentityError(IdentityProtocolError):
+    """This computer holds no unlocked vault identity, so it cannot sign the request."""
+
+
+class RecoveryKeyMismatchError(IdentityProtocolError):
+    """A well-formed recovery key that does not open this identity's recovery bundle."""
+
+
 @dataclass(frozen=True)
 class PendingDevice:
     """Fresh local material retained while the one-shot approval is pending."""
@@ -433,14 +441,24 @@ class IdentityClient:
         """Recover a bundle on a pending device after locally verifying all keys."""
         pending = self._required_pending()
         checked = _verified_server_identity(identity)
+        from .crypto import open_wrap, decode_bundle
         try:
             blob = _decode_b64(str(recovery_wrap["blob"]))
-            from .crypto import open_wrap, decode_bundle
-            seeds = decode_bundle(open_wrap(
-                recovery_kek(parse_recovery_key(recovery_key), checked[0]), blob,
-                wrap_aad("recovery", checked[0], checked[1], checked[4]),
-            ))
-        except (KeyError, ValueError, IntegrityError) as exc:
+            key = parse_recovery_key(recovery_key)
+        except (KeyError, ValueError) as exc:
+            raise IdentityProtocolError("Recovery bundle could not be verified") from exc
+        try:
+            plain = open_wrap(
+                recovery_kek(key, checked[0]), blob, wrap_aad("recovery", checked[0], checked[1], checked[4]),
+            )
+        except IntegrityError as exc:
+            # The bundle is intact; this key is simply not the one that sealed it.
+            raise RecoveryKeyMismatchError("Recovery key does not open this identity's recovery bundle") from exc
+        except ValueError as exc:
+            raise IdentityProtocolError("Recovery bundle could not be verified") from exc
+        try:
+            seeds = decode_bundle(plain)
+        except ValueError as exc:
             raise IdentityProtocolError("Recovery bundle could not be verified") from exc
         recovered = LocalIdentity(
             identity_id=checked[0], user_id=checked[1], signing_seed=seeds[0], encryption_secret_key=seeds[1],
@@ -500,7 +518,7 @@ class IdentityClient:
 
     def _required_identity(self) -> LocalIdentity:
         if self._store.identity is None:
-            raise IdentityProtocolError("A local Team Vault identity is required")
+            raise NoLocalIdentityError("A local Team Vault identity is required")
         return self._store.identity
 
     def _required_pending(self) -> PendingDevice:

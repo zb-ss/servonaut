@@ -24,6 +24,7 @@ from servonaut.services.vault.crypto import (
 from servonaut.services.vault.identity_client import (
     IdentityClient,
     IdentityProtocolError,
+    RecoveryKeyMismatchError,
     _verified_server_identity,
 )
 from servonaut.services.vault.identity_store import IdentityStore, IdentityStoreError
@@ -361,7 +362,7 @@ async def test_wrong_identity_recovery_wrap_is_never_persisted(tmp_path) -> None
         "enc_public_key": base64.b64encode(claimed.encryption_public_key).decode(),
         "self_signature": base64.b64encode(claimed_signature).decode(),
     }
-    with pytest.raises(IdentityProtocolError, match="Recovery bundle"):
+    with pytest.raises(RecoveryKeyMismatchError, match="recovery bundle"):
         await client.activate_with_recovery(
             recovery_key=format_recovery_key(recovery),
             recovery_wrap={"blob": base64.b64encode(wrapped).decode()}, identity=claimed_wire,
@@ -572,3 +573,19 @@ def test_starting_a_new_registration_destroys_an_unfinished_one(tmp_path) -> Non
 
     assert not any(first.device.signing_seed) and not any(first.device_nonce)
     assert any(second.device.signing_seed)
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_recovery_bundle_is_not_reported_as_a_wrong_key(tmp_path) -> None:
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY)
+    client = IdentityClient(MagicMock(), store, timeout=1)
+    client.begin_pending_device()
+    source = IdentityStore.generate_identity(identity_id="11111111-1111-4111-8111-111111111111", user_id=7)
+    signature = self_signature(bytes(source.signing_seed), source.identity_id, source.user_id, source.signing_public_key, source.encryption_public_key)
+    wire = {"identity_id": source.identity_id, "user_id": 7, "fingerprint": source.fingerprint, "sig_public_key": base64.b64encode(source.signing_public_key).decode(), "enc_public_key": base64.b64encode(source.encryption_public_key).decode(), "self_signature": base64.b64encode(signature).decode()}
+
+    with pytest.raises(IdentityProtocolError) as raised:
+        await client.activate_with_recovery(
+            recovery_key=format_recovery_key(b"r" * 32), recovery_wrap={"blob": base64.b64encode(b"\x02short").decode()}, identity=wire,
+        )
+    assert not isinstance(raised.value, RecoveryKeyMismatchError)
