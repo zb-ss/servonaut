@@ -44,9 +44,10 @@ async def _recover_with(app: App, screen: VaultScreen, recovery_key: str) -> Non
     """Choose Recover and enter *recovery_key*, as a user would."""
     await wait_for_async(lambda: not screen.query_one("#vault_recover", Button).disabled, desc="Recover available")
     screen.query_one("#vault_recover", Button).press()
+    # The prompt mounts its widgets over several frames: wait for the button it is about to press.
     prompt = await wait_for_async(
         lambda: app.screen if isinstance(app.screen, VaultSecretPromptModal)
-        and app.screen.query("#vault_secret_input") else None,
+        and app.screen.query("#vault_secret_input") and app.screen.query("#vault_secret_continue") else None,
         desc="the recovery-key prompt",
     )
     prompt.query_one("#vault_secret_input", Input).value = recovery_key
