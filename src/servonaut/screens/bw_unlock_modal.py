@@ -23,6 +23,7 @@ from textual.widgets import Button, Checkbox, Input, Static
 
 from servonaut.services.bw_errors import BwError
 from servonaut.services.bw_session_service import BwAuthState, BwSessionService
+from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class BwUnlockModal(ModalScreen[bool]):
     def _render_locked(self) -> None:
         self._body().mount(
             Static("Enter your Bitwarden master password to unlock the vault for this session."),
-            Input(placeholder="Master password", password=True, id="bw_master_pw"),
+            SecretInput(placeholder="Master password", id="bw_master_pw"),
             Checkbox(
                 "Remember on this device (coming soon)",
                 value=False,

@@ -36,6 +36,7 @@ from servonaut.services.object_storage_regions import (
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.secret_input import SecretInput
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -64,7 +65,7 @@ class OVHSetupScreen(Screen):
     }
     OVHSetupScreen #ovh_input_label,
     OVHSetupScreen #ovh_input_client_id,
-    OVHSetupScreen #ovh_input_client_secret {
+    OVHSetupScreen #ovh_input_client_secret_field {
         width: 1fr;
     }
     OVHSetupScreen #ovh_select_auth {
@@ -209,10 +210,9 @@ class OVHSetupScreen(Screen):
             ),
             Horizontal(
                 Static("Client Secret:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="Client secret, $ENV_VAR or file:/path",
                     id="ovh_input_client_secret",
-                    password=True,
                 ),
                 classes="setting_row ovh-oauth-auth",
             ),
@@ -228,10 +228,9 @@ class OVHSetupScreen(Screen):
             ),
             Horizontal(
                 Static("Application Secret:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="Your OVH Application Secret or $ENV_VAR",
                     id="ovh_input_app_secret",
-                    password=True,
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
@@ -248,10 +247,9 @@ class OVHSetupScreen(Screen):
             ),
             Horizontal(
                 Static("Consumer Key:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="Your OVH Consumer Key or $ENV_VAR",
                     id="ovh_input_consumer_key",
-                    password=True,
                 ),
                 classes="setting_row ovh-classic-auth",
             ),
@@ -363,19 +361,17 @@ class OVHSetupScreen(Screen):
             ),
             Horizontal(
                 Static("Access Key:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="your-key or $OVH_S3_ACCESS_KEY or file:/path",
                     id="ovh_input_s3_access_key",
-                    password=True,
                 ),
                 classes="setting_row",
             ),
             Horizontal(
                 Static("Secret Key:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="your-secret or $OVH_S3_SECRET_KEY or file:/path",
                     id="ovh_input_s3_secret_key",
-                    password=True,
                 ),
                 classes="setting_row",
             ),
