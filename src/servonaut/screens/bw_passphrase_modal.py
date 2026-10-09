@@ -19,6 +19,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+from servonaut.widgets.secret_input import SecretInput
 
 
 class BwPassphraseModal(ModalScreen[Optional[str]]):
@@ -48,7 +49,7 @@ class BwPassphraseModal(ModalScreen[Optional[str]]):
                 "to decrypt it for import. Skip to leave this key out.",
                 id="bw_passphrase_prompt",
             ),
-            Input(placeholder="Passphrase", password=True, id="bw_passphrase_input"),
+            SecretInput(placeholder="Passphrase", id="bw_passphrase_input"),
             Horizontal(
                 Button("Skip", variant="default", id="bw_passphrase_skip_btn"),
                 Button("Unlock", variant="primary", id="bw_passphrase_unlock_btn"),

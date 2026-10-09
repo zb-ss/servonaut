@@ -470,8 +470,8 @@ PassphraseModal {
     color: $text-muted;
 }
 
-#input_passphrase,
-#input_passphrase_confirm {
+#input_passphrase_field,
+#input_passphrase_confirm_field {
     margin: 0 0 1 0;
     width: 1fr;
 }
