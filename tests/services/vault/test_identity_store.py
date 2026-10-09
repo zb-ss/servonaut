@@ -1,6 +1,7 @@
 """Focused tests for trusted local Team Vault identity custody."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -452,3 +453,122 @@ def test_replacing_the_device_ssh_key_wipes_only_the_old_ssh_key(tmp_path) -> No
     assert _signs_validly(store.signer(), device_public)
     reloaded = IdentityStore(tmp_path / "vault_keys.json", environment_key=base64.b64encode(b"\0" * 32).decode())
     assert reloaded.load().device_ssh_private_key == bytearray(b"new ssh key")
+
+
+def test_an_approved_device_keeps_its_keys_in_memory_after_saving(tmp_path) -> None:
+    """The approved device becomes the identity's device: its keys must not be zeroed.
+
+    Zeroing them made every later signed request of a running app fail
+    (device_signature_invalid) until restart, while the saved file was fine.
+    """
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY)
+    source = IdentityStore.generate_identity(identity_id="11111111-1111-4111-8111-111111111111", user_id=7)
+    client = IdentityClient(None, store, timeout=1)  # type: ignore[arg-type]
+    pending = client.begin_pending_device()
+    seed_before = bytes(pending.device.signing_seed)
+    signature = self_signature(bytes(source.signing_seed), source.identity_id, source.user_id, source.signing_public_key, source.encryption_public_key)
+    endorsement = sign(bytes(source.signing_seed), endorsement_message(
+        source.identity_id, source.user_id, pending.device.device_id,
+        pending.device.signing_public_key, pending.device.encryption_public_key,
+    ))
+    identity = {"identity_id": source.identity_id, "user_id": 7, "fingerprint": source.fingerprint, "sig_public_key": base64.b64encode(source.signing_public_key).decode(), "enc_public_key": base64.b64encode(source.encryption_public_key).decode(), "self_signature": base64.b64encode(signature).decode()}
+    approval = {"state": "approved", "sealed_bundle": base64.b64encode(seal(encode_bundle(bytes(source.signing_seed), bytes(source.encryption_secret_key)), pending.device.encryption_public_key)).decode(), "endorsement_signature": base64.b64encode(endorsement).decode()}
+
+    adopted = client.finish_pending_approval(approval=approval, identity=identity)
+
+    assert bytes(adopted.device.signing_seed) == seed_before and any(adopted.device.encryption_secret_key)
+    assert bytes(store.identity.device.signing_seed) == seed_before
+    assert store.load().device.signing_public_key == adopted.device.signing_public_key
+    assert not any(pending.device_nonce)  # the approval nonce is still destroyed
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_device_keeps_its_keys_in_memory_after_saving(tmp_path) -> None:
+    store = IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY)
+    api = MagicMock()
+    api.request_signed = AsyncMock(return_value={"device": {"device_id": "d"}})
+    client = IdentityClient(api, store, timeout=1)
+    pending = client.begin_pending_device()
+    seed_before = bytes(pending.device.signing_seed)
+    source = IdentityStore.generate_identity(identity_id="11111111-1111-4111-8111-111111111111", user_id=7)
+    recovery = b"r" * 32
+    wrapped = seal_wrap(
+        recovery_kek(recovery, source.identity_id),
+        encode_bundle(bytes(source.signing_seed), bytes(source.encryption_secret_key)),
+        wrap_aad("recovery", source.identity_id, source.user_id, source.fingerprint_raw),
+    )
+    signature = self_signature(bytes(source.signing_seed), source.identity_id, source.user_id, source.signing_public_key, source.encryption_public_key)
+    wire = {"identity_id": source.identity_id, "user_id": 7, "fingerprint": source.fingerprint, "sig_public_key": base64.b64encode(source.signing_public_key).decode(), "enc_public_key": base64.b64encode(source.encryption_public_key).decode(), "self_signature": base64.b64encode(signature).decode()}
+
+    await client.activate_with_recovery(
+        recovery_key=format_recovery_key(recovery),
+        recovery_wrap={"blob": base64.b64encode(wrapped).decode()}, identity=wire,
+    )
+
+    assert store.identity is not None
+    assert bytes(store.identity.device.signing_seed) == seed_before
+    assert any(store.identity.device.encryption_secret_key)
+    assert not any(pending.device_nonce)
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_a_pending_device_cancels_it_at_the_service_then_destroys_its_keys(tmp_path) -> None:
+    api = MagicMock()
+    api.request_signed = AsyncMock(return_value={"state": "rejected"})
+    client = IdentityClient(api, IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY), timeout=1)
+    pending = client.begin_pending_device()
+
+    await client.withdraw_pending_device()
+
+    method, path = api.request_signed.await_args.args
+    assert (method, path) == ("POST", f"/api/v1/vault/devices/{pending.device.device_id}/reject")
+    assert api.request_signed.await_args.kwargs["device"] is pending.device  # signed by the pending device
+    assert api.request_signed.await_args.kwargs["json"] == {"reason": "cancelled"}
+    assert not any(pending.device.signing_seed) and not any(pending.device_nonce)
+    await client.withdraw_pending_device()  # nothing left to withdraw
+    assert api.request_signed.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_service_still_leaves_no_pending_keys(tmp_path) -> None:
+    api = MagicMock()
+    api.request_signed = AsyncMock(side_effect=OSError("offline"))
+    client = IdentityClient(api, IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY), timeout=1)
+    pending = client.begin_pending_device()
+
+    with pytest.raises(OSError):
+        await client.withdraw_pending_device()
+    assert not any(pending.device.signing_seed) and not any(pending.device.encryption_secret_key)
+
+
+@pytest.mark.asyncio
+async def test_a_newer_registration_keeps_its_keys_while_an_older_one_is_withdrawn(tmp_path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_reject(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return {"state": "rejected"}
+
+    api = MagicMock()
+    api.request_signed = slow_reject
+    client = IdentityClient(api, IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY), timeout=1)
+    old = client.begin_pending_device()
+    withdrawal = asyncio.create_task(client.withdraw_pending_device())
+    await started.wait()
+    new = client.begin_pending_device()  # the user started again meanwhile
+    release.set()
+    await withdrawal
+
+    assert not any(old.device.signing_seed)
+    assert any(new.device.signing_seed) and client._pending is new
+
+
+def test_starting_a_new_registration_destroys_an_unfinished_one(tmp_path) -> None:
+    client = IdentityClient(None, IdentityStore(tmp_path / "vault_keys.json", environment_key=_KEY), timeout=1)  # type: ignore[arg-type]
+    first = client.begin_pending_device()
+    second = client.begin_pending_device()
+
+    assert not any(first.device.signing_seed) and not any(first.device_nonce)
+    assert any(second.device.signing_seed)

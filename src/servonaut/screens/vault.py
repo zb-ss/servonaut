@@ -7,9 +7,11 @@ the screen never constructs cryptographic or HTTP services itself.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import secrets
-from collections.abc import Mapping
+from pathlib import Path
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any, Optional
 
 from rich.markup import escape
@@ -18,14 +20,18 @@ from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
 from textual.widgets.selection_list import Selection
+from textual.worker import Worker
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.services.vault import onboarding
 from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -270,7 +276,9 @@ class VaultSharedServerPicker(Vertical):
         # Unredacted labels and message, so a demo-mode toggle can redraw them.
         self._team_choices: list[tuple[str, str]] = []
         self._server_choices: list[tuple[str, str]] = []
-        self._message: Optional[str] = "Loading your teams…"
+        self._message: Optional[str] = None
+        # Counts server loads; only the newest one may end the loading indicator.
+        self._servers_load = 0
 
     def compose(self) -> ComposeResult:
         yield Select([], prompt="Loading teams…", disabled=True, id=self._team_id)
@@ -280,10 +288,24 @@ class VaultSharedServerPicker(Vertical):
             yield servers
         else:
             yield Select([], prompt="Choose a team first", disabled=True, id=self._server_id)
-        yield Static("Loading your teams…", markup=False, id=self._message_id)
+        yield BusyIndicator()
+        yield Static("", markup=False, id=self._message_id)
 
     def on_mount(self) -> None:
+        self._say(None)
+        self._loading("Loading your teams…")
         self.run_worker(self._load_teams(), group="vault-picker-teams", exclusive=True)
+
+    def _loading(self, message: Optional[str]) -> None:
+        """Show what the picker is waiting for; ``None`` when it has its answer."""
+        try:
+            busy = self.query_one(BusyIndicator)
+        except NoMatches:
+            return  # the dialog is closing
+        if message:
+            busy.start(message)
+        else:
+            busy.stop()
 
     @property
     def team(self) -> Optional[str]:
@@ -349,6 +371,12 @@ class VaultSharedServerPicker(Vertical):
         return choices
 
     async def _load_teams(self) -> None:
+        try:
+            await self._load_teams_now()
+        finally:
+            self._loading(None)
+
+    async def _load_teams_now(self) -> None:
         select = self._team_select()
         if self._service is None:
             select.prompt = "No teams"
@@ -391,9 +419,12 @@ class VaultSharedServerPicker(Vertical):
         self._clear_servers("Loading servers…" if team else "Choose a team first")
         if team is None:
             self._say(None)
+            self._loading(None)
             return
-        self._say("Loading this team's shared servers…")
-        self.run_worker(self._load_servers(team), group="vault-picker-servers", exclusive=True)
+        self._say(None)
+        self._loading("Loading this team's shared servers…")
+        self._servers_load += 1
+        self.run_worker(self._load_servers(team, self._servers_load), group="vault-picker-servers", exclusive=True)
 
     def _clear_servers(self, prompt: str) -> None:
         self._servers_team = None
@@ -407,7 +438,15 @@ class VaultSharedServerPicker(Vertical):
             servers.set_options([])
         servers.disabled = True
 
-    async def _load_servers(self, team: str) -> None:
+    async def _load_servers(self, team: str, load: int) -> None:
+        try:
+            await self._load_servers_now(team)
+        finally:
+            # A newer load may still be running; it ends its own indicator.
+            if load == self._servers_load:
+                self._loading(None)
+
+    async def _load_servers_now(self, team: str) -> None:
         try:
             choices = self._choices(await _invoke(self._service, "shared_server_choices", team=team), "server_id")
         except Exception as exc:
@@ -673,8 +712,147 @@ class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
         self.dismiss(self._options[index] if isinstance(index, int) and 0 <= index < len(self._options) else None)
 
 
+class VaultAddDeviceModal(ModalScreen[Optional[str]]):
+    """Say who approves this computer before it asks, and offer Recover instead.
+
+    Dismisses with ``"start"``, ``"recover"`` or ``None``.
+    """
+
+    DEFAULT_CSS = """
+    VaultAddDeviceModal { align: center middle; }
+    #vault_add_device_modal {
+        width: 78; max-width: 94%; height: auto; max-height: 90%;
+        border: round $primary; background: $surface; padding: 1 2; overflow-y: auto;
+    }
+    #vault_add_device_title { text-style: bold; }
+    #vault_add_device_steps { margin-top: 1; }
+    #vault_add_device_other { margin-top: 1; color: $text-muted; }
+    #vault_add_device_modal > Horizontal { height: auto; margin-top: 1; }
+    #vault_add_device_cancel, #vault_add_device_recover, #vault_add_device_start { width: 1fr; min-width: 0; }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, device_name: str, *, key_file_missing: bool) -> None:
+        super().__init__()
+        self._device_name = device_name
+        self._key_file_missing = key_file_missing
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Add this computer as a vault device", id="vault_add_device_title"),
+            Static(self._steps(self._shown_name()), id="vault_add_device_steps"),
+            Static(self._other_way(), id="vault_add_device_other"),
+            Horizontal(
+                Button("Cancel", id="vault_add_device_cancel"),
+                Button("Use Recover instead", id="vault_add_device_recover"),
+                Button("Start", variant="primary", id="vault_add_device_start"),
+            ),
+            id="vault_add_device_modal",
+        )
+
+    def on_mount(self) -> None:
+        preferred = "#vault_add_device_recover" if self._key_file_missing else "#vault_add_device_start"
+        self.query_one(preferred, Button).focus()
+
+    def _steps(self, name: str) -> Text:
+        return Text(
+            "A device where your vault is already unlocked has to approve this computer.\n"
+            "  1. Choose Start. This computer then waits for the approval.\n"
+            f"  2. On the other device, open Vault, choose Devices, select “{name}” and choose Approve device.\n"
+            "  3. Check that both screens show the same safety number."
+        )
+
+    def _other_way(self) -> str:
+        if self._key_file_missing:
+            return (
+                "This computer used your vault before, but its vault key file is missing. Unless another "
+                "device still has your vault unlocked, choose Recover and enter your recovery key."
+            )
+        return "No other device with your vault unlocked? Use Recover with your recovery key instead."
+
+    def _shown_name(self) -> str:
+        return _hide_device_name(self.app, scrub_for_demo(self.app, self._device_name), self._device_name)
+
+    def refresh_after_demo_toggle(self) -> None:
+        name = _hide_device_name(self.app, scrub_for_demo(self.app, self._device_name), self._device_name)
+        self.query_one("#vault_add_device_steps", Static).update(self._steps(name))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        choices = {"vault_add_device_start": "start", "vault_add_device_recover": "recover"}
+        self.dismiss(choices.get(event.button.id or ""))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class _RunningWork:
+    """One running piece of work the Vault screen shows; its message can change."""
+
+    def __init__(self, screen: "VaultScreen", message: str, *, holds_screen: bool = False) -> None:
+        self._screen = screen
+        self.message = message
+        # A change that leaving the screen would cut off halfway.
+        self.holds_screen = holds_screen
+
+    def say(self, message: str) -> None:
+        self.message = message
+        self._screen._show_busy()
+
+
+def _hide_device_name(app: Any, text: str, device_name: Optional[str]) -> str:
+    """In demo mode, name this computer generically: its host name is personal."""
+    if device_name and getattr(app, "demo_mode", False):
+        return text.replace(device_name, "this computer")
+    return text
+
+
+def _key_file_label(service: Any) -> str:
+    """Where this computer keeps its vault keys, home-relative when it can be."""
+    path = getattr(getattr(service, "store", None), "path", None)
+    if not isinstance(path, Path):
+        return "~/.servonaut/vault/vault_keys.json"
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _device_name(service: Any) -> str:
+    """The name this computer registers under, as the approving device lists it."""
+    name_for = getattr(service, "default_device_name", None)
+    name = name_for() if callable(name_for) else None
+    return name if isinstance(name, str) and name else "this computer"
+
+
+async def _cancel_pending_device(service: Any) -> None:
+    """Withdraw this computer's unapproved device and destroy its keys.
+
+    Shielded, so leaving the screen (which cancels its worker) cannot cut the
+    withdrawal short.
+    """
+    cancel = getattr(service, "cancel_pending_device", None)
+    if not callable(cancel):
+        return
+    with contextlib.suppress(Exception):
+        result = cancel()
+        if hasattr(result, "__await__"):
+            await asyncio.shield(result)
+
+
+# The identity states in which this computer has no usable identity of an existing account.
+_NEEDS_THIS_DEVICE = ("remote_identity", "custody_missing")
+
+
 class VaultScreen(Screen):
     """Full-screen vault metadata, device state, and exposure entry point."""
+
+    DEFAULT_CSS = """
+    VaultScreen #vault_busy_row { height: auto; }
+    VaultScreen #vault_busy { width: 1fr; }
+    VaultScreen #vault_cancel_wait { display: none; min-width: 16; }
+    VaultScreen #vault_cancel_wait.-shown { display: block; }
+    """
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -704,6 +882,17 @@ class VaultScreen(Screen):
         self._table_mode = "vaults"
         self._roster: list[dict[str, Any]] = []
         self._rotation_hosts: list[dict[str, Any]] = []
+        # Work in progress, newest last; actions stay disabled while any runs.
+        self._busy_work: list[_RunningWork] = []
+        # Set while a wait can be stopped from the screen (Add device).
+        self._stop_waiting: Optional[Callable[[], None]] = None
+        self._add_device_worker: Optional[Worker[None]] = None
+        self._approve_worker: Optional[Worker[None]] = None
+        # This computer's name once Add device is used (hidden in demo mode).
+        self._device_name: Optional[str] = None
+        self._focus_before_busy: Optional[Widget] = None
+        # The action the status line names, focused (and so scrolled into view) once work ends.
+        self._next_action: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -712,6 +901,9 @@ class VaultScreen(Screen):
             with Vertical(id="vault_content"):
                 yield Static("Vault", id="vault_title")
                 yield Static("Loading encrypted vault metadata…", id="vault_status")
+                with Horizontal(id="vault_busy_row"):
+                    yield BusyIndicator(id="vault_busy")
+                    yield Button("Stop waiting", id="vault_cancel_wait", disabled=True)
                 yield DataTable(id="vault_table", cursor_type="row")
                 with VerticalScroll(id="vault_action_scroll"):
                     with Horizontal(id="vault_actions"):
@@ -726,8 +918,8 @@ class VaultScreen(Screen):
                         yield Button("Rotate exposed SSH key", id="vault_rotate_exposure")
                         yield Button("Devices", id="vault_devices")
                         yield Button("Add device", id="vault_add_device")
-                        yield Button("Approve device", id="vault_approve")
                         yield Button("Recover", id="vault_recover")
+                        yield Button("Approve device", id="vault_approve")
                         yield Button("Rotate recovery key", id="vault_recovery_rotate")
                         yield Button("Reset identity", id="vault_reset")
                         yield Button("Import SSH", id="vault_import")
@@ -759,7 +951,7 @@ class VaultScreen(Screen):
 
     def scrub_for_display(self, value: object) -> str:
         """Redact rendered server/user metadata while preserving local state."""
-        return scrub_for_demo(self.app, value)
+        return _hide_device_name(self.app, scrub_for_demo(self.app, value), self._device_name)
 
     def _status(self, message: str) -> None:
         self._status_raw = message
@@ -771,6 +963,76 @@ class VaultScreen(Screen):
         if callable(render):
             render()
         self._status(self._status_raw)
+        self._show_busy()
+
+    @contextlib.asynccontextmanager
+    async def _busy(
+        self, message: str, *, stop: Optional[Callable[[], None]] = None, holds_screen: bool = False,
+    ) -> AsyncIterator[_RunningWork]:
+        """Show *message* while the block runs and hold every action until it ends.
+
+        Vault workers are exclusive, so a second action would cancel this one;
+        the block also ends when its worker is cancelled. *stop*, when given,
+        is offered as "Stop waiting". *holds_screen* also holds Back, for
+        changes that leaving would cut off halfway. (The other vault dialogs
+        share ``BusyWork``; this screen's actions instead follow an identity
+        state that can change while work runs, so it keeps its own.)
+        """
+        work = _RunningWork(self, message, holds_screen=holds_screen)
+        if not self._busy_work:
+            # Disabled buttons lose focus; give it back once the work is done.
+            self._focus_before_busy = self.focused
+        self._busy_work.append(work)
+        if stop is not None:
+            self._stop_waiting = stop
+        self._show_busy()
+        try:
+            yield work
+        finally:
+            self._busy_work.remove(work)
+            if stop is not None:
+                self._stop_waiting = None
+            self._show_busy()
+            if not self._busy_work:
+                self._restore_focus()
+
+    def _restore_focus(self) -> None:
+        widget, self._focus_before_busy = self._focus_before_busy, None
+        button_id, self._next_action = self._next_action, None
+        # The table takes focus when the screen opens; focus moved elsewhere (the sidebar) stays.
+        if button_id and self.app.screen is self and (self.focused is None or isinstance(self.focused, DataTable)):
+            with contextlib.suppress(NoMatches):
+                button = self.query_one(f"#{button_id}", Button)
+                if button.focusable:
+                    button.focus()
+                    return
+        if self.focused is None and widget is not None and widget.is_attached and widget.focusable:
+            widget.focus()
+
+    def _show_busy(self) -> None:
+        try:
+            indicator = self.query_one("#vault_busy", BusyIndicator)
+            stop = self.query_one("#vault_cancel_wait", Button)
+        except NoMatches:
+            return  # the screen is closing
+        if self._busy_work:
+            indicator.start(self.scrub_for_display(self._busy_work[-1].message))
+        else:
+            indicator.stop()
+        stop.set_class(self._stop_waiting is not None, "-shown")
+        stop.disabled = self._stop_waiting is None
+        self._apply_action_state()
+
+    def _refuse_while_busy(self) -> bool:
+        """Explain instead of starting work that would cancel what is running."""
+        if not self._busy_work:
+            return False
+        self.app.notify(
+            f"Please wait: {self.scrub_for_display(self._busy_work[-1].message)}",
+            severity="warning",
+            markup=False,
+        )
+        return True
 
     def _render_vaults(self) -> None:
         table = self.query_one("#vault_table", DataTable)
@@ -820,16 +1082,27 @@ class VaultScreen(Screen):
     def _set_identity_state(self, state: str) -> None:
         """Make only the safe next identity action available for this state."""
         self._identity_state = state
-        ready = state == "ready"
-        for button_id in self._READY_ACTIONS:
-            self.query_one(f"#{button_id}", Button).disabled = not ready
-        self.query_one("#vault_setup", Button).disabled = state != "first_user"
-        remote_identity = state == "remote_identity"
-        self.query_one("#vault_recover", Button).disabled = not remote_identity
-        self.query_one("#vault_add_device", Button).disabled = not remote_identity
+        self._apply_action_state()
+
+    def _apply_action_state(self) -> None:
+        """Enable the actions this identity state allows, none while work runs."""
+        idle = not self._busy_work
+        state = self._identity_state
+        try:
+            for button_id in self._READY_ACTIONS:
+                self.query_one(f"#{button_id}", Button).disabled = not (idle and state == "ready")
+            self.query_one("#vault_setup", Button).disabled = not (idle and state == "first_user")
+            needs_device = idle and state in _NEEDS_THIS_DEVICE
+            self.query_one("#vault_recover", Button).disabled = not needs_device
+            self.query_one("#vault_add_device", Button).disabled = not needs_device
+            self.query_one("#vault_refresh", Button).disabled = not idle
+        except NoMatches:
+            return  # the screen is closing
 
     def _allows_identity_action(self, *states: str) -> bool:
         """Keep keyboard actions from bypassing the disabled-button state."""
+        if self._refuse_while_busy():
+            return False
         if self._identity_state in states:
             return True
         self.app.notify(
@@ -861,7 +1134,9 @@ class VaultScreen(Screen):
                 # A persisted but locked, corrupt, or foreign identity must
                 # never be mistaken for an empty first-user store.
                 return "custody_unavailable"
-        return "remote_identity" if isinstance(remote_identity, Mapping) else "first_user"
+        if not isinstance(remote_identity, Mapping):
+            return "first_user"
+        return "custody_missing" if status.get("custody_missing") is True else "remote_identity"
 
     async def _drain_pending_device_events(self) -> None:
         service = self._service()
@@ -881,6 +1156,10 @@ class VaultScreen(Screen):
         await show_pending_device(self.app, self._service(), device)
 
     async def _load(self) -> None:
+        async with self._busy("Checking your vault…"):
+            await self._load_now()
+
+    async def _load_now(self) -> None:
         service = self._service()
         if service is None:
             self._status("Vault services are unavailable in this session.")
@@ -898,7 +1177,16 @@ class VaultScreen(Screen):
             return
         if readiness == "remote_identity":
             self._set_identity_state(readiness)
-            self._status("This account has a vault identity on another device. Choose Recover or Add device.")
+            self._next_action = "vault_add_device"
+            self._status(
+                "Your vault identity is not on this computer. Choose Recover and enter your recovery key, "
+                "or Add device to have a device where your vault is unlocked approve this one."
+            )
+            return
+        if readiness == "custody_missing":
+            self._set_identity_state(readiness)
+            self._next_action = "vault_recover"
+            self._status(f"{onboarding.RECOVER_DEVICE.message} (Expected at {_key_file_label(service)}.)")
             return
         if readiness == "custody_unavailable":
             self._set_identity_state(readiness)
@@ -964,6 +1252,7 @@ class VaultScreen(Screen):
             "vault_rotate_exposure": self.action_rotate_exposure,
             "vault_devices": self.action_devices,
             "vault_add_device": self.action_add_device,
+            "vault_cancel_wait": self.action_stop_waiting,
             "vault_approve": self.action_approve,
             "vault_recover": self.action_recover,
             "vault_recovery_rotate": self.action_recovery_rotate,
@@ -978,7 +1267,13 @@ class VaultScreen(Screen):
             handler()
 
     def action_refresh(self) -> None:
+        if self._refuse_while_busy():
+            return
         self.run_worker(self._load(), group="vault", exclusive=True)
+
+    def action_stop_waiting(self) -> None:
+        if self._stop_waiting is not None:
+            self._stop_waiting()
 
     def action_setup(self) -> None:
         if not self._allows_identity_action("first_user"):
@@ -1003,7 +1298,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            await _invoke(service, "setup", device_name=None, platform=None, recovery_confirmation=confirmation)
+            async with self._busy('Creating your vault identity…', holds_screen=True):
+                await _invoke(service, "setup", device_name=None, platform=None, recovery_confirmation=confirmation)
         except Exception as exc:
             self.app.notify(f"Vault setup failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1022,7 +1318,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "confirm_identity")
+            async with self._busy('Confirming your vault identity…'):
+                result = await _invoke(service, "confirm_identity")
         except Exception as exc:
             self.app.notify(f"Could not confirm the vault identity ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1047,7 +1344,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            options = await _invoke(service, "creatable_vaults", vaults=self._vaults)
+            async with self._busy('Checking which vaults you can create…'):
+                options = await _invoke(service, "creatable_vaults", vaults=self._vaults)
         except Exception as exc:
             self.app.notify(f"Could not check which vaults you can create ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1061,7 +1359,8 @@ class VaultScreen(Screen):
         if not isinstance(choice, Mapping):
             return
         try:
-            await _invoke(service, "create_vault", team=choice.get("team"), name=None, grant_policy="auto")
+            async with self._busy('Creating the vault…', holds_screen=True):
+                await _invoke(service, "create_vault", team=choice.get("team"), name=None, grant_policy="auto")
         except Exception as exc:
             self.app.notify(f"Could not create the vault ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1069,6 +1368,14 @@ class VaultScreen(Screen):
         await self._load()
 
     def action_back(self) -> None:
+        holding = next((work for work in self._busy_work if work.holds_screen), None)
+        if holding is not None:
+            self.app.notify(
+                f"Wait for this to finish: {self.scrub_for_display(holding.message)} Leaving now would stop it halfway.",
+                severity="warning",
+                markup=False,
+            )
+            return
         self.app.pop_screen()
 
     def action_items(self) -> None:
@@ -1090,7 +1397,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            response = await _invoke(service, "list_items", vault_id=self._selected_vault_id)
+            async with self._busy("Loading the vault's items…"):
+                response = await _invoke(service, "list_items", vault_id=self._selected_vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load item metadata ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1125,7 +1433,8 @@ class VaultScreen(Screen):
             if service is None:
                 return
             try:
-                revealed = await _invoke(service, "show_item", vault_id=self._selected_vault_id, item_id=item_id, reveal=True)
+                async with self._busy('Decrypting the item…'):
+                    revealed = await _invoke(service, "show_item", vault_id=self._selected_vault_id, item_id=item_id, reveal=True)
             except Exception as exc:
                 self.app.notify(f"Could not reveal item ({vault_failure_reason(exc)}).", severity="error", markup=False)
                 return
@@ -1162,7 +1471,8 @@ class VaultScreen(Screen):
         if service is None or not self._selected_vault_id:
             return
         try:
-            exposures = await _invoke(service, "list_exposures", vault_id=self._selected_vault_id)
+            async with self._busy('Loading exposures…'):
+                exposures = await _invoke(service, "list_exposures", vault_id=self._selected_vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load exposures ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1193,7 +1503,8 @@ class VaultScreen(Screen):
         if service is None or not self._selected_vault_id:
             return
         try:
-            result = await _invoke(service, "resolve_exposure", vault_id=self._selected_vault_id, exposure_id=str(exposure.get("exposure_id") or ""), resolution=values["resolution"], note=values.get("note"))
+            async with self._busy('Resolving the exposure…'):
+                result = await _invoke(service, "resolve_exposure", vault_id=self._selected_vault_id, exposure_id=str(exposure.get("exposure_id") or ""), resolution=values["resolution"], note=values.get("note"))
         except Exception as exc:
             self.app.notify(f"Exposure resolution failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1233,7 +1544,12 @@ class VaultScreen(Screen):
             return
         servers = [server.strip() for server in values["servers"].split(",") if server.strip()]
         try:
-            result = await _invoke(service, "rotate_ssh_key", vault_id=self._selected_vault_id, item_id=str(exposure["item_id"]), team=values["team"], servers=servers)
+            servers_text = f"{len(servers)} server{'s' if len(servers) != 1 else ''}"
+            async with self._busy(
+                f"Rotating the SSH key on {servers_text}: this connects to each one and can take a few minutes…",
+                holds_screen=True,
+            ):
+                result = await _invoke(service, "rotate_ssh_key", vault_id=self._selected_vault_id, item_id=str(exposure["item_id"]), team=values["team"], servers=servers)
         except Exception as exc:
             self.app.notify(f"SSH-key rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1259,50 +1575,91 @@ class VaultScreen(Screen):
         self.run_worker(self._load_devices(), group="vault", exclusive=True)
 
     def action_add_device(self) -> None:
-        if not self._allows_identity_action("remote_identity"):
+        if not self._allows_identity_action(*_NEEDS_THIS_DEVICE):
             return
-        self.run_worker(self._add_device(), group="vault", exclusive=True)
+        service = self._service()
+        if service is None:
+            return
+        name = _device_name(service)
+        self._device_name = name
 
-    async def _add_device(self) -> None:
+        def chosen(choice: Optional[str]) -> None:
+            if choice == "start":
+                self._add_device_worker = self.run_worker(self._add_device(name), group="vault", exclusive=True)
+            elif choice == "recover":
+                self.action_recover()
+
+        self.app.push_screen(
+            VaultAddDeviceModal(name, key_file_missing=self._identity_state == "custody_missing"), chosen,
+        )
+
+    def _stop_add_device(self) -> None:
+        worker, self._add_device_worker = self._add_device_worker, None
+        if worker is not None:
+            worker.cancel()
+
+    async def _add_device(self, name: str) -> None:
         service = self._service()
         if service is None:
             return
         try:
-            pending = await _invoke(service, "add_device", device_name=None, platform=None)
-            identity = pending.get("identity") if isinstance(pending, Mapping) else None
-            expires_at = pending.get("expires_at") if isinstance(pending, Mapping) else None
-            if not identity or not expires_at:
-                raise RuntimeError("missing pending-device approval state")
-            self._status("Waiting for approval on an active device. Compare the safety number when it appears.")
-            attempt = 0
-            while True:
-                approval = await _invoke(service, "poll_pending_device", identity=identity, expires_at=expires_at)
-                state = approval.get("state") if isinstance(approval, Mapping) else None
-                if state == "revealed":
-                    self._status(f"Safety number: {escape(str(approval.get('safety_number') or ''))}")
-                if state == "approved":
-                    approved_payload = approval.get("approval") if isinstance(approval, Mapping) else None
-                    if not isinstance(approved_payload, Mapping):
-                        raise RuntimeError("pending-device approval payload is malformed")
-                    result = await _invoke(
-                        service,
-                        "finish_pending_device",
-                        approval=approved_payload,
-                        identity=identity,
-                    )
-                    self._status(f"Device approved: {escape(str(result))}")
-                    return
-                await asyncio.sleep(_approval_poll_delay(service, attempt))
-                attempt += 1
+            async with self._busy("Asking to add this computer…", stop=self._stop_add_device) as work:
+                pending = await _invoke(service, "add_device", device_name=name, platform=None)
+                identity = pending.get("identity") if isinstance(pending, Mapping) else None
+                expires_at = pending.get("expires_at") if isinstance(pending, Mapping) else None
+                if not identity or not expires_at:
+                    raise RuntimeError("missing pending-device approval state")
+                work.say(f"Waiting for another device to approve “{name}”…")
+                self._status(
+                    f"On a device where your vault is unlocked, open Vault, choose Devices, select “{name}” "
+                    "and choose Approve device. No other device? Choose Stop waiting, then Recover."
+                )
+                await self._wait_for_approval(service, work, identity, expires_at)
+        except asyncio.CancelledError:
+            with contextlib.suppress(NoMatches):
+                self._status("Stopped waiting: this computer was not added. Choose Add device to try again, or Recover.")
+            await _cancel_pending_device(service)
+            raise
         except Exception as exc:
-            self.app.notify(f"Device registration failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            await _cancel_pending_device(service)
+            reason = vault_failure_reason(exc)
+            self._status(f"This computer was not added ({reason}). Choose Add device to try again, or Recover.")
+            self.app.notify(f"Device registration failed ({reason}).", severity="error", markup=False)
+            return
+        self.app.notify("This computer is now a vault device.", markup=False)
+        await self._load()
+
+    async def _wait_for_approval(
+        self, service: Any, work: _RunningWork, identity: Mapping[str, Any], expires_at: str,
+    ) -> None:
+        """Poll until another device approves this one, then save its keys here."""
+        attempt = 0
+        while True:
+            approval = await _invoke(service, "poll_pending_device", identity=identity, expires_at=expires_at)
+            state = approval.get("state") if isinstance(approval, Mapping) else None
+            if state == "revealed" and approval.get("safety_number"):
+                self._status(
+                    f"Safety number: {approval.get('safety_number')}. Check that the other device shows "
+                    "exactly this number, then approve it there."
+                )
+                work.say("Waiting for the other device to approve…")
+            if state == "approved":
+                approved_payload = approval.get("approval") if isinstance(approval, Mapping) else None
+                if not isinstance(approved_payload, Mapping):
+                    raise RuntimeError("pending-device approval payload is malformed")
+                work.say("Saving this computer's vault keys…")
+                await _invoke(service, "finish_pending_device", approval=approved_payload, identity=identity)
+                return
+            await asyncio.sleep(_approval_poll_delay(service, attempt))
+            attempt += 1
 
     async def _load_devices(self) -> None:
         service = self._service()
         if service is None:
             return
         try:
-            devices = await _invoke(service, "list_devices")
+            async with self._busy('Loading devices…'):
+                devices = await _invoke(service, "list_devices")
         except Exception as exc:
             self.app.notify(f"Could not load devices ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1311,6 +1668,11 @@ class VaultScreen(Screen):
         self._table_mode = "devices"
         self._render_devices()
         self._status("Device list loaded. To approve a pending device, select it and choose Approve device, then compare its safety number.")
+        pending = next((row for row, device in enumerate(self._devices) if device.get("status") == "pending"), None)
+        if pending is not None:
+            # Select the waiting device and bring Approve device into view.
+            self.query_one("#vault_table", DataTable).move_cursor(row=pending)
+            self.query_one("#vault_approve", Button).focus()
 
     def action_approve(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1327,21 +1689,33 @@ class VaultScreen(Screen):
         async def confirm(sas: str) -> bool:
             return bool(await self.app.push_screen_wait(VaultSasConfirmModal(sas)))
 
-        self.run_worker(self._approve_device(device_id, confirm), group="vault", exclusive=True)
+        self._approve_worker = self.run_worker(self._approve_device(device_id, confirm), group="vault", exclusive=True)
+
+    def _stop_approving(self) -> None:
+        worker, self._approve_worker = self._approve_worker, None
+        if worker is not None:
+            worker.cancel()
 
     async def _approve_device(self, device_id: str, confirmation: Any) -> None:
         service = self._service()
         if service is None:
             return
         try:
-            result = await _invoke(service, "approve_device", device_id=device_id, confirmation=confirmation)
+            async with self._busy(
+                "Approving the device: waiting for it to show its safety number…", stop=self._stop_approving,
+            ):
+                result = await _invoke(service, "approve_device", device_id=device_id, confirmation=confirmation)
+        except asyncio.CancelledError:
+            with contextlib.suppress(NoMatches):
+                self._status("Stopped approving. The device is still waiting: choose Devices to approve it again.")
+            raise
         except Exception as exc:
             self.app.notify(f"Device approval failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Device approval completed: {escape(str(result))}")
+        self._status("Device approved: it can open your vaults now.")
 
     def action_recover(self) -> None:
-        if not self._allows_identity_action("remote_identity"):
+        if not self._allows_identity_action(*_NEEDS_THIS_DEVICE):
             return
         def callback(recovery_key: Optional[str]) -> None:
             if recovery_key:
@@ -1354,11 +1728,13 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "recover", recovery_key=recovery_key, device_name=None, platform=None)
+            async with self._busy("Restoring your vault identity on this computer…", holds_screen=True):
+                await _invoke(service, "recover", recovery_key=recovery_key, device_name=None, platform=None)
         except Exception as exc:
             self.app.notify(f"Vault recovery failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Vault recovery completed: {escape(str(result))}")
+        self.app.notify("Your vault identity is restored on this computer.", markup=False)
+        await self._load()
 
     def action_recovery_rotate(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1372,7 +1748,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "rotate_recovery_key", recovery_confirmation=confirmation)
+            async with self._busy('Replacing your recovery key…', holds_screen=True):
+                result = await _invoke(service, "rotate_recovery_key", recovery_confirmation=confirmation)
         except Exception as exc:
             self.app.notify(f"Recovery-key rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1393,22 +1770,24 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "reset_identity", reason="rotate", recovery_confirmation=confirmation)
+            async with self._busy('Requesting a new vault identity…', holds_screen=True):
+                result = await _invoke(service, "reset_identity", reason="rotate", recovery_confirmation=confirmation)
         except Exception as exc:
             self.app.notify(f"Identity reset failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         self._status("Identity reset requested. Confirm it through the e-mail, then this screen will verify and save the replacement identity.")
         attempt = 0
         try:
-            while True:
-                status = await _invoke(service, "poll_reset_identity")
-                if isinstance(status, Mapping) and status.get("state") == "confirmed":
-                    self._status(
-                        f"Identity reset confirmed for device {escape(str(status.get('device_id') or ''))}."
-                    )
-                    return
-                await asyncio.sleep(_approval_poll_delay(service, attempt))
-                attempt += 1
+            async with self._busy("Waiting for you to confirm the reset from the e-mail…"):
+                while True:
+                    status = await _invoke(service, "poll_reset_identity")
+                    if isinstance(status, Mapping) and status.get("state") == "confirmed":
+                        self._status(
+                            f"Identity reset confirmed for device {escape(str(status.get('device_id') or ''))}."
+                        )
+                        return
+                    await asyncio.sleep(_approval_poll_delay(service, attempt))
+                    attempt += 1
         except Exception as exc:
             self.app.notify(f"Identity reset confirmation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
 
@@ -1473,7 +1852,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            vaults = await _invoke(service, "list_vaults")
+            async with self._busy('Refreshing the vault…'):
+                vaults = await _invoke(service, "list_vaults")
         except Exception as exc:
             self._status(f"{message} Vault metadata could not be refreshed ({vault_failure_reason(exc)}).")
         else:
@@ -1538,17 +1918,18 @@ class VaultScreen(Screen):
         if not approved:
             return
         try:
-            result = await _invoke(
-                service,
-                "bind_imported_bitwarden_ref",
-                vault_id=vault_id,
-                item_id=selected["vault_item_id"],
-                team=team,
-                server_id=server_id,
-                source_ref=selected["source_ref"],
-                login=target["login"] or None,
-                clear_legacy=False,
-            )
+            async with self._busy('Binding the imported key and checking the SSH login…', holds_screen=True):
+                result = await _invoke(
+                    service,
+                    "bind_imported_bitwarden_ref",
+                    vault_id=vault_id,
+                    item_id=selected["vault_item_id"],
+                    team=team,
+                    server_id=server_id,
+                    source_ref=selected["source_ref"],
+                    login=target["login"] or None,
+                    clear_legacy=False,
+                )
         except Exception as exc:
             self.app.notify(
                 f"Native binding was not created; the Bitwarden reference remains ({vault_failure_reason(exc)}).",
@@ -1580,17 +1961,18 @@ class VaultScreen(Screen):
             self._status("Native SSH binding verified. The legacy Bitwarden server reference remains by choice.")
             return
         try:
-            cleared = await _invoke(
-                service,
-                "bind_imported_bitwarden_ref",
-                vault_id=vault_id,
-                item_id=selected["vault_item_id"],
-                team=team,
-                server_id=server_id,
-                source_ref=selected["source_ref"],
-                login=target["login"] or None,
-                clear_legacy=True,
-            )
+            async with self._busy('Clearing the legacy Bitwarden reference…', holds_screen=True):
+                cleared = await _invoke(
+                    service,
+                    "bind_imported_bitwarden_ref",
+                    vault_id=vault_id,
+                    item_id=selected["vault_item_id"],
+                    team=team,
+                    server_id=server_id,
+                    source_ref=selected["source_ref"],
+                    login=target["login"] or None,
+                    clear_legacy=True,
+                )
         except Exception as exc:
             self.app.notify(
                 f"Legacy reference was retained ({vault_failure_reason(exc)}).",
@@ -1621,7 +2003,8 @@ class VaultScreen(Screen):
         if service is None or not vault_id:
             return
         try:
-            vault = await _invoke(service, "get_vault", vault_id=vault_id)
+            async with self._busy("Loading the vault's members…"):
+                vault = await _invoke(service, "get_vault", vault_id=vault_id)
         except Exception as exc:
             self.app.notify(f"Could not load vault roster ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1645,7 +2028,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "process_grants", vault_id=vault_id, interactive=True)
+            async with self._busy('Processing access requests…', holds_screen=True):
+                result = await _invoke(service, "process_grants", vault_id=vault_id, interactive=True)
         except Exception as exc:
             self.app.notify(f"Could not process grants ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
@@ -1681,7 +2065,8 @@ class VaultScreen(Screen):
         if service is None:
             return
         try:
-            result = await _invoke(service, "rotate", vault_id=vault_id)
+            async with self._busy('Rotating the vault key…', holds_screen=True):
+                result = await _invoke(service, "rotate", vault_id=vault_id)
         except Exception as exc:
             self.app.notify(f"Vault rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return

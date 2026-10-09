@@ -39,7 +39,7 @@ from .grant_processor import GrantProcessor
 from .identity_client import IdentityClient
 from .identity_store import IdentityStore
 from .items import VaultItemService
-from .local_state import VaultLocalState
+from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
@@ -283,6 +283,7 @@ class VaultCommandService:
         if local.user_id != account_id:
             self.store.lock()
             raise VaultStateError("local vault identity belongs to a different account")
+        self._remember_local_custody()
         return True
 
     def _load_pins(self) -> Mapping[str, str]:
@@ -304,7 +305,49 @@ class VaultCommandService:
     async def status(self) -> dict[str, Any]:
         remote = await self.identity.status()
         fingerprint = self.store.identity.fingerprint if self.store.identity else None
-        return {"fingerprint": fingerprint, "remote": remote, "local_identity": fingerprint}
+        return {
+            "fingerprint": fingerprint, "remote": remote, "local_identity": fingerprint,
+            "custody_missing": self.local_custody_missing(),
+        }
+
+    def default_device_name(self) -> str:
+        """The name a new device of this computer gets, as other devices will see it."""
+        return platform_module.node() or "Servonaut"
+
+    def local_custody_missing(self) -> bool:
+        """Whether this computer held a vault identity but its key file is now gone.
+
+        A marker is saved whenever custody here is unlocked; installs from before
+        the marker are recognised by their signed vault heads, which are only
+        recorded while an identity is unlocked on this computer.
+        """
+        if self.store.identity is not None or self.store.has_persisted_identity():
+            return False
+        try:
+            state = self.state.load()
+        except (LocalStateError, ValueError):
+            return False
+        marker = state.get("local_custody")
+        if isinstance(marker, Mapping):
+            # Without the account id the marker cannot be attributed: say nothing.
+            account_id = self.auth.user_id
+            return account_id is not None and marker.get("user_id") == account_id
+        return bool(state.get("vault_heads"))
+
+    def _remember_local_custody(self) -> None:
+        """Record that this computer holds the unlocked identity (public ids only)."""
+        local = self.store.identity
+        if local is None:
+            return
+        marker = {"user_id": local.user_id, "identity_id": local.identity_id, "device_id": local.device.device_id}
+        try:
+            state = self.state.load()
+            if state.get("local_custody") == marker:
+                return
+            state["local_custody"] = marker
+            self.state.save(state)
+        except Exception:  # noqa: BLE001 — only a hint for a later message; never block vault use
+            logger.debug("Could not record local vault custody", exc_info=True)
 
     @property
     def poll_interval_seconds(self) -> int:
@@ -487,8 +530,8 @@ class VaultCommandService:
             self.store.wipe()
             raise
         try:
-            return await self.identity.enroll(
-                recovery_key=recovery, device_name=device_name or platform_module.node() or "Servonaut",
+            enrolled = await self.identity.enroll(
+                recovery_key=recovery, device_name=device_name or self.default_device_name(),
                 platform=platform or platform_module.system().lower(), client="cli",
             )
         except APIError as exc:
@@ -505,6 +548,8 @@ class VaultCommandService:
         except Exception:
             await self._discard_unenrolled(local)
             raise
+        self._remember_local_custody()
+        return enrolled
 
     async def _discard_unenrolled(self, local: Any) -> None:
         """Drop saved custody once the service shows it never received this identity.
@@ -540,21 +585,28 @@ class VaultCommandService:
         self._apply_key_store_setting()
         user_id = await self._user_id()
         self.identity.begin_pending_device()
-        registered = await self.identity.register_pending_device(
-            user_id=user_id,
-            name=device_name or platform_module.node() or "Servonaut",
-            platform=platform or platform_module.system().lower(),
-            client="cli",
-        )
-        remote_identity = registered.get("identity")
-        if not isinstance(remote_identity, dict):
-            raise VaultStateError("pending-device registration did not return an identity")
-        recovery_wrap = await self.identity.fetch_recovery_wrap()
-        result = await self.identity.activate_with_recovery(
-            recovery_key=recovery_key,
-            recovery_wrap=recovery_wrap,
-            identity=remote_identity,
-        )
+        try:
+            registered = await self.identity.register_pending_device(
+                user_id=user_id,
+                name=device_name or self.default_device_name(),
+                platform=platform or platform_module.system().lower(),
+                client="cli",
+            )
+            remote_identity = registered.get("identity")
+            if not isinstance(remote_identity, dict):
+                raise VaultStateError("pending-device registration did not return an identity")
+            recovery_wrap = await self.identity.fetch_recovery_wrap()
+            result = await self.identity.activate_with_recovery(
+                recovery_key=recovery_key,
+                recovery_wrap=recovery_wrap,
+                identity=remote_identity,
+            )
+        except BaseException:
+            # A wrong key or a failed request must not leave a device waiting at the
+            # service, nor its keys in memory, for every attempt.
+            await self.cancel_pending_device()
+            raise
+        self._remember_local_custody()
         return {"device": result.get("device", result), "fingerprint": self.store.identity.fingerprint if self.store.identity else None}
 
     async def add_device(
@@ -572,7 +624,7 @@ class VaultCommandService:
         try:
             registered = await self.identity.register_pending_device(
                 user_id=user_id,
-                name=device_name or platform_module.node() or "Servonaut",
+                name=device_name or self.default_device_name(),
                 platform=platform or platform_module.system().lower(),
                 client="cli",
             )
@@ -588,8 +640,8 @@ class VaultCommandService:
                 "identity": identity,
                 "state": approval.get("state"),
             }
-        except Exception:
-            self.identity.discard_pending_device()
+        except BaseException:
+            await self.cancel_pending_device()
             raise
 
     async def poll_pending_device(
@@ -619,7 +671,20 @@ class VaultCommandService:
     ) -> dict[str, Any]:
         """Verify and persist the approved bundle returned by polling."""
         local = self.identity.finish_pending_approval(approval=dict(approval), identity=dict(identity))
+        self._remember_local_custody()
         return {"device_id": local.device.device_id, "fingerprint": local.fingerprint}
+
+    async def cancel_pending_device(self) -> None:
+        """Stop waiting for approval: withdraw this computer's request and destroy its keys.
+
+        Withdrawing keeps approvers from seeing a device that will never come;
+        when the service cannot be reached the keys are destroyed anyway and the
+        request expires on its own.
+        """
+        try:
+            await self.identity.withdraw_pending_device()
+        except Exception:  # noqa: BLE001 — the keys are gone either way
+            logger.debug("Could not withdraw the pending vault device", exc_info=True)
 
     async def approve_device(
         self, *, device_id: str, confirmation: Callable[[str], bool | Awaitable[bool]],
@@ -668,7 +733,7 @@ class VaultCommandService:
                 replacement=replacement,
                 recovery_key=recovery_key,
                 reason=reason,
-                device_name=platform_module.node() or "Servonaut",
+                device_name=self.default_device_name(),
                 platform=platform_module.system().lower(),
                 client="cli",
             )
@@ -698,12 +763,14 @@ class VaultCommandService:
                 return {"state": "pending_reset", "expires_at": expires_at}
             local = self.identity.finish_confirmed_reset(replacement=pending.replacement, status=status)
             self._pending_identity_reset = None
-            return {"state": "confirmed", "fingerprint": local.fingerprint, "device_id": local.device.device_id}
         except Exception:
             # A failed/expired/cancelled reset must never replace the current custody.
             self.identity.discard_reset_replacement(pending.replacement)
             self._pending_identity_reset = None
             raise
+        # After the try: the replacement is saved now and must never be discarded.
+        self._remember_local_custody()
+        return {"state": "confirmed", "fingerprint": local.fingerprint, "device_id": local.device.device_id}
 
     async def create_vault(self, *, team: str | None, name: str | None, grant_policy: str) -> dict[str, Any]:
         if team is None:

@@ -23,6 +23,7 @@ from servonaut.screens.vault import (
 )
 from servonaut.services.api_client import APIError
 from servonaut.styles import CSS_FILES
+from servonaut.widgets.busy_indicator import BusyIndicator
 from tests._async_bounds import wait_until
 
 _TEAMS = [{"slug": "ops", "label": "Operations (ops)"}, {"slug": "web", "label": "Web [prod] (web)"}]
@@ -95,6 +96,12 @@ def _message(screen, message_id: str) -> Optional[str]:
     return str(note.render()) if note.display else None
 
 
+def _loading(screen) -> Optional[str]:
+    """What the dialog's team/server picker is waiting for, if anything."""
+    busy = screen.query_one(VaultSharedServerPicker).query_one(BusyIndicator)
+    return busy.message if busy.is_active else None
+
+
 def _assert_not_clipped(screen, container_id: str) -> None:
     """Every shown part of the dialog fits on screen without scrolling."""
     container = screen.query_one(f"#{container_id}", Widget)
@@ -111,7 +118,7 @@ async def _teams_loaded(app: App, pilot, modal_type: type, prefix: str):
     await wait_until(lambda: isinstance(app.screen, modal_type) and bool(app.screen.query(f"#{prefix}_team")))
     screen = app.screen
     team = screen.query_one(f"#{prefix}_team", Select)
-    await wait_until(lambda: not team.disabled or _message(screen, f"{prefix}_message") != "Loading your teams…")
+    await wait_until(lambda: not team.disabled or _loading(screen) is None)
     await pilot.pause()
     return screen
 
@@ -220,7 +227,8 @@ async def test_import_binding_ignores_servers_of_a_team_the_user_left() -> None:
 
         team.value = "ops"
         await wait_until(lambda: service.server_calls == ["ops"])
-        assert _message(screen, "vault_import_bind_message") == "Loading this team's shared servers…"
+        assert _loading(screen) == "Loading this team's shared servers…"
+        assert _message(screen, "vault_import_bind_message") is None
         assert server.disabled
         team.value = "web"
         await wait_until(lambda: _option_values(server) == ["srv-web-1", "srv-web-2"])
@@ -328,7 +336,7 @@ async def test_import_binding_escape_cancels_while_teams_are_loading() -> None:
         await pilot.pause()
         screen = app.screen
         assert screen.query_one("#vault_import_bind_team", Select).disabled
-        assert _message(screen, "vault_import_bind_message") == "Loading your teams…"
+        assert _loading(screen) == "Loading your teams…"
         await pilot.press("escape")
         await wait_until(lambda: bool(app.results))
 
@@ -712,7 +720,7 @@ async def test_dialogs_fit_a_100x30_terminal(make_modal, container_id, pick, mes
             await wait_until(lambda: not team.disabled)
             team.value = value
             if message_id:
-                await wait_until(lambda: _message(screen, message_id) not in (None, "Loading this team's shared servers…"))
+                await wait_until(lambda: _loading(screen) is None and _message(screen, message_id) is not None)
             else:
                 await wait_until(lambda: screen.query_one("#vault_exposure_servers", SelectionList).option_count == 12)
         await pilot.pause()
@@ -722,3 +730,28 @@ async def test_dialogs_fit_a_100x30_terminal(make_modal, container_id, pick, mes
             assert button.region.height == 3, button
         for select in screen.query(Select):
             assert select.region.width >= 60, select
+
+
+@pytest.mark.asyncio
+async def test_the_loading_line_stays_while_the_newest_server_load_runs() -> None:
+    """Choose a team, clear it, choose it again: the older load must not end the newer one's line."""
+    service = _PickerService()
+    service.release["ops"] = asyncio.Event()
+    app = _ModalHost(VaultImportedTeamBindingModal(service))
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _import_modal_loaded(app, pilot)
+        team = screen.query_one("#vault_import_bind_team", Select)
+
+        team.value = "ops"
+        await wait_until(lambda: service.server_calls == ["ops"])
+        team.clear()
+        await wait_until(lambda: _loading(screen) is None)
+        team.value = "ops"
+        await wait_until(lambda: service.server_calls == ["ops", "ops"])
+        for _ in range(5):
+            await pilot.pause()
+        assert _loading(screen) == "Loading this team's shared servers…"
+
+        service.release["ops"].set()
+        await wait_until(lambda: _loading(screen) is None)

@@ -50,6 +50,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="start signed in to the local Servonaut API")
     up.add_argument("--ssh-ca-off", action="store_true",
                     help="answer like a service with SSH certificates switched off")
+    up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
+                    help="answer every Servonaut API request after SECONDS (up to 30), "
+                         "to see what the app shows while it waits")
     up.add_argument("--keep", action="store_true",
                     help="keep the sandbox directory after it stops, renamed to "
                          "<root>.kept-<time> (for inspection; delete it yourself)")
@@ -80,13 +83,27 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The longest --api-delay: longer only makes a walk slow, not more telling.
+_MAX_API_DELAY_SECONDS = 30.0
+
+
+def _api_delay(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not 0 <= seconds <= _MAX_API_DELAY_SECONDS:
+        raise argparse.ArgumentTypeError(f"must be between 0 and {_MAX_API_DELAY_SECONDS:g} seconds")
+    return seconds
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "up":
         from e2e.sandbox import owner
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
-                        keep=args.keep, ssh_ca_off=args.ssh_ca_off)
+                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay)
 
     from e2e.sandbox import client
 

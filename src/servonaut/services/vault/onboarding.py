@@ -33,9 +33,17 @@ SETUP = NextStep(
 )
 ADD_DEVICE = NextStep(
     "add_device",
-    "Your vault identity lives on another device. Add this device from there, or recover it with your recovery key.",
+    "Your vault identity lives on another device. Add this device and approve it there, "
+    "or recover it here with your recovery key.",
     "servonaut vault devices add",
     "vault_add_device",
+)
+RECOVER_DEVICE = NextStep(
+    "recover_device",
+    "This computer used your vault before, but its vault key file is missing. "
+    "Recover it with your recovery key: your vaults and items are safe on the server.",
+    "servonaut vault recover",
+    "vault_recover",
 )
 RESET_IDENTITY = NextStep(
     "reset_identity",
@@ -77,7 +85,7 @@ def identity_step(status: Mapping[str, Any]) -> Optional[NextStep]:
     if not isinstance(identity, Mapping):
         return SETUP
     if not local:
-        return ADD_DEVICE
+        return RECOVER_DEVICE if status.get("custody_missing") is True else ADD_DEVICE
     trust = identity.get("trust_status")
     if trust == "compromised":
         return RESET_IDENTITY

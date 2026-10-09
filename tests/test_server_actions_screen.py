@@ -311,8 +311,7 @@ class _FakeApp:
 def _make_screen(instance=None, app=None) -> ServerActionsScreen:
     """Build ServerActionsScreen without mounting it in a Textual app."""
     inst = instance or _make_instance()
-    screen = ServerActionsScreen.__new__(ServerActionsScreen)
-    screen._instance = inst
+    screen = ServerActionsScreen(inst)
     if app is not None:
         screen._app = app  # bypass the Textual descriptor
     # Patch self.app to return the fake
@@ -627,8 +626,7 @@ def _make_connect_screen(
 ) -> ServerActionsScreen:
     """Build a ServerActionsScreen for _ssh_connect_flow tests."""
     inst = instance or _make_instance()
-    screen = ServerActionsScreen.__new__(ServerActionsScreen)
-    screen._instance = inst
+    screen = ServerActionsScreen(inst)
     if app is not None:
         screen.__class__ = type(
             "ConnectScreen",

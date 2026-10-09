@@ -14,9 +14,11 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Select, Static
 
+from servonaut.screens._busy_work import BusyWork
 from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
 from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -115,6 +117,10 @@ class CaScreen(Screen):
         color: $text-muted;
         margin-top: 1;
     }
+    /* What is loading or running stays in view however far the actions scroll. */
+    CaScreen #ca_busy {
+        dock: bottom;
+    }
     """
 
     BINDINGS = [Binding("escape", "back", "Back", show=True), Binding("r", "refresh", "Refresh", show=True)]
@@ -149,6 +155,8 @@ class CaScreen(Screen):
         # One CA action runs at a time, so another action cannot cancel an enrollment or KRL
         # delivery midway; Back waits for it too (leaving the screen cancels its workers).
         self._action_running = False
+        # Loads and an action can overlap; the line shows the newest still running.
+        self._busy = BusyWork(self, "#ca_busy", display=self.scrub_for_display)
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
@@ -166,6 +174,7 @@ class CaScreen(Screen):
                 yield Button("Enroll server", id="ca_enroll")
                 yield Button("Deliver KRL", id="ca_krl")
                 yield Button("Scan break-glass use", id="ca_break_glass_scan")
+                yield BusyIndicator(id="ca_busy")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -203,6 +212,7 @@ class CaScreen(Screen):
         for picker_id, options in self._picker_options.items():
             select = self.query_one(f"#{picker_id}", Select)
             self._fill_picker(picker_id, options, prompt=select.prompt, keep=select.value)
+        self._busy.redraw()
 
     # -- pickers ---------------------------------------------------------
 
@@ -238,6 +248,15 @@ class CaScreen(Screen):
         select.disabled = not options
         if keep is not None and any(value == keep for value, _ in options):
             select.value = keep
+
+    def _servers_text(self, servers: Sequence[str]) -> str:
+        """*servers* in words, by their picker labels: ``[]`` is every enrolled server."""
+        if not servers:
+            return "every enrolled server"
+        if len(servers) > 1:
+            return f"{len(servers)} servers"
+        labels = dict(self._picker_options.get("ca_server", []))
+        return terminal_safe(labels.get(servers[0]) or "the server")
 
     def _set_picker_state(self, picker_id: str, state: str) -> None:
         self._picker_state[picker_id] = state
@@ -283,7 +302,8 @@ class CaScreen(Screen):
             self._set_hint("ca_team", "Your teams cannot be listed in this session.")
             return
         try:
-            options = self._choice_options(await self._call(method), "slug")
+            with self._busy.running("Loading your teams…"):
+                options = self._choice_options(await self._call(method), "slug")
         except Exception as exc:
             self._fill_picker("ca_team", [], prompt="Teams unavailable")
             self._set_hint("ca_team", f"Could not load your teams ({vault_failure_reason(exc)}). Refresh to try again.")
@@ -337,7 +357,10 @@ class CaScreen(Screen):
         )
 
     async def _load_team_options(self, team: str, keep_server: object, keep_break_glass: object) -> None:
-        await asyncio.gather(self._load_servers(team, keep_server), self._load_break_glass_keys(team, keep_break_glass))
+        with self._busy.running("Loading this team's servers and break-glass keys…"):
+            await asyncio.gather(
+                self._load_servers(team, keep_server), self._load_break_glass_keys(team, keep_break_glass),
+            )
 
     async def _load_servers(self, team: str, keep: object) -> None:
         method = self._service_method("shared_server_choices")
@@ -528,7 +551,8 @@ class CaScreen(Screen):
             self._set_status("CA status service is unavailable.")
             return
         try:
-            result = await self._call(method, team=team)
+            with self._busy.running("Loading SSH certificate status…"):
+                result = await self._call(method, team=team)
         except Exception as exc:
             if is_feature_disabled(exc, "ssh_ca"):
                 self._show_switched_off(team)
@@ -551,7 +575,8 @@ class CaScreen(Screen):
             self.app.notify("CA audit service is unavailable.", severity="warning", markup=False)
             return
         try:
-            result = await self._call(method, team=team)
+            with self._busy.running("Auditing the certificate issuance chain…"):
+                result = await self._call(method, team=team)
         except Exception as exc:
             self._notify_failure(team, "CA audit", exc)
             return
@@ -563,13 +588,19 @@ class CaScreen(Screen):
             self.app.notify("CA enrollment service is unavailable.", severity="warning", markup=False)
             return
 
-        async def confirmation(summary: Mapping[str, Any]) -> str:
-            return str(await self.app.push_screen_wait(CaEnrollmentConfirmModal(summary)) or "")
-
+        name = self._servers_text([server])
         try:
-            result = await self._call(
-                method, team=team, server=server, break_glass_item_id=break_glass_item, confirmation=confirmation,
-            )
+            with self._busy.running(f"Preparing to enroll {name}…") as job:
+
+                async def confirmation(summary: Mapping[str, Any]) -> str:
+                    typed = str(await self.app.push_screen_wait(CaEnrollmentConfirmModal(summary)) or "")
+                    if typed:
+                        self._busy.say(job, f"Enrolling {name}… this connects over SSH and can take a minute")
+                    return typed
+
+                result = await self._call(
+                    method, team=team, server=server, break_glass_item_id=break_glass_item, confirmation=confirmation,
+                )
         except Exception as exc:
             self._notify_failure(team, "CA enrollment", exc)
             return
@@ -581,7 +612,11 @@ class CaScreen(Screen):
             self.app.notify("KRL delivery service is unavailable.", severity="warning", markup=False)
             return
         try:
-            result = await self._call(method, team=team, servers=servers)
+            with self._busy.running(
+                f"Delivering the revocation list to {self._servers_text(servers)}… "
+                "this connects over SSH and can take a minute"
+            ):
+                result = await self._call(method, team=team, servers=servers)
         except Exception as exc:
             self._notify_failure(team, "KRL delivery", exc)
             return
@@ -593,7 +628,11 @@ class CaScreen(Screen):
             self.app.notify("Break-glass scanning is unavailable.", severity="warning", markup=False)
             return
         try:
-            result = await self._call(method, team=team, servers=servers or None)
+            with self._busy.running(
+                f"Scanning {self._servers_text(servers)} for break-glass logins… "
+                "this connects over SSH and can take a minute"
+            ):
+                result = await self._call(method, team=team, servers=servers or None)
         except Exception as exc:
             self._notify_failure(team, "Break-glass scan", exc)
             return

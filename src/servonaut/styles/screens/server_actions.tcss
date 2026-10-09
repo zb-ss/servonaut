@@ -98,6 +98,14 @@ ServerActionsScreen.-short #action_buttons .section_label:first-child {
     height: auto;
 }
 
+/* Slow work started from this screen (binding a vault key, preparing SSH):
+   pinned to the bottom of the detail pane so it stays in view however far
+   the panels scroll. Hidden while nothing runs. */
+#sa_busy {
+    dock: bottom;
+    padding: 0 2;
+}
+
 /* Inline read-only views (Browse / Logs) mounted below the dashboard panels */
 #sa-inline {
     width: 100%;
