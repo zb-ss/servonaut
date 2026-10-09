@@ -15,6 +15,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,11 @@ class PassphraseModal(ModalScreen[Optional[str]]):
         widgets: list = [
             Static(f"[bold $text-accent]{self._title}[/bold $text-accent]", id="passphrase_title"),
             Static(hint, id="passphrase_hint"),
-            Input(placeholder="passphrase", id="input_passphrase", password=True),
+            SecretInput(placeholder="passphrase", id="input_passphrase"),
         ]
         if self._confirm:
             widgets.append(
-                Input(placeholder="confirm passphrase", id="input_passphrase_confirm", password=True)
+                SecretInput(placeholder="confirm passphrase", id="input_passphrase_confirm")
             )
         widgets.append(Static("", id="passphrase_error"))
         widgets.append(

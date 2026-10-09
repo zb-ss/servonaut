@@ -187,7 +187,8 @@ DataTable > .datatable--even-row {
     color: $text-muted;
 }
 
-.setting_row Input {
+.setting_row Input,
+.setting_row SecretInput {
     width: 1fr;
     margin-right: 1;
 }

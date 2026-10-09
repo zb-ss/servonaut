@@ -47,6 +47,7 @@ from servonaut.services.object_storage_regions import (
 from servonaut.runtime import RuntimeCapabilityError, detect_runtime
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.secret_input import SecretInput
 
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
@@ -186,10 +187,9 @@ class HetznerSetupScreen(Screen):
             ),
             Horizontal(
                 Static("API Token:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="Hetzner API token, $ENV_VAR, or file:/path",
                     id="hetzner_input_token",
-                    password=True,
                 ),
                 classes="setting_row",
             ),
@@ -302,19 +302,17 @@ class HetznerSetupScreen(Screen):
             ),
             Horizontal(
                 Static("Access Key:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="your-key or $HETZNER_S3_ACCESS_KEY or file:/path",
                     id="hetzner_input_s3_access_key",
-                    password=True,
                 ),
                 classes="setting_row",
             ),
             Horizontal(
                 Static("Secret Key:", classes="label"),
-                Input(
+                SecretInput(
                     placeholder="your-secret or $HETZNER_S3_SECRET_KEY or file:/path",
                     id="hetzner_input_s3_secret_key",
-                    password=True,
                 ),
                 classes="setting_row",
             ),

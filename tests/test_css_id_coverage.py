@@ -29,6 +29,16 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         # ---- Account / profile widgets ----
         "account_info",         # Reason: Static label; inherits global Static styling
         "account_info_header",  # Reason: Static header; inherits global Static styling
+        # ---- Secret fields ----
+        # The inner Input of a SecretInput keeps the field's id so code reads it
+        # unchanged; SecretInput's DEFAULT_CSS sizes it and the <id>_field
+        # container carries the screen's layout rules.
+        "enrol-pass1",
+        "enrol-pass2",
+        "input_passphrase",
+        "input_passphrase_confirm",
+        "ovh_input_client_secret",
+        "vault_secret_input",
         # ---- Provider account pickers ----
         # AccountPicker styles itself through its DEFAULT_CSS and is hidden
         # unless the provider has several accounts.

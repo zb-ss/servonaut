@@ -34,6 +34,7 @@ from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.widgets.secret_input import SecretInput
 
 
 async def _invoke(service: Any, method: str, /, **kwargs: Any) -> Any:
@@ -107,7 +108,7 @@ class VaultSecretPromptModal(ModalScreen[Optional[str]]):
         yield Vertical(
             Static(escape(self._title)),
             Static(escape(self._prompt)),
-            Input(password=True, id="vault_secret_input"),
+            SecretInput(id="vault_secret_input"),
             Horizontal(Button("Cancel", id="vault_secret_cancel"), Button("Continue", id="vault_secret_continue")),
             id="vault_secret_modal",
         )
@@ -153,7 +154,7 @@ class VaultRecoveryConfirmModal(ModalScreen[bool]):
             Static("Groups are counted from the left; the first group is group 1.", id="vault_recovery_hint"),
         ]
         for index in self._checks:
-            fields.append(Input(placeholder=f"Re-enter group {index + 1}", password=True, id=f"vault_recovery_group_{index}"))
+            fields.append(SecretInput(placeholder=f"Re-enter group {index + 1}", id=f"vault_recovery_group_{index}"))
         yield Vertical(*fields, Horizontal(Button("Cancel", id="vault_recovery_cancel"), Button("Confirm", id="vault_recovery_confirm")), id="vault_recovery_confirm_modal")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
