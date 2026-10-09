@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.services.api_client import APIError
+from servonaut.services.vault import crypto
 from servonaut.services.vault.command_service import VaultCommandService, VaultSshLease
-from servonaut.services.vault.errors import VaultUserError
+from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
 from servonaut.services.vault.identity_store import IdentityStore
 from servonaut.services.vault.local_state import LocalStateError, VaultLocalState
 from servonaut.services.vault.team_vault_client import VaultStateError
@@ -2318,9 +2319,68 @@ async def test_a_failed_recover_withdraws_its_device_and_leaves_no_keys() -> Non
     service.identity = identity
 
     with pytest.raises(RuntimeError, match="could not be verified"):
-        await service.recover(recovery_key="SVRK1-WRONG", device_name=None, platform=None)
+        await service.recover(recovery_key=_WELL_FORMED_KEY, device_name=None, platform=None)
 
     identity.withdraw_pending_device.assert_awaited_once_with()
+
+
+# A key that passes the format and checksum check; it opens no bundle here.
+_WELL_FORMED_KEY = crypto.format_recovery_key(b"r" * 32)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        (_WELL_FORMED_KEY[:-1] + ("0" if _WELL_FORMED_KEY[-1] != "0" else "1"), "has a typo"),
+        (_WELL_FORMED_KEY[:-6], "has a typo"),  # a group short
+        ("CEXNB-JZST3-XG7BP", "is not a recovery key"),
+        ("", "is not a recovery key"),
+    ],
+    ids=["one-wrong-character", "group-missing", "no-prefix", "empty"],
+)
+async def test_a_mistyped_key_is_refused_before_a_device_is_registered(typed: str, expected: str) -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    identity = MagicMock()
+    identity.register_pending_device = AsyncMock()
+    service.identity = identity
+
+    with pytest.raises(VaultUserError, match=expected) as raised:
+        await service.recover(recovery_key=typed, device_name=None, platform=None)
+
+    identity.begin_pending_device.assert_not_called()
+    identity.register_pending_device.assert_not_awaited()
+    assert vault_failure_reason(raised.value) == str(raised.value)  # shown as written
+
+
+@pytest.mark.asyncio
+async def test_a_valid_key_of_another_identity_says_so_and_withdraws_the_device() -> None:
+    from servonaut.services.vault.identity_client import RecoveryKeyMismatchError
+
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    identity = MagicMock()
+    identity.register_pending_device = AsyncMock(return_value={"identity": {"identity_id": "x"}})
+    identity.fetch_recovery_wrap = AsyncMock(return_value={"blob": "AAAA"})
+    identity.activate_with_recovery = AsyncMock(side_effect=RecoveryKeyMismatchError("no"))
+    identity.withdraw_pending_device = AsyncMock()
+    service.identity = identity
+
+    with pytest.raises(VaultUserError, match="does not unlock your current vault identity"):
+        await service.recover(recovery_key=_WELL_FORMED_KEY, device_name=None, platform=None)
+
+    identity.withdraw_pending_device.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_relay_hints_are_quiet_on_a_computer_without_an_unlocked_identity() -> None:
+    """A recovering computer gets the hint for its own registration: nothing to refresh, nothing to log."""
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.identity._api = MagicMock(request_signed=AsyncMock())
+    assert service.store.identity is None
+
+    await service.handle_event({"type": "vault.device_pending", "data": {"device_id": "d-1"}})
+
+    service.identity._api.request_signed.assert_not_awaited()
 
 
 def test_an_undecodable_state_file_never_blocks_unlocking(tmp_path) -> None:
