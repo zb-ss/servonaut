@@ -34,9 +34,16 @@ from .ca_client import CertificateAuthorityClient
 from .ca_pins import CaPins
 from .ca_enrollment import CaEnrollmentExecutor, EnrollmentResult, deliver_krl, enrollment_error_code
 from .display import terminal_safe
-from .errors import NO_LOCAL_IDENTITY, VaultUserError, vault_failure_reason
+from .errors import (
+    NO_LOCAL_IDENTITY,
+    RECOVERY_KEY_NOT_A_KEY,
+    RECOVERY_KEY_NOT_THIS_IDENTITY,
+    RECOVERY_KEY_TYPO,
+    VaultUserError,
+    vault_failure_reason,
+)
 from .grant_processor import GrantProcessor
-from .identity_client import IdentityClient
+from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError
 from .identity_store import IdentityStore
 from .items import VaultItemService
 from .local_state import LocalStateError, VaultLocalState
@@ -172,6 +179,16 @@ class PendingIdentityReset:
 
     replacement: Any
     expires_at: str
+
+
+def _check_recovery_key(value: str) -> None:
+    """Refuse a recovery key that cannot be right, saying how it is wrong."""
+    try:
+        crypto.parse_recovery_key(value)
+    except crypto.VaultCryptoError as exc:
+        if not value.strip().upper().startswith("SVRK1-"):
+            raise VaultUserError(RECOVERY_KEY_NOT_A_KEY) from exc
+        raise VaultUserError(RECOVERY_KEY_TYPO) from exc
 
 
 class VaultCommandService:
@@ -430,6 +447,14 @@ class VaultCommandService:
         data = event.get("data")
         if not isinstance(event_type, str) or not isinstance(data, Mapping):
             raise ValueError("vault event has an invalid shape")
+        try:
+            await self._refresh_for_hint(event_type, data)
+        except NoLocalIdentityError:
+            # Every refresh is a signed request: a computer without an unlocked
+            # identity (one that is recovering, say) has nothing to refresh.
+            return
+
+    async def _refresh_for_hint(self, event_type: str, data: Mapping[str, Any]) -> None:
         if event_type == "ssh_ca.krl_updated":
             team = data.get("team_slug")
             if isinstance(team, str):
@@ -583,6 +608,8 @@ class VaultCommandService:
     ) -> dict[str, Any]:
         """Restore an identity bundle into a freshly registered local device."""
         self._apply_key_store_setting()
+        # A mistyped key is refused here, before a device is registered for it.
+        _check_recovery_key(recovery_key)
         user_id = await self._user_id()
         self.identity.begin_pending_device()
         try:
@@ -601,10 +628,12 @@ class VaultCommandService:
                 recovery_wrap=recovery_wrap,
                 identity=remote_identity,
             )
-        except BaseException:
+        except BaseException as exc:
             # A wrong key or a failed request must not leave a device waiting at the
             # service, nor its keys in memory, for every attempt.
             await self.cancel_pending_device()
+            if isinstance(exc, RecoveryKeyMismatchError):
+                raise VaultUserError(RECOVERY_KEY_NOT_THIS_IDENTITY) from exc
             raise
         self._remember_local_custody()
         return {"device": result.get("device", result), "fingerprint": self.store.identity.fingerprint if self.store.identity else None}
