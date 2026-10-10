@@ -134,7 +134,9 @@ class ServonautApp(App):
     config_sync_service = None
     team_service = None
     vault_command_service = None
-    vault_available = False
+    # Reactive so every mounted Sidebar follows Vault discovery, which
+    # finishes after the first screen is already on display.
+    vault_available = reactive(False)
     remote_audit_service = None
     findings_service = None  # proactive-monitoring thin client (paid, gated)
     gcp_service = None
@@ -1055,10 +1057,6 @@ class ServonautApp(App):
             return
         try:
             self.vault_available = await service.discover()
-            for sidebar in self.query("Sidebar"):
-                for selector in ("#nav_vault", "#nav_ca"):
-                    for button in sidebar.query(selector):
-                        button.display = self.vault_available
             if not self.vault_available:
                 return
             # Discovery keeps Vault navigation available to a new device, but
