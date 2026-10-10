@@ -473,3 +473,28 @@ def test_isolated_environment_sets_utf8_and_case_insensitive_windows_vars(
     assert env["SystemRoot"] == r"C:\Windows"
     assert env["WINDIR"] == r"C:\Windows"
     assert env["PATHEXT"] == ".COM;.EXE;.BAT;.CMD"
+
+
+def test_the_boto3_probe_reports_missing_resource_definitions(monkeypatch: pytest.MonkeyPatch) -> None:
+    import boto3.session
+    from boto3.exceptions import ResourceNotExistsError
+
+    def missing(self, service_name, *args, **kwargs):
+        raise ResourceNotExistsError(service_name, [], has_low_level_client=True)
+
+    monkeypatch.setattr(boto3.session.Session, "resource", missing)
+
+    with pytest.raises(selftest._SelftestFailure, match="diagnostic-sdk-boto3"):
+        selftest.probe_boto3_resources()
+
+
+def test_the_boto3_probe_builds_a_resource_without_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    import botocore.endpoint
+
+    def blocked(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the probe must not send a request")
+
+    monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(botocore.endpoint.Endpoint, "make_request", blocked)
+
+    selftest.probe_boto3_resources()
