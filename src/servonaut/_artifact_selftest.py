@@ -542,10 +542,11 @@ def _probe_botocore_sdk() -> None:
 
 
 def probe_boto3_resources() -> None:
-    """Build an EC2 resource as the instance list does, without any request.
+    """Build an EC2 resource and an S3 client as the app does, without any request.
 
-    boto3 reads resource definitions from its own data directory; a frozen
-    build that leaves them out fails every resource call at run time.
+    boto3 reads resource definitions from its own data directory and imports
+    its EC2 and S3 helpers by name while it builds them; a frozen build that
+    leaves either out fails every such call at run time.
     """
     try:
         import boto3.session
@@ -554,7 +555,7 @@ def probe_boto3_resources() -> None:
         session = boto3.session.Session(
             region_name="us-east-1", aws_access_key_id="selftest", aws_secret_access_key="selftest",
         )
-        if session.resource("ec2") is None:
+        if session.resource("ec2") is None or session.client("s3") is None:
             raise ValueError
     except Exception:
         raise _SelftestFailure("diagnostic-sdk-boto3") from None
