@@ -40,6 +40,7 @@ from servonaut._artifact_selftest import (
     _verify_fixtures,
     _write_result,
     isolated_home,
+    probe_boto3_resources,
 )
 
 if TYPE_CHECKING:
@@ -90,6 +91,8 @@ def _run_isolated_check(initial_runtime: object, check: str) -> dict[str, object
         with isolated_home() as home:
             runtime = _packaged_runtime(home, initial_runtime)
             _import_desktop_stack()
+            # The window lists AWS instances through boto3 resources at start.
+            probe_boto3_resources()
             resources = _verify_resources(runtime)
             voice = _verify_voice_payload(runtime)
             config_path, cache_path, expected = _create_fixtures(runtime.data_root)

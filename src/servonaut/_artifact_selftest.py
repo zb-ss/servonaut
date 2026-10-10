@@ -483,6 +483,7 @@ def _probe_sdks() -> None:
     _probe_ovh_metadata()
     _probe_hcloud_sdk()
     _probe_botocore_sdk()
+    probe_boto3_resources()
     if "ovh" in sys.modules:
         raise _SelftestFailure("diagnostic-sdk")
 
@@ -538,6 +539,26 @@ def _probe_botocore_sdk() -> None:
             raise ValueError
     except Exception:
         raise _SelftestFailure("diagnostic-sdk-botocore") from None
+
+
+def probe_boto3_resources() -> None:
+    """Build an EC2 resource and an S3 client as the app does, without any request.
+
+    boto3 reads resource definitions from its own data directory and imports
+    its EC2 and S3 helpers by name while it builds them; a frozen build that
+    leaves either out fails every such call at run time.
+    """
+    try:
+        import boto3.session
+
+        # Explicit placeholder credentials: no lookup chain, so no metadata-service request.
+        session = boto3.session.Session(
+            region_name="us-east-1", aws_access_key_id="selftest", aws_secret_access_key="selftest",
+        )
+        if session.resource("ec2") is None or session.client("s3") is None:
+            raise ValueError
+    except Exception:
+        raise _SelftestFailure("diagnostic-sdk-boto3") from None
 
 
 def _probe_crypto() -> None:
