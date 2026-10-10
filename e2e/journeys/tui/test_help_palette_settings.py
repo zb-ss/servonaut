@@ -3,7 +3,9 @@ settings panels.
 
 ``?`` opens the help from any screen and returns to where the user was.
 The command palette offers the Hetzner and OVH destinations only when that
-provider is configured, and they lead to the right screens. In Settings, the
+provider is configured, and they lead to the right screens. Vault entries
+appear, in the palette and in the sidebar already on screen, once discovery
+finishes. In Settings, the
 search box finds a panel by keyword; the IP Lookup panel stores an AbuseIPDB
 key as an environment-variable reference (showing whether it is set, never
 its value), and choosing the MCP "Dangerous" guard level warns before it is
@@ -91,6 +93,29 @@ async def test_vault_palette_entries_wait_for_discovery_and_open_native_screens(
         for command, screen in VAULT_PALETTE_DESTINATIONS.items():
             await t.palette(command)
             await t.wait_for_screen(screen)
+
+
+async def test_vault_sidebar_entries_appear_on_the_open_screen_after_discovery(tui, seed, fake_cloud):
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+    seed_session(seed.home, fake_cloud)
+    # A slow API makes discovery answer after the instance list is on screen,
+    # which is the order a real network produces.
+    fake_cloud.slow_down(1.0)
+
+    async with tui() as t:
+        first = await t.wait_for_screen("InstanceListScreen")
+        assert not t.app.vault_available, "discovery answered before the first screen was up"
+        assert not t.nav_reachable("nav_vault")
+
+        await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
+        await t.wait_until(
+            lambda: t.nav_reachable("nav_vault") and t.nav_reachable("nav_ca"),
+            desc="Vault entries in the sidebar already on screen",
+        )
+        assert t.screen is first
+        await t.nav("nav_vault")
+        await t.wait_for_screen("VaultScreen")
 
 
 async def test_vault_palette_entries_are_hidden_when_vault_is_unavailable(tui, seed):

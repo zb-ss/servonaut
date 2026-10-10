@@ -316,9 +316,9 @@ class Sidebar(Widget):
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----
         auth = getattr(self.app, "auth_service", None)
-        if not getattr(self.app, "vault_available", False):
-            self._hide_button("nav_vault")
-            self._hide_button("nav_ca")
+        # Vault discovery usually answers after this sidebar is up, so follow
+        # the app's flag instead of reading it once.
+        self.watch(self.app, "vault_available", self._show_vault_navigation)
         if not auth or not auth.has_feature("team_workspaces"):
             self._hide_button("nav_teams")
 
@@ -358,6 +358,13 @@ class Sidebar(Widget):
             self.query_one(f"#{section_id}", SidebarSection).display = False
         except NoMatches:
             pass
+
+    def _show_vault_navigation(self, available: object) -> None:
+        for button_id in ("nav_vault", "nav_ca"):
+            try:
+                self.query_one(f"#{button_id}", Button).display = bool(available)
+            except NoMatches:
+                pass
 
     def _hide_button(self, button_id: str) -> None:
         try:

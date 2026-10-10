@@ -327,7 +327,7 @@ class TestPaletteNavigation:
     def test_commands_post_navigation_messages(self) -> None:
         from servonaut.widgets.sidebar import Sidebar
 
-        app = object.__new__(ServonautApp)
+        app = ServonautApp()
         app.ovh_service = None
         app.hetzner_service = None
         posted = []
@@ -343,7 +343,7 @@ class TestPaletteNavigation:
 
     @pytest.mark.parametrize("available", [False, True])
     def test_vault_commands_follow_discovered_availability(self, available: bool) -> None:
-        app = object.__new__(ServonautApp)
+        app = ServonautApp()
         app.ovh_service = None
         app.hetzner_service = None
         app.vault_available = available
