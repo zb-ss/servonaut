@@ -495,6 +495,21 @@ async def test_other_ca_action_failures_still_notify_an_error() -> None:
         assert _ca_actions_disabled(screen) == [False, False, False, False]
 
 
+async def _click_once_laid_out(pilot, selector: str) -> None:
+    """Click a button on a dialog that was just pushed, once it has its place.
+
+    Before the first layout the button has no region, and a click there lands
+    on the top-left corner: the header's command-palette icon.
+    """
+
+    def laid_out() -> bool:
+        buttons = pilot.app.screen.query(selector)
+        return bool(buttons) and buttons.first().region.area > 0
+
+    await wait_until(laid_out)
+    await pilot.click(selector)
+
+
 @pytest.mark.asyncio
 async def test_pending_device_modal_is_presented_while_fleet_is_active() -> None:
     class FleetScreen(Screen):
@@ -518,7 +533,7 @@ async def test_pending_device_modal_is_presented_while_fleet_is_active() -> None
         )
         await pilot.pause()
         assert isinstance(app.screen, VaultPendingDeviceModal)
-        await pilot.click("#vault_pending_device_later")
+        await _click_once_laid_out(pilot, "#vault_pending_device_later")
         await presenter
         assert isinstance(app.screen, FleetScreen)
 
@@ -540,7 +555,7 @@ async def test_imported_bitwarden_reference_requires_explicit_tui_selection() ->
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         assert isinstance(app.screen, VaultImportedReferenceModal)
-        await pilot.click("#vault_import_bind_continue")
+        await _click_once_laid_out(pilot, "#vault_import_bind_continue")
         await pilot.pause()
         assert app.selected == reference
 
