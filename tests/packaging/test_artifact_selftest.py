@@ -488,6 +488,23 @@ def test_the_boto3_probe_reports_missing_resource_definitions(monkeypatch: pytes
         selftest.probe_boto3_resources()
 
 
+@pytest.mark.parametrize("helper", ["boto3.ec2", "boto3.s3"])
+def test_the_boto3_probe_reports_a_missing_helper_module(monkeypatch: pytest.MonkeyPatch, helper: str) -> None:
+    import boto3.utils
+
+    real_import = boto3.utils.import_module
+
+    def frozen_without_helper(name: str):
+        if name == helper or name.startswith(f"{helper}."):
+            raise ModuleNotFoundError(f"No module named {helper!r}")
+        return real_import(name)
+
+    monkeypatch.setattr(boto3.utils, "import_module", frozen_without_helper)
+
+    with pytest.raises(selftest._SelftestFailure, match="diagnostic-sdk-boto3"):
+        selftest.probe_boto3_resources()
+
+
 def test_the_boto3_probe_builds_a_resource_without_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
     import botocore.endpoint
 
