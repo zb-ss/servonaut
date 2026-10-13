@@ -2110,8 +2110,10 @@ async def test_ssh_key_choices_name_keys_from_the_decrypted_item_and_keep_nothin
     choices = await service.ssh_key_choices(vault_id="v1")
 
     # A key that fails verification says so; it is not passed off as an unnamed one.
-    assert choices == [{"item_id": "k2", "label": "SHA256:bbb (could not be verified)"},
-                       {"item_id": "k1", "label": "web1_ed25519 · SHA256:aaa"}]
+    assert choices == [
+        {"item_id": "k2", "label": "SHA256:bbb (could not be verified)", "name": None, "fingerprint": "SHA256:bbb"},
+        {"item_id": "k1", "label": "web1_ed25519 · SHA256:aaa", "name": "web1_ed25519", "fingerprint": "SHA256:aaa"},
+    ]
     assert payloads == [{}]  # the decrypted item was emptied once its name was read
 
 
@@ -2418,3 +2420,163 @@ async def test_a_failing_marker_write_never_undoes_a_confirmed_reset() -> None:
     with pytest.raises(UnicodeDecodeError):
         await service.poll_reset_identity()
     identity.discard_reset_replacement.assert_not_called()
+
+
+def _unlocked_service(tmp_path, api):
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    service = VaultCommandService(api, SimpleNamespace(user_id=1), _config(), store=store)
+    service._resolve_ca_ssh = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    return service
+
+
+@pytest.mark.asyncio
+async def test_an_aws_row_without_a_provider_looks_up_its_binding_as_aws(tmp_path) -> None:
+    # AWS inventory rows carry no provider key. With an unlocked vault the
+    # binding lookup used to fail validation, so every AWS connect failed
+    # closed instead of falling back to Bitwarden and local keys.
+    api = _Api({})
+    paths: list[str] = []
+
+    async def request_signed(method, path, **_kwargs):
+        paths.append(path)
+        raise APIError(code="not_found", message="none", status=404)
+
+    api.request_signed = request_signed
+    service = _unlocked_service(tmp_path, api)
+
+    lease = await service.resolve_ssh({"id": "i-0abc", "name": "web-1", "public_ip": "198.51.100.7"})
+
+    assert lease is None  # no binding: the resolver's other tiers continue
+    assert paths == ["/api/v1/me/instances/aws/i-0abc/credential-binding"]
+
+
+@pytest.mark.asyncio
+async def test_a_bound_server_whose_address_moved_says_so(tmp_path) -> None:
+    from servonaut.services.vault.bindings import BindingDestinationChangedError
+    from servonaut.services.vault.errors import SERVER_MOVED_SINCE_BINDING
+
+    service = _unlocked_service(tmp_path, _Api({}))
+    binding = {"source": "servonaut_vault", "vault_id": "v", "vault_item_id": "i", "hostname": "198.51.100.7", "port": 22}
+    service._credential_binding = AsyncMock(return_value=(binding, "instance:aws:i-0abc"))  # type: ignore[method-assign]
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={"vault_id": "v"})
+    service.bindings = MagicMock()
+    service.bindings.verify_binding.side_effect = BindingDestinationChangedError("moved")
+
+    with pytest.raises(VaultUserError) as raised:
+        await service.resolve_ssh({"id": "i-0abc", "public_ip": "203.0.113.9"})
+
+    assert str(raised.value) == SERVER_MOVED_SINCE_BINDING
+    # The SSH resolver's wrapper shows the reason, not its own class name.
+    from servonaut.services.ssh_ref_resolver import VaultResolutionError
+
+    wrapped = VaultResolutionError("Native Vault SSH credential could not be verified")
+    wrapped.__cause__ = raised.value
+    assert vault_failure_reason(wrapped) == SERVER_MOVED_SINCE_BINDING
+
+
+@pytest.mark.asyncio
+async def test_rebinding_a_server_whose_address_moved_replaces_the_old_destination() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(return_value={"type": "ssh_key"})
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:fixture"})
+    service.bindings = MagicMock()
+    service.bindings.verify_binding.return_value = {"binding_revision": 2}
+    service.bindings.build_binding.side_effect = lambda **kwargs: kwargs
+    service.bindings.put_personal_binding = AsyncMock(return_value={"valid": True})
+    old = {"hostname": "198.51.100.7", "port": 22, "binding_revision": 2}
+    service._personal_binding = AsyncMock(return_value=(old, "instance:aws:i-0abc"))  # type: ignore[method-assign]
+
+    await service.bind_personal(
+        vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+        provider="aws", instance_id="i-0abc", hostname="203.0.113.9", port=22, login="ubuntu",
+        host_keys=["ssh-ed25519 AAAA"],
+    )
+
+    # The old binding is verified as it was signed, then replaced by the new address.
+    checked = service.bindings.verify_binding.call_args.kwargs
+    assert (checked["hostname"], checked["port"]) == ("198.51.100.7", 22)
+    built = service.bindings.build_binding.call_args.kwargs
+    assert (built["hostname"], built["binding_revision"]) == ("203.0.113.9", 3)
+
+
+@pytest.mark.asyncio
+async def test_bind_personal_can_refuse_to_replace_an_existing_key() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(return_value={"type": "ssh_key"})
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:fixture"})
+    service.bindings = MagicMock()
+    service.bindings.put_personal_binding = AsyncMock()
+    service._personal_binding = AsyncMock(return_value=({"binding_revision": 1}, "instance:aws:i-0abc"))  # type: ignore[method-assign]
+
+    with pytest.raises(VaultUserError, match="already has a vault key"):
+        await service.bind_personal(
+            vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+            provider="aws", instance_id="i-0abc", hostname="198.51.100.7", port=22, login="ubuntu",
+            host_keys=["ssh-ed25519 AAAA"], replace_existing=False,
+        )
+    service.bindings.put_personal_binding.assert_not_awaited()
+
+
+def test_ssh_destination_is_where_the_connection_rule_sends_ssh() -> None:
+    rules = MagicMock()
+    rules.resolve_profile.side_effect = lambda row: SimpleNamespace(bastion_host="b") if row["id"] == "i-behind" else None
+    rules.get_target_host.side_effect = lambda row, profile: row["private_ip"] if profile else row["public_ip"]
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), connection_service=rules)
+
+    direct = {"id": "i-direct", "public_ip": "198.51.100.7", "private_ip": "10.0.0.7"}
+    behind = {"id": "i-behind", "public_ip": "198.51.100.8", "private_ip": "10.0.0.8"}
+    shared = {"id": "s1", "hostname": "web.example.test", "port": 2222, "public_ip": "198.51.100.9"}
+
+    assert service.ssh_destination(direct) == ("198.51.100.7", 22)
+    assert service.ssh_destination(behind) == ("10.0.0.8", 22)
+    # A named host (team server, custom server) is used as named.
+    assert service.ssh_destination(shared) == ("web.example.test", 2222)
+
+
+@pytest.mark.asyncio
+async def test_ssh_key_choices_can_name_every_key() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    rows = [{"item_id": f"k{index:03d}", "type": "ssh_key", "public_fingerprint": f"SHA256:{index}"} for index in range(60)]
+    service.list_items = AsyncMock(return_value={"data": rows})  # type: ignore[method-assign]
+    service.vaults = MagicMock()
+    service.vaults.get_vault = AsyncMock(return_value={"vault_id": "v1"})
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(side_effect=lambda vault_id, item_id: {"item_id": item_id})
+    service.items.read_item = lambda _vault, item: {"name": f"key-{item['item_id']}"}
+
+    capped = await service.ssh_key_choices(vault_id="v1")
+    every = await service.ssh_key_choices(vault_id="v1", name_limit=None)
+
+    assert sum(choice["name"] is not None for choice in capped) == 50
+    assert all(choice["name"] == f"key-{choice['item_id']}" for choice in every)
+
+
+def test_ssh_login_is_the_one_ssh_would_use() -> None:
+    rules = MagicMock()
+    rules.resolve_profile.side_effect = lambda row: SimpleNamespace(username="deploy", bastion_host=None) if row["id"] == "i-rule" else None
+    rules.get_target_host.return_value = "198.51.100.7"
+    rules.get_proxy_args.return_value = []
+    rules.get_extra_options.return_value = []
+    keys = MagicMock()
+    keys.get_key_path.return_value = None
+    config = _config()
+    config.default_username = "ec2-user"
+    service = VaultCommandService(
+        _Api({}), SimpleNamespace(user_id=1), config, connection_service=rules, ssh_service=keys,
+    )
+
+    assert service.ssh_login({"id": "i-plain"}) == "ec2-user"  # the default username
+    assert service.ssh_login({"id": "i-rule"}) == "deploy"  # a connection rule's username
+    assert service.ssh_login({"id": "i-own", "username": "admin"}) == "admin"  # the server's own
+    assert VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config()).ssh_login({"id": "i-1"}) is None

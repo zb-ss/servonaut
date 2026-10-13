@@ -15,12 +15,13 @@ import secrets
 import sys
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
+from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
 
 _EXIT_OK = 0
@@ -210,6 +211,16 @@ def add_vault_parser(subparsers: Any) -> None:
     bind_personal.add_argument("--login", required=True)
     bind_personal.add_argument("--host-key", action="append", required=True, help="Verified OpenSSH host key; repeat for each pin.")
     bind_personal.add_argument("--yes", action="store_true")
+    auto_bind = commands.add_parser(
+        "auto-bind",
+        help="Bind personal-vault SSH keys to the servers named like them (key pair name, then server name).",
+    )
+    auto_bind.add_argument("--vault", default=None, help=f"{_VAULT_HELP} Default: your personal vault.")
+    auto_bind.add_argument("--dry-run", action="store_true", help="Show what would be bound and change nothing.")
+    auto_bind.add_argument(
+        "--yes", action="store_true",
+        help="Pin the host keys this computer already trusts and bind without asking.",
+    )
     rotate = commands.add_parser("rotate", help="Rotate a vault encryption version.")
     rotate.add_argument("--vault", required=True, help=_VAULT_HELP)
     rotate.add_argument("--yes", action="store_true")
@@ -495,6 +506,91 @@ def _approval_poll_delay(services: Any, attempt: int) -> float:
     return float(delay)
 
 
+def _auto_bind_servers() -> list[dict[str, Any]]:
+    """Every cached server of every account, and the custom servers."""
+    from servonaut.config.manager import ConfigManager
+    from servonaut.services.accounts.headless import CachedFleet
+    from servonaut.services.custom_server_service import CustomServerService
+
+    manager = ConfigManager()
+    return CachedFleet.from_config(manager.get(), CustomServerService(manager), manager).instances()
+
+
+def _auto_bind_record(row: Any) -> dict[str, Any]:
+    from servonaut.services.vault import crypto
+
+    instance = row.instance
+    return {
+        "server": instance.get("name") or instance.get("id"),
+        "instance_id": instance.get("id"),
+        "provider": "custom" if instance.get("is_custom") else str(instance.get("provider") or "aws").lower(),
+        "vault_item_id": row.match.item_id if row.match is not None else None,
+        "key_name": row.match.name if row.match is not None else None,
+        "matched_by": row.match.matched_by if row.match is not None else None,
+        "login": row.login,
+        "host": row.host,
+        "port": row.port,
+        "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
+        "status": row.status,
+        "result": row.result,
+    }
+
+
+def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
+    for row in rows:
+        record = _auto_bind_record(row)
+        name = terminal_safe(str(record["server"] or "server"))
+        status = row.status_text if results or not row.ready else "ready"
+        if row.match is None or row.match.ambiguous:
+            print(f"{name}: {status}")
+            continue
+        parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
+        if record["login"] and record["host"]:
+            parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
+        print(" ".join(parts) + f" - {status}")
+        if row.ready and not results:
+            for fingerprint in record["host_key_fingerprints"]:
+                print(f"    host key {fingerprint}")
+
+
+async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> int:
+    """Plan, confirm and apply ``vault auto-bind``."""
+    from servonaut.services.vault.auto_bind import apply_auto_bind, plan_auto_bind
+
+    vault_id = args.vault
+    if not vault_id:
+        personal = [
+            choice for choice in await _invoke(services, "vault_choices")
+            if isinstance(choice, Mapping) and choice.get("kind") == "personal"
+        ]
+        if not personal:
+            print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
+            return _EXIT_ERROR
+        vault_id = str(personal[0]["vault_id"])
+    keys = await _invoke(services, "ssh_key_choices", vault_id=vault_id, name_limit=None)
+    rows = await plan_auto_bind(services, _auto_bind_servers(), keys)
+    ready = [row for row in rows if row.ready]
+    if output and (args.dry_run or not ready):
+        _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
+        return _EXIT_OK
+    if not output:
+        _print_auto_bind(rows, results=False)
+    if args.dry_run or not ready:
+        if not output:
+            print(f"{len(ready)} of {len(rows)} servers can get a vault key.", file=sys.stderr)
+        return _EXIT_OK
+    if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(ready)} servers"):
+        return _EXIT_ABORTED
+    await apply_auto_bind(services, ready, vault_id=vault_id)
+    failed = [row for row in ready if row.result != "bound"]
+    if output:
+        _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
+    else:
+        _print_auto_bind(ready, results=True)
+        print(f"Bound vault keys to {len(ready) - len(failed)} of {len(ready)} servers.", file=sys.stderr)
+    return _EXIT_ERROR if failed else _EXIT_OK
+
+
 async def _handle(args: argparse.Namespace) -> int:
     command = args.vault_command
     output = bool(getattr(args, "json", False))
@@ -659,6 +755,8 @@ async def _handle(args: argparse.Namespace) -> int:
                 ),
                 json_output=output,
             )
+        elif command == "auto-bind":
+            return await _auto_bind(services, args, output)
         elif command == "rotate":
             if not _confirm(args, "Rotate the vault key version"):
                 return _EXIT_ABORTED

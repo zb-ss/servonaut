@@ -29,6 +29,9 @@ PROVIDER_QUERIES = {
     "OVH DNS Zones": "OVHDNSScreen",
 }
 
+# The read that tells the client whether the service offers Vault.
+VAULT_DISCOVERY_PATH = "/api/v1/vault/identity/me"
+
 VAULT_PALETTE_DESTINATIONS = {
     "Go to Vault": "VaultScreen",
     "Go to SSH Certificates": "CaScreen",
@@ -99,15 +102,16 @@ async def test_vault_sidebar_entries_appear_on_the_open_screen_after_discovery(t
     seed.config()
     seed.cache(fleet.cache_rows(), fresh=True)
     seed_session(seed.home, fake_cloud)
-    # A slow API makes discovery answer after the instance list is on screen,
-    # which is the order a real network produces.
-    fake_cloud.slow_down(1.0)
+    # Discovery answers only after the instance list is on screen, the order
+    # a real network produces.
+    fake_cloud.hold(VAULT_DISCOVERY_PATH)
 
     async with tui() as t:
         first = await t.wait_for_screen("InstanceListScreen")
-        assert not t.app.vault_available, "discovery answered before the first screen was up"
+        assert not t.app.vault_available
         assert not t.nav_reachable("nav_vault")
 
+        fake_cloud.release(VAULT_DISCOVERY_PATH)
         await t.wait_until(lambda: t.app.vault_available, desc="Vault feature discovery")
         await t.wait_until(
             lambda: t.nav_reachable("nav_vault") and t.nav_reachable("nav_ca"),

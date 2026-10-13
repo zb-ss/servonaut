@@ -57,6 +57,7 @@
 #vault_actions #vault_recovery_rotate,
 #vault_actions #vault_reset,
 #vault_actions #vault_import,
+#vault_actions #vault_auto_bind,
 #vault_actions #vault_roster,
 #vault_actions #vault_grants,
 #vault_actions #vault_rotate {
@@ -268,4 +269,90 @@ CaEnrollmentConfirmModal {
 
 #action_buttons #btn_use_vault_key:focus {
     color: $text;
+}
+
+/* Auto-bind: the review of which vault key each server gets. */
+#auto_bind_layout {
+    height: 1fr;
+}
+
+#auto_bind_content {
+    width: 1fr;
+    padding: 1 2;
+}
+
+#auto_bind_title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#auto_bind_intro {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#auto_bind_busy {
+    height: auto;
+}
+
+#auto_bind_status {
+    margin-bottom: 1;
+}
+
+#auto_bind_table {
+    height: 1fr;
+    min-height: 5;
+}
+
+#auto_bind_detail {
+    height: auto;
+    max-height: 6;
+    color: $text-muted;
+    margin-top: 1;
+}
+
+#auto_bind_trust {
+    margin-top: 1;
+}
+
+#auto_bind_actions {
+    height: auto;
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-gutter: 0 1;
+    margin-top: 1;
+}
+
+#auto_bind_actions #auto_bind_apply,
+#auto_bind_actions #auto_bind_all,
+#auto_bind_actions #auto_bind_none,
+#auto_bind_actions #auto_bind_back {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_content {
+    padding: 0 1;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_actions {
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+}
+
+/* A short terminal keeps the table, the reason and the buttons: the intro goes. */
+VaultAutoBindScreen.-short #auto_bind_intro {
+    display: none;
+}
+
+VaultAutoBindScreen.-short #auto_bind_detail {
+    max-height: 4;
+}
+
+/* Use Vault Key: the search boxes above its two lists. */
+#vault_bind_vault_search,
+#vault_bind_item_search {
+    margin: 0;
 }

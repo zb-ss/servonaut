@@ -653,6 +653,10 @@ class InstanceListScreen(Screen):
         the events fall through to nothing — the screen-level ``enter``
         binding never fires because DataTable consumes the key first.
         """
+        # Both clicks of a double-click on the highlighted row can reach the
+        # table before the first one has opened the server: open it once.
+        if self.app.screen is not self:
+            return
         self.action_select_instance()
 
     def _update_detail_panel(self) -> None:

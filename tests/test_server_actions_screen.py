@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
@@ -1206,27 +1207,70 @@ class TestVerifySshNoRefPathPushesEditorModal:
         assert not any("not yet implemented" in m for m in msgs)
 
 
+def _bind_with(inst, *, connection_service=None, login=""):
+    """Run Use Vault Key for *inst* and return the ``bind_personal`` arguments."""
+    from servonaut.services.vault.command_service import VaultCommandService
+
+    app = _FakeApp()
+    app._push_screen_wait_result = {
+        "vault_id": "v", "item_id": "i", "team": "", "login": login, "host_keys": "ssh-ed25519 AAAA",
+    }
+    service = MagicMock()
+    service.bind_personal = AsyncMock(return_value={"source": "servonaut_vault"})
+    # The real destination rule, with the connection rules given.
+    runtime = SimpleNamespace(connection_service=connection_service)
+    service.ssh_destination = lambda instance: VaultCommandService.ssh_destination(runtime, instance)
+    app.vault_command_service = service
+    screen = _make_screen(instance=inst, app=app)
+    flows = []
+    screen.run_worker = lambda coroutine, **_kwargs: flows.append(coroutine)
+
+    screen.action_use_vault_key()
+    _run(flows[0])
+    return app, service.bind_personal.await_args
+
+
+class TestUseVaultKeyForAwsServer:
+    def test_an_aws_row_without_a_provider_binds_as_aws(self):
+        # AWS inventory rows carry no provider key; binding used to send an
+        # empty provider and fail validation.
+        inst = {"id": "i-0abc", "name": "web-1", "public_ip": "198.51.100.7", "private_ip": "10.0.0.7"}
+
+        app, call = _bind_with(inst, login="ubuntu")
+
+        assert call is not None, app._notifications
+        assert (call.kwargs["provider"], call.kwargs["instance_id"]) == ("aws", "i-0abc")
+        assert (call.kwargs["hostname"], call.kwargs["port"]) == ("198.51.100.7", 22)
+
+    def test_a_server_behind_a_bastion_is_pinned_under_its_private_address(self):
+        inst = {"id": "i-0abc", "name": "web-1", "public_ip": "198.51.100.7", "private_ip": "10.0.0.7"}
+        profile = SimpleNamespace(bastion_host="bastion.example.test")
+        rules = MagicMock()
+        rules.resolve_profile.return_value = profile
+        rules.get_target_host.side_effect = lambda row, prof: row["private_ip"] if prof else row["public_ip"]
+
+        _app, call = _bind_with(inst, connection_service=rules, login="ubuntu")
+
+        assert call.kwargs["hostname"] == "10.0.0.7"
+
+    def test_a_server_with_no_address_is_not_bound(self):
+        inst = {"id": "i-0abc", "name": "web-1"}
+
+        app, call = _bind_with(inst, login="ubuntu")
+
+        assert call is None
+        assert "no address" in app._notifications[-1]["message"]
+
+
 class TestUseVaultKeyForCustomServer:
     def test_custom_server_binds_by_name_with_the_custom_provider(self):
         inst = {
             "id": "custom-Web 1", "name": "Web 1", "host": "192.0.2.10", "is_custom": True,
             "provider": "DigitalOcean", "port": 2222, "username": "deploy",
         }
-        app = _FakeApp()
-        app._push_screen_wait_result = {
-            "vault_id": "v", "item_id": "i", "team": "", "login": "", "host_keys": "ssh-ed25519 AAAA",
-        }
-        service = MagicMock()
-        service.bind_personal = AsyncMock(return_value={"source": "servonaut_vault"})
-        app.vault_command_service = service
-        screen = _make_screen(instance=inst, app=app)
-        flows = []
-        screen.run_worker = lambda coroutine, **_kwargs: flows.append(coroutine)
+        app, call = _bind_with(inst)
 
-        screen.action_use_vault_key()
-        _run(flows[0])
-
-        kwargs = service.bind_personal.await_args.kwargs
+        kwargs = call.kwargs
         # The provider label of a custom server is free text: the binding uses
         # "custom" and the server's name, whatever the label says.
         assert (kwargs["provider"], kwargs["instance_id"]) == ("custom", "Web 1")

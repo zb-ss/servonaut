@@ -554,6 +554,7 @@ servonaut vault import ssh --vault VAULT_ID --path PATH [--break-glass --from-ci
 servonaut vault import bitwarden --vault VAULT_ID --item BITWARDEN_ITEM_ID
 servonaut vault bind SERVER ITEM_ID --vault VAULT_ID --team TEAM [--login USER] (--host-key 'OPENSSH_HOST_KEY' [--host-key ...] | --pin-host-key) --yes
 servonaut vault bind-personal --vault VAULT_ID --item ITEM_ID --provider PROVIDER --instance-id INSTANCE_ID --hostname HOST --login USER --host-key 'OPENSSH_HOST_KEY' [--host-key 'OPENSSH_HOST_KEY' ...]
+servonaut vault auto-bind [--vault VAULT_ID] [--dry-run] [--yes]
 servonaut vault rotate --vault VAULT_ID --yes
 servonaut vault exposures --vault VAULT_ID
 servonaut vault exposures --vault VAULT_ID --rotate-ssh ITEM_ID --team TEAM --server SERVER_ID [--server SERVER_ID ...] --yes
@@ -586,7 +587,22 @@ always requires explicit `--host-key` pins. Neither copies trust from an
 unverified server record. For a cloud instance, `bind-personal` takes
 `--provider aws|ovh|hetzner` and its instance id; for a custom server, use
 `--provider custom` and the custom server's name. Renaming a custom server
-needs a new binding.
+needs a new binding. A binding pins the address SSH connects to: the private
+address for a server reached through a bastion. If a server's address changes
+(a cloud server's public IP after a restart), its vault key is not used until
+you bind it again.
+
+`auto-bind` gives each of your own servers the key from your personal vault
+(or `--vault`) named like the server's key pair (an AWS instance's key pair
+name) or, failing that, like the server, ignoring case and a `.pem`/`.key`
+extension. It pins the host keys this computer already trusts for each server
+from earlier SSH connections, with the login SSH uses for it. It lists every
+server with its key, login, address and host-key fingerprints, or why it was
+skipped: no key with that name, two different keys with that name, no trusted
+host key yet, or a vault key bound already (never replaced). Check the
+fingerprints, then confirm, or pass `--yes`. `--dry-run` only shows the list.
+In the app, the same review is Auto-bind keys on the Vault screen; Use Vault
+Key on a server chooses the key named like it for you.
 
 The exposure rotation command installs and proves the replacement on every
 selected host, then removes the old key. When every host completes, the

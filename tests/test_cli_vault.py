@@ -828,3 +828,79 @@ def test_a_vault_name_is_resolved_once_before_the_command_runs(capsys) -> None:
         vault.set_vault_service_factory(None)
 
     assert calls == [("resolve", "Personal"), ("items", VAULT_ID), ("items", VAULT_ID)]
+
+
+class _AutoBindService:
+    """The vault service as ``vault auto-bind`` uses it."""
+
+    HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+
+    def __init__(self) -> None:
+        self.binds: list[dict] = []
+
+    async def vault_choices(self, *, team=None):
+        return [{"vault_id": VAULT_ID, "label": "Personal", "kind": "personal"}]
+
+    async def ssh_key_choices(self, *, vault_id, name_limit):
+        assert (vault_id, name_limit) == (VAULT_ID, None)
+        return [{"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"}]
+
+    def ssh_destination(self, instance):
+        return instance.get("public_ip"), 22
+
+    def ssh_login(self, instance):
+        return "ubuntu"
+
+    async def personal_binding(self, instance):
+        return None
+
+    async def bind_personal(self, **kwargs):
+        self.binds.append(kwargs)
+        return {"source": "servonaut_vault"}
+
+
+def _auto_bind(monkeypatch, argv: list[str]) -> tuple[int, _AutoBindService]:
+    from servonaut.services.vault import auto_bind
+
+    service = _AutoBindService()
+    servers = [
+        {"id": "i-web1", "name": "web-1", "public_ip": "198.51.100.1"},
+        {"id": "i-db1", "name": "db-1", "public_ip": "198.51.100.2"},
+    ]
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: servers)
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda instance, host, port: [service.HOST_KEY])
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        return vault.handle_vault_command(_parser().parse_args(["vault", "auto-bind", *argv])), service
+    finally:
+        vault.set_vault_service_factory(None)
+
+
+def test_auto_bind_dry_run_shows_the_plan_and_binds_nothing(monkeypatch, capsys) -> None:
+    code, service = _auto_bind(monkeypatch, ["--dry-run"])
+
+    out = capsys.readouterr()
+    assert code == 0 and service.binds == []
+    assert "web-1: web-1.pem (by server name) ubuntu@198.51.100.1 - ready" in out.out
+    assert "host key SHA256:" in out.out
+    assert "db-1: No vault key" in out.out
+    assert "1 of 2 servers can get a vault key." in out.err
+
+
+def test_auto_bind_refuses_without_yes_when_not_interactive(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
+    code, service = _auto_bind(monkeypatch, [])
+
+    assert code != 0 and service.binds == []
+    assert "Refusing in a non-interactive shell without --yes" in capsys.readouterr().err
+
+
+def test_auto_bind_yes_binds_the_ready_servers_and_reports_json(monkeypatch, capsys) -> None:
+    code, service = _auto_bind(monkeypatch, ["--yes", "--json"])
+
+    assert code == 0
+    (bound,) = service.binds
+    assert (bound["provider"], bound["instance_id"], bound["item_id"], bound["replace_existing"]) == ("aws", "i-web1", "k1", False)
+    report = json.loads(capsys.readouterr().out)
+    results = {server["server"]: (server["status"], server["result"]) for server in report["servers"]}
+    assert results == {"web-1": ("ready", "bound"), "db-1": ("no_key", None)}

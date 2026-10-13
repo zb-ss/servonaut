@@ -39,6 +39,14 @@ NO_LOCAL_IDENTITY = (
 )
 
 
+# A bound server's address or port is not the one its vault key was bound to:
+# the pinned host keys belong to the old address, so the key is not used.
+SERVER_MOVED_SINCE_BINDING = (
+    "this server's address changed after its vault key was bound; "
+    "bind the key again (Use Vault Key) to pin the new address"
+)
+
+
 # A request signed by a device the server no longer accepts fails with
 # ``device_not_active``; ``details.status`` says why.
 _INACTIVE_DEVICE_REASONS = {
