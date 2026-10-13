@@ -602,7 +602,11 @@ skipped: no key with that name, two different keys with that name, no trusted
 host key yet, or a vault key bound already (never replaced). Check the
 fingerprints, then confirm, or pass `--yes`. `--dry-run` only shows the list.
 In the app, the same review is Auto-bind keys on the Vault screen; Use Vault
-Key on a server chooses the key named like it for you.
+Key on a server chooses the key named like it for you. When this computer has
+no host key for that server yet, Use Vault Key offers Fetch host key: it
+connects to the server once, as a first SSH connection does with the default
+`ssh.host_key_checking` of `accept-new`, records its host key and shows the
+fingerprint for you to check before it is pinned.
 
 The exposure rotation command installs and proves the replacement on every
 selected host, then removes the old key. When every host completes, the
