@@ -22,6 +22,7 @@ import asyncio
 import json
 import re
 import ssl
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -88,6 +89,9 @@ class FakeCloud(LoopbackServer):
         self.ssh_ca_switched_off = False
         # Seconds every /api response waits; see :meth:`slow_down`.
         self.api_delay_seconds = 0.0
+        # Paths whose requests wait for release(); see :meth:`hold`.
+        self._held_paths: set[str] = set()
+        self._held_lock = threading.Lock()
         self.findings = FindingsCloud()
 
     # ------------------------------------------------------------------
@@ -121,6 +125,7 @@ class FakeCloud(LoopbackServer):
         self.vault.reset()
         self.ssh_ca_switched_off = False
         self.api_delay_seconds = 0.0
+        self.release()
         self.findings.reset()
 
     # The account's OAuth session (see ``session.TokenSession``).
@@ -198,6 +203,7 @@ class FakeCloud(LoopbackServer):
     # ------------------------------------------------------------------
 
     def before_stop(self) -> None:
+        self.release()  # so would a request still waiting for release()
         self.relay.drop_streams()  # open subscriptions would hold up shutdown
         self.ai.drop_streams()  # so would an open chat stream
 
@@ -219,6 +225,28 @@ class FakeCloud(LoopbackServer):
         if seconds < 0:
             raise ValueError("the API delay cannot be negative")
         self.api_delay_seconds = float(seconds)
+
+    def hold(self, path: str) -> None:
+        """Keep every request to *path* waiting until :meth:`release`.
+
+        Unlike :meth:`slow_down`, the journey decides when the answer comes,
+        so an order such as "the screen was up before the API answered" holds
+        however long the machine takes to draw the screen.
+        """
+        with self._held_lock:
+            self._held_paths.add(path)
+
+    def release(self, path: Optional[str] = None) -> None:
+        """Let the requests held for *path* (by default, every path) through."""
+        with self._held_lock:
+            if path is None:
+                self._held_paths.clear()
+            else:
+                self._held_paths.discard(path)
+
+    def _is_held(self, path: str) -> bool:
+        with self._held_lock:
+            return path in self._held_paths
 
     def ssl_context(self) -> ssl.SSLContext:
         return self._tls.server_context()
@@ -246,6 +274,8 @@ class FakeCloud(LoopbackServer):
     async def _delay_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
         if self.api_delay_seconds and request.path.startswith("/api/"):
             await asyncio.sleep(self.api_delay_seconds)
+        while self._is_held(request.path):
+            await asyncio.sleep(0.02)
         return await handler(request)
 
     @web.middleware
