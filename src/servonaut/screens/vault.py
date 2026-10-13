@@ -867,7 +867,7 @@ class VaultScreen(Screen):
     _READY_ACTIONS = (
         "vault_confirm_identity", "vault_create", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
         "vault_rotate_exposure", "vault_devices", "vault_approve", "vault_recovery_rotate",
-        "vault_reset", "vault_import", "vault_roster", "vault_grants", "vault_rotate",
+        "vault_reset", "vault_import", "vault_auto_bind", "vault_roster", "vault_grants", "vault_rotate",
     )
 
     def __init__(self) -> None:
@@ -924,6 +924,7 @@ class VaultScreen(Screen):
                         yield Button("Rotate recovery key", id="vault_recovery_rotate")
                         yield Button("Reset identity", id="vault_reset")
                         yield Button("Import SSH", id="vault_import")
+                        yield Button("Auto-bind keys", id="vault_auto_bind")
                         yield Button("Roster", id="vault_roster")
                         yield Button("Grants", id="vault_grants")
                         yield Button("Rotate vault key", id="vault_rotate")
@@ -1259,6 +1260,7 @@ class VaultScreen(Screen):
             "vault_recovery_rotate": self.action_recovery_rotate,
             "vault_reset": self.action_reset,
             "vault_import": self.action_import,
+            "vault_auto_bind": self.action_auto_bind,
             "vault_roster": self.action_roster,
             "vault_grants": self.action_grants,
             "vault_rotate": self.action_rotate,
@@ -1791,6 +1793,16 @@ class VaultScreen(Screen):
                     attempt += 1
         except Exception as exc:
             self.app.notify(f"Identity reset confirmation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
+
+    def action_auto_bind(self) -> None:
+        """Review and bind personal-vault keys to the servers named like them."""
+        if not self._allows_identity_action("ready"):
+            return
+        if self._refuse_while_busy():
+            return
+        from servonaut.screens.vault_auto_bind import VaultAutoBindScreen
+
+        self.app.push_screen(VaultAutoBindScreen())
 
     def action_import(self) -> None:
         if not self._allows_identity_action("ready"):

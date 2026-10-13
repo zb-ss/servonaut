@@ -32,6 +32,7 @@ from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._busy_work import BusyJob, BusyWork
+from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
 from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
@@ -146,6 +147,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     #vault_bind_trusted { margin: 1 0 0 0; }
     #vault_bind_use_trusted { margin: 0 0 1 0; }
     #vault_bind_message { color: $warning; margin: 1 0 0 0; }
+    #vault_bind_match { color: $text-muted; display: none; }
     /* Bind stays in reach, and what is loading in view, however far the form scrolls. */
     #vault_bind_footer { dock: bottom; height: auto; margin-top: 1; }
     #vault_bind_footer > Horizontal { height: auto; }
@@ -167,18 +169,26 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self._key_choices: list[dict[str, str]] = []
         self._keys_for: str | None = None
         self._message = ""
+        self._match_text = ""
+        # The key the dialog chose by name; the hint saying why goes once another is chosen.
+        self._matched_item: str | None = None
         self._trusted_text = ""
         self._busy = BusyWork(self, "#vault_bind_busy")
 
     def compose(self) -> ComposeResult:
         login = str(self._instance.get("login_user") or self._instance.get("username") or "")
+        if not login and not self._team:
+            login = self._suggested_login()
         rows: list[Any] = [
             Static("[bold]Use vault key[/bold]"),
             Static(escape(self.scrub_for_display(self._scope_text())), id="vault_bind_scope"),
             Label("Vault"),
+            Input(placeholder="Search vaults…", id="vault_bind_vault_search"),
             Select([], prompt="Loading vaults…", id="vault_bind_vault", disabled=True),
             Label("SSH key"),
+            Input(placeholder="Search keys by name or fingerprint…", id="vault_bind_item_search"),
             Select([], prompt="Choose a vault first", id="vault_bind_item", disabled=True),
+            Static("", id="vault_bind_match"),
             Label("Login user"),
             Input(value=login, placeholder="Login user", id="vault_bind_login"),
         ]
@@ -209,6 +219,16 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         if not self._team:
             self.run_worker(self._load_trusted_host_keys(), group="vault_bind_host_keys")
 
+    def _suggested_login(self) -> str:
+        """The login SSH would use for this server today, so a binding keeps it."""
+        suggest = getattr(self._service, "ssh_login", None)
+        try:
+            login = suggest(self._instance) if callable(suggest) else None
+        except Exception:  # a guess only: the field stays editable and empty
+            logger.debug("Could not work out the login user for the vault binding", exc_info=True)
+            return ""
+        return login if isinstance(login, str) else ""
+
     def _scope_text(self) -> str:
         if self._team:
             return f"Shared server in team {self._team}: everyone in the team uses this key."
@@ -231,16 +251,57 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self._show_options("#vault_bind_item", self._key_choices, "item_id")
         self.query_one("#vault_bind_scope", Static).update(escape(self.scrub_for_display(self._scope_text())))
         self._say(self._message)
+        self._show_match(self._match_text)
         if not self._team:
             self._show_trusted(self._trusted_text)
 
-    def _show_options(self, selector: str, choices: list[dict[str, str]], key: str) -> None:
+    # Each picker's search box.
+    _SEARCH_BOX = {"#vault_bind_vault": "#vault_bind_vault_search", "#vault_bind_item": "#vault_bind_item_search"}
+
+    def _show_options(self, selector: str, choices: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+        """Offer the *choices* that match the picker's search box; return them."""
         select = self.query_one(selector, Select)
         kept = select.value
+        query = self.query_one(self._SEARCH_BOX[selector], Input).value.strip().lower()
+        # Searched as shown, so demo mode's hidden names cannot be probed.
+        labels = [(choice, self.scrub_for_display(choice["label"])) for choice in choices]
+        shown = [(choice, label) for choice, label in labels if query in label.lower()]
         # Names come from other team members: inert text, never parsed as markup.
-        select.set_options([(Text(self.scrub_for_display(choice["label"])), choice[key]) for choice in choices])
-        if any(choice[key] == kept for choice in choices):
+        select.set_options([(Text(label), choice[key]) for choice, label in shown])
+        if any(choice[key] == kept for choice, _ in shown):
             select.value = kept
+        return [choice for choice, _ in shown]
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        pickers = {
+            "vault_bind_vault_search": ("#vault_bind_vault", self._vault_choices, "vault_id", "vaults"),
+            "vault_bind_item_search": ("#vault_bind_item", self._key_choices, "item_id", "keys"),
+        }
+        picker = pickers.get(event.input.id or "")
+        if picker is None:
+            return
+        selector, choices, key, noun = picker
+        if not choices:
+            return  # nothing loaded yet: the picker keeps saying what it waits for
+        shown = self._show_options(selector, choices, key)
+        select = self.query_one(selector, Select)
+        query = event.value.strip()
+        select.prompt = f"No {noun} match “{query}”" if query and not shown else f"Choose {'a vault' if noun == 'vaults' else 'an SSH key'}"
+        if query and len(shown) == 1 and select.value != shown[0][key]:
+            select.value = shown[0][key]
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        targets = {"vault_bind_vault_search": "#vault_bind_vault", "vault_bind_item_search": "#vault_bind_item"}
+        target = targets.get(event.input.id or "")
+        if target is not None:
+            event.stop()
+            self.query_one(target, Select).focus()
+
+    def _show_match(self, text: str) -> None:
+        self._match_text = text
+        line = self.query_one("#vault_bind_match", Static)
+        line.update(escape(self.scrub_for_display(text)))
+        line.display = bool(text)
 
     def _show_trusted(self, text: str) -> None:
         self._trusted_text = text
@@ -286,6 +347,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     async def _load_keys(self, vault_id: str) -> None:
         self._keys_for = vault_id
         self._key_choices = []
+        self._matched_item = None
+        self._show_match("")
         select = self.query_one("#vault_bind_item", Select)
         select.set_options([])
         select.prompt = "Loading SSH keys…"
@@ -311,10 +374,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             return
         self._say("")
         self._key_choices = choices
-        self._show_options("#vault_bind_item", choices, "item_id")
+        shown = self._show_options("#vault_bind_item", choices, "item_id")
         select.prompt = "Choose an SSH key"
         select.disabled = False
-        if len(choices) == 1:
+        match = match_ssh_key(self._instance, choices)
+        if match is not None and match.ambiguous:
+            self._show_match(f"Several different keys are named “{match.name}”: choose the right one.")
+        elif match is not None and any(choice["item_id"] == match.item_id for choice in shown):
+            self._matched_item = match.item_id
+            select.value = match.item_id
+            named_like = {
+                MATCHED_BY_KEY_PAIR: "the server's key pair", MATCHED_BY_KEY_FILE: "the server's key file",
+            }.get(match.matched_by, "the server")
+            self._show_match(f"Chose “{match.name}”: it is named like {named_like}.")
+        elif len(choices) == 1:
             select.value = choices[0]["item_id"]
         select.focus()
 
@@ -323,8 +396,15 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
 
         from servonaut.services.vault import crypto
 
-        host = str(self._instance.get("hostname") or self._instance.get("host") or self._instance.get("public_ip") or "")
-        port = self._instance.get("port") if isinstance(self._instance.get("port"), int) else None
+        # The address SSH reaches (the private one behind a bastion) is the one pinned.
+        destination = getattr(self._service, "ssh_destination", None)
+        if callable(destination):
+            host, port = destination(self._instance)
+        else:
+            host = self._instance.get("hostname") or self._instance.get("host") or self._instance.get("public_ip")
+            port = self._instance.get("port")
+        host = str(host or "")
+        port = port if isinstance(port, int) and not isinstance(port, bool) else None
         try:
             with self._busy.running("Reading the host keys this machine trusts…", hold=_BIND_BUTTON):
                 keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
@@ -347,6 +427,9 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         # A redraw that restores the same vault is not a new choice.
         if event.select.id == "vault_bind_vault" and isinstance(event.value, str) and event.value != self._keys_for:
             self.run_worker(self._load_keys(event.value), group="vault_bind_choices", exclusive=True)
+        if event.select.id == "vault_bind_item" and self._matched_item is not None and event.value != self._matched_item:
+            self._matched_item = None
+            self._show_match("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "vault_bind_confirm":
@@ -1573,14 +1656,22 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                             markup=False,
                         )
                         return
+                    from servonaut.services.vault.personal_targets import instance_provider
+
                     # A custom server is addressed by name (provider "custom").
                     custom = instance.get("is_custom") is True
-                    provider = "custom" if custom else str(instance.get("provider") or "")
-                    hostname = str(
-                        instance.get("hostname") or instance.get("host") or instance.get("public_ip") or ""
-                    )
-                    port = instance.get("port", 22)
+                    provider = instance_provider(instance)
+                    # Pin the address SSH reaches: the private one behind a bastion.
+                    destination, port = service.ssh_destination(instance)
+                    hostname = str(destination or "")
                     login = values["login"] or instance.get("username")
+                    if not hostname:
+                        self.app.notify(
+                            "This server has no address to connect to, so no vault key can be bound to it.",
+                            severity="warning",
+                            markup=False,
+                        )
+                        return
                     if not isinstance(port, int) or not isinstance(login, str) or not login:
                         self.app.notify(
                             "The personal server needs a numeric port and login user.",

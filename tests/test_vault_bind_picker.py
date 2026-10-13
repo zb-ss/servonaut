@@ -244,3 +244,120 @@ async def test_a_failed_key_load_can_be_retried_by_choosing_the_vault_again() ->
         service.fail_keys = False
         vault.value = TEAM_VAULT  # the only vault, chosen again
         await _settle(pilot, lambda: not app.screen.query_one("#vault_bind_item", Select).disabled)
+
+
+class _AwsService(_Service):
+    """Like the vault service: knows where SSH goes and which login it uses."""
+
+    def __init__(self, keys, *, login="ubuntu", destination=("10.0.0.7", 22)) -> None:
+        super().__init__(
+            vaults=[{"vault_id": PERSONAL_VAULT, "label": "Personal (your personal vault)", "kind": "personal"}],
+            keys={PERSONAL_VAULT: keys},
+        )
+        self.login, self.destination = login, destination
+
+    def ssh_login(self, instance):
+        return self.login
+
+    def ssh_destination(self, instance):
+        return self.destination
+
+
+def _choice(item_id: str, name: str, fingerprint: str) -> dict:
+    return {"item_id": item_id, "label": f"{name} · {fingerprint}", "name": name, "fingerprint": fingerprint}
+
+
+AWS_ROW = {"id": "i-0abc", "name": "web-2", "key_name": "web-launch", "public_ip": "198.51.100.7"}
+
+
+@pytest.mark.asyncio
+async def test_the_key_named_like_the_key_pair_is_chosen_with_the_login_ssh_uses(monkeypatch) -> None:
+    looked_up: list[tuple] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: looked_up.append((host, port)) or [])
+    keys = [_choice(OTHER_ITEM, "web-2", "SHA256:aaa"), _choice(KEY_ITEM, "web-launch.pem", "SHA256:bbb")]
+    app = _Host(_AwsService(keys), AWS_ROW)
+    async with app.run_test(size=(160, 50)) as pilot:
+        item = lambda: app.screen.query_one("#vault_bind_item", Select)  # noqa: E731
+        await _settle(pilot, lambda: item().value == KEY_ITEM)
+        match = app.screen.query_one("#vault_bind_match", Static)
+        assert match.display and "named like the server's key pair" in str(match.render())
+        assert app.screen.query_one("#vault_bind_login", Input).value == "ubuntu"
+        # Host keys are looked up for the address SSH reaches (behind a bastion: the private one).
+        assert looked_up == [("10.0.0.7", 22)]
+
+        # Choosing another key drops the reason the first one was chosen.
+        item().value = OTHER_ITEM
+        await _settle(pilot, lambda: not match.display)
+
+
+@pytest.mark.asyncio
+async def test_two_different_keys_with_the_server_name_are_left_to_the_user() -> None:
+    keys = [_choice(OTHER_ITEM, "web-2", "SHA256:aaa"), _choice(KEY_ITEM, "web-2.pem", "SHA256:bbb")]
+    app = _Host(_AwsService(keys), {**AWS_ROW, "key_name": None})
+    async with app.run_test(size=(160, 50)) as pilot:
+        item = lambda: app.screen.query_one("#vault_bind_item", Select)  # noqa: E731
+        await _settle(pilot, lambda: not item().disabled)
+        assert item().value == Select.NULL
+        assert "Several different keys" in str(app.screen.query_one("#vault_bind_match", Static).render())
+
+
+@pytest.mark.asyncio
+async def test_typing_in_the_search_box_narrows_the_keys_and_picks_a_single_match() -> None:
+    keys = [_choice(f"5555555{n}-5555-4555-8555-55555555555{n}", name, f"SHA256:{n}")
+            for n, name in enumerate(["web-1", "web-2", "db-primary", "backup"])]
+    app = _Host(_AwsService(keys), {"id": "i-1", "name": "other"})
+    async with app.run_test(size=(160, 50)) as pilot:
+        item = lambda: app.screen.query_one("#vault_bind_item", Select)  # noqa: E731
+        await _settle(pilot, lambda: not item().disabled)
+        offered = lambda: [str(label) for label, _ in item()._options if str(label)]  # noqa: E731
+
+        app.screen.query_one("#vault_bind_item_search", Input).focus()
+        await pilot.press(*"web")
+        await _settle(pilot, lambda: offered() == ["web-1 · SHA256:0", "web-2 · SHA256:1"])
+        assert item().value == Select.NULL
+
+        await pilot.press("ctrl+u", *"prim")
+        await _settle(pilot, lambda: item().value == keys[2]["item_id"])
+
+        await pilot.press("ctrl+u", *"nothing")
+        await _settle(pilot, lambda: offered() == [])
+        assert "No keys match" in item().prompt
+
+        await pilot.press("ctrl+u", "enter")
+        await _settle(pilot, lambda: len(offered()) == 4)
+        assert app.focused is item()  # Enter in the search box moves on to the list
+
+
+@pytest.mark.asyncio
+async def test_the_dialog_with_search_boxes_still_fits_a_narrow_terminal(monkeypatch) -> None:
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: [_host_key()] * 3)
+    keys = [_choice(KEY_ITEM, "web-launch", "SHA256:bbb")]
+    app = _Host(_AwsService(keys), AWS_ROW)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        await pilot.pause()
+        modal = app.screen.query_one("#vault_bind_modal").region
+        for selector in ("#vault_bind_item_search", "#vault_bind_item", "#vault_bind_confirm"):
+            region = app.screen.query_one(selector).region
+            assert region.width > 0 and modal.contains_region(region), (selector, region, modal)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_the_search_boxes_show_their_text_with_the_app_stylesheet(size) -> None:
+    # The app styles every Input with a border; a box with no room inside it
+    # draws as an empty bar.
+    from servonaut.styles import CSS_FILES
+
+    class _StyledHost(_Host):
+        CSS_PATH = CSS_FILES
+
+    keys = [_choice(KEY_ITEM, "web-launch", "SHA256:bbb")]
+    app = _StyledHost(_AwsService(keys), AWS_ROW)
+    async with app.run_test(size=size) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        for selector in ("#vault_bind_vault_search", "#vault_bind_item_search"):
+            box = app.screen.query_one(selector, Input)
+            box.scroll_visible(animate=False)
+            await pilot.pause()
+            assert box.content_region.height >= 1 and box.content_region.width > 10, (selector, box.content_region)

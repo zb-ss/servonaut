@@ -40,8 +40,19 @@ def personal_target(provider: str, instance_id: str) -> tuple[str, str]:
     return validate_provider(provider), validate_instance_id(instance_id)
 
 
+def instance_provider(instance: Mapping[str, Any]) -> str:
+    """The provider an inventory row is bound under, before validation.
+
+    AWS rows carry no ``provider`` key, so an absent one means ``aws``: the
+    same keying the Bitwarden references and the MCP tools use.
+    """
+    if instance.get("is_custom") is True:
+        return CUSTOM_PROVIDER
+    return str(instance.get("provider") or "aws")
+
+
 def instance_target(instance: Mapping[str, Any]) -> tuple[str, str]:
     """``(provider, route id)`` for an inventory row."""
     if instance.get("is_custom") is True:
         return CUSTOM_PROVIDER, custom_binding_id(instance.get("name"))
-    return validate_provider(instance.get("provider")), validate_instance_id(instance.get("id"))
+    return validate_provider(instance_provider(instance)), validate_instance_id(instance.get("id"))
