@@ -1987,6 +1987,26 @@ class VaultCommandService:
         username = route.get("username")
         return username if isinstance(username, str) and username else None
 
+    def records_new_host_keys(self) -> bool:
+        """True when a first connection records a server's host key (``accept-new``)."""
+        if self.connection_service is None:
+            return False
+        from servonaut.services.host_key_recording import records_new_host_keys
+
+        return records_new_host_keys(self.connection_service)
+
+    async def visit_for_host_key(self, instance: Mapping[str, Any], *, login: str | None = None) -> str | None:
+        """Connect to *instance* once so its host key is recorded; why not, if it failed."""
+        if self.connection_service is None or self.ssh_service is None:
+            return "Servonaut cannot open SSH connections here."
+        from servonaut.services.host_key_recording import visit_for_host_key, visit_timeout
+
+        return await visit_for_host_key(
+            instance, self.connection_service, self.ssh_service,
+            login or self.ssh_login(instance) or getattr(self.config, "default_username", None) or "",
+            timeout=visit_timeout(getattr(self.config, "ssh", None)),
+        )
+
     async def personal_binding(self, instance: Mapping[str, Any]) -> Mapping[str, Any] | None:
         """The signed binding stored for one of the user's own servers, if any."""
         binding, _ = await self._personal_binding(*instance_target(instance))

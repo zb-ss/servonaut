@@ -23,6 +23,8 @@ def _host_key() -> str:
 
 
 class _Service:
+    records_new = False  # what a first connection does with a new host key (accept-new)
+
     def __init__(self, *, vaults=None, keys=None, fail_keys: bool = False) -> None:
         self.vaults = vaults if vaults is not None else [
             {"vault_id": PERSONAL_VAULT, "label": "Personal (your personal vault)", "kind": "personal"},
@@ -44,6 +46,26 @@ class _Service:
         if self.fail_keys:
             raise RuntimeError("boom")
         return self.keys.get(vault_id, [])
+
+    def records_new_host_keys(self) -> bool:
+        return self.records_new
+
+
+class _VisitingService(_Service):
+    """Connecting once records the server's host key in *trusted*, or fails with *failure*."""
+
+    records_new = True
+
+    def __init__(self, trusted: list[str], failure: str | None = None) -> None:
+        super().__init__()
+        self.trusted, self.failure = trusted, failure
+        self.visits: list[tuple[Any, Any]] = []
+
+    async def visit_for_host_key(self, instance, *, login=None):
+        self.visits.append((instance.get("id"), login))
+        if self.failure is None:
+            self.trusted.append(_host_key())
+        return self.failure
 
 
 class _Host(App):
@@ -102,6 +124,7 @@ async def test_a_personal_server_pins_the_host_keys_this_machine_trusts(monkeypa
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await pilot.pause()
         assert app.result == "pending"
+        assert "tick" in str(app.screen.query_one("#vault_bind_message", Static).render())
         box.value = True
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: app.result != "pending")
@@ -116,11 +139,17 @@ async def test_a_personal_server_without_trusted_or_pasted_keys_is_not_bound(mon
     app = _Host(_Service(), {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
     async with app.run_test(size=(160, 50)) as pilot:
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
-        await _settle(pilot, lambda: "does not trust" in str(app.screen.query_one("#vault_bind_trusted", Static).render()))
+        await _settle(pilot, lambda: "no host key for this server" in str(
+            app.screen.query_one("#vault_bind_trusted", Static).render()))
+        assert app.screen.query_one("#vault_bind_use_trusted", Checkbox).display is False
+        # A first connection would not record the key here, so the dialog cannot make one.
+        assert app.screen.query_one("#vault_bind_fetch_host_key", Button).display is False
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await pilot.pause()
         assert app.result == "pending"
-        assert "needs its host keys pinned" in str(app.screen.query_one("#vault_bind_message", Static).render())
+        # No box to tick: the message must not ask for one.
+        message = str(app.screen.query_one("#vault_bind_message", Static).render())
+        assert "connect to it once with SSH first" in message and "tick" not in message
 
         pasted = _host_key()
         app.screen.query_one("#vault_bind_host_keys", Input).value = pasted
@@ -128,6 +157,80 @@ async def test_a_personal_server_without_trusted_or_pasted_keys_is_not_bound(mon
         await _settle(pilot, lambda: app.result != "pending")
 
     assert app.result["host_keys"] == pasted
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_key_connects_once_then_asks_to_check_the_fingerprint(monkeypatch) -> None:
+    trusted: list[str] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: list(trusted))
+    service = _VisitingService(trusted)
+    app = _Host(service, {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
+    async with app.run_test(size=(160, 50)) as pilot:
+        fetch = lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button)  # noqa: E731
+        box = lambda: app.screen.query_one("#vault_bind_use_trusted", Checkbox)  # noqa: E731
+        message = lambda: str(app.screen.query_one("#vault_bind_message", Static).render())  # noqa: E731
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        await _settle(pilot, lambda: fetch().display)
+        assert "Fetch host key connects to it once" in str(app.screen.query_one("#vault_bind_trusted", Static).render())
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await pilot.pause()
+        assert app.result == "pending" and "use Fetch host key" in message()
+
+        fetch().press()
+        await _settle(pilot, lambda: box().display)
+        assert service.visits == [("i-1", "ec2-user")]  # with the login in the form
+        assert "SHA256:" in str(app.screen.query_one("#vault_bind_trusted", Static).render())
+        assert fetch().display is False and app.screen.focused is box()
+        assert box().value is False  # recorded is not checked: the user still says so
+        box().value = True
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: app.result != "pending")
+
+    assert app.result["host_keys"] == trusted[0]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_says_why_and_can_be_tried_again(monkeypatch) -> None:
+    trusted: list[str] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: list(trusted))
+    service = _VisitingService(trusted, failure="The server did not answer in time.")
+    app = _Host(service, {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
+    async with app.run_test(size=(160, 50)) as pilot:
+        fetch = lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button)  # noqa: E731
+        trusted_text = lambda: str(app.screen.query_one("#vault_bind_trusted", Static).render())  # noqa: E731
+        await _settle(pilot, lambda: fetch().display)
+        fetch().press()
+        await _settle(pilot, lambda: "did not answer in time" in trusted_text())
+        assert "Could not record this server's host key: The server did not answer in time. Connect" in trusted_text()
+        assert fetch().display and not fetch().disabled
+        assert app.screen.query_one("#vault_bind_use_trusted", Checkbox).display is False
+
+        service.failure = None
+        fetch().press()
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_use_trusted", Checkbox).display)
+    assert len(service.visits) == 2
+
+
+@pytest.mark.asyncio
+async def test_host_key_work_that_outlives_the_dialog_is_harmless(monkeypatch) -> None:
+    # Reading known_hosts and fetching a key finish in a thread or over the
+    # network; by then the dialog's widgets may be gone (the app quitting).
+    trusted: list[str] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: list(trusted))
+    service = _VisitingService(trusted)
+    app = _Host(service, {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button).display)
+        modal = app.screen
+
+        async def visit_while_the_dialog_goes(instance, *, login=None):
+            trusted.append(_host_key())
+            await modal.query_one("#vault_bind_modal").remove()
+            return None
+
+        service.visit_for_host_key = visit_while_the_dialog_goes
+        await modal._fetch_host_key()  # awaited directly: a failure surfaces here
+        assert not modal.query("#vault_bind_use_trusted")
 
 
 @pytest.mark.asyncio

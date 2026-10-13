@@ -2580,3 +2580,38 @@ def test_ssh_login_is_the_one_ssh_would_use() -> None:
     assert service.ssh_login({"id": "i-rule"}) == "deploy"  # a connection rule's username
     assert service.ssh_login({"id": "i-own", "username": "admin"}) == "admin"  # the server's own
     assert VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config()).ssh_login({"id": "i-1"}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_host_key_visit_uses_the_login_and_the_connect_timeout(monkeypatch) -> None:
+    from servonaut.config.schema import SSHConfig
+    from servonaut.services import host_key_recording
+
+    seen = []
+
+    async def visit(instance, connection, ssh, login, *, timeout):
+        seen.append((instance["id"], connection, ssh, login, timeout))
+        return None
+
+    monkeypatch.setattr(host_key_recording, "visit_for_host_key", visit)
+    rules = MagicMock()
+    rules.resolve_profile.return_value = None
+    rules.get_target_host.return_value = "198.51.100.7"
+    rules.get_proxy_args.return_value = []
+    rules.get_extra_options.return_value = []
+    keys = MagicMock()
+    keys.get_key_path.return_value = None
+    config = _config()
+    config.default_username = "ec2-user"
+    config.ssh = SSHConfig(connect_timeout=4)
+    service = VaultCommandService(
+        _Api({}), SimpleNamespace(user_id=1), config, connection_service=rules, ssh_service=keys,
+    )
+
+    assert await service.visit_for_host_key({"id": "i-1"}, login="ubuntu") is None
+    assert await service.visit_for_host_key({"id": "i-2"}) is None  # the login SSH would use
+    assert seen == [("i-1", rules, keys, "ubuntu", 12.0), ("i-2", rules, keys, "ec2-user", 12.0)]
+
+    bare = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    assert await bare.visit_for_host_key({"id": "i-1"}) == "Servonaut cannot open SSH connections here."
+    assert bare.records_new_host_keys() is False
