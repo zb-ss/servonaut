@@ -303,6 +303,14 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         line.update(escape(self.scrub_for_display(text)))
         line.display = bool(text)
 
+    def _missing_host_keys_text(self) -> str:
+        """What pins a server of your own, given what this machine trusts for it."""
+        if self._trusted_keys:
+            return ("A server of your own needs its host keys pinned: tick \"I checked these fingerprints\" "
+                    "or paste verified host keys.")
+        return ("A server of your own needs its host keys pinned: connect to it once with SSH first, "
+                "or paste verified host keys.")
+
     def _show_trusted(self, text: str) -> None:
         self._trusted_text = text
         self.query_one("#vault_bind_trusted", Static).update(escape(self.scrub_for_display(text)))
@@ -412,8 +420,9 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             keys = []
         box = self.query_one("#vault_bind_use_trusted", Checkbox)
         if not keys:
-            self._show_trusted("This machine does not trust a host key for this server yet: connect once "
-                               "with SSH and check its fingerprint, or paste verified host keys below.")
+            self._show_trusted("This machine has no host key for this server yet: connect to it once with "
+                               "SSH, then open this dialog again to check and pin its fingerprint, or paste "
+                               "verified host keys below.")
             box.value = False
             return
         self._trusted_keys = list(keys)
@@ -457,7 +466,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         use_trusted = not self._team and self.query_one("#vault_bind_use_trusted", Checkbox).value
         host_keys = [*(self._trusted_keys if use_trusted else []), *typed]
         if not self._team and not host_keys:
-            self._say("A server of your own needs its host keys pinned: tick the trusted keys or paste them.")
+            self._say(self._missing_host_keys_text())
             return
         self.dismiss({
             "team": self._team or "",
