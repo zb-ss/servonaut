@@ -12,6 +12,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Static, Button, Checkbox, Footer, Input, Label, Select
 
@@ -347,7 +348,10 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             failure=failure or "the connection worked, but no host key was recorded for it.",
         )
         if self._trusted_keys:
-            self.query_one("#vault_bind_use_trusted", Checkbox).focus()
+            try:
+                self.query_one("#vault_bind_use_trusted", Checkbox).focus()
+            except NoMatches:
+                pass  # the dialog closed meanwhile
 
     def _missing_host_keys_text(self) -> str:
         """What pins a server of your own, given what this machine trusts for it."""
@@ -472,8 +476,11 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
                 self._can_fetch_host_key = bool(host) and await asyncio.to_thread(self._records_new_host_keys)
         except Exception:
             keys = []
-        box = self.query_one("#vault_bind_use_trusted", Checkbox)
-        fetch = self.query_one("#vault_bind_fetch_host_key", Button)
+        try:
+            box = self.query_one("#vault_bind_use_trusted", Checkbox)
+            fetch = self.query_one("#vault_bind_fetch_host_key", Button)
+        except NoMatches:
+            return  # the dialog closed while the keys were read
         if not keys:
             self._trusted_keys = []
             box.value = False

@@ -212,6 +212,28 @@ async def test_a_failed_fetch_says_why_and_can_be_tried_again(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_host_key_work_that_outlives_the_dialog_is_harmless(monkeypatch) -> None:
+    # Reading known_hosts and fetching a key finish in a thread or over the
+    # network; by then the dialog's widgets may be gone (the app quitting).
+    trusted: list[str] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: list(trusted))
+    service = _VisitingService(trusted)
+    app = _Host(service, {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button).display)
+        modal = app.screen
+
+        async def visit_while_the_dialog_goes(instance, *, login=None):
+            trusted.append(_host_key())
+            await modal.query_one("#vault_bind_modal").remove()
+            return None
+
+        service.visit_for_host_key = visit_while_the_dialog_goes
+        await modal._fetch_host_key()  # awaited directly: a failure surfaces here
+        assert not modal.query("#vault_bind_use_trusted")
+
+
+@pytest.mark.asyncio
 async def test_no_vault_or_a_failed_key_load_says_what_to_do() -> None:
     app = _Host(_Service(vaults=[]), {"id": "s1", "is_shared": True, "team_slug": "ops"})
     async with app.run_test(size=(160, 50)) as pilot:
