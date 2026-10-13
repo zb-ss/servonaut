@@ -29,7 +29,7 @@ from servonaut.services.auth_service import AuthService
 from servonaut.services.team_service import TeamService
 
 from . import crypto
-from .bindings import VaultBindingService
+from .bindings import BindingDestinationChangedError, VaultBindingService
 from .ca_client import CertificateAuthorityClient
 from .ca_pins import CaPins
 from .ca_enrollment import CaEnrollmentExecutor, EnrollmentResult, deliver_krl, enrollment_error_code
@@ -39,6 +39,7 @@ from .errors import (
     RECOVERY_KEY_NOT_A_KEY,
     RECOVERY_KEY_NOT_THIS_IDENTITY,
     RECOVERY_KEY_TYPO,
+    SERVER_MOVED_SINCE_BINDING,
     VaultUserError,
     vault_failure_reason,
 )
@@ -918,19 +919,23 @@ class VaultCommandService:
             }))
         return [choice for _, choice in sorted(choices, key=lambda pair: (pair[0], pair[1]["label"]))]
 
-    async def ssh_key_choices(self, *, vault_id: str) -> list[dict[str, str]]:
-        """SSH keys in *vault_id*, as ``{"item_id", "label"}`` for a picker.
+    async def ssh_key_choices(
+        self, *, vault_id: str, name_limit: int | None = _NAMED_KEY_CHOICES,
+    ) -> list[dict[str, Any]]:
+        """SSH keys in *vault_id*, as ``{"item_id", "label", "name", "fingerprint"}``.
 
         The service only knows each key's fingerprint; its name is inside the
-        encrypted item, so up to ``_NAMED_KEY_CHOICES`` keys are decrypted
-        locally for their names and nothing else is kept. Names are cached per
-        item revision, and the items are fetched a few at a time.
+        encrypted item, so up to *name_limit* keys (``None``: all of them) are
+        decrypted locally for their names and nothing else is kept. Names are
+        cached per item revision, and the items are fetched a few at a time.
+        ``name`` is ``None`` for a key whose name is unknown or unverified.
         """
         rows = [
             row for row in (await self.list_items(vault_id=vault_id))["data"]
             if row.get("type") == "ssh_key" and not row.get("deleted") and isinstance(row.get("item_id"), str)
         ]
-        named = rows[:_NAMED_KEY_CHOICES]
+        limit = len(rows) if name_limit is None else name_limit
+        named = rows[:limit]
         missing = [row for row in named if self._key_name_cache_key(vault_id, row) not in self._key_names]
         unverified: set[tuple[str, str, Any]] = set()
         if missing:
@@ -950,6 +955,8 @@ class VaultCommandService:
             # shown now but not cached: it can clear, e.g. once a vault grant arrives.
             for row, item in await asyncio.gather(*(fetch(row) for row in missing)):
                 if item is not None:
+                    # Each item is verified and decrypted here; let the UI draw in between.
+                    await asyncio.sleep(0)
                     name = self._ssh_key_name(vault, item)
                     key = self._key_name_cache_key(vault_id, row)
                     if name is _UNVERIFIED_KEY:
@@ -960,7 +967,7 @@ class VaultCommandService:
         for index, row in enumerate(rows):
             fingerprint = str(row.get("public_fingerprint") or "")
             key = self._key_name_cache_key(vault_id, row)
-            name = None if index >= _NAMED_KEY_CHOICES else (_UNVERIFIED_KEY if key in unverified else self._key_names.get(key))
+            name = None if index >= limit else (_UNVERIFIED_KEY if key in unverified else self._key_names.get(key))
             if name is _UNVERIFIED_KEY:
                 label = f"{fingerprint or row['item_id']} (could not be verified)"
             elif name:
@@ -969,7 +976,10 @@ class VaultCommandService:
                 label = f"{name} · {short}"
             else:
                 label = fingerprint or row["item_id"]
-            choices.append({"item_id": row["item_id"], "label": terminal_safe(label)})
+            choices.append({
+                "item_id": row["item_id"], "label": terminal_safe(label),
+                "name": name if isinstance(name, str) else None, "fingerprint": fingerprint,
+            })
         return sorted(choices, key=lambda choice: choice["label"].lower())
 
     @staticmethod
@@ -1499,12 +1509,15 @@ class VaultCommandService:
         self,
         *, vault_id: str, item_id: str, provider: str, instance_id: str,
         hostname: str, port: int, login: str, host_keys: Sequence[str],
+        replace_existing: bool = True,
     ) -> dict[str, Any]:
         """Create or update a signed binding for one personal instance.
 
         Personal inventory deliberately omits bindings, so the existing record
         is read from its signed canonical endpoint before its revision can be
         advanced.  Host pins are explicit caller input and required for use.
+        With ``replace_existing=False`` a server that already has a binding
+        is refused instead of updated.
         """
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
@@ -1528,11 +1541,16 @@ class VaultCommandService:
             raise VaultStateError("personal binding item has no verified SSH fingerprint")
         target = f"instance:{normalized_provider}:{normalized_instance_id}"
         existing, existing_target = await self._personal_binding(normalized_provider, normalized_instance_id)
+        if existing is not None and not replace_existing:
+            raise VaultUserError("this server already has a vault key")
         if existing is None:
             revision = 1
         else:
+            # The existing binding only has to be ours: its address may be the
+            # one that changed (a cloud server's public IP after a restart).
             verified = self.bindings.verify_binding(
-                existing, vault, target=existing_target, hostname=hostname, port=port,
+                existing, vault, target=existing_target,
+                hostname=str(existing.get("hostname") or ""), port=existing.get("port"),
             )
             revision = _positive_int(verified.get("binding_revision"), "binding.binding_revision") + 1
         binding = self.bindings.build_binding(
@@ -1892,7 +1910,7 @@ class VaultCommandService:
         # and is allowed to fail closed below.
         if not requires_native and instance.get("is_shared") is not True:
             try:
-                instance_target({**instance, "provider": instance.get("provider", "aws")})
+                instance_target(instance)
             except ValueError:
                 return None
         ca_lease = await self._resolve_ca_ssh(instance)
@@ -1904,12 +1922,14 @@ class VaultCommandService:
         vault_id, item_id = binding.get("vault_id"), binding.get("vault_item_id")
         if not isinstance(vault_id, str) or not isinstance(item_id, str):
             raise VaultStateError("native credential binding is malformed")
-        hostname = instance.get("hostname") or instance.get("host") or instance.get("public_ip")
-        port = instance.get("port", 22)
+        hostname, port = self.ssh_destination(instance)
         if not isinstance(hostname, str) or isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise VaultStateError("bound server has no valid hostname or port")
         vault = await self.vaults.get_vault(vault_id)
-        verified = self.bindings.verify_binding(binding, vault, target=target, hostname=hostname, port=port)
+        try:
+            verified = self.bindings.verify_binding(binding, vault, target=target, hostname=hostname, port=port)
+        except BindingDestinationChangedError as exc:
+            raise VaultUserError(SERVER_MOVED_SINCE_BINDING) from exc
         pins = tuple(verified.get("host_keys", ()))
         if not pins:
             raise VaultStateError("native SSH binding has no verified host pins")
@@ -1937,6 +1957,40 @@ class VaultCommandService:
                 if path is not None:
                     path.unlink(missing_ok=True)
             raise
+
+    def ssh_destination(self, instance: Mapping[str, Any]) -> tuple[Any, Any]:
+        """``(host, port)`` SSH connects to for *instance*: what a binding pins.
+
+        Shared servers and custom servers name their host. A cloud server is
+        reached as its connection rule says, so one behind a bastion is pinned
+        under the private address SSH actually opens, not its public one.
+        """
+        hostname = instance.get("hostname") or instance.get("host")
+        if not hostname and self.connection_service is not None:
+            row = dict(instance)
+            hostname = self.connection_service.get_target_host(row, self.connection_service.resolve_profile(row))
+        return hostname or instance.get("public_ip"), instance.get("port") or 22
+
+    def ssh_login(self, instance: Mapping[str, Any]) -> str | None:
+        """The login SSH would use for *instance* without a binding, if known."""
+        login = instance.get("login_user") or instance.get("username")
+        if isinstance(login, str) and login:
+            return login
+        if self.connection_service is None or self.ssh_service is None:
+            return None
+        from servonaut.services.connection_service import server_connection
+
+        route = server_connection(
+            dict(instance), self.connection_service, self.ssh_service,
+            getattr(self.config, "default_username", None) or "",
+        )
+        username = route.get("username")
+        return username if isinstance(username, str) and username else None
+
+    async def personal_binding(self, instance: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        """The signed binding stored for one of the user's own servers, if any."""
+        binding, _ = await self._personal_binding(*instance_target(instance))
+        return binding
 
     async def _credential_binding(
         self, instance: Mapping[str, Any],

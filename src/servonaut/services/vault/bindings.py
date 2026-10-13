@@ -12,6 +12,10 @@ from .roster_pins import decode_b64
 from .team_vault_client import TeamVaultClient, VaultStateError, _positive_int, current_identity, identity_signing_seed
 
 
+class BindingDestinationChangedError(VaultStateError):
+    """A binding names another address or port than the server has now."""
+
+
 class VaultBindingService:
     """Bind native vault SSH items only to verified, pinned destinations."""
 
@@ -71,7 +75,7 @@ class VaultBindingService:
             raise VaultStateError("credential binding is not a usable native-vault binding")
         binding_port = binding.get("port")
         if isinstance(binding_port, bool) or not isinstance(binding_port, int) or binding.get("hostname") != hostname or binding_port != port:
-            raise VaultStateError("credential binding destination no longer matches the server")
+            raise BindingDestinationChangedError("credential binding destination no longer matches the server")
         scope = str(vault["scope"])
         if not target or not str(binding.get("vault_id", "")) == str(vault["vault_id"]):
             raise VaultStateError("credential binding targets the wrong vault")
