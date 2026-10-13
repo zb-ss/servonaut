@@ -372,6 +372,13 @@ class Owner:
         )
         self._start(self.world.start())
         self.world.install_clients(self.shims.directory)
+        # Host keys the user accepted with the real ssh are found again with
+        # the real ssh-keygen (Use Vault Key and Auto-bind read them).
+        from e2e.harness import keygen_lookup_shim
+
+        keygen = shutil.which("ssh-keygen", path="/usr/bin:/bin:/usr/local/bin")
+        if keygen:
+            keygen_lookup_shim.install(str(self.shims.directory), keygen, str(ctx.root))
 
     def _seed_and_record(self) -> None:
         from e2e.harness import endpoints, session_seed
