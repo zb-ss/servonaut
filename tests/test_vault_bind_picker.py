@@ -102,6 +102,7 @@ async def test_a_personal_server_pins_the_host_keys_this_machine_trusts(monkeypa
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await pilot.pause()
         assert app.result == "pending"
+        assert "tick" in str(app.screen.query_one("#vault_bind_message", Static).render())
         box.value = True
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await _settle(pilot, lambda: app.result != "pending")
@@ -116,11 +117,15 @@ async def test_a_personal_server_without_trusted_or_pasted_keys_is_not_bound(mon
     app = _Host(_Service(), {"id": "i-1", "hostname": "198.51.100.7", "username": "ec2-user"})
     async with app.run_test(size=(160, 50)) as pilot:
         await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
-        await _settle(pilot, lambda: "does not trust" in str(app.screen.query_one("#vault_bind_trusted", Static).render()))
+        await _settle(pilot, lambda: "no host key for this server" in str(
+            app.screen.query_one("#vault_bind_trusted", Static).render()))
+        assert app.screen.query_one("#vault_bind_use_trusted", Checkbox).display is False
         app.screen.query_one("#vault_bind_confirm", Button).press()
         await pilot.pause()
         assert app.result == "pending"
-        assert "needs its host keys pinned" in str(app.screen.query_one("#vault_bind_message", Static).render())
+        # No box to tick: the message must not ask for one.
+        message = str(app.screen.query_one("#vault_bind_message", Static).render())
+        assert "connect to it once with SSH first" in message and "tick" not in message
 
         pasted = _host_key()
         app.screen.query_one("#vault_bind_host_keys", Input).value = pasted
