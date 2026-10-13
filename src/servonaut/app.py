@@ -318,6 +318,7 @@ class ServonautApp(App):
         from servonaut.screens.instance_list import InstanceListScreen
 
         self._init_services()
+        self._start_ui_stall_watchdog()
         # Background ssh runs in its own session, so closing the terminal no
         # longer hangs it up; end it (a log tail, say) before the app goes.
         try:
@@ -992,8 +993,22 @@ class ServonautApp(App):
         except Exception:
             pass
 
+    def _start_ui_stall_watchdog(self) -> None:
+        """Log the stack of any long freeze, which otherwise leaves no trace."""
+        import threading
+
+        from servonaut.utils.ui_stall_watchdog import UiStallWatchdog, stall_seconds_from_env
+
+        watchdog = UiStallWatchdog(threading.get_ident(), stall_seconds=stall_seconds_from_env())
+        self._ui_stall_watchdog = watchdog
+        self.set_interval(1.0, watchdog.beat)
+        watchdog.start()
+
     async def on_unmount(self) -> None:
         """Cancel the relay listener cleanly as the app exits."""
+        watchdog = getattr(self, "_ui_stall_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         if self.vault_command_service is not None:
             self.vault_command_service.close()
         if self.relay_manager is not None:

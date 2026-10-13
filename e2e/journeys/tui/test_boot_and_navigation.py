@@ -8,6 +8,9 @@ the help screen, returning to the root screen and quitting.
 
 from __future__ import annotations
 
+import logging
+import time
+
 import pytest
 
 from e2e.harness import fleet
@@ -166,3 +169,49 @@ async def test_help_back_to_root_and_quit(tui, seed):
         await t.press("q")
         await t.wait_until(lambda: t.app.return_code is not None, desc="app exit")
         assert t.app.return_code == 0
+
+
+async def test_double_clicking_the_highlighted_row_opens_the_server_once(tui, seed):
+    _seed_fleet(seed)
+    async with tui() as t:
+        await t.wait_until(lambda: t.table_rows("InstanceTable"), desc="fleet rows")
+        table = t.on_screen("InstanceTable")
+        # Arrow keys leave a row highlighted; the user then double-clicks it.
+        table.focus()
+        await t.press("down")
+        await t.wait_until(lambda: table.cursor_row == 1, desc="second row highlighted")
+        header = table.header_height if table.show_header else 0
+        y = table.gutter.top + header + table.ordered_rows[0].height - int(table.scroll_offset.y)
+        assert await t.pilot.click(table, offset=(table.gutter.left + 1, y), times=2)
+
+        await t.wait_for_screen("ServerActionsScreen")
+        await t.settle()
+        stack = [type(screen).__name__ for screen in t.app.screen_stack]
+        assert stack.count("ServerActionsScreen") == 1, stack
+        # One Back returns to the list: there is no second copy underneath.
+        await t.press("escape")
+        await t.wait_for_screen("InstanceListScreen")
+
+
+async def test_a_frozen_interface_logs_where_it_was_stuck(tui, seed, monkeypatch, caplog):
+    monkeypatch.setenv("SERVONAUT_UI_STALL_SECONDS", "2")
+    _seed_fleet(seed)
+    async with tui() as t:
+        await t.wait_until(lambda: t.table_rows("InstanceTable"), desc="fleet rows")
+        caplog.set_level(logging.WARNING, logger="servonaut.utils.ui_stall_watchdog")
+
+        def blocking_work() -> None:
+            time.sleep(3)  # work that blocks the event loop
+
+        t.app.call_later(blocking_work)
+
+        def messages() -> list[str]:
+            return [record.getMessage() for record in caplog.records if record.name == "servonaut.utils.ui_stall_watchdog"]
+
+        def stall_logged() -> bool:
+            # Any other long render may be logged too; this stall names the work.
+            logged = messages()
+            stalls = [index for index, m in enumerate(logged) if "busy in:" in m and "in blocking_work" in m]
+            return bool(stalls) and any("responding again" in m for m in logged[stalls[0]:])
+
+        await t.wait_until(stall_logged, desc="the stall and its end logged")
