@@ -496,11 +496,46 @@ async def test_bind_waits_for_the_trusted_host_keys_as_well(monkeypatch) -> None
             assert modal.query_one("#vault_bind_confirm", Button).disabled
 
             release.set()
-            await wait_until(lambda: "does not trust" in str(modal.query_one("#vault_bind_trusted", Static).render()))
+            await wait_until(lambda: "no host key for this server" in str(
+                modal.query_one("#vault_bind_trusted", Static).render()))
             await _idle(busy)
             assert not modal.query_one("#vault_bind_confirm", Button).disabled
     finally:
         release.set()
+
+
+class _VisitService(_BindService):
+    """A first connection records new host keys; the visit waits for the ``visit`` gate."""
+
+    def records_new_host_keys(self) -> bool:
+        return True
+
+    async def visit_for_host_key(self, instance, *, login=None):
+        await self._pass("visit")
+        return "The server did not answer in time."
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_key_holds_bind_and_itself_while_it_connects(monkeypatch) -> None:
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda _instance, _host, _port: [])
+    service = _VisitService()
+    service.gates["visit"] = _Gate()
+    app = _BindHost(service, {"id": "i-1", "hostname": "192.0.2.7", "username": "ec2-user"})
+    async with app.run_test(size=(160, 50)):
+        await wait_until(lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button).display)
+        modal = app.screen
+        busy = _busy(modal, "#vault_bind_busy")
+        await _idle(busy)
+        modal.query_one("#vault_bind_fetch_host_key", Button).press()
+        await _shows(busy, "Connecting once to record the server's host key…")
+        assert modal.query_one("#vault_bind_confirm", Button).disabled
+        assert modal.query_one("#vault_bind_fetch_host_key", Button).disabled  # one visit at a time
+
+        service.gates["visit"].release.set()
+        await wait_until(lambda: "did not answer in time" in str(modal.query_one("#vault_bind_trusted", Static).render()))
+        await _idle(busy)
+        assert not modal.query_one("#vault_bind_confirm", Button).disabled
+        assert not modal.query_one("#vault_bind_fetch_host_key", Button).disabled
 
 
 # ---------------------------------------------------------------------------

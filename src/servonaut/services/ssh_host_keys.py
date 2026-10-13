@@ -44,6 +44,7 @@ from servonaut.runtime import data_root_for_home
 logger = logging.getLogger(__name__)
 
 HOST_KEY_CHECKING_OFF = "off"
+HOST_KEY_CHECKING_ACCEPT_NEW = "accept-new"
 KNOWN_HOSTS_FILENAME = "known_hosts"
 
 

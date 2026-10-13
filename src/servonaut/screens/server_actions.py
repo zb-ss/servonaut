@@ -153,6 +153,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     #vault_bind_footer > Horizontal { height: auto; }
     #vault_bind_busy { margin: 0; }
     #vault_bind_use_trusted.-hidden { display: none; }
+    #vault_bind_fetch_host_key { margin: 0 0 1 0; }
+    #vault_bind_fetch_host_key.-hidden { display: none; }
     #vault_bind_message { display: none; }
     """
     AUTO_FOCUS = ""
@@ -173,6 +175,8 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         # The key the dialog chose by name; the hint saying why goes once another is chosen.
         self._matched_item: str | None = None
         self._trusted_text = ""
+        # Whether a first connection records the host key (accept-new), so the dialog can make one.
+        self._can_fetch_host_key = False
         self._busy = BusyWork(self, "#vault_bind_busy")
 
     def compose(self) -> ComposeResult:
@@ -197,6 +201,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         else:
             rows.extend((
                 Static("Checking the host keys this machine trusts…", id="vault_bind_trusted"),
+                Button("Fetch host key", id="vault_bind_fetch_host_key", classes="-hidden"),
                 Checkbox("I checked these fingerprints: pin them", value=False, id="vault_bind_use_trusted",
                          disabled=True, classes="-hidden"),
                 Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
@@ -303,11 +308,55 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         line.update(escape(self.scrub_for_display(text)))
         line.display = bool(text)
 
+    def _records_new_host_keys(self) -> bool:
+        check = getattr(self._service, "records_new_host_keys", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:  # unknown: the user can still connect once or paste keys
+            logger.debug("Could not read the host-key policy for the vault binding", exc_info=True)
+            return False
+
+    def _no_trusted_keys_text(self, failure: str | None) -> str:
+        if failure:
+            # ssh's own last line may lack the full stop the next sentence needs.
+            reason = failure.strip().rstrip(".")
+            return (f"Could not record this server's host key: {reason}. Connect to it once with SSH "
+                    "and check its fingerprint, or paste verified host keys below.")
+        if self._can_fetch_host_key:
+            return ("This machine has no host key for this server yet. Fetch host key connects to it "
+                    "once, as SSH does, and records it; then check its fingerprint here. Or paste "
+                    "verified host keys below.")
+        return ("This machine has no host key for this server yet: connect to it once with SSH, then "
+                "open this dialog again to check and pin its fingerprint, or paste verified host keys below.")
+
+    async def _fetch_host_key(self) -> None:
+        """Connect to the server once so its host key is recorded, then show it."""
+        visit = getattr(self._service, "visit_for_host_key", None)
+        if not callable(visit):
+            return
+        login = self.query_one("#vault_bind_login", Input).value.strip() or None
+        self._say("")
+        try:
+            with self._busy.running("Connecting once to record the server's host key…",
+                                    hold=(*_BIND_BUTTON, "#vault_bind_fetch_host_key")):
+                failure = await visit(self._instance, login=login)
+        except Exception:
+            logger.debug("Recording the host key for the vault binding failed", exc_info=True)
+            failure = "Could not connect to the server."
+        await self._load_trusted_host_keys(
+            failure=failure or "the connection worked, but no host key was recorded for it.",
+        )
+        if self._trusted_keys:
+            self.query_one("#vault_bind_use_trusted", Checkbox).focus()
+
     def _missing_host_keys_text(self) -> str:
         """What pins a server of your own, given what this machine trusts for it."""
         if self._trusted_keys:
             return ("A server of your own needs its host keys pinned: tick \"I checked these fingerprints\" "
                     "or paste verified host keys.")
+        if self._can_fetch_host_key:
+            return ("A server of your own needs its host keys pinned: use Fetch host key and check its "
+                    "fingerprint, or paste verified host keys.")
         return ("A server of your own needs its host keys pinned: connect to it once with SSH first, "
                 "or paste verified host keys.")
 
@@ -399,7 +448,11 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             select.value = choices[0]["item_id"]
         select.focus()
 
-    async def _load_trusted_host_keys(self) -> None:
+    async def _load_trusted_host_keys(self, failure: str | None = None) -> None:
+        """Show the host keys this machine trusts for the server, or how to get them.
+
+        *failure* says why the dialog's own connection recorded none.
+        """
         import asyncio
 
         from servonaut.services.vault import crypto
@@ -416,15 +469,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         try:
             with self._busy.running("Reading the host keys this machine trusts…", hold=_BIND_BUTTON):
                 keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
+                self._can_fetch_host_key = bool(host) and await asyncio.to_thread(self._records_new_host_keys)
         except Exception:
             keys = []
         box = self.query_one("#vault_bind_use_trusted", Checkbox)
+        fetch = self.query_one("#vault_bind_fetch_host_key", Button)
         if not keys:
-            self._show_trusted("This machine has no host key for this server yet: connect to it once with "
-                               "SSH, then open this dialog again to check and pin its fingerprint, or paste "
-                               "verified host keys below.")
+            self._trusted_keys = []
             box.value = False
+            box.disabled = True
+            box.add_class("-hidden")
+            fetch.set_class(not self._can_fetch_host_key, "-hidden")
+            self._show_trusted(self._no_trusted_keys_text(failure))
             return
+        fetch.add_class("-hidden")
         self._trusted_keys = list(keys)
         self._show_trusted(f"Host keys this machine trusts for {host}:\n" + "\n".join(
             f"  {crypto.ssh_public_fingerprint(key)}" for key in keys
@@ -441,6 +499,10 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             self._show_match("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "vault_bind_fetch_host_key":
+            event.stop()
+            self.run_worker(self._fetch_host_key(), group="vault_bind_host_keys", exclusive=True)
+            return
         if event.button.id != "vault_bind_confirm":
             self.dismiss(None)
             return
