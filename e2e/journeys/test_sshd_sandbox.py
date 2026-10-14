@@ -113,6 +113,17 @@ def test_non_loopback_destinations_are_refused(journey, sshd):
     assert sshd.target.sessions() == []
 
 
+def test_a_refused_destination_is_logged_like_an_unreachable_host(journey, sshd):
+    """ssh writes its connection errors to its private log, not to stderr."""
+    log = journey.directory / "ssh-refused.log"
+
+    result = _ssh(journey, sshd, "-E", str(log), "deploy@9.9.9.9", "true")
+
+    assert result.returncode == 255
+    assert result.stdout == ""
+    assert "Connection refused" in log.read_text()
+
+
 def test_non_loopback_jump_hosts_are_refused(journey, sshd):
     # OpenSSH starts a jump hop with its own binary, so the pass-through
     # checks the hops before the client runs.

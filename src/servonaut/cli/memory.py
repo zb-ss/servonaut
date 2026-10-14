@@ -207,13 +207,25 @@ def _check_opt_out(
 # Sub-subcommand handlers
 # ---------------------------------------------------------------------------
 
+def _report_unreached(inst: Dict[str, Any], message: str, use_json: bool = False) -> int:
+    """Say why nothing was probed; the stored memory is unchanged."""
+    iid = inst.get("id") or inst.get("name", "?")
+    if use_json:
+        print(json.dumps({"error": {"instance_id": iid, "message": message}}, indent=2))
+    print(f"Memory for {iid} was not updated: {message}", file=sys.stderr)
+    return _EXIT_GENERIC_ERROR
+
+
 def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory build``."""
     use_json = getattr(args, "json", False)
     modules = getattr(args, "modules", None) or None
 
     async def _do_build() -> int:
-        results = await memory_service.build(inst, modules)
+        report = await memory_service.build_report(inst, modules)
+        results = report.successes
+        if report.unreached_message:
+            return _report_unreached(inst, report.unreached_message, use_json)
         if use_json:
             out = {
                 k: {
@@ -241,10 +253,14 @@ async def _build_all(
     instances: List[Dict[str, Any]],
     memory_service: Any,
     modules: Optional[List[str]],
-) -> List[Tuple[str, Exception]]:
-    """Build memory for all *instances*, at most 5 concurrent probes."""
+) -> List[Tuple[str, str]]:
+    """Build memory for all *instances*, at most 5 concurrent probes.
+
+    Returns ``(instance id, reason)`` for every server whose build failed or
+    could not reach it.
+    """
     sem = asyncio.Semaphore(5)
-    failures: List[Tuple[str, Exception]] = []
+    failures: List[Tuple[str, str]] = []
     total = len(instances)
     counter = 0
     lock = asyncio.Lock()
@@ -258,9 +274,12 @@ async def _build_all(
         async with sem:
             try:
                 print(f"[{n}/{total}] Probing {iid}...", flush=True)
-                await memory_service.build(inst, modules)
+                report = await memory_service.build_report(inst, modules)
             except Exception as exc:
-                failures.append((iid, exc))
+                failures.append((iid, str(exc)))
+                return
+            if report.unreached_message:
+                failures.append((iid, report.unreached_message))
 
     await asyncio.gather(*(one(i) for i in instances))
     return failures
@@ -282,8 +301,8 @@ def _cmd_build_all(
     failures = _run_async(_build_all(instances, memory_service, modules))
 
     if failures:
-        for iid, exc in failures:
-            print(f"FAILED {iid}: {exc}", file=sys.stderr)
+        for iid, reason in failures:
+            print(f"FAILED {iid}: {reason}", file=sys.stderr)
         return _EXIT_PARTIAL_FAILURE
     return _EXIT_SUCCESS
 
@@ -293,7 +312,10 @@ def _cmd_refresh(args: Any, config: Any, memory_service: Any, inst: Dict[str, An
     modules = getattr(args, "modules", None) or None
 
     async def _do_refresh() -> int:
-        results = await memory_service.refresh(inst, modules)
+        report = await memory_service.refresh_report(inst, modules)
+        if report.unreached_message:
+            return _report_unreached(inst, report.unreached_message)
+        results = report.successes
         iid = inst.get("id") or inst.get("name", "?")
         print(f"Refreshed memory for {iid}: {', '.join(sorted(results)) if results else '(none)'}")
         return _EXIT_SUCCESS

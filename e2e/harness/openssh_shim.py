@@ -125,6 +125,28 @@ def _refuse(message: str) -> int:
     return REFUSED
 
 
+# A host outside the sandbox stands for an unreachable one.
+_NOT_LOOPBACK = "is not a loopback address"
+
+
+def _log_unreachable(guard: Any, args: list[str], problem: str) -> None:
+    """Write ssh's own message for an unreachable host to its log (``-E``).
+
+    Real ssh writes its connection errors there instead of to stderr, and
+    Servonaut tells ssh's failures from a remote command's by that log. The
+    path was already checked to be inside the test root.
+    """
+    try:
+        options, _operands = guard.parse_openssh_argv("ssh", args)
+    except ValueError:
+        return
+    path = next((value for letter, value in options if letter == "E"), None)
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"ssh: connect to host port 22: Connection refused (e2e: {problem})\n")
+
+
 def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
@@ -380,7 +402,7 @@ def _connection_problem(real_ssh: str, config: str, root: str, args: list[str],
                 return f"jump host {hop[-1]!r}: {problem}"
         return ""
     host = _first(settings, "hostname", "")
-    return "" if _is_loopback(host) else f"{host!r} is not a loopback address"
+    return "" if _is_loopback(host) else f"{host!r} {_NOT_LOOPBACK}"
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +421,8 @@ def main(argv: list[str]) -> int:
     problem = _argv_problem(guard, tool, args, config, os.path.realpath(root))
     if not problem and tool == "ssh":
         problem = _connection_problem(real_ssh, config, os.path.realpath(root), args)
+        if problem.endswith(_NOT_LOOPBACK):
+            _log_unreachable(guard, args, problem)
     if problem:
         return _refuse(f"refused to connect: {problem}")
     extra = ["-S", os.path.join(shim_dir, "ssh")] if tool == "scp" else []

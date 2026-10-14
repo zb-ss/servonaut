@@ -113,6 +113,7 @@ class GitProber(ModuleProber):
         from .base import (
             _CMD_TIMEOUT_SECONDS,
             _MAX_OUTPUT_BYTES,
+            is_command_failure,
             _SUDO_UNAVAILABLE_MARKERS,  # noqa: F401 — unused here but imported for consistency
         )
         from servonaut.services.memory.interfaces import ModuleResult
@@ -135,7 +136,7 @@ class GitProber(ModuleProber):
                 truncated = True
             # Runner-level errors are captured by _run_once and inlined as
             # ``<error: ...>`` or ``<timeout>``; treat either as a partial probe.
-            if _is_error_marker(stdout):
+            if is_command_failure(stdout):
                 partial = True
             raw_parts.append(f"{_FIND_CMD} →\n{stdout}\n")
 
@@ -220,20 +221,6 @@ def _branch_cmd_for(repo_root: str) -> str:
 def _remote_cmd_for(repo_root: str) -> str:
     """Return the exact ``git -C`` origin-URL command for *repo_root*."""
     return f"git -C {shlex.quote(repo_root)} remote get-url origin 2>/dev/null"
-
-
-def _is_error_marker(text: str) -> bool:
-    """Return True if *text* is one of the base-class error sentinels.
-
-    The base ``_run_command`` helper substitutes ``<timeout>`` or
-    ``<error: ...>`` for failed commands.  The git prober uses this helper
-    to detect when the ``find`` phase couldn't run at all so it can mark the
-    overall probe as ``partial``.
-    """
-    if not text:
-        return False
-    stripped = text.lstrip()
-    return stripped.startswith("<timeout>") or stripped.startswith("<error:")
 
 
 def _first_stripped_line(section: str) -> Optional[str]:
