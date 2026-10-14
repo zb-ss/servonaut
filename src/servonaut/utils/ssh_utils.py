@@ -168,6 +168,17 @@ def with_diagnostics(diagnostics: str, stderr: Any) -> Any:
     return stderr
 
 
+def is_known_hosts_notice(line: str) -> bool:
+    """Whether *line* is ssh's note that it saved a new host key.
+
+    OpenSSH prints "Warning: Permanently added ... to the list of known
+    hosts." on a first connection it trusts (``accept-new``). The connection
+    still went ahead, so this is information, not an error.
+    """
+    text = line.strip()
+    return text.startswith("Warning: Permanently added ") and "to the list of known hosts" in text
+
+
 _BACKGROUND_PROCESSES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 _BACKGROUND_LOCK = threading.Lock()
 
