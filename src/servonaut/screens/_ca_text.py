@@ -60,7 +60,7 @@ def status_text(status: Mapping[str, Any], *, team: str, server_labels: Mapping[
     if not status.get("enabled"):
         return (
             "SSH certificates are not switched on for this team.\n"
-            "Switch them on from a terminal:\n"
+            "Switch them on below, or from a terminal:\n"
             f"  servonaut ca enable --team {terminal_safe(team)}"
         )
     lines = ["SSH certificates are on for this team."]

@@ -633,10 +633,12 @@ login before escrow recovery.
 
 ## `servonaut ca`
 
-Manage a team SSH certificate authority after the team has enabled the
-feature and the account has completed MFA. These commands change access on
-real hosts, so enrollment, refresh, unenrollment and enablement require an
-interactive confirmation or `--yes`.
+Manage a team SSH certificate authority. SSH certificates are part of the
+Teams plan. The team owner switches them on with `ca enable`, or with
+**Switch on SSH certificates** on the TUI's SSH Certificates screen. Switching
+them on and enrolling a server need a recent MFA sign-in (`servonaut login`).
+These commands change access on real hosts, so enrollment, refresh,
+unenrollment and enablement require an interactive confirmation or `--yes`.
 
 ```
 servonaut ca status --team TEAM
@@ -689,12 +691,11 @@ reads each enrolled host's SSH log over your existing access and reports any
 login with a break-glass key to the team, once per event; the team owner is
 notified.
 
-SSH certificates are coming soon. Until they are switched on for your
-Servonaut service, the `ca` commands say so and nothing is changed:
-`ca status` reports it and exits 0, and the other `ca` commands exit 1. Vault
-keys keep working, so team members connect to shared servers as before. If
-the service cannot sign certificates for a while, the commands say that
-instead; try again later.
+If a Servonaut service has SSH certificates switched off, the `ca` commands
+say so and nothing is changed: `ca status` reports it and exits 0, and the
+other `ca` commands exit 1. Vault keys keep working, so team members connect
+to shared servers as before. If the service cannot sign certificates for a
+while, the commands say that instead; try again later.
 
 ---
 

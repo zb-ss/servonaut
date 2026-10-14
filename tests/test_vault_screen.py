@@ -21,7 +21,7 @@ from servonaut.screens.vault import (
     show_pending_device,
 )
 from servonaut.services.api_client import APIError, FeatureDisabledError
-from servonaut.services.vault.errors import SSH_CA_COMING_SOON
+from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
@@ -405,7 +405,7 @@ async def _ca_team_options_loaded(pilot, screen: Screen) -> None:
 
 
 @pytest.mark.asyncio
-async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actions() -> None:
+async def test_switched_off_certificates_are_explained_and_hold_back_ca_actions() -> None:
     service = _SwitchableCaService()
     app = _CaHost(service)
     async with app.run_test(size=(160, 50)) as pilot:
@@ -414,10 +414,10 @@ async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actio
         assert isinstance(screen, CaScreen)
         status = screen.query_one("#ca_status", Static)
         (await _ca_team_picker(screen)).value = "ops"  # choosing a team loads its CA status
-        await wait_until(lambda: "coming soon" in str(status.render()))
+        await wait_until(lambda: "switched off" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
 
-        assert str(status.render()) == SSH_CA_COMING_SOON
+        assert str(status.render()) == SSH_CA_SWITCHED_OFF
         assert "Could not load" not in str(status.render())
         assert _ca_actions_disabled(screen) == [True, True, True, True]
         assert screen.query_one("#ca_refresh", Button).disabled is False
@@ -467,8 +467,8 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
         await wait_until(lambda: bool(app.notes))
 
         assert service.audits == 1
-        assert app.notes == [(SSH_CA_COMING_SOON, {"severity": "information", "markup": False})]
-        assert str(screen.query_one("#ca_status", Static).render()) == SSH_CA_COMING_SOON
+        assert app.notes == [(SSH_CA_SWITCHED_OFF, {"severity": "information", "markup": False})]
+        assert str(screen.query_one("#ca_status", Static).render()) == SSH_CA_SWITCHED_OFF
         assert _ca_actions_disabled(screen) == [True, True, True, True]
 
 
