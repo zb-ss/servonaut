@@ -35,7 +35,12 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._busy_work import BusyJob, BusyWork
 from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
-from servonaut.screens._demo_resolve import connection_instance, refuse_unresolved
+from servonaut.screens._demo_resolve import (
+    connection_instance,
+    display_username,
+    hide_login,
+    refuse_unresolved,
+)
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
 
@@ -206,11 +211,19 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         # Whether a first connection records the host key (accept-new), so the dialog can make one.
         self._can_fetch_host_key = False
         self._busy = BusyWork(self, "#vault_bind_busy")
+        # The real login, and what the login field was given for it: in demo
+        # mode the stand-in the server details show. An untouched stand-in
+        # binds the real login; once the user types, the field holds theirs.
+        self._login = ""
+        self._login_shown = ""
+        self._login_written: set[str] = set()
+        self._login_edited = False
 
     def compose(self) -> ComposeResult:
         login = str(self._instance.get("login_user") or self._instance.get("username") or "")
         if not login and not self._team:
             login = self._suggested_login()
+        self._login = login
         rows: list[Any] = [
             Static("[bold]Use vault key[/bold]"),
             Static(escape(self.scrub_for_display(self._scope_text())), id="vault_bind_scope"),
@@ -222,7 +235,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             Select([], prompt="Choose a vault first", id="vault_bind_item", disabled=True),
             Static("", id="vault_bind_match"),
             Label("Login user"),
-            Input(value=login, placeholder="Login user", id="vault_bind_login"),
+            Input(value=self._login_for_display(), placeholder="Login user", id="vault_bind_login"),
         ]
         if self._team:
             rows.append(Input(placeholder="Verified OpenSSH host keys, comma separated (optional)", id="vault_bind_host_keys"))
@@ -262,6 +275,25 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             return ""
         return login if isinstance(login, str) else ""
 
+    def _login_for_display(self) -> str:
+        """The value the login field shows for the real login, remembered as ours."""
+        self._login_shown = display_username(self.app, self._login) or ""
+        self._login_written.add(self._login_shown)
+        return self._login_shown
+
+    def _show_login(self) -> None:
+        """Put the login back in its field for the current demo mode, unless the user typed one."""
+        if self._login_edited:
+            return
+        self.query_one("#vault_bind_login", Input).value = self._login_for_display()
+
+    def _login_value(self) -> str:
+        """The login the form names: an untouched demo stand-in is the real login."""
+        value = self.query_one("#vault_bind_login", Input).value.strip()
+        if not self._login_edited and value == self._login_shown.strip():
+            return self._login
+        return value
+
     def _scope_text(self) -> str:
         if self._team:
             return f"Shared server in team {self._team}: everyone in the team uses this key."
@@ -271,15 +303,17 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self.dismiss(None)
 
     def scrub_for_display(self, value: object) -> str:
-        """Demo-safe text: vault, key and host names are hidden in demo mode."""
+        """Demo-safe text: vault, key, host and login names are hidden in demo mode."""
         text = str(value)
         redactor = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redactor is not None:
-            return str(redactor.scrub_stream(text))
+            # ssh's own messages quote the login ("login@host: Permission denied").
+            return str(redactor.scrub_stream(hide_login(self.app, text, self._login)))
         return text
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw names and messages under the current demo mode, keeping the choices."""
+        self._show_login()
         self._show_options("#vault_bind_vault", self._vault_choices, "vault_id")
         self._show_options("#vault_bind_item", self._key_choices, "item_id")
         self.query_one("#vault_bind_scope", Static).update(escape(self.scrub_for_display(self._scope_text())))
@@ -306,6 +340,11 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         return [choice for choice, _ in shown]
 
     def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "vault_bind_login":
+            # Our own writes echo back as Changed events; anything else is the user typing.
+            if event.value not in self._login_written:
+                self._login_edited = True
+            return
         pickers = {
             "vault_bind_vault_search": ("#vault_bind_vault", self._vault_choices, "vault_id", "vaults"),
             "vault_bind_item_search": ("#vault_bind_item", self._key_choices, "item_id", "keys"),
@@ -362,7 +401,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         visit = getattr(self._service, "visit_for_host_key", None)
         if not callable(visit):
             return
-        login = self.query_one("#vault_bind_login", Input).value.strip() or None
+        login = self._login_value() or None
         self._say("")
         try:
             with self._busy.running("Connecting once to record the server's host key…",
@@ -550,7 +589,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         ):
             self._say("Choose a vault and an SSH key first.")
             return
-        login = self.query_one("#vault_bind_login", Input).value.strip()
+        login = self._login_value()
         if not self._team and not login:
             self._say("A server of your own needs the login user the key is for.")
             return
