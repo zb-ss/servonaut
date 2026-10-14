@@ -317,7 +317,7 @@ async def test_demo_mode_redacts_ca_status_and_repaints_cached_value() -> None:
     class Service:
         async def ca_status(self, *, team: str):
             assert team == "private-team"
-            return {"hostname": "private-ca-host", "enabled": True}
+            return {"enabled": True, "user_ca_fingerprint": "SHA256:private-ca-host"}
 
     class Host(App):
         demo_mode = True
@@ -365,7 +365,7 @@ class _SwitchableCaService:
 
     async def ca_status(self, *, team: str):
         self._refuse(team)
-        return {"team": team, "enabled": True}
+        return {"enabled": True, "user_ca_fingerprint": f"SHA256:{team}-user-ca"}
 
     async def ca_audit(self, *, team: str):
         self.audits += 1
@@ -429,7 +429,7 @@ async def test_switched_off_certificates_show_coming_soon_and_hold_back_ca_actio
 
         service.switched_off.clear()
         await pilot.click("#ca_refresh")
-        await wait_until(lambda: "enabled: True" in str(status.render()))
+        await wait_until(lambda: "SSH certificates are on" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         assert _ca_actions_disabled(screen) == [False, False, False, False]
 
@@ -446,7 +446,7 @@ async def test_another_team_offers_the_ca_actions_again() -> None:
         await wait_until(lambda: _ca_actions_disabled(screen) == [True, True, True, True])
 
         team.value = "platform"
-        await wait_until(lambda: "team: platform" in str(status.render()))
+        await wait_until(lambda: "SHA256:platform-user-ca" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         assert _ca_actions_disabled(screen) == [False, False, False, False]
 
@@ -460,7 +460,7 @@ async def test_an_action_that_meets_switched_off_certificates_informs_instead_of
         screen = app.screen
         status = screen.query_one("#ca_status", Static)
         (await _ca_team_picker(screen)).value = "platform"
-        await wait_until(lambda: "team: platform" in str(status.render()))
+        await wait_until(lambda: "SHA256:platform-user-ca" in str(status.render()))
         await _ca_team_options_loaded(pilot, screen)
         service.switched_off.add("platform")  # switched off after the status was read
         await pilot.click("#ca_audit")
@@ -485,7 +485,7 @@ async def test_other_ca_action_failures_still_notify_an_error() -> None:
         await pilot.pause()
         screen = app.screen
         (await _ca_team_picker(screen)).value = "ops"
-        await wait_until(lambda: "enabled: True" in str(screen.query_one("#ca_status", Static).render()))
+        await wait_until(lambda: "SSH certificates are on" in str(screen.query_one("#ca_status", Static).render()))
         await _ca_team_options_loaded(pilot, screen)
         await screen._audit("ops")
 

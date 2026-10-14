@@ -15,6 +15,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
+from servonaut.screens._ca_text import audit_text, enroll_text, report_text, status_text
 from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
 from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
@@ -141,6 +142,8 @@ class CaScreen(Screen):
     def __init__(self) -> None:
         super().__init__()
         self._status_raw = _CHOOSE_TEAM_STATUS
+        # The CA status on show (team, result), redrawn once the server names load.
+        self._shown_ca_status: tuple[str, Mapping[str, Any]] | None = None
         # The team whose CA the service reported as not switched on yet.
         self._switched_off_team: str | None = None
         # The team the server and break-glass pickers were last filled for.
@@ -202,12 +205,22 @@ class CaScreen(Screen):
         return text
 
     def _set_status(self, value: object) -> None:
+        self._shown_ca_status = None
         self._status_raw = str(value)
         self.query_one("#ca_status", Static).update(escape(self.scrub_for_display(value)))
 
+    def _show_ca_status(self, team: str, result: Mapping[str, Any]) -> None:
+        """Show *team*'s CA status in words, naming servers by their picker labels."""
+        labels = {str(value): label for value, label in self._picker_options.get("ca_server", [])}
+        self._set_status(status_text(result, team=team, server_labels=labels))
+        self._shown_ca_status = (team, result)
+
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the cached status, guidance and picker labels under the current demo redaction mode."""
-        self._set_status(self._status_raw)
+        if self._shown_ca_status is not None:
+            self._show_ca_status(*self._shown_ca_status)
+        else:
+            self._set_status(self._status_raw)
         self._render_hints()
         for picker_id, options in self._picker_options.items():
             select = self.query_one(f"#{picker_id}", Select)
@@ -386,6 +399,8 @@ class CaScreen(Screen):
         options: list[tuple[object, str]] = [(_EVERY_ENROLLED_SERVER, _EVERY_ENROLLED_SERVER_LABEL), *servers]
         self._fill_picker("ca_server", options, prompt="Choose a server", keep=keep)
         self._set_picker_state("ca_server", "ready")
+        if self._shown_ca_status is not None and self._shown_ca_status[0] == team:
+            self._show_ca_status(*self._shown_ca_status)
 
     async def _load_break_glass_keys(self, team: str, keep: object) -> None:
         list_vaults, list_items = self._service_method("vault_choices"), self._service_method("list_items")
@@ -561,13 +576,9 @@ class CaScreen(Screen):
             return
         self._clear_switched_off()
         if isinstance(result, Mapping):
-            summary = ", ".join(
-                f"{key}: {value}" for key, value in result.items()
-                if not isinstance(value, (dict, list))
-            )
+            self._show_ca_status(team, result)
         else:
-            summary = str(result)
-        self._set_status(summary or "No CA status returned.")
+            self._set_status(str(result) or "No CA status returned.")
 
     async def _audit(self, team: str) -> None:
         method = self._service_method("ca_audit")
@@ -580,7 +591,7 @@ class CaScreen(Screen):
         except Exception as exc:
             self._notify_failure(team, "CA audit", exc)
             return
-        self._set_status(self.scrub_for_display(result))
+        self._set_status(audit_text(result) if isinstance(result, Mapping) else report_text("CA audit", result))
 
     async def _enroll(self, team: str, server: str, break_glass_item: str | None = None) -> None:
         method = self._service_method("ca_enroll")
@@ -604,7 +615,9 @@ class CaScreen(Screen):
         except Exception as exc:
             self._notify_failure(team, "CA enrollment", exc)
             return
-        self._set_status(self.scrub_for_display(result))
+        self._set_status(
+            enroll_text(result, server=name) if isinstance(result, Mapping) else report_text("CA enrollment", result)
+        )
 
     async def _deliver_krl(self, team: str, servers: list[str]) -> None:
         method = self._service_method("ca_deliver_krl")
@@ -620,7 +633,7 @@ class CaScreen(Screen):
         except Exception as exc:
             self._notify_failure(team, "KRL delivery", exc)
             return
-        self._set_status(self.scrub_for_display(result))
+        self._set_status(report_text("Revocation list delivery", result))
 
     async def _scan_break_glass(self, team: str, servers: list[str]) -> None:
         method = self._service_method("ca_break_glass_scan")
@@ -637,7 +650,7 @@ class CaScreen(Screen):
             self._notify_failure(team, "Break-glass scan", exc)
             return
         reported = result.get("reported", 0) if isinstance(result, Mapping) else 0
-        self._set_status(self.scrub_for_display(result))
+        self._set_status(report_text("Break-glass scan", result))
         if reported:
             self.app.notify(
                 f"Reported {reported} break-glass login(s) to the team.", severity="warning", markup=False,
