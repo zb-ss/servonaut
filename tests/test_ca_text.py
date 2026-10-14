@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from servonaut.screens._ca_text import audit_text, enroll_text, report_text, status_text
 
-SERVER_ID = "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f"
+SERVER_ID = "server-0001-web"
 LABELS = {SERVER_ID: "server-1 (192.0.2.10)"}
 
 STATUS = {
@@ -22,7 +22,7 @@ STATUS = {
 # plus the executed result.
 ENROLLED = {
     "enrollment": {
-        "enrollment_id": "71376930-7935-40b2-b4e7-5762e39b3dd2",
+        "enrollment_id": "enrollment-0001",
         "user_ca_public_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample team-gen1"],
         "krl": "U1NIS1JMAAAA",
         "server": {"id": SERVER_ID, "name": "server-1", "hostname": "192.0.2.10", "port": 22},
@@ -68,7 +68,7 @@ def test_switched_on_certificates_are_described():
 def test_a_server_whose_name_is_not_known_yet_is_shown_by_a_short_id():
     text = status_text(STATUS, team="example-team", server_labels={})
 
-    assert "Logins on server c2a4e6f8: deploy" in text
+    assert "Logins on server server-0: deploy" in text
 
 
 def test_a_successful_enrollment_lists_its_checks_and_hides_the_raw_record():
@@ -79,7 +79,7 @@ def test_a_successful_enrollment_lists_its_checks_and_hides_the_raw_record():
         "Checks: pre-check ok · managed files ok · host certificate ok · sshd config test ok · "
         "sshd reload ok · certificate login ok",
     ]
-    for raw in ("enrollment_id", "AAAAC3", "U1NIS1JM", "71376930", "{"):
+    for raw in ("enrollment_id", "enrollment-0001", "AAAAC3", "U1NIS1JM", "{"):
         assert raw not in text
 
 
