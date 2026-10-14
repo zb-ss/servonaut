@@ -11,7 +11,7 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
-from servonaut.services.vault.display import terminal_safe
+from servonaut.services.vault.display import flatten_rows, terminal_safe
 from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
 
 _EXIT_OK = 0
@@ -128,27 +128,10 @@ def _print(value: Any, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
     elif isinstance(payload, Mapping):
-        for key, item in _flatten(payload):
+        for key, item in flatten_rows(payload):
             print(f"{key}: {item}")
     else:
         print(payload)
-
-
-def _flatten(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
-    """Dotted ``key: value`` rows, so nested policy and host data are shown too."""
-    if isinstance(value, Mapping):
-        rows: list[tuple[str, Any]] = []
-        for key, item in value.items():
-            rows.extend(_flatten(item, f"{prefix}{key}."))
-        return rows if rows or not prefix else [(prefix[:-1], "{}")]
-    if isinstance(value, list):
-        if not value:
-            return [(prefix[:-1], "[]")] if prefix else []
-        rows = []
-        for index, item in enumerate(value, start=1):
-            rows.extend(_flatten(item, f"{prefix}{index}."))
-        return rows
-    return [(prefix[:-1], value)]
 
 
 def _confirm(args: argparse.Namespace, action: str) -> bool:

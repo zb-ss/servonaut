@@ -87,7 +87,7 @@ class _PickerService:
             raise FeatureDisabledError(
                 code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
             )
-        return {"team": team, "enabled": True}
+        return {"enabled": True, "user_ca_fingerprint": f"SHA256:{team}-user-ca"}
 
     async def ca_audit(self, *, team: str) -> dict[str, Any]:
         await self._answer("ca_audit", team=team)
@@ -95,7 +95,7 @@ class _PickerService:
 
     async def ca_enroll(self, *, team: str, server: str, break_glass_item_id: str | None, confirmation: Any):
         await self._answer("ca_enroll", team=team, server=server, break_glass_item_id=break_glass_item_id)
-        return {"status": "enrolled"}
+        return {"result": {"status": "succeeded", "steps": [{"name": "precheck", "status": "ok"}]}}
 
     async def ca_deliver_krl(self, *, team: str, servers: list[str]):
         await self._answer("ca_deliver_krl", team=team, servers=servers)
@@ -223,7 +223,7 @@ async def test_a_single_team_is_chosen_for_the_user() -> None:
     app = _Host(service)
     async with app.run_test(size=(160, 50)) as pilot:
         screen = app.screen
-        await wait_until(lambda: "team: ops" in _text(screen, "ca_status"))
+        await wait_until(lambda: "User CA: SHA256:ops-user-ca" in _text(screen, "ca_status"))
         await _team_settled(pilot, screen)
         assert _picker(screen, "ca_team").value == "ops"
         assert service.calls_to("ca_status") == [{"team": "ops"}]
@@ -409,7 +409,7 @@ async def test_a_second_action_neither_starts_nor_cancels_a_running_enrollment()
         assert app.screen is screen
 
         service.gates["ca_enroll"].set()
-        await wait_until(lambda: "enrolled" in _text(screen, "ca_status"))
+        await wait_until(lambda: "is enrolled" in _text(screen, "ca_status"))
         assert "ca_enroll" in service.finished
         await wait_until(lambda: _ca_actions_disabled(screen) == [False, False, False, False])
 
@@ -614,3 +614,25 @@ async def test_pickers_fit_and_actions_stay_reachable_at_100x30() -> None:
         content.scroll_to_widget(scan, animate=False)
         await pilot.pause()
         assert scan.region.bottom <= content.region.bottom
+
+
+@pytest.mark.asyncio
+async def test_the_status_names_servers_once_their_list_loads() -> None:
+    """The status can arrive before the server list: it is redrawn with the server names."""
+    service = _PickerService(teams=[_TEAMS[0]])
+    service.gates["shared_server_choices"] = asyncio.Event()
+    original = service.ca_status
+
+    async def ca_status(*, team: str) -> dict[str, Any]:
+        return {**await original(team=team), "logins_by_server": {"srv-web": ["deploy"]}}
+
+    service.ca_status = ca_status  # type: ignore[method-assign]
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)):
+        screen = app.screen
+        await wait_until(lambda: "Logins on server srv-web: deploy" in _text(screen, "ca_status"))
+
+        service.gates["shared_server_choices"].set()
+
+        await wait_until(lambda: "Logins on web-1 (web-1): deploy" in _text(screen, "ca_status"))
+        assert "{" not in _text(screen, "ca_status")
