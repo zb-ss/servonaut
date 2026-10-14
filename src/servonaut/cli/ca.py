@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
 from servonaut.services.vault.display import flatten_rows, terminal_safe
-from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
+from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, is_feature_disabled, vault_failure_reason
 
 _EXIT_OK = 0
 _EXIT_ERROR = 1
@@ -250,13 +250,13 @@ def _report_ca_switched_off(args: argparse.Namespace) -> int:
     if args.ca_command == "status":
         if args.json:
             _print(
-                {"enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_COMING_SOON},
+                {"enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_SWITCHED_OFF},
                 True,
             )
         else:
-            print(SSH_CA_COMING_SOON)
+            print(SSH_CA_SWITCHED_OFF)
         return _EXIT_OK
-    print(f"{SSH_CA_COMING_SOON} Nothing was changed.", file=sys.stderr)
+    print(f"{SSH_CA_SWITCHED_OFF} Nothing was changed.", file=sys.stderr)
     return _EXIT_ERROR
 
 

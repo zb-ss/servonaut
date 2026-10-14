@@ -18,7 +18,7 @@ from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._ca_text import audit_text, enroll_text, report_text, status_text
 from servonaut.services.vault.ca_enrollment import BREAK_GLASS_AUTHORIZED_KEYS, MANAGED_PATHS_SUMMARY
 from servonaut.services.vault.display import terminal_safe
-from servonaut.services.vault.errors import SSH_CA_COMING_SOON, is_feature_disabled, vault_failure_reason
+from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, is_feature_disabled, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -106,11 +106,42 @@ class CaEnrollmentConfirmModal(ModalScreen[str]):
             self.dismiss("")
 
 
-class CaScreen(Screen):
-    """Read-only CA state with an explicit audit action.
+class CaEnableConfirmModal(ModalScreen[bool]):
+    """Ask before switching on SSH certificates for a team."""
 
-    Enrollment and policy changes remain in their command/modal flows because
-    they require typed confirmation and a selected team/server.
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=True)]
+
+    def __init__(self, team_label: str) -> None:
+        super().__init__()
+        self._team_label = team_label
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        yield Vertical(
+            Static(f"[bold]Switch on SSH certificates for {escape(self._team_label)}?[/bold]", id="ca_enable_title"),
+            Static(
+                "Servonaut creates this team's user and host certificate authorities. "
+                "No server changes until you enroll it."
+            ),
+            Horizontal(
+                Button("Cancel", id="ca_enable_cancel"),
+                Button("Switch on", id="ca_enable_confirm", variant="warning"),
+            ),
+            id="ca_enable_modal",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "ca_enable_confirm")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class CaScreen(Screen):
+    """A team's SSH certificate state, with the actions that change it.
+
+    Switching certificates on asks first; enrollment needs the host name
+    typed. Policy changes stay in the CLI.
     """
 
     DEFAULT_CSS = """
@@ -144,8 +175,10 @@ class CaScreen(Screen):
         self._status_raw = _CHOOSE_TEAM_STATUS
         # The CA status on show (team, result), redrawn once the server names load.
         self._shown_ca_status: tuple[str, Mapping[str, Any]] | None = None
-        # The team whose CA the service reported as not switched on yet.
+        # The team for which the service reported SSH certificates switched off.
         self._switched_off_team: str | None = None
+        # The team whose own status says its certificates are off: it can switch them on.
+        self._not_enabled_team: str | None = None
         # The team the server and break-glass pickers were last filled for.
         self._active_team = ""
         # Whether the team picker offers at least one team; Refresh lists them again otherwise.
@@ -172,6 +205,7 @@ class CaScreen(Screen):
                 yield Select[str]([], prompt="Choose a team first", id="ca_break_glass", disabled=True)
                 yield Static("", id="ca_hint")
                 yield Static(_CHOOSE_TEAM_STATUS, id="ca_status")
+                yield Button("Switch on SSH certificates", id="ca_enable", variant="primary")
                 yield Button("Refresh status", id="ca_refresh")
                 yield Button("Audit issuance chain", id="ca_audit")
                 yield Button("Enroll server", id="ca_enroll")
@@ -340,6 +374,8 @@ class CaScreen(Screen):
         self._active_team = team
         if self._switched_off_team is not None and team != self._switched_off_team:
             self._clear_switched_off()
+        if self._not_enabled_team is not None and team != self._not_enabled_team:
+            self._set_not_enabled(None)
         self._load_team(team)
 
     def _load_team(self, team: str, *, keep_server: object = None, keep_break_glass: object = None) -> None:
@@ -468,18 +504,27 @@ class CaScreen(Screen):
             "ca_krl": servers_ready,
             "ca_break_glass_scan": servers_ready,
         }
-        held_back = not self._team() or self._switched_off_team is not None or self._action_running
+        not_enabled = bool(self._team()) and self._not_enabled_team == self._team()
+        held_back = not self._team() or self._switched_off_team is not None or not_enabled or self._action_running
         for button_id in self._CA_ACTION_IDS:
             self.query_one(f"#{button_id}", Button).disabled = held_back or not allowed[button_id]
+        # Offered only while the chosen team's own status says its certificates are off.
+        enable = self.query_one("#ca_enable", Button)
+        enable.display = not_enabled and self._switched_off_team is None
+        enable.disabled = self._action_running
+
+    def _set_not_enabled(self, team: str | None) -> None:
+        self._not_enabled_team = team
+        self._sync_actions()
 
     def _show_switched_off(self, team: str) -> None:
-        """Present certificates that are not switched on yet as information, not a failure."""
+        """Present certificates the service has switched off as information, not a failure."""
         selected = self._team()
         if selected and selected != team:
             return  # a late answer about a team no longer selected must not hold back this one
         self._switched_off_team = team
         self._sync_actions()
-        self._set_status(SSH_CA_COMING_SOON)
+        self._set_status(SSH_CA_SWITCHED_OFF)
 
     def _clear_switched_off(self) -> None:
         self._switched_off_team = None
@@ -488,7 +533,7 @@ class CaScreen(Screen):
     def _notify_failure(self, team: str, action: str, exc: Exception) -> None:
         if is_feature_disabled(exc, "ssh_ca"):
             self._show_switched_off(team)
-            self.app.notify(SSH_CA_COMING_SOON, severity="information", markup=False)
+            self.app.notify(SSH_CA_SWITCHED_OFF, severity="information", markup=False)
             return
         self.app.notify(f"{action} failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
 
@@ -497,7 +542,7 @@ class CaScreen(Screen):
         if button_id == "ca_refresh":
             self.action_refresh()
             return
-        if button_id not in self._CA_ACTION_IDS:
+        if button_id not in self._CA_ACTION_IDS and button_id != "ca_enable":
             return
         # The buttons are disabled in these cases; a press already queued must not slip through.
         team = self._team()
@@ -505,6 +550,10 @@ class CaScreen(Screen):
             self.app.notify("Another CA action is still running.", severity="warning", markup=False)
         elif not team:
             self.app.notify("Choose a team first.", severity="warning", markup=False)
+        elif button_id == "ca_enable":
+            self._start_action(self._enable(team))
+        elif self._not_enabled_team == team:
+            self.app.notify("Switch on SSH certificates for this team first.", severity="warning", markup=False)
         elif button_id == "ca_audit":
             self._start_action(self._audit(team))
         elif self._picker_state.get("ca_server") != "ready":
@@ -576,9 +625,34 @@ class CaScreen(Screen):
             return
         self._clear_switched_off()
         if isinstance(result, Mapping):
+            self._set_not_enabled(None if result.get("enabled") else team)
             self._show_ca_status(team, result)
         else:
             self._set_status(str(result) or "No CA status returned.")
+
+    def _team_label(self, team: str) -> str:
+        label = dict(self._picker_options.get("ca_team", [])).get(team) or team
+        return self.scrub_for_display(terminal_safe(label))
+
+    async def _enable(self, team: str) -> None:
+        method = self._service_method("ca_enable")
+        if method is None:
+            self.app.notify("SSH certificates cannot be switched on in this session.", severity="warning", markup=False)
+            return
+        if not await self.app.push_screen_wait(CaEnableConfirmModal(self._team_label(team))):
+            return
+        try:
+            with self._busy.running("Switching on SSH certificates…"):
+                result = await self._call(method, team=team)
+        except Exception as exc:
+            self._notify_failure(team, "Switching on SSH certificates", exc)
+            return
+        self.app.notify(f"SSH certificates are on for {self._team_label(team)}.", markup=False)
+        if self._team() != team:
+            return  # another team is on screen now; its status stays
+        if isinstance(result, Mapping):
+            self._set_not_enabled(None if result.get("enabled") else team)
+            self._show_ca_status(team, result)
 
     async def _audit(self, team: str) -> None:
         method = self._service_method("ca_audit")

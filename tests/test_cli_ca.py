@@ -8,7 +8,7 @@ import pytest
 
 from servonaut.cli import ca
 from servonaut.services.api_client import FeatureDisabledError
-from servonaut.services.vault.errors import SSH_CA_COMING_SOON
+from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -286,11 +286,11 @@ def _run_switched_off(argv: list[str]) -> int:
         ca.set_ca_service_factory(None)
 
 
-def test_status_says_certificates_are_coming_soon_and_succeeds(capsys) -> None:
+def test_status_says_certificates_are_switched_off_and_succeeds(capsys) -> None:
     assert _run_switched_off(["ca", "status", "--team", "ops"]) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == f"{SSH_CA_COMING_SOON}\n"
+    assert captured.out == f"{SSH_CA_SWITCHED_OFF}\n"
     assert captured.err == ""
 
 
@@ -298,7 +298,7 @@ def test_status_json_reports_certificates_as_not_available(capsys) -> None:
     assert _run_switched_off(["ca", "status", "--team", "ops", "--json"]) == 0
 
     assert json.loads(capsys.readouterr().out) == {
-        "enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_COMING_SOON,
+        "enabled": False, "available": False, "reason": "feature_disabled", "message": SSH_CA_SWITCHED_OFF,
     }
 
 
@@ -315,14 +315,14 @@ def test_status_json_reports_certificates_as_not_available(capsys) -> None:
     ["ca", "audit", "--team", "ops"],
     ["ca", "audit", "--team", "ops", "--json"],
 ])
-def test_other_commands_say_coming_soon_and_that_nothing_changed(argv, capsys, monkeypatch) -> None:
+def test_other_commands_say_certificates_are_switched_off_and_that_nothing_changed(argv, capsys, monkeypatch) -> None:
     # Host jobs only reach the service from a terminal; nothing is typed here.
     monkeypatch.setattr(ca.sys.stdin, "isatty", lambda: True)
     assert _run_switched_off(argv) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == f"{SSH_CA_COMING_SOON} Nothing was changed.\n"
+    assert captured.err == f"{SSH_CA_SWITCHED_OFF} Nothing was changed.\n"
 
 
 def test_a_wrapped_switched_off_refusal_is_reported_the_same_way(capsys) -> None:
@@ -339,7 +339,7 @@ def test_a_wrapped_switched_off_refusal_is_reported_the_same_way(capsys) -> None
     finally:
         ca.set_ca_service_factory(None)
 
-    assert capsys.readouterr().err == f"{SSH_CA_COMING_SOON} Nothing was changed.\n"
+    assert capsys.readouterr().err == f"{SSH_CA_SWITCHED_OFF} Nothing was changed.\n"
 
 
 def test_another_switched_off_feature_still_fails_status(capsys) -> None:
@@ -357,5 +357,5 @@ def test_another_switched_off_feature_still_fails_status(capsys) -> None:
 
     err = capsys.readouterr().err
     assert err.startswith("CA request failed (")
-    assert "coming soon" not in err
+    assert "SSH certificates are switched off" not in err
     assert "server text" not in err

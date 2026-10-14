@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 from servonaut.services.api_client import APIClient, APIError, FeatureDisabledError
 from servonaut.services.vault.errors import (
-    SSH_CA_COMING_SOON,
+    SSH_CA_SWITCHED_OFF,
     VaultUserError,
     is_feature_disabled,
     vault_failure_reason,
@@ -118,11 +118,11 @@ def _ssh_ca_switched_off() -> FeatureDisabledError:
     )
 
 
-def test_switched_off_ssh_certificates_are_announced_as_coming_soon() -> None:
+def test_switched_off_ssh_certificates_are_explained_not_reported_as_a_failure() -> None:
     reason = vault_failure_reason(_ssh_ca_switched_off())
 
-    assert reason == SSH_CA_COMING_SOON.rstrip(".")  # shown inside "... failed (reason)."
-    assert reason.startswith("SSH certificates are coming soon")
+    assert reason == SSH_CA_SWITCHED_OFF.rstrip(".")  # shown inside "... failed (reason)."
+    assert reason.startswith("SSH certificates are switched off on this Servonaut service")
     assert "vault keys" in reason
     assert "server text" not in reason
 
@@ -149,7 +149,7 @@ def test_feature_disabled_looks_through_a_generic_wrapper() -> None:
             raise RuntimeError("wrapper") from inner
     except RuntimeError as outer:
         assert is_feature_disabled(outer, "ssh_ca")
-        assert vault_failure_reason(outer) == SSH_CA_COMING_SOON.rstrip(".")
+        assert vault_failure_reason(outer) == SSH_CA_SWITCHED_OFF.rstrip(".")
 
 
 @pytest.mark.parametrize("exc", [
