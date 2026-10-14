@@ -619,3 +619,49 @@ async def test_unusable_roots_are_refused_with_the_reason(qa_sandbox, journey):
         refused = await qa_sandbox.command("up", "--root", str(inside))
         assert refused.returncode == 2 and "is inside the checkout" in refused.stderr
         assert not inside.exists()
+
+
+def test_a_long_root_gives_the_children_a_short_temp_dir(journey, monkeypatch):
+    """A Vault key's private SSH agent needs room for its socket under TMPDIR.
+
+    Under a deep checkout the sandbox's own temp directory leaves too little
+    room, and the agent's fallback (/tmp) is outside the guard's write roots,
+    so such a sandbox gives its children a short private temp directory.
+    """
+    from e2e.sandbox import owner
+
+    short_base = journey.directory / "s"
+    short_base.mkdir()
+    monkeypatch.setattr(owner, "_SHORT_TMP_BASE", str(short_base))
+    monkeypatch.delenv("SERVONAUT_E2E_WRITE_ROOTS", raising=False)
+    deep = journey.directory / ("d" * 60) / "user"
+    shallow = journey.directory / "u"
+
+    assert owner.needs_short_temp_dir(Sandbox(deep).tmp)
+    # Only a temp directory that is too long gets a short stand-in.
+    assert (owner.make_short_temp_dir(shallow) is None) == (not owner.needs_short_temp_dir(Sandbox(shallow).tmp))
+
+    made = owner.make_short_temp_dir(deep)
+    assert made is not None and made.parent == short_base.resolve()
+    assert made.is_dir() and (made.stat().st_mode & 0o777) == 0o700
+    # The real base, /tmp, leaves room for the socket.
+    assert not owner.needs_short_temp_dir(Path("/tmp/servonaut-qa-abcdefgh"))
+
+
+def test_a_confined_sandbox_never_reaches_outside_its_write_roots(journey, monkeypatch):
+    """A sandbox started inside a guarded journey keeps to that journey's roots."""
+    from e2e.sandbox import owner
+
+    deep = journey.directory / ("d" * 60) / "user"
+    monkeypatch.setenv("SERVONAUT_E2E_WRITE_ROOTS", str(journey.directory / ("r" * 60)))
+    assert owner.make_short_temp_dir(deep) is None
+
+    short_root = journey.directory / "s2"
+    short_root.mkdir()
+    monkeypatch.setattr(owner, "_SHORT_TMP_BASE", "/nonexistent-base")
+    monkeypatch.setenv("SERVONAUT_E2E_WRITE_ROOTS", os.pathsep.join([str(journey.directory / ("r" * 60)), str(short_root)]))
+    made = owner.make_short_temp_dir(deep)
+    if owner.needs_short_temp_dir(short_root / "servonaut-qa-xxxxxxxx"):
+        assert made is None  # even the shortest root is too long here
+    else:
+        assert made is not None and made.parent == short_root.resolve()

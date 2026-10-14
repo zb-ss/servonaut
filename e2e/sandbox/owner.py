@@ -57,6 +57,48 @@ from typing import Any, Callable, Iterator, Optional
 from e2e.harness import bootstrap
 from e2e.sandbox import state
 
+# A Vault key's private SSH agent puts its socket under TMPDIR, and uses /tmp
+# when TMPDIR leaves too little room for a Unix socket path ("svn-agent-",
+# eight random characters, separators and "agent-<pid>-<16 hex>.sock", with
+# slack). The guard keeps the sandbox's children out of /tmp, so a sandbox
+# whose own temp directory is that long gives its children a short one.
+_UNIX_SOCKET_PATH_MAX = 107 if sys.platform.startswith("linux") else 103
+_AGENT_SOCKET_ROOM = 60
+_SHORT_TMP_BASE = "/tmp"
+
+
+def needs_short_temp_dir(tmp: Path) -> bool:
+    """Whether *tmp* is too long to hold a private SSH agent's socket."""
+    return len(os.fsencode(os.path.realpath(tmp))) + _AGENT_SOCKET_ROOM > _UNIX_SOCKET_PATH_MAX
+
+
+def _short_temp_base() -> Optional[str]:
+    """Where a short temp directory may go, or None.
+
+    /tmp, unless an outer e2e guard confines this process (a sandbox started
+    by a journey): then only one of its write roots that is short enough, and
+    otherwise none, since even an attempt outside them counts as an escape.
+    """
+    confined = os.environ.get("SERVONAUT_E2E_WRITE_ROOTS")
+    if not confined:
+        return _SHORT_TMP_BASE if os.path.isdir(_SHORT_TMP_BASE) else None
+    for root in sorted(filter(None, confined.split(os.pathsep)), key=len):
+        if not needs_short_temp_dir(Path(root) / "servonaut-qa-xxxxxxxx"):
+            return root
+    return None
+
+
+def make_short_temp_dir(user_base: Path) -> Optional[Path]:
+    """A new private temp directory when *user_base*/tmp is too long, else None."""
+    from e2e.harness.bootstrap import Sandbox
+
+    base = _short_temp_base() if needs_short_temp_dir(Sandbox(user_base).tmp) else None
+    if base is None:
+        return None
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="servonaut-qa-", dir=base)).resolve()
+
 READY_PREFIX = "SANDBOX READY"
 # How often the owner looks for desktop requests and writes the request logs.
 _POLL_SECONDS = 0.5
@@ -284,6 +326,8 @@ class Owner:
         self.shims: Any = None
         self.user: Any = None
         self.child_env: Optional[dict] = None
+        # Short temp directory for the children, when the root makes theirs too long.
+        self.agent_tmp: Optional[Path] = None
         self._state_lock = threading.Lock()
         self._state: dict = {}
         self._started: list[Any] = []  # things with .stop(), in start order
@@ -303,6 +347,8 @@ class Owner:
 
     def start(self) -> None:
         with self.stop_request.deferred():
+            # Made before this process's guard is armed: it lies outside the root.
+            self.agent_tmp = make_short_temp_dir(self.root / "user")
             self.ctx = bootstrap.bootstrap(self.root)
             self.logs.mkdir()
             self.control.mkdir()
@@ -404,6 +450,12 @@ class Owner:
                 **endpoints.providers_env(self.providers),
             },
         )
+        if self.agent_tmp is not None:
+            for name in ("TMPDIR", "TMP", "TEMP"):
+                self.child_env[name] = str(self.agent_tmp)
+            self.child_env["SERVONAUT_E2E_WRITE_ROOTS"] = os.pathsep.join(
+                filter(None, [self.child_env.get("SERVONAUT_E2E_WRITE_ROOTS", ""), str(self.agent_tmp)])
+            )
         self._state = self._record(seeded)
         self._write_state()
 
@@ -619,6 +671,7 @@ class Owner:
             # Nothing of the sandbox runs any more; what is left lies
             # outside the root: the pointer, and a kept root's new name.
             ("lift this process's guard", bootstrap.load_guard().disarm_filesystem_and_spawns),
+            ("remove the short temp directory", self._remove_agent_tmp),
             ("release the pointer", lambda: release(self.pointer, self.claim_record)),
             ("put the kept sandbox directory aside", self._set_kept_root_aside),
             ("remove the sandbox directory", self._remove_root),
@@ -629,6 +682,11 @@ class Owner:
             except Exception as exc:  # noqa: BLE001 - stopping must finish
                 _say(f"could not {description}: {type(exc).__name__}: {exc}")
         self.lock.release()
+
+    def _remove_agent_tmp(self) -> None:
+        """Remove the children's short temp directory (kept roots keep only the root)."""
+        if self.agent_tmp is not None:
+            shutil.rmtree(self.agent_tmp, ignore_errors=True)
 
     def _flush_kept_logs(self) -> None:
         if self.keep and self.logs.is_dir():
