@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from rich.markup import escape
@@ -63,6 +64,20 @@ _ACTION_HELP: dict[str, str] = {
 
 logger = logging.getLogger(__name__)
 
+#: Display names of the credential sources a binding can name.
+_CREDENTIAL_SOURCE_LABELS: dict[str, str] = {
+    "servonaut_vault": "Servonaut Vault",
+    "bitwarden": "Bitwarden",
+}
+
+#: Binding source of a native Servonaut Vault key.
+_VAULT_SOURCE = "servonaut_vault"
+
+
+def credential_source_label(source: object) -> Optional[str]:
+    """The name shown for a binding's credential source, or None if unknown."""
+    return _CREDENTIAL_SOURCE_LABELS.get(source) if isinstance(source, str) else None
+
 
 class ConfirmSshVerifyModal(ModalScreen[bool]):
     """Brief blocking confirmation for the SSH probe action.
@@ -76,22 +91,34 @@ class ConfirmSshVerifyModal(ModalScreen[bool]):
         Binding("escape", "action_cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, host: str, has_ref: bool) -> None:
+    def __init__(self, host: str, has_ref: bool, *, vault: bool = False) -> None:
         """Initialize the modal.
 
         Args:
             host: Target host name / IP (cloud-origin — must be escaped).
             has_ref: True if a BW SSH ref is stored for this instance. When
                 False the modal offers "Add SSH ref" instead of the probe prompt.
+            vault: True when the server is bound to a Servonaut Vault key;
+                the probe then uses that key and ``has_ref`` is ignored.
         """
         super().__init__()
         self._host = host
         self._has_ref = has_ref
+        self._vault = vault
 
     def compose(self) -> ComposeResult:
         """Compose the confirm modal."""
         safe_host = escape(self._host)
-        if self._has_ref:
+        if self._vault:
+            body_text = (
+                f"About to check SSH to [bold]{safe_host}[/bold] with this "
+                "server's Servonaut Vault key.\n\n"
+                "This will:\n"
+                "  (1) load the key into a private, short-lived SSH agent\n"
+                "  (2) run ssh -o BatchMode=yes to test connectivity"
+            )
+            confirm_label = "Verify"
+        elif self._has_ref:
             body_text = (
                 f"About to run a local SSH probe against [bold]{safe_host}[/bold].\n\n"
                 "This will:\n"
@@ -613,10 +640,18 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Slow work started here (binding a vault key, preparing SSH) and the
         # button that would restart it, held back until it ends.
         self._busy = BusyWork(self, "#sa_busy")
+        # Source of the personal binding the vault service holds for this
+        # server. Personal bindings are not part of the row (only a team's
+        # shared servers carry theirs), so it is looked up after mount.
+        self._vault_binding_source: Optional[str] = None
 
     def on_mount(self) -> None:
         """Focus the first action button and populate the detail pane."""
         self.query_one("#btn_browse", Button).focus()
+        if self._vault_runtime_for_lookup() is not None:
+            self.run_worker(
+                self._refresh_vault_binding(), group="vault_binding_lookup", exclusive=True
+            )
         # Fetch reverse DNS for OVH VPS instances
         if self._instance.get('is_ovh') and self._instance.get('provider_type') == 'vps':
             if self._instance.get('public_ip'):
@@ -814,14 +849,58 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
     def _credential_source_line(self) -> str:
         """Describe the configured SSH credential without exposing its reference."""
+        label = credential_source_label(self._binding_source()) or "Automatic resolution"
+        return f"[dim]SSH credential:[/dim] {label}\n"
+
+    def _binding_source(self) -> Optional[str]:
+        """The credential source this screen bound or looked up, else the row's (team servers)."""
+        bound = getattr(self, "_vault_binding_source", None)
+        if bound:
+            return bound
         binding = self._instance.get("credential_binding")
         source = binding.get("source") if isinstance(binding, dict) else None
-        labels = {
-            "servonaut_vault": "Servonaut Vault",
-            "bitwarden": "Bitwarden",
-        }
-        label = labels.get(source, "Automatic resolution")
-        return f"[dim]SSH credential:[/dim] {label}\n"
+        return source if isinstance(source, str) and source else None
+
+    def _vault_runtime_for_lookup(self) -> Any:
+        """The vault service, when a personal binding could exist and be read.
+
+        A team's shared server carries its binding on the row. A personal
+        binding is read with the unlocked vault identity; without one this
+        device has no vault credential to use, so nothing is looked up.
+        """
+        if isinstance(self._instance.get("credential_binding"), dict):
+            return None
+        service = getattr(self.app, "vault_command_service", None)
+        if service is None or getattr(getattr(service, "store", None), "identity", None) is None:
+            return None
+        return service
+
+    async def _lookup_vault_binding_source(self) -> Optional[str]:
+        """The source of this server's personal binding; None when there is none or it is unreadable."""
+        service = self._vault_runtime_for_lookup()
+        if service is None:
+            return None
+        instance = connection_instance(self.app, self._instance)
+        try:
+            binding = await service.personal_binding(instance)
+        except Exception as exc:  # noqa: BLE001 - the panel keeps its default label
+            logger.debug("Personal vault binding lookup failed: %s", type(exc).__name__)
+            return None
+        if not isinstance(binding, Mapping) or not binding:
+            return None
+        source = binding.get("source")
+        # Personal bindings are native vault bindings; older answers may omit the source.
+        return source if isinstance(source, str) and source else _VAULT_SOURCE
+
+    async def _refresh_vault_binding(self) -> None:
+        """Show the personal binding's source once the vault service has answered."""
+        source = await self._lookup_vault_binding_source()
+        # An answer that started before a bind on this screen must not undo it.
+        if source is None or source == self._vault_binding_source:
+            return
+        self._vault_binding_source = source
+        if self.is_mounted:
+            self._render_server_info()
 
     def _colorize_state(self, state: str) -> str:
         """Add color markup to instance state.
@@ -1256,11 +1335,98 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         with self._busy.running("Preparing the SSH connection…", hold=("#btn_ssh",)) as job:
             await self._resolve_and_launch_ssh(job)
 
+    async def _ssh_ref_resolver(self) -> Any:
+        """The SSH credential resolver Connect and Verify share (mirrors ``servonaut ssh``)."""
+        from servonaut.services.ssh_ref_resolver import SshRefResolver
+
+        teams_supplier = None
+        team_service = getattr(self.app, "team_service", None)
+        if team_service is not None:
+            teams: list = []
+            try:
+                teams = await team_service.list_teams()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not load teams list for SSH connect: %s", exc)
+
+            def _teams_supplier_fn() -> list:
+                return teams
+
+            teams_supplier = _teams_supplier_fn
+
+        # Null stubs stand in for services that are unavailable.
+        bw_ssh_config_service = getattr(self.app, "bw_ssh_config_service", None)
+        if bw_ssh_config_service is None:
+            bw_ssh_config_service = _NullBwService()
+        if team_service is None:
+            team_service = _NullTeamService()
+
+        return SshRefResolver(
+            bw_ssh_config_service=bw_ssh_config_service,
+            team_service=team_service,
+            ssh_service=self.app.ssh_service,
+            teams_supplier=teams_supplier,
+            vault_runtime=getattr(self.app, "vault_command_service", None),
+        )
+
+    def _native_ssh_command(
+        self,
+        instance: Dict[str, Any],
+        resolved: Any,
+        *,
+        remote_command: Optional[str] = None,
+        options: tuple[str, ...] = (),
+    ) -> Optional[list[str]]:
+        """The ssh argv for a Vault or certificate credential, or None after saying why.
+
+        It connects exactly where the pinned known_hosts entry points, through
+        the resolved private agent. *options* are extra ``KEY=VALUE`` entries.
+        """
+        if (
+            not resolved.identity_agent
+            or not getattr(resolved, "identity_file", None)
+            or not resolved.known_hosts_path
+        ):
+            self.app.notify(
+                "The configured Vault SSH credential is incomplete.",
+                severity="error",
+                markup=False,
+            )
+            return None
+        profile = self.app.connection_service.resolve_profile(instance)
+        host = self.app.connection_service.get_target_host(instance, profile)
+        host = host or instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or instance.get("hostname")
+        # Connect exactly where the pinned known_hosts entry points.
+        host = getattr(resolved.lease, "target_host", None) or host
+        if not host:
+            self.app.notify("No IP address available for this instance.", severity="error")
+            return None
+        proxy_args = self.app.connection_service.get_proxy_args(
+            profile, identity_agent=resolved.identity_agent
+        ) if profile else []
+        username = (
+            resolved.login_user
+            or (profile.username if profile else None)
+            or instance.get("username")
+            or self.app.config_manager.get().default_username
+            or "ubuntu"
+        )
+        return self.app.ssh_service.build_ssh_command(
+            host=host,
+            username=username,
+            remote_command=remote_command,
+            proxy_args=proxy_args,
+            port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
+            extra_options=[*self.app.connection_service.get_extra_options(instance, profile), *options],
+            identity_agent=resolved.identity_agent,
+            identity_file=getattr(resolved, "identity_file", None),
+            certificate_file=resolved.certificate_path,
+            known_hosts_file=resolved.known_hosts_path,
+        )
+
     async def _resolve_and_launch_ssh(self, job: BusyJob) -> None:
         """The connect flow of :meth:`_ssh_connect_flow`; *job* is its busy line."""
         from rich.markup import escape as rich_escape
 
-        from servonaut.services.ssh_ref_resolver import SshRefResolver
         from servonaut.services.bw_resolver import (
             BwResolver,
             BwCliMissingError,
@@ -1274,39 +1440,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         instance = connection_instance(self.app, self._instance)
         name = instance.get("name") or instance.get("id", "instance")
 
-        # ------------------------------------------------------------------
-        # Build teams_supplier (mirrors cli/ssh.py _handle_ssh_async)
-        # ------------------------------------------------------------------
-        teams_supplier = None
-        team_service = getattr(self.app, "team_service", None)
-        if team_service is not None:
-            _teams: list = []
-            try:
-                _teams = await team_service.list_teams()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Could not load teams list for SSH connect: %s", exc)
-
-            def _teams_supplier_fn() -> list:
-                return _teams
-
-            teams_supplier = _teams_supplier_fn
-
-        # ------------------------------------------------------------------
-        # Build resolver — use Null stubs when services are unavailable
-        # ------------------------------------------------------------------
-        bw_ssh_config_service = getattr(self.app, "bw_ssh_config_service", None)
-        if bw_ssh_config_service is None:
-            bw_ssh_config_service = _NullBwService()
-        if team_service is None:
-            team_service = _NullTeamService()
-
-        resolver = SshRefResolver(
-            bw_ssh_config_service=bw_ssh_config_service,
-            team_service=team_service,
-            ssh_service=self.app.ssh_service,
-            teams_supplier=teams_supplier,
-            vault_runtime=getattr(self.app, "vault_command_service", None),
-        )
+        resolver = await self._ssh_ref_resolver()
 
         try:
             resolved = await resolver.resolve(instance)
@@ -1335,46 +1469,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         source = resolved.source
 
         if source in ("ca", "vault"):
-            if (
-                not resolved.identity_agent
-                or not getattr(resolved, "identity_file", None)
-                or not resolved.known_hosts_path
-            ):
-                self.app.notify(
-                    "The configured Vault SSH credential is incomplete.",
-                    severity="error",
-                    markup=False,
-                )
+            ssh_cmd = self._native_ssh_command(instance, resolved)
+            if ssh_cmd is None:
                 return
-            profile = self.app.connection_service.resolve_profile(instance)
-            host = self.app.connection_service.get_target_host(instance, profile)
-            host = host or instance.get("public_ip") or instance.get("private_ip") or instance.get("host") or instance.get("hostname")
-            # Connect exactly where the pinned known_hosts entry points.
-            host = getattr(resolved.lease, "target_host", None) or host
-            if not host:
-                self.app.notify("No IP address available for this instance.", severity="error")
-                return
-            proxy_args = self.app.connection_service.get_proxy_args(
-                profile, identity_agent=resolved.identity_agent
-            ) if profile else []
-            username = (
-                resolved.login_user
-                or (profile.username if profile else None)
-                or instance.get("username")
-                or self.app.config_manager.get().default_username
-                or "ubuntu"
-            )
-            ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                proxy_args=proxy_args,
-                port=getattr(resolved.lease, "target_port", None) or instance.get("port"),
-                extra_options=self.app.connection_service.get_extra_options(instance, profile),
-                identity_agent=resolved.identity_agent,
-                identity_file=getattr(resolved, "identity_file", None),
-                certificate_file=resolved.certificate_path,
-                known_hosts_file=resolved.known_hosts_path,
-            )
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
                 # The terminal is detached. The runtime owns this lease and
                 # keeps its private agent alive until process shutdown/TTL.
@@ -1774,8 +1871,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 return
             finally:
                 self._busy.end(job)
-            source = result.get("source", "servonaut_vault") if isinstance(result, dict) else "servonaut_vault"
-            self.app.notify(f"SSH credential source: {source}", markup=False)
+            source = result.get("source") if isinstance(result, dict) else None
+            source = source if isinstance(source, str) and source else _VAULT_SOURCE
+            label = credential_source_label(source) or "Servonaut Vault"
+            self._vault_binding_source = source
+            if self.is_mounted:
+                self._render_server_info()
+            self.app.notify(f"Vault key bound. SSH to this server now uses {label}.", markup=False)
 
         self.run_worker(flow(), group="vault", exclusive=True)
 
@@ -1840,7 +1942,21 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         )
 
     async def _verify_ssh_flow(self) -> None:
-        """Async flow: modal → BW resolve → probe → report → refresh."""
+        """Async flow: modal → BW resolve → probe → report → refresh.
+
+        A server bound to a Servonaut Vault key is checked with that key
+        instead; it needs no Bitwarden ref.
+        """
+        if self._binding_source() != _VAULT_SOURCE:
+            looked_up = await self._lookup_vault_binding_source()
+            if looked_up is not None and looked_up != self._vault_binding_source:
+                self._vault_binding_source = looked_up
+                if self.is_mounted:
+                    self._render_server_info()
+        if self._binding_source() == _VAULT_SOURCE:
+            await self._verify_with_vault()
+            return
+
         bw_service = getattr(self.app, "bw_ssh_config_service", None)
         if bw_service is None:
             self.app.notify(
@@ -1988,6 +2104,68 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     break
         except Exception:
             pass
+
+    async def _verify_with_vault(self) -> None:
+        """Check SSH with this server's Servonaut Vault key and say how it went."""
+        import asyncio
+
+        confirmed = await self.app.push_screen_wait(
+            ConfirmSshVerifyModal(host=self._display_host(), has_ref=False, vault=True)
+        )
+        if not confirmed:
+            return
+        instance = connection_instance(self.app, self._instance)
+        resolver = await self._ssh_ref_resolver()
+        try:
+            resolved = await resolver.resolve(instance)
+        except Exception as exc:  # Configured native credentials fail closed.
+            from servonaut.services.vault.errors import vault_failure_reason
+
+            self.app.notify(
+                f"The configured Vault SSH credential could not be used ({vault_failure_reason(exc)}).",
+                severity="error",
+                markup=False,
+            )
+            return
+        if resolved is None or resolved.source not in ("ca", "vault"):
+            self.app.notify(
+                "This server's Servonaut Vault key could not be loaded, so SSH was not checked.",
+                severity="error",
+                markup=False,
+            )
+            return
+        cmd = self._native_ssh_command(
+            instance, resolved, remote_command="true",
+            options=("BatchMode=yes", "ConnectTimeout=5"),
+        )
+        if cmd is None:
+            return
+        try:
+            # No terminal to prompt on; ssh's messages go to a private log.
+            proc = await asyncio.to_thread(run_ssh, cmd, capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            self.app.notify(
+                "The SSH check with the Servonaut Vault key timed out.", severity="error", markup=False
+            )
+            return
+        except FileNotFoundError:
+            self.app.notify("ssh binary not found on PATH — cannot run probe.", severity="error", markup=False)
+            return
+        if proc.returncode == 0:
+            self.app.notify("SSH verified with the Servonaut Vault key.", markup=False)
+        elif proc.returncode == 255:
+            self.app.notify(
+                "SSH with the Servonaut Vault key failed: the server could not be reached, "
+                "or its host key does not match the pinned one.",
+                severity="error",
+                markup=False,
+            )
+        else:
+            self.app.notify(
+                f"SSH with the Servonaut Vault key failed (exit {proc.returncode}).",
+                severity="error",
+                markup=False,
+            )
 
     async def _run_ssh_probe(self, item_id: Optional[str], host: str) -> str:
         """Resolve BW item and run BatchMode SSH probe. Returns status string."""
