@@ -11,6 +11,7 @@ from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from servonaut.screens import server_actions
 from servonaut.screens.server_actions import VaultBindingModal
+from servonaut.services.redaction_service import RedactionService
 
 PERSONAL_VAULT = "11111111-1111-4111-8111-111111111111"
 TEAM_VAULT = "33333333-3333-4333-8333-333333333333"
@@ -334,6 +335,123 @@ async def test_demo_mode_hides_vault_key_and_host_names_and_redraws_on_toggle(mo
         assert any("web1_ed25519" in label for label in labels("#vault_bind_item"))
         assert app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM  # choice kept
         assert "198.51.100.7" in str(app.screen.query_one("#vault_bind_trusted", Static).render())
+
+
+# The login of a server as demo mode shows it in the server details.
+REAL_LOGIN = "deploy"
+LOGIN_STAND_IN = RedactionService().redact_instance({"username": REAL_LOGIN})["username"]
+PERSONAL_ROW = {"id": "i-1", "hostname": "198.51.100.7", "port": 22, "username": REAL_LOGIN}
+
+
+def _demo_on(app: App) -> None:
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+
+
+def _login_field(app: App) -> Input:
+    return app.screen.query_one("#vault_bind_login", Input)
+
+
+async def _bind_with_trusted_keys(app: App, pilot) -> None:
+    box = app.screen.query_one("#vault_bind_use_trusted", Checkbox)
+    await _settle(pilot, lambda: not box.disabled)
+    box.value = True
+    app.screen.query_one("#vault_bind_confirm", Button).press()
+    await _settle(pilot, lambda: app.result != "pending")
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_shows_the_login_stand_in_and_binds_the_real_login(monkeypatch) -> None:
+    assert LOGIN_STAND_IN != REAL_LOGIN
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: [_host_key()])
+    app = _Host(_Service(), dict(PERSONAL_ROW))
+    _demo_on(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        # The same login the server details show, never the real one.
+        assert _login_field(app).value == LOGIN_STAND_IN
+        await _bind_with_trusted_keys(app, pilot)
+
+    assert app.result["login"] == REAL_LOGIN
+
+
+@pytest.mark.asyncio
+async def test_a_login_typed_in_demo_mode_is_bound_as_typed(monkeypatch) -> None:
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: [_host_key()])
+    app = _Host(_Service(), dict(PERSONAL_ROW))
+    _demo_on(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        _login_field(app).focus()
+        await pilot.press(*["backspace"] * 12)
+        await pilot.press(*LOGIN_STAND_IN)  # typed by the user: theirs, even equal to the stand-in
+        await pilot.pause()
+        assert _login_field(app).value == LOGIN_STAND_IN
+        await _bind_with_trusted_keys(app, pilot)
+    assert app.result["login"] == LOGIN_STAND_IN
+
+    app = _Host(_Service(), dict(PERSONAL_ROW))
+    _demo_on(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        _login_field(app).focus()
+        await pilot.press(*["backspace"] * 12)
+        await pilot.press(*"ops")
+        await pilot.pause()
+        await _bind_with_trusted_keys(app, pilot)
+    assert app.result["login"] == "ops"
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_key_in_demo_mode_connects_with_the_real_login(monkeypatch) -> None:
+    trusted: list[str] = []
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: list(trusted))
+    service = _VisitingService(trusted, failure=f"{REAL_LOGIN}@198.51.100.7: Permission denied (publickey).")
+    app = _Host(service, dict(PERSONAL_ROW))
+    _demo_on(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        fetch = lambda: app.screen.query_one("#vault_bind_fetch_host_key", Button)  # noqa: E731
+        trusted_text = lambda: str(app.screen.query_one("#vault_bind_trusted", Static).render())  # noqa: E731
+        await _settle(pilot, lambda: fetch().display)
+        fetch().press()
+        await _settle(pilot, lambda: "Permission denied" in trusted_text())
+        assert service.visits == [("i-1", REAL_LOGIN)]
+        # ssh's own message quotes the login: shown as the stand-in.
+        assert f"{LOGIN_STAND_IN}@" in trusted_text() and f"{REAL_LOGIN}@" not in trusted_text()
+
+
+@pytest.mark.asyncio
+async def test_the_login_field_follows_a_demo_toggle_until_the_user_types(monkeypatch) -> None:
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda instance, host, port: [_host_key()])
+    app = _Host(_Service(), dict(PERSONAL_ROW))
+    app.demo_mode, app.redaction_service = False, None
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        assert _login_field(app).value == REAL_LOGIN
+
+        _demo_on(app)
+        app.screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert _login_field(app).value == LOGIN_STAND_IN
+
+        app.demo_mode, app.redaction_service = False, None
+        app.screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert _login_field(app).value == REAL_LOGIN
+
+        _demo_on(app)
+        app.screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        _login_field(app).focus()
+        await pilot.press(*["backspace"] * 12)
+        await pilot.press(*"ops")
+        await pilot.pause()
+        app.demo_mode, app.redaction_service = False, None
+        app.screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert _login_field(app).value == "ops"  # what the user typed stays
+        await _bind_with_trusted_keys(app, pilot)
+    assert app.result["login"] == "ops"
 
 
 @pytest.mark.asyncio

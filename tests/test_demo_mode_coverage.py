@@ -973,6 +973,7 @@ class TestCommandOverlayBuffer:
         screen = object.__new__(CommandOverlay)
         screen._output_lines = []
         screen._running_process = None
+        screen._username = "deploy"
         mock_app = _make_mock_app(demo=True)
 
         # Simulate the SSH worker by calling _run_ssh_process with a fake process
@@ -1013,6 +1014,7 @@ class TestCommandOverlayBuffer:
         screen = object.__new__(CommandOverlay)
         screen._output_lines = []
         screen._running_process = None
+        screen._username = "deploy"
         mock_app = _make_mock_app(demo=False)
 
         raw_line = b"Connection from 10.20.30.40\n"

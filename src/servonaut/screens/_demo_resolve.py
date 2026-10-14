@@ -9,6 +9,7 @@ call them tolerantly so a screen keeps working against any app stand-in
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -61,6 +62,39 @@ def display_text(app: Any, text: str) -> str:
     except Exception:  # noqa: BLE001 — a stand-in app must never break a screen
         return text
     return shown if isinstance(shown, str) else text
+
+
+def display_username(app: Any, username: Optional[str]) -> Optional[str]:
+    """*username* as demo mode shows it: the stand-in the server details show.
+
+    Screens that hold a real login (one resolved from the real record or a
+    connection profile) show it through this, so a server never shows two
+    different logins on one recording. Outside demo mode, the login itself.
+    """
+    if not username or not getattr(app, "demo_mode", False):
+        return username
+    redact = getattr(getattr(app, "redaction_service", None), "redact_username", None)
+    if not callable(redact):
+        return username
+    try:
+        shown = redact(username)
+    except Exception:  # noqa: BLE001 — a stand-in app must never break a screen
+        return username
+    return shown if isinstance(shown, str) and shown else username
+
+
+def hide_login(app: Any, text: str, login: Optional[str]) -> str:
+    """*text* with ``login@`` (how ssh quotes a login) shown as its stand-in.
+
+    Only the ``login@`` form is swapped: a login is often a plain word
+    ("admin", "deploy") that also appears in ordinary sentences.
+    """
+    shown = display_username(app, login)
+    if not text or not login or not shown or shown == login:
+        return text
+    return re.sub(
+        rf"(?<![\w.-]){re.escape(login)}@", lambda _match: f"{shown}@", text,
+    )
 
 
 def real_instance_id(app: Any, instance_id: Optional[str]) -> Optional[str]:
