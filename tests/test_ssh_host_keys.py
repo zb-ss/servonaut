@@ -1097,6 +1097,7 @@ def _overlay(host: str, port: Optional[int]) -> CommandOverlay:
     overlay = patched.__new__(patched)
     overlay._host, overlay._port, overlay._output_lines = host, port, []
     overlay._connection, overlay._profile, overlay._running_process = None, None, None
+    overlay._username = "deploy"
     return overlay
 
 

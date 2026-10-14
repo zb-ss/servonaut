@@ -27,7 +27,7 @@ from servonaut.utils.ssh_utils import (
     track_background_process,
 )
 from servonaut.widgets.command_output import CommandOutput
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, display_username, hide_login
 
 logger = logging.getLogger(__name__)
 
@@ -262,8 +262,10 @@ class CommandOverlay(ModalScreen):
         """
         output_widget = self.query_one("#command_output", CommandOutput)
 
-        # Show command in output
-        prompt = f"{self._username}@{self._instance.get('name', 'server')}:~"
+        # Show command in output. The name comes from the displayed row; the
+        # login is the real one SSH uses, so demo mode shows its stand-in.
+        login = display_username(self.app, self._username)
+        prompt = f"{login}@{self._instance.get('name', 'server')}:~"
         command_line = f"{prompt}$ {command}"
         output_widget.append_command(command_line)
         self._output_lines.append(command_line)
@@ -348,9 +350,14 @@ class CommandOverlay(ModalScreen):
                     return self.app.redaction_service.scrub_stream(text)
                 return text
 
+            def _shown(text: str) -> str:
+                # ssh quotes the login as "login@host" ("Permission denied"):
+                # demo mode shows the stand-in the prompt line shows.
+                return hide_login(self.app, text, self._username)
+
             def _read_stderr() -> None:
                 for raw_line in iter(process.stderr.readline, b''):
-                    line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                    line = _shown(raw_line.decode("utf-8", errors="replace").rstrip("\n"))
                     if not line:
                         continue
                     # Filter bash -i job control noise
@@ -368,7 +375,7 @@ class CommandOverlay(ModalScreen):
             saw_stdout = False
             for raw_line in iter(process.stdout.readline, b''):
                 saw_stdout = True
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+                line = _shown(raw_line.decode("utf-8", errors="replace").rstrip("\n"))
                 self._output_lines.append(_scrub(line))
                 self.app.call_from_thread(output_widget.append_output, line)
 
@@ -376,7 +383,7 @@ class CommandOverlay(ModalScreen):
             return_code = process.wait()
 
             diagnostics = ssh_log.read()
-            for line in diagnostics.splitlines():
+            for line in map(_shown, diagnostics.splitlines()):
                 if line.strip():
                     self._output_lines.append(_scrub(line))
                     # Escaped: OpenSSH's own hints contain "[host]:port",
