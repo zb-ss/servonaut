@@ -22,7 +22,12 @@ from servonaut.config.schema import MemoryConfig
 from servonaut.services.accounts.headless import CachedFleet
 from servonaut.services.aws_service import AWSService
 from servonaut.services.memory.interfaces import ModuleResult
-from servonaut.services.memory.service import MemoryService
+from servonaut.services.memory.service import (
+    SSH_FAILED_BUILD_REASON,
+    BuildReport,
+    MemoryService,
+    ModuleBuildFailure,
+)
 from servonaut.services.memory.store import MemoryStore
 
 
@@ -93,9 +98,9 @@ class TestExitCode0:
         inst = _make_inst()
         memory_service = _make_memory_service(tmp_path)
 
-        # Stub build to return a fake ModuleResult mapping.
+        # Stub the build to return a fake ModuleResult mapping.
         result = ModuleResult(module="os", instance_id="i-abc123", probed_at="2026-04-21T00:00:00+00:00")
-        memory_service.build = AsyncMock(return_value={"os": result})
+        memory_service.build_report = AsyncMock(return_value=BuildReport(successes={"os": result}))
 
         args = _make_args(memory_command="build", instance="i-abc123")
         config = _fake_config()
@@ -239,14 +244,14 @@ class TestExitCode3:
         # First two instances succeed; last one fails
         call_count = 0
 
-        async def _mock_build(inst: Dict[str, Any], modules: Any) -> Dict[str, Any]:
+        async def _mock_build(inst: Dict[str, Any], modules: Any) -> BuildReport:
             nonlocal call_count
             call_count += 1
             if inst.get("id") == "fail-3":
                 raise RuntimeError("SSH timeout")
-            return {}
+            return BuildReport()
 
-        memory_service.build = _mock_build
+        memory_service.build_report = _mock_build
 
         instances = [
             _make_inst(iid="i-1"),
@@ -443,10 +448,10 @@ class TestBuildAllRateLimit:
             await asyncio.sleep(0.05)
             async with lock:
                 current_concurrent -= 1
-            return {}
+            return BuildReport()
 
         memory_service = _make_memory_service(tmp_path)
-        memory_service.build = _mock_build
+        memory_service.build_report = _mock_build
 
         instances = [_make_inst(iid=f"i-{n:03d}") for n in range(10)]
 
@@ -461,21 +466,41 @@ class TestBuildAllRateLimit:
         """Failures from individual instances are collected, not raised."""
         from servonaut.cli.memory import _build_all
 
-        async def _mock_build(inst: Dict[str, Any], modules: Any) -> Dict[str, Any]:
+        async def _mock_build(inst: Dict[str, Any], modules: Any) -> BuildReport:
             if inst.get("id") == "i-bad":
                 raise RuntimeError("probe failed")
-            return {}
+            return BuildReport()
 
         memory_service = _make_memory_service(tmp_path)
-        memory_service.build = _mock_build
+        memory_service.build_report = _mock_build
 
         instances = [_make_inst(iid="i-001"), _make_inst(iid="i-bad"), _make_inst(iid="i-002")]
         failures = asyncio.run(_build_all(instances, memory_service, modules=None))
 
         assert len(failures) == 1
-        failed_id, exc = failures[0]
+        failed_id, reason = failures[0]
         assert failed_id == "i-bad"
-        assert "probe failed" in str(exc)
+        assert "probe failed" in reason
+
+    def test_build_all_counts_an_unreached_server_as_failed(self, tmp_path: Path) -> None:
+        """A server SSH could not reach is a failure, with the reason."""
+        from servonaut.cli.memory import _build_all
+
+        unreached = BuildReport(
+            failures=[ModuleBuildFailure("ssh", "ssh_unreachable", "The server could not be reached over SSH.")],
+            overall_reason=SSH_FAILED_BUILD_REASON,
+        )
+
+        async def _mock_build(inst: Dict[str, Any], modules: Any) -> BuildReport:
+            return unreached if inst.get("id") == "i-bad" else BuildReport()
+
+        memory_service = _make_memory_service(tmp_path)
+        memory_service.build_report = _mock_build
+
+        instances = [_make_inst(iid="i-001"), _make_inst(iid="i-bad")]
+        failures = asyncio.run(_build_all(instances, memory_service, modules=None))
+
+        assert failures == [("i-bad", "The server could not be reached over SSH.")]
 
 
 # ---------------------------------------------------------------------------
@@ -956,8 +981,8 @@ class TestRefreshCommand:
 
         inst = _make_inst()
         memory_service = _make_memory_service(tmp_path)
-        memory_service.refresh = AsyncMock(
-            return_value={"os": MagicMock(), "runtimes": MagicMock()}
+        memory_service.refresh_report = AsyncMock(
+            return_value=BuildReport(successes={"os": MagicMock(), "runtimes": MagicMock()})
         )
 
         args = _make_args(memory_command="refresh", instance="i-abc123")
@@ -983,7 +1008,7 @@ class TestBuildJsonFormat:
         memory_service = _make_memory_service(tmp_path)
         result = ModuleResult(module="os", instance_id="i-abc123", probed_at="2026-04-21T00:00:00+00:00")
         result.observed = {"arch": "x86_64"}
-        memory_service.build = AsyncMock(return_value={"os": result})
+        memory_service.build_report = AsyncMock(return_value=BuildReport(successes={"os": result}))
 
         args = _make_args(memory_command="build", instance="i-abc123", json=True)
         config = _fake_config()
@@ -1001,7 +1026,7 @@ class TestBuildJsonFormat:
 
         inst = _make_inst()
         memory_service = _make_memory_service(tmp_path)
-        memory_service.build = AsyncMock(return_value={})
+        memory_service.build_report = AsyncMock(return_value=BuildReport(overall_reason="opt_out"))
 
         args = _make_args(memory_command="build", instance="i-abc123")
         config = _fake_config()

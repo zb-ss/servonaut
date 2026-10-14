@@ -30,7 +30,6 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.memory.provider import instance_provider
-from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
 from servonaut.services.memory.status import (
     STATUS_FRESH,
     STATUS_NONE,
@@ -823,10 +822,10 @@ class MemoryScreen(Screen):
             return
         self.app.notify("Probing all modules…")
         try:
-            host_key_message = await self._refresh_memory(memory_service)
+            failure_message = await self._refresh_memory(memory_service)
             self._render_table()
-            if host_key_message:
-                self._notify_host_key_refusal(host_key_message)
+            if failure_message:
+                self._notify_refresh_failure(failure_message)
             else:
                 self.app.notify("Memory refreshed.")
         except Exception as exc:
@@ -836,7 +835,10 @@ class MemoryScreen(Screen):
     async def _refresh_memory(
         self, memory_service: Any, modules: Optional[list] = None,
     ) -> Optional[str]:
-        """Re-probe, returning the message when ssh refused the host key.
+        """Re-probe, returning the message when the server could not be reached.
+
+        That is a refused host key or a failed SSH connection: nothing was
+        probed and the stored memory is unchanged.
 
         Uses the reporting API when the service provides it; services that
         expose only the dict-returning ``refresh`` report nothing.
@@ -851,12 +853,10 @@ class MemoryScreen(Screen):
                 await memory_service.refresh(target, modules=modules)
             return None
         report = await refresh_report(target, modules)
-        if report.overall_reason == HOST_KEY_BUILD_REASON and report.failures:
-            return report.failures[0].message
-        return None
+        return report.unreached_message
 
-    def _notify_host_key_refusal(self, message: str) -> None:
-        """Show a refused host key; the message carries "[host]:port"."""
+    def _notify_refresh_failure(self, message: str) -> None:
+        """Show why nothing was probed (a host-key refusal names "[host]:port")."""
         self.app.notify(message, severity="error", markup=False, timeout=20)
 
     def action_refresh_module(self) -> None:
@@ -887,12 +887,12 @@ class MemoryScreen(Screen):
             return
         self.app.notify(f"Probing {module_name}…", markup=False)
         try:
-            host_key_message = await self._refresh_memory(
+            failure_message = await self._refresh_memory(
                 memory_service, modules=[module_name],
             )
             self._render_table()
-            if host_key_message:
-                self._notify_host_key_refusal(host_key_message)
+            if failure_message:
+                self._notify_refresh_failure(failure_message)
             else:
                 self.app.notify(f"Module '{module_name}' refreshed.", markup=False)
         except Exception as exc:

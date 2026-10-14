@@ -106,6 +106,16 @@ _SUDO_UNAVAILABLE_MARKERS: Tuple[str, ...] = (
 SshRunner = Callable[[str], Any]  # returns Awaitable[tuple[str, str, int]]
 
 
+def is_command_failure(stdout: str) -> bool:
+    """Whether *stdout* is a sentinel ``_run_command`` put in place of output.
+
+    ``<timeout>`` and ``<error: ...>`` mean the command produced nothing, so
+    the module that ran it is partial.
+    """
+    stripped = (stdout or "").lstrip()
+    return stripped.startswith("<timeout>") or stripped.startswith("<error:")
+
+
 # ---------------------------------------------------------------------------
 # Write-guard helper
 # ---------------------------------------------------------------------------
@@ -337,6 +347,8 @@ class ModuleProber(ModuleProberInterface, ABC):
                 )
                 if did_truncate:
                     truncated = True
+                if is_command_failure(stdout):
+                    partial = True
                 if cmd_sudo_failed:
                     sudo_failed = True
                 raw_parts.append(f"{cmd} →\n{stdout}\n")
@@ -349,6 +361,8 @@ class ModuleProber(ModuleProberInterface, ABC):
                     stdout, did_truncate, _ = await self._run_command(ssh_runner, cmd)
                     if did_truncate:
                         truncated = True
+                    if is_command_failure(stdout):
+                        partial = True
                     raw_parts.append(f"{cmd} →\n{stdout}\n")
             elif sudo_failed:
                 partial = True

@@ -99,3 +99,28 @@ async def test_dangerous_level_runs_a_compound_command(mcp, journey, fake_cloud,
     stdout, stderr = _split(output)
     assert stdout.startswith("uid="), output
     assert any("tail: cannot open 'x'" in line for line in stderr), stderr
+
+
+async def test_a_refused_login_keeps_the_stored_memory(mcp, journey, fake_cloud, sshd):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    sandbox = _mcp_home(journey, sshd, fake_cloud, "standard")
+    async with mcp(sandbox) as session:
+        built = json.loads(await session.call("build_server_memory", {"instance_id": WEB_1}))
+    assert "os" in built["successes"], built
+
+    # The server no longer accepts the key Servonaut has for it.
+    key = sandbox.home / ".ssh" / remote_fleet.WEB_1_KEY
+    key.write_bytes(Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ))
+    async with mcp(sandbox) as session:
+        refreshed = json.loads(await session.call("refresh_server_memory", {"instance_id": WEB_1}))
+        memory = await session.call("get_server_memory", {"instance_id": WEB_1})
+
+    assert refreshed["reason"] == "ssh_connection_failed", refreshed
+    assert [f["reason"] for f in refreshed["failures"]] == ["ssh_auth_failed"]
+    assert "stored memory was kept" in refreshed["message"]
+    assert "E2E Linux 12 (fixture)" in memory

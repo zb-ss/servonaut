@@ -860,7 +860,6 @@ class ChatPanel(Widget):
         self.app.notify(f"🧠 Building memory for {name}…")
 
         async def _build_then_refresh() -> None:
-            from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
             try:
                 if hasattr(memory_service, "build_report"):
                     report = await memory_service.build_report(inst)
@@ -868,10 +867,11 @@ class ChatPanel(Widget):
                         self.app.notify(
                             f"Memory built for {name}: {report.count} modules."
                         )
-                    elif report.overall_reason == HOST_KEY_BUILD_REASON and report.failures:
-                        # The message names the host and the recovery command.
+                    elif report.unreached_message:
+                        # The message says why nothing was probed (a refused
+                        # host key names the host and the recovery command).
                         self.app.notify(
-                            report.failures[0].message,
+                            report.unreached_message,
                             severity="error", markup=False, timeout=20,
                         )
                     else:
