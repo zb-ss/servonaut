@@ -134,6 +134,8 @@ class ServonautApp(App):
     config_sync_service = None
     team_service = None
     vault_command_service = None
+    # Shared by every in-app SSH path (see _wire_vault_ssh); None until the vault is set up.
+    vault_lease_cache = None
     # Reactive so every mounted Sidebar follows Vault discovery, which
     # finishes after the first screen is already on display.
     vault_available = reactive(False)
@@ -1108,6 +1110,27 @@ class ServonautApp(App):
         """Point the user at waiting SSH CA jobs; carrying one out needs their confirmation."""
         self.notify(notice["message"], title="SSH certificates", severity="information", timeout=30, markup=False)
 
+    def _wire_vault_ssh(self) -> None:
+        """Let every in-app SSH path use a server's Servonaut Vault key.
+
+        Memory probes, log access and keyword scans resolve their own
+        connections; this hands them the current vault runtime and one lease
+        cache, so a server's private agent is reused across them. A new
+        runtime (after signing in again) gets a new cache: the old runtime
+        closed its leases.
+        """
+        from servonaut.services.ssh_credentials import VaultLeaseCache
+
+        self.vault_lease_cache = VaultLeaseCache()
+        for service in (
+            getattr(self, "memory_service", None),
+            getattr(self, "log_viewer_service", None),
+            getattr(self, "scan_service", None),
+        ):
+            setter = getattr(service, "set_vault_runtime", None)
+            if callable(setter):
+                setter(self.vault_command_service, self.vault_lease_cache)
+
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
 
@@ -1183,6 +1206,7 @@ class ServonautApp(App):
             )
             from servonaut.services.vault.background import unlock_vault_for_startup
             unlock_vault_for_startup(self.vault_command_service)
+            self._wire_vault_ssh()
             # Step 6 — wire the active :class:`SecretProvider` into the
             # SSH service. Resolver consults auth + entitlement + cached
             # team SecretsConfig and returns None for Free / unauthed

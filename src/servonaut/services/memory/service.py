@@ -201,6 +201,10 @@ class MemoryService(MemoryServiceInterface):
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service
         self._connection_service = connection_service
+        # A server's vault credential (see set_vault_runtime), applied on top
+        # of the local connection by every SSH runner made here.
+        self._vault_runtime: Any = None
+        self._vault_leases: Any = None
         # Demo mode resolvers (identity until the app wires them): every
         # instance dict / id entering the public surface is mapped back to
         # the real record before probes, storage keys or the sync queue.
@@ -1132,6 +1136,16 @@ class MemoryService(MemoryServiceInterface):
         self._resolve_id = _id
         self._store.set_instance_id_resolver(_id)
 
+    def set_vault_runtime(self, runtime: Any, leases: Any = None) -> None:
+        """Use a server's Servonaut Vault key (or SSH certificate) for every probe.
+
+        *runtime* is the vault command service; *leases* an optional
+        :class:`~servonaut.services.ssh_credentials.VaultLeaseCache` shared
+        with the app's other SSH paths.
+        """
+        self._vault_runtime = runtime
+        self._vault_leases = leases
+
     def set_sync_service(self, svc: Optional["_MemorySyncService"]) -> None:
         """Wire the optional sync service after construction.
 
@@ -1382,16 +1396,34 @@ class MemoryService(MemoryServiceInterface):
                 "extra_options": extra_options,
             }
 
+        from servonaut.services.ssh_credentials import (  # noqa: PLC0415
+            resolve_with_vault,
+            ssh_identity_kwargs,
+        )
+
+        vault_runtime, vault_leases = self._vault_runtime, self._vault_leases
+        # The vault credential is applied on the first command (it needs the
+        # event loop); later commands reuse it.
+        resolved: Dict[str, Any] = {}
+
         async def _real_runner(command: str) -> tuple[str, str, int]:
             """Execute *command* on the remote host and return (stdout, stderr, rc)."""
+            if not resolved:
+                # A VaultCredentialError propagates: probers record it as the
+                # module's error instead of trying a local key.
+                resolved.update(await resolve_with_vault(
+                    conn, instance, vault_runtime=vault_runtime,
+                    connection_service=connection_service, cache=vault_leases,
+                ))
             ssh_cmd = ssh_service.build_ssh_command(
-                host=conn["host"],
-                username=conn["username"],
-                key_path=conn.get("key_path"),
-                proxy_args=conn.get("proxy_args") or [],
+                host=resolved["host"],
+                username=resolved["username"],
+                key_path=resolved.get("key_path"),
+                proxy_args=resolved.get("proxy_args") or [],
                 remote_command=command,
-                port=conn.get("port"),
-                extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
+                port=resolved.get("port"),
+                extra_options=["BatchMode=yes", *(resolved.get("extra_options") or [])],
+                **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
             )
             try:
                 # Memory probes retain their short deadline; monitoring supplies
@@ -1408,7 +1440,7 @@ class MemoryService(MemoryServiceInterface):
                     problem = detect_host_key_problem(
                         getattr(exc, "diagnostics", "") or "", exc.returncode,
                         HostKeyTarget.for_connection(
-                            conn["host"], conn.get("port"),
+                            resolved.get("host", conn["host"]), resolved.get("port", conn.get("port")),
                             instance=instance, profile=profile,
                         ),
                         connection_service.host_key_policy(),

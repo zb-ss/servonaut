@@ -8,6 +8,8 @@ directory names, index keys or sync-queue keys. Neutral fixtures only.
 
 from __future__ import annotations
 
+import asyncio
+
 import json
 from types import SimpleNamespace
 
@@ -155,11 +157,19 @@ class TestInstanceListSshConnect:
         mock_app.ssh_service.build_ssh_command.return_value = ["ssh", "9.9.9.9"]
         mock_app.terminal_service.launch_ssh_in_terminal.return_value = True
         mock_app.config_manager.get.return_value.default_username = "ubuntu"
+        # No vault on this machine: the local key is used.
+        mock_app.vault_command_service = None
+        mock_app.vault_lease_cache = None
+        launches = []
 
         with patch.object(type(screen), "app", new_callable=lambda: property(lambda self: mock_app)):
             with patch.object(screen, "_get_selected_running_instance", return_value=shown), \
-                    patch.object(screen, "_maybe_show_memory_prompt") as prompt:
+                    patch.object(screen, "_maybe_show_memory_prompt") as prompt, \
+                    patch.object(screen, "run_worker", side_effect=lambda coro, **_kw: launches.append(coro)):
                 screen.action_ssh_connect()
+                # The terminal opens from a worker (the vault lookup needs the loop).
+                assert len(launches) == 1
+                asyncio.run(launches[0])
 
         host_arg = mock_app.connection_service.get_target_host.call_args.args[0]
         assert host_arg["public_ip"] == "9.9.9.9", "connection must use the real record"

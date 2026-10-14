@@ -951,14 +951,46 @@ class InstanceListScreen(Screen):
                     key_path = self.app.ssh_service.discover_key(instance['key_name'])
 
             extra_options = self.app.connection_service.get_extra_options(instance, profile)
+            conn = {
+                "host": host, "username": username, "key_path": key_path,
+                "proxy_args": proxy_args, "port": port, "extra_options": extra_options,
+                "profile": profile,
+            }
+        except Exception as e:
+            self.app.notify(f"SSH error: {e}", severity="error", markup=False)
+            return
+        # The server's vault credential needs the event loop: launch from a worker.
+        self.run_worker(
+            self._launch_ssh(display, instance, conn),
+            group="ssh_connect", exclusive=True, exit_on_error=False,
+        )
 
+    async def _launch_ssh(self, display: dict, instance: dict, conn: dict) -> None:
+        """Open the SSH terminal for *instance*, with its vault credential when it has one."""
+        from servonaut.services.ssh_credentials import (
+            VaultCredentialError, resolve_with_vault, ssh_identity_kwargs,
+        )
+
+        profile = conn.get("profile")
+        try:
+            conn = await resolve_with_vault(
+                conn, instance,
+                vault_runtime=getattr(self.app, "vault_command_service", None),
+                connection_service=self.app.connection_service,
+                cache=getattr(self.app, "vault_lease_cache", None),
+            )
+        except VaultCredentialError as exc:
+            self.app.notify(str(exc), severity="error", markup=False)
+            return
+        try:
             ssh_cmd = self.app.ssh_service.build_ssh_command(
-                host=host,
-                username=username,
-                key_path=key_path,
-                proxy_args=proxy_args,
-                port=port,
-                extra_options=extra_options,
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn.get("key_path"),
+                proxy_args=conn.get("proxy_args") or [],
+                port=conn.get("port"),
+                extra_options=conn.get("extra_options") or [],
+                **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
             )
 
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
