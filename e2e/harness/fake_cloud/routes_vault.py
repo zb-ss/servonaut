@@ -65,6 +65,9 @@ MAX_SKEW_SECONDS = 300
 TEAM_SLUG = "example-team"
 TEAM_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 SERVER_ID = "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f"
+# The account's ``/api/v1/teams`` row for that team, as its owner sees it
+# (``FakeCloud.account.configure(teams=[TEAM_ROW])``).
+TEAM_ROW = {"id": TEAM_ID, "slug": TEAM_SLUG, "name": "Example team", "role": "owner", "member_count": 2}
 # The shared server the CA knows, when no inventory is wired in.
 DEFAULT_SHARED_SERVER = {"id": SERVER_ID, "name": "server-1", "hostname": "server-1.example.test", "port": 22}
 

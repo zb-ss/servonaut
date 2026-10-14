@@ -505,6 +505,14 @@ signed in to the local API.
   `multi-account` adds a second account per provider, each with a server
   named `web-1`. `status` lists every server with the reference that picks
   it and whether it accepts SSH (`web-1`, and `app-1` through `bastion-1`).
+- `--teams` adds a team you own on the Teams plan, `example-team`, whose
+  shared server `server-1` runs on loopback with an sshd that honours SSH
+  certificates. Your home already holds the key that logs in to it as its
+  admin user, so you can walk `vault setup`, `ca enable`, `ca enroll
+  server-1` and a certificate login end to end; `status` says where it
+  listens. It needs a short `--root`, such as `/tmp/svt` (`up` says how
+  short): the private SSH agent of a certificate login keeps its socket
+  under it.
 - CLI: `python -m e2e.sandbox run -- ssh web-1 -- uptime` runs the
   checkout's `servonaut` in the sandbox and exits with its status.
 - MCP: `python -m e2e.sandbox mcp-call list_instances '{"account": "prod"}'`
