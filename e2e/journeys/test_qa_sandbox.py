@@ -267,6 +267,61 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
     qa_sandbox.assert_gone(before)
 
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox, journey):
+    from e2e.harness.ca_sshd import ADMIN_USER, BOOTSTRAP_KEY_NAME, HOST_NAME, LOGIN
+    from e2e.harness.fake_cloud.routes_vault import TEAM_SLUG
+    from e2e.sandbox import owner
+
+    # A root too long for a certificate login's SSH agent socket is refused
+    # before anything is claimed or started.
+    assert owner.teams_root_problem(qa_sandbox.root) is not None
+    refused = await qa_sandbox.command("up", "--teams", "--root", str(qa_sandbox.root))
+    assert refused.returncode == 2 and "--teams needs a shorter --root" in refused.stderr, refused.stderr
+    assert not qa_sandbox.root.exists() and not qa_sandbox.pointer.exists()
+
+    qa_sandbox.root = journey.ctx.root / f"q{journey.directory.name[:4]}"
+    if owner.teams_root_problem(qa_sandbox.root):
+        pytest.skip(f"the e2e root is too long for a --teams sandbox: {journey.ctx.root}")
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--teams")
+    teams = current["teams"]
+    server = teams["shared_server"]
+    assert (teams["plan"], teams["team"], teams["role"]) == ("teams", TEAM_SLUG, "owner")
+    assert (server["name"], server["login"], server["admin_login"]) == (HOST_NAME, LOGIN, ADMIN_USER)
+    assert current["urls"]["ssh_team_host"] == server["address"]
+    assert server["admin_key"] == str(Path(current["sandbox"]["home"]) / ".ssh" / BOOTSTRAP_KEY_NAME)
+    # Vault custody works in every child (the sandbox has no OS keyring).
+    assert current["env"][owner.VAULT_DEVICE_KEY_ENV]
+
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 0, status.stderr
+    assert ", teams," in status.stdout.splitlines()[0]
+    assert f"you own the team {TEAM_SLUG}" in status.stdout
+    assert f"shared server {HOST_NAME} listens on {server['address']}" in status.stdout
+    assert f"for the login {LOGIN}" in status.stdout
+
+    # Nothing of the Vault or the CA is set up yet: that is what a person walks.
+    vault = await qa_sandbox.command("run", "--", "vault", "status")
+    assert vault.returncode == 0 and "Run: servonaut vault setup" in vault.stdout, vault.stdout + vault.stderr
+
+    # The service lists the shared server at the loopback host, and the owner's
+    # existing credential (admin key, trusted host key) reaches it.
+    reached = await qa_sandbox.command("run", "--", "ssh", HOST_NAME, "--", "hostname")
+    assert reached.returncode == 0, reached.stdout + reached.stderr
+    assert reached.stdout.splitlines()[-1] == HOST_NAME
+    sessions = [json.loads(line) for line in Path(current["logs"]["ssh_sessions"]).read_text().splitlines()]
+    logins = [entry for entry in sessions if entry.get("host") == HOST_NAME and entry.get("event") == "auth"]
+    assert logins and all(
+        (entry["user"], entry["accepted"], entry["reason"]) == (ADMIN_USER, True, "authorized key")
+        for entry in logins
+    ), logins
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
 def _write_stale_sandbox(qa_sandbox: QaSandbox, root: Path, pid: int) -> None:
     """A pointer and root left by an owner that died, naming a pid now used by *pid*."""
     record = {

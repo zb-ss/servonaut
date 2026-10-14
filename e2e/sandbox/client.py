@@ -215,7 +215,8 @@ def status(*, as_json: bool) -> int:
         desktop_line = "not started (python -m e2e.sandbox desktop)"
     lines = [
         f"QA sandbox: running, owner pid {current['owner_pid']}, scenario {current['scenario']}"
-        f"{', signed in' if current.get('signed_in') else ''}, since {current['started_at']}",
+        f"{', signed in' if current.get('signed_in') else ''}"
+        f"{', teams' if current.get('teams') else ''}, since {current['started_at']}",
         f"checkout:   {current['repo_root']}",
         f"root:       {current['root']}",
         f"home:       {current['sandbox']['home']}",

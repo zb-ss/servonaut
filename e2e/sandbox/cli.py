@@ -50,6 +50,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="start signed in to the local Servonaut API")
     up.add_argument("--ssh-ca-off", action="store_true",
                     help="answer like a service with SSH certificates switched off")
+    up.add_argument("--teams", action="store_true",
+                    help="on the Teams plan, owning a team whose shared server (server-1) runs "
+                         "an sshd that honours SSH certificates, to walk Team Vault and SSH "
+                         "certificates end to end; needs a short --root, such as /tmp/svt")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
@@ -103,7 +107,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from e2e.sandbox import owner
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
-                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay)
+                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay,
+                        teams=args.teams)
 
     from e2e.sandbox import client
 
