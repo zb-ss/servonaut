@@ -71,6 +71,9 @@ class RemoteTree(Tree):
             self._key_path = ssh_service.get_key_path(instance['id'])
             if not self._key_path and instance.get('key_name'):
                 self._key_path = ssh_service.discover_key(instance['key_name'])
+        # The server's vault credential, applied before the first listing
+        # (None until then): identity arguments for the ssh builder.
+        self._identity: Optional[dict] = None
 
     def on_mount(self) -> None:
         """Populate root nodes on mount."""
@@ -126,11 +129,46 @@ class RemoteTree(Tree):
         Returns:
             List of entry dictionaries.
         """
+        await self._apply_vault()
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,
             lambda: self._fetch_directory_contents(path)
         )
+
+    async def _apply_vault(self) -> None:
+        """Use the server's Servonaut Vault key, if it has one (once per tree).
+
+        Raises:
+            RuntimeError: the server's vault credential cannot be used.
+        """
+        if self._identity is not None:
+            return
+        from servonaut.services.ssh_credentials import (
+            VaultCredentialError, resolve_with_vault, ssh_identity_kwargs,
+        )
+
+        app = self.app
+        try:
+            resolved = await resolve_with_vault(
+                {
+                    "host": self._host, "username": self._username, "key_path": self._key_path,
+                    "proxy_args": self._proxy_args, "port": self._port,
+                    "extra_options": self._extra_options, "profile": self._profile,
+                },
+                self._instance,
+                vault_runtime=getattr(app, "vault_command_service", None),
+                connection_service=self._connection_service,
+                cache=getattr(app, "vault_lease_cache", None),
+            )
+        except VaultCredentialError as exc:
+            raise RuntimeError(str(exc)) from exc
+        self._host = resolved["host"]
+        self._username = resolved["username"]
+        self._key_path = resolved.get("key_path")
+        self._proxy_args = list(resolved.get("proxy_args") or [])
+        self._port = resolved.get("port")
+        self._identity = {key: value for key, value in ssh_identity_kwargs(resolved).items() if value}
 
     def on_worker_state_changed(self, event) -> None:
         """Handle worker completion for directory fetches.
@@ -259,6 +297,7 @@ class RemoteTree(Tree):
             proxy_args=self._proxy_args,
             port=self._port,
             extra_options=self._extra_options,
+            **(self._identity or {}),
         )
         try:
             # No terminal to prompt on; ssh's messages go to a private log

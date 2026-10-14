@@ -151,25 +151,64 @@ class SCPTransferScreen(Screen):
         # Demo mode redacts the row we display, so transfer against the real
         # record.
         conn = connection_instance(self.app, self._instance)
-        command = self._build_transfer_command(conn, local_path, remote_path)
 
         # Execute transfer in worker
         status_output.update(f"[$text-warning]Transferring...[/$text-warning]")
         self.run_worker(
-            self.app.scp_service.execute_transfer(command),
+            self._transfer(conn, local_path, remote_path),
             name="scp_transfer",
-            exclusive=True
+            exclusive=True,
+            # A refused vault credential is reported as the worker's error.
+            exit_on_error=False,
         )
+
+    async def _transfer(self, conn: dict, local_path: str, remote_path: str):
+        """Run the transfer with the server's vault credential when it has one."""
+        command = await self._vault_transfer_command(conn, local_path, remote_path)
+        return await self.app.scp_service.execute_transfer(command)
+
+    async def _vault_transfer_command(
+        self, conn: dict, local_path: str, remote_path: str,
+    ) -> List[str]:
+        """:meth:`_build_transfer_command` with the server's vault credential applied.
+
+        Raises:
+            VaultCredentialError: the server's vault credential cannot be used.
+        """
+        from servonaut.services.ssh_credentials import resolve_with_vault, ssh_identity_kwargs
+
+        options = self._transfer_options(conn)
+        resolved = await resolve_with_vault(
+            options, conn,
+            vault_runtime=getattr(self.app, "vault_command_service", None),
+            connection_service=self.app.connection_service,
+            cache=getattr(self.app, "vault_lease_cache", None),
+        )
+        if resolved.get("identity_agent") is None:
+            return self._command_for(options, local_path, remote_path)
+        options = {
+            **{key: resolved.get(key) for key in options},
+            **{key: value for key, value in ssh_identity_kwargs(resolved).items() if value},
+        }
+        self._host_key_target = HostKeyTarget.for_connection(
+            options['host'], options['port'], instance=conn,
+            profile=self.app.connection_service.resolve_profile(conn),
+        )
+        return self._command_for(options, local_path, remote_path)
 
     def _build_transfer_command(
         self, conn: dict, local_path: str, remote_path: str,
     ) -> List[str]:
-        """Build the scp argv for *conn* in the selected direction.
+        """Build the scp argv for *conn* in the selected direction (local keys).
 
         Custom servers use their own username, key and port, as the other
         connect paths do; everything else takes the username from the
         connection profile or the configured default.
         """
+        return self._command_for(self._transfer_options(conn), local_path, remote_path)
+
+    def _transfer_options(self, conn: dict) -> dict:
+        """Host, user, key, proxy, port and options for *conn* (local keys)."""
         connection_service = self.app.connection_service
         profile = connection_service.resolve_profile(conn)
 
@@ -199,7 +238,10 @@ class SCPTransferScreen(Screen):
         self._host_key_target = HostKeyTarget.for_connection(
             options['host'], options['port'], instance=conn, profile=profile,
         )
+        return options
 
+    def _command_for(self, options: dict, local_path: str, remote_path: str) -> List[str]:
+        """The scp argv for *options* in the selected direction."""
         if self._transfer_direction == "upload":
             return self.app.scp_service.build_upload_command(
                 local_path=local_path, remote_path=remote_path, **options,

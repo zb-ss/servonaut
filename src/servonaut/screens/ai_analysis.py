@@ -505,7 +505,9 @@ class AIAnalysisScreen(Screen):
 
         try:
             service = self.app.log_viewer_service
-            conn = service._resolve_connection(
+            # Applies the server's vault credential (VaultCredentialError is
+            # reported like any other fetch failure below).
+            conn = await service.resolve_connection(
                 connection_instance(self.app, self._instance),
                 self.app.ssh_service,
                 self.app.connection_service,
@@ -520,6 +522,8 @@ class AIAnalysisScreen(Screen):
                     log_path, num_lines=200, follow=False
                 )
 
+            from servonaut.services.ssh_credentials import ssh_identity_kwargs
+
             ssh_cmd = self.app.ssh_service.build_ssh_command(
                 host=conn["host"],
                 username=conn["username"],
@@ -528,6 +532,7 @@ class AIAnalysisScreen(Screen):
                 remote_command=read_cmd,
                 port=conn["port"],
                 extra_options=conn.get("extra_options") or [],
+                **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
             )
 
             stdout, stderr = await run_ssh_subprocess(ssh_cmd, timeout=30)

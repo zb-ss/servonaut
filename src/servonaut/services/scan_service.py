@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import dataclasses
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import Any, List, Tuple, Optional
 from datetime import datetime
 
 from servonaut.services.interfaces import (
@@ -136,14 +137,28 @@ class _ScanTarget:
     port: Optional[int]
     # Names a genuine host-key refusal can report.
     host_key_target: HostKeyTarget
+    # A Servonaut Vault credential (private agent, pinned host keys).
+    identity_agent: Optional[str] = None
+    identity_file: Optional[str] = None
+    certificate_file: Optional[str] = None
+    known_hosts_file: Optional[str] = None
 
     def argv(self, remote_command: str) -> List[str]:
+        identity = {
+            key: value for key, value in (
+                ("identity_agent", self.identity_agent),
+                ("identity_file", self.identity_file),
+                ("certificate_file", self.certificate_file),
+                ("known_hosts_file", self.known_hosts_file),
+            ) if value
+        }
         return self.ssh_service.build_ssh_command(
             self.host, self.username, self.key_path,
             remote_command=remote_command,
             proxy_args=self.proxy_args,
             port=self.port,
             extra_options=self.extra_options,
+            **identity,
         )
 
 
@@ -161,6 +176,8 @@ class ScanService(ScanServiceInterface):
             config_manager: Configuration manager instance
         """
         self._config_manager = config_manager
+        self._vault_runtime: Any = None
+        self._vault_leases: Any = None
 
     async def scan_server(
         self,
@@ -202,6 +219,7 @@ class ScanService(ScanServiceInterface):
             return []
 
         target = self._resolve_target(instance, ssh_service, connection_service)
+        target = await self._with_vault(target, instance, connection_service)
         await self._check_connection(target)
 
         results = []
@@ -219,6 +237,44 @@ class ScanService(ScanServiceInterface):
                 results.append(result)
 
         return results
+
+    def set_vault_runtime(self, runtime: Any, leases: Any = None) -> None:
+        """Use a server's Servonaut Vault key (or SSH certificate) for scans."""
+        self._vault_runtime = runtime
+        self._vault_leases = leases
+
+    async def _with_vault(
+        self, target: _ScanTarget, instance: dict, connection_service: Any,
+    ) -> _ScanTarget:
+        """*target* with the server's vault credential applied, if it has one.
+
+        Raises:
+            ScanConnectionError: the vault credential exists but cannot be used.
+        """
+        from servonaut.services.ssh_credentials import VaultCredentialError, resolve_with_vault
+
+        conn = {
+            "host": target.host, "username": target.username, "key_path": target.key_path,
+            "proxy_args": target.proxy_args, "port": target.port,
+            "extra_options": target.extra_options,
+        }
+        try:
+            resolved = await resolve_with_vault(
+                conn, instance, vault_runtime=self._vault_runtime,
+                connection_service=connection_service, cache=self._vault_leases,
+            )
+        except VaultCredentialError as exc:
+            raise ScanConnectionError(str(exc)) from exc
+        if resolved.get("identity_agent") is None:
+            return target
+        return dataclasses.replace(
+            target,
+            host=resolved["host"], username=resolved["username"], key_path=None,
+            proxy_args=list(resolved.get("proxy_args") or []), port=resolved.get("port"),
+            identity_agent=resolved["identity_agent"], identity_file=resolved.get("identity_file"),
+            certificate_file=resolved.get("certificate_path"),
+            known_hosts_file=resolved.get("known_hosts_path"),
+        )
 
     def _resolve_target(
         self,
