@@ -1914,6 +1914,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             source = source if isinstance(source, str) and source else _VAULT_SOURCE
             label = credential_source_label(source) or "Servonaut Vault"
             self._vault_binding_source = source
+            # The other SSH paths must not reuse a lease for the previous key.
+            leases = getattr(self.app, "vault_lease_cache", None)
+            if leases is not None:
+                leases.forget(instance)
             if self.is_mounted:
                 self._render_server_info()
             self.app.notify(f"Vault key bound. SSH to this server now uses {label}.", markup=False)

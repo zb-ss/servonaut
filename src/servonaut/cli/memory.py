@@ -42,6 +42,17 @@ def _run_async(coro: Any) -> Any:
 # Headless service initialisation (mirrors mcp/server.py create_mcp_server)
 # ---------------------------------------------------------------------------
 
+def _vault_runtime() -> Any:
+    """The signed-in user's vault runtime, or None (signed out, no vault)."""
+    try:
+        from servonaut.services.vault.command_service import VaultCommandService
+
+        return VaultCommandService.from_local_session()
+    except Exception as exc:  # noqa: BLE001 - signed out or an older service
+        logger.debug("Vault runtime unavailable for memory probes: %s", type(exc).__name__)
+        return None
+
+
 def _init_headless_services() -> Tuple[Any, Any, Any]:
     """Initialise Config, MemoryService and the cached fleet.
 
@@ -86,6 +97,12 @@ def _init_headless_services() -> Tuple[Any, Any, Any]:
     )
     # Back-reference for log-viewer cache lookups.
     log_viewer_service.set_memory_service(memory_service)
+    # Probes use a server's Servonaut Vault key when it has one. One CLI run
+    # needs no lease cache; the private agents end with the process.
+    vault_runtime = _vault_runtime()
+    if vault_runtime is not None:
+        memory_service.set_vault_runtime(vault_runtime)
+        log_viewer_service.set_vault_runtime(vault_runtime)
 
     fleet = CachedFleet.from_config(config, custom_server_service, config_manager)
     return config, memory_service, fleet

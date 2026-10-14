@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
 from servonaut.services.memory.provider import instance_provider
@@ -18,6 +18,13 @@ if TYPE_CHECKING:
     from servonaut.services.memory.interfaces import MemoryServiceInterface
 
 logger = logging.getLogger(__name__)
+
+
+def _identity(conn: Dict[str, Any]) -> Dict[str, Any]:
+    """The vault identity arguments of a resolved connection (empty for a local key)."""
+    from servonaut.services.ssh_credentials import ssh_identity_kwargs
+
+    return {key: value for key, value in ssh_identity_kwargs(conn).items() if value}
 
 # Patterns for file classification
 _COMPRESSED_RE = re.compile(r"\.(gz|bz2|xz|zst)$")
@@ -61,6 +68,8 @@ class LogViewerService(LogViewerServiceInterface):
     ) -> None:
         self._config_manager = config_manager
         self._memory_service = memory_service
+        self._vault_runtime: Any = None
+        self._vault_leases: Any = None
 
     def set_memory_service(
         self, memory_service: Optional["MemoryServiceInterface"]
@@ -74,6 +83,27 @@ class LogViewerService(LogViewerServiceInterface):
         log viewer injected, and finally wire the memory service back here.
         """
         self._memory_service = memory_service
+
+    def set_vault_runtime(self, runtime: Any, leases: Any = None) -> None:
+        """Use a server's Servonaut Vault key (or SSH certificate) for log access."""
+        self._vault_runtime = runtime
+        self._vault_leases = leases
+
+    async def resolve_connection(
+        self, instance: dict, ssh_service: Any, connection_service: Any,
+    ) -> Dict[str, Any]:
+        """The connection for *instance*, with its vault credential applied.
+
+        Raises:
+            VaultCredentialError: the server's vault credential cannot be used.
+        """
+        from servonaut.services.ssh_credentials import resolve_with_vault
+
+        return await resolve_with_vault(
+            self._resolve_connection(instance, ssh_service, connection_service),
+            instance, vault_runtime=self._vault_runtime,
+            connection_service=connection_service, cache=self._vault_leases,
+        )
 
     def _resolve_connection(
         self,
@@ -170,12 +200,13 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        conn = self._resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
             key_path=conn["key_path"],
             proxy_args=conn["proxy_args"],
+            **_identity(conn),
             remote_command=checks,
             port=conn["port"],
             extra_options=conn.get("extra_options") or [],
@@ -336,12 +367,13 @@ class LogViewerService(LogViewerServiceInterface):
             f"2>/dev/null | sort -u"
         )
 
-        conn = self._resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
             key_path=conn["key_path"],
             proxy_args=conn["proxy_args"],
+            **_identity(conn),
             remote_command=find_cmd,
             port=conn["port"],
             extra_options=conn.get("extra_options") or [],
@@ -410,12 +442,13 @@ class LogViewerService(LogViewerServiceInterface):
             "2>/dev/null | sort -u"
         )
 
-        conn = self._resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
             key_path=conn["key_path"],
             proxy_args=conn["proxy_args"],
+            **_identity(conn),
             remote_command=find_cmd,
             port=conn["port"],
             extra_options=conn.get("extra_options") or [],

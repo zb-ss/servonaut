@@ -67,6 +67,9 @@ class CommandOverlay(ModalScreen):
         """
         super().__init__()
         self._instance = instance
+        # The server's vault credential, applied before the first command runs
+        # (None until then): identity arguments for the ssh builder.
+        self._identity: Optional[dict] = None
         self._history: List[str] = []
         self._history_index = -1
         self._running_process: Optional[subprocess.Popen] = None
@@ -286,8 +289,55 @@ class CommandOverlay(ModalScreen):
         # Use bash -ic (interactive) so .bashrc is fully sourced, including
         # nvm/rbenv/pyenv init blocks guarded by the non-interactive check.
         login_command = f'bash -ic {shlex.quote(command)}'
+        self.run_worker(
+            self._resolve_and_run(login_command, output_widget),
+            name=f"resolve_{len(self._history)}",
+            exclusive=False,
+            exit_on_error=False,
+        )
 
-        # Build SSH command
+    async def _apply_vault(self) -> None:
+        """Use the server's Servonaut Vault key, if it has one (once per overlay).
+
+        Raises:
+            VaultCredentialError: the server's vault credential cannot be used.
+        """
+        if self._identity is not None:
+            return
+        from servonaut.services.ssh_credentials import resolve_with_vault, ssh_identity_kwargs
+
+        resolved = await resolve_with_vault(
+            {
+                "host": self._host, "username": self._username, "key_path": self._key_path,
+                "proxy_args": self._proxy_args, "port": self._port,
+                "extra_options": self._extra_options, "profile": self._profile,
+            },
+            self._connection or connection_instance(self.app, self._instance),
+            vault_runtime=getattr(self.app, "vault_command_service", None),
+            connection_service=self.app.connection_service,
+            cache=getattr(self.app, "vault_lease_cache", None),
+        )
+        self._host = resolved["host"]
+        self._username = resolved["username"]
+        self._key_path = resolved.get("key_path")
+        self._proxy_args = list(resolved.get("proxy_args") or [])
+        self._port = resolved.get("port")
+        self._identity = {key: value for key, value in ssh_identity_kwargs(resolved).items() if value}
+
+    async def _resolve_and_run(self, login_command: str, output_widget: CommandOutput) -> None:
+        """Build the ssh command (with the vault credential) and run it in a thread."""
+        from servonaut.services.ssh_credentials import VaultCredentialError
+
+        try:
+            await self._apply_vault()
+        except VaultCredentialError as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            output_widget.append_error(escape(message))
+            self._output_lines.append(message)
+            return
+
         ssh_cmd = self.app.ssh_service.build_ssh_command(
             host=self._host,
             username=self._username,
@@ -296,6 +346,7 @@ class CommandOverlay(ModalScreen):
             proxy_args=self._proxy_args,
             port=self._port,
             extra_options=self._extra_options,
+            **(self._identity or {}),
         )
 
         logger.debug("Command overlay executing: %s", ' '.join(ssh_cmd))

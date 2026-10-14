@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
@@ -887,6 +887,11 @@ class TestAIAnalysisScrub:
                                 "key_path": None, "port": 22,
                                 "extra_options": [],
                             }
+                            # The fetch resolves the connection (and any vault key) first.
+                            mock_app.log_viewer_service.resolve_connection = AsyncMock(return_value={
+                                "host": "10.0.0.1", "username": "ubuntu", "key_path": None,
+                                "proxy_args": [], "port": 22, "extra_options": [],
+                            })
                             asyncio.run(screen._do_fetch_log("/var/log/app.log"))
 
         assert "1.2.3.4" not in screen._raw_text, (

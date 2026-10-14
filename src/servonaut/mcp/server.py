@@ -138,6 +138,13 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         )
         from servonaut.services.vault.background import unlock_vault_for_startup
         unlock_vault_for_startup(vault_runtime)
+        # Memory probes and log access resolve their own connections: hand
+        # them the vault too, with one lease cache for this server process.
+        from servonaut.services.ssh_credentials import VaultLeaseCache
+        vault_leases = VaultLeaseCache()
+        for service in (memory_service, log_viewer_service):
+            if service is not None:
+                service.set_vault_runtime(vault_runtime, vault_leases)
 
     # Hetzner Cloud and OVH — optional. The registry builds an account only
     # when it can connect (Hetzner: a token resolves; OVH: credentials are

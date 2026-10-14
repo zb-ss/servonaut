@@ -249,11 +249,21 @@ class LogViewerScreen(Screen):
         config = self.app.config_manager.get()
         read_cmd = service.get_read_command(log_path, config.log_viewer_tail_lines)
 
-        conn = service._resolve_connection(
-            self._connection_instance(),
-            self.app.ssh_service,
-            self.app.connection_service,
-        )
+        from servonaut.services.ssh_credentials import VaultCredentialError, ssh_identity_kwargs
+
+        try:
+            conn = await service.resolve_connection(
+                self._connection_instance(),
+                self.app.ssh_service,
+                self.app.connection_service,
+            )
+        except VaultCredentialError as exc:
+            message = str(exc)
+            if self.app.demo_mode and self.app.redaction_service:
+                message = self.app.redaction_service.scrub_stream(message)
+            self.query_one("#log_output", RichLog).write(Text(message, style="red"))
+            self.app.notify(message, severity="error", markup=False)
+            return
         ssh_cmd = self.app.ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
@@ -262,6 +272,7 @@ class LogViewerScreen(Screen):
             remote_command=read_cmd,
             port=conn["port"],
             extra_options=conn.get("extra_options") or [],
+            **{key: value for key, value in ssh_identity_kwargs(conn).items() if value},
         )
 
         logger.debug("Starting log stream: %s", " ".join(str(a) for a in ssh_cmd))
