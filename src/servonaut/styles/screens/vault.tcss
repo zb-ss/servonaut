@@ -259,6 +259,13 @@ CaEnrollmentConfirmModal {
     margin-bottom: 1;
 }
 
+/* The button rows take their own height: filling the dialog left its buttons
+   floating in the middle of empty space. */
+#ca_confirm_modal > Horizontal,
+#ca_enable_modal > Horizontal {
+    height: auto;
+}
+
 #ca_content #ca_enable,
 #ca_content #ca_refresh,
 #ca_content #ca_audit,

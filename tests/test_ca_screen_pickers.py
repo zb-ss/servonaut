@@ -785,3 +785,55 @@ async def test_the_switch_on_confirmation_fits_at_100x30() -> None:
         for button_id in ("#ca_enable_cancel", "#ca_enable_confirm"):
             button = app.screen.query_one(button_id, Button)
             assert button.region.height >= 1 and modal.region.contains_region(button.region)
+        _assert_buttons_close_the_dialog(modal, app.screen.query_one("#ca_enable_confirm", Button))
+
+
+def _assert_buttons_close_the_dialog(modal: Any, button: Button) -> None:
+    """The dialog is as tall as its content: its buttons end it, with no empty space below."""
+    inner_bottom = modal.region.bottom - 2  # bottom border and padding
+    assert inner_bottom - 1 <= button.region.bottom <= inner_bottom
+
+
+@pytest.mark.asyncio
+async def test_the_enrollment_confirmation_is_as_tall_as_its_content() -> None:
+    from servonaut.screens.ca import CaEnrollmentConfirmModal
+
+    summary = {"kind": "enroll", "params": {"server": {"hostname": "192.0.2.10"}, "user_ca_public_keys": []}}
+
+    class _ModalHost(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.push_screen(CaEnrollmentConfirmModal(summary))
+
+    app = _ModalHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, CaEnrollmentConfirmModal))
+        await pilot.pause()
+        _assert_buttons_close_the_dialog(
+            app.screen.query_one("#ca_confirm_modal"), app.screen.query_one("#ca_confirm", Button),
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_switch_on_names_the_team_as_demo_mode_shows_it() -> None:
+    class Redactor:
+        def scrub_stream(self, text: str) -> str:
+            return text.replace("Ops", "Team-A")
+
+    service = _PickerService(teams=[{"slug": "ops", "label": "[bold]Ops[/bold] (ops)"}, _TEAMS[1]])
+    service.not_enabled.add("ops")
+    app = _StyledHost(service)
+    app.redaction_service = Redactor()
+    app.demo_mode = True
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+
+        question = await _confirm_switch_on(pilot, confirm=True)
+
+        # Redacted, and the label's brackets shown as typed rather than read as markup.
+        assert question == "Switch on SSH certificates for [bold]Team-A[/bold] (ops)?"
+        await wait_until(lambda: service.calls_to("ca_enable") == [{"team": "ops"}])
+        await wait_until(lambda: any(note.startswith("SSH certificates are on for") for note, _ in app.notes))
+        assert ("SSH certificates are on for [bold]Team-A[/bold] (ops).", {"markup": False}) in app.notes
