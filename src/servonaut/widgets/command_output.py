@@ -57,6 +57,17 @@ class CommandOutput(RichLog):
                 error = self.app.redaction_service.scrub_stream(error)
             self.write(f"[bold red]{error}[/bold red]")
 
+    def append_notice(self, notice: str) -> None:
+        """Append an informational line, dimmed so it does not read as an error.
+
+        Args:
+            notice: Notice text to display (already escaped for Rich markup).
+        """
+        if notice:
+            if self.app.demo_mode and self.app.redaction_service:
+                notice = self.app.redaction_service.scrub_stream(notice)
+            self.write(f"[dim]{notice}[/dim]")
+
     def clear_output(self) -> None:
         """Clear all output from the log."""
         self.clear()

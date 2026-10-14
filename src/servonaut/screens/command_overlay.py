@@ -24,6 +24,7 @@ from servonaut.services.ssh_host_keys import (
 from servonaut.utils.ssh_utils import (
     SshLog,
     background_process_kwargs,
+    is_known_hosts_notice,
     track_background_process,
 )
 from servonaut.widgets.command_output import CommandOutput
@@ -437,9 +438,11 @@ class CommandOverlay(ModalScreen):
             for line in map(_shown, diagnostics.splitlines()):
                 if line.strip():
                     self._output_lines.append(_scrub(line))
+                    # A saved host key is news, not a failure: shown dimmed, not red.
+                    show = output_widget.append_notice if is_known_hosts_notice(line) else output_widget.append_error
                     # Escaped: OpenSSH's own hints contain "[host]:port",
                     # which Rich markup would otherwise swallow.
-                    self.app.call_from_thread(output_widget.append_error, escape(line))
+                    self.app.call_from_thread(show, escape(line))
 
             if return_code != 0 and return_code not in (-15, -9):
                 exit_msg = f"Command exited with code {return_code}"
