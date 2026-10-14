@@ -1275,4 +1275,181 @@ class TestUseVaultKeyForCustomServer:
         # "custom" and the server's name, whatever the label says.
         assert (kwargs["provider"], kwargs["instance_id"]) == ("custom", "Web 1")
         assert (kwargs["hostname"], kwargs["port"], kwargs["login"]) == ("192.0.2.10", 2222, "deploy")
-        assert app._notifications[-1]["message"] == "SSH credential source: servonaut_vault"
+        assert app._notifications[-1]["message"] == "Vault key bound. SSH to this server now uses Servonaut Vault."
+
+
+# ---------------------------------------------------------------------------
+# Personal Servonaut Vault bindings: details panel and Verify SSH
+# ---------------------------------------------------------------------------
+
+_VAULT_RESOLVED = ResolvedSshRef(
+    source="vault",
+    login_user="deploy",
+    identity_agent="/run/agent.sock",
+    identity_file="/run/key.pub",
+    known_hosts_path="/run/known_hosts",
+)
+
+
+def _vault_app(*, binding=None, binding_raises=None, identity=True, verify_rc=0):
+    """A connect-ready fake app with a vault service holding *binding*."""
+    app = _make_connect_app()
+    service = MagicMock()
+    service.store.identity = object() if identity else None
+    if binding_raises is not None:
+        service.personal_binding = AsyncMock(side_effect=binding_raises)
+    else:
+        service.personal_binding = AsyncMock(return_value=binding)
+    app.vault_command_service = service
+    app.bw_ssh_config_service = MagicMock()
+    app.bw_ssh_config_service.get_personal_instance_ref = AsyncMock(return_value=None)
+    app._pushed = []
+
+    async def push_screen_wait(modal):
+        app._pushed.append(modal)
+        return True
+
+    app.push_screen_wait = push_screen_wait
+    app._verify_rc = verify_rc
+    return app
+
+
+class TestPersonalVaultBindingLabel:
+    def test_a_personal_binding_is_shown_as_servonaut_vault(self):
+        app = _vault_app(binding={"source": "servonaut_vault", "valid": True})
+        screen = _make_connect_screen(app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        assert "SSH credential:[/dim] Servonaut Vault" in screen._credential_source_line()
+        app.vault_command_service.personal_binding.assert_awaited_once()
+
+    def test_a_binding_without_a_source_is_still_a_vault_binding(self):
+        app = _vault_app(binding={"valid": True})
+        screen = _make_connect_screen(app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        assert "Servonaut Vault" in screen._credential_source_line()
+
+    def test_no_binding_keeps_automatic_resolution(self):
+        app = _vault_app(binding=None)
+        screen = _make_connect_screen(app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        assert "Automatic resolution" in screen._credential_source_line()
+
+    def test_a_failed_lookup_keeps_automatic_resolution(self):
+        app = _vault_app(binding_raises=RuntimeError("offline"))
+        screen = _make_connect_screen(app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        assert "Automatic resolution" in screen._credential_source_line()
+
+    def test_nothing_is_looked_up_without_an_unlocked_vault_identity(self):
+        app = _vault_app(binding={"source": "servonaut_vault"}, identity=False)
+        screen = _make_connect_screen(app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        app.vault_command_service.personal_binding.assert_not_awaited()
+        assert "Automatic resolution" in screen._credential_source_line()
+
+    def test_a_shared_servers_own_binding_is_not_looked_up_again(self):
+        inst = _make_instance()
+        inst["credential_binding"] = {"source": "bitwarden"}
+        app = _vault_app(binding={"source": "servonaut_vault"})
+        screen = _make_connect_screen(instance=inst, app=app)
+
+        _run(screen._refresh_vault_binding())
+
+        app.vault_command_service.personal_binding.assert_not_awaited()
+        assert "SSH credential:[/dim] Bitwarden" in screen._credential_source_line()
+
+    def test_a_late_empty_answer_does_not_undo_a_bind(self):
+        app = _vault_app(binding=None)
+        screen = _make_connect_screen(app=app)
+        screen._vault_binding_source = "servonaut_vault"
+
+        _run(screen._refresh_vault_binding())
+
+        assert "Servonaut Vault" in screen._credential_source_line()
+
+
+class TestVerifySshWithVaultKey:
+    def _verify(self, app, *, resolved=_VAULT_RESOLVED, resolve_raises=None):
+        screen = _make_connect_screen(app=app)
+        resolver = MagicMock()
+        if resolve_raises is not None:
+            resolver.resolve = AsyncMock(side_effect=resolve_raises)
+        else:
+            resolver.resolve = AsyncMock(return_value=resolved)
+        proc = SimpleNamespace(returncode=app._verify_rc, stdout="", stderr="")
+        with patch.object(type(screen), "_ssh_ref_resolver", AsyncMock(return_value=resolver)), \
+                patch("servonaut.screens.server_actions.run_ssh", return_value=proc) as run:
+            _run(screen._verify_ssh_flow())
+        return screen, run
+
+    def test_a_vault_bound_server_is_checked_with_its_vault_key(self):
+        app = _vault_app(binding={"source": "servonaut_vault"})
+
+        screen, run = self._verify(app)
+
+        modal = app._pushed[0]
+        assert isinstance(modal, ConfirmSshVerifyModal) and modal._vault is True
+        # The Bitwarden ref is never consulted for a vault-bound server.
+        app.bw_ssh_config_service.get_personal_instance_ref.assert_not_awaited()
+        build = app.ssh_service.build_ssh_command.call_args.kwargs
+        assert build["remote_command"] == "true"
+        assert build["identity_agent"] == "/run/agent.sock"
+        assert build["known_hosts_file"] == "/run/known_hosts"
+        assert "BatchMode=yes" in build["extra_options"]
+        assert build["username"] == "deploy"
+        run.assert_called_once()
+        assert app._notifications[-1]["message"] == "SSH verified with the Servonaut Vault key."
+        assert "Servonaut Vault" in screen._credential_source_line()
+
+    def test_a_refused_vault_key_is_reported(self):
+        app = _vault_app(binding={"source": "servonaut_vault"}, verify_rc=255)
+
+        self._verify(app)
+
+        note = app._notifications[-1]
+        assert note["severity"] == "error"
+        assert "pinned" in note["message"]
+
+    def test_an_unusable_vault_credential_fails_closed(self):
+        app = _vault_app(binding={"source": "servonaut_vault"})
+
+        _screen, run = self._verify(app, resolve_raises=RuntimeError("locked"))
+
+        run.assert_not_called()
+        assert app._notifications[-1]["severity"] == "error"
+        assert "could not be used" in app._notifications[-1]["message"]
+
+    def test_a_non_vault_resolution_is_not_probed(self):
+        app = _vault_app(binding={"source": "servonaut_vault"})
+
+        _screen, run = self._verify(app, resolved=_LOCAL_RESOLVED)
+
+        run.assert_not_called()
+        assert "could not be loaded" in app._notifications[-1]["message"]
+
+    def test_a_server_without_a_vault_binding_keeps_the_bitwarden_flow(self):
+        app = _vault_app(binding=None)
+
+        self._verify(app)
+
+        app.bw_ssh_config_service.get_personal_instance_ref.assert_awaited_once()
+        modal = app._pushed[0]
+        assert isinstance(modal, ConfirmSshVerifyModal) and modal._vault is False
+
+
+class TestConfirmSshVerifyModalVaultText:
+    def test_the_vault_variant_describes_the_vault_check(self):
+        modal = ConfirmSshVerifyModal(host="192.0.2.10", has_ref=False, vault=True)
+
+        assert modal._vault is True
+        assert modal._has_ref is False
