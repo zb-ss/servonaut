@@ -48,6 +48,33 @@ _ADMIN_ONLY_FEATURES = {
     "allow_dangerous_ai_tools",
 }
 
+# Human-readable feature names for the Account screen. Unreleased features are
+# filtered out so the user doesn't see things they can't use yet, even if the
+# backend's plan map still lists them. A feature without a label here shows
+# its raw slug; a test checks every feature the plan map names has one.
+_FEATURE_LABELS = {
+    "config_sync": "Config sync across machines",
+    "premium_ai": "Premium AI providers",
+    "gcp_provider": "GCP provider support",
+    "azure_provider": "Azure provider support",
+    "team_workspaces": "Team workspaces",
+    "memory_sync": "Memory Sync (encrypted memory backup)",
+    "memory_drift": "Drift detection across re-probes",
+    "memory_digest": "Periodic email digests of memory changes",
+    "memory_team_share": "Share encrypted memory with team-mates",
+    "memory_ai_summary": "AI-generated memory summaries",
+    "memory_compliance_export": "Signed compliance export tarball",
+    "secrets_management": "Secrets management",
+    "secrets_team_shared": "Team-shared secrets",
+    "personal_vault": "Personal vault for SSH keys and secrets",
+    "team_vault": "Team vault shared with your team",
+    "ssh_ca": "SSH certificates for team servers",
+    "proactive_monitoring": "Proactive monitoring and findings",
+}
+
+# Plan names as the product writes them; an unknown plan shows as sent.
+_PLAN_LABELS = {"free": "Free", "solo": "Solo", "teams": "Teams"}
+
 
 class PassphraseModal(ModalScreen[Optional[str]]):
     """Prompt the user for a sync passphrase.
@@ -321,30 +348,11 @@ class LoginScreen(Screen):
         plan = auth.plan
         features = auth.get_plan_features() if hasattr(auth, "get_plan_features") else {}
 
-        # Human-readable feature names. Unreleased features are filtered
-        # below so the user doesn't see things they can't use yet — even if
-        # the backend's plan map still lists them. Keys without a label here
-        # fall back to the raw slug, which is a screaming hint to add one.
-        feature_labels = {
-            "config_sync": "Config sync across machines",
-            "premium_ai": "Premium AI providers",
-            "gcp_provider": "GCP provider support",
-            "azure_provider": "Azure provider support",
-            "team_workspaces": "Team workspaces",
-            "memory_sync": "Memory Sync (encrypted fleet memory backup)",
-            "memory_drift": "Drift detection across re-probes",
-            "memory_digest": "Periodic email digests of memory changes",
-            "memory_team_share": "Share encrypted memory with team-mates",
-            "memory_ai_summary": "AI-generated memory summaries",
-            "memory_compliance_export": "Signed compliance export tarball",
-            "secrets_management": "Secrets management",
-            "secrets_team_shared": "Team-shared secrets",
-        }
         feature_lines = []
         for feat, enabled in features.items():
             if feat in _UNRELEASED_FEATURES or feat in _ADMIN_ONLY_FEATURES:
                 continue
-            label = feature_labels.get(feat, feat)
+            label = _FEATURE_LABELS.get(feat, feat)
             if enabled:
                 feature_lines.append(f"  [$text-success]✓[/$text-success] {label}")
             else:
@@ -355,7 +363,8 @@ class LoginScreen(Screen):
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
             email = self.app.redaction_service.scrub_stream(email)
         self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {email}")
-        self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {plan}")
+        plan_label = _PLAN_LABELS.get(str(plan or "").lower(), plan)
+        self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {plan_label}")
         self.query_one("#entitlements_info", Static).update(
             "[bold]Features:[/bold]\n" + "\n".join(feature_lines)
         )
