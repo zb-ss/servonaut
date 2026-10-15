@@ -1,14 +1,16 @@
 """Converse with an interactive CLI command: read its prompts, type answers.
 
 ``run_cli`` hands a child all of its standard input up front, which cannot
-answer a prompt whose right answer is only printed at run time (a staging
-token, say). :class:`InteractiveCli` keeps the pipes open instead::
+answer a prompt whose right answer is only printed at run time (a device
+id, say). :class:`InteractiveCli` keeps the pipes open instead::
 
-    with InteractiveCli.start(cmd, "db", "setup", "edge-1", env=..., ...) as child:
-        token = child.expect(r"token=(\\S+)").group(1)
-        child.expect(r"Token to save")
-        child.send(token)
+    with InteractiveCli.start(cmd, "vault", "devices", "add", env=..., ...) as child:
+        device_id = child.expect(r"device_id: (\\S+)").group(1)
+        ...  # act on device_id elsewhere while the command waits
     result = child.result  # a CliResult, like run_cli's
+
+The child's standard input is a pipe, not a terminal: a command that asks
+only on a terminal needs :mod:`e2e.harness.terminal` instead.
 
 Waits are bounded and condition-based: :meth:`expect` returns as soon as the
 output matches, and fails with everything read so far when it does not. The

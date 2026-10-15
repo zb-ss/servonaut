@@ -286,12 +286,20 @@ def test_cli_db_setup_passes_the_named_instance():
     from servonaut.cli import db as cli_db
 
     tools = MagicMock()
-    tools.db_setup_scan = AsyncMock(return_value="token=dbstg_x ...")
+    tools.db_scan_stage = AsyncMock(return_value={"error": None, "instance": "web-1", "candidates": [{
+        "token": "dbstg_x", "engine": "mysql", "user": "app", "host": "localhost",
+        "port": 3306, "database": "shop", "source": _SITE_SOURCE, "label": "shop.example.com",
+    }]})
     tools.db_setup_save = AsyncMock(return_value="Saved db_profile for web-1 (i-aaa)")
-    args = argparse.Namespace(instance="web-1", search_path="", source="auto")
+    args = argparse.Namespace(
+        instance="web-1", search_path="", source="auto", yes=True, pick=None,
+        label="", json=False, manual=False,
+    )
 
-    with patch.object(cli_db, "_build_tools", return_value=(tools, MagicMock())), \
-         patch("builtins.input", side_effect=["dbstg_x", "y"]):
+    with patch.object(cli_db, "_build_tools", return_value=(tools, MagicMock())):
         assert asyncio.run(cli_db._run_setup(args)) == 0
 
-    tools.db_setup_save.assert_awaited_once_with("dbstg_x", instance_id="web-1")
+    tools.db_scan_stage.assert_awaited_once_with("web-1", search_path="", source="auto")
+    tools.db_setup_save.assert_awaited_once_with(
+        "dbstg_x", instance_id="web-1", label="shop.example.com",
+    )
