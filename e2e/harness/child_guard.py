@@ -21,6 +21,11 @@ refuse it anyway).
 ``SERVONAUT_E2E_PROVIDER_REDIRECTS`` points the Hetzner and OVH client
 libraries at the local fakes (see ``provider_redirects.py``).
 
+``SERVONAUT_E2E_HOSTNAME``, when set, is the machine name the process sees
+(``socket.gethostname``, ``os.uname`` and ``platform.node``), so names derived
+from it, such as relay client IDs and vault device names, never carry the
+real machine's name.
+
 With ``watch_owner`` (the default) a daemon thread ends the process
 (exit 75) once the process that owns the run, or the run's root directory,
 is gone. Fixture teardown normally stops children; the watchdog covers a run
@@ -38,6 +43,7 @@ ENV_REDIRECTS = "SERVONAUT_E2E_REDIRECTS"
 ENV_PROVIDER_REDIRECTS = "SERVONAUT_E2E_PROVIDER_REDIRECTS"
 ENV_OWNER_PID = "SERVONAUT_E2E_OWNER_PID"
 ENV_OWNER_ROOT = "SERVONAUT_E2E_OWNER_ROOT"
+ENV_HOSTNAME = "SERVONAUT_E2E_HOSTNAME"
 EXIT_UNGUARDED = 70
 EXIT_ORPHANED = 75
 _WATCH_SECONDS = 0.25
@@ -213,6 +219,19 @@ def _install_redirects():
             _set_attributes(sys.modules[name], attributes)
 
 
+def _pin_hostname():
+    name = os.environ.get(ENV_HOSTNAME)
+    if not name:
+        return
+    import platform
+    import socket
+
+    real = os.uname()
+    os.uname = lambda: os.uname_result((real.sysname, name, real.release, real.version, real.machine))
+    socket.gethostname = lambda: name
+    platform.node = lambda: name
+
+
 def arm(*, watch_owner=True):
     """Install the guards and apply the redirects named in the environment."""
     # The process never writes bytecode: what it imports lives in the
@@ -223,3 +242,4 @@ def arm(*, watch_owner=True):
         _start_owner_watchdog()
     _install_redirects()
     _redirect_providers()
+    _pin_hostname()

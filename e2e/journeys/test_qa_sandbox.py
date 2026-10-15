@@ -273,7 +273,9 @@ async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbo
     """--account-email and --verification-uri: what a recording shows instead of blanks or 127.0.0.1."""
     email, page = "you@example.com", "https://example.com/device"
     before = _files(qa_sandbox.person.base)
-    current = await qa_sandbox.up("--signed-in", "--account-email", email, "--verification-uri", page)
+    current = await qa_sandbox.up(
+        "--signed-in", "--account-email", email, "--verification-uri", page, "--hostname", "laptop",
+    )
     session = Path(current["sandbox"]["home"]) / ".servonaut" / "auth.json"
     assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
 
@@ -286,6 +288,20 @@ async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbo
     assert login.returncode == 0, login.stderr
     assert page in login.stdout and "127.0.0.1" not in login.stdout, login.stdout
     assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Names derived from the machine name use the given one: the relay's
+    # client ID starts with it.
+    started = await qa_sandbox.command("run", "--", "connect", "--bg")
+    assert started.returncode == 0, started.stderr
+    try:
+        for _ in range(40):  # until the first heartbeat lands
+            status = await qa_sandbox.command("run", "--", "connect", "--status")
+            if "Backend view: connected" in status.stdout:
+                break
+            await asyncio.sleep(0.5)
+        assert "laptop-" in status.stdout and os.uname().nodename not in status.stdout, status.stdout
+    finally:
+        await qa_sandbox.command("run", "--", "connect", "--stop")
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)

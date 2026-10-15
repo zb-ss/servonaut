@@ -337,7 +337,7 @@ class Owner:
                  lock: state.OwnerLock, stop_request: StopRequest, *,
                  signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
                  teams: bool = False, account_email: str = "",
-                 verification_uri: Optional[str] = None) -> None:
+                 verification_uri: Optional[str] = None, hostname: Optional[str] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -351,6 +351,7 @@ class Owner:
         self.teams = teams
         self.account_email = account_email
         self.verification_uri = verification_uri
+        self.hostname = hostname
         self.logs = root / "logs"
         self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
@@ -507,6 +508,9 @@ class Owner:
         if self.teams:
             # A throwaway Vault custody key: the children have no OS keyring.
             self.child_env[VAULT_DEVICE_KEY_ENV] = base64.b64encode(os.urandom(32)).decode("ascii")
+        if self.hostname:
+            # child_guard.ENV_HOSTNAME (that file is loaded by path, not imported).
+            self.child_env["SERVONAUT_E2E_HOSTNAME"] = self.hostname
         self._state = self._record(seeded)
         self._write_state()
 
@@ -907,7 +911,7 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
 def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
     ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
-    account_email: str = "", verification_uri: Optional[str] = None,
+    account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -938,7 +942,7 @@ def up(
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
                           teams=teams, account_email=account_email,
-                          verification_uri=verification_uri)
+                          verification_uri=verification_uri, hostname=hostname)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

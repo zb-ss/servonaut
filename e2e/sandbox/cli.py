@@ -64,6 +64,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="the sign-in page `servonaut login` names, for recordings that must "
                          "not show the local address (display only: the sandbox still approves "
                          "the sign-in itself)")
+    up.add_argument("--hostname", default=None, metavar="NAME",
+                    help="the machine name every sandbox child sees, so names derived from it "
+                         "(relay client IDs, vault device names) do not show the real one")
     up.add_argument("--keep", action="store_true",
                     help="keep the sandbox directory after it stops, renamed to "
                          "<root>.kept-<time> (for inspection; delete it yourself)")
@@ -116,7 +119,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
                         keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay,
                         teams=args.teams, account_email=args.account_email,
-                        verification_uri=args.verification_uri)
+                        verification_uri=args.verification_uri, hostname=args.hostname)
 
     from e2e.sandbox import client
 
