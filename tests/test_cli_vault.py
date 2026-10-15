@@ -916,7 +916,7 @@ def _vault_record(name, kind, vault_id, team=None, items=0):
     }
 
 
-TEAM_VAULT_ID = "6b2c3d4e-5f60-4b7c-9d8e-0f1a2b3c4d5e"
+TEAM_VAULT_ID = "6b2c3d4e-5f60-4b7c-9d8e-0f1a2b3c4d5e"  # synthetic fixture  leak-guard:allow
 
 
 def _run_with(service, argv):
