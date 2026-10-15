@@ -396,3 +396,17 @@ def test_a_provider_listed_for_the_first_time_goes_before_the_team_servers():
     replace_instances(app, "shared", [shared_row(_server(), TEAM)])
     replace_instances(app, "hetzner", [{"id": "42", "name": "cache-1", "is_hetzner": True}])
     assert [row["name"] for row in app.instances] == ["app-1", "cache-1", "web-1"]
+
+
+
+def test_the_teams_key_login_stays_with_the_teams_key():
+    row = shared_row(_server(username=None), TEAM)
+    assert row["login_user"] == "deploy"
+    assert row["username"] == ""
+
+    from servonaut.services.shared_servers import shared_login
+
+    assert shared_login(row, None, "ec2-user") == "ec2-user"
+    assert shared_login(shared_row(_server(), TEAM), None, "ec2-user") == "deploy"
+    rule = SimpleNamespace(username="admin")
+    assert shared_login(shared_row(_server(), TEAM), rule, "ec2-user") == "admin"

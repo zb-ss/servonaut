@@ -4,8 +4,8 @@ Signed in as a member of the team Ops, the user opens the TUI. Besides their
 own servers, the list holds the team's server-1 ("Team Ops", state
 "shared"). One of their own servers the team shares too, app-1, is listed
 once, marked "· shared". Searching "shared" finds both; opening server-1
-shows it as the team's server, and a command there runs as the team's
-login. When the team stops sharing server-1, a
+shows it as the team's server, and a command there runs as the login
+the share names. When the team stops sharing server-1, a
 refresh takes it off the list; signed out, the list holds only the user's
 own servers and nothing asks the team service.
 """
@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 TEAM = {"slug": "ops", "name": "Ops", "role": "member", "member_count": 2}
 SERVER_1 = {
     "id": "srv-1", "name": "server-1", "hostname": "server-1.example.com", "port": 22,
-    "login_user": "deploy", "status": "active",
+    "login_user": "deploy", "username": "deploy", "status": "active",
 }
 # The team's copy of the user's own app-1.
 APP_1_SHARED = {
@@ -81,14 +81,14 @@ async def test_a_member_finds_the_team_servers_in_the_server_list(tui, seed, fak
         info = str(t.on_screen("#server_info").visual)
         assert "Team server: server-1" in info
         assert "Team: Ops" in info
-        assert "Login: deploy" in info
+        assert "Team login: deploy" in info
 
-        # A command runs as the team's login, not the configured default.
+        # A command runs as the login the share names, not the configured default.
         await t.press("2")
         await t.wait_for_screen("CommandOverlay")
         await t.fill("#command_input", "uptime")
         await t.press("enter")
-        prompt = f"{SERVER_1['login_user']}@{SERVER_1['name']}:~$ uptime"
+        prompt = f"{SERVER_1['username']}@{SERVER_1['name']}:~$ uptime"
         await t.wait_for_text(prompt, screen_only=True)
         await t.press("escape")
         await t.wait_for_screen("ServerActionsScreen")

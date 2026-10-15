@@ -5,8 +5,10 @@ TUI's server list, in the MCP ``list_instances`` tool and for
 ``servonaut ssh``. Every row carries ``is_shared=True`` and ``team_slug``,
 the keys the connection paths (team vault keys, SSH certificates, team
 Bitwarden references) already read, plus the plain fields the rest of the
-app reads for any server: ``name``, ``public_ip`` (the shared hostname),
-``username`` and ``port``.
+app reads for any server: ``name``, ``public_ip`` (the shared hostname)
+and ``port``. The team's ``login_user`` is the login its vault key or SSH
+certificate uses (the key names it itself); with the user's own key the
+user's own login applies (see :func:`shared_login`).
 
 A shared server that is also one of the user's own servers is listed once:
 the user's own row, marked as shared (see :func:`fold_shared`). The user's
@@ -59,7 +61,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
     host = str(
         server.get("hostname") or server.get("public_ip") or server.get("host") or ""
     ).strip()
-    login = server.get("login_user") or server.get("username")
+    # Only a login the share names for any key: ``login_user`` belongs to
+    # the team's own key and stays on the row as it came.
+    login = server.get("username")
     label = team_label(team)
     slug = team.get("slug") if isinstance(team.get("slug"), str) else ""
     row.update(
@@ -101,11 +105,12 @@ def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def shared_login(row: Mapping[str, Any], profile: Any, default_username: str) -> str:
-    """The login for a team's shared server: a matching connection rule's,
-    else the team's, else the configured default.
+    """The login for a team's shared server with the user's own key: a
+    matching connection rule's, else the login the share names, else the
+    configured default (the user's own access to the server).
 
-    A team vault key or SSH certificate names its own login and replaces
-    this one when the session starts.
+    A team vault key or SSH certificate names its own login (the team's
+    ``login_user``) and replaces this one when the session starts.
     """
     rule_login = getattr(profile, "username", None) if profile is not None else None
     return rule_login or str(row.get("username") or "") or default_username

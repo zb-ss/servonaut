@@ -94,10 +94,10 @@ def server_connection(
     profile = route['profile']
 
     if instance.get('is_shared') is True:
-        # A team's shared server: login and port come from the team's
-        # record. The team's key (vault, SSH certificate or Bitwarden
-        # reference) replaces the user's own configured key when it applies,
-        # as the local tier of ``servonaut ssh`` does.
+        # A team's shared server: the port, and a login the share names,
+        # come from the team's record. The team's key (vault, SSH
+        # certificate or Bitwarden reference) replaces the user's own key and
+        # login when it applies, as the local tier of ``servonaut ssh`` does.
         username = instance.get('username') or default_username or 'root'
         key_path = ssh_service.get_key_path(instance.get('id', ''))
         port = instance.get('port') or None

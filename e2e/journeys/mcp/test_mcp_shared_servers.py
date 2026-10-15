@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 TEAM = {"slug": "ops", "name": "Ops", "role": "member", "member_count": 2}
 SERVER_1 = {
     "id": "srv-1", "name": "server-1", "hostname": "server-1.example.com", "port": 22,
-    "login_user": "deploy", "status": "active",
+    "login_user": "deploy", "username": "deploy", "status": "active",
 }
 APP_1_SHARED = {
     "id": "srv-2", "name": "app-1-team", "hostname": "app-1.example.com", "port": 22,
@@ -59,7 +59,7 @@ async def test_run_command_reaches_a_team_server_by_its_reference(
 
     assert UPTIME.strip() in result
     (connect,) = journey.shims.calls("ssh")
-    login, host = SERVER_1["login_user"], SERVER_1["hostname"]
+    login, host = SERVER_1["username"], SERVER_1["hostname"]
     assert f"{login}@{host}" in connect.argv
 
 

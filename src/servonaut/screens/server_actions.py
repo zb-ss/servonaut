@@ -813,7 +813,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 f"[dim]Team:[/dim] {field('team_name', '-')}\n"
                 f"[dim]Host:[/dim] {public_ip}\n"
                 f"[dim]Port:[/dim] {port}\n"
-                f"[dim]Login:[/dim] {field('username', '-')}\n"
+                f"[dim]Team login:[/dim] {field('login_user', '-')}\n"
                 f"[dim]State:[/dim] [dim]N/A (shared by the team)[/dim]\n\n"
                 f"{credential_line}"
                 f"[$text-accent]Direct Connection[/$text-accent]\n"
