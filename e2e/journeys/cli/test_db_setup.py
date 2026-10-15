@@ -38,7 +38,7 @@ from e2e.harness.bitwarden_shim import digest
 from e2e.harness.db_scan import BLOG_PASSWORD, SHOP_PASSWORD, script_db_scan
 from e2e.harness.fake_cloud.wire import expected
 from e2e.harness.processes import require_armed
-from e2e.harness.terminal import _PlainText, _read_until, _start_on_pty
+from e2e.harness.terminal import _PlainText, _read_until, _start_on_pty, _wait_reading_terminal
 
 pytestmark = [pytest.mark.e2e_pr]
 
@@ -79,8 +79,13 @@ def _on_terminal(journey, home, servonaut_cmd, exchange: list[tuple[str, str]]) 
                 master, screen, lambda text, prompt=prompt: re.search(prompt, text) is not None,
                 time.monotonic() + 30, f"the prompt /{prompt}/",
             )
-            # Ctrl+C is a keystroke, not a line: the terminal turns it into SIGINT.
-            os.write(master, (answer if answer == CTRL_C else answer + "\n").encode("utf-8"))
+            if answer == CTRL_C:
+                # Ctrl+C is a keystroke, not a line: the terminal turns it
+                # into SIGINT, which is lost if it lands before the read.
+                _wait_reading_terminal(process.pid, time.monotonic() + 30, f"the prompt /{prompt}/")
+                os.write(master, CTRL_C.encode("utf-8"))
+            else:
+                os.write(master, (answer + "\n").encode("utf-8"))
         _read_until(master, screen, lambda _text: False, time.monotonic() + 30, "the result")
         returncode = process.wait(timeout=30)
     finally:

@@ -357,8 +357,8 @@ class Owner:
                  lock: state.OwnerLock, stop_request: StopRequest, *,
                  signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
                  teams: bool = False, account_email: str = "",
-                 verification_uri: Optional[str] = None, hostname: Optional[str] = None,
-                 ai_script: Optional[dict] = None) -> None:
+                 verification_uri: Optional[str] = None, user_code: Optional[str] = None,
+                 hostname: Optional[str] = None, ai_script: Optional[dict] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -372,6 +372,7 @@ class Owner:
         self.teams = teams
         self.account_email = account_email
         self.verification_uri = verification_uri
+        self.user_code = user_code
         self.hostname = hostname
         self.ai_script = ai_script
         self.logs = root / "logs"
@@ -470,6 +471,8 @@ class Owner:
             self.fake_cloud.slow_down(self.api_delay)
         if self.account_email or self.verification_uri:
             self.fake_cloud.configure(email=self.account_email, verification_uri=self.verification_uri)
+        if self.user_code:
+            self.fake_cloud.configure(user_code=self.user_code)
         if self.ai_script is not None:
             from e2e.sandbox import ai_script
 
@@ -1040,7 +1043,7 @@ def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
     ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
-    ai_script: Optional[Path] = None,
+    ai_script: Optional[Path] = None, user_code: Optional[str] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -1080,7 +1083,8 @@ def up(
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
                           teams=teams, account_email=account_email,
-                          verification_uri=verification_uri, hostname=hostname, ai_script=script)
+                          verification_uri=verification_uri, user_code=user_code,
+                          hostname=hostname, ai_script=script)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

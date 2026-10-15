@@ -12,9 +12,9 @@ MVP surface — kept deliberately small:
     so the user finishes the install themselves.
 
 ``servonaut secrets status``
-    Show which provider is active, where the cache came from, and
-    when it was last refreshed. Useful for "is my team's BWS config
-    actually being used?" debugging — no other side effects.
+    Say in plain sentences which plan you are on, where secrets are
+    kept and what to fix or run next. ``--json`` prints the status
+    snapshot's fields for scripts. Read-only — no other side effects.
 
 ``servonaut secrets setup``
     Guided Bitwarden onboarding: pick a project by name, test the
@@ -41,12 +41,15 @@ Design choices:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import platform
 import shutil
 import subprocess
 import sys
 from typing import List, Optional
+
+from servonaut.services.plan_labels import PRICING_URL
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,6 @@ _EXIT_INSTALL_FAILED = 7
 BWS_INSTALL_DOC_URL = "https://bitwarden.com/help/secrets-manager-cli/"
 BWS_RELEASES_URL = "https://github.com/bitwarden/sdk-sm/releases"
 BWS_TOKEN_DOC_URL = "https://bitwarden.com/help/access-tokens/"
-PRICING_URL = "https://servonaut.dev/pricing"
 
 
 # ---------------------------------------------------------------------------
@@ -343,11 +345,8 @@ async def _run_setup_async(args: argparse.Namespace) -> int:
     guard = EntitlementGuard(auth)
     allowed, reason = guard.check("secrets_management")
     if not allowed:
-        print(
-            "Secrets management requires a Solo or Teams plan.\n"
-            f"  {reason}\n"
-            f"  Upgrade: {PRICING_URL}"
-        )
+        # The reason names the plan it needs and where to upgrade.
+        print(reason)
         return _EXIT_NOT_FOUND
 
     # Step 1 — bws installed?
@@ -445,83 +444,136 @@ async def _run_setup_async(args: argparse.Namespace) -> int:
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    """``servonaut secrets status`` — print which provider is active.
+    """``servonaut secrets status`` — say where secrets are kept.
 
     Thin renderer around :func:`compute_secrets_status` — both the
     CLI subcommand and the TUI :class:`SecretsScreen` read from the
-    same frozen snapshot so the two surfaces stay in sync. If a
-    future field gets added to :class:`SecretsStatusSummary`, both
-    surfaces light it up via this single function.
+    same frozen snapshot so the two surfaces stay in sync. People get
+    sentences (:func:`_status_lines`); ``--json`` prints the snapshot's
+    fields for scripts.
     """
     from servonaut.services.auth_service import AuthService
     from servonaut.services.entitlement_guard import EntitlementGuard
-    from servonaut.services.secrets_status import (
-        compute_secrets_status,
-        format_relative_age,
-    )
+    from servonaut.services.secrets_status import compute_secrets_status
 
     auth = AuthService()
     guard = EntitlementGuard(auth)
     s = compute_secrets_status(auth, guard)
 
-    print(f"Authenticated: {s.authenticated}")
-    if not s.authenticated:
-        print("Plan: free (anonymous)")
-        print("Active provider: none (legacy ~/.ssh discovery)")
-        return _EXIT_SUCCESS
-
-    print(f"Plan: {s.plan}")
-    print(
-        f"Entitled to secrets_management: "
-        f"{s.entitled_secrets_management} ({s.entitlement_reason})"
-    )
-
-    if s.cache_present:
-        age = format_relative_age(s.cache_fetched_at)
-        print(
-            f"Cached SecretsConfig: provider={s.active_provider_name} "
-            f"updated_at={s.cache_updated_at or '(none)'} "
-            f"fresh={s.cache_fresh} fetched={age}"
-        )
+    if getattr(args, "json", False):
+        print(json.dumps(_status_fields(s), indent=2))
     else:
-        print("Cached SecretsConfig: none (would fetch on next refresh)")
-
-    if s.active_provider_name is None:
-        print("Active provider: none (legacy ~/.ssh discovery)")
-    else:
-        print(f"Active provider: {s.active_provider_name}")
-        if s.bitwarden_project_id:
-            invalid_note = " (⚠ not a valid project UUID)" if s.project_id_invalid else ""
-            print(f"  Bitwarden project_id: {s.bitwarden_project_id}{invalid_note}")
-            print(
-                f"  Token env var: {s.bitwarden_token_env_var} "
-                f"({'set' if s.bws_token_set else 'NOT SET'})"
-            )
-            print(
-                f"  bws CLI: {s.bws_path if s.bws_path else 'not installed'}"
-            )
-        if s.shadowed_user_project_id:
-            print(
-                f"  Personal config (shadowed by team): "
-                f"project_id={s.shadowed_user_project_id}"
-            )
-        if s.local_secrets_path:
-            from servonaut.services.ssh_host_keys import home_relative
-
-            print(f"  LocalProvider path: {home_relative(s.local_secrets_path)}")
-        if s.has_health_warning:
-            reasons = []
-            if s.project_id_invalid:
-                reasons.append("project id is not a valid UUID (placeholder?)")
-            if s.bws_path is None:
-                reasons.append("bws CLI missing")
-            if not s.bws_token_set:
-                reasons.append("token not set")
-            print(
-                "  ⚠ Health: " + "; ".join(reasons or ["configuration problem"])
-                + ". CLI falls back to ~/.ssh discovery until fixed."
-            )
+        print("\n".join(_status_lines(s)))
     return _EXIT_SUCCESS
+
+
+def _status_fields(s) -> dict:
+    """The snapshot as JSON-ready fields, paths shown without the home folder."""
+    from dataclasses import asdict
+
+    from servonaut.services.ssh_host_keys import home_relative
+
+    fields = asdict(s)
+    for key in ("local_secrets_path", "bws_path"):
+        if fields.get(key):
+            fields[key] = home_relative(fields[key])
+    return fields
+
+
+_SSH_FALLBACK = "SSH keys are looked up in ~/.ssh"
+
+
+def _status_lines(s) -> List[str]:
+    """``servonaut secrets status`` in sentences a person reads."""
+    if not s.authenticated:
+        return [
+            f"Not signed in, so there is no secret store: {_SSH_FALLBACK}.",
+            "Sign in with `servonaut login`. Solo and Teams plans include a secret store.",
+        ]
+    lines = [f"Signed in on the {str(s.plan or 'free').capitalize()} plan."]
+    if not s.entitled_secrets_management:
+        return lines + [
+            f"Your plan has no secret store (Solo and Teams plans do), so {_SSH_FALLBACK}.",
+            f"Plans: {PRICING_URL}",
+        ]
+    if s.active_provider_name is None:
+        return lines + [f"No secret store is active right now, so {_SSH_FALLBACK}."]
+    return lines + _store_lines(s) + _setting_problem_lines(s) + _fetched_lines(s)
+
+
+def _store_lines(s) -> List[str]:
+    """Where secrets are kept, and what the store needs to work."""
+    from servonaut.services.secrets_status import secret_store_phrase
+    from servonaut.services.ssh_host_keys import home_relative
+
+    store = secret_store_phrase(
+        s.active_provider_name,
+        project_id=s.bitwarden_project_id,
+        path=s.local_secrets_path,
+    )
+    chosen = {"team": ", chosen by your team", "user": ", chosen by you"}
+    lines = [f"Secrets are kept in {store}{chosen.get(s.config_source, '')}."]
+    if s.active_provider_name != "bitwarden":
+        return lines
+    token = s.bitwarden_token_env_var or "BWS_ACCESS_TOKEN"
+    if s.bws_token_set:
+        lines.append(f"The access token is read from {token}, which is set.")
+    else:
+        lines.append(
+            f"The access token is read from {token}, which is not set: "
+            "export it in your shell."
+        )
+    if s.bws_path:
+        lines.append(f"The bws program is at {home_relative(s.bws_path)}.")
+    else:
+        lines.append(
+            "The bws program is not installed: run `servonaut secrets install bws`."
+        )
+    if not (s.bws_path and s.bws_token_set):
+        lines.append(f"Until that is fixed, {_SSH_FALLBACK}.")
+    return lines
+
+
+def _setting_problem_lines(s) -> List[str]:
+    """Bitwarden settings that are ignored, and how to switch stores."""
+    lines = []
+    if s.shadowed_user_project_id:
+        lines.append(
+            f"Your own Bitwarden project ({s.shadowed_user_project_id}) is not "
+            "used: your team's setting comes first."
+        )
+    if s.team_config_broken:
+        instead = (
+            "your own setting is used instead" if s.active_provider_name == "bitwarden"
+            else "the local secret store is used instead"
+        )
+        lines.append(
+            "Your team's Bitwarden setting is ignored because its project id "
+            f"({s.broken_team_project_id or 'empty'}) is not valid, so {instead}. "
+            "A team admin can fix it in the team settings."
+        )
+    elif s.project_id_invalid:
+        lines.append(
+            "Your Bitwarden setting is ignored because its project id "
+            f"({s.bitwarden_project_id or 'empty'}) is not valid. "
+            "Fix it with `servonaut secrets setup`."
+        )
+        return lines
+    if s.active_provider_name == "local" and s.config_source != "team":
+        lines.append(
+            "To keep them in Bitwarden Secrets Manager instead, run "
+            "`servonaut secrets setup`."
+        )
+    return lines
+
+
+def _fetched_lines(s) -> List[str]:
+    from servonaut.services.secrets_status import format_relative_age
+
+    if not (s.cache_present and s.cache_fetched_at):
+        return []
+    age = format_relative_age(s.cache_fetched_at)
+    return [f"Settings last fetched from your account {age}."]
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +648,13 @@ def add_secrets_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
 
-    secrets_sub.add_parser(
+    status = secrets_sub.add_parser(
         "status",
-        help="Show the active secret provider, plan, and cache state.",
+        help="Show your plan and where your secrets are kept.",
+    )
+    status.add_argument(
+        "--json", action="store_true",
+        help="Print the status fields as JSON, for scripts.",
     )
 
 

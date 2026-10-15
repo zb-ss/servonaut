@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import io
 import sys
+from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -74,7 +75,7 @@ class TestDetectPlatform:
     @pytest.mark.parametrize("system,expected", [
         ("Darwin", "macos"),
         ("DARWIN", "macos"),  # case-insensitive
-        ("Linux", "linux"),
+         ("Linux", "linux"),
         ("Windows", "windows"),
         ("FreeBSD", "unknown"),
         ("", "unknown"),
@@ -258,57 +259,225 @@ class TestInstallBwsAutoInstall:
 # ---------------------------------------------------------------------------
 
 
+_DEVELOPER_FIELDS = (
+    "Authenticated:", "Plan:", "Entitled to", "secrets_management",
+    "SecretsConfig", "Active provider", "LocalProvider", "project_id",
+)
+
+
+def _local_store_path() -> str:
+    # The unit suite runs with HOME isolated, so this is under the home folder.
+    return str(Path.home() / ".servonaut" / "secrets.json")
+
+
+def _summary(**overrides):
+    """A signed-in Solo user on the default local store, with overrides."""
+    from servonaut.services.secrets_status import SecretsStatusSummary
+
+    fields = dict(
+        authenticated=True, plan="solo", entitled_secrets_management=True,
+        entitlement_reason="OK", entitled_secrets_team_shared=False,
+        active_provider_name="local", config_source=None,
+        bitwarden_project_id=None, bitwarden_token_env_var=None,
+        bws_path=None, bws_token_set=False,
+        local_secrets_path=_local_store_path(),
+        cache_present=False, cache_fresh=False, cache_updated_at="",
+        cache_fetched_at=0.0, has_health_warning=False,
+    )
+    fields.update(overrides)
+    return SecretsStatusSummary(**fields)
+
+
+def _bitwarden(**overrides):
+    fields = dict(
+        active_provider_name="bitwarden", config_source="user",
+        bitwarden_project_id="proj-servers-1",
+        bitwarden_token_env_var="BWS_ACCESS_TOKEN", bws_token_set=True,
+        bws_path=str(Path.home() / ".cargo" / "bin" / "bws"),
+        local_secrets_path=None,
+    )
+    fields.update(overrides)
+    return _summary(**fields)
+
+
+def _lines(summary) -> list[str]:
+    from servonaut.cli.secrets import _status_lines
+
+    lines = _status_lines(summary)
+    for line in lines:
+        for field in _DEVELOPER_FIELDS:
+            assert field not in line, line
+    return lines
+
+
+def _run_status(capsys, auth, *, guard=None, provider=None, json_out=False):
+    patches = [patch("servonaut.services.auth_service.AuthService", return_value=auth)]
+    if guard is not None:
+        patches.append(patch(
+            "servonaut.services.entitlement_guard.EntitlementGuard", return_value=guard,
+        ))
+    if provider is not None:
+        patches.append(patch(
+            "servonaut.services.secret_provider_resolver.resolve_secret_provider",
+            return_value=provider,
+        ))
+    for active in patches:
+        active.start()
+    try:
+        rc = handle_secrets_command(argparse.Namespace(
+            subcommand="secrets", secrets_command="status", json=json_out,
+        ))
+    finally:
+        for active in patches:
+            active.stop()
+    return rc, capsys.readouterr().out
+
+
+def _solo_local_auth():
+    from servonaut.config.schema import SecretsConfig
+
+    auth = MagicMock()
+    auth.is_authenticated = True
+    auth.plan = "solo"
+    auth.is_secrets_cache_present.return_value = False
+    auth.is_secrets_cache_fresh.return_value = False
+    auth._token = MagicMock(secrets_fetched_at=0.0)
+    auth.secrets_config_source.return_value = None
+    auth.cached_secrets_config.return_value = SecretsConfig.local_default()
+    guard = MagicMock()
+    guard.check.return_value = (True, "OK")
+    provider = MagicMock()
+    provider.provider_name = "local"
+    provider.path = _local_store_path()
+    return auth, guard, provider
+
+
 class TestStatusCommand:
-    def test_unauthenticated_prints_legacy_path(self, capsys):
-        # handle_status() now delegates to compute_secrets_status,
-        # which itself calls entitlement_guard.check + reads the
-        # auth state. Mock the AuthService at its source binding;
-        # let the real EntitlementGuard run against the mocked
-        # AuthService (it gracefully returns False for an unauthed
-        # user).
+    def test_unauthenticated_says_how_to_sign_in(self, capsys):
+        # handle_status() delegates to compute_secrets_status, which calls
+        # entitlement_guard.check + reads the auth state. Mock the
+        # AuthService at its source binding; the real EntitlementGuard
+        # returns False for an unauthed user.
         auth = MagicMock()
         auth.is_authenticated = False
         auth.plan = "free"
-        with patch("servonaut.services.auth_service.AuthService") as AuthCls:
-            AuthCls.return_value = auth
-            rc = handle_secrets_command(argparse.Namespace(
-                subcommand="secrets", secrets_command="status",
-            ))
-        out = capsys.readouterr().out
+        rc, out = _run_status(capsys, auth)
         assert rc == _EXIT_SUCCESS
-        assert "Authenticated: False" in out
-        assert "legacy ~/.ssh discovery" in out
+        assert out.splitlines() == [
+            "Not signed in, so there is no secret store: SSH keys are looked up in ~/.ssh.",
+            "Sign in with `servonaut login`. Solo and Teams plans include a secret store.",
+        ]
 
-    def test_authenticated_solo_with_local_provider(self, capsys):
-        auth = MagicMock()
-        auth.is_authenticated = True
-        auth.plan = "solo"
-        auth.is_secrets_cache_present.return_value = False
-        auth.is_secrets_cache_fresh.return_value = False
-        auth._token = MagicMock(secrets_fetched_at=0.0)
-
-        from servonaut.config.schema import SecretsConfig
-        auth.cached_secrets_config.return_value = SecretsConfig.local_default()
-
-        guard = MagicMock()
-        guard.check.return_value = (True, "OK")
-
-        provider = MagicMock()
-        provider.provider_name = "local"
-        provider.path = "/home/test/.servonaut/secrets.json"
-
-        with patch("servonaut.services.auth_service.AuthService", return_value=auth), \
-             patch("servonaut.services.entitlement_guard.EntitlementGuard", return_value=guard), \
-             patch("servonaut.services.secret_provider_resolver.resolve_secret_provider", return_value=provider):
-            rc = handle_secrets_command(argparse.Namespace(
-                subcommand="secrets", secrets_command="status",
-            ))
-        out = capsys.readouterr().out
+    def test_solo_on_the_local_store_reads_as_sentences(self, capsys):
+        auth, guard, provider = _solo_local_auth()
+        rc, out = _run_status(capsys, auth, guard=guard, provider=provider)
         assert rc == _EXIT_SUCCESS
-        assert "Plan: solo" in out
-        assert "Entitled to secrets_management: True" in out
-        assert "Active provider: local" in out
-        assert "/home/test/.servonaut/secrets.json" in out
+        assert out.splitlines() == [
+            "Signed in on the Solo plan.",
+            "Secrets are kept in the local secret store (~/.servonaut/secrets.json).",
+            ("To keep them in Bitwarden Secrets Manager instead, run "
+             "`servonaut secrets setup`."),
+        ]
+
+    def test_json_prints_the_snapshot_fields(self, capsys):
+        import json
+
+        auth, guard, provider = _solo_local_auth()
+        rc, out = _run_status(capsys, auth, guard=guard, provider=provider, json_out=True)
+        assert rc == _EXIT_SUCCESS
+        fields = json.loads(out)
+        assert fields["authenticated"] is True
+        assert fields["plan"] == "solo"
+        assert fields["entitled_secrets_management"] is True
+        assert fields["active_provider_name"] == "local"
+        assert fields["cache_present"] is False
+        # No home folder in the output, as in the sentences.
+        assert fields["local_secrets_path"] == "~/.servonaut/secrets.json"
+
+    def test_free_plan_points_at_the_plans(self):
+        lines = _lines(_summary(
+            plan="free", entitled_secrets_management=False,
+            active_provider_name=None, local_secrets_path=None,
+        ))
+        assert lines == [
+            "Signed in on the Free plan.",
+            ("Your plan has no secret store (Solo and Teams plans do), so SSH "
+             "keys are looked up in ~/.ssh."),
+            "Plans: https://servonaut.dev/pricing",
+        ]
+
+    def test_working_bitwarden_names_project_token_and_program(self):
+        lines = _lines(_bitwarden())
+        assert lines == [
+            "Signed in on the Solo plan.",
+            ("Secrets are kept in Bitwarden Secrets Manager (project "
+             "proj-servers-1), chosen by you."),
+            "The access token is read from BWS_ACCESS_TOKEN, which is set.",
+            "The bws program is at ~/.cargo/bin/bws.",
+        ]
+
+    def test_broken_bitwarden_says_what_to_fix(self):
+        lines = _lines(_bitwarden(
+            plan="teams", config_source="team", bws_path=None, bws_token_set=False,
+            has_health_warning=True,
+        ))
+        assert lines[1] == (
+            "Secrets are kept in Bitwarden Secrets Manager (project "
+            "proj-servers-1), chosen by your team."
+        )
+        assert lines[2:] == [
+            ("The access token is read from BWS_ACCESS_TOKEN, which is not set: "
+             "export it in your shell."),
+            "The bws program is not installed: run `servonaut secrets install bws`.",
+            "Until that is fixed, SSH keys are looked up in ~/.ssh.",
+        ]
+
+    def test_team_setting_shadowing_your_own_is_explained(self):
+        lines = _lines(_bitwarden(config_source="team", shadowed_user_project_id="proj-mine"))
+        assert (
+            "Your own Bitwarden project (proj-mine) is not used: your team's "
+            "setting comes first." in lines
+        )
+
+    def test_invalid_own_project_id_falls_back_to_the_local_store(self):
+        lines = _lines(_summary(
+            config_source="user", project_id_invalid=True,
+            bitwarden_project_id="<uuid>", has_health_warning=True,
+        ))
+        assert lines[1:] == [
+            ("Secrets are kept in the local secret store (~/.servonaut/secrets.json), "
+             "chosen by you."),
+            ("Your Bitwarden setting is ignored because its project id (<uuid>) is "
+             "not valid. Fix it with `servonaut secrets setup`."),
+        ]
+
+    def test_invalid_team_project_id_names_who_can_fix_it(self):
+        lines = _lines(_summary(
+            plan="teams", project_id_invalid=True, team_config_broken=True,
+            bitwarden_project_id="<uuid>", broken_team_project_id="<uuid>",
+            has_health_warning=True,
+        ))
+        assert lines[2:] == [
+            ("Your team's Bitwarden setting is ignored because its project id "
+             "(<uuid>) is not valid, so the local secret store is used instead. "
+             "A team admin can fix it in the team settings."),
+            ("To keep them in Bitwarden Secrets Manager instead, run "
+             "`servonaut secrets setup`."),
+        ]
+
+    def test_team_chosen_local_store_offers_no_switch(self):
+        lines = _lines(_summary(plan="teams", config_source="team"))
+        assert lines == [
+            "Signed in on the Teams plan.",
+            ("Secrets are kept in the local secret store (~/.servonaut/secrets.json), "
+             "chosen by your team."),
+        ]
+
+    def test_fetch_age_is_said_when_settings_came_from_the_account(self):
+        import time
+
+        lines = _lines(_bitwarden(cache_present=True, cache_fetched_at=time.time() - 600))
+        assert lines[-1] == "Settings last fetched from your account 10m ago."
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +502,11 @@ class TestParserWiring:
     def test_status(self):
         ns = _parse_argv(["secrets", "status"])
         assert ns.secrets_command == "status"
+        assert ns.json is False
+
+    def test_status_json(self):
+        ns = _parse_argv(["secrets", "status", "--json"])
+        assert ns.json is True
 
     def test_missing_subcommand_raises_systemexit(self):
         # argparse should refuse "servonaut secrets" with no

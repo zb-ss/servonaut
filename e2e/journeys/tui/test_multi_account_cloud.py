@@ -115,7 +115,7 @@ async def test_power_off_reaches_the_servers_own_project(tui, seed, providers):
         await select_row(t, HZ_TABLE, 1, f"{STAGING}/{WEB_1}")
         await press(t, "#btn_hetzner_mgr_power_off")
         await _answer_power_prompt(t, "HetznerManagerScreen")
-        await t.wait_for_toast(rf"^Server {target.server_id}: powered off\.$")
+        await t.wait_for_toast(rf"^Power off sent to {re.escape(f'{STAGING}/{WEB_1}')}\.$")
         await t.wait_until(
             lambda: _states(t, HZ_TABLE)[f"{STAGING}/{WEB_1}"] == "stopped",
             desc="staging/web-1 stopped",
@@ -220,7 +220,7 @@ async def test_ovh_manager_reboots_in_the_servers_own_account(tui, seed, provide
         await select_row(t, OVH_TABLE, 1, f"{BACKUP}/{WEB_1}")
         await press(t, "#btn_ovh_mgr_reboot")
         await _answer_power_prompt(t, "OVHManagerScreen")
-        await t.wait_for_toast(rf"OVH vps {re.escape(target.service_name)}: reboot sent")
+        await t.wait_for_toast(rf"^Reboot sent to {re.escape(f'{BACKUP}/{WEB_1}')}\.$")
 
     assert _mutations(providers, "ovh", BACKUP) == [("POST", f"/vps/{target.service_name}/reboot")]
     assert _mutations(providers, "ovh", OVH) == []

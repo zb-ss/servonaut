@@ -88,6 +88,26 @@ def test_commands_see_the_remote_root_as_their_machine(journey, sshd):
     require_armed(journey.armed_log, marker=str(HARNESS_DIR / "openssh_shim.py"))
 
 
+def test_the_db_credential_scan_reads_config_files_on_the_box(journey, sshd):
+    """The scan finds files with ``find`` and reads them with ``sed -n``."""
+    from servonaut.services.db_credential_scanner import DBCredentialScanner
+
+    sshd.target.remote.write(
+        "/var/www/shop/.env",
+        "DB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_DATABASE=shop\n"
+        "DB_USERNAME=shop\nDB_PASSWORD=fabricated-scan-probe-3e7a\n",
+    )
+    command = DBCredentialScanner.build_scan_command("/var/www")
+
+    result = _ssh(journey, sshd, f"{fleet.WEB_1.username}@{LOOPBACK}", command)
+
+    assert result.returncode == 0, result.stderr
+    candidates = DBCredentialScanner().parse(result.stdout)
+    assert [(c.source, c.user, c.database) for c in candidates] == [
+        ("/var/www/shop/.env", "shop", "shop"),
+    ], result.stdout
+
+
 def test_bubblewrap_hides_the_host_when_available(journey, sshd):
     if sshd.confinement != "bwrap":
         pytest.skip(f"remote commands are not sandboxed here: {sshd.target.launcher.detail}")

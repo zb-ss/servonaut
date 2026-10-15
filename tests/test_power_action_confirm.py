@@ -2,7 +2,8 @@
 
 Runs the AWS, OVH and Hetzner manager screens inside a real Textual app so
 the confirmation goes through ``push_screen_wait`` in a worker, exactly as
-the user sees it.
+the user sees it. The notice after each power action names the server the
+way its row does, whether the action went through or failed.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from textual.app import App
+from textual.content import Content
 from textual.widgets import Button, DataTable, Static
 
 from servonaut.screens.aws_manager import AWSManagerScreen
@@ -52,25 +54,25 @@ def _hetzner_service(state: str = "running") -> MagicMock:
     return svc
 
 
-def _aws_service() -> MagicMock:
+def _aws_service(state: str = "running") -> MagicMock:
     svc = MagicMock()
     svc.fetch_instances_cached = AsyncMock(return_value=[{
-        "id": "i-0abc", "name": "app-1", "type": "t3.micro", "state": "running",
+        "id": "i-0abc", "name": "app-1", "type": "t3.micro", "state": state,
         "public_ip": "9.9.9.9", "region": "eu-west-1",
     }])
-    svc.stop_instance = AsyncMock(return_value=True)
-    svc.reboot_instance = AsyncMock(return_value=True)
+    for method in ("start_instance", "stop_instance", "reboot_instance"):
+        setattr(svc, method, AsyncMock(return_value=True))
     return svc
 
 
-def _ovh_service() -> MagicMock:
+def _ovh_service(state: str = "running") -> MagicMock:
     svc = MagicMock()
     svc.fetch_instances_cached = AsyncMock(return_value=[{
-        "id": "vps-1.example", "name": "mail-1", "type": "vps", "state": "running",
+        "id": "vps-1.example", "name": "mail-1", "type": "vps", "state": state,
         "provider_type": "vps", "public_ip": "9.9.9.9", "region": "GRA", "is_ovh": True,
     }])
-    svc.stop_instance = AsyncMock(return_value=True)
-    svc.reboot_instance = AsyncMock(return_value=True)
+    for method in ("start_instance", "stop_instance", "reboot_instance"):
+        setattr(svc, method, AsyncMock(return_value=True))
     return svc
 
 
@@ -440,3 +442,127 @@ async def test_ovh_declined_power_action_is_audited(button_id: str, method: str)
             details={"provider_type": "vps", "success": False},
             confirmed=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# The notice after a power action names the server, as its row does
+# ---------------------------------------------------------------------------
+
+# provider -> (screen class, table id, app attribute, service factory)
+_MANAGERS = {
+    "hetzner": (HetznerManagerScreen, "hetzner_mgr_table", "hetzner_service", _hetzner_service),
+    "aws": (AWSManagerScreen, "aws_mgr_table", "aws_service", _aws_service),
+    "ovh": (OVHManagerScreen, "ovh_mgr_table", "ovh_service", _ovh_service),
+}
+
+# (provider, button, service method, row state, asks first, notice)
+_POWER_NOTICES = [
+    ("hetzner", "btn_hetzner_mgr_power_on", "power_on", "off", False, "Start sent to web-[b]1[/b]."),
+    ("hetzner", "btn_hetzner_mgr_shutdown", "shutdown", "running", True,
+     "Shutdown sent to web-[b]1[/b]."),
+    ("hetzner", "btn_hetzner_mgr_power_off", "power_off", "running", True,
+     "Power off sent to web-[b]1[/b]."),
+    ("hetzner", "btn_hetzner_mgr_reboot", "reboot", "running", True,
+     "Reboot sent to web-[b]1[/b]."),
+    ("aws", "btn_aws_mgr_start", "start_instance", "stopped", False, "Start sent to app-1."),
+    ("aws", "btn_aws_mgr_stop", "stop_instance", "running", True, "Stop sent to app-1."),
+    ("aws", "btn_aws_mgr_reboot", "reboot_instance", "running", True, "Reboot sent to app-1."),
+    ("ovh", "btn_ovh_mgr_start", "start_instance", "stopped", False, "Start sent to mail-1."),
+    ("ovh", "btn_ovh_mgr_stop", "stop_instance", "running", True, "Stop sent to mail-1."),
+    ("ovh", "btn_ovh_mgr_reboot", "reboot_instance", "running", True, "Reboot sent to mail-1."),
+]
+
+
+async def _run_power_action(
+    app: ManagerHost, pilot, provider: str, button_id: str, *, asks: bool,
+):
+    """Open *provider*'s manager, run one power action, return (screen, notices)."""
+    screen_cls, table_id, _, _ = _MANAGERS[provider]
+    screen = screen_cls()
+    await _open(app, pilot, screen, table_id)
+    if asks:
+        modal = await _press_and_get_modal(app, pilot, screen, button_id)
+        modal.query_one("#btn_power_confirm_yes", Button).press()
+    else:
+        button = screen.query_one(f"#{button_id}", Button)
+        await _wait_for(pilot, lambda: not button.disabled, f"{button_id} enabled")
+        button.press()
+    await _wait_for(pilot, lambda: app._notifications, "the result notice")
+    return screen, list(app._notifications)
+
+
+def _status_plain(screen, provider: str) -> str:
+    status_id = _MANAGERS[provider][1].replace("_table", "_status")
+    return Content.from_markup(str(screen.query_one(f"#{status_id}", Static).content)).plain
+
+
+@pytest.mark.parametrize("provider, button_id, method, state, asks, expected", _POWER_NOTICES)
+@pytest.mark.asyncio
+async def test_power_action_notice_names_the_server(
+    provider: str, button_id: str, method: str, state: str, asks: bool, expected: str,
+) -> None:
+    _, _, service_attr, make_service = _MANAGERS[provider]
+    app = ManagerHost()
+    setattr(app, service_attr, make_service(state))
+    async with app.run_test(size=(160, 48)) as pilot:
+        _, notices = await _run_power_action(app, pilot, provider, button_id, asks=asks)
+
+    getattr(getattr(app, service_attr), method).assert_awaited_once()
+    assert [(n.message, n.severity, n.markup) for n in notices] == [
+        (expected, "information", False),
+    ]
+
+
+# (provider, button, service method, notice); the provider refuses with "server is locked"
+_FAILED_NOTICES = [
+    ("hetzner", "btn_hetzner_mgr_reboot", "reboot",
+     "Could not reboot web-[b]1[/b]: server is locked"),
+    ("aws", "btn_aws_mgr_stop", "stop_instance", "Could not stop app-1: server is locked"),
+    ("ovh", "btn_ovh_mgr_reboot", "reboot_instance", "Could not reboot mail-1: server is locked"),
+]
+
+
+@pytest.mark.parametrize("provider, button_id, method, expected", _FAILED_NOTICES)
+@pytest.mark.asyncio
+async def test_failed_power_action_names_the_server(
+    provider: str, button_id: str, method: str, expected: str,
+) -> None:
+    _, _, service_attr, make_service = _MANAGERS[provider]
+    svc = make_service("running")
+    getattr(svc, method).side_effect = RuntimeError("server is locked")
+    app = ManagerHost()
+    setattr(app, service_attr, svc)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen, notices = await _run_power_action(app, pilot, provider, button_id, asks=True)
+        status = _status_plain(screen, provider)
+
+    assert [(n.message, n.severity, n.markup) for n in notices] == [(expected, "error", False)]
+    # The status line says the same; the name is shown literally, not as markup.
+    assert status == expected
+
+
+# (provider, button, row state, asks first, notice before the server's name)
+_DEMO_NOTICES = [
+    ("hetzner", "btn_hetzner_mgr_shutdown", "running", True, "Shutdown sent to "),
+    ("aws", "btn_aws_mgr_start", "stopped", False, "Start sent to "),
+    ("ovh", "btn_ovh_mgr_reboot", "running", True, "Reboot sent to "),
+]
+
+
+@pytest.mark.parametrize("provider, button_id, state, asks, prefix", _DEMO_NOTICES)
+@pytest.mark.asyncio
+async def test_demo_mode_notice_names_the_server_as_its_row_shows_it(
+    provider: str, button_id: str, state: str, asks: bool, prefix: str,
+) -> None:
+    _, _, service_attr, make_service = _MANAGERS[provider]
+    svc = make_service(state)
+    real = dict(svc.fetch_instances_cached.return_value[0], name="web-2")
+    svc.fetch_instances_cached.return_value = [real]
+    app = _demo_host()
+    setattr(app, service_attr, svc)
+    async with app.run_test(size=(160, 48)) as pilot:
+        screen, notices = await _run_power_action(app, pilot, provider, button_id, asks=asks)
+        shown = screen._instances[0]["name"]
+
+    assert shown and shown != "web-2"
+    assert [n.message for n in notices] == [f"{prefix}{shown}."]
