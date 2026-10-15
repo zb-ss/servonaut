@@ -72,6 +72,9 @@ async def test_standard_level_reads_a_real_server(mcp, journey, fake_cloud, sshd
     assert "CRON[901]" in logs and "Started Daily" not in logs
     assert info.splitlines()[0] == WEB_1
     assert "load average" in info and "/dev/vda1" in info and "Mem:" in info
+    # The disk module parses the server's filesystems.
+    assert "disk" in built["successes"], built
+    assert "/dev/vda1" in memory and "30%" in memory, memory
     assert "os" in built["successes"], built
     assert "E2E Linux 12 (fixture)" in memory
 
