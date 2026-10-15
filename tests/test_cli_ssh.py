@@ -354,15 +354,15 @@ class TestHandleSshCommand:
         return result, (resolved.args[0] if resolved else None)
 
     def test_a_shared_copy_of_an_own_server_connects_as_the_own_server(self):
-        own = _make_instance("i-abc", "web-1")
-        shared = {"id": "srv-1", "name": "web-1", "hostname": "1.2.3.4", "instance_id": "i-abc"}
+        own = _make_instance("i-abc", "web-1", public_ip="9.9.9.9")
+        shared = {"id": "srv-1", "name": "web-1", "hostname": "9.9.9.9", "instance_id": "i-abc"}
         result, row = self._run_with_team("web-1", [own], [shared])
         assert result == _EXIT_SUCCESS
         assert row["id"] == "i-abc"
 
     def test_the_team_s_name_for_an_own_server_still_finds_the_team_row(self):
-        own = _make_instance("i-abc", "web-1")
-        shared = {"id": "srv-1", "name": "team-web", "hostname": "1.2.3.4", "instance_id": "i-abc"}
+        own = _make_instance("i-abc", "web-1", public_ip="9.9.9.9")
+        shared = {"id": "srv-1", "name": "team-web", "hostname": "9.9.9.9", "instance_id": "i-abc"}
         result, row = self._run_with_team("team-web", [own], [shared])
         assert result == _EXIT_SUCCESS
         assert row["id"] == "srv-1"
