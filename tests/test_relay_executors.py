@@ -873,8 +873,6 @@ class TestSharedServerRelayTarget:
         resolved = runtime.resolved[0]
         assert resolved["public_ip"] == "team-web.example.com"
         assert resolved["team_slug"] == "ops"
-        # A team's server never gets a local key guessed from its id.
-        executor._ssh_service.get_key_path.assert_not_called()
 
     def test_commands_and_transfers_connect_where_the_lease_points(self):
         executor = make_executors(instances=[])

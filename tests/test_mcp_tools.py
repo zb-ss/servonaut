@@ -387,8 +387,7 @@ class TestRunCommand:
         assert command["identity_file"] == "/tmp/native-agent-key.pub"
         assert command["known_hosts_file"] == "/tmp/native-known-hosts"
         assert command["username"] == "deploy"
-        # A team's server never gets a local key guessed from its id.
-        assert tools._ssh_service.get_key_path.call_count == 0
+        assert tools._ssh_service.get_key_path.call_count == 1
         lease.close.assert_called_once()
 
     def test_shared_vault_connection_failure_never_falls_back_to_ssm(self):

@@ -276,7 +276,7 @@ def test_ovh_user_defaults_do_not_inherit_aws_user(provider_type: str, expected:
 
 
 class TestSharedServerConnection(TestConnectionService):
-    """A team's shared server: the team's host, login and port, no guessed key."""
+    """A team's shared server: the team's host, login and port; the user's own key."""
 
     def test_uses_the_team_record(self, service):
         from servonaut.services.connection_service import server_connection
@@ -288,13 +288,14 @@ class TestSharedServerConnection(TestConnectionService):
             {"slug": "ops", "name": "Ops"},
         )
         ssh_service = MagicMock()
+        ssh_service.get_key_path.return_value = "~/.ssh/default.pem"
         conn = server_connection(row, service, ssh_service, "ubuntu")
 
         assert conn["host"] == "web.example.com"
         assert conn["username"] == "deploy"
         assert conn["port"] == 2222
-        assert conn["key_path"] is None
-        ssh_service.get_key_path.assert_not_called()
+        # The team's key, when it has one, replaces this one later.
+        assert conn["key_path"] == "~/.ssh/default.pem"
 
     def test_without_a_login_uses_the_default_username(self, service):
         from servonaut.services.connection_service import server_connection

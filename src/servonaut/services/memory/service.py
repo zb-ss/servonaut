@@ -1422,7 +1422,16 @@ class MemoryService(MemoryServiceInterface):
 
         # Resolve connection parameters once (not per command call).
         profile = None
-        if instance.get("is_custom"):
+        if instance.get("is_shared") is True:
+            from servonaut.services.connection_service import server_connection  # noqa: PLC0415
+
+            config_obj = getattr(ssh_service, "_config_manager", None)
+            default_username = (
+                config_obj.get().default_username if config_obj is not None else ""
+            ) or "ec2-user"
+            conn = server_connection(instance, connection_service, ssh_service, default_username)
+            profile = conn.pop("profile", None)
+        elif instance.get("is_custom"):
             conn: Dict[str, Any] = {
                 "host": instance.get("public_ip") or instance.get("private_ip", ""),
                 "username": instance.get("username") or "root",

@@ -970,15 +970,16 @@ class InstanceListScreen(Screen):
 
             # Custom servers use their own username/port/key; OVH uses provider defaults; AWS uses config defaults
             if instance.get('is_shared') is True:
-                # The team's login and port; the team's key (vault or SSH
-                # certificate) is applied when the session starts.
+                # The team's login and port. The team's key (vault or SSH
+                # certificate), when it has one, replaces the user's own
+                # configured key when the session starts.
                 username = (
                     (profile.username if profile else None)
                     or instance.get('username')
                     or self.app.config_manager.get().default_username
                 )
                 port = instance.get('port') or None
-                key_path = None
+                key_path = self.app.ssh_service.get_key_path(instance['id'])
             elif instance.get('is_custom'):
                 username = instance.get('username') or 'root'
                 port = instance.get('port') or 22

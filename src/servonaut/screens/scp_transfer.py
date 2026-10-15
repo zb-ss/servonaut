@@ -212,7 +212,12 @@ class SCPTransferScreen(Screen):
         connection_service = self.app.connection_service
         profile = connection_service.resolve_profile(conn)
 
-        if conn.get('is_custom'):
+        if conn.get('is_shared') is True:
+            from servonaut.services.shared_servers import shared_login
+
+            username = shared_login(conn, profile, self.app.config_manager.get().default_username)
+            key_path = None
+        elif conn.get('is_custom'):
             username = conn.get('username') or 'root'
             key_path = conn.get('ssh_key') or None
         else:

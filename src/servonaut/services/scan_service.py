@@ -293,7 +293,12 @@ class ScanService(ScanServiceInterface):
             logger.warning("No reachable host for instance %s", instance.get('id'))
             raise ScanConnectionError("no IP address or hostname to connect to")
 
-        if instance.get('is_custom'):
+        if instance.get('is_shared') is True:
+            from servonaut.services.shared_servers import shared_login
+
+            username = shared_login(instance, profile, self._config_manager.get().default_username)
+            key_path = ssh_service.get_key_path(instance.get('id', ''))
+        elif instance.get('is_custom'):
             username = instance.get('username') or 'root'
             key_path = instance.get('ssh_key') or instance.get('key_name') or None
         else:

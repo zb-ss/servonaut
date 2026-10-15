@@ -688,6 +688,12 @@ class BrowseRemoteScreen(Screen[str]):
 
         if instance.get("is_custom"):
             username = instance.get("username") or "root"
+        elif instance.get("is_shared") is True:
+            from servonaut.services.shared_servers import shared_login
+
+            username = shared_login(
+                instance, profile, self.app.config_manager.get().default_username,
+            )
         else:
             username = (
                 (profile.username if profile else None)

@@ -95,10 +95,11 @@ def server_connection(
 
     if instance.get('is_shared') is True:
         # A team's shared server: login and port come from the team's
-        # record. Its key is the team's (vault, SSH certificate or Bitwarden
-        # reference), applied after this; never a local key guessed by id.
+        # record. The team's key (vault, SSH certificate or Bitwarden
+        # reference) replaces the user's own configured key when it applies,
+        # as the local tier of ``servonaut ssh`` does.
         username = instance.get('username') or default_username or 'root'
-        key_path = None
+        key_path = ssh_service.get_key_path(instance.get('id', ''))
         port = instance.get('port') or None
     elif instance.get('is_ovh'):
         # The defaults of the OVH account the server belongs to.
