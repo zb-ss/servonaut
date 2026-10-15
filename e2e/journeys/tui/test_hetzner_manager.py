@@ -272,3 +272,32 @@ async def test_manager_reports_a_refused_token(tui, seed, providers):
         assert "unable to authenticate" in str(status.render())
         assert t.table_rows(TABLE) == []
     assert providers.mutations("hetzner") == []
+
+
+async def test_the_next_key_acts_on_the_server_the_action_was_for(tui, seed, providers):
+    """An action redraws the list; the cursor stays on the server it was for.
+
+    Delete pressed right after starting the second server asks about that
+    server, not about the first row.
+    """
+    _seed(seed, providers)
+    build = fleet.HZ_BUILD_1
+
+    async with tui() as t:
+        await _open_manager(t)
+        assert list(_rows(t)).index(build.name) > 0
+        await _select(t, build.name)
+        await _power(
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running",
+            asks=False,
+        )
+        await t.settle()
+        assert t.on_screen(TABLE).cursor_row == list(_rows(t)).index(build.name)
+
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Delete Hetzner Server", build.name, screen_only=True)
+        await t.press("escape")
+        await t.wait_for_screen("HetznerManagerScreen")
+
+    assert providers.requests("hetzner", method="DELETE") == []

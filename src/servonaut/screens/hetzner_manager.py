@@ -41,6 +41,7 @@ from servonaut.screens._provider_accounts import (
     inventory,
     row_service,
 )
+from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
@@ -236,19 +237,21 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#hetzner_mgr_table", DataTable)
-        table.clear()
-        for idx, inst in enumerate(self._instances, start=1):
-            table.add_row(
-                str(idx),
-                display_name(inst),
-                str(inst.get("id", "")),
-                str(inst.get("type", "")),
-                self._colorize_state(str(inst.get("state", ""))),
-                str(inst.get("public_ip", "") or "—"),
-                str(inst.get("region", "")),
-                str(inst.get("created_at", "") or "—")[:19],
-                key=str(inst.get("id", idx)),
-            )
+        # The next action must reach the server the user picked, not row 1.
+        with keep_selected_row(table):
+            table.clear()
+            for idx, inst in enumerate(self._instances, start=1):
+                table.add_row(
+                    str(idx),
+                    display_name(inst),
+                    str(inst.get("id", "")),
+                    str(inst.get("type", "")),
+                    self._colorize_state(str(inst.get("state", ""))),
+                    str(inst.get("public_ip", "") or "—"),
+                    str(inst.get("region", "")),
+                    str(inst.get("created_at", "") or "—")[:19],
+                    key=str(inst.get("id", idx)),
+                )
         self._sync_action_buttons()
 
     @staticmethod
