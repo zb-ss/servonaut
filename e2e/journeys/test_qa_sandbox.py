@@ -45,6 +45,7 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
 
 READY_TIMEOUT = 90.0
 COMMAND_TIMEOUT = 90.0
+OWNER_REAP_SECONDS = 5.0
 JOURNEY_TIMEOUT = 240
 
 
@@ -98,8 +99,15 @@ class QaSandbox:
         stopped = await self.command("down")
         assert stopped.returncode == 0, stopped.stdout + stopped.stderr
         assert self.owner is not None
-        # `down` returns only once the owner itself has exited.
-        assert self.owner.poll() == 0, "the owner still ran when down returned"
+        # `down` returns only once the owner itself has exited. Its exit
+        # status can still be on the way: Linux shows an exited main thread
+        # as a zombie while the process's other threads finish dying, and
+        # only then can the parent collect the status. Allow a moment for it.
+        try:
+            returncode = self.owner.wait(timeout=OWNER_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("the owner still ran when down returned") from None
+        assert returncode == 0, f"the owner exited with {returncode}"
 
     def close(self) -> None:
         """Stop an owner a failed journey left running."""
