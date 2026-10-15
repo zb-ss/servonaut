@@ -53,6 +53,7 @@ from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.routes_vault import VaultCloud
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
+from e2e.harness.fake_cloud.users import REQUEST_ACCOUNT, Account
 from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 from e2e.harness.loopback import LoopbackServer
 
@@ -82,7 +83,8 @@ class FakeCloud(LoopbackServer):
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
         self.vault = VaultCloud(
-            lambda: self._store.snapshot().user_id, shared_servers=self.account.shared_servers
+            lambda: self._store.snapshot().user_id, shared_servers=self.account.shared_servers,
+            team_members=self.account.team_members,
         )
         # The hosted service can ship with SSH certificates switched off (Settings
         # feature.ssh_ca_enabled); see :meth:`switch_off_ssh_ca`.
@@ -142,9 +144,57 @@ class FakeCloud(LoopbackServer):
         """Access and refresh tokens both stop working (refresh: invalid_grant)."""
         self._store.session.revoke()
 
-    def entitlements(self) -> dict:
-        """The document ``/api/entitlements`` currently returns."""
-        return routes_auth.entitlements_payload(self._store)
+    def entitlements(self, user_id: Optional[int] = None) -> dict:
+        """The document ``/api/entitlements`` currently returns (to *user_id*, if added)."""
+        if user_id is None:
+            return routes_auth.entitlements_payload(self._store)
+        token = REQUEST_ACCOUNT.set(self._added_user(user_id))
+        try:
+            return routes_auth.entitlements_payload(self._store)
+        finally:
+            REQUEST_ACCOUNT.reset(token)
+
+    # More people (see ``users.py``): each added user has a session of their own.
+
+    def add_user(self, user_id: int, *, email: str, name: Optional[str] = None,
+                 plan: str = "teams") -> None:
+        """Register another user, who can sign in and is answered as themselves."""
+        if user_id == self._store.snapshot().user_id:
+            raise ValueError(f"user {user_id} is the scenario's own account")
+        self._store.accounts.add(user_id, email=email, name=name or email.split("@")[0], plan=plan)
+
+    def _added_user(self, user_id: int) -> Account:
+        account = self._store.accounts.get(user_id)
+        if account is None:
+            raise KeyError(f"user {user_id} was never added (FakeCloud.add_user)")
+        return account
+
+    def user_tokens(self, user_id: int) -> tuple[str, str]:
+        """An added user's current (access, refresh) token pair."""
+        return self._added_user(user_id).session.tokens()
+
+    def sign_in_next_as(self, user_id: int) -> None:
+        """The next device-flow sign-in completes as the added user *user_id*.
+
+        Stands in for that person approving the code in their own browser.
+        """
+        self._store.accounts.sign_in_next_as(user_id)
+
+    def accept_invitation(self, email: str, *, user_id: Optional[int] = None,
+                          slug: Optional[str] = None) -> dict:
+        """Accept the pending team invitation sent to *email* (the browser step).
+
+        As the added user *user_id*, or by default the added user with that
+        e-mail address. They become an active member of the team, and with
+        that of its Team Vault's roster, where an owner's or admin's client
+        grants them access once they have a Vault identity.
+        """
+        account = self._added_user(user_id) if user_id is not None else self._store.accounts.by_email(email)
+        if account is None:
+            raise KeyError(f"no added user has the e-mail address {email}; pass user_id")
+        return self.account.accept_invitation(
+            email, user_id=account.user_id, name=account.name, user_email=account.email, slug=slug,
+        )
 
     def requests(self, path: Optional[str] = None, method: Optional[str] = None) -> list[dict]:
         """Requests received so far, oldest first (control routes excluded)."""
@@ -257,7 +307,8 @@ class FakeCloud(LoopbackServer):
         )
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
-        routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field)
+        routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field,
+                                  base_url=lambda: self.url)
         routes_ai.add_routes(app, self._store, self.ai)
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)
@@ -298,9 +349,19 @@ class FakeCloud(LoopbackServer):
     @web.middleware
     async def _log_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
         epoch = self._epoch
-        body: Any = None
         authorization = request.headers.get("Authorization")
-        bearer_ok = self._store.session.bearer_valid(authorization)
+        # A request with an added user's token is answered for that user.
+        account = self._store.accounts.for_bearer(authorization)
+        bearer_ok = account is not None or self._store.session.bearer_valid(authorization)
+        account_token = REQUEST_ACCOUNT.set(account)
+        try:
+            return await self._logged(request, handler, epoch, authorization, bearer_ok, account)
+        finally:
+            REQUEST_ACCOUNT.reset(account_token)
+
+    async def _logged(self, request: web.Request, handler: Any, epoch: int, authorization: Optional[str],
+                      bearer_ok: bool, account: Optional[Account]) -> web.StreamResponse:
+        body: Any = None
         raw = await request.read() if request.can_read_body else b""
         if raw:
             try:
@@ -321,18 +382,19 @@ class FakeCloud(LoopbackServer):
         except web.HTTPNotFound:
             response = web.json_response({"error": "not provided by FakeCloud"}, status=404)
         if epoch == self._epoch and not request.path.startswith(control.CONTROL_PREFIX):
-            self._log.add(
-                {
-                    "method": request.method,
-                    "path": request.path,
-                    "query": redact(dict(request.query)),
-                    "body": body,
-                    "authorization": "Bearer <redacted>" if authorization else None,
-                    "bearer_ok": bearer_ok,
-                    "user_agent": request.headers.get("User-Agent"),
-                    "status": response.status,
-                }
-            )
+            entry = {
+                "method": request.method,
+                "path": request.path,
+                "query": redact(dict(request.query)),
+                "body": body,
+                "authorization": "Bearer <redacted>" if authorization else None,
+                "bearer_ok": bearer_ok,
+                "user_agent": request.headers.get("User-Agent"),
+                "status": response.status,
+            }
+            if account is not None:
+                entry["user_id"] = account.user_id  # requests of an added user only
+            self._log.add(entry)
         return response
 
 
