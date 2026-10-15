@@ -55,7 +55,7 @@ async def _launch_ssh(t, journey, name: str):
 async def test_add_a_custom_server_and_ssh_into_it(tui, seed, journey):
     seed.config()
     seed.cache(fleet.cache_rows(), fresh=True)
-    key = seed.ssh_key("e2e_web1")
+    key = seed.ssh_key("web1_deploy")
     journey.shims.when("ssh", f"{WEB_1.username}@{WEB_1.host}", rc=0)
 
     async with tui() as t:
