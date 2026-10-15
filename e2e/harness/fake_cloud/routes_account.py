@@ -13,7 +13,8 @@ members: each member sees the team through their own role, and owners and
 admins invite (``POST …/members``), resend (``…/members/{id}/resend``),
 change roles (``PUT …/members/{id}``) and remove members (``DELETE``), as
 the CLI's ``TeamService`` calls them. Shared servers (``POST`` and ``DELETE
-…/servers``) and shared configs (``…/configs``) work for both kinds.
+…/servers``), their SSH-verify results (``…/servers/{id}/ssh-verify-*``) and
+shared configs (``…/configs``) work for both kinds.
 """
 
 from __future__ import annotations
@@ -86,6 +87,7 @@ class AccountData:
             self._verify: dict[tuple[str, str], dict[str, Any]] = {}
             self._managed: dict[str, ManagedTeam] = {}
             self._configs: dict[str, list[dict[str, Any]]] = {}
+            self._team_verify: dict[tuple[str, str], dict[str, Any]] = {}
             # True: invitations are recorded but their e-mail "fails" (email_sent false).
             self.mail_delivery_fails = False
 
@@ -319,6 +321,38 @@ class AccountData:
             rows.remove(row)
             return {"deleted": True, "name": name}
 
+    def report_team_verify(self, slug: str, user_id: int, server_id: str, body: dict[str, Any], *,
+                           scenario_account: bool) -> dict[str, Any]:
+        """``POST …/servers/{server_id}/ssh-verify-report`` from a member who connected."""
+        if self.caller_role(slug, user_id, scenario_account=scenario_account) is None:
+            raise _not_found()
+        if not any(str(row.get("id")) == server_id for row in self.shared_servers(slug)):
+            raise Refusal(404, "not_found", "Shared server not found.")
+        status = body.get("status")
+        if status not in VERIFY_STATUSES:
+            raise Refusal(422, "validation_failed", f"status must be one of {sorted(VERIFY_STATUSES)}")
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        row = {
+            "server_id": server_id, "ssh_verify_status": status,
+            # The service only keeps a timestamp for a verified key.
+            "ssh_verified_at": now if status == "verified" else None,
+            "checked_by_client": body.get("checked_by_client"),
+            "resolution_tier": body.get("resolution_tier"), "updated_at": now,
+        }
+        with self._lock:
+            self._team_verify[(slug, server_id)] = row
+            return dict(row)
+
+    def team_verify(self, slug: str, user_id: int, server_id: str, *, scenario_account: bool) -> dict[str, Any]:
+        """``GET …/servers/{server_id}/ssh-verify-status`` (any member reads)."""
+        if self.caller_role(slug, user_id, scenario_account=scenario_account) is None:
+            raise _not_found()
+        with self._lock:
+            row = self._team_verify.get((slug, server_id))
+        if row is None:
+            raise Refusal(404, "not_found", "No SSH verification recorded for this server.")
+        return dict(row)
+
     def team_configs(self, slug: str, user_id: int, *, scenario_account: bool) -> list[dict[str, Any]]:
         """Every shared-config version of *slug*, latest first (any member reads)."""
         if self.caller_role(slug, user_id, scenario_account=scenario_account) is None:
@@ -446,6 +480,21 @@ def add_routes(
             request.match_info["slug"], user_id, request.match_info["name"], scenario_account=scenario_account,
         ))
 
+    async def team_verify_report(request: web.Request) -> web.Response:
+        user_id, scenario_account = caller()
+        body = await json_body(request)
+        return answer(lambda: data.report_team_verify(
+            request.match_info["slug"], user_id, request.match_info["server_id"], body,
+            scenario_account=scenario_account,
+        ))
+
+    async def team_verify_status(request: web.Request) -> web.Response:
+        user_id, scenario_account = caller()
+        return answer(lambda: data.team_verify(
+            request.match_info["slug"], user_id, request.match_info["server_id"],
+            scenario_account=scenario_account,
+        ))
+
     async def team_configs(request: web.Request) -> web.Response:
         user_id, scenario_account = caller()
         return answer(lambda: {"data": data.team_configs(
@@ -511,6 +560,8 @@ def add_routes(
     app.router.add_get(f"{team}/servers", guarded(team_servers))
     app.router.add_post(f"{team}/servers", guarded(share_server))
     app.router.add_delete(f"{team}/servers/{{name}}", guarded(unshare_server))
+    app.router.add_post(f"{team}/servers/{{server_id}}/ssh-verify-report", guarded(team_verify_report))
+    app.router.add_get(f"{team}/servers/{{server_id}}/ssh-verify-status", guarded(team_verify_status))
     app.router.add_post(f"{team}/members", guarded(invite))
     app.router.add_put(member, guarded(change_role))
     app.router.add_delete(member, guarded(remove_member))
