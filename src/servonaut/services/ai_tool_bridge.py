@@ -51,6 +51,7 @@ from servonaut.models.relay_messages import (
     CommandResponse,
     CommandType,
 )
+from servonaut.services.team_rules import TEAM_RULE_REASON, is_team_refusal
 
 if TYPE_CHECKING:
     from servonaut.mcp.audit import AuditTrail
@@ -1367,6 +1368,8 @@ class AIToolBridge(_FloorDangerousMixin):
         # error_message. The reason code preserves the relay distinction
         # in the audit row so we can grep for blocklist trips.
         reason = "relay_rejected" if response.status == "rejected" else "relay_error"
+        if response.status == "rejected" and is_team_refusal(response.error_message):
+            reason = TEAM_RULE_REASON
         return self._error_with_audit(
             call,
             reason=reason,

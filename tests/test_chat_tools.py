@@ -268,3 +268,39 @@ class TestLiveGuardLevel:
     def test_level_label_is_normalised(self):
         executor, _config = _live_executor(" Standard ")
         assert executor.guard_level == "standard"
+
+
+# ---------------------------------------------------------------------------
+# Team shared servers: the chat's tools run under the team's rule
+# ---------------------------------------------------------------------------
+
+class TestTeamRules:
+    def test_a_team_shared_server_refuses_what_its_team_does_not_allow(self):
+        from unittest.mock import patch
+
+        from servonaut.mcp.guards import GuardLevel
+        from tests.test_mcp_tools import _team_tools
+
+        tools = _team_tools(role="member", level=GuardLevel.DANGEROUS)
+        executor = ChatToolExecutor(tools=tools, guard_level="dangerous")
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            shared = _run(executor.execute(
+                "run_command",
+                {"instance_id": "ops/team-web-1", "command": "systemctl restart nginx"},
+            ))
+            own = _run(executor.execute(
+                "run_command",
+                {"instance_id": "i-abc123", "command": "systemctl restart nginx"},
+            ))
+
+        assert shared == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'systemctl restart nginx' is not an "
+            "allowed command there."
+        )
+        reasons = [call.args[4] for call in tools._audit.log.call_args_list if len(call.args) > 4]
+        assert "team_rule" in reasons
+        assert "[transport_used: ssh]" in own

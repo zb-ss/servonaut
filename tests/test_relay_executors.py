@@ -227,6 +227,7 @@ class TestNativeVaultRelay:
         shared = {
             "id": "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f",
             "name": "shared-web", "is_shared": True, "team_slug": "example-team",
+            "team_role": "member",
             "hostname": "shared.example.test", "port": 22,
         }
         executor = make_executors(instances=[])
@@ -851,6 +852,7 @@ class TestSharedServerRelayTarget:
     _TARGET = {
         "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
         "port": 22, "login_user": "deploy", "is_shared": True, "team_slug": "ops",
+        "team_name": "Ops", "team_role": "member",
     }
 
     def test_the_team_record_becomes_a_row_with_its_host(self):
@@ -883,3 +885,130 @@ class TestSharedServerRelayTarget:
 
         command = executor._ssh_service.build_ssh_command.call_args.kwargs
         assert (command["host"], command["port"]) == ("pinned.example.com", 2200)
+
+
+class TestTeamRulesOnRelay:
+    """Relayed commands on a team's shared server run under the team's rule."""
+
+    _TARGET = {
+        "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
+        "port": 22, "login_user": "deploy", "is_shared": True, "team_slug": "ops",
+        "team_name": "Ops",
+    }
+
+    def _executor(self, role="member", level="dangerous", allowlist=None):
+        executor = make_executors()
+        target = dict(self._TARGET)
+        if role is not None:
+            target["team_role"] = role
+        executor.set_vault_runtime(_VaultRuntime(lease=_VaultLease(), target=target))
+        config = MCPConfig(guard_level=level)
+        if allowlist is not None:
+            config.command_allowlist = allowlist
+        executor._config_manager.get.return_value = AppConfig(mcp=config)
+        return executor
+
+    @staticmethod
+    def _ssh_ok():
+        return patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        )
+
+    def test_a_command_the_team_does_not_allow_is_rejected(self):
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                target="srv-1", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'systemctl restart nginx' is not an "
+            "allowed command there."
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_the_same_command_runs_on_an_own_server(self):
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                target="i-abc123", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "systemctl restart nginx"
+
+    def test_an_allowed_command_runs_as_the_team_guard_rendered_it(self):
+        executor = self._executor()
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                target="srv-1", payload={"command": "ps aux | grep 'nginx'"},
+            )))
+
+        assert response.status == "success"
+        remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "ps aux | grep nginx"
+
+    def test_a_local_allowlist_addition_does_not_apply(self):
+        allowlist = [*MCPConfig().command_allowlist, "systemctl"]
+        executor = self._executor(level="standard", allowlist=allowlist)
+        response = run(executor.execute(make_request(
+            target="srv-1", payload={"command": "systemctl status nginx"},
+        )))
+
+        assert response.status == "rejected"
+
+    @pytest.mark.parametrize("role", ["viewer", None])
+    def test_a_viewer_or_an_unknown_role_runs_nothing(self, role):
+        executor = self._executor(role=role)
+        response = run(executor.execute(make_request(
+            target="srv-1", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "rejected"
+        assert "run at the readonly level" in response.error_message
+
+    def test_logs_are_read_at_the_standard_level(self):
+        executor = self._executor()
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                cmd_type=CommandType.GET_LOGS, target="srv-1",
+                payload={"log_path": "/var/log/syslog", "lines": 10},
+            )))
+
+        assert response.status == "success"
+
+    def test_transfers_are_rejected(self, tmp_path, monkeypatch):
+        import servonaut.services.relay_executors as executors_module
+
+        transfers = tmp_path / "transfers"
+        transfers.mkdir()
+        monkeypatch.setattr(executors_module, "_TRANSFERS_DIR", transfers)
+        executor = self._executor(role="owner")
+        response = run(executor.execute(make_request(
+            cmd_type=CommandType.TRANSFER_FILE, target="srv-1",
+            payload={
+                "local_path": str(transfers / "file.txt"),
+                "remote_path": "/tmp/file.txt", "direction": "download",
+            },
+        )))
+
+        assert response.status == "rejected"
+        assert "transfer_file is not available there" in response.error_message
+        executor._scp_service.execute_transfer.assert_not_called()
+
+    def test_the_hosted_ai_path_gets_the_same_refusal(self):
+        from servonaut.services.ai_tool_bridge import ToolCall
+
+        executor = self._executor()
+        result = run(executor.execute_for_ai(ToolCall(
+            tool_call_id="tc-1", tool="run_command",
+            args={"instance_id": "srv-1", "command": "systemctl restart nginx"},
+            guard_level="standard", conversation_id="conv-1",
+        )))
+
+        assert result.status == "error"
+        assert "is not an allowed command there" in result.result

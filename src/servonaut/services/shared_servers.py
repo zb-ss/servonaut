@@ -6,7 +6,8 @@ TUI's server list, in the MCP ``list_instances`` tool and for
 the keys the connection paths (team vault keys, SSH certificates, team
 Bitwarden references) already read, plus the plain fields the rest of the
 app reads for any server: ``name``, ``public_ip`` (the shared hostname),
-``username`` and ``port``.
+``username`` and ``port``. ``team_role`` is the signed-in user's role in the
+team, which decides what their agents may do there (see ``team_rules``).
 
 A shared server that is also one of the user's own servers is listed once:
 the user's own row, marked as shared (see :func:`fold_shared`). The user's
@@ -62,6 +63,7 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
     login = server.get("login_user") or server.get("username")
     label = team_label(team)
     slug = team.get("slug") if isinstance(team.get("slug"), str) else ""
+    role = team.get("role") if isinstance(team.get("role"), str) else ""
     row.update(
         {
             "id": str(server.get("id") or ""),
@@ -80,6 +82,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
             "is_shared": True,
             "team_slug": slug,
             "team_name": label,
+            # "" when the team list did not say: agents then get the
+            # strictest level there.
+            "team_role": role.strip().lower(),
         }
     )
     return row
@@ -88,13 +93,18 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
 def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
     """A shared server record that names its team (``team_slug``) as a row.
 
-    The vault's shared-target lookup returns the team's record with only
-    ``is_shared`` and ``team_slug`` added; this fills the plain fields the
-    connection paths read (the host above all). A row is returned as is.
+    The vault's shared-target lookup returns the team's record with
+    ``is_shared``, ``team_slug``, ``team_name`` and ``team_role`` added;
+    this fills the plain fields the connection paths read (the host above
+    all). A row is returned as is.
     """
     if target.get("type") == "shared" and "public_ip" in target:
         return dict(target)
-    team = {"slug": target.get("team_slug") or "", "name": target.get("team_name") or ""}
+    team = {
+        "slug": target.get("team_slug") or "",
+        "name": target.get("team_name") or "",
+        "role": target.get("team_role") or "",
+    }
     return shared_row(target, team)
 
 

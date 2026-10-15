@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.team_rules import TEAM_RULE_REASON, TeamGuard, guard_for_target
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
@@ -429,6 +430,34 @@ class RelayExecutors:
             self._config_manager.get().default_username,
         )
 
+    def _team_guard(self, instance: Mapping[str, Any]) -> Optional[TeamGuard]:
+        """The guard relayed commands run under on *instance*; None unless a team shares it.
+
+        The local MCP settings are read on every call, so a level lowered in
+        Settings applies to the next command.
+        """
+        mcp = self._config_manager.get().mcp
+        return guard_for_target(
+            instance, mcp.guard_level, mcp.command_allowlist, mcp.command_blocklist,
+        )
+
+    def _team_refusal(
+        self, request: CommandRequest, instance: Mapping[str, Any],
+        team_guard: TeamGuard, tool_name: str, command: Optional[str] = None,
+    ) -> Optional[CommandResponse]:
+        """A rejection when the team's rule refuses *tool_name* here, else None."""
+        refusal = team_guard.refusal(tool_name, command)
+        if refusal is None:
+            return None
+        logger.warning(
+            "Relay %s on shared server %s refused (%s): %s",
+            tool_name, instance.get('id') or request.target_server_id,
+            TEAM_RULE_REASON, refusal,
+        )
+        return CommandResponse(
+            request_id=request.id, status="rejected", error_message=refusal,
+        )
+
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""
         for pattern in _COMMAND_BLOCKLIST:
@@ -462,6 +491,15 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
+        team_guard = self._team_guard(instance)
+        if team_guard is not None:
+            rejection = self._team_refusal(
+                request, instance, team_guard, 'run_command', command,
+            )
+            if rejection is not None:
+                return rejection
+            # Run exactly the words the team's guard checked.
+            command = team_guard.guard.command_for_execution(command)
 
         lease = await self._vault_lease(instance)
         try:
@@ -601,6 +639,11 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
+        team_guard = self._team_guard(instance)
+        if team_guard is not None:
+            rejection = self._team_refusal(request, instance, team_guard, 'transfer_file')
+            if rejection is not None:
+                return rejection
 
         lease = await self._vault_lease(instance)
         try:

@@ -101,6 +101,8 @@ def _build_tools():
         hetzner_service=accounts.default_service("hetzner"),
         ovh_service=accounts.default_service("ovh"),
         account_registry=accounts,
+        # A person runs this command: team rules govern agents only.
+        apply_team_rules=False,
     ), secret_provider
 
 
