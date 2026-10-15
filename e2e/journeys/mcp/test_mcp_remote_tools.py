@@ -76,7 +76,7 @@ async def test_standard_level_reads_a_real_server(mcp, journey, fake_cloud, sshd
     assert "disk" in built["successes"], built
     assert "/dev/vda1" in memory and "30%" in memory, memory
     assert "os" in built["successes"], built
-    assert "E2E Linux 12 (fixture)" in memory
+    assert "Debian GNU/Linux 12 (bookworm)" in memory
 
     assert refused.startswith("Blocked:"), refused
     commands = sshd.target.commands()
@@ -126,4 +126,4 @@ async def test_a_refused_login_keeps_the_stored_memory(mcp, journey, fake_cloud,
     assert refreshed["reason"] == "ssh_connection_failed", refreshed
     assert [f["reason"] for f in refreshed["failures"]] == ["ssh_auth_failed"]
     assert "stored memory was kept" in refreshed["message"]
-    assert "E2E Linux 12 (fixture)" in memory
+    assert "Debian GNU/Linux 12 (bookworm)" in memory

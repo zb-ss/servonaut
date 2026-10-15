@@ -562,7 +562,7 @@ class SshWorld:
         self.config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.config_path.chmod(0o600)
 
-    def install_client_key(self, home: Path, name: str = "e2e_web1") -> Path:
+    def install_client_key(self, home: Path, name: str = "web1_deploy") -> Path:
         """Copy the key the target accepts into ``<home>/.ssh/<name>``."""
         ssh_dir = home / ".ssh"
         ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)

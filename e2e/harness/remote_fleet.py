@@ -17,7 +17,7 @@ from typing import Any
 from e2e.harness import fleet
 from e2e.harness.sshd import BASTION_ALIAS, LOOPBACK, SshWorld
 
-WEB_1_KEY = "e2e_web1"
+WEB_1_KEY = "web1_deploy"
 WEB_1_KEY_PATH = f"~/.ssh/{WEB_1_KEY}"
 APP_1 = fleet.APP_1
 
