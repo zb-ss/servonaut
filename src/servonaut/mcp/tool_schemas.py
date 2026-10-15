@@ -1037,6 +1037,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
     # --- AWS CloudWatch Logs (read-only) --------------------------------
     "cloudwatch_list_log_groups": {
+        "required_service": "aws",
         "description": (
             "List AWS CloudWatch log groups, optionally filtered by name "
             "prefix. Shows stored bytes and retention per group."
@@ -1060,6 +1061,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "cloudwatch_get_log_events": {
+        "required_service": "aws",
         "description": (
             "Fetch recent events from a CloudWatch log group within the last N "
             "hours, with an optional filter pattern. Set group_by "
@@ -1126,6 +1128,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "cloudwatch_top_ips": {
+        "required_service": "aws",
         "description": (
             "Rank the top client IPs in a CloudWatch log group. Parses "
             "WAF/ALB structured logs to report per-IP total, allowed, and "
@@ -1171,6 +1174,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "cloudwatch_insights": {
+        "required_service": "aws",
         "description": (
             "Run a CloudWatch Logs Insights query over one or more log groups. "
             "The general aggregation primitive (top IPs, status mix, URI "
@@ -1222,6 +1226,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_call": {
+        "required_service": "aws",
         "description": (
             "Generic boto3 passthrough for the AWS read surface: call any "
             "Describe*/Get*/List*/Filter*/Lookup* operation that isn't pre-"
@@ -1293,6 +1298,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
     # --- AWS CloudTrail (read-only) -------------------------------------
     "cloudtrail_lookup_events": {
+        "required_service": "aws",
         "description": (
             "Look up AWS CloudTrail management events with optional filters "
             "(event name, username, resource type). Filters are exact, "
@@ -1423,6 +1429,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
     # --- AWS EC2 lifecycle ---------------------------------------------
     "aws_start_instance": {
+        "required_service": "aws",
         "description": (
             "Start a stopped AWS EC2 instance. Requires both the instance ID "
             "and the region. Confirm with the user before calling — resumes "
@@ -1447,6 +1454,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_stop_instance": {
+        "required_service": "aws",
         "description": (
             "Stop a running AWS EC2 instance (EBS-backed; restartable). Disk "
             "state preserved; EBS billing continues, instance-hours pause. "
@@ -1471,6 +1479,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_reboot_instance": {
+        "required_service": "aws",
         "description": (
             "Reboot a running AWS EC2 instance. Brief OS-level restart; "
             "billing continues. Confirm with the user before calling."
@@ -1494,6 +1503,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_terminate_instance": {
+        "required_service": "aws",
         "description": (
             "PERMANENTLY terminate an AWS EC2 instance. Instance-store data "
             "lost; EBS volumes detached or destroyed per their "
@@ -1520,6 +1530,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": False,
     },
     "aws_run_instances": {
+        "required_service": "aws",
         "description": (
             "Launch one or more new AWS EC2 instances. Costs money — billing "
             "starts immediately. Reserved for dangerous guard mode. Summarise "
@@ -1575,6 +1586,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
     # --- AWS EC2 describe helpers --------------------------------------
     "aws_list_regions": {
+        "required_service": "aws",
         "description": (
             "List all AWS regions enabled on the account. bootstrap_region is "
             "only used to construct the EC2 client (the call itself is global). "
@@ -1594,6 +1606,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_list_amis": {
+        "required_service": "aws",
         "description": (
             "List AMIs in the given region, sorted newest-first. Filter by "
             "partial name match (case-sensitive glob). Defaults to AMIs owned "
@@ -1630,6 +1643,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_list_instance_types": {
+        "required_service": "aws",
         "description": (
             "List EC2 instance types available in the given region with vCPU "
             "and RAM sizing. Use to drive aws_run_instances input."
@@ -1653,6 +1667,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_list_key_pairs": {
+        "required_service": "aws",
         "description": (
             "List EC2 key pairs registered in the given region. Use the "
             "key_name values returned here as the key_name argument to "
@@ -1672,6 +1687,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_list_subnets": {
+        "required_service": "aws",
         "description": (
             "List VPC subnets in the given region. Use the subnet_id values "
             "as the subnet_id argument to aws_run_instances."
@@ -1690,6 +1706,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "aws_list_security_groups": {
+        "required_service": "aws",
         "description": (
             "List EC2 security groups in the given region. Use the group_id "
             "values as entries in the security_group_ids list passed to "
@@ -2598,6 +2615,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "describe_ingress_path": {
+        "required_service": "aws",
         "description": (
             "Map an AWS instance's ingress path in one call: instance → target "
             "group(s) → load balancer(s) → listeners/rules → associated WebACL "
@@ -2639,6 +2657,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "waf_rate_rule_set": {
+        "required_service": "aws",
         "description": (
             "Create/attach (or remove) a WAF rate-based rule on a site's "
             "WebACL — the durable fix for a flood. 'site' is a WebACL ARN, ALB "
@@ -2729,6 +2748,7 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "chat_exposed": True,
     },
     "rds_metrics": {
+        "required_service": "aws",
         "description": (
             "Snapshot an RDS instance's health from CloudWatch: CPU, "
             "connections, CPU credit balance, read/write latency, freeable "
@@ -2873,6 +2893,7 @@ def mcp_tool_list(
     have_hetzner: bool = True,
     have_ip_ban: bool = True,
     have_memory: bool = True,
+    have_aws: bool = True,
 ) -> list:
     """Build the list of ``mcp.types.Tool`` objects for the MCP server.
 
@@ -2883,8 +2904,8 @@ def mcp_tool_list(
     existing (the service itself is always present); ``memory`` is gated on
     the memory subsystem being wired and enabled (``config.memory.enabled``).
 
-    CloudWatch/CloudTrail tools are intentionally NOT gated — AWS is the base
-    provider (like ``list_instances``), not an optional add-on. Session and
+    The AWS tools (EC2, CloudWatch, CloudTrail, WAF, RDS) are gated on AWS
+    being switched on in Settings (``aws.enabled``, on by default). Session and
     relay tools are not gated either: login state can change mid-session, so
     they stay visible and return a clear "run `servonaut login`" error when
     unauthenticated.
@@ -2895,6 +2916,7 @@ def mcp_tool_list(
         'hetzner': have_hetzner,
         'ip_ban': have_ip_ban,
         'memory': have_memory,
+        'aws': have_aws,
     }
     out = []
     for name, spec in TOOL_SCHEMAS.items():

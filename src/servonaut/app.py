@@ -348,6 +348,7 @@ class ServonautApp(App):
         # Keeps the real records aside and redacts what is listed in demo mode.
         self.replace_instances(None, fleet)
         self.push_screen(InstanceListScreen())
+        self._note_aws_switched_off()
         # Push optional initial screen (e.g., OVH setup wizard launched via --setup-ovh)
         if self._initial_screen is not None:
             self.push_screen(self._initial_screen)
@@ -496,6 +497,31 @@ class ServonautApp(App):
             if inventory is not None:
                 fleet.extend(inventory.get_cached_instances())
         return fleet
+
+    def _note_aws_switched_off(self) -> None:
+        """Say once that cached AWS servers are hidden because AWS is switched off.
+
+        The switch in Settings → AWS used to change nothing, so someone who
+        once turned it off would otherwise find their AWS servers gone.
+        """
+        import dataclasses
+
+        from servonaut.config.accounts import aws_enabled
+
+        config = self.config_manager.get()
+        if aws_enabled(config) or config.aws.off_notice_shown or self.accounts is None:
+            return
+        hidden = self.accounts.cached_aws_servers()
+        if not hidden:
+            return
+        self.notify(
+            f"AWS is switched off in Settings, so {hidden} AWS "
+            f"{'server is' if hidden == 1 else 'servers are'} hidden. "
+            "Switch it on in Settings → AWS to list them again.",
+            severity="warning",
+            timeout=20,
+        )
+        self.config_manager.update(aws=dataclasses.replace(config.aws, off_notice_shown=True))
 
     def provider_available(self, provider: str) -> bool:
         """True when *provider* has at least one account that can be used.

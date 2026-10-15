@@ -289,6 +289,10 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
     handler = getattr(tools, name, None)
     if handler is None:
         return [TextContent(type="text", text=f"Tool handler not available: {name}")]
+    refusal = getattr(tools, "refusal", None)
+    refused = refusal(name) if callable(refusal) else None
+    if isinstance(refused, str) and refused:
+        return [TextContent(type="text", text=refused)]
     try:
         result = await handler(**arguments)
     except Exception as exc:  # noqa: BLE001 — a throwing tool must NOT crash
@@ -393,6 +397,9 @@ def create_mcp_server():
             have_hetzner=have_hetzner,
             have_ip_ban=have_ip_ban,
             have_memory=have_memory,
+            # Read per listing: switching AWS off in Settings takes effect at
+            # the agent's next tools/list.
+            have_aws=tools.has_aws,
         )
 
     @server.call_tool()
