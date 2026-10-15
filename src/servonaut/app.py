@@ -2542,6 +2542,15 @@ class ServonautApp(App):
                 help_text,
                 lambda target=target_id: self.post_message(Sidebar.NavigationRequested(target)),
             )
+        # The sidebar's relay indicator opens this on a click; the palette
+        # makes it reachable from the keyboard too.
+        from servonaut.widgets.relay_indicator import open_relay_status
+
+        yield SystemCommand(
+            "Relay status",
+            "MCP relay connection: its state, restart and stop",
+            lambda: open_relay_status(self),
+        )
 
     def _apply_configured_theme(self, configured: str) -> None:
         """Switch to the saved theme; TEXTUAL_THEME still wins for one run."""

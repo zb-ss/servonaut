@@ -8,7 +8,7 @@ one click away.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from servonaut.services.relay_manager import RelayState
 from servonaut.widgets.relay_indicator import RelayIndicator
@@ -133,3 +133,25 @@ def test_restart_reports_a_failed_start_without_ending_the_app(monkeypatch):
     assert len(failure) == 1
     assert "Permission denied" in failure[0].args[0]
     assert failure[0].kwargs["markup"] is False
+
+
+def test_the_command_palette_offers_the_relay_status():
+    """Keyboard users reach the relay status too: the palette runs what a click does."""
+    from servonaut.app import ServonautApp
+    from servonaut.screens.login import LoginScreen
+    from servonaut.widgets.relay_indicator import RelayStatusScreen
+
+    app = ServonautApp()
+    app.ovh_service = None
+    app.hetzner_service = None
+    app.push_screen = MagicMock()
+    with patch("textual.app.App.get_system_commands", return_value=iter(())):
+        command = next(c for c in ServonautApp.get_system_commands(app, None) if c.title == "Relay status")
+
+    app.relay_state = RelayState.CONNECTED
+    command.callback()
+    assert isinstance(app.push_screen.call_args.args[0], RelayStatusScreen)
+
+    app.relay_state = RelayState.SESSION_EXPIRED
+    command.callback()
+    assert isinstance(app.push_screen.call_args.args[0], LoginScreen)
