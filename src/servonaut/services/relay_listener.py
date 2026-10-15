@@ -1230,8 +1230,6 @@ class RelayListener:
                         "command": wrap_with_exit_marker(command, marker_nonce),
                     },
                     ttl_seconds=ttl,
-                    # A refusal names the fix, not the wrapped command.
-                    requested_as=f"the {verb} remediation",
                 )
                 try:
                     response = await self._executors.execute(request)
@@ -1647,7 +1645,6 @@ class RelayListener:
             target_server_id=target,
             payload={"command": wrap_with_exit_marker(command, marker_nonce)},
             ttl_seconds=ttl,
-            requested_as="the block_ip remediation",
         )
         try:
             response = await self._executors.execute(request)
@@ -1839,7 +1836,6 @@ class RelayListener:
             target_server_id=target,
             payload={"command": wrap_with_exit_marker(command, marker_nonce)},
             ttl_seconds=ttl,
-            requested_as="the unblock_ip remediation",
         )
         try:
             response = await self._executors.execute(request)

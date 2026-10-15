@@ -1984,3 +1984,11 @@ def test_a_team_rule_rejection_is_audited_as_team_rule():
     assert result.status == "error"
     assert result.result == message
     assert audit.log.call_args.args[4] == "team_rule"
+
+
+def test_relayed_ai_tool_calls_are_marked_as_an_agents():
+    # A team's rules apply to agents on its shared servers; the relay
+    # tells an AI tool call from a command a person sent by this flag.
+    bridge, *_ = _make_bridge()
+    request = bridge._build_command_request(_call(), CommandType.RUN_COMMAND)
+    assert request.from_agent is True

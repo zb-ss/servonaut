@@ -1,7 +1,7 @@
 """What agents may do on a team's shared servers.
 
-When an agent (the MCP server, the AI chat's tools, the relay) acts on a
-server a team shares, the team's rule applies and the member's own MCP
+When an agent (the MCP server, the AI chat's tools, the hosted AI's tool
+calls relayed to this machine) acts on a server a team shares, the team's rule applies and the member's own MCP
 settings can only tighten it, never loosen it:
 
 - The guard level is the stricter of the local ``mcp.guard_level`` and the
@@ -13,7 +13,8 @@ settings can only tighten it, never loosen it:
   the patterns added to the local blocklist.
 
 The user's own servers keep their local rules, and nothing here applies to
-commands a person types (TUI, ``servonaut ssh``).
+what a person sends: commands typed in the TUI, with ``servonaut ssh`` or in
+the web console, and remediations a person approved.
 
 The team service does not publish rules yet: :data:`DEFAULT_TEAM_RULES`
 holds the defaults and :func:`rules_for` is where published rules will be
@@ -39,9 +40,8 @@ _UNNAMED_TEAM = "this team's"
 _REFUSAL_PREFIXES: Tuple[str, ...] = (
     REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared servers ",
 )
-# Who a refusal says runs under the rule, per surface.
+# Who a refusal says runs under the rule.
 AGENTS = "your agents"
-RELAYED_COMMANDS = "relayed commands"
 # Plain words for the tools a team's level can take away entirely.
 _UNAVAILABLE = {
     "run_command": "running commands is not available there",

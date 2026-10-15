@@ -508,8 +508,6 @@ class TestRemediationRouting:
             "(sudo -n certbot renew --cert-name example.com",
         )
         assert EXIT_MARKER in request.payload["command"]
-        # A refusal (a team's rule on a shared server) names the fix.
-        assert request.requested_as == "the certbot_renew remediation"
 
         response = posted_response(listener)
         assert response.request_id == "rmd-1"
@@ -1052,7 +1050,6 @@ class TestOnboxBlockRouting:
         request = listener._executors.execute.await_args.args[0]
         assert request.type == CommandType.RUN_COMMAND
         assert "nft add element" in request.payload["command"]
-        assert request.requested_as == "the block_ip remediation"
 
         response = posted_response(listener)
         assert response.status == "success"
@@ -1429,7 +1426,6 @@ class TestOnboxUnblockRouting:
         ip_ban.unban_ip.assert_not_awaited()
         request = listener._executors.execute.await_args.args[0]
         assert "nft delete element" in request.payload["command"]
-        assert request.requested_as == "the unblock_ip remediation"
         result = json.loads(posted_response(listener).output)
         assert result["verb"] == "unblock_ip"
         assert result["ok"] is True

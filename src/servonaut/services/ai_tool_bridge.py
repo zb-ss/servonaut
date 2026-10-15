@@ -1332,6 +1332,8 @@ class AIToolBridge(_FloorDangerousMixin):
             target_server_id=str(target),
             payload=payload,
             ttl_seconds=ttl,
+            # An AI tool call: the team's rules apply on its shared servers.
+            from_agent=True,
         )
 
     def _map_response_to_result(
