@@ -22,6 +22,8 @@ examples:
   python -m e2e.sandbox up --scenario multi-account &
   python -m e2e.sandbox status
   python -m e2e.sandbox run -- servonaut hetzner list
+  python -m e2e.sandbox accept-invite member@example.test   # up --teams
+  python -m e2e.sandbox run --as member -- login           # up --teams
   python -m e2e.sandbox mcp-call list_instances
   python -m e2e.sandbox desktop
   python -m e2e.sandbox down
@@ -53,7 +55,9 @@ def _parser() -> argparse.ArgumentParser:
     up.add_argument("--teams", action="store_true",
                     help="on the Teams plan, owning a team whose shared server (server-1) runs "
                          "an sshd that honours SSH certificates, to walk Team Vault and SSH "
-                         "certificates end to end; needs a short --root, such as /tmp/svt")
+                         "certificates end to end; with a second person, a member to be "
+                         "(member@example.test, own home, signed out: run --as member, "
+                         "accept-invite); needs a short --root, such as /tmp/svt")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
@@ -65,7 +69,18 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", help="print state.json")
 
     run = commands.add_parser("run", help="run the Servonaut CLI in the sandbox: run -- <args>")
+    run.add_argument("--as", dest="as_person", default=None, metavar="PERSON",
+                     help="run as another person of a --teams sandbox, in their own home: member "
+                          "(default: the owner); the member's `login` is approved as the member")
     run.add_argument("args", nargs=argparse.REMAINDER, help="servonaut arguments")
+
+    accept = commands.add_parser(
+        "accept-invite",
+        help="accept a team invitation as the member of a --teams sandbox (their browser step)",
+    )
+    accept.add_argument("email", help="the address the invitation was sent to")
+    accept.add_argument("--as", dest="as_person", default="member", metavar="PERSON",
+                        help="who accepts it (default: %(default)s)")
 
     mcp_call = commands.add_parser("mcp-call", help="call one tool of the real MCP server")
     mcp_call.add_argument("tool")
@@ -116,7 +131,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "status":
             return client.status(as_json=args.json)
         if args.command == "run":
-            return client.run(args.args)
+            return client.run(args.args, as_person=args.as_person)
+        if args.command == "accept-invite":
+            return client.accept_invite(args.email, as_person=args.as_person)
         if args.command == "mcp-call":
             return client.mcp_call(args.tool, args.arguments, timeout=args.timeout)
         if args.command == "mcp":

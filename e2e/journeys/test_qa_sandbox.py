@@ -9,6 +9,12 @@ none of the sandbox's processes runs, its root is gone, and nothing was left
 outside it: the pointer was the only file written there, and ``down``
 removed it again.
 
+With ``--teams`` the sandbox also holds a second person, a member to be:
+the owner invites them, ``accept-invite`` stands in for their browser,
+``run --as member`` signs them in and sets up their Vault identity in their
+own home, and after the owner's grants they reach the team's shared server
+with a certificate of their own.
+
 The others cover what can go wrong around it: a pointer naming a process
 that is no longer the owner (never signalled), a stop request during
 start-up, and a long-lived host (the TUI inside an MCP server) that outlives
@@ -20,9 +26,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
+import signal
+import ssl
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -281,7 +291,7 @@ async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox
     assert refused.returncode == 2 and "--teams needs a shorter --root" in refused.stderr, refused.stderr
     assert not qa_sandbox.root.exists() and not qa_sandbox.pointer.exists()
 
-    qa_sandbox.root = journey.ctx.root / f"q{journey.directory.name[:4]}"
+    qa_sandbox.root = journey.ctx.root / f"q{journey.directory.name[:2]}"
     if owner.teams_root_problem(qa_sandbox.root):
         pytest.skip(f"the e2e root is too long for a --teams sandbox: {journey.ctx.root}")
     before = _files(qa_sandbox.person.base)
@@ -317,6 +327,153 @@ async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox
         (entry["user"], entry["accepted"], entry["reason"]) == (ADMIN_USER, True, "authorized key")
         for entry in logins
     ), logins
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+_RECOVERY_KEY = re.compile(r"(SVRK1-(?:[A-Z0-9]+-)+[A-Z0-9]+)")
+_RECOVERY_PROMPT = re.compile(r"Re-enter recovery group (\d+):")
+
+
+def _on_terminal(qa_sandbox: QaSandbox, args: tuple[str, ...], reply) -> tuple[int, str]:
+    """Run ``python -m e2e.sandbox <args>`` on a terminal, as a person types into it.
+
+    *reply(screen, sent)* returns what to type next once its prompt is on
+    the screen (``sent`` replies so far), or None to keep reading.
+    """
+    from e2e.harness.terminal import _PlainText, _read_until, _start_on_pty
+
+    process, master = _start_on_pty(qa_sandbox.argv(*args), env=qa_sandbox.env, cwd=REPO_ROOT,
+                                    size=(160, 50))
+    screen, sent = _PlainText(), 0
+    deadline = time.monotonic() + COMMAND_TIMEOUT
+    try:
+        while True:
+            answer = reply(screen.text, sent)
+            if answer is not None:
+                os.write(master, (answer + "\n").encode("ascii"))
+                sent += 1
+                continue
+            if not _read_until(master, screen, lambda text: reply(text, sent) is not None, deadline,
+                               " ".join(args)):
+                break
+        code = process.wait(timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        os.close(master)
+    return code, screen.text
+
+
+def _recovery_groups(screen: str, sent: int) -> Optional[str]:
+    """``vault setup``: the recovery-key group each confirmation prompt asks for."""
+    key, prompts = _RECOVERY_KEY.search(screen), _RECOVERY_PROMPT.findall(screen)
+    if key is None or len(prompts) <= sent or sent >= 2:
+        return None
+    return key.group(1).split("-")[int(prompts[sent]) - 1]
+
+
+def _host_confirmation(screen: str, sent: int) -> Optional[str]:
+    """``ca enroll``: the host address typed to confirm the job."""
+    return "127.0.0.1" if sent == 0 and "Type 127.0.0.1 to continue:" in screen else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT * 2)
+async def test_teams_member_joins_by_invitation_and_reaches_the_shared_server(qa_sandbox, journey):
+    import httpx
+
+    from e2e.harness.ca_sshd import HOST_NAME, LOGIN
+    from e2e.harness.fake_cloud.routes_vault import MEMBER_USER_ID, TEAM_SLUG
+    from e2e.harness.session_seed import read_session
+    from e2e.sandbox import owner
+
+    qa_sandbox.root = journey.ctx.root / "qm"
+    if owner.teams_root_problem(qa_sandbox.root):
+        pytest.skip(f"the e2e root is too long for a --teams sandbox: {journey.ctx.root}")
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--teams")
+    member = current["personas"][owner.MEMBER]
+    member_home = Path(member["sandbox"]["home"])
+    owner_home = Path(current["sandbox"]["home"])
+    assert (member["email"], member["user_id"]) == (owner.MEMBER_EMAIL, MEMBER_USER_ID)
+    assert member_home == qa_sandbox.root.resolve() / owner.MEMBER / "home"
+    assert current["teams"]["member"] == {"email": owner.MEMBER_EMAIL, "home": str(member_home)}
+    assert member["env"]["HOME"] == str(member_home)
+    # Each person keeps their own Vault custody key.
+    assert member["env"][owner.VAULT_DEVICE_KEY_ENV] != current["env"][owner.VAULT_DEVICE_KEY_ENV]
+
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 0, status.stderr
+    assert f"member:     {member_home} ({owner.MEMBER_EMAIL}; run --as member)" in status.stdout
+    assert f"accept-invite {owner.MEMBER_EMAIL}" in status.stdout
+
+    # Nobody invited the member yet, and only the people the sandbox has can act.
+    early = await qa_sandbox.command("accept-invite", owner.MEMBER_EMAIL)
+    assert early.returncode == 1 and f"no pending invitation for {owner.MEMBER_EMAIL}" in early.stderr, early.stderr
+    nobody = await qa_sandbox.command("run", "--as", "nobody", "--", "vault", "status")
+    assert nobody.returncode == 1 and "no person called 'nobody'" in nobody.stderr, nobody.stderr
+    assert read_session(member_home) is None
+
+    # The owner invites the member (the call the Teams screen makes); they accept.
+    trusted = ssl.create_default_context(cafile=current["env"]["SSL_CERT_FILE"])
+    async with httpx.AsyncClient(verify=trusted, timeout=30) as http:
+        invited = await http.post(
+            f"{current['urls']['servonaut_api']}/api/v1/teams/{TEAM_SLUG}/members",
+            json={"email": owner.MEMBER_EMAIL, "role": "member"},
+            headers={"Authorization": f"Bearer {read_session(owner_home)['access_token']}"},
+        )
+    assert invited.status_code == 201, invited.text
+    accepted = await qa_sandbox.command("accept-invite", owner.MEMBER_EMAIL)
+    assert accepted.returncode == 0, accepted.stderr
+    assert f"now a member of {TEAM_SLUG} with the role member" in accepted.stdout
+
+    # The member signs in as themselves, in their own home.
+    login = await qa_sandbox.command("run", "--as", "member", "--", "login", "--no-browser")
+    assert login.returncode == 0 and "Signed in successfully (plan: teams)" in login.stdout, login.stdout + login.stderr
+    assert read_session(member_home)["user_id"] == MEMBER_USER_ID
+    assert read_session(owner_home)["user_id"] != MEMBER_USER_ID
+
+    # The owner: Vault identity, team vault, SSH CA on server-1.
+    code, text = await asyncio.to_thread(_on_terminal, qa_sandbox, ("run", "--", "vault", "setup"), _recovery_groups)
+    assert code == 0, text
+    created = await qa_sandbox.command("run", "--", "vault", "create", "--team", TEAM_SLUG, "--json")
+    assert created.returncode == 0, created.stdout + created.stderr
+    vault_id = json.loads(created.stdout)["vault_id"]
+    enabled = await qa_sandbox.command("run", "--", "ca", "enable", "--team", TEAM_SLUG, "--yes")
+    assert enabled.returncode == 0, enabled.stdout + enabled.stderr
+    code, text = await asyncio.to_thread(
+        _on_terminal, qa_sandbox, ("run", "--", "ca", "enroll", HOST_NAME, "--team", TEAM_SLUG), _host_confirmation,
+    )
+    assert code == 0 and "result.status: succeeded" in text, text
+
+    # The member's Vault identity; the owner's client grants them the team vault.
+    code, text = await asyncio.to_thread(
+        _on_terminal, qa_sandbox, ("run", "--as", "member", "--", "vault", "setup"), _recovery_groups,
+    )
+    assert code == 0, text
+    granted = await qa_sandbox.command("run", "--", "vault", "grants", "process", "--yes", "--json")
+    assert granted.returncode == 0, granted.stdout + granted.stderr
+    assert [g["recipient_user_id"] for r in json.loads(granted.stdout) for g in r["accepted"]] == [MEMBER_USER_ID]
+    listed = await qa_sandbox.command("run", "--as", "member", "--", "vault", "list", "--json")
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    [team_vault] = [row for row in json.loads(listed.stdout) if row["vault_id"] == vault_id]
+    assert team_vault["my_role"] == "member" and team_vault["my_grant"] is not None
+
+    # The member logs in to the shared server with a certificate for their own device.
+    reached = await qa_sandbox.command("run", "--as", "member", "--", "ssh", HOST_NAME, "--", "hostname")
+    assert reached.returncode == 0, reached.stdout + reached.stderr
+    assert reached.stdout.splitlines()[-1] == HOST_NAME
+    assert "SSH resolution tier: ca" in reached.stderr
+    sessions = [json.loads(line) for line in Path(current["logs"]["ssh_sessions"]).read_text().splitlines()]
+    certificate_logins = [entry for entry in sessions if entry.get("host") == HOST_NAME
+                          and entry.get("event") == "auth"
+                          and str(entry.get("key", "")).startswith("certificate serial")]
+    assert certificate_logins, sessions
+    last = certificate_logins[-1]
+    assert (last["user"], last["accepted"], last["reason"]) == (LOGIN, True, "trusted CA"), last
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)
