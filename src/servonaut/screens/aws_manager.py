@@ -52,7 +52,7 @@ from servonaut.screens._provider_accounts import (
     with_account,
 )
 from servonaut.screens._table_cursor import keep_selected_row
-from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
@@ -91,6 +91,19 @@ _CONFIRM_POWER = {
         "Reboot",
         "The instance restarts and its services are unavailable until it is "
         "back up.",
+    ),
+}
+
+# What each power action tells the user, naming the instance as its row does.
+_POWER_TEXT = {
+    "start_instance": PowerActionText(
+        "Starting", "Start sent to {server}.", "Could not start {server}",
+    ),
+    "stop_instance": PowerActionText(
+        "Stopping", "Stop sent to {server}.", "Could not stop {server}",
+    ),
+    "reboot_instance": PowerActionText(
+        "Rebooting", "Reboot sent to {server}.", "Could not reboot {server}",
     ),
 }
 
@@ -342,13 +355,6 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             return None
         return ref.label if ref is not None else account
 
-    def _display_id(self, api_id: str) -> str:
-        """An API id as the table shows it (a placeholder in demo mode)."""
-        if not self.app.demo_mode:
-            return api_id
-        redactor = self.app.redaction_service
-        return redactor.redact_instance_id(api_id) if redactor else "Hidden"
-
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's EC2 state.
 
@@ -422,7 +428,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
-        self._run_lifecycle("start_instance", "Starting", "started")
+        self._run_lifecycle("start_instance")
 
     def action_stop(self) -> None:
         inst = self._selected_instance()
@@ -435,7 +441,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
-        self._run_lifecycle("stop_instance", "Stopping", "stop sent")
+        self._run_lifecycle("stop_instance")
 
     def action_reboot(self) -> None:
         inst = self._selected_instance()
@@ -448,7 +454,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
                 severity="warning", markup=False,
             )
             return
-        self._run_lifecycle("reboot_instance", "Rebooting", "reboot sent")
+        self._run_lifecycle("reboot_instance")
 
     def action_terminate(self) -> None:
         inst = self._selected_instance()
@@ -471,9 +477,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
     # Workers
     # ------------------------------------------------------------------
 
-    def _run_lifecycle(
-        self, method: str, in_progress_verb: str, done_verb: str,
-    ) -> None:
+    def _run_lifecycle(self, method: str) -> None:
         """Fire a lifecycle worker for start / stop / reboot."""
         inst = self._selected_instance()
         if inst is None:
@@ -489,16 +493,17 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         account = self._row_account(inst)
         if account is None:
             return
+        label = self._row_label(inst)
         self.run_worker(
             confirm_and_run_power_action(
                 self.app,
                 prompt=_CONFIRM_POWER.get(method),
-                server_name=self._row_label(inst),
+                server_name=label,
                 provider=f"AWS EC2, {region}",
-                in_progress_verb=in_progress_verb,
+                in_progress_verb=_POWER_TEXT[method].in_progress,
                 set_status=self._set_status,
                 run=lambda: self._do_lifecycle(
-                    method, instance_id, region, done_verb, account=account,
+                    method, instance_id, region, label, account=account,
                 ),
             ),
             exclusive=False,
@@ -510,7 +515,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         method: str,
         instance_id: str,
         region: str,
-        done_verb: str,
+        label: str,
         account: str = "",
     ) -> None:
         """Call the EC2 lifecycle method (start/stop/reboot) with region.
@@ -519,7 +524,10 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
         region — the region-scoped boto3 client cannot be inferred from
         instance_id alone (unlike Hetzner, which uses a global endpoint).
         The call runs in *account* (its label; "" = the default account).
+        The notices name the instance *label*, the name its row shows, so
+        demo mode never shows the real one.
         """
+        text = _POWER_TEXT[method]
         try:
             svc = account_service(self.app, "aws", account)
             await getattr(svc, method)(instance_id, region)
@@ -531,11 +539,9 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(f"[$text-error]{method} failed: {err_msg}[/$text-error]")
-            self.notify(
-                f"{method} failed: {err_msg}",
-                severity="error", markup=False,
-            )
+            message = text.failed_message(label, err_msg)
+            self._set_status(f"[$text-error]{markup_escape(message)}[/$text-error]")
+            self.notify(message, severity="error", markup=False)
             return
 
         audit = getattr(self.app, "aws_audit", None)
@@ -550,10 +556,7 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("Failed to write AWS audit row: %s", exc)
 
-        self.notify(
-            f"EC2 {self._display_id(instance_id)}: {done_verb}.",
-            severity="information", markup=False,
-        )
+        self.notify(text.done_message(label), severity="information", markup=False)
         # Re-fetch so the table reflects the new state.
         await self._load_instances()
 

@@ -49,6 +49,8 @@ import subprocess
 import sys
 from typing import List, Optional
 
+from servonaut.services.plan_labels import PRICING_URL
+
 logger = logging.getLogger(__name__)
 
 
