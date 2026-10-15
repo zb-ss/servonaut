@@ -106,6 +106,11 @@ class Accounts:
                 raise KeyError(f"user {user_id} was never added")
             self._next_sign_ins.append(user_id)
 
+    def cancel_sign_in(self, user_id: int) -> None:
+        """Forget *user_id*'s sign-ins that no device code claimed (their login never asked)."""
+        with self._lock:
+            self._next_sign_ins = [waiting for waiting in self._next_sign_ins if waiting != user_id]
+
     def claim_device_code(self, device_code: str) -> None:
         """Give a newly issued device code to the user waiting for one, if any."""
         with self._lock:

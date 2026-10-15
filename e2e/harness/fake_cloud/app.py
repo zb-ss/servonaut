@@ -180,6 +180,10 @@ class FakeCloud(LoopbackServer):
         """
         self._store.accounts.sign_in_next_as(user_id)
 
+    def cancel_sign_in(self, user_id: int) -> None:
+        """Drop a :meth:`sign_in_next_as` that no device-flow sign-in used."""
+        self._store.accounts.cancel_sign_in(user_id)
+
     def accept_invitation(self, email: str, *, user_id: Optional[int] = None,
                           slug: Optional[str] = None) -> dict:
         """Accept the pending team invitation sent to *email* (the browser step).
