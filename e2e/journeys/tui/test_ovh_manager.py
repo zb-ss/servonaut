@@ -40,6 +40,11 @@ def _rows(t) -> dict[str, list[str]]:
     return {row[1]: [plain(cell) for cell in row] for row in t.table_rows(TABLE)}
 
 
+def _fleet_names(t) -> list[str]:
+    """Server names in the main server list."""
+    return [row[1] for row in t.table_rows("InstanceTable")]
+
+
 def _state(t, name: str) -> str:
     return _rows(t)[name][4]
 
@@ -179,8 +184,14 @@ async def test_deleting_a_cloud_instance_needs_the_typed_confirmation(tui, seed,
         await t.fill("#confirm_input", "delete")
         await t.wait_until(lambda: not confirm.disabled, desc="confirm enabled")
         await press(t, confirm)
-        await t.wait_for_toast(r"OVH instance .* deleted\.")
+        await t.wait_for_toast(rf"^OVH instance {re.escape(BATCH_1.name)} deleted\.$")
         await t.wait_until(lambda: BATCH_1.name not in _rows(t), desc="batch-1 row gone")
+
+        # The server list no longer offers the deleted instance.
+        await t.nav("nav_list")
+        await t.wait_for_screen("InstanceListScreen")
+        await t.wait_until(lambda: BATCH_2.name in _fleet_names(t), desc="server list rows")
+        assert BATCH_1.name not in _fleet_names(t)
 
     assert [(r["method"], r["api_path"]) for r in providers.mutations("ovh")] == [
         ("DELETE", delete_path)

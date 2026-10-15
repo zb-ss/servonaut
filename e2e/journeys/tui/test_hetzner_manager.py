@@ -81,6 +81,11 @@ async def _select(t, name: str) -> None:
     await t.settle()
 
 
+def _fleet_names(t) -> list[str]:
+    """Server names in the main server list."""
+    return [row[1] for row in t.table_rows("InstanceTable")]
+
+
 def _enabled(t, selector: str) -> bool:
     return not t.on_screen(selector).disabled
 
@@ -236,9 +241,17 @@ async def test_delete_needs_the_typed_word(tui, seed, providers):
         await t.wait_until(lambda: _enabled(t, "#btn_confirm"), desc="confirm enabled")
         await t.click("#btn_confirm")
         await t.wait_for_screen("HetznerManagerScreen")
-        await t.wait_for_toast(rf"^Server {doomed.server_id} deleted\.$")
+        await t.wait_for_toast(rf"^Server {re.escape(doomed.name)} deleted\.$")
         await t.wait_until(lambda: doomed.name not in _rows(t), desc="row removed")
         assert set(_rows(t)) == {fleet.HZ_BUILD_1.name}
+
+        # The server list no longer offers the deleted server.
+        await t.nav("nav_list")
+        await t.wait_for_screen("InstanceListScreen")
+        await t.wait_until(
+            lambda: fleet.HZ_BUILD_1.name in _fleet_names(t), desc="server list rows"
+        )
+        assert doomed.name not in _fleet_names(t)
 
     assert [e["api_path"] for e in deletes()] == [f"/servers/{doomed.server_id}"]
     assert providers.hetzner.server(doomed.server_id) is None
