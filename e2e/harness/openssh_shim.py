@@ -163,6 +163,17 @@ def _is_loopback(host: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _log_roots(guard: Any, root: str) -> list[str]:
+    """Where ssh may write its log (-E): the test root and this process's write roots.
+
+    A QA sandbox with a long root gives its children a short temp directory
+    outside that root (a private SSH agent's socket needs the room), and the
+    product puts ssh's private log in the temp directory.
+    """
+    extra = os.environ.get(guard.ENV_WRITE_ROOTS, "")
+    return [root, *(os.path.realpath(path) for path in extra.split(os.pathsep) if path)]
+
+
 def _argv_problem(guard: Any, tool: str, args: list[str], config: str, root: str) -> str:
     """Why the command line itself is not allowed ("" when it is)."""
     try:
@@ -173,7 +184,8 @@ def _argv_problem(guard: Any, tool: str, args: list[str], config: str, root: str
         if letter == "F" and value != config:
             return "only the sandbox ssh config may be used"
         if tool == "ssh" and letter == "E" and not (
-            os.path.isabs(value) and _within(os.path.realpath(value), root)
+            os.path.isabs(value)
+            and any(_within(os.path.realpath(value), log_root) for log_root in _log_roots(guard, root))
         ):
             return f"a log file (-E) outside the test root ({value!r}) is not allowed"
         if letter in REFUSED_OPTIONS[tool]:
