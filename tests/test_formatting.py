@@ -223,3 +223,16 @@ class TestEscapeCell:
         assert escaped.startswith("\\[bold red]"), (
             f"Expected escaped form to start with '\\\\[bold red]' but got: {escaped!r}"
         )
+
+
+def test_format_time_ago():
+    from datetime import datetime, timezone
+
+    from servonaut.utils.formatting import format_time_ago
+
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    assert format_time_ago("2026-01-01T11:59:48+00:00", now) == "12s ago"
+    assert format_time_ago("2026-01-01T11:55:00Z", now) == "5m ago"
+    assert format_time_ago("2026-01-01T09:00:00", now) == "3h ago"  # naive = UTC
+    assert format_time_ago("2026-01-01T12:00:05+00:00", now) == "just now"
+    assert format_time_ago("not a time", now) == "not a time"

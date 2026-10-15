@@ -20,6 +20,7 @@ from textual.widgets import Button, Footer, Static
 
 from servonaut.services.relay_manager import RelayState
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.formatting import format_time_ago
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -240,12 +241,12 @@ class RelayStatusScreen(Screen):
         flag = "[$text-success]connected[/$text-success]" if connected else "[$text-warning]disconnected[/$text-warning]"
         parts = [f"Backend: {flag}"]
         if last_hb:
-            parts.append(f"last heartbeat {last_hb}")
+            parts.append(f"last heartbeat {escape(format_time_ago(str(last_hb)))}")
         if clients:
             if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
                 # A client id embeds the OS user and the machine model.
                 clients = [self.app.redaction_service.redact_name(str(c)) for c in clients]
-            parts.append(f"client_ids={clients}")
+            parts.append(f"listening: {escape(', '.join(str(c) for c in clients))}")
         self.query_one("#backend_status", Static).update(" · ".join(parts))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
