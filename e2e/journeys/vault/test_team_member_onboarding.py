@@ -153,6 +153,9 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     processed = _json(cli(owner, "vault", "grants", "process", "--yes", "--json"))
     accepted_grants = [grant for result in processed for grant in result["accepted"]]
     assert [grant["recipient_user_id"] for grant in accepted_grants] == [MEMBER_ID], processed
+    # The roster names both people as the team does, so a screen never falls back to a user id.
+    [team_vault] = [row for row in _json(cli(owner, "vault", "list", "--json")) if row["vault_id"] == vault_id]
+    assert all(entry.get("display_name") for entry in team_vault["roster"]), team_vault["roster"]
     items = _json(cli(member, "vault", "items", "--vault", vault_id, "--json"))
     assert [row["item_id"] for row in items["data"]] == [item_id]
     shown = _json(cli(member, "vault", "show", item_id, "--vault", vault_id, "--json"))

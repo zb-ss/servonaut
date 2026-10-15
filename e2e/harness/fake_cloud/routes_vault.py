@@ -653,8 +653,16 @@ class VaultCloud:
         members = self._team_members(str((vault.get("team") or {}).get("slug", "")))
         if not members:
             return own
+        # The team knows its people's names: the vault's own entries use them too.
+        people = {int(m["user_id"]): m for m in members}
+        named = [
+            {**entry, "email": people[entry["user_id"]]["email"], "name": people[entry["user_id"]]["name"],
+             "display_name": people[entry["user_id"]]["name"]}
+            if entry["user_id"] in people else entry
+            for entry in own
+        ]
         listed = {entry["user_id"] for entry in own}
-        return [*own, *(self._member_entry(vault, m) for m in members if m["user_id"] not in listed)]
+        return [*named, *(self._member_entry(vault, m) for m in members if m["user_id"] not in listed)]
 
     def _member_entry(self, vault: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
         """A team member's roster entry, as the grant processor reads it.
