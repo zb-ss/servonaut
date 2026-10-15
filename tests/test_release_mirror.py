@@ -545,6 +545,36 @@ def test_a_release_without_a_desktop_package_gets_no_block(tmp_path: Path) -> No
 def test_half_a_block_is_left_for_a_person_to_fix(body: str) -> None:
     with pytest.raises(mirror.MirrorError):
         mirror.with_notes_block(body, f"{mirror.NOTES_START}\nnew\n{mirror.NOTES_END}")
+    with pytest.raises(mirror.MirrorError):
+        mirror.without_notes_block(body)
+
+
+def test_a_withdrawn_package_loses_its_link_and_the_notes_are_restored(tmp_path: Path) -> None:
+    _, plan = _plan(tmp_path)
+    block = mirror.notes_block(plan, BASE, "", "")
+    body = "## What's Changed\n* a fix"
+
+    assert mirror.without_notes_block(mirror.with_notes_block(body, block)) == body + "\n"
+    assert mirror.without_notes_block(body) == body
+    assert mirror.without_notes_block(mirror.with_notes_block("", block)) == ""
+    # Text a person added after the block is kept.
+    edited = mirror.with_notes_block(body, block) + "\nThanks to everyone who tested.\n"
+    assert mirror.without_notes_block(edited) == body + "\n\nThanks to everyone who tested.\n"
+
+
+def test_the_notes_command_removes_the_link_when_the_package_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    _, plan = _plan(tmp_path)
+    block = mirror.notes_block(plan, BASE, "", "")
+    plan["assets"] = [raw for raw in plan["assets"] if raw["kind"] != "desktop-deb"]
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+    (tmp_path / "body.md").write_text(mirror.with_notes_block("notes", block))
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    code = mirror.main(["notes", "--plan", str(tmp_path / "plan.json"), "--base", BASE, "--body-file", str(tmp_path / "body.md"), "--out", str(tmp_path / "new.md")])
+
+    assert code == 0
+    assert capsys.readouterr().out == "release notes changed\n"
+    assert (tmp_path / "new.md").read_text() == "notes\n"
 
 
 def test_empty_notes_get_just_the_block() -> None:
@@ -836,7 +866,8 @@ def test_the_desktop_package_must_come_from_its_own_workflow_and_tag(workflow: s
 
 def test_the_notes_job_edits_only_after_a_real_mirror_run(workflow: str) -> None:
     notes = _job(workflow, "notes")
-    assert "    if: needs.mirror.outputs.desktop-deb != '' && needs.resolve.outputs.dry-run != 'true'\n" in notes
+    # Every real run, so a withdrawn package's link is removed again.
+    assert "    if: needs.mirror.result == 'success' && needs.resolve.outputs.dry-run != 'true'\n" in notes
     assert 'gh api -X PATCH "repos/${GH_REPO}/releases/${release_id}"' in notes
 
 
