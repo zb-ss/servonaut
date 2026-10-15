@@ -609,7 +609,6 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "manage_edit",
         "manage_remove",
         # ---- Team management ----
-        "member_actions_row",   # Reason: Horizontal layout row; inherits layout
         "members_table",        # Reason: DataTable; styled via ancestor container
         # ---- Memory screens ----
         "memory-empty-state",       # Reason: Static; inherits global Static
