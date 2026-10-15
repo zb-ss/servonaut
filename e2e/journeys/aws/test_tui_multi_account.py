@@ -83,6 +83,11 @@ def _column(t, selector: str, index: int) -> list[str]:
     return [row[index] for row in table_text(t, selector)]
 
 
+def _manager_state(t, name: str) -> str:
+    """The EC2 manager's State cell for the row named *name*."""
+    return next(row[4] for row in table_text(t, "#aws_mgr_table") if row[1] == name)
+
+
 # ---------------------------------------------------------------------------
 # EC2 manager and launch wizard
 # ---------------------------------------------------------------------------
@@ -116,6 +121,20 @@ async def test_manager_stops_a_server_in_its_own_account(tui, seed, moto):
         await t.wait_until(
             lambda: len(_column(t, "#aws_mgr_table", 1)) == 4, desc="both accounts listed"
         )
+        # ...and keeps the cursor on the stopped instance, so the next key
+        # (Terminate here) asks about it, not about the first row.
+        target = f"{SECOND}/web-1"
+        await t.wait_until(
+            lambda: _manager_state(t, target) in ("stopping", "stopped"), desc="row redrawn"
+        )
+        await t.settle()
+        assert _column(t, "#aws_mgr_table", 1).index(target) > 0
+        assert table.cursor_row == _column(t, "#aws_mgr_table", 1).index(target)
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Terminate EC2 Instance", target, screen_only=True)
+        await t.press("escape")
+        await t.wait_for_screen("AWSManagerScreen")
 
     assert _states(moto)["web-1"] == "running"
 

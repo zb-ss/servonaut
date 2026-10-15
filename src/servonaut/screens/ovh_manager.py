@@ -48,6 +48,7 @@ from servonaut.screens._provider_accounts import (
     row_service,
     with_account,
 )
+from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
@@ -273,19 +274,21 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
-        table.clear()
-        for idx, inst in enumerate(self._instances, start=1):
-            table.add_row(
-                str(idx),
-                display_name(inst),
-                str(inst.get("type", "")),
-                str(inst.get("provider_type", "—")),
-                self._colorize_state(str(inst.get("state", ""))),
-                str(inst.get("public_ip", "") or "—"),
-                str(inst.get("region", "")),
-                str(inst.get("id", "")),
-                key=str(inst.get("id", idx)),
-            )
+        # The next action must reach the server the user picked, not row 1.
+        with keep_selected_row(table):
+            table.clear()
+            for idx, inst in enumerate(self._instances, start=1):
+                table.add_row(
+                    str(idx),
+                    display_name(inst),
+                    str(inst.get("type", "")),
+                    str(inst.get("provider_type", "—")),
+                    self._colorize_state(str(inst.get("state", ""))),
+                    str(inst.get("public_ip", "") or "—"),
+                    str(inst.get("region", "")),
+                    str(inst.get("id", "")),
+                    key=str(inst.get("id", idx)),
+                )
         self._sync_action_buttons()
 
     @staticmethod

@@ -248,3 +248,26 @@ async def test_create_a_cloud_instance_through_the_wizard(tui, seed, providers):
     }
     creates = [row for row in ovh_audit(seed) if row["action"] == "cloud_create"]
     assert [row["confirmed"] for row in creates] == [False, True]
+
+
+async def test_the_next_key_acts_on_the_instance_the_action_was_for(tui, seed, providers):
+    """An action redraws the list; the cursor stays on the instance it was for."""
+    _seed(seed, providers)
+
+    async with tui() as t:
+        await _open_manager(t)
+        table = t.on_screen(TABLE)
+        assert list(_rows(t)).index(BATCH_2.name) > 0
+        await select_row(t, TABLE, 1, BATCH_2.name)
+        await _act(t, "start", r"OVH cloud .*: started")
+        await t.wait_until(lambda: _state(t, BATCH_2.name) == "running", desc="batch-2 up")
+        await t.settle()
+        assert table.cursor_row == list(_rows(t)).index(BATCH_2.name)
+
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Delete OVH Cloud Instance", BATCH_2.name, screen_only=True)
+        await t.press("escape")
+        await t.wait_for_screen("OVHManagerScreen")
+
+    assert [r["method"] for r in providers.mutations("ovh")] == ["POST"]

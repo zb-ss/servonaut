@@ -51,6 +51,7 @@ from servonaut.screens._provider_accounts import (
     inventory,
     with_account,
 )
+from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.formatting import escape_cell
 from servonaut.utils.instance_resolver import display_name
@@ -252,18 +253,20 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#aws_mgr_table", DataTable)
-        table.clear()
-        for idx, inst in enumerate(self._instances, start=1):
-            table.add_row(
-                str(idx),
-                escape_cell(display_name(inst)),
-                escape_cell(str(inst.get("id", ""))),
-                escape_cell(str(inst.get("type", ""))),
-                self._colorize_state(str(inst.get("state", ""))),
-                escape_cell(str(inst.get("public_ip", "") or "—")),
-                escape_cell(str(inst.get("region", ""))),
-                key=str(inst.get("id", idx)),
-            )
+        # The next action must reach the server the user picked, not row 1.
+        with keep_selected_row(table):
+            table.clear()
+            for idx, inst in enumerate(self._instances, start=1):
+                table.add_row(
+                    str(idx),
+                    escape_cell(display_name(inst)),
+                    escape_cell(str(inst.get("id", ""))),
+                    escape_cell(str(inst.get("type", ""))),
+                    self._colorize_state(str(inst.get("state", ""))),
+                    escape_cell(str(inst.get("public_ip", "") or "—")),
+                    escape_cell(str(inst.get("region", ""))),
+                    key=str(inst.get("id", idx)),
+                )
         self._sync_action_buttons()
 
     @staticmethod

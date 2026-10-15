@@ -322,7 +322,8 @@ class TestAWSManagerRenderTable:
             {"id": "i-0abc12345678def90", "name": "web", "type": "t3.micro",
              "state": "running", "public_ip": "1.2.3.4", "region": "us-east-1"},
         ]
-        mock_table = MagicMock()
+        # An empty table: the redraw keeps the selected row (none here).
+        mock_table = MagicMock(row_count=0)
         with patch.object(screen, "query_one", return_value=mock_table), \
              patch.object(screen, "_sync_action_buttons"):
             screen._render_table()
@@ -336,7 +337,8 @@ class TestAWSManagerRenderTable:
              "state": "stopped", "public_ip": None, "region": "us-east-1"},
         ]
         rows_added = []
-        mock_table = MagicMock()
+        # An empty table: the redraw keeps the selected row (none here).
+        mock_table = MagicMock(row_count=0)
         mock_table.add_row = MagicMock(side_effect=lambda *a, **kw: rows_added.append(a))
         with patch.object(screen, "query_one", return_value=mock_table), \
              patch.object(screen, "_sync_action_buttons"):
