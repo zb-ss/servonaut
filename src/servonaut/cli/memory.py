@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.ssh_host_keys import home_relative
+from servonaut.utils.editor import editor_argv
 
 logger = logging.getLogger(__name__)
 
@@ -412,8 +414,16 @@ def _cmd_annotate(args: Any, config: Any, memory_service: Any, inst: Dict[str, A
     except Exception:  # noqa: BLE001
         old_hash = ""
 
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    subprocess.run([editor, str(path)], check=False)
+    argv = editor_argv(path)
+    try:
+        subprocess.run(argv, check=False)
+    except OSError as exc:
+        print(
+            f"Could not start the editor {argv[0]!r} ({exc.strerror or exc}). Set $VISUAL or "
+            f"$EDITOR to an installed editor, or edit {home_relative(str(path))} directly.",
+            file=sys.stderr,
+        )
+        return _EXIT_GENERIC_ERROR
 
     # Recompute annotations_hash and update index via the public API
     try:
