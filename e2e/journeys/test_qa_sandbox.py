@@ -320,6 +320,7 @@ async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, jou
     script = journey.directory / "ai.json"
     script.write_text(json.dumps({
         "model": "hosted-model",
+        "topup_url": "https://checkout.stripe.com/c/pay/cs_example",
         "quota": {"tokens_used": 41200, "resets_in_days": 18},
         "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
         "conversations": [{
@@ -342,6 +343,9 @@ async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, jou
     listed = await qa_sandbox.command("run", "--", "ai", "conversations", "list")
     assert listed.returncode == 0, listed.stderr
     assert "Stopped servers" in listed.stdout and "2030" not in listed.stdout, listed.stdout
+    topup = await qa_sandbox.command("run", "--", "ai", "topup", "pack_small")
+    assert topup.returncode == 0, topup.stderr
+    assert "https://checkout.stripe.com/c/pay/cs_example" in topup.stdout, topup.stdout
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)

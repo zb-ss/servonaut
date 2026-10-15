@@ -2,10 +2,13 @@
 
 The fake service answers ``servonaut ai chat`` only with turns queued in
 advance. This loads them from one JSON file, with the account's AI quota and
-the stored conversations ``servonaut ai conversations`` lists::
+the stored conversations ``servonaut ai conversations`` lists, and the
+checkout address ``servonaut ai topup`` opens (through the sandbox's no-op
+browser)::
 
     {
       "model": "hosted-model",
+      "topup_url": "https://checkout.stripe.com/c/pay/cs_example",
       "quota": {"tokens_used": 41200, "resets_in_days": 18},
       "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
       "conversations": [
@@ -48,6 +51,8 @@ def load(path: Path) -> dict[str, Any]:
         raise ScriptError("the AI script must be a JSON object")
     if not isinstance(spec.get("model", ""), str):
         raise ScriptError("model must be a string")
+    if not str(spec.get("topup_url", "https://checkout.stripe.com/")).startswith("https://checkout.stripe.com/"):
+        raise ScriptError("topup_url must be a https://checkout.stripe.com/ address (the app refuses others)")
     quota = spec.get("quota", {})
     if not isinstance(quota, dict) or set(quota) - _QUOTA_KEYS - {"resets_in_days"}:
         raise ScriptError(f"quota takes only: {', '.join(sorted(_QUOTA_KEYS | {'resets_in_days'}))}")
@@ -120,3 +125,5 @@ def apply(fake_cloud: Any, spec: dict[str, Any], *, now: Optional[datetime] = No
         exports[row["id"]] = export
     if rows:
         fake_cloud.ai.configure(conversations=rows, exports=exports)
+    if spec.get("topup_url"):
+        fake_cloud.ai.configure(topup_url=spec["topup_url"])
