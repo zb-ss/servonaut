@@ -840,7 +840,7 @@ async def test_the_scan_of_every_server_names_it_and_server_names_are_redacted_i
 
 
 @pytest.mark.asyncio
-async def test_coming_soon_still_ends_the_status_load() -> None:
+async def test_switched_off_certificates_still_end_the_status_load() -> None:
     service = _PickerService()
     service.switched_off.add("ops")
     app = _CaHost(service)

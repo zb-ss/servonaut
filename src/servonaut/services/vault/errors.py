@@ -76,17 +76,17 @@ _ACTIONABLE_CODES = {
     ),
 }
 
-# A service can ship with SSH certificates switched off; that is a planned
-# state rather than a failure, so it reads as an announcement, not an error.
-SSH_CA_COMING_SOON = (
-    "SSH certificates are coming soon: they are not switched on for this Servonaut service yet. "
-    "Team members connect with vault keys until then."
+# A service can run with SSH certificates switched off; that is the service's
+# choice rather than a failure, so it reads as information, not an error.
+SSH_CA_SWITCHED_OFF = (
+    "SSH certificates are switched off on this Servonaut service. "
+    "Team members connect with vault keys."
 )
 
 # ``feature_disabled`` names the feature switched off on the service in ``details.feature``.
 # Reasons are shown inside "... failed (reason)." so they carry no final stop.
 _DISABLED_FEATURES = {
-    "ssh_ca": SSH_CA_COMING_SOON.rstrip("."),
+    "ssh_ca": SSH_CA_SWITCHED_OFF.rstrip("."),
 }
 
 # ``entitlement_required`` names the missing plan feature in ``details.feature``.

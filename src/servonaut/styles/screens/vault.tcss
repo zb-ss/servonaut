@@ -119,7 +119,8 @@ CaEnrollmentConfirmModal {
 #vault_bind_modal,
 #vault_create_modal,
 #vault_import_modal,
-#ca_confirm_modal {
+#ca_confirm_modal,
+#ca_enable_modal {
     width: 72;
     max-width: 92%;
     height: auto;
@@ -247,11 +248,25 @@ CaEnrollmentConfirmModal {
 #vault_create_confirm,
 #vault_import_go,
 #ca_cancel,
-#ca_confirm {
+#ca_confirm,
+#ca_enable_cancel,
+#ca_enable_confirm {
     min-width: 12;
     margin-top: 1;
 }
 
+#ca_enable_title {
+    margin-bottom: 1;
+}
+
+/* The button rows take their own height: filling the dialog left its buttons
+   floating in the middle of empty space. */
+#ca_confirm_modal > Horizontal,
+#ca_enable_modal > Horizontal {
+    height: auto;
+}
+
+#ca_content #ca_enable,
 #ca_content #ca_refresh,
 #ca_content #ca_audit,
 #ca_content #ca_enroll,

@@ -11,9 +11,9 @@ from textual.pilot import Pilot
 from textual.screen import Screen
 from textual.widgets import Button, OptionList, Select, Static
 
-from servonaut.screens.ca import _EVERY_ENROLLED_SERVER, CaScreen
+from servonaut.screens.ca import _EVERY_ENROLLED_SERVER, CaEnableConfirmModal, CaScreen
 from servonaut.services.api_client import APIError, FeatureDisabledError
-from servonaut.services.vault.errors import SSH_CA_COMING_SOON, VaultUserError
+from servonaut.services.vault.errors import SSH_CA_SWITCHED_OFF, VaultUserError
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
 
@@ -51,6 +51,8 @@ class _PickerService:
         self.failures: dict[str, Exception] = {}
         self.gates: dict[str, asyncio.Event] = {}
         self.switched_off: set[str] = set()
+        # Teams whose own CA is not switched on yet (ca_enable switches it on).
+        self.not_enabled: set[str] = set()
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.finished: list[str] = []
 
@@ -87,6 +89,13 @@ class _PickerService:
             raise FeatureDisabledError(
                 code="feature_disabled", message="server text", status=503, details={"feature": "ssh_ca"},
             )
+        if team in self.not_enabled:
+            return {"enabled": False, "user_ca_fingerprint": None, "policy": None}
+        return {"enabled": True, "user_ca_fingerprint": f"SHA256:{team}-user-ca"}
+
+    async def ca_enable(self, *, team: str) -> dict[str, Any]:
+        await self._answer("ca_enable", team=team)
+        self.not_enabled.discard(team)
         return {"enabled": True, "user_ca_fingerprint": f"SHA256:{team}-user-ca"}
 
     async def ca_audit(self, *, team: str) -> dict[str, Any]:
@@ -436,14 +445,14 @@ async def test_choosing_another_team_does_not_cancel_a_running_action() -> None:
 
 
 @pytest.mark.asyncio
-async def test_coming_soon_holds_back_actions_until_another_team_is_chosen() -> None:
+async def test_switched_off_certificates_hold_back_actions_until_another_team_is_chosen() -> None:
     service = _PickerService()
     service.switched_off.add("ops")
     app = _Host(service)
     async with app.run_test(size=(160, 50)) as pilot:
         screen = app.screen
         await _choose_team(pilot, service, screen, "ops")
-        assert _text(screen, "ca_status") == SSH_CA_COMING_SOON
+        assert _text(screen, "ca_status") == SSH_CA_SWITCHED_OFF
         assert _ca_actions_disabled(screen) == [True, True, True, True]
         assert app.notes == []
 
@@ -636,3 +645,195 @@ async def test_the_status_names_servers_once_their_list_loads() -> None:
 
         await wait_until(lambda: "Logins on web-1 (web-1): deploy" in _text(screen, "ca_status"))
         assert "{" not in _text(screen, "ca_status")
+
+
+def _enable_button(screen: Screen) -> Button:
+    return screen.query_one("#ca_enable", Button)
+
+
+async def _confirm_switch_on(pilot: Pilot, *, confirm: bool) -> str:
+    """Press "Switch on SSH certificates", answer its confirmation and return its question."""
+    app = pilot.app
+    await _click(pilot, "#ca_enable")
+    await wait_until(lambda: isinstance(app.screen, CaEnableConfirmModal))
+    await pilot.pause()
+    question = str(app.screen.query_one("#ca_enable_title", Static).render())
+    await pilot.click("#ca_enable_confirm" if confirm else "#ca_enable_cancel")
+    await wait_until(lambda: not isinstance(app.screen, CaEnableConfirmModal))
+    return question
+
+
+@pytest.mark.asyncio
+async def test_certificates_that_are_off_can_be_switched_on_after_confirming() -> None:
+    service = _PickerService()
+    service.not_enabled.add("ops")
+    app = _StyledHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+        assert _text(screen, "ca_status").startswith("SSH certificates are not switched on for this team.")
+        assert "Switch them on below" in _text(screen, "ca_status")
+        assert _enable_button(screen).display and not _enable_button(screen).disabled
+        # Nothing else can run on a CA that is not switched on.
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+        await _refused(pilot, screen, "#ca_enroll", "Switch on SSH certificates for this team first.")
+
+        question = await _confirm_switch_on(pilot, confirm=True)
+
+        assert question == "Switch on SSH certificates for Ops (ops)?"
+        await wait_until(lambda: _text(screen, "ca_status").startswith("SSH certificates are on for this team."))
+        assert service.calls_to("ca_enable") == [{"team": "ops"}]
+        assert ("SSH certificates are on for Ops (ops).", {"markup": False}) in app.notes
+        assert not _enable_button(screen).display
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_switch_on_changes_nothing() -> None:
+    service = _PickerService()
+    service.not_enabled.add("ops")
+    app = _StyledHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+
+        await _confirm_switch_on(pilot, confirm=False)
+        await pilot.pause()
+
+        assert service.calls_to("ca_enable") == []
+        assert _enable_button(screen).display and not _enable_button(screen).disabled
+        assert _text(screen, "ca_status").startswith("SSH certificates are not switched on for this team.")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_switch_on_says_what_to_do() -> None:
+    service = _PickerService()
+    service.not_enabled.add("ops")
+    service.failures["ca_enable"] = APIError(code="mfa_required", message="server text", status=403)
+    app = _StyledHost(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+
+        await _confirm_switch_on(pilot, confirm=True)
+
+        await wait_until(lambda: any("Switching on SSH certificates failed" in note for note, _ in app.notes))
+        note = next(entry for entry in app.notes if "Switching on SSH certificates failed" in entry[0])
+        assert note == (
+            (
+                "Switching on SSH certificates failed "
+                "(this needs a recent MFA sign-in; run `servonaut login` and try again)."
+            ),
+            {"severity": "error", "markup": False},
+        )
+        await wait_until(lambda: not _enable_button(screen).disabled)
+        assert _enable_button(screen).display
+        assert _ca_actions_disabled(screen) == [True, True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_the_switch_on_is_offered_only_for_a_team_whose_certificates_are_off() -> None:
+    service = _PickerService()
+    service.not_enabled.add("ops")
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        assert not _enable_button(screen).display  # no team chosen yet
+
+        await _choose_team(pilot, service, screen, "platform")
+        assert not _enable_button(screen).display
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
+
+        await _choose_team(pilot, service, screen, "ops")
+        assert _enable_button(screen).display
+
+        await _choose_team(pilot, service, screen, "platform")
+        assert not _enable_button(screen).display
+        assert _ca_actions_disabled(screen) == [False, False, False, False]
+
+
+@pytest.mark.asyncio
+async def test_the_switch_on_is_not_offered_while_the_service_has_certificates_switched_off() -> None:
+    service = _PickerService()
+    service.switched_off.add("ops")
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+
+        assert _text(screen, "ca_status") == SSH_CA_SWITCHED_OFF
+        assert not _enable_button(screen).display
+
+
+@pytest.mark.asyncio
+async def test_the_switch_on_confirmation_fits_at_100x30() -> None:
+    service = _PickerService(teams=[_TEAMS[0]])
+    service.not_enabled.add("ops")
+    app = _StyledHost(service)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: _enable_button(screen).display)
+        await _team_settled(pilot, screen)
+        screen.query_one("#ca_content").scroll_to_widget(_enable_button(screen), animate=False)
+        await pilot.pause()
+        await _click(pilot, "#ca_enable")
+        await wait_until(lambda: isinstance(app.screen, CaEnableConfirmModal))
+        await pilot.pause()
+
+        modal = app.screen.query_one("#ca_enable_modal")
+        assert modal.region.right <= 100 and modal.region.bottom <= 30
+        for button_id in ("#ca_enable_cancel", "#ca_enable_confirm"):
+            button = app.screen.query_one(button_id, Button)
+            assert button.region.height >= 1 and modal.region.contains_region(button.region)
+        _assert_buttons_close_the_dialog(modal, app.screen.query_one("#ca_enable_confirm", Button))
+
+
+def _assert_buttons_close_the_dialog(modal: Any, button: Button) -> None:
+    """The dialog is as tall as its content: its buttons end it, with no empty space below."""
+    inner_bottom = modal.region.bottom - 2  # bottom border and padding
+    assert inner_bottom - 1 <= button.region.bottom <= inner_bottom
+
+
+@pytest.mark.asyncio
+async def test_the_enrollment_confirmation_is_as_tall_as_its_content() -> None:
+    from servonaut.screens.ca import CaEnrollmentConfirmModal
+
+    summary = {"kind": "enroll", "params": {"server": {"hostname": "192.0.2.10"}, "user_ca_public_keys": []}}
+
+    class _ModalHost(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self) -> None:
+            self.push_screen(CaEnrollmentConfirmModal(summary))
+
+    app = _ModalHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, CaEnrollmentConfirmModal))
+        await pilot.pause()
+        _assert_buttons_close_the_dialog(
+            app.screen.query_one("#ca_confirm_modal"), app.screen.query_one("#ca_confirm", Button),
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_switch_on_names_the_team_as_demo_mode_shows_it() -> None:
+    class Redactor:
+        def scrub_stream(self, text: str) -> str:
+            return text.replace("Ops", "Team-A")
+
+    service = _PickerService(teams=[{"slug": "ops", "label": "[bold]Ops[/bold] (ops)"}, _TEAMS[1]])
+    service.not_enabled.add("ops")
+    app = _StyledHost(service)
+    app.redaction_service = Redactor()
+    app.demo_mode = True
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await _choose_team(pilot, service, screen, "ops")
+
+        question = await _confirm_switch_on(pilot, confirm=True)
+
+        # Redacted, and the label's brackets shown as typed rather than read as markup.
+        assert question == "Switch on SSH certificates for [bold]Team-A[/bold] (ops)?"
+        await wait_until(lambda: service.calls_to("ca_enable") == [{"team": "ops"}])
+        await wait_until(lambda: any(note.startswith("SSH certificates are on for") for note, _ in app.notes))
+        assert ("SSH certificates are on for [bold]Team-A[/bold] (ops).", {"markup": False}) in app.notes
