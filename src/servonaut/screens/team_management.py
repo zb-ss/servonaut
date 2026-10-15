@@ -42,6 +42,10 @@ class TeamManagementScreen(Screen):
         Binding("escape", "back", "Back", show=True),
     ]
 
+    # Below 120 columns the five member buttons wrap onto a grid (see the
+    # ``-narrow`` rules in the styles); on one row the last ones were cut off.
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
