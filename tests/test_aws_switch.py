@@ -156,3 +156,13 @@ async def test_the_sidebar_shows_aws_only_while_it_is_switched_on(enabled: bool)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         assert app.screen.query_one("#section_aws").display is enabled
+
+
+def test_the_ai_chat_dispatcher_answers_with_the_refusal():
+    from servonaut.services.chat_tools import ChatToolExecutor
+
+    tools = TestAgentTools._tools(enabled=False)
+    tools.aws_list_regions = AsyncMock(return_value="regions")
+    result = asyncio.run(ChatToolExecutor(tools, guard_level="standard").execute("aws_list_regions", {}))
+    assert result == f"Error: {AWS_SWITCHED_OFF}"
+    tools.aws_list_regions.assert_not_awaited()

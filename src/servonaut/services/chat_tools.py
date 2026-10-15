@@ -182,7 +182,7 @@ class ChatToolExecutor:
             return f"Tool handler not available: {tool_name}"
         refusal = getattr(self._tools, "refusal", None)
         refused = refusal(tool_name) if callable(refusal) else None
-        if refused:
+        if isinstance(refused, str) and refused:
             return refused
 
         try:

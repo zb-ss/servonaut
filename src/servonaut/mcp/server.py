@@ -291,7 +291,7 @@ async def _dispatch_tool(tools, name: str, arguments: dict):
         return [TextContent(type="text", text=f"Tool handler not available: {name}")]
     refusal = getattr(tools, "refusal", None)
     refused = refusal(name) if callable(refusal) else None
-    if refused:
+    if isinstance(refused, str) and refused:
         return [TextContent(type="text", text=refused)]
     try:
         result = await handler(**arguments)
