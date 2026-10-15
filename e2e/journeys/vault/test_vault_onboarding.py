@@ -59,7 +59,17 @@ def test_solo_user_is_guided_from_setup_to_a_personal_vault(journey, fake_cloud,
 
     created = cli(home, "vault", "create", "--name", "Personal")
     assert created.returncode == 0, created.describe()
+    # Said in words, without the signed records behind it.
+    assert created.stdout.startswith('Created your personal vault "Personal" (ID ')
+    assert "Next: import an SSH key with `servonaut vault import ssh --vault " in created.stdout
+    assert "signature" not in created.stdout and "sealed_private_key" not in created.stdout
     assert _next_step(cli(home, "vault", "status")) == ""
+
+    listed = cli(home, "vault", "list")
+    assert listed.returncode == 0, listed.describe()
+    header, row = listed.stdout.splitlines()
+    assert header.split() == ["Name", "Kind", "Items", "Open", "exposures", "Vault", "ID"]
+    assert row.split()[:4] == ["Personal", "personal", "0", "0"]
 
 
 class _VaultHost(App):
@@ -128,3 +138,8 @@ async def test_vault_screen_confirms_the_identity_and_creates_the_personal_vault
         await _wait(app, screen, lambda: app.screen is screen and table.row_count == 1, "the new personal vault row")
         assert "Personal" in str(table.get_row_at(0))
         assert "Create your personal vault" not in _status(screen)
+
+        # Processing access requests says what happened, in words.
+        screen.query_one("#vault_grants", Button).press()
+        await _wait_for_status(app, screen, "No one is waiting for access.")
+        assert "accepted" not in _status(screen)

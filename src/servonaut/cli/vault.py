@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
-from servonaut.services.vault.display import terminal_safe
+from servonaut.services.vault.display import grant_summary, terminal_safe
 from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
 
 _EXIT_OK = 0
@@ -378,6 +378,49 @@ def _print_next_step(step: Optional[Mapping[str, Any]]) -> None:
         print(f"  Run: {step['command']}")
 
 
+def _vault_kind(vault: Mapping[str, Any]) -> str:
+    """"personal", or "team <slug>" for a team's vault."""
+    team = vault.get("team")
+    slug = team.get("slug") if isinstance(team, Mapping) else None
+    if vault.get("kind") == "team" and slug:
+        return f"team {terminal_safe(slug)}"
+    return terminal_safe(vault.get("kind") or "")
+
+
+def _print_vaults(vaults: Any) -> None:
+    """``vault list`` for people: one line per vault, the columns the Vault screen shows."""
+    rows = [vault for vault in vaults if isinstance(vault, Mapping)] if isinstance(vaults, list) else []
+    if not rows:
+        print("You have no vaults yet: run `servonaut vault create`.")
+        return
+    table = [("Name", "Kind", "Items", "Open exposures", "Vault ID")]
+    for vault in rows:
+        counts = vault.get("counts") if isinstance(vault.get("counts"), Mapping) else {}
+        table.append((
+            terminal_safe(vault.get("name") or "Unnamed vault"), _vault_kind(vault),
+            str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
+            terminal_safe(vault.get("vault_id") or ""),
+        ))
+    widths = [max(len(row[column]) for row in table) for column in range(len(table[0]))]
+    for row in table:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
+def _print_created_vault(vault: Any) -> None:
+    """``vault create`` for people: what was created and what to do next."""
+    if not isinstance(vault, Mapping):
+        _print(vault, json_output=False)
+        return
+    name = terminal_safe(vault.get("name") or "Unnamed vault")
+    vault_id = terminal_safe(vault.get("vault_id") or "")
+    kind = _vault_kind(vault)
+    if kind.startswith("team "):
+        print(f'Created the team vault "{name}" for {kind[len("team "):]} (ID {vault_id}).')
+    else:
+        print(f'Created your personal vault "{name}" (ID {vault_id}).')
+    print(f"Next: import an SSH key with `servonaut vault import ssh --vault {vault_id} --path ~/.ssh/<key>`.")
+
+
 def _print_confirmation(result: Any, *, after_setup: bool) -> None:
     """Say whether the identity is confirmed, and how to confirm it if not."""
     confirmation = result.get("confirmation") if isinstance(result, Mapping) else None
@@ -694,9 +737,17 @@ async def _handle(args: argparse.Namespace) -> int:
                     return _EXIT_ABORTED
                 _print(await _invoke(services, "revoke_device", device_id=args.device_id, reason=args.reason), json_output=output)
         elif command == "create":
-            _print(await _invoke(services, "create_vault", team=args.team, name=args.name, grant_policy=args.grant_policy), json_output=output)
+            created = await _invoke(services, "create_vault", team=args.team, name=args.name, grant_policy=args.grant_policy)
+            if output:
+                _print(created, json_output=True)
+            else:
+                _print_created_vault(created)
         elif command == "list":
-            _print(await _invoke(services, "list_vaults"), json_output=output)
+            vaults = await _invoke(services, "list_vaults")
+            if output:
+                _print(vaults, json_output=True)
+            else:
+                _print_vaults(vaults)
         elif command == "items":
             _print(await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted), json_output=output)
         elif command == "show":
@@ -793,7 +844,11 @@ async def _handle(args: argparse.Namespace) -> int:
                 if not output:
                     _note_replaced_keys(listed)
         elif command == "grants":
-            _print(await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes), json_output=output)
+            processed = await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes)
+            if output:
+                _print(processed, json_output=True)
+            else:
+                print(grant_summary(_plain(processed)))
         elif command == "verify-member":
             _print(await _invoke(services, "verify_member", member=args.member), json_output=output)
         elif command == "escrow":
