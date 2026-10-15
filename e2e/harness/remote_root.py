@@ -141,6 +141,17 @@ esac
 """
 
 
+def _stub_df() -> str:
+    # The memory prober asks for the --output columns; ``df -h`` answers in full.
+    return _STUB_HEADER + r"""case "$*" in
+  *--output=source,pcent,target*) printf '%s\n' "Filesystem      Use% Mounted on" \
+                                    "/dev/vda1        30% /" ;;
+  *) printf '%s\n' "Filesystem      Size  Used Avail Use% Mounted on" \
+                    "/dev/vda1        40G   12G   28G  30% /" ;;
+esac
+"""
+
+
 def _stub_print(lines: Iterable[str]) -> str:
     body = "".join(f"printf '%s\\n' {shlex.quote(line)}\n" for line in lines)
     return _STUB_HEADER + body
@@ -157,12 +168,7 @@ def _stubs(hostname_file: str) -> dict[str, str]:
         "uptime": _stub_print(
             [" 10:00:00 up 3 days,  2:14,  1 user,  load average: 0.10, 0.05, 0.01"]
         ),
-        "df": _stub_print(
-            [
-                "Filesystem      Size  Used Avail Use% Mounted on",
-                "/dev/vda1        40G   12G   28G  30% /",
-            ]
-        ),
+        "df": _stub_df(),
         "free": _stub_print(
             [
                 "               total        used        free      shared  buff/cache   available",
