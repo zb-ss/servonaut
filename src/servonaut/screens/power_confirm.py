@@ -4,10 +4,14 @@ Stopping, shutting down, powering off and rebooting take a server's services
 down, so the provider managers ask first. The question is a plain yes/no:
 typing the name back stays reserved for actions that destroy data (delete,
 terminate), which use :class:`ConfirmActionScreen`.
+
+:class:`PowerActionText` holds what a manager tells the user about each power
+action, so every notice names the server the same way.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from rich.markup import escape
@@ -16,6 +20,35 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
+
+
+@dataclass(frozen=True)
+class PowerActionText:
+    """What the user reads about one power action, in plain words.
+
+    Every message names the server by the name its table row shows (a
+    demo-mode stand-in stays a stand-in, an unnamed server shows the id the
+    table shows). ``{server}`` marks where that name goes.
+
+    Attributes:
+        in_progress: Status-line verb while the action runs, e.g. ``"Rebooting"``.
+        done: Notice once the provider accepted the action, e.g.
+            ``"Reboot sent to {server}."``.
+        failed: Start of the notice when the provider refused it, e.g.
+            ``"Could not reboot {server}"``; the reason follows a colon.
+    """
+
+    in_progress: str
+    done: str
+    failed: str
+
+    def done_message(self, server: str) -> str:
+        """The notice for an action the provider accepted."""
+        return self.done.format(server=server)
+
+    def failed_message(self, server: str, reason: str) -> str:
+        """The notice for an action the provider refused, with its *reason*."""
+        return f"{self.failed.format(server=server)}: {reason}"
 
 
 class PowerActionConfirmModal(ModalScreen[bool]):

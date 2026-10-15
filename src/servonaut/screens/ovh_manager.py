@@ -49,7 +49,7 @@ from servonaut.screens._provider_accounts import (
     with_account,
 )
 from servonaut.screens._table_cursor import keep_selected_row
-from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
@@ -90,6 +90,19 @@ _CONFIRM_POWER = {
         "Reboot",
         "The server restarts and its services are unavailable until it is "
         "back up.",
+    ),
+}
+
+# What each power action tells the user, naming the server as its row does.
+_POWER_TEXT = {
+    "start_instance": PowerActionText(
+        "Starting", "Started {server}.", "Could not start {server}",
+    ),
+    "stop_instance": PowerActionText(
+        "Stopping", "Stop sent to {server}.", "Could not stop {server}",
+    ),
+    "reboot_instance": PowerActionText(
+        "Rebooting", "Reboot sent to {server}.", "Could not reboot {server}",
     ),
 }
 
@@ -436,13 +449,13 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             self._refresh()
 
     def action_start(self) -> None:
-        self._run_lifecycle("start_instance", "Starting", "started")
+        self._run_lifecycle("start_instance")
 
     def action_stop(self) -> None:
-        self._run_lifecycle("stop_instance", "Stopping", "stop sent")
+        self._run_lifecycle("stop_instance")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot_instance", "Rebooting", "reboot sent")
+        self._run_lifecycle("reboot_instance")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()
@@ -466,9 +479,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
     # Workers
     # ------------------------------------------------------------------
 
-    def _run_lifecycle(
-        self, method: str, in_progress_verb: str, done_verb: str,
-    ) -> None:
+    def _run_lifecycle(self, method: str) -> None:
+        """Run power action *method* on the selected server, asking first if it interrupts."""
         inst = self._selected_instance()
         if inst is None:
             return
@@ -499,17 +511,18 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         if svc is None:
             return
         account = self._row_account(inst)
+        label = self._row_label(inst)
 
         self.run_worker(
             confirm_and_run_power_action(
                 self.app,
                 prompt=_CONFIRM_POWER.get(method),
-                server_name=self._row_label(inst),
+                server_name=label,
                 provider=_PRODUCT_LABELS.get(ptype, "OVHcloud"),
-                in_progress_verb=in_progress_verb,
+                in_progress_verb=_POWER_TEXT[method].in_progress,
                 set_status=self._set_status,
                 run=lambda: self._do_lifecycle(
-                    svc, method, identifier, ptype, done_verb, account=account,
+                    svc, method, identifier, ptype, label, account=account,
                 ),
                 # Declined stops and reboots are recorded like declined
                 # deletes, so the audit log shows every answered question.
@@ -523,9 +536,14 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
         )
 
     async def _do_lifecycle(
-        self, svc, method: str, identifier: str, ptype: str, done_verb: str,
+        self, svc, method: str, identifier: str, ptype: str, label: str,
         *, account: str = "",
     ) -> None:
+        """Send *method* for *identifier* (the API id); the notices say *label*.
+
+        *label* is the name the row shows, so demo mode never shows the real one.
+        """
+        text = _POWER_TEXT[method]
         try:
             await getattr(svc, method)(identifier, ptype)
         except Exception as exc:
@@ -533,21 +551,13 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                 "OVH %s failed for %s (%s): %s",
                 method, identifier, ptype, exc,
             )
-            err_msg = escape(self._provider_error(exc))
-            self._set_status(
-                f"[$text-error]{method} failed: {err_msg}[/$text-error]"
-            )
-            self.notify(
-                f"{method} failed: {self._provider_error(exc)}",
-                severity="error", markup=False,
-            )
+            message = text.failed_message(label, self._provider_error(exc))
+            self._set_status(f"[$text-error]{escape(message)}[/$text-error]")
+            self.notify(message, severity="error", markup=False)
             return
 
         self._audit_action(method, identifier, ptype, success=True, account=account)
-        self.notify(
-            f"OVH {ptype} {self._display_id(identifier)}: {done_verb}.",
-            severity="information", markup=False,
-        )
+        self.notify(text.done_message(label), severity="information", markup=False)
         await self._load_instances()
 
     async def _do_delete(self, inst: dict) -> None:

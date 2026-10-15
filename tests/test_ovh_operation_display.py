@@ -76,8 +76,11 @@ def test_manager_lifecycle_preserves_raw_target(fails: bool, is_demo: bool) -> N
     # Generated synthetic compact project ID, matching the provider's format.
     identifier = "a" * 32 + "/12345"
     call = AsyncMock(side_effect=RuntimeError(identifier) if fails else None)
-    app = SimpleNamespace(demo_mode=is_demo, redaction_service=RedactionService(),
+    redactor = RedactionService()
+    app = SimpleNamespace(demo_mode=is_demo, redaction_service=redactor,
                           ovh_service=SimpleNamespace(start_instance=call), ovh_audit=None)
+    # An unnamed row is labelled by the id the table shows: a stand-in in demo mode.
+    label = redactor.redact_instance_id(identifier) if is_demo else identifier
     with (
         patch.object(OVHManagerScreen, "app", new_callable=PropertyMock, return_value=app),
         patch.object(screen, "_set_status") as status,
@@ -85,7 +88,7 @@ def test_manager_lifecycle_preserves_raw_target(fails: bool, is_demo: bool) -> N
         patch.object(screen, "_load_instances", new_callable=AsyncMock),
     ):
         asyncio.run(screen._do_lifecycle(
-            app.ovh_service, "start_instance", identifier, "cloud", "started",
+            app.ovh_service, "start_instance", identifier, "cloud", label,
         ))
     call.assert_awaited_once_with(identifier, "cloud")
     visible = str(notify.call_args_list) + str(status.call_args_list)

@@ -122,12 +122,15 @@ async def _answer_power_prompt(t, *, confirm: bool) -> None:
 async def _power(
     t, providers, button: str, server, verb: str, toast: str, state: str, *, asks: bool = True
 ) -> None:
-    """Press a power button and check the one request, the toast and the new state."""
+    """Press a power button and check the one request, the toast and the new state.
+
+    *toast* is the whole notice, which names the server as its row does.
+    """
     before = len(_actions(providers, server.server_id))
     await t.click(button)
     if asks:
         await _answer_power_prompt(t, confirm=True)
-    await t.wait_for_toast(rf"^Server {server.server_id}: {toast}\.$")
+    await t.wait_for_toast(rf"^{re.escape(toast)}$")
     await t.wait_until(
         lambda: _rows(t)[server.name]["state"] == state, desc=f"{server.name} {state}"
     )
@@ -154,8 +157,8 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         await _select(t, build.name)
         assert [_enabled(t, b) for b in POWER_BUTTONS] == [True, False, False, False]
         await _power(
-            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running",
-            asks=False,
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Started {build.name}.",
+            "running", asks=False,
         )
 
         # A running server can be shut down, powered off or rebooted, not started.
@@ -169,7 +172,7 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         assert len(_actions(providers, cache.server_id)) == before
         await t.press("b")
         await _answer_power_prompt(t, confirm=True)
-        await t.wait_for_toast(rf"^Server {cache.server_id}: reboot sent\.$")
+        await t.wait_for_toast(rf"^Reboot sent to {re.escape(cache.name)}\.$")
         await t.wait_until(
             lambda: len(_actions(providers, cache.server_id)) > before, desc="reboot request"
         )
@@ -178,9 +181,15 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         assert _rows(t)[cache.name]["state"] == "running"
 
         await _select(t, cache.name)
-        await _power(t, providers, "#btn_hetzner_mgr_shutdown", cache, "shutdown", "shutdown sent", "stopped")
+        await _power(
+            t, providers, "#btn_hetzner_mgr_shutdown", cache, "shutdown",
+            f"Shutdown sent to {cache.name}.", "stopped",
+        )
         await _select(t, build.name)
-        await _power(t, providers, "#btn_hetzner_mgr_power_off", build, "poweroff", "powered off", "stopped")
+        await _power(
+            t, providers, "#btn_hetzner_mgr_power_off", build, "poweroff",
+            f"Powered off {build.name}.", "stopped",
+        )
 
     assert providers.hetzner.server(cache.server_id)["status"] == "off"
     assert providers.hetzner.server(build.server_id)["status"] == "off"
@@ -301,8 +310,8 @@ async def test_the_next_key_acts_on_the_server_the_action_was_for(tui, seed, pro
         assert list(_rows(t)).index(build.name) > 0
         await _select(t, build.name)
         await _power(
-            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running",
-            asks=False,
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Started {build.name}.",
+            "running", asks=False,
         )
         await t.settle()
         assert t.on_screen(TABLE).cursor_row == list(_rows(t)).index(build.name)
