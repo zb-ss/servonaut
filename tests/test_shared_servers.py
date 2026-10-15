@@ -99,6 +99,17 @@ class TestSharedRow:
         assert not is_aws_row(shared_row(_server(), TEAM))
         assert is_aws_row(_own())
 
+    def test_carries_the_user_s_role_in_the_team(self):
+        assert shared_row(_server(), {**TEAM, "role": "Viewer"})["team_role"] == "viewer"
+
+    def test_a_team_that_names_no_role_leaves_it_empty(self):
+        assert shared_row(_server(), TEAM)["team_role"] == ""
+        assert shared_row(_server(), {**TEAM, "role": 7})["team_role"] == ""
+
+    def test_a_vault_target_keeps_the_role_it_names(self):
+        target = {**_server(), "is_shared": True, "team_slug": "ops", "team_role": "admin"}
+        assert as_shared_row(target)["team_role"] == "admin"
+
     def test_a_vault_target_record_becomes_a_row_with_its_host(self):
         target = {**_server(), "is_shared": True, "team_slug": "ops"}
         row = as_shared_row(target)
@@ -188,6 +199,14 @@ class TestLoadSharedServers:
         found = asyncio.run(load_shared_servers(service))
         assert [row["name"] for row in found.rows] == ["build-1"]
         assert found.problems == ["team Ops: 503 Service Unavailable"]
+
+    def test_each_row_carries_the_role_from_its_team(self):
+        service = _Teams(
+            [{**TEAM, "role": "member"}, {"slug": "dev", "name": "Dev", "role": "viewer"}],
+            {"ops": [_server()], "dev": [_server(id="srv-2", name="build-1")]},
+        )
+        found = asyncio.run(load_shared_servers(service))
+        assert [row["team_role"] for row in found.rows] == ["member", "viewer"]
 
     def test_a_known_team_list_is_not_asked_again(self):
         service = _Teams([TEAM], {"ops": [_server()]})

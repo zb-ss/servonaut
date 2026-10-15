@@ -37,6 +37,11 @@ from servonaut.services.accounts.headless import (
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
+from servonaut.services.team_rules import (
+    TEAM_RULE_REASON,
+    TeamGuard,
+    guard_for_target_from,
+)
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
     AmbiguousInstanceError,
@@ -218,7 +223,8 @@ class ServonautTools:
                  bw_ssh_config_service=None,
                  team_service=None,
                  account_registry=None,
-                 vault_runtime=None) -> None:
+                 vault_runtime=None,
+                 apply_team_rules: bool = True) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -259,6 +265,10 @@ class ServonautTools:
         self._bw_ssh_config_service = bw_ssh_config_service
         self._team_service = team_service
         self._vault_runtime = vault_runtime
+        # On a team's shared server an agent runs under the team's rule
+        # (services/team_rules.py). False only for a surface where a person
+        # typed the request, which team rules do not govern.
+        self._apply_team_rules = apply_team_rules
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -568,15 +578,21 @@ class ServonautTools:
 
     async def _lookup_instance(
         self, tool_name: str, args: Dict[str, Any], instance_id: str,
-        *, audit_result: str = '',
+        *, audit_result: str = '', for_agent: bool = True, requested_as: str = '',
     ):
         """Resolve *instance_id* for a tool call.
 
         Returns ``(instance, None)``, or ``(None, message)`` once the refusal
         is audited: ``instance_not_found``, ``ambiguous_instance`` for a
-        name several servers share (the message lists their references), or
+        name several servers share (the message lists their references),
         ``<provider>_unavailable`` for an ``<account>/...`` reference to an
-        account that cannot connect (the message says why).
+        account that cannot connect (the message says why), or
+        ``team_rule`` when the server is a team's shared server whose rule
+        does not let an agent run *tool_name* (for ``run_command``, the
+        command in ``args``) there. *requested_as* names the request in a
+        team refusal when the command is one the tool built (see
+        :meth:`TeamGuard.refusal`). *for_agent* False is for a surface where
+        a person made the request: team rules do not apply to it.
         """
         try:
             instance = await self._find_instance(instance_id)
@@ -625,7 +641,20 @@ class ServonautTools:
                 tool_name, args, audit_result, False, 'instance_not_found',
             )
             return None, f"Instance not found: {instance_id}"
+        team_guard = self._team_guard(instance) if for_agent else None
+        if team_guard is not None:
+            command = args.get('command', '') if tool_name == 'run_command' else None
+            refusal = team_guard.refusal(tool_name, command, requested_as=requested_as)
+            if refusal is not None:
+                self._audit.log(tool_name, args, '', False, TEAM_RULE_REASON)
+                return None, refusal
         return instance, None
+
+    def _team_guard(self, instance: Dict) -> Optional[TeamGuard]:
+        """The guard agents run under on *instance*: None unless a team shares it."""
+        if not self._apply_team_rules:
+            return None
+        return guard_for_target_from(instance, self._guard)
 
     async def _provider_target(
         self, provider: str, reference: str, account: str,
@@ -774,6 +803,18 @@ class ServonautTools:
             timed out / unreachable) and the instance is AWS + SSM-managed,
             fall back to SSM. The result is annotated with which channel won.
         """
+        return await self._run_command(instance_id, command, transport)
+
+    async def _run_command(
+        self, instance_id: str, command: str, transport: str = "auto",
+        *, requested_as: str = "",
+    ) -> str:
+        """:meth:`run_command`; *requested_as* names a command the caller built.
+
+        A tool that runs a command it composed (``get_logs``) passes what
+        was asked for in plain words, so a team refusal names that instead
+        of the internal command.
+        """
         args = {
             'instance_id': instance_id, 'command': command, 'transport': transport,
         }
@@ -786,13 +827,17 @@ class ServonautTools:
         if not cmd_allowed:
             self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
-        command = self._guard.command_for_execution(command)
 
         instance, error = await self._lookup_instance(
-            'run_command', args, instance_id,
+            'run_command', args, instance_id, requested_as=requested_as,
         )
         if error is not None:
             return error
+        # Rendered by the guard that accepted it: on a team's shared server
+        # that can be the team's standard level under a local dangerous one.
+        team_guard = self._team_guard(instance)
+        guard = team_guard.guard if team_guard is not None else self._guard
+        command = guard.command_for_execution(command)
 
         transport = (transport or "auto").strip().lower()
         if transport not in ("auto", "ssh", "ssm"):
@@ -1102,8 +1147,9 @@ class ServonautTools:
             return "validation: lines must be an integer (1-10000)"
         if not 1 <= count <= 10000:
             return "validation: lines must be an integer (1-10000)"
-        return await self.run_command(
-            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}"
+        return await self._run_command(
+            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}",
+            requested_as="reading logs",
         )
 
     async def check_status(self, instance_id: str) -> str:
@@ -6828,8 +6874,9 @@ class ServonautTools:
             return {"error": f"Blocked: {reason}", "instance": instance_id,
                     "candidates": []}
 
+        # Only the TUI calls this, for a person reviewing the scan.
         instance, error = await self._lookup_instance(
-            'db_setup_scan', args, instance_id,
+            'db_setup_scan', args, instance_id, for_agent=False,
         )
         if error is not None:
             return {"error": error, "instance": instance_id, "candidates": []}

@@ -2615,3 +2615,20 @@ async def test_a_host_key_visit_uses_the_login_and_the_connect_timeout(monkeypat
     bare = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     assert await bare.visit_for_host_key({"id": "i-1"}) == "Servonaut cannot open SSH connections here."
     assert bare.records_new_host_keys() is False
+
+
+@pytest.mark.asyncio
+async def test_a_relay_target_names_the_team_and_the_callers_role_in_it() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[
+        {"slug": "ops", "name": "Ops", "role": "viewer"},
+    ])
+    service.teams.list_shared_servers = AsyncMock(return_value=[{"id": "srv-1", "name": "web-1"}])
+
+    target = await service.resolve_relay_target("web-1")
+
+    assert target == {
+        "id": "srv-1", "name": "web-1", "is_shared": True,
+        "team_slug": "ops", "team_name": "Ops", "team_role": "viewer",
+    }

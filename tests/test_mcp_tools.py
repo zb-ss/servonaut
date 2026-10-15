@@ -347,6 +347,7 @@ class TestRunCommand:
             "name": "team-web-1",
             "is_shared": True,
             "team_slug": "team-a",
+            "team_role": "member",
             "public_ip": "192.0.2.25",
             "port": 22,
         }
@@ -395,6 +396,7 @@ class TestRunCommand:
             "name": "team-web-1",
             "is_shared": True,
             "team_slug": "team-a",
+            "team_role": "member",
             "public_ip": "192.0.2.25",
             "port": 22,
         }
@@ -429,21 +431,23 @@ class TestRunCommand:
 class TestGetLogs:
     def test_calls_run_command_with_tail(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="log output")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="log output")) as mock_rc:
             result = run(tools.get_logs("i-abc123", "/var/log/syslog", 50))
-        mock_rc.assert_called_once_with("i-abc123", "tail -n 50 -- /var/log/syslog")
+        mock_rc.assert_called_once_with(
+            "i-abc123", "tail -n 50 -- /var/log/syslog", requested_as="reading logs",
+        )
         assert result == "log output"
 
     def test_default_log_path(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="ok")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="ok")) as mock_rc:
             run(tools.get_logs("i-abc123"))
         call_args = mock_rc.call_args
         assert "/var/log/syslog" in call_args[0][1]
 
     def test_default_lines(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="ok")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="ok")) as mock_rc:
             run(tools.get_logs("i-abc123"))
         call_args = mock_rc.call_args
         assert "tail -n 100" in call_args[0][1]
@@ -1108,6 +1112,7 @@ class TestBwVaultKeyResolution:
         shared = {
             "id": "shared-server-1", "name": "team-web-1", "provider": "aws",
             "public_ip": "192.0.2.25", "is_shared": True, "team_slug": "team-a",
+            "team_role": "member",
         }
         tools = make_tools(
             guard_level=GuardLevel.STANDARD, instances=[shared],
@@ -1422,7 +1427,9 @@ def _shared_server(**changes):
 def _team_service(servers=None, teams=None):
     service = MagicMock()
     service.list_teams = AsyncMock(
-        return_value=teams if teams is not None else [{"slug": "ops", "name": "Ops"}],
+        return_value=(
+            teams if teams is not None else [{"slug": "ops", "name": "Ops", "role": "member"}]
+        ),
     )
     service.list_shared_servers = AsyncMock(
         return_value=servers if servers is not None else [_shared_server()],
@@ -1468,7 +1475,7 @@ class TestSharedServers:
 
     def test_a_team_reference_reaches_the_shared_server(self):
         tools = make_tools(team_service=_team_service())
-        instance, error = run(tools._lookup_instance("run_command", {}, "ops/team-web-1"))
+        instance, error = run(tools._lookup_instance("run_command", {"command": "uptime"}, "ops/team-web-1"))
         assert error is None
         assert instance["id"] == "srv-1"
         assert instance["public_ip"] == "team-web.example.com"
@@ -1476,7 +1483,7 @@ class TestSharedServers:
 
     def test_a_bare_shared_name_reaches_the_shared_server(self):
         tools = make_tools(team_service=_team_service())
-        instance, error = run(tools._lookup_instance("run_command", {}, "team-web-1"))
+        instance, error = run(tools._lookup_instance("run_command", {"command": "uptime"}, "team-web-1"))
         assert error is None
         assert instance["team_slug"] == "ops"
 
@@ -1511,3 +1518,190 @@ class TestSharedServers:
         command = tools._ssh_service.build_ssh_command.call_args.kwargs
         assert command["host"] == "pinned.example.com"
         assert command["port"] == 2200
+
+
+# ---------------------------------------------------------------------------
+# Team rules on team shared servers
+# ---------------------------------------------------------------------------
+
+def _team_tools(role="member", level=GuardLevel.DANGEROUS, allowlist=None, blocklist=None):
+    """Tools whose user is a *role* of team Ops, with these local MCP settings."""
+    teams = [{"slug": "ops", "name": "Ops", "role": role}] if role is not None else [
+        {"slug": "ops", "name": "Ops"},
+    ]
+    tools = make_tools(guard_level=level, team_service=_team_service(teams=teams))
+    config = MCPConfig(guard_level=level)
+    if allowlist is not None:
+        config.command_allowlist = allowlist
+    if blocklist is not None:
+        config.command_blocklist = blocklist
+    tools._config_manager.get.return_value = AppConfig(mcp=config)
+    tools._guard = CommandGuard(config)
+    return tools
+
+
+def _ssh_ok(output=b"ok"):
+    return patch(
+        "servonaut.mcp.tools.run_ssh_subprocess",
+        new=AsyncMock(return_value=(output, b"")),
+    )
+
+
+def _audit_reasons(tools):
+    return [call.args[4] for call in tools._audit.log.call_args_list if len(call.args) > 4]
+
+
+NOT_ALLOWLISTED = "systemctl restart nginx"
+
+
+class TestTeamRulesOnSharedServers:
+    def test_a_local_dangerous_level_runs_at_the_team_level_on_a_shared_server(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        with _ssh_ok():
+            result = run(tools.run_command("ops/team-web-1", NOT_ALLOWLISTED))
+
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'systemctl restart nginx' is not an "
+            "allowed command there."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_the_same_command_runs_on_an_own_server(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result
+        remote = tools._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == NOT_ALLOWLISTED
+
+    def test_an_allowlisted_command_runs_as_the_team_guard_rendered_it(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        with _ssh_ok():
+            result = run(tools.run_command("ops/team-web-1", "ps aux | grep 'nginx'"))
+
+        assert "[transport_used: ssh]" in result
+        remote = tools._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "ps aux | grep nginx"
+
+    def test_a_viewer_cannot_run_commands_at_all(self):
+        tools = _team_tools(role="viewer")
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (set by the team), and running commands is not available there."
+        )
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    @pytest.mark.parametrize("role", [None, "guest"])
+    def test_an_unknown_role_is_readonly(self, role):
+        tools = _team_tools(role=role)
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert "run at the readonly level" in result
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_local_readonly_level_stays_readonly(self):
+        # The local guard refuses before the server is looked up; the team
+        # guard's own handling of a stricter local level is covered by the
+        # relay tests, where only the team guard reads the level.
+        tools = _team_tools(role="owner", level=GuardLevel.READONLY)
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert result == "Blocked: Tool 'run_command' not available in readonly mode"
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_a_local_blocklist_addition_applies(self):
+        # Here too the local guard (same blocklist) refuses first; the team
+        # guard's merge of local patterns is covered by the relay tests.
+        blocklist = [*MCPConfig().command_blocklist, r"\buptime\b"]
+        tools = _team_tools(blocklist=blocklist)
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert result == "Blocked: Command matches blocklist pattern: \\buptime\\b"
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_an_option_the_team_level_refuses_is_named(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        result = run(tools.run_command("ops/team-web-1", "find / -name x -delete"))
+
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'find / -name x -delete' is refused there: "
+            "find actions that run programs, delete or write files are not allowed."
+        )
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_viewer_reading_logs_is_told_logs_are_refused(self):
+        tools = _team_tools(role="viewer")
+        result = run(tools.get_logs("ops/team-web-1", "/var/log/syslog", 10))
+
+        assert result.endswith("and reading logs is not available there.")
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_local_allowlist_addition_does_not_apply(self):
+        allowlist = [*MCPConfig().command_allowlist, "systemctl"]
+        tools = _team_tools(level=GuardLevel.STANDARD, allowlist=allowlist)
+        with _ssh_ok():
+            shared = run(tools.run_command("ops/team-web-1", "systemctl status nginx"))
+            own = run(tools.run_command("i-abc123", "systemctl status nginx"))
+
+        assert "'systemctl status nginx' is not an allowed command there" in shared
+        assert "[transport_used: ssh]" in own
+
+    def test_read_tools_still_work_for_a_viewer(self):
+        tools = _team_tools(role="viewer")
+        status = run(tools.check_status("ops/team-web-1"))
+        with _ssh_ok(b"server-1\n up 3 days"):
+            info = run(tools.get_server_info("ops/team-web-1"))
+
+        assert "team-web.example.com" in status
+        assert "up 3 days" in info
+        assert "team_rule" not in _audit_reasons(tools)
+
+    def test_transfers_are_refused_on_a_shared_server(self):
+        tools = _team_tools(role="owner", level=GuardLevel.DANGEROUS)
+        result = run(tools.transfer_file("ops/team-web-1", "/tmp/a", "/tmp/b", "download"))
+
+        assert "file transfers are not available there" in result
+        tools._scp_service.execute_transfer.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_get_logs_reads_at_the_standard_level(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        with _ssh_ok(b"log line"):
+            result = run(tools.get_logs("ops/team-web-1", "/var/log/syslog", 10))
+
+        assert "log line" in result
+
+    def test_a_vault_target_without_a_role_is_readonly(self):
+        runtime = MagicMock()
+        runtime.resolve_relay_target = AsyncMock(return_value={
+            "id": "srv-9", "name": "team-db-1", "is_shared": True,
+            "team_slug": "ops", "hostname": "team-db.example.com",
+        })
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS, vault_runtime=runtime)
+        result = run(tools.run_command("team-db-1", "uptime"))
+
+        assert "run at the readonly level" in result
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_person_scanning_in_the_tui_is_not_held_to_team_rules(self):
+        tools = _team_tools(role="viewer", level=GuardLevel.STANDARD)
+        tools._scan_db_and_stage = AsyncMock(return_value=([], None))
+        result = run(tools.db_scan_stage("ops/team-web-1"))
+
+        assert result["error"] is None
+        assert "team_rule" not in _audit_reasons(tools)
+
+    def test_a_person_run_surface_can_switch_team_rules_off(self):
+        tools = _team_tools(role="viewer", level=GuardLevel.DANGEROUS)
+        tools._apply_team_rules = False
+        with _ssh_ok():
+            result = run(tools.run_command("ops/team-web-1", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result

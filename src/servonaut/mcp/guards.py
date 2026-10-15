@@ -257,6 +257,21 @@ class CommandGuard:
         self._allowlist = config.command_allowlist
         self._config_manager = config_manager
 
+    @property
+    def level(self) -> str:
+        """The guard level this guard enforces."""
+        return self._level
+
+    @property
+    def allowlist(self) -> List[str]:
+        """The current command allowlist (re-read from config when live)."""
+        return list(self._get_allowlist())
+
+    @property
+    def blocklist(self) -> List[str]:
+        """The blocklist patterns, as configured."""
+        return [pattern.pattern for pattern in self._blocklist]
+
     def _get_allowlist(self) -> List[str]:
         """Get current allowlist, re-reading from config if manager available."""
         if self._config_manager:
