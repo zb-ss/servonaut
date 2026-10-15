@@ -46,7 +46,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.python-version == '3.12'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-report
           path: coverage.xml
@@ -106,7 +106,7 @@ jobs:
       - name: Upload the new renderings
         # Public: the renderings show only the neutral test fixtures.
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: screenshot-failures
           path: tests/snapshots/__failures__/
@@ -165,7 +165,7 @@ jobs:
       - name: Upload failure artifacts
         # Public: every fixture is neutral, and paths and credentials are scrubbed.
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-failure-artifacts
           path: e2e-artifacts/
@@ -210,7 +210,7 @@ jobs:
         # scrubbed, and the session tokens in screenshots and traces are
         # random per journey and die with it.
         if: failure() || cancelled()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-desktop-failure-artifacts
           path: e2e-artifacts/
