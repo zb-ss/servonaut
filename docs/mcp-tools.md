@@ -26,6 +26,19 @@ Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_
 
 Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, arguments, success flag, and short reason code on early returns.
 
+### Team shared servers
+
+On a server one of your teams shares with you, the team decides what your AI agents may do. This covers the MCP server and the tools of the AI chat, including the hosted AI's tool calls relayed to this machine. Your own settings can make it stricter, never looser:
+
+- Your agents run at the stricter of your `guard_level` and the level your role in the team gets: owners, admins and members get `standard`, viewers get `readonly`. If Servonaut cannot tell your role, it uses `readonly`.
+- At `standard`, only the built-in command allowlist applies, with the same option rules as on your own servers (no `find -delete`, no `ip ... add`, and so on). Commands you added to your own allowlist do not work on a team's servers, and commands you removed from it stay refused.
+- The built-in blocklist always applies, and so do the patterns you added to your own blocklist.
+- `transfer_file` and the other `dangerous` tools are not available on a team's servers.
+
+A refusal names the team, the level and what was refused, for example: *Blocked: on team Ops's shared servers your agents run at the standard level (set by the team), and 'systemctl restart nginx' is not an allowed command there.* When the command is on the allowlist but one of its options is not allowed, the refusal says which rule it broke. The audit log records every refusal with the reason `team_rule`.
+
+Your own servers keep your own settings. A server that is both in your own inventory and shared by a team keeps your own settings when your agent names it by your own name or id; named through the team (`ops/<name>`, or the team's id for it), the team's rule applies. What you do yourself does not fall under team rules: commands you type in the TUI, with `servonaut ssh` or in the web console, and remediation fixes you approve.
+
 ## Several accounts per provider
 
 When a provider has more than one account configured (see

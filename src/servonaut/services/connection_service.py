@@ -93,7 +93,15 @@ def server_connection(
     route = profile_route(instance, connection_service)
     profile = route['profile']
 
-    if instance.get('is_ovh'):
+    if instance.get('is_shared') is True:
+        # A team's shared server: the port, and a login the share names,
+        # come from the team's record. The team's key (vault, SSH
+        # certificate or Bitwarden reference) replaces the user's own key and
+        # login when it applies, as the local tier of ``servonaut ssh`` does.
+        username = instance.get('username') or default_username or 'root'
+        key_path = ssh_service.get_key_path(instance.get('id', ''))
+        port = instance.get('port') or None
+    elif instance.get('is_ovh'):
         # The defaults of the OVH account the server belongs to.
         options = connection_service.resolve_ovh_connection(instance)
         username = options['username']
@@ -442,8 +450,8 @@ class ConnectionService(ConnectionServiceInterface):
     def get_target_port(self, instance: dict) -> Optional[int]:
         """Get the SSH port for the target host.
 
-        Custom servers carry their own ``port``; every other provider listens
-        on the SSH default. A bastion's port is not returned here: it lives on
+        Custom and team shared servers carry their own ``port``; every other
+        provider listens on the SSH default. A bastion's port is not returned here: it lives on
         the connection profile and :meth:`get_proxy_args` emits it.
 
         Args:
@@ -454,6 +462,6 @@ class ConnectionService(ConnectionServiceInterface):
             it straight to ``build_ssh_command`` / ``build_*_command``, which
             omit the flag for None and 22.
         """
-        if not instance.get('is_custom'):
+        if not (instance.get('is_custom') or instance.get('is_shared') is True):
             return None
         return instance.get('port') or None

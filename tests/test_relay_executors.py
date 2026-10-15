@@ -86,6 +86,7 @@ def make_request(
     ttl=60,
     req_id="req-001",
     user_id="user-1",
+    from_agent=False,
 ):
     return CommandRequest(
         id=req_id,
@@ -94,6 +95,7 @@ def make_request(
         target_server_id=target,
         payload=payload or {},
         ttl_seconds=ttl,
+        from_agent=from_agent,
     )
 
 
@@ -227,6 +229,7 @@ class TestNativeVaultRelay:
         shared = {
             "id": "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f",
             "name": "shared-web", "is_shared": True, "team_slug": "example-team",
+            "team_role": "member",
             "hostname": "shared.example.test", "port": 22,
         }
         executor = make_executors(instances=[])
@@ -242,7 +245,10 @@ class TestNativeVaultRelay:
             )))
 
         assert response.status == "success"
-        assert runtime.resolved == [shared]
+        # The team's record, kept whole, as a server-list row with its host.
+        resolved = runtime.resolved[0]
+        assert {key: resolved[key] for key in shared} == shared
+        assert resolved["public_ip"] == "shared.example.test"
         assert lease.closed == 1
 
     def test_native_scp_uses_agent_metadata_and_closes_lease(self, tmp_path, monkeypatch):
@@ -835,3 +841,319 @@ class TestExecuteDispatch:
         resp = run(ex.execute(request))
         assert resp.status == "error"
         assert "boom" in resp.error_message
+
+
+class _PinnedLease(_VaultLease):
+    target_host = "pinned.example.com"
+    target_port = 2200
+
+
+class TestSharedServerRelayTarget:
+    """A team's shared server found through the vault, as the relay reaches it."""
+
+    _TARGET = {
+        "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
+        "port": 22, "login_user": "deploy", "is_shared": True, "team_slug": "ops",
+        "team_name": "Ops", "team_role": "member",
+    }
+
+    def test_the_team_record_becomes_a_row_with_its_host(self):
+        executor = make_executors(instances=[])
+        runtime = _VaultRuntime(lease=_VaultLease(), target=dict(self._TARGET))
+        executor.set_vault_runtime(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                target="srv-1", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "success"
+        resolved = runtime.resolved[0]
+        assert resolved["public_ip"] == "team-web.example.com"
+        assert resolved["team_slug"] == "ops"
+
+    def test_commands_and_transfers_connect_where_the_lease_points(self):
+        executor = make_executors(instances=[])
+        executor.set_vault_runtime(_VaultRuntime(lease=_PinnedLease(), target=dict(self._TARGET)))
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            run(executor.execute(make_request(target="srv-1", payload={"command": "uptime"})))
+
+        command = executor._ssh_service.build_ssh_command.call_args.kwargs
+        assert (command["host"], command["port"]) == ("pinned.example.com", 2200)
+
+
+class TestTeamRulesOnRelay:
+    """An agent's relayed requests on a team's shared server run under the team's rule."""
+
+    _TARGET = {
+        "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
+        "port": 22, "login_user": "deploy", "is_shared": True, "team_slug": "ops",
+        "team_name": "Ops",
+    }
+
+    def _executor(self, role="member", level="dangerous", allowlist=None, blocklist=None,
+                  target=None):
+        executor = make_executors()
+        target = dict(target or self._TARGET)
+        if role is not None:
+            target["team_role"] = role
+        executor.set_vault_runtime(_VaultRuntime(lease=_VaultLease(), target=target))
+        # Set after construction: only what the executor reads per call
+        # (the team guard) sees these settings, not the blocklist it
+        # compiled when it was built.
+        config = MCPConfig(guard_level=level)
+        if allowlist is not None:
+            config.command_allowlist = allowlist
+        if blocklist is not None:
+            config.command_blocklist = blocklist
+        executor._config_manager.get.return_value = AppConfig(mcp=config)
+        executor._audit = MagicMock()
+        return executor
+
+    @staticmethod
+    def _audit_rows(executor):
+        return [
+            (call.args[0], call.args[4], call.kwargs.get("source"))
+            for call in executor._audit.log.call_args_list
+        ]
+
+    @staticmethod
+    def _ssh_ok():
+        return patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        )
+
+    def test_what_a_person_sends_keeps_todays_rules(self):
+        # The web console and approved remediations are not an agent's.
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                target="srv-1", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        executor._audit.log.assert_not_called()
+
+    def test_a_command_the_team_does_not_allow_is_rejected(self):
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(from_agent=True, 
+                target="srv-1", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Blocked: on team Ops's shared servers your agents run at the "
+            "standard level (set by the team), and 'systemctl restart nginx' is "
+            "not an allowed command there."
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_the_same_command_runs_on_an_own_server(self):
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(from_agent=True, 
+                target="i-abc123", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "systemctl restart nginx"
+
+    def test_an_allowed_command_runs_as_the_team_guard_rendered_it(self):
+        executor = self._executor()
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(from_agent=True, 
+                target="srv-1", payload={"command": "ps aux | grep 'nginx'"},
+            )))
+
+        assert response.status == "success"
+        remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "ps aux | grep nginx"
+
+    def test_a_local_allowlist_addition_does_not_apply(self):
+        allowlist = [*MCPConfig().command_allowlist, "systemctl"]
+        executor = self._executor(level="standard", allowlist=allowlist)
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "systemctl status nginx"},
+        )))
+
+        assert response.status == "rejected"
+
+    @pytest.mark.parametrize("role", ["viewer", None])
+    def test_a_viewer_or_an_unknown_role_runs_nothing(self, role):
+        executor = self._executor(role=role)
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "rejected"
+        assert "run at the readonly level" in response.error_message
+
+    def test_logs_are_read_at_the_standard_level(self):
+        executor = self._executor()
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(from_agent=True, 
+                cmd_type=CommandType.GET_LOGS, target="srv-1",
+                payload={"log_path": "/var/log/syslog", "lines": 10},
+            )))
+
+        assert response.status == "success"
+
+    def test_transfers_are_rejected(self, tmp_path, monkeypatch):
+        import servonaut.services.relay_executors as executors_module
+
+        transfers = tmp_path / "transfers"
+        transfers.mkdir()
+        monkeypatch.setattr(executors_module, "_TRANSFERS_DIR", transfers)
+        executor = self._executor(role="owner")
+        response = run(executor.execute(make_request(from_agent=True, 
+            cmd_type=CommandType.TRANSFER_FILE, target="srv-1",
+            payload={
+                "local_path": str(transfers / "file.txt"),
+                "remote_path": "/tmp/file.txt", "direction": "download",
+            },
+        )))
+
+        assert response.status == "rejected"
+        assert "file transfers are not available there" in response.error_message
+        executor._scp_service.execute_transfer.assert_not_called()
+
+    def test_the_hosted_ai_path_gets_the_same_refusal(self):
+        from servonaut.services.ai_tool_bridge import ToolCall
+
+        executor = self._executor()
+        result = run(executor.execute_for_ai(ToolCall(
+            tool_call_id="tc-1", tool="run_command",
+            args={"instance_id": "srv-1", "command": "systemctl restart nginx"},
+            guard_level="standard", conversation_id="conv-1",
+        )))
+
+        assert result.status == "error"
+        assert "is not an allowed command there" in result.result
+
+    def test_a_local_blocklist_addition_made_after_start_applies(self):
+        # The executor compiled its own blocklist when it was built, so only
+        # the team guard (which reads the settings per call) can refuse this.
+        blocklist = [*MCPConfig().command_blocklist, r"\buptime\b"]
+        executor = self._executor(blocklist=blocklist)
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "rejected"
+        assert response.error_message.endswith(
+            "and 'uptime' is refused there: it matches the blocked pattern \\buptime\\b."
+        )
+        assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_a_local_readonly_level_stays_readonly(self):
+        executor = self._executor(role="owner", level="readonly")
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "uptime"},
+        )))
+
+        assert response.error_message == (
+            "Blocked: on team Ops's shared servers your agents run at the "
+            "readonly level (set by your MCP settings), and running commands is "
+            "not available there."
+        )
+        assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
+
+    def test_every_refusal_is_audited_as_team_rule(self, tmp_path, monkeypatch):
+        import servonaut.services.relay_executors as executors_module
+
+        transfers = tmp_path / "transfers"
+        transfers.mkdir()
+        monkeypatch.setattr(executors_module, "_TRANSFERS_DIR", transfers)
+        executor = self._executor(role="viewer")
+        run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "uptime"},
+        )))
+        run(executor.execute(make_request(from_agent=True, 
+            cmd_type=CommandType.TRANSFER_FILE, target="srv-1",
+            payload={
+                "local_path": str(transfers / "file.txt"),
+                "remote_path": "/tmp/file.txt", "direction": "download",
+            },
+        )))
+
+        assert self._audit_rows(executor) == [
+            ("run_command", "team_rule", "relay"), ("transfer_file", "team_rule", "relay"),
+        ]
+        audited = executor._audit.log.call_args_list[0]
+        assert audited.args[1] == {
+            "instance_id": "srv-1", "request_type": "run_command", "command": "uptime",
+        }
+        assert audited.args[3] is False
+
+    def test_without_an_audit_trail_the_configured_one_is_used(self, tmp_path):
+        import json
+
+        executor = self._executor(level="dangerous")
+        executor._audit = None
+        audit_path = tmp_path / "mcp_audit.jsonl"
+        executor._config_manager.get.return_value.mcp.audit_path = str(audit_path)
+        run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "systemctl restart nginx"},
+        )))
+
+        rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        assert [(row["tool"], row["reason"]) for row in rows] == [("run_command", "team_rule")]
+
+    def test_an_option_the_standard_level_refuses_is_named(self):
+        executor = self._executor()
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "find / -name x -delete"},
+        )))
+
+        assert response.error_message.endswith(
+            "and 'find / -name x -delete' is refused there: find actions that run "
+            "programs, delete or write files are not allowed."
+        )
+
+    def test_a_log_read_is_refused_as_a_log_read(self):
+        executor = self._executor(role="viewer")
+        response = run(executor.execute(make_request(from_agent=True, 
+            cmd_type=CommandType.GET_LOGS, target="srv-1",
+            payload={"log_path": "/var/log/syslog", "lines": 10},
+        )))
+
+        assert response.status == "rejected"
+        assert response.error_message.endswith("and reading logs is not available there.")
+        audited = executor._audit.log.call_args
+        assert audited.args[1]["requested_as"] == "reading logs"
+
+    def test_a_remediation_is_refused_by_name_not_by_its_wrapped_command(self):
+        from servonaut.services.remediation_executor import wrap_with_exit_marker
+
+        executor = self._executor(role="owner")
+        request = make_request(from_agent=True, target="srv-1", payload={
+            "command": wrap_with_exit_marker("sudo -n systemctl restart nginx", "abc"),
+        })
+        request.requested_as = "the restart_service remediation"
+        response = run(executor.execute(request))
+
+        assert response.status == "rejected"
+        assert response.error_message.endswith(
+            "and the restart_service remediation is not allowed there."
+        )
+        assert "rc=$?" not in response.error_message
+
+    def test_a_team_without_a_name_reads_naturally(self):
+        target = {**self._TARGET, "team_slug": "", "team_name": ""}
+        executor = self._executor(target=target)
+        response = run(executor.execute(make_request(from_agent=True, 
+            target="srv-1", payload={"command": "systemctl restart nginx"},
+        )))
+
+        assert response.error_message.startswith(
+            "Blocked: on this team's shared servers your agents run at"
+        )

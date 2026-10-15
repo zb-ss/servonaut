@@ -501,7 +501,10 @@ class AWSConfig:
     """AWS provider configuration for EC2 management and S3 object storage.
 
     Attributes:
-        enabled: Whether the AWS provider is active.
+        enabled: Whether the AWS provider is active. Switched off, no AWS
+            server is listed or fetched and the AWS tools are unavailable.
+        off_notice_shown: Whether the user has been told, once, that their
+            cached AWS servers are hidden because the switch is off.
         default_region: Default AWS region used when no region is specified.
         cache_ttl_seconds: TTL for the on-disk EC2 instance cache.
         cache_path: On-disk cache file path.
@@ -522,6 +525,10 @@ class AWSConfig:
     """
 
     enabled: bool = True
+    # True once the user was told their cached AWS servers are hidden because
+    # the switch is off (the switch used to change nothing), or switched it
+    # off themselves in Settings.
+    off_notice_shown: bool = False
     default_region: str = "us-east-1"
     cache_ttl_seconds: int = 300
     cache_path: str = "~/.servonaut/aws_cache.json"

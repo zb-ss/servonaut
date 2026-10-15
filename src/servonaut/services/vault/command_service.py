@@ -2069,7 +2069,13 @@ class VaultCommandService:
                     continue
                 if identifier not in {str(server.get("id", "")), str(server.get("name", ""))}:
                     continue
-                matches.append({**server, "is_shared": True, "team_slug": slug})
+                matches.append({
+                    **server, "is_shared": True, "team_slug": slug,
+                    # What the caller's agents may do there follows the
+                    # caller's role in the team (see team_rules).
+                    "team_name": team.get("name") if isinstance(team.get("name"), str) else "",
+                    "team_role": team.get("role") if isinstance(team.get("role"), str) else "",
+                })
         if len(matches) > 1:
             raise ValueError("relay target is ambiguous; use the canonical server id")
         return matches[0] if matches else None

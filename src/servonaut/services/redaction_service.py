@@ -643,7 +643,8 @@ class RedactionService:
             instance["key_name"] = self.redact_key_name(instance["key_name"])
         if instance.get("ssh_key"):
             instance["ssh_key"] = self.redact_key_name(instance["ssh_key"])
-        if instance.get("provider"):
+        shared = instance.get("is_shared") is True
+        if instance.get("provider") and not shared:
             instance["provider"] = self.redact_provider(instance["provider"])
         if instance.get("group"):
             instance["group"] = self.redact_group(instance["group"])
@@ -668,7 +669,27 @@ class RedactionService:
             region = instance["region"]
             if not region.startswith(("us-", "eu-", "ap-", "sa-", "ca-", "me-", "af-")):
                 instance["region"] = self.redact_provider(region)
+        if shared:
+            self._redact_shared_fields(instance)
         return instance
+
+    def _redact_shared_fields(self, instance: dict[str, Any]) -> None:
+        """The team's own fields of a team shared server row.
+
+        The team's name often names a client, so it gets an account-label
+        stand-in and the provider column reads ``Team <stand-in>``. The
+        recorded instance id maps like any id, so a shared server that is
+        also one of the user's own still matches that row in demo mode.
+        """
+        if instance.get("team_name"):
+            instance["team_name"] = self.redact_account_label(instance["team_name"])
+        instance["provider"] = f"Team {instance.get('team_name') or ''}".rstrip()
+        if instance.get("hostname"):
+            instance["hostname"] = self.redact_host(instance["hostname"])
+        if instance.get("login_user"):
+            instance["login_user"] = self.redact_username(instance["login_user"])
+        if instance.get("instance_id"):
+            instance["instance_id"] = self.redact_instance_id(str(instance["instance_id"]))
 
     def redact_instances(self, instances: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Redact all instances in a list."""

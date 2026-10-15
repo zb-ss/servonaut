@@ -231,6 +231,10 @@ class TestGetTargetPort(TestConnectionService):
     def test_aws_instance_is_default(self, service):
         assert service.get_target_port({'id': 'i-0abc', 'public_ip': '9.9.9.9'}) is None
 
+    def test_shared_server_returns_its_port(self, service):
+        instance = {'id': 'srv-1', 'is_shared': True, 'port': 2222}
+        assert service.get_target_port(instance) == 2222
+
     def test_port_ignored_without_custom_flag(self, service):
         # Only custom servers define a target port; other providers' dicts
         # never did, so a stray key must not start emitting -p.
@@ -269,3 +273,47 @@ def test_ovh_user_defaults_do_not_inherit_aws_user(provider_type: str, expected:
     options = service.resolve_ovh_connection(row)
     assert options["username"] == "operator"
     assert options["host"] == "10.0.0.2"
+
+
+class TestSharedServerConnection(TestConnectionService):
+    """A team's shared server: the team's host, login and port; the user's own key."""
+
+    def test_uses_the_team_record(self, service):
+        from servonaut.services.connection_service import server_connection
+        from servonaut.services.shared_servers import shared_row
+
+        row = shared_row(
+            {"id": "srv-1", "name": "web-1", "hostname": "web.example.com",
+             "port": 2222, "login_user": "deploy", "username": "deploy"},
+            {"slug": "ops", "name": "Ops"},
+        )
+        ssh_service = MagicMock()
+        ssh_service.get_key_path.return_value = "~/.ssh/default.pem"
+        conn = server_connection(row, service, ssh_service, "ubuntu")
+
+        assert conn["host"] == "web.example.com"
+        assert conn["username"] == "deploy"
+        assert conn["port"] == 2222
+        # The team's key, when it has one, replaces this one later.
+        assert conn["key_path"] == "~/.ssh/default.pem"
+
+    def test_without_a_login_uses_the_default_username(self, service):
+        from servonaut.services.connection_service import server_connection
+
+        row = {"id": "srv-1", "is_shared": True, "public_ip": "web.example.com"}
+        conn = server_connection(row, service, MagicMock(), "ubuntu")
+        assert conn["username"] == "ubuntu"
+
+
+    def test_the_teams_key_login_is_not_used_with_the_users_own_key(self, service):
+        # ``login_user`` is the login of the team's vault key or certificate,
+        # which names it itself; the user's own key keeps the user's login.
+        from servonaut.services.connection_service import server_connection
+        from servonaut.services.shared_servers import shared_row
+
+        row = shared_row(
+            {"id": "srv-1", "name": "web-1", "hostname": "web.example.com", "login_user": "deploy"},
+            {"slug": "ops", "name": "Ops"},
+        )
+        conn = server_connection(row, service, MagicMock(), "ec2-user")
+        assert conn["username"] == "ec2-user"

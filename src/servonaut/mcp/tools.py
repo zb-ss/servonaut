@@ -36,10 +36,18 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
+from servonaut.services.team_rules import (
+    TEAM_RULE_REASON,
+    TeamGuard,
+    guard_for_target_from,
+)
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
     AmbiguousInstanceError,
     display_name,
+    is_aws_row,
+    qualified_reference,
 )
 from servonaut.utils.ssh_utils import (
     SSHOutput,
@@ -83,6 +91,9 @@ _S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
 # Internal coalescing window, not an ops-tunable: key material is still
 # resolved and wiped per call, only the opaque ref pointer is memoized.
 _BW_REF_MEMO_TTL_SECONDS = 60.0
+# How long one read of the teams' shared servers serves list_instances and
+# lookups: a tool loop must not cost a team-list request per call.
+_SHARED_SERVERS_MEMO_TTL_SECONDS = 60.0
 
 # --- aws_call passthrough -------------------------------------------------
 # boto3 operation names are snake_case (describe_security_group_rules, get_ip_set,
@@ -212,7 +223,8 @@ class ServonautTools:
                  bw_ssh_config_service=None,
                  team_service=None,
                  account_registry=None,
-                 vault_runtime=None) -> None:
+                 vault_runtime=None,
+                 apply_team_rules: bool = True) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -253,9 +265,15 @@ class ServonautTools:
         self._bw_ssh_config_service = bw_ssh_config_service
         self._team_service = team_service
         self._vault_runtime = vault_runtime
+        # On a team's shared server an agent runs under the team's rule
+        # (services/team_rules.py). False only for a surface where a person
+        # typed the request, which team rules do not govern.
+        self._apply_team_rules = apply_team_rules
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
+        # (expires_at, rows) of the last read of the teams' shared servers.
+        self._shared_memo: Optional[tuple] = None
         # Every provider account (AccountRegistry). The single-service
         # attributes above are each provider's default account; None keeps
         # them the only account (surfaces that never build the registry).
@@ -298,6 +316,27 @@ class ServonautTools:
     # Capability flags — public so construction sites (MCP server, relay
     # AI-tool executor) can gate tool listings without reaching into
     # private attributes.
+
+    @property
+    def has_aws(self) -> bool:
+        """False while AWS is switched off in Settings → AWS (``aws.enabled``)."""
+        from servonaut.config.accounts import aws_enabled
+
+        return aws_enabled(self._config_manager.get())
+
+    def refusal(self, name: str) -> Optional[str]:
+        """Why tool *name* cannot run now (audited), or None.
+
+        Every dispatcher (MCP, AI chat, relay) asks before calling a tool:
+        the AWS tools are unavailable while AWS is switched off.
+        """
+        from servonaut.config.accounts import AWS_SWITCHED_OFF
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+
+        if TOOL_SCHEMAS.get(name, {}).get("required_service") == "aws" and not self.has_aws:
+            self._audit.log(name, {}, '', False, 'aws_switched_off')
+            return f"Error: {AWS_SWITCHED_OFF}"
+        return None
 
     @property
     def has_ovh(self) -> bool:
@@ -539,22 +578,39 @@ class ServonautTools:
 
     async def _lookup_instance(
         self, tool_name: str, args: Dict[str, Any], instance_id: str,
-        *, audit_result: str = '',
+        *, audit_result: str = '', for_agent: bool = True, requested_as: str = '',
     ):
         """Resolve *instance_id* for a tool call.
 
         Returns ``(instance, None)``, or ``(None, message)`` once the refusal
         is audited: ``instance_not_found``, ``ambiguous_instance`` for a
-        name several servers share (the message lists their references), or
+        name several servers share (the message lists their references),
         ``<provider>_unavailable`` for an ``<account>/...`` reference to an
-        account that cannot connect (the message says why).
+        account that cannot connect (the message says why), or
+        ``team_rule`` when the server is a team's shared server whose rule
+        does not let an agent run *tool_name* (for ``run_command``, the
+        command in ``args``) there. *requested_as* names the request in a
+        team refusal when the command is one the tool built (see
+        :meth:`TeamGuard.refusal`). *for_agent* False is for a surface where
+        a person made the request: team rules do not apply to it.
         """
         try:
             instance = await self._find_instance(instance_id)
         except AmbiguousInstanceError as exc:
             return None, self._ambiguous(tool_name, args, exc)
         except UnknownAccountError as exc:
-            return None, self._account_refused(tool_name, args, exc)
+            # "<team>/<name>" names a team's shared server, not an account.
+            try:
+                instance = await self._find_shared(instance_id)
+            except AmbiguousInstanceError as shared_exc:
+                return None, self._ambiguous(tool_name, args, shared_exc)
+            if instance is None:
+                return None, self._account_refused(tool_name, args, exc)
+        if not instance:
+            try:
+                instance = await self._find_shared(instance_id)
+            except AmbiguousInstanceError as exc:
+                return None, self._ambiguous(tool_name, args, exc)
         if not instance and self._vault_runtime is not None:
             resolve_relay_target = getattr(
                 self._vault_runtime, 'resolve_relay_target', None,
@@ -579,13 +635,26 @@ class ServonautTools:
                             'shared_target_resolution_failed',
                         )
                         return None, "Native Vault returned an invalid shared server target"
-                    instance = shared_target
+                    instance = as_shared_row(shared_target)
         if not instance:
             self._audit.log(
                 tool_name, args, audit_result, False, 'instance_not_found',
             )
             return None, f"Instance not found: {instance_id}"
+        team_guard = self._team_guard(instance) if for_agent else None
+        if team_guard is not None:
+            command = args.get('command', '') if tool_name == 'run_command' else None
+            refusal = team_guard.refusal(tool_name, command, requested_as=requested_as)
+            if refusal is not None:
+                self._audit.log(tool_name, args, '', False, TEAM_RULE_REASON)
+                return None, refusal
         return instance, None
+
+    def _team_guard(self, instance: Dict) -> Optional[TeamGuard]:
+        """The guard agents run under on *instance*: None unless a team shares it."""
+        if not self._apply_team_rules:
+            return None
+        return guard_for_target_from(instance, self._guard)
 
     async def _provider_target(
         self, provider: str, reference: str, account: str,
@@ -690,7 +759,11 @@ class ServonautTools:
             except UnknownAccountError as exc:
                 return self._account_refused('list_instances', args, exc)
         else:
-            instances = await self._directory.all_instances()
+            # A team's shared server that is also one of the user's own is
+            # listed once, as the user's own server.
+            instances = fold_shared_rows(
+                await self._directory.all_instances() + await self._shared_server_rows()
+            )
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
@@ -730,6 +803,18 @@ class ServonautTools:
             timed out / unreachable) and the instance is AWS + SSM-managed,
             fall back to SSM. The result is annotated with which channel won.
         """
+        return await self._run_command(instance_id, command, transport)
+
+    async def _run_command(
+        self, instance_id: str, command: str, transport: str = "auto",
+        *, requested_as: str = "",
+    ) -> str:
+        """:meth:`run_command`; *requested_as* names a command the caller built.
+
+        A tool that runs a command it composed (``get_logs``) passes what
+        was asked for in plain words, so a team refusal names that instead
+        of the internal command.
+        """
         args = {
             'instance_id': instance_id, 'command': command, 'transport': transport,
         }
@@ -742,23 +827,24 @@ class ServonautTools:
         if not cmd_allowed:
             self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
-        command = self._guard.command_for_execution(command)
 
         instance, error = await self._lookup_instance(
-            'run_command', args, instance_id,
+            'run_command', args, instance_id, requested_as=requested_as,
         )
         if error is not None:
             return error
+        # Rendered by the guard that accepted it: on a team's shared server
+        # that can be the team's standard level under a local dangerous one.
+        team_guard = self._team_guard(instance)
+        guard = team_guard.guard if team_guard is not None else self._guard
+        command = guard.command_for_execution(command)
 
         transport = (transport or "auto").strip().lower()
         if transport not in ("auto", "ssh", "ssm"):
             self._audit.log('run_command', args, '', False, 'bad_transport')
             return f"Error: transport must be 'auto', 'ssh', or 'ssm'; got {transport!r}."
 
-        is_aws = not (
-            instance.get('is_custom') or instance.get('is_ovh')
-            or instance.get('is_hetzner')
-        )
+        is_aws = is_aws_row(instance)
 
         # --- SSM-only transport ----------------------------------------
         if transport == "ssm":
@@ -1061,8 +1147,9 @@ class ServonautTools:
             return "validation: lines must be an integer (1-10000)"
         if not 1 <= count <= 10000:
             return "validation: lines must be an integer (1-10000)"
-        return await self.run_command(
-            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}"
+        return await self._run_command(
+            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}",
+            requested_as="reading logs",
         )
 
     async def check_status(self, instance_id: str) -> str:
@@ -4279,6 +4366,12 @@ class ServonautTools:
                         "Native Vault SSH credential is missing its strict host-key file"
                     )
                 conn = dict(conn)
+                from servonaut.services.ssh_credentials import lease_destination
+
+                # Connect exactly where the pinned host keys point.
+                conn['host'], conn['port'] = lease_destination(
+                    lease, conn['host'], conn.get('port'),
+                )
                 profile = self._connection_service.resolve_profile(instance)
                 proxy_args = conn['proxy_args']
                 if profile is not None:
@@ -4404,6 +4497,40 @@ class ServonautTools:
 
         return conn, _cleanup
 
+    async def _shared_server_rows(self) -> List[Dict]:
+        """The servers the signed-in user's teams share; none when signed out.
+
+        One read serves every call for a minute. A failed read lists none
+        (and is remembered for the same minute): the user's own servers
+        never wait on the team service.
+        """
+        now = time.monotonic()
+        if self._shared_memo is not None and self._shared_memo[0] > now:
+            return [dict(row) for row in self._shared_memo[1]]
+        team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
+        rows: List[Dict] = []
+        if team_service is not None:
+            from servonaut.services.shared_servers import load_shared_servers
+
+            try:
+                rows = (await load_shared_servers(team_service)).rows
+            except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
+                logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
+        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows)
+        return [dict(row) for row in rows]
+
+    async def _find_shared(self, reference: str) -> Optional[Dict]:
+        """The team shared server *reference* names (id, name or ``<team>/<name>``).
+
+        Raises:
+            AmbiguousInstanceError: The reference names several shared servers.
+        """
+        from servonaut.utils.instance_resolver import resolve_unique
+
+        if not (reference or "").strip():
+            return None
+        return resolve_unique(reference, await self._shared_server_rows())
+
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
         """Find an instance of any provider account, or a custom server.
 
@@ -4427,8 +4554,9 @@ class ServonautTools:
         lines = [f"{'Name':<30} {'ID':<20} {'State':<10} {'Public IP':<16} {'Region':<14}"]
         lines.append('-' * 90)
         for i in instances:
+            name = qualified_reference(i) if i.get('is_shared') is True else display_name(i)
             lines.append(
-                f"{display_name(i):<30} "
+                f"{name:<30} "
                 f"{i.get('id', ''):<20} "
                 f"{i.get('state', ''):<10} "
                 f"{(i.get('public_ip') or '-'):<16} "
@@ -4870,12 +4998,19 @@ class ServonautTools:
         """Return the ObjectStorageService for the given provider, or None."""
         if provider not in _S3_PROVIDERS:
             return None  # caller converts to validation: invalid_provider error
+        if provider == "aws" and not self.has_aws:
+            return None  # caller reports AWS switched off (_s3_unavailable)
         return getattr(self, f'_{provider}_object_storage_service', None)
 
     def _s3_unavailable(
         self, tool_name: str, provider: str, payload: Dict[str, Any],
     ) -> str:
         """Return a structured 'not configured' error + audit row for S3."""
+        if provider == "aws" and not self.has_aws:
+            from servonaut.config.accounts import AWS_SWITCHED_OFF
+
+            self._audit.log(tool_name, payload, '', False, 'aws_switched_off')
+            return f"Error: {AWS_SWITCHED_OFF}"
         msg = (
             f"S3 ({provider}) is not configured. Set "
             f"config.{provider}.object_storage.access_key and "
@@ -6018,7 +6153,7 @@ class ServonautTools:
         if error is not None:
             return error
 
-        if instance.get('is_custom') or instance.get('is_ovh') or instance.get('is_hetzner'):
+        if not is_aws_row(instance):
             self._audit.log('describe_ingress_path', args, '', False, 'not_aws')
             return (
                 "describe_ingress_path is AWS-only (ALB/WAF topology). "
@@ -6530,6 +6665,19 @@ class ServonautTools:
         )
         return self._db_staging_batch
 
+    async def find_db_setup_instance(self, instance_id: str) -> Optional[Dict]:
+        """Resolve *instance_id* exactly as :meth:`db_setup_save` will.
+
+        Lets a human surface refuse a server name that cannot be saved
+        under before it asks for connection details and a password.
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
+            UnknownAccountError: It is qualified with an account that
+                cannot connect.
+        """
+        return await self._find_instance(instance_id.strip())
+
     def _staged_db_entry(self, token: str):
         """Return ``(store, entry)`` for a live staging token, else ``(None, None)``."""
         for store in (self._db_staging, self._db_staging_batch):
@@ -6726,8 +6874,9 @@ class ServonautTools:
             return {"error": f"Blocked: {reason}", "instance": instance_id,
                     "candidates": []}
 
+        # Only the TUI calls this, for a person reviewing the scan.
         instance, error = await self._lookup_instance(
-            'db_setup_scan', args, instance_id,
+            'db_setup_scan', args, instance_id, for_agent=False,
         )
         if error is not None:
             return {"error": error, "instance": instance_id, "candidates": []}

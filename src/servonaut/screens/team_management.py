@@ -216,6 +216,7 @@ class TeamManagementScreen(Screen):
                     Static("[bold]Shared Servers[/bold]", id="section_servers", classes="section_header"),
                     DataTable(id="servers_table"),
                     Horizontal(
+                        Button("Connect", variant="success", id="btn_connect_shared"),
                         Button("Share Server", variant="primary", id="btn_share"),
                         Button("Share All", variant="default", id="btn_share_all"),
                         classes="add_row",
@@ -568,6 +569,7 @@ class TeamManagementScreen(Screen):
             servers = await team_svc.list_shared_servers(slug)
             self._shared_servers = servers
             self._populate_servers_table(servers)
+            self._list_shared_servers(slug, team.get("name") or slug, servers)
 
             try:
                 configs = await team_svc.list_team_configs(slug)
@@ -595,6 +597,65 @@ class TeamManagementScreen(Screen):
         except Exception as exc:
             logger.error("Failed to load team detail: %s", exc)
             self.notify(f"Failed to load team: {exc}", severity="error", markup=False)
+
+    def _list_shared_servers(self, slug: str, team_name: str, servers: list[dict]) -> None:
+        """Make the team's shared servers in the server list the ones listed here.
+
+        The other teams' shared servers stay as they are.
+        """
+        from servonaut.screens._demo_resolve import replace_instances
+        from servonaut.services.shared_servers import shared_row
+
+        # The real records (the list shows them redacted in demo mode).
+        current = getattr(self.app, "_instances_pristine", None)
+        if not isinstance(current, list):
+            current = list(getattr(self.app, "instances", None) or [])
+        others = [
+            row for row in current
+            if row.get("is_shared") is True and row.get("team_slug") != slug
+        ]
+        team = {"slug": slug, "name": team_name}
+        replace_instances(
+            self.app, "shared",
+            others + [shared_row(server, team) for server in servers if isinstance(server, dict)],
+        )
+
+    def _selected_shared_row(self) -> Optional[dict]:
+        """The server-list row of the shared server selected in the table, after saying why not."""
+        from servonaut.screens._demo_resolve import real_instance_id
+
+        if not self._shared_servers:
+            self.notify("This team shares no servers yet.", severity="warning")
+            return None
+        index = self.query_one("#servers_table", DataTable).cursor_row
+        if not 0 <= index < len(self._shared_servers):
+            self.notify("Select a shared server first.", severity="warning")
+            return None
+        server_id = str(self._shared_servers[index].get("id") or "")
+        for row in getattr(self.app, "instances", None) or []:
+            if (
+                row.get("is_shared") is True
+                and row.get("team_slug") == self._current_team_slug
+                and real_instance_id(self.app, row.get("id")) == server_id
+            ):
+                return row
+        self.notify(
+            "That server is not in the server list yet: open the team again.",
+            severity="warning",
+        )
+        return None
+
+    def _action_connect_shared_server(self) -> None:
+        """Open the selected shared server's actions and start an SSH session to it."""
+        from servonaut.screens.server_actions import ServerActionsScreen
+
+        row = self._selected_shared_row()
+        if row is None:
+            return
+        screen = ServerActionsScreen(row)
+        self.app.push_screen(screen)
+        # The connect action runs once the screen has mounted.
+        self.app.call_later(screen.action_action_3)
 
     def _infer_caller_role(self, members: list[dict]) -> Optional[str]:
         """Fallback when GET /teams/{slug} omits a top-level ``role`` field.
@@ -949,6 +1010,9 @@ class TeamManagementScreen(Screen):
 
         elif button_id == "btn_cancel_change_role":
             self._hide_change_role_form()
+
+        elif button_id == "btn_connect_shared":
+            self._action_connect_shared_server()
 
         elif button_id == "btn_share":
             self._action_share_server()

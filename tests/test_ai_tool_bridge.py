@@ -1965,3 +1965,30 @@ def test_local_tool_resolves_demo_instance_ids_before_dispatch():
     assert result.status == "ok"
     # The call object itself keeps what the model sent.
     assert call.args["instance_id"] == "custom-fake"
+
+
+def test_a_team_rule_rejection_is_audited_as_team_rule():
+    from servonaut.services.team_rules import REFUSAL_PREFIX
+
+    message = (
+        f"{REFUSAL_PREFIX}Ops's shared servers your agents run at the standard level "
+        "(set by the team), and 'systemctl restart nginx' is not an allowed command there."
+    )
+    bridge, _, _, audit, _ = _make_bridge(relay_response=CommandResponse(
+        request_id="tc_001", status="rejected", error_message=message,
+    ))
+    result = run(bridge.handle_tool_call(_call(args={
+        "command": "systemctl restart nginx", "instance_id": "ops/server-1",
+    })))
+
+    assert result.status == "error"
+    assert result.result == message
+    assert audit.log.call_args.args[4] == "team_rule"
+
+
+def test_relayed_ai_tool_calls_are_marked_as_an_agents():
+    # A team's rules apply to agents on its shared servers; the relay
+    # tells an AI tool call from a command a person sent by this flag.
+    bridge, *_ = _make_bridge()
+    request = bridge._build_command_request(_call(), CommandType.RUN_COMMAND)
+    assert request.from_agent is True

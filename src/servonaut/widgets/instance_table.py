@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.widgets import DataTable
 
 from servonaut.utils.instance_resolver import display_name
+from servonaut.services.shared_servers import fold_shared
 
 # What an empty cell shows.
 _EMPTY = "-"
@@ -69,27 +70,41 @@ def _fit(value: str, max_width: Optional[int]) -> Text:
     return text
 
 
-def _name_cell(instance: dict, max_width: Optional[int]) -> Text:
+# Marks one of the user's own servers that a team shares too.
+SHARED_MARK = " · shared"
+
+
+def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False) -> Text:
     """The Name cell: ``account/name`` when the provider has several accounts.
 
     The account part is dimmed so the server name stays the eye's anchor;
-    a provider with a single account shows the plain name, as before.
+    a provider with a single account shows the plain name, as before. One of
+    the user's own servers that a team shares too ends in a dim ``· shared``.
     """
     shown = display_name(instance)
     name = str(instance.get("name") or "")
-    if shown == name:
+    if shown == name and not shared:
         return _fit(name or _EMPTY, max_width)
-    account, _, rest = shown.partition("/")
     text = Text(no_wrap=True, end="")
-    text.append(f"{account}/", style="dim")
-    text.append(rest)
+    if shown == name:
+        text.append(name or _EMPTY)
+    else:
+        account, _, rest = shown.partition("/")
+        text.append(f"{account}/", style="dim")
+        text.append(rest)
+    if shared:
+        text.append(SHARED_MARK, style="dim")
     if max_width is not None and text.cell_len > max_width:
         text.truncate(max_width, overflow="ellipsis")
     return text
 
 
-def _search_fields(instance: dict) -> List[str]:
-    """What the search box matches: name, type, id, provider and account."""
+def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]:
+    """What the search box matches: name, type, id, provider and account.
+
+    ``shared`` and the team's name match a team's server, and one of the
+    user's own servers that a team shares too.
+    """
     fields = [
         instance.get("name"),
         instance.get("type"),
@@ -97,6 +112,8 @@ def _search_fields(instance: dict) -> List[str]:
         instance.get("provider"),
         instance.get("account") if instance.get("account_qualified") else None,
     ]
+    if shared_with:
+        fields.extend(["shared", *shared_with])
     return [str(value).lower() for value in fields if value]
 
 
@@ -123,6 +140,8 @@ class InstanceTable(DataTable):
         super().__init__(cursor_type="row")
         self._all_instances: List[dict] = []
         self._filtered_instances: List[dict] = []
+        # id() of an own row -> the teams that share it too (see fold_shared).
+        self._shared_by: Dict[int, List[str]] = {}
         self._shown_columns: List[_Column] = []
         self._setup_columns([column for column in COLUMNS if not column.optional])
 
@@ -170,12 +189,21 @@ class InstanceTable(DataTable):
     def populate(self, instances: List[dict]) -> None:
         """Populate table with instances.
 
+        A team's shared server that is also one of the user's own is listed
+        once, as the user's own row marked as shared.
+
         Args:
             instances: List of instance dictionaries.
         """
-        self._all_instances = instances
-        self._filtered_instances = instances.copy()
+        self._all_instances, self._shared_by = fold_shared(instances)
+        self._filtered_instances = self._all_instances.copy()
         self._refresh_table()
+
+    def _shared_with(self, instance: dict) -> List[str]:
+        """The teams sharing *instance*: its own team, or the teams sharing an own row."""
+        if instance.get("is_shared") is True:
+            return [str(instance.get("team_name") or instance.get("team_slug") or "")]
+        return self._shared_by.get(id(instance), [])
 
     def filter(self, query: str) -> None:
         """Filter table rows by query string.
@@ -193,7 +221,10 @@ class InstanceTable(DataTable):
             query_lower = query.lower()
             self._filtered_instances = [
                 inst for inst in self._all_instances
-                if any(query_lower in value for value in _search_fields(inst))
+                if any(
+                    query_lower in value
+                    for value in _search_fields(inst, self._shared_with(inst))
+                )
                 or query_lower in display_name(inst).lower()
             ]
         self._refresh_table()
@@ -278,7 +309,9 @@ class InstanceTable(DataTable):
         coloured = self._colorize_state(state)
         return {
             "index": str(idx + 1),
-            "name": _name_cell(instance, limits["name"]),
+            "name": _name_cell(
+                instance, limits["name"], shared=id(instance) in self._shared_by,
+            ),
             # A state without a colour is provider text: never read as markup.
             "state": coloured if coloured != state else plain("state", state),
             "provider": plain("provider", instance.get("provider", "AWS")),

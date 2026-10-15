@@ -323,6 +323,58 @@ class TestHandleSshCommand:
         team_service.list_shared_servers.assert_awaited_once_with("team-a")
         assert resolver_instance.resolve.await_args.args[0]["credential_binding"] == {"vault_id": "vault-1"}
 
+    def _run_with_team(self, reference, own_rows, shared_rows):
+        """Connect to *reference* with the team sharing *shared_rows*; the resolved row back."""
+        args = _make_args(instance=reference)
+        headless, _ssh_svc, _ = _patch_headless(instances=own_rows)
+        team_service = MagicMock()
+        team_service.list_teams = AsyncMock(return_value=[{"slug": "ops", "name": "Ops"}])
+        team_service.list_shared_servers = AsyncMock(return_value=shared_rows)
+        headless = (*headless[:4], team_service, *headless[5:])
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=list(own_rows)),
+            # "ops" names no provider account: the real check lets it through
+            # (the stand-in config here cannot build an account registry).
+            patch("servonaut.services.accounts.headless.check_configured_reference"),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            resolver_instance = MagicMock()
+            resolver_instance.resolve = AsyncMock(return_value=_resolved_local())
+            MockResolver.return_value = resolver_instance
+
+            from servonaut.cli.ssh import handle_ssh_command
+
+            result = handle_ssh_command(args)
+        resolved = resolver_instance.resolve.await_args
+        return result, (resolved.args[0] if resolved else None)
+
+    def test_a_shared_copy_of_an_own_server_connects_as_the_own_server(self):
+        own = _make_instance("i-abc", "web-1", public_ip="9.9.9.9")
+        shared = {"id": "srv-1", "name": "web-1", "hostname": "9.9.9.9", "instance_id": "i-abc"}
+        result, row = self._run_with_team("web-1", [own], [shared])
+        assert result == _EXIT_SUCCESS
+        assert row["id"] == "i-abc"
+
+    def test_the_team_s_name_for_an_own_server_still_finds_the_team_row(self):
+        own = _make_instance("i-abc", "web-1", public_ip="9.9.9.9")
+        shared = {"id": "srv-1", "name": "team-web", "hostname": "9.9.9.9", "instance_id": "i-abc"}
+        result, row = self._run_with_team("team-web", [own], [shared])
+        assert result == _EXIT_SUCCESS
+        assert row["id"] == "srv-1"
+        assert row["is_shared"] is True
+
+    def test_team_slash_name_picks_the_team_s_server(self):
+        own = _make_instance("i-abc", "web-1", public_ip="9.9.9.9")
+        shared = {"id": "srv-1", "name": "web-1", "hostname": "web.example.com"}
+        result, row = self._run_with_team("ops/web-1", [own], [shared])
+        assert result == _EXIT_SUCCESS
+        assert row["id"] == "srv-1"
+
     def test_vault_login_to_a_shared_server_goes_to_the_pinned_destination(self):
         """A shared row from the API carries ``hostname``, not an IP field."""
         args = _make_args(instance="qa-host")

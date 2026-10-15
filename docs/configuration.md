@@ -73,6 +73,14 @@ projects or OVH accounts — whose servers join the fleet as `label/name`:
 Every field, the label rules and how servers are referenced are described in
 [Multiple accounts per provider](multiple-accounts.md).
 
+### Switching AWS off
+
+AWS is on by default. If you don't use AWS, switch it off in **Settings → AWS**
+(`"aws": {"enabled": false}`). Servonaut then lists and fetches no AWS servers,
+hides the AWS section of the sidebar, and offers AI agents no AWS tools; a call
+to one is refused with the reason. Switch it back on there to list your AWS
+servers again.
+
 ## Scan Rules
 
 Scan rules define what paths to search and commands to execute when scanning servers. Rules only apply to instances matching their conditions.

@@ -15,6 +15,7 @@ from servonaut.widgets.remote_tree import RemoteTree
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.utils.match_utils import matches_conditions
 from servonaut.screens._demo_resolve import connection_instance
+from servonaut.services.shared_servers import shared_login
 
 
 if TYPE_CHECKING:
@@ -53,6 +54,10 @@ def build_remote_tree(app, instance: dict, tree_id: str = "remote_tree") -> Remo
     scan_paths = get_scan_paths_for_instance(config, instance)
     if instance.get('is_custom'):
         username = instance.get('username') or 'root'
+    elif instance.get('is_shared') is True:
+        username = shared_login(
+            instance, app.connection_service.resolve_profile(instance), config.default_username,
+        )
     else:
         profile = app.connection_service.resolve_profile(instance)
         username = (profile.username if profile else None) or config.default_username

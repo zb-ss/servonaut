@@ -77,7 +77,10 @@ def describe_secret_store(provider: object) -> str:
     if name == "local":
         path = getattr(provider, "path", None)
         if path is not None:
-            return f"the local secret store ({path})"
+            from servonaut.services.ssh_host_keys import home_relative
+
+            # Shown to agents and pasted into tickets: no home directory.
+            return f"the local secret store ({home_relative(str(path))})"
         return "the local secret store"
 
     return "your active secret store"

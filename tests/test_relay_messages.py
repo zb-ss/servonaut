@@ -129,6 +129,10 @@ class TestCommandRequest:
             "target_server_id": "i-server",
             "payload": {"log_path": "/var/log/syslog"},
             "ttl_seconds": 90,
+            # Local-only: set by the caller that builds the request, never
+            # read from a hub event.
+            "requested_as": "",
+            "from_agent": False,
         }
 
     def test_asdict_type_value_is_string(self):

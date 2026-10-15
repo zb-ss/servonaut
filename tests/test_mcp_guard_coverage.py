@@ -86,12 +86,12 @@ def test_readonly_refuses_backend_tools_without_side_effects(readonly_tools, too
 
 def test_get_logs_quotes_the_path_and_validates_lines():
     tools = make_tools()
-    tools.run_command = AsyncMock(return_value="ok")
+    tools._run_command = AsyncMock(return_value="ok")
     path = "/var/log/app one.log; id"
 
     asyncio.run(tools.get_logs("i-abc123", log_path=path, lines=25))
 
-    command = tools.run_command.call_args.args[1]
+    command = tools._run_command.call_args.args[1]
     assert command == f"tail -n 25 -- {shlex.quote(path)}"
     assert shlex.split(command)[-1] == path
 
@@ -99,12 +99,12 @@ def test_get_logs_quotes_the_path_and_validates_lines():
 @pytest.mark.parametrize("lines", ["ten", 0, 10001, "5; id"])
 def test_get_logs_refuses_invalid_line_counts(lines):
     tools = make_tools()
-    tools.run_command = AsyncMock(return_value="ok")
+    tools._run_command = AsyncMock(return_value="ok")
 
     result = asyncio.run(tools.get_logs("i-abc123", lines=lines))
 
     assert result.startswith("validation:")
-    tools.run_command.assert_not_called()
+    tools._run_command.assert_not_called()
 
 
 def test_web_traffic_summary_prints_the_marker_from_the_quoted_path():

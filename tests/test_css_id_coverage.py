@@ -768,6 +768,7 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "btn_resend",
         "btn_save_role",
         "btn_share_all",
+        "btn_connect_shared",  # Reason: Button in the Teams #server_actions_row, like btn_share
         "cancel_btn",
         "change_role_header",
         "delete_btn",

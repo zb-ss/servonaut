@@ -28,6 +28,8 @@ def _app(*, aws_fresh: bool, hetzner_fresh: bool = False, ovh_fresh: bool = True
     app.demo_mode = False
     app.redaction_service = None
     app.instances = [dict(AWS_ROW)]
+    # Signed out: no team shared servers to list (see the signed-in tests).
+    app.team_service = None
     app.provider_inventory.side_effect = lambda provider: getattr(app, f"{provider}_service")
     app.aws_service.is_cache_fresh.return_value = aws_fresh
     app.ovh_service.is_cache_fresh.return_value = ovh_fresh
@@ -74,6 +76,39 @@ def test_fresh_aws_and_hetzner_caches_fetch_nothing():
     with _with_app(app):
         screen.on_mount()
     assert started == []
+
+
+def _signed_in(app):
+    app.team_service = MagicMock()
+    app.auth_service.is_authenticated = True
+    return app
+
+
+def test_signed_in_the_team_shared_servers_are_listed_even_with_fresh_caches():
+    # They are never cached: every start asks the teams again.
+    app = _signed_in(_app(aws_fresh=True, hetzner_fresh=True))
+    screen, started = _screen(app)
+    with _with_app(app):
+        screen.on_mount()
+    assert started == ["shared_refresh"]
+
+
+def test_the_refresh_key_lists_the_team_shared_servers_again():
+    app = _signed_in(_app(aws_fresh=True))
+    screen, started = _screen(app)
+    with _with_app(app):
+        screen.action_refresh()
+    assert "shared_refresh" in started
+
+
+def test_signed_out_the_shared_rows_leave_the_list_without_a_request():
+    app = _app(aws_fresh=True, hetzner_fresh=True)
+    app.instances = [dict(AWS_ROW), {"id": "srv-1", "name": "server-1", "is_shared": True}]
+    screen, started = _screen(app)
+    with _with_app(app):
+        screen.on_mount()
+    assert started == []
+    assert [row["name"] for row in app.instances] == ["app-1"]
 
 
 def test_refresh_key_refreshes_every_provider():

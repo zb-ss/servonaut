@@ -506,7 +506,9 @@ def _handle_status(args: argparse.Namespace) -> int:
                 f"project_id={s.shadowed_user_project_id}"
             )
         if s.local_secrets_path:
-            print(f"  LocalProvider path: {s.local_secrets_path}")
+            from servonaut.services.ssh_host_keys import home_relative
+
+            print(f"  LocalProvider path: {home_relative(s.local_secrets_path)}")
         if s.has_health_warning:
             reasons = []
             if s.project_id_invalid:

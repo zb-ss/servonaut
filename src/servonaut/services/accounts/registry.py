@@ -31,6 +31,7 @@ from servonaut.config.accounts import (
     account_cache_path,
     account_problems,
     aws_accounts,
+    aws_enabled,
     describe_account_problems,
     hetzner_accounts,
     ovh_accounts,
@@ -188,6 +189,16 @@ class AccountRegistry:
         self._build_hetzner(state, skipped)
         self._build_ovh(state, skipped)
         self._state = state
+
+    def cached_aws_servers(self) -> int:
+        """How many servers the AWS accounts' caches hold, switched on or off."""
+        total = 0
+        for service in self._state.provider(AWS).services.values():
+            try:
+                total += len(service.get_cached_instances() or [])
+            except Exception as exc:  # noqa: BLE001 — a broken cache counts as empty
+                logger.debug("Reading an AWS cache failed: %s", exc)
+        return total
 
     def _build_aws(self, state: _RegistryState, skipped) -> None:
         from servonaut.services.aws_service import AWSService
@@ -515,8 +526,15 @@ class AccountRegistry:
         return bundle
 
     def fleet(self, provider: str) -> Optional[AccountFleet]:
-        """Every account of *provider* as one inventory; None when unused."""
+        """Every account of *provider* as one inventory; None when unused.
+
+        AWS switched off in Settings (``aws.enabled``) has no inventory: no
+        server of it is listed or fetched. Its services stay built, so code
+        that holds one keeps working.
+        """
         state = self._state
+        if provider == AWS and not aws_enabled(state.config):
+            return None
         fleet = state.fleets.get(provider)
         if fleet is not None:
             return fleet

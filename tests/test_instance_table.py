@@ -22,6 +22,7 @@ def _make_table() -> InstanceTable:
         table = InstanceTable.__new__(InstanceTable)
         table._all_instances = []
         table._filtered_instances = []
+        table._shared_by = {}
     return table
 
 

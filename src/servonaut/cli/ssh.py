@@ -271,18 +271,9 @@ async def _load_shared_instances(team_service: Any, teams: List[dict]) -> List[D
     A failed team inventory request must not hide rows from another team or
     prevent ordinary local inventory from remaining usable.
     """
-    rows: List[Dict[str, Any]] = []
-    for team in teams:
-        slug = team.get("slug") if isinstance(team, dict) else None
-        if not isinstance(slug, str) or not slug:
-            continue
-        try:
-            shared_rows = await team_service.list_shared_servers(slug)
-        except Exception as exc:  # noqa: BLE001 — another team may still load
-            logger.warning("Could not load shared servers for %s: %s", slug, exc)
-            continue
-        rows.extend(row for row in shared_rows if isinstance(row, dict))
-    return rows
+    from servonaut.services.shared_servers import load_shared_servers
+
+    return (await load_shared_servers(team_service, teams)).rows
 
 
 def _find_instance(instances: List[Dict[str, Any]], search: str) -> List[Dict[str, Any]]:
@@ -394,7 +385,12 @@ async def _handle_ssh_async(args: Any) -> int:
             instances.extend(await _load_shared_instances(team_service, teams))
         except Exception as exc:  # noqa: BLE001 — preserve local discovery
             logger.warning("Could not load shared server inventory: %s", exc)
-    matches = _find_instance(instances, args.instance)
+    # When a reference names both one of the user's own servers and the same
+    # server shared by a team, the user's own row is the match, as in the
+    # server list. A team's name for the server still finds the team's row.
+    from servonaut.services.shared_servers import fold_shared_rows
+
+    matches = fold_shared_rows(_find_instance(instances, args.instance))
     if not matches:
         print(
             f"No instance found matching {args.instance!r}. "

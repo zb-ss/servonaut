@@ -76,6 +76,18 @@ class AWSAccountSettings:
     regions: Tuple[str, ...]
 
 
+def aws_enabled(config: "AppConfig") -> bool:
+    """Whether AWS is switched on in Settings → AWS (``aws.enabled``, on by default)."""
+    return bool(getattr(getattr(config, "aws", None), "enabled", True))
+
+
+# What every AWS surface says while AWS is switched off.
+AWS_SWITCHED_OFF = (
+    "AWS is switched off in Settings → AWS, so AWS servers and tools are not "
+    "available. Switch it on there to use them."
+)
+
+
 def primary_label(provider: str, config: "AppConfig") -> str:
     """Label of *provider*'s primary account: the configured one, else the provider name.
 
