@@ -105,8 +105,8 @@ async def resolve_webacl(
     instance = await find_instance(target)
     if not instance:
         return {"error": f"instance not found: {target}"}
-    if (instance.get("is_custom") or instance.get("is_ovh")
-            or instance.get("is_hetzner")):
+    from servonaut.utils.instance_resolver import is_aws_row
+    if not is_aws_row(instance):
         return {"error": f"{target} is not an AWS instance"}
     from servonaut.services.ingress_path_service import IngressPathService
     eff_region = region or instance.get("region") or ""

@@ -29,6 +29,7 @@ from servonaut.utils.ssh_utils import (
 )
 from servonaut.widgets.command_output import CommandOutput
 from servonaut.screens._demo_resolve import connection_instance, display_username, hide_login
+from servonaut.services.shared_servers import shared_login
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,12 @@ class CommandOverlay(ModalScreen):
         self._missing_profile = self._detect_missing_profile()
 
         config = self.app.config_manager.get()
-        if conn.get('is_custom'):
+        if conn.get('is_shared') is True:
+            # A team's server: the team's login; the team's key, when it has
+            # one, replaces the user's own configured key.
+            self._username = shared_login(conn, self._profile, config.default_username)
+            self._key_path = self.app.ssh_service.get_key_path(conn['id'])
+        elif conn.get('is_custom'):
             self._username = conn.get('username') or 'root'
             self._key_path = conn.get('ssh_key') or conn.get('key_name') or None
         else:

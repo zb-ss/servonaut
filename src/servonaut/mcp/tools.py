@@ -36,10 +36,13 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
 from servonaut.utils.instance_resolver import (
     CUSTOM_QUALIFIER,
     AmbiguousInstanceError,
     display_name,
+    is_aws_row,
+    qualified_reference,
 )
 from servonaut.utils.ssh_utils import (
     SSHOutput,
@@ -83,6 +86,9 @@ _S3_PROVIDERS: frozenset = frozenset({"aws", "hetzner", "ovh"})
 # Internal coalescing window, not an ops-tunable: key material is still
 # resolved and wiped per call, only the opaque ref pointer is memoized.
 _BW_REF_MEMO_TTL_SECONDS = 60.0
+# How long one read of the teams' shared servers serves list_instances and
+# lookups: a tool loop must not cost a team-list request per call.
+_SHARED_SERVERS_MEMO_TTL_SECONDS = 60.0
 
 # --- aws_call passthrough -------------------------------------------------
 # boto3 operation names are snake_case (describe_security_group_rules, get_ip_set,
@@ -256,6 +262,8 @@ class ServonautTools:
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
+        # (expires_at, rows) of the last read of the teams' shared servers.
+        self._shared_memo: Optional[tuple] = None
         # Every provider account (AccountRegistry). The single-service
         # attributes above are each provider's default account; None keeps
         # them the only account (surfaces that never build the registry).
@@ -575,7 +583,18 @@ class ServonautTools:
         except AmbiguousInstanceError as exc:
             return None, self._ambiguous(tool_name, args, exc)
         except UnknownAccountError as exc:
-            return None, self._account_refused(tool_name, args, exc)
+            # "<team>/<name>" names a team's shared server, not an account.
+            try:
+                instance = await self._find_shared(instance_id)
+            except AmbiguousInstanceError as shared_exc:
+                return None, self._ambiguous(tool_name, args, shared_exc)
+            if instance is None:
+                return None, self._account_refused(tool_name, args, exc)
+        if not instance:
+            try:
+                instance = await self._find_shared(instance_id)
+            except AmbiguousInstanceError as exc:
+                return None, self._ambiguous(tool_name, args, exc)
         if not instance and self._vault_runtime is not None:
             resolve_relay_target = getattr(
                 self._vault_runtime, 'resolve_relay_target', None,
@@ -600,7 +619,7 @@ class ServonautTools:
                             'shared_target_resolution_failed',
                         )
                         return None, "Native Vault returned an invalid shared server target"
-                    instance = shared_target
+                    instance = as_shared_row(shared_target)
         if not instance:
             self._audit.log(
                 tool_name, args, audit_result, False, 'instance_not_found',
@@ -711,7 +730,11 @@ class ServonautTools:
             except UnknownAccountError as exc:
                 return self._account_refused('list_instances', args, exc)
         else:
-            instances = await self._directory.all_instances()
+            # A team's shared server that is also one of the user's own is
+            # listed once, as the user's own server.
+            instances = fold_shared_rows(
+                await self._directory.all_instances() + await self._shared_server_rows()
+            )
         if region:
             instances = [i for i in instances if i.get('region') == region]
         if state:
@@ -776,10 +799,7 @@ class ServonautTools:
             self._audit.log('run_command', args, '', False, 'bad_transport')
             return f"Error: transport must be 'auto', 'ssh', or 'ssm'; got {transport!r}."
 
-        is_aws = not (
-            instance.get('is_custom') or instance.get('is_ovh')
-            or instance.get('is_hetzner')
-        )
+        is_aws = is_aws_row(instance)
 
         # --- SSM-only transport ----------------------------------------
         if transport == "ssm":
@@ -4300,6 +4320,12 @@ class ServonautTools:
                         "Native Vault SSH credential is missing its strict host-key file"
                     )
                 conn = dict(conn)
+                from servonaut.services.ssh_credentials import lease_destination
+
+                # Connect exactly where the pinned host keys point.
+                conn['host'], conn['port'] = lease_destination(
+                    lease, conn['host'], conn.get('port'),
+                )
                 profile = self._connection_service.resolve_profile(instance)
                 proxy_args = conn['proxy_args']
                 if profile is not None:
@@ -4425,6 +4451,40 @@ class ServonautTools:
 
         return conn, _cleanup
 
+    async def _shared_server_rows(self) -> List[Dict]:
+        """The servers the signed-in user's teams share; none when signed out.
+
+        One read serves every call for a minute. A failed read lists none
+        (and is remembered for the same minute): the user's own servers
+        never wait on the team service.
+        """
+        now = time.monotonic()
+        if self._shared_memo is not None and self._shared_memo[0] > now:
+            return [dict(row) for row in self._shared_memo[1]]
+        team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
+        rows: List[Dict] = []
+        if team_service is not None:
+            from servonaut.services.shared_servers import load_shared_servers
+
+            try:
+                rows = (await load_shared_servers(team_service)).rows
+            except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
+                logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
+        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows)
+        return [dict(row) for row in rows]
+
+    async def _find_shared(self, reference: str) -> Optional[Dict]:
+        """The team shared server *reference* names (id, name or ``<team>/<name>``).
+
+        Raises:
+            AmbiguousInstanceError: The reference names several shared servers.
+        """
+        from servonaut.utils.instance_resolver import resolve_unique
+
+        if not (reference or "").strip():
+            return None
+        return resolve_unique(reference, await self._shared_server_rows())
+
     async def _find_instance(self, instance_id: str) -> Optional[Dict]:
         """Find an instance of any provider account, or a custom server.
 
@@ -4448,8 +4508,9 @@ class ServonautTools:
         lines = [f"{'Name':<30} {'ID':<20} {'State':<10} {'Public IP':<16} {'Region':<14}"]
         lines.append('-' * 90)
         for i in instances:
+            name = qualified_reference(i) if i.get('is_shared') is True else display_name(i)
             lines.append(
-                f"{display_name(i):<30} "
+                f"{name:<30} "
                 f"{i.get('id', ''):<20} "
                 f"{i.get('state', ''):<10} "
                 f"{(i.get('public_ip') or '-'):<16} "
@@ -6046,7 +6107,7 @@ class ServonautTools:
         if error is not None:
             return error
 
-        if instance.get('is_custom') or instance.get('is_ovh') or instance.get('is_hetzner'):
+        if not is_aws_row(instance):
             self._audit.log('describe_ingress_path', args, '', False, 'not_aws')
             return (
                 "describe_ingress_path is AWS-only (ALB/WAF topology). "

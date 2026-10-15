@@ -374,7 +374,12 @@ class TestRunCommand:
 
         assert "native output" in result
         runtime.resolve_relay_target.assert_awaited_once_with("team-web-1")
-        runtime.resolve_ssh.assert_awaited_once_with(shared_target)
+        runtime.resolve_ssh.assert_awaited_once()
+        resolved = runtime.resolve_ssh.await_args.args[0]
+        # The team's record, as a server-list row.
+        assert resolved["id"] == "shared-server-1"
+        assert resolved["team_slug"] == "team-a"
+        assert resolved["public_ip"] == "192.0.2.25"
         command = tools._ssh_service.build_ssh_command.call_args.kwargs
         assert command["key_path"] is None
         assert command["identity_agent"] == "/tmp/native-agent.sock"
@@ -1399,3 +1404,110 @@ class TestBwVaultKeyResolution:
         assert "[transport_used: ssh]" in result
         key_path = tools._ssh_service.build_ssh_command.call_args.kwargs["key_path"]
         assert key_path == "~/.ssh/test.pem"
+
+
+# ---------------------------------------------------------------------------
+# Team shared servers
+# ---------------------------------------------------------------------------
+
+def _shared_server(**changes):
+    server = {
+        "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
+        "port": 22, "login_user": "deploy", "instance_id": None, "region": "eu-west-1",
+    }
+    server.update(changes)
+    return server
+
+
+def _team_service(servers=None, teams=None):
+    service = MagicMock()
+    service.list_teams = AsyncMock(
+        return_value=teams if teams is not None else [{"slug": "ops", "name": "Ops"}],
+    )
+    service.list_shared_servers = AsyncMock(
+        return_value=servers if servers is not None else [_shared_server()],
+    )
+    return service
+
+
+class TestSharedServers:
+    def test_list_instances_lists_them_by_team_reference(self):
+        tools = make_tools(team_service=_team_service())
+        result = run(tools.list_instances())
+        assert "ops/team-web-1" in result
+        assert "team-web.example.com" in result
+        assert "shared" in result
+        assert "web-server-prod" in result
+
+    def test_a_shared_copy_of_an_own_server_is_listed_once(self):
+        service = _team_service([_shared_server(name="shared-copy", instance_id="i-abc123")])
+        tools = make_tools(team_service=service)
+        result = run(tools.list_instances())
+        assert "shared-copy" not in result
+        assert result.count("i-abc123") == 1
+
+    def test_one_read_serves_a_minute_of_calls(self):
+        service = _team_service()
+        tools = make_tools(team_service=service)
+        run(tools.list_instances())
+        run(tools.list_instances())
+        assert service.list_teams.await_count == 1
+
+    def test_signed_out_lists_only_the_own_servers(self):
+        service = _team_service()
+        service.list_teams = AsyncMock(side_effect=RuntimeError("401 Unauthorized"))
+        tools = make_tools(team_service=service)
+        result = run(tools.list_instances())
+        assert "web-server-prod" in result
+        assert "team-web-1" not in result
+
+    def test_an_account_filter_leaves_them_out(self):
+        tools = make_tools(team_service=_team_service())
+        result = run(tools.list_instances(account="aws"))
+        assert "team-web-1" not in result
+
+    def test_a_team_reference_reaches_the_shared_server(self):
+        tools = make_tools(team_service=_team_service())
+        instance, error = run(tools._lookup_instance("run_command", {}, "ops/team-web-1"))
+        assert error is None
+        assert instance["id"] == "srv-1"
+        assert instance["public_ip"] == "team-web.example.com"
+        assert instance["is_shared"] is True
+
+    def test_a_bare_shared_name_reaches_the_shared_server(self):
+        tools = make_tools(team_service=_team_service())
+        instance, error = run(tools._lookup_instance("run_command", {}, "team-web-1"))
+        assert error is None
+        assert instance["team_slug"] == "ops"
+
+    def test_an_unknown_team_reference_is_still_refused_as_an_account(self):
+        tools = make_tools(team_service=_team_service())
+        instance, error = run(tools._lookup_instance("run_command", {}, "nope/team-web-1"))
+        assert instance is None
+        assert "nope" in error
+
+    def test_the_vault_lease_destination_is_where_the_command_connects(self):
+        lease = MagicMock(
+            source="vault",
+            identity_agent="/tmp/native-agent.sock",
+            identity_file="/tmp/native-agent-key.pub",
+            certificate_path=None,
+            known_hosts_path="/tmp/native-known-hosts",
+            login_user="deploy",
+            target_host="pinned.example.com",
+            target_port=2200,
+        )
+        runtime = MagicMock()
+        runtime.resolve_relay_target = AsyncMock(return_value=None)
+        runtime.resolve_ssh = AsyncMock(return_value=lease)
+        tools = make_tools(team_service=_team_service(), vault_runtime=runtime)
+
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            run(tools.run_command("ops/team-web-1", "uptime"))
+
+        command = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert command["host"] == "pinned.example.com"
+        assert command["port"] == 2200

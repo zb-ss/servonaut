@@ -152,6 +152,17 @@ async def vault_lease(
     return lease
 
 
+def lease_destination(lease: Any, host: Any, port: Any) -> tuple[Any, Any]:
+    """``(host, port)`` where *lease*'s pinned host keys point, else *host* and *port*."""
+    target_host = getattr(lease, "target_host", None) if lease is not None else None
+    target_port = getattr(lease, "target_port", None) if lease is not None else None
+    if not isinstance(target_host, str) or not target_host:
+        target_host = host
+    if isinstance(target_port, bool) or not isinstance(target_port, int) or not 1 <= target_port <= 65535:
+        target_port = port
+    return target_host, target_port
+
+
 def apply_vault_lease(
     conn: Mapping[str, Any],
     lease: Any,

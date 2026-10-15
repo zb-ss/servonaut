@@ -26,7 +26,18 @@ _QUALIFIED_KEY = "account_qualified"
 # Qualifier for custom servers, which belong to no provider account.
 CUSTOM_QUALIFIER = "custom"
 
-_PROVIDER_TITLES = {"aws": "AWS", "hetzner": "Hetzner", "ovh": "OVH", "custom": "custom"}
+_PROVIDER_TITLES = {
+    "aws": "AWS", "hetzner": "Hetzner", "ovh": "OVH", "custom": "custom", "shared": "team",
+}
+
+# The flags a server row of each non-AWS source carries. EC2 rows carry
+# none, so a row with none of them is an AWS instance.
+NON_AWS_FLAGS = ("is_custom", "is_ovh", "is_hetzner", "is_shared")
+
+
+def is_aws_row(row: dict) -> bool:
+    """Whether *row* is an EC2 instance (no other source's flag)."""
+    return not any(row.get(flag) for flag in NON_AWS_FLAGS)
 
 
 class AmbiguousInstanceError(LookupError):
@@ -43,6 +54,8 @@ class AmbiguousInstanceError(LookupError):
 
 
 def _provider(row: dict) -> str:
+    if row.get("is_shared") is True:
+        return "shared"
     if row.get("is_custom"):
         return "custom"
     if row.get("is_ovh"):
@@ -62,7 +75,10 @@ def display_name(row: dict) -> str:
 
 
 def _qualifier(row: dict) -> str:
-    """The account label of a provider row, ``custom`` for a custom server."""
+    """The account label of a provider row, ``custom`` for a custom server,
+    the team's slug for a team shared server (``ops/web-1``)."""
+    if row.get("is_shared") is True:
+        return str(row.get("team_slug") or "")
     if row.get("is_custom"):
         return CUSTOM_QUALIFIER
     return str(row.get(_ACCOUNT_KEY) or "")

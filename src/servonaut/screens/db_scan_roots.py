@@ -28,6 +28,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.utils.instance_resolver import display_name
+from servonaut.services.shared_servers import shared_login
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +94,13 @@ class DbScanRootsScreen(Screen):
         if self._instance.get("is_custom"):
             username = self._instance.get("username") or "root"
         else:
-            profile = app.connection_service.resolve_profile(
-                connection_instance(app, self._instance)
-            )
-            username = (
-                (profile.username if profile else None)
-                or app.config_manager.get().default_username
-            )
+            real = connection_instance(app, self._instance)
+            profile = app.connection_service.resolve_profile(real)
+            default_username = app.config_manager.get().default_username
+            if real.get("is_shared") is True:
+                username = shared_login(real, profile, default_username)
+            else:
+                username = (profile.username if profile else None) or default_username
         return RemoteTree(
             instance=self._instance,
             ssh_service=app.ssh_service,
