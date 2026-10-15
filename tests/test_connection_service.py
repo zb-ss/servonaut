@@ -284,7 +284,7 @@ class TestSharedServerConnection(TestConnectionService):
 
         row = shared_row(
             {"id": "srv-1", "name": "web-1", "hostname": "web.example.com",
-             "port": 2222, "login_user": "deploy"},
+             "port": 2222, "login_user": "deploy", "username": "deploy"},
             {"slug": "ops", "name": "Ops"},
         )
         ssh_service = MagicMock()
@@ -303,3 +303,17 @@ class TestSharedServerConnection(TestConnectionService):
         row = {"id": "srv-1", "is_shared": True, "public_ip": "web.example.com"}
         conn = server_connection(row, service, MagicMock(), "ubuntu")
         assert conn["username"] == "ubuntu"
+
+
+    def test_the_teams_key_login_is_not_used_with_the_users_own_key(self, service):
+        # ``login_user`` is the login of the team's vault key or certificate,
+        # which names it itself; the user's own key keeps the user's login.
+        from servonaut.services.connection_service import server_connection
+        from servonaut.services.shared_servers import shared_row
+
+        row = shared_row(
+            {"id": "srv-1", "name": "web-1", "hostname": "web.example.com", "login_user": "deploy"},
+            {"slug": "ops", "name": "Ops"},
+        )
+        conn = server_connection(row, service, MagicMock(), "ec2-user")
+        assert conn["username"] == "ec2-user"
