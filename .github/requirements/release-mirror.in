@@ -1,0 +1,3 @@
+# Uploads for the release mirror workflow. Compile the hash-locked file with:
+#   uv pip compile .github/requirements/release-mirror.in --python-version 3.12 --python-platform x86_64-manylinux_2_17 --only-binary :all: --generate-hashes --no-strip-markers --no-cache --output-file .github/requirements/release-mirror.txt
+boto3
