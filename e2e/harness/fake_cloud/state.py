@@ -34,6 +34,8 @@ class Scenario:
     # The sign-in page the device flow names; None = this fake's own /device.
     # Display only: the fake approves the sign-in itself.
     verification_uri: Optional[str] = None
+    # The code the device flow shows the person. Display only, like the page.
+    user_code: str = USER_CODE
     premium_ai: bool = True
     # Relay listeners the plan allows (0 keeps the relay off).
     mcp_connections: int = 1
