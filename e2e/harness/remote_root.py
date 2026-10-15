@@ -48,11 +48,13 @@ SYSTEM_TOOL_DIRS = ("/usr/bin", "/bin")
 # minimal server. This keeps output predictable; it is not a boundary (a
 # command can still name any host program by its absolute path, and ``find``
 # can run programs), which is what bubblewrap, when available, is for. Tools
-# whose main job is to run other programs (env, xargs, timeout) or to edit
-# files in place (sed, awk) are left out.
+# whose main job is to run other programs (env, xargs, timeout) are left out.
+# ``sed`` is here because the DB credential scan reads config files with
+# ``sed -n``; it can edit files in place, but so can the shell itself, and
+# only the remote root is writable under bubblewrap.
 LINKED_TOOLS = (
-    "bash", "sh", "cat", "ls", "head", "tail", "grep", "sort", "uniq", "wc", "cut",
-    "tr", "find", "stat", "du", "id", "whoami", "date", "basename", "dirname",
+    "bash", "sh", "cat", "ls", "head", "tail", "grep", "sed", "sort", "uniq", "wc",
+    "cut", "tr", "find", "stat", "du", "id", "whoami", "date", "basename", "dirname",
 )
 
 # The login shell. It reads no start-up files, so the host's bash.bashrc and

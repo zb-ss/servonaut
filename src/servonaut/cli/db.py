@@ -35,10 +35,6 @@ _EXIT_USAGE = 2
 _EXIT_ABORTED = 5  # refused: a non-interactive shell without --yes / --pick
 _EXIT_CANCELLED = 130  # 128 + SIGINT, matching the shell convention
 
-_ENGINE_NAMES = {
-    "mysql": "MySQL", "mariadb": "MariaDB",
-    "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
-}
 _MANUAL_ENGINES = {
     "mysql": "mysql", "mariadb": "mariadb", "postgres": "postgres",
     "postgresql": "postgres", "pg": "postgres",
@@ -583,15 +579,15 @@ def _printable(value: Any) -> str:
 
 
 def _location(candidate: dict[str, Any]) -> str:
-    where = (f"{candidate.get('user', '?')}@{candidate.get('host', '?')}"
-             f":{candidate.get('port', '?')}")
-    database = candidate.get("database")
-    return _printable(f"{where}/{database}" if database else where)
+    from servonaut.services.db_credential_scanner import connection_text
+
+    return _printable(connection_text(candidate))
 
 
 def _engine_name(candidate: dict[str, Any]) -> str:
-    engine = str(candidate.get("engine") or "?")
-    return _ENGINE_NAMES.get(engine.lower(), _printable(engine))
+    from servonaut.services.db_credential_scanner import engine_display_name
+
+    return _printable(engine_display_name(str(candidate.get("engine") or "?")))
 
 
 def _print_candidates(candidates: Sequence[dict[str, Any]]) -> None:

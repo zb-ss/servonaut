@@ -153,3 +153,34 @@ def _read_until(
             return False
         screen.feed(chunk)
     return True
+
+
+# The number of the ``read`` system call, by machine (``/proc/<pid>/syscall``).
+_READ_SYSCALL = {"x86_64": "0", "aarch64": "63"}
+
+
+def _wait_reading_terminal(pid: int, deadline: float, what: str) -> None:
+    """Wait until *pid* is blocked reading its standard input.
+
+    A key the terminal turns into a signal (Ctrl+C) is lost when it arrives
+    after a prompt is printed but before the program starts to read: Python
+    notes the signal, then blocks in ``read`` until the next keystroke. A
+    person never types that fast; a journey does, so it presses such a key
+    only once the program waits. Returns at once where this cannot be seen
+    (no ``/proc``, another machine type, not allowed to look).
+    """
+    number = _READ_SYSCALL.get(os.uname().machine)
+    path = Path(f"/proc/{pid}/syscall")
+    if number is None or not path.exists():
+        return
+    while True:
+        try:
+            fields = path.read_text(encoding="ascii").split()
+        except OSError:
+            return
+        # "<number> <first argument, the descriptor> ...", or "running".
+        if fields[:1] == [number] and len(fields) > 1 and int(fields[1], 16) == 0:
+            return
+        if time.monotonic() > deadline:
+            raise TerminalTimeout(f"{what}: the program never waited for input ({fields[:2]})")
+        time.sleep(0.02)

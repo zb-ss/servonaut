@@ -588,7 +588,7 @@ servonaut secrets install bws         # macOS: brew · Linux: cargo
 export BWS_ACCESS_TOKEN=<your-token>
 
 # 3. Verify wiring
-servonaut secrets status              # shows plan, entitlement, active provider
+servonaut secrets status              # your plan and where secrets are kept (--json for scripts)
 
 # That's it — SSH key resolution now checks Bitwarden first, ~/.ssh as
 # fallback. Push a key into BWS with `bws secret create`:

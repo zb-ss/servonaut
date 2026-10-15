@@ -65,22 +65,36 @@ def describe_secret_store(provider: object) -> str:
     """
     if provider is None:
         return "no active secret store"
+    path = getattr(provider, "path", None)
+    return secret_store_phrase(
+        getattr(provider, "provider_name", None),
+        project_id=getattr(provider, "project_id", None),
+        path=str(path) if path is not None else None,
+    )
 
-    name = getattr(provider, "provider_name", None)
 
-    if name == "bitwarden":
-        project_id = getattr(provider, "project_id", None)
+def secret_store_phrase(
+    provider_name: object,
+    *,
+    project_id: object = None,
+    path: Optional[str] = None,
+) -> str:
+    """The store named by *provider_name*, worded as :func:`describe_secret_store`.
+
+    For callers that hold the provider's fields rather than the provider
+    (``servonaut secrets status`` reads them from the status snapshot).
+    """
+    if provider_name == "bitwarden":
         if isinstance(project_id, str) and project_id:
             return f"Bitwarden Secrets Manager (project {project_id})"
         return "Bitwarden Secrets Manager"
 
-    if name == "local":
-        path = getattr(provider, "path", None)
-        if path is not None:
+    if provider_name == "local":
+        if path:
             from servonaut.services.ssh_host_keys import home_relative
 
             # Shown to agents and pasted into tickets: no home directory.
-            return f"the local secret store ({home_relative(str(path))})"
+            return f"the local secret store ({home_relative(path)})"
         return "the local secret store"
 
     return "your active secret store"

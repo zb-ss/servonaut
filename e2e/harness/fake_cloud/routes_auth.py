@@ -83,9 +83,9 @@ def add_routes(
         return web.json_response(
             {
                 "device_code": store.next_device_code(),
-                "user_code": USER_CODE,
+                "user_code": scenario.user_code,
                 "verification_uri": verification,
-                "verification_uri_complete": f"{verification}?user_code={USER_CODE}",
+                "verification_uri_complete": f"{verification}?user_code={scenario.user_code}",
                 "interval": scenario.device_interval,
                 "expires_in": scenario.device_expires_in,
             }
