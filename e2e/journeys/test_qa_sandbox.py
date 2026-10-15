@@ -280,11 +280,15 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
 async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbox):
-    """--account-email and --verification-uri: what a recording shows instead of blanks or 127.0.0.1."""
-    email, page = "you@example.com", "https://example.com/device"
+    """--account-email, --verification-uri and --user-code: what a recording shows instead of
+    blanks, 127.0.0.1 or the test suite's own sign-in code."""
+    from e2e.harness.fake_cloud.state import USER_CODE
+
+    email, page, code = "you@example.com", "https://example.com/device", "WDJB-MJHT"
     before = _files(qa_sandbox.person.base)
     current = await qa_sandbox.up(
         "--signed-in", "--account-email", email, "--verification-uri", page, "--hostname", "laptop",
+        "--user-code", code,
     )
     session = Path(current["sandbox"]["home"]) / ".servonaut" / "auth.json"
     assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
@@ -297,6 +301,7 @@ async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbo
     login = await qa_sandbox.command("run", "--", "login", "--no-browser")
     assert login.returncode == 0, login.stderr
     assert page in login.stdout and "127.0.0.1" not in login.stdout, login.stdout
+    assert code in login.stdout and USER_CODE not in login.stdout, login.stdout
     assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
 
     # Names derived from the machine name use the given one: the relay's
