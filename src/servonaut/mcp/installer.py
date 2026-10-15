@@ -20,6 +20,7 @@ from servonaut.runtime import (
     detect_runtime,
     validate_launch_argv,
 )
+from servonaut.services.ssh_host_keys import home_relative
 
 SUPPORTED_TARGETS = [
     "claude",
@@ -297,6 +298,17 @@ def _merge_server_entry(
     return entry
 
 
+def _report_installed(config_path: Path, command: str, args: list[str]) -> None:
+    """Say where the server was installed, and with which command.
+
+    Paths are written home-relative so the output can be shared (an issue
+    report, a screenshot, a recording) without the user's name in it; the
+    config file itself keeps the full path.
+    """
+    print(f"Installed servonaut MCP server in {home_relative(str(config_path))}")
+    print(f"  command: {' '.join([home_relative(command), *args])}")
+
+
 def _install_claude(command: str, args: list[str]) -> None:
     """Install into Claude Code (~/.claude.json)."""
     config_path = Path.home() / ".claude.json"
@@ -315,8 +327,7 @@ def _install_claude(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart Claude Code to use the new MCP server.")
 
 
@@ -398,8 +409,7 @@ def _install_opencode(command: str, args: list[str]) -> None:
     servers["servonaut"] = entry
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {[command, *args]}")
+    _report_installed(config_path, command, args)
     print("Restart OpenCode to use the new MCP server.")
 
 
@@ -426,8 +436,7 @@ def _install_cursor(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart Cursor to use the new MCP server.")
 
 
@@ -451,8 +460,7 @@ def _install_windsurf(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart Windsurf to use the new MCP server.")
 
 
@@ -494,8 +502,7 @@ def _install_vscode(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart VS Code to use the new MCP server.")
 
 
@@ -524,8 +531,7 @@ def _install_agy(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart Antigravity (agy) to use the new MCP server.")
 
 
@@ -569,8 +575,7 @@ def _install_gemini(command: str, args: list[str]) -> None:
     )
 
     _save_json(config_path, config)
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     print("Restart Gemini CLI to use the new MCP server.")
 
 
@@ -781,8 +786,7 @@ def _install_codex(command: str, args: list[str]) -> None:
     rendered_config = "\n".join(before + new_block + after) + "\n"
     _atomic_write_text(config_path, rendered_config)
 
-    print(f"Installed servonaut MCP server in {config_path}")
-    print(f"  command: {command} {' '.join(args)}")
+    _report_installed(config_path, command, args)
     forwarded_count = len(_required_forward_env_vars())
     print(f"  forwards {forwarded_count} runtime variables by name")
     if preserved:
