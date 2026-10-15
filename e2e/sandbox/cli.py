@@ -57,6 +57,13 @@ def _parser() -> argparse.ArgumentParser:
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
+    up.add_argument("--account-email", default="", metavar="EMAIL",
+                    help="give the signed-in account this e-mail address (use a reserved "
+                         "example domain), so screens that show it have one")
+    up.add_argument("--verification-uri", default=None, metavar="URL",
+                    help="the sign-in page `servonaut login` names, for recordings that must "
+                         "not show the local address (display only: the sandbox still approves "
+                         "the sign-in itself)")
     up.add_argument("--keep", action="store_true",
                     help="keep the sandbox directory after it stops, renamed to "
                          "<root>.kept-<time> (for inspection; delete it yourself)")
@@ -108,7 +115,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
                         keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay,
-                        teams=args.teams)
+                        teams=args.teams, account_email=args.account_email,
+                        verification_uri=args.verification_uri)
 
     from e2e.sandbox import client
 

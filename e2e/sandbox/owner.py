@@ -336,7 +336,8 @@ class Owner:
     def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict,
                  lock: state.OwnerLock, stop_request: StopRequest, *,
                  signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
-                 teams: bool = False) -> None:
+                 teams: bool = False, account_email: str = "",
+                 verification_uri: Optional[str] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -348,6 +349,8 @@ class Owner:
         self.ssh_ca_off = ssh_ca_off
         self.api_delay = api_delay
         self.teams = teams
+        self.account_email = account_email
+        self.verification_uri = verification_uri
         self.logs = root / "logs"
         self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
@@ -439,6 +442,8 @@ class Owner:
             self.fake_cloud.switch_off_ssh_ca()
         if self.api_delay:
             self.fake_cloud.slow_down(self.api_delay)
+        if self.account_email or self.verification_uri:
+            self.fake_cloud.configure(email=self.account_email, verification_uri=self.verification_uri)
         if self.teams:
             self._join_team()
         self.moto = self._start(MotoAws().start())
@@ -902,6 +907,7 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
 def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
     ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
+    account_email: str = "", verification_uri: Optional[str] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -931,7 +937,8 @@ def up(
                 return 2
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
-                          teams=teams)
+                          teams=teams, account_email=account_email,
+                          verification_uri=verification_uri)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

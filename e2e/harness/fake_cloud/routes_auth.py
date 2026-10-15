@@ -45,7 +45,7 @@ def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
     return {
         "plan": scenario.plan,
         "user_id": scenario.user_id,
-        "email": "",
+        "email": scenario.email,
         "premium_ai": scenario.premium_ai,
         "mcp_connections": scenario.mcp_connections,
         "quota": scenario.quota,
@@ -63,7 +63,7 @@ def _token_payload(store: ScenarioStore, pair: tuple[str, str]) -> dict[str, Any
         "expires_in": 3600,
         "plan": scenario.plan,
         "user_id": scenario.user_id,
-        "email": "",
+        "email": scenario.email,
     }
 
 
@@ -74,7 +74,7 @@ def add_routes(
 
     async def device(request: web.Request) -> web.Response:
         scenario = store.snapshot()
-        verification = f"{base_url()}/device"
+        verification = scenario.verification_uri or f"{base_url()}/device"
         return web.json_response(
             {
                 "device_code": store.next_device_code(),

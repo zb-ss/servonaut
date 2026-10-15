@@ -269,6 +269,30 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbox):
+    """--account-email and --verification-uri: what a recording shows instead of blanks or 127.0.0.1."""
+    email, page = "you@example.com", "https://example.com/device"
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--account-email", email, "--verification-uri", page)
+    session = Path(current["sandbox"]["home"]) / ".servonaut" / "auth.json"
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Signing in again names the given page, never the local address, and the
+    # sandbox still approves it. BROWSER keeps the page from being opened.
+    qa_sandbox.env["BROWSER"] = "true"
+    logout = await qa_sandbox.command("run", "--", "logout")
+    assert logout.returncode == 0, logout.stderr
+    login = await qa_sandbox.command("run", "--", "login", "--no-browser")
+    assert login.returncode == 0, login.stderr
+    assert page in login.stdout and "127.0.0.1" not in login.stdout, login.stdout
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
 async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox, journey):
     from e2e.harness.ca_sshd import ADMIN_USER, BOOTSTRAP_KEY_NAME, HOST_NAME, LOGIN
     from e2e.harness.fake_cloud.routes_vault import TEAM_SLUG
