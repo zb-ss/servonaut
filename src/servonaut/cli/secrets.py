@@ -73,7 +73,6 @@ _EXIT_INSTALL_FAILED = 7
 BWS_INSTALL_DOC_URL = "https://bitwarden.com/help/secrets-manager-cli/"
 BWS_RELEASES_URL = "https://github.com/bitwarden/sdk-sm/releases"
 BWS_TOKEN_DOC_URL = "https://bitwarden.com/help/access-tokens/"
-PRICING_URL = "https://servonaut.dev/pricing"
 
 
 # ---------------------------------------------------------------------------
@@ -344,11 +343,8 @@ async def _run_setup_async(args: argparse.Namespace) -> int:
     guard = EntitlementGuard(auth)
     allowed, reason = guard.check("secrets_management")
     if not allowed:
-        print(
-            "Secrets management requires a Solo or Teams plan.\n"
-            f"  {reason}\n"
-            f"  Upgrade: {PRICING_URL}"
-        )
+        # The reason names the plan it needs and where to upgrade.
+        print(reason)
         return _EXIT_NOT_FOUND
 
     # Step 1 — bws installed?

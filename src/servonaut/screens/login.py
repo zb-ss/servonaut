@@ -12,6 +12,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.services.plan_labels import FEATURE_LABELS, plan_label
 from servonaut.utils.endpoints import API_URL_ENV, EndpointOverrideError, endpoint_override_errors
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -48,32 +49,11 @@ _ADMIN_ONLY_FEATURES = {
     "allow_dangerous_ai_tools",
 }
 
-# Human-readable feature names for the Account screen. Unreleased features are
-# filtered out so the user doesn't see things they can't use yet, even if the
-# backend's plan map still lists them. A feature without a label here shows
-# its raw slug; a test checks every feature the plan map names has one.
-_FEATURE_LABELS = {
-    "config_sync": "Config sync across machines",
-    "premium_ai": "Premium AI providers",
-    "gcp_provider": "GCP provider support",
-    "azure_provider": "Azure provider support",
-    "team_workspaces": "Team workspaces",
-    "memory_sync": "Memory Sync (encrypted memory backup)",
-    "memory_drift": "Drift detection across re-probes",
-    "memory_digest": "Periodic email digests of memory changes",
-    "memory_team_share": "Share encrypted memory with team-mates",
-    "memory_ai_summary": "AI-generated memory summaries",
-    "memory_compliance_export": "Signed compliance export tarball",
-    "secrets_management": "Secrets management",
-    "secrets_team_shared": "Team-shared secrets",
-    "personal_vault": "Personal vault for SSH keys and secrets",
-    "team_vault": "Team vault shared with your team",
-    "ssh_ca": "SSH certificates for team servers",
-    "proactive_monitoring": "Proactive monitoring and findings",
-}
-
-# Plan names as the product writes them; an unknown plan shows as sent.
-_PLAN_LABELS = {"free": "Free", "solo": "Solo", "teams": "Teams"}
+# Human-readable feature names for the Account screen (shared with every
+# other message that names a feature). Unreleased features are filtered out
+# so the user doesn't see things they can't use yet, even if the backend's
+# plan map still lists them.
+_FEATURE_LABELS = FEATURE_LABELS
 
 
 class PassphraseModal(ModalScreen[Optional[str]]):
@@ -363,8 +343,8 @@ class LoginScreen(Screen):
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
             email = self.app.redaction_service.scrub_stream(email)
         self.query_one("#account_info", Static).update(f"[bold]Logged in as:[/bold] {email}")
-        plan_label = _PLAN_LABELS.get(str(plan or "").lower(), plan)
-        self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {plan_label}")
+        shown_plan = plan_label(plan)
+        self.query_one("#plan_info", Static).update(f"[bold]Plan:[/bold] {shown_plan}")
         self.query_one("#entitlements_info", Static).update(
             "[bold]Features:[/bold]\n" + "\n".join(feature_lines)
         )
