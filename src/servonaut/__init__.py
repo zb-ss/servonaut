@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Servonaut — Interactive TUI for managing AWS EC2 SSH connections."""
-__version__ = '2.30.0rc9'
+__version__ = '2.30.0rc10'
 
 
 def get_version() -> str:
