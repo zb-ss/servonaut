@@ -12,7 +12,8 @@ name: Release mirror
 #            again through the public URL, then points latest.json (newest
 #            stable release) and channels/pre.json (newest release,
 #            candidates included) at the release when it is the newest;
-#   notes    links the mirrored desktop package from the release notes;
+#   notes    links the mirrored desktop package from the release notes, and
+#            removes that link once the package is gone from the release;
 #   audit    every day, re-checks the channel files and every file they list
 #            against GitHub, and opens an issue when they disagree.
 #
@@ -274,10 +275,12 @@ jobs:
           overwrite: true
           include-hidden-files: false
 
+  # Runs after every real mirror run: it adds the link once the package is
+  # mirrored and removes it again if the package was taken off the release.
   notes:
     name: notes
     needs: [resolve, mirror]
-    if: needs.mirror.outputs.desktop-deb != '' && needs.resolve.outputs.dry-run != 'true'
+    if: needs.mirror.result == 'success' && needs.resolve.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The only job that can write to the repository: it edits the release notes.

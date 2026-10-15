@@ -33,6 +33,11 @@ before you run it.
 pipx install servonaut
 ```
 
+**Desktop app (preview), Linux:** download the `.deb` from
+[servonaut.dev/download](https://servonaut.dev/download), and see the
+[Linux desktop preview](docs/release-candidates.md#linux-desktop-preview)
+notes before you install it.
+
 ### Try a release candidate
 
 Each release is published as a release candidate (for example `2.28.0rc1`)

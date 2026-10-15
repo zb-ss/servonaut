@@ -431,16 +431,34 @@ def notes_block(plan: dict[str, Any], base: str, prefix: str, download_page: str
     return "\n".join(lines)
 
 
+def notes_block_span(body: str) -> tuple[int, int] | None:
+    """Where the mirror block sits in the release notes, if it is there."""
+    start, end = body.find(NOTES_START), body.find(NOTES_END)
+    if start == -1 and end == -1:
+        return None
+    if start == -1 or end < start:
+        raise MirrorError("The release notes hold half a mirror block; fix them by hand")
+    return start, end + len(NOTES_END)
+
+
 def with_notes_block(body: str | None, block: str) -> str:
     """The release notes with the mirror block added, or replaced in place."""
     body = body or ""
-    start, end = body.find(NOTES_START), body.find(NOTES_END)
-    if start != -1 and end > start:
-        return body[:start] + block + body[end + len(NOTES_END):]
-    if start != -1 or end != -1:
-        raise MirrorError("The release notes hold half a mirror block; fix them by hand")
+    span = notes_block_span(body)
+    if span is not None:
+        return body[: span[0]] + block + body[span[1]:]
     stripped = body.rstrip()
     return f"{stripped}\n\n{block}\n" if stripped else f"{block}\n"
+
+
+def without_notes_block(body: str | None) -> str:
+    """The release notes without the mirror block, for a package that was withdrawn."""
+    body = body or ""
+    span = notes_block_span(body)
+    if span is None:
+        return body
+    parts = [part for part in (body[: span[0]].rstrip(), body[span[1]:].strip("\n")) if part]
+    return "\n\n".join(parts) + "\n" if parts else ""
 
 
 # --- public downloads ------------------------------------------------------
@@ -684,7 +702,8 @@ def command_notes(args: argparse.Namespace) -> None:
     plan = load_plan(args.plan)
     block = notes_block(plan, args.base, check_prefix(args.prefix), args.download_page)
     body = Path(args.body_file).read_text(encoding="utf-8")
-    updated = body if block is None else with_notes_block(body, block)
+    # Without a mirrored package, an earlier link to one must go.
+    updated = without_notes_block(body) if block is None else with_notes_block(body, block)
     Path(args.out).write_text(updated, encoding="utf-8")
     set_output("changed", "true" if updated != body else "false")
     print("release notes " + ("changed" if updated != body else "unchanged"))

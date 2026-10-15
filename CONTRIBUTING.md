@@ -85,6 +85,13 @@ gh release delete-asset v2.28.0rc1 servonaut-desktop-preview_2.28.0rc1_amd64.deb
 gh release delete-asset v2.28.0rc1 servonaut-desktop-preview_2.28.0rc1_SHA256SUMS --yes --repo zb-ss/servonaut
 ```
 
+Then run the release mirror (described below) for that tag again
+(`gh workflow run release-mirror.yml -f tag=<tag>`), so that its channel files
+and release notes stop pointing at the package. Deleting an asset does not
+delete its copy on the mirror: published files there are locked against
+replacement and deletion, and taking one down needs a maintainer with
+administrative access to the storage.
+
 Every published release and candidate also carries the install scripts,
 `install.sh` and `install.ps1`, with `install-scripts_SHA256SUMS`, attached by
 the Release install scripts workflow from the release's tag commit. An install
@@ -97,6 +104,44 @@ run `gh workflow run release-install-scripts.yml -f tag=vX.Y.Z`; the tag's own
 scripts are used whichever branch runs it. Add `-f dry_run=true` to check
 without uploading. Tags from before the workflow existed are refused, since
 their scripts fall back to installing the default branch.
+
+Once those two workflows have attached a release's files, the Release mirror
+workflow copies them to the download mirror, at
+`https://releases.servonaut.dev/<tag>/<asset>`, which stays fast on slow or
+lossy connections. GitHub remains the source of truth: a file is uploaded only
+when the `SHA256SUMS` asset that lists it matches, the desktop package only
+with a build-provenance attestation from the Desktop preview .deb workflow for
+that very tag, and files no `SHA256SUMS` lists are skipped. An upload never
+replaces a file the mirror already holds, and every file is downloaded again
+through its public URL and compared before the run goes on. The run then
+updates two channel files:
+
+- `latest.json` names GitHub's latest stable release and lists its files with
+  their size, SHA-256 and GitHub address;
+  [servonaut.dev/download](https://servonaut.dev/download) reads it;
+- `channels/pre.json` has the same shape and names the newest release of any
+  kind, candidates included.
+
+Neither ever moves to an older release. While the release has a mirrored
+desktop package, its notes carry a "Faster download" block between
+`<!-- release-mirror:start -->` and `<!-- release-mirror:end -->`; a re-run
+replaces the block, and removes it once the package is gone from the release.
+Every day an audit downloads both channel files and every file they list,
+compares them with GitHub, and opens a "Release mirror audit failed" issue (or
+comments on the open one) when they disagree.
+
+The repository variable `RELEASE_MIRROR` switches the mirror. While it is
+`off`, or unset, runs end with a notice and upload nothing, and the audit does
+not run. To mirror a release again, or one published while the mirror was off,
+run `gh workflow run release-mirror.yml -f tag=vX.Y.Z`; files already mirrored
+are kept. Add `-f dry_run=true` to download and verify without uploading or
+editing anything, which also works while the mirror is off, and run
+`gh workflow run release-mirror.yml -f audit=true` to audit straight away.
+The workflow needs the repository variable `MIRROR_PUBLIC_BASE` and the
+`release-mirror` environment, which only the default branch can deploy to,
+with the secrets `R2_MIRROR_ACCESS_KEY_ID`, `R2_MIRROR_SECRET_ACCESS_KEY`,
+`R2_MIRROR_ENDPOINT` and `R2_MIRROR_BUCKET`: a storage token that can only read
+and write objects in that one bucket.
 
 Binary release candidates (standalone CLI archives and desktop installers)
 are assembled and verified by the Release candidate workflow, separately from
