@@ -337,7 +337,8 @@ class Owner:
                  lock: state.OwnerLock, stop_request: StopRequest, *,
                  signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
                  teams: bool = False, account_email: str = "",
-                 verification_uri: Optional[str] = None, hostname: Optional[str] = None) -> None:
+                 verification_uri: Optional[str] = None, hostname: Optional[str] = None,
+                 ai_script: Optional[dict] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -352,6 +353,7 @@ class Owner:
         self.account_email = account_email
         self.verification_uri = verification_uri
         self.hostname = hostname
+        self.ai_script = ai_script
         self.logs = root / "logs"
         self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
@@ -445,6 +447,10 @@ class Owner:
             self.fake_cloud.slow_down(self.api_delay)
         if self.account_email or self.verification_uri:
             self.fake_cloud.configure(email=self.account_email, verification_uri=self.verification_uri)
+        if self.ai_script is not None:
+            from e2e.sandbox import ai_script
+
+            ai_script.apply(self.fake_cloud, self.ai_script)
         if self.teams:
             self._join_team()
         self.moto = self._start(MotoAws().start())
@@ -912,6 +918,7 @@ def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
     ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
+    ai_script: Optional[Path] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -928,6 +935,15 @@ def up(
     if problem:
         _say(f"not starting: {problem}")
         return 2
+    script = None
+    if ai_script is not None:
+        from e2e.sandbox import ai_script as ai_script_module
+
+        try:
+            script = ai_script_module.load(ai_script)
+        except ai_script_module.ScriptError as exc:
+            _say(f"not starting: {exc}")
+            return 2
     pointer = state.pointer_path()
     owner: Optional[Owner] = None
     try:
@@ -942,7 +958,7 @@ def up(
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
                           teams=teams, account_email=account_email,
-                          verification_uri=verification_uri, hostname=hostname)
+                          verification_uri=verification_uri, hostname=hostname, ai_script=script)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

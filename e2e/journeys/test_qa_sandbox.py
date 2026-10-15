@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -302,6 +303,43 @@ async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbo
         assert "laptop-" in status.stdout and os.uname().nodename not in status.stdout, status.stdout
     finally:
         await qa_sandbox.command("run", "--", "connect", "--stop")
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, journey):
+    """--ai-script FILE: what `servonaut ai` shows, written in advance."""
+    bad = journey.directory / "bad-ai.json"
+    bad.write_text('{"turns": [{"text": "no reply key"}]}', encoding="utf-8")
+    refused = await qa_sandbox.command("up", "--ai-script", str(bad), "--root", str(qa_sandbox.root))
+    assert refused.returncode == 2 and "turns must be a list" in refused.stderr, refused.stderr
+
+    script = journey.directory / "ai.json"
+    script.write_text(json.dumps({
+        "quota": {"tokens_used": 41200, "resets_in_days": 18},
+        "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
+        "conversations": [{
+            "id": "conv-1", "title": "Stopped servers", "minutes_ago": 45,
+            "messages": [{"role": "user", "content": "Which servers are stopped?"},
+                         {"role": "assistant", "content": "db-1 and build-1."}],
+        }],
+    }), encoding="utf-8")
+    before = _files(qa_sandbox.person.base)
+    await qa_sandbox.up("--signed-in", "--ai-script", str(script))
+
+    # Streamed: the fake service answers chat as a stream only.
+    chat = await qa_sandbox.command("run", "--", "ai", "chat", "--stream", "Which servers are stopped?")
+    assert chat.returncode == 0, chat.stderr
+    assert "Two servers are stopped: db-1 and build-1." in chat.stdout, chat.stdout
+    quota = await qa_sandbox.command("run", "--", "ai", "quota")
+    assert quota.returncode == 0, quota.stderr
+    assert re.search(r"Resets: in 1[78] days", quota.stdout), quota.stdout
+    listed = await qa_sandbox.command("run", "--", "ai", "conversations", "list")
+    assert listed.returncode == 0, listed.stderr
+    assert "Stopped servers" in listed.stdout and "2030" not in listed.stdout, listed.stdout
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)
