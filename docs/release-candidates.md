@@ -177,6 +177,13 @@ gh attestation verify servonaut-desktop-preview_2.28.0rc1_amd64.deb --repo zb-ss
 The attestation shows that the package was built by a workflow in this
 repository, and records the commit it was built from.
 
+If downloads from GitHub are slow for you, the same files are also served
+from a download mirror that stays fast on slow or lossy connections. Each
+release's notes link its package there, and
+[servonaut.dev/download](https://servonaut.dev/download) offers the newest
+stable one. The mirrored package is byte-for-byte the GitHub asset, so the
+same two commands check it.
+
 Older GitHub CLI versions cannot be relied on here: before 2.49 there is no
 `gh attestation` command at all ("unknown command"; some distributions still
 package such a version), and from 2.49 to 2.66 `gh attestation verify`
