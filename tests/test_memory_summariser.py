@@ -307,6 +307,33 @@ class TestObservedVsDeclaredRendering:
         assert "pinned by operator" in result
         assert "2026-04-10T09:00Z" in result
 
+    def test_a_pin_shows_its_time_to_the_minute(self) -> None:
+        """A pin stored with microseconds and an offset shows as UTC to the minute."""
+        modules = {
+            "runtimes": _make_module(
+                "runtimes",
+                observed={"node": "v20.11.0"},
+                declared={"node": {"value": "v22.0.0", "pinned_by": "operator",
+                                   "at": "2026-04-10T10:00:42.183015+01:00"}},
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "(pinned by operator at 2026-04-10T09:00Z)" in result
+        assert ".183015" not in result
+
+    def test_a_pin_on_nothing_observed_shows_no_observed_value(self) -> None:
+        """When the probe saw nothing, the pin is not compared with "None"."""
+        modules = {
+            "runtimes": _make_module(
+                "runtimes",
+                observed={"node": None},
+                declared={"node": {"value": "v22.0.0", "pinned_by": "operator", "at": "2026-04-10T09:00Z"}},
+            )
+        }
+        result = Summariser().summarise(_INSTANCE_META, modules, now=_NOW)
+        assert "declared=v22.0.0 (pinned by operator at 2026-04-10T09:00Z)" in result
+        assert "observed=None" not in result
+
     def test_no_declared_just_shows_observed(self) -> None:
         """When no declared entry exists, just show the observed value."""
         modules = {

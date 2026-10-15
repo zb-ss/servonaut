@@ -95,7 +95,7 @@ def _render_value(
     Returns:
         A string like ``"v20.11.0"`` when they match, or
         ``"observed=v20.11.0 declared=v22.0.0 (pinned by operator at 2026-04-10T09:00Z)"``
-        when they differ.
+        when they differ (no ``observed=`` part when nothing was observed).
     """
     if declared_entry is None:
         return str(observed) if observed is not None else ""
@@ -106,11 +106,20 @@ def _render_value(
         return str(observed) if observed is not None else ""
 
     pinned_by = declared_entry.get("pinned_by", "?")
-    at = declared_entry.get("at", "?")
-    return (
-        f"observed={observed} declared={declared_value}"
-        f" (pinned by {pinned_by} at {at})"
-    )
+    at = _pin_time(declared_entry.get("at", "?"))
+    seen = f"observed={observed} " if observed is not None else ""
+    return f"{seen}declared={declared_value} (pinned by {pinned_by} at {at})"
+
+
+def _pin_time(value: Any) -> str:
+    """A pin's time to the minute, in UTC (``2026-04-10T09:00Z``); as stored if unparsable."""
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
 
 
 def _is_stale(probed_at: str, ttl_seconds: int, now: datetime) -> bool:
@@ -320,9 +329,9 @@ class Summariser:
             ("arch", "arch"),
         ):
             val = observed.get(field)
-            if val is None:
-                continue
             dec = declared.get(field)
+            if val is None and dec is None:
+                continue
             rendered = _render_value(field, val, dec)
             if rendered:
                 lines.append(f"{label}: {rendered}")
@@ -334,12 +343,14 @@ class Summariser:
         declared = mod.get("declared", {})
 
         # Only rows where runtime is installed (non-null).
+        # A pinned runtime shows even when the probe did not find it (one in
+        # a container, say): that is what pinning it is for.
         rows = []
-        for runtime in sorted(observed.keys()):
-            val = observed[runtime]
-            if val is None:
-                continue
+        for runtime in sorted(set(observed) | set(declared)):
+            val = observed.get(runtime)
             dec = declared.get(runtime)
+            if val is None and dec is None:
+                continue
             rendered = _render_value(runtime, val, dec)
             rows.append((runtime, rendered))
 
@@ -382,15 +393,15 @@ class Summariser:
 
         # Nginx version — prober emits key ``"nginx"``.
         nginx_ver = observed.get("nginx")
-        if nginx_ver:
-            dec = declared.get("nginx")
-            lines.append(f"nginx: {_render_value('nginx', nginx_ver, dec)}")
+        dec = declared.get("nginx")
+        if nginx_ver or dec:
+            lines.append(f"nginx: {_render_value('nginx', nginx_ver or None, dec)}")
 
         # Apache version — prober emits key ``"apache"``.
         apache_ver = observed.get("apache")
-        if apache_ver:
-            dec = declared.get("apache")
-            lines.append(f"apache: {_render_value('apache', apache_ver, dec)}")
+        dec = declared.get("apache")
+        if apache_ver or dec:
+            lines.append(f"apache: {_render_value('apache', apache_ver or None, dec)}")
 
         # Sites-enabled — prober emits separate ``nginx_sites_enabled`` and
         # ``apache_sites_enabled`` lists; merge and deduplicate for the summary.
@@ -473,10 +484,10 @@ class Summariser:
         lines: List[str] = ["## Databases"]
         for key, label in engines:
             val = observed.get(key)
-            if not val:
-                continue
             dec = declared.get(key)
-            lines.append(f"{label}: {_render_value(key, val, dec)}")
+            if not val and dec is None:
+                continue
+            lines.append(f"{label}: {_render_value(key, val or None, dec)}")
 
         clusters = observed.get("postgres_clusters") or []
         if clusters:
