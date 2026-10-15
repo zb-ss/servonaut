@@ -279,6 +279,89 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbox):
+    """--account-email and --verification-uri: what a recording shows instead of blanks or 127.0.0.1."""
+    email, page = "you@example.com", "https://example.com/device"
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up(
+        "--signed-in", "--account-email", email, "--verification-uri", page, "--hostname", "laptop",
+    )
+    session = Path(current["sandbox"]["home"]) / ".servonaut" / "auth.json"
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Signing in again names the given page, never the local address, and the
+    # sandbox still approves it. BROWSER keeps the page from being opened.
+    qa_sandbox.env["BROWSER"] = "true"
+    logout = await qa_sandbox.command("run", "--", "logout")
+    assert logout.returncode == 0, logout.stderr
+    login = await qa_sandbox.command("run", "--", "login", "--no-browser")
+    assert login.returncode == 0, login.stderr
+    assert page in login.stdout and "127.0.0.1" not in login.stdout, login.stdout
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Names derived from the machine name use the given one: the relay's
+    # client ID starts with it.
+    started = await qa_sandbox.command("run", "--", "connect", "--bg")
+    assert started.returncode == 0, started.stderr
+    try:
+        for _ in range(40):  # until the first heartbeat lands
+            status = await qa_sandbox.command("run", "--", "connect", "--status")
+            if "Backend view: connected" in status.stdout:
+                break
+            await asyncio.sleep(0.5)
+        assert "laptop-" in status.stdout and os.uname().nodename not in status.stdout, status.stdout
+    finally:
+        await qa_sandbox.command("run", "--", "connect", "--stop")
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, journey):
+    """--ai-script FILE: what `servonaut ai` shows, written in advance."""
+    bad = journey.directory / "bad-ai.json"
+    bad.write_text('{"turns": [{"text": "no reply key"}]}', encoding="utf-8")
+    refused = await qa_sandbox.command("up", "--ai-script", str(bad), "--root", str(qa_sandbox.root))
+    assert refused.returncode == 2 and "turns must be a list" in refused.stderr, refused.stderr
+
+    script = journey.directory / "ai.json"
+    script.write_text(json.dumps({
+        "model": "hosted-model",
+        "topup_url": "https://checkout.stripe.com/c/pay/cs_example",
+        "quota": {"tokens_used": 41200, "resets_in_days": 18},
+        "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
+        "conversations": [{
+            "id": "conv-1", "title": "Stopped servers", "minutes_ago": 45,
+            "messages": [{"role": "user", "content": "Which servers are stopped?"},
+                         {"role": "assistant", "content": "db-1 and build-1."}],
+        }],
+    }), encoding="utf-8")
+    before = _files(qa_sandbox.person.base)
+    await qa_sandbox.up("--signed-in", "--ai-script", str(script))
+
+    # Streamed: the fake service answers chat as a stream only.
+    chat = await qa_sandbox.command("run", "--", "ai", "chat", "--stream", "Which servers are stopped?")
+    assert chat.returncode == 0, chat.stderr
+    assert "Two servers are stopped: db-1 and build-1." in chat.stdout, chat.stdout
+    assert "model=hosted-model" in chat.stderr and "e2e" not in chat.stderr, chat.stderr
+    quota = await qa_sandbox.command("run", "--", "ai", "quota")
+    assert quota.returncode == 0, quota.stderr
+    assert re.search(r"Resets: in 1[78] days", quota.stdout), quota.stdout
+    listed = await qa_sandbox.command("run", "--", "ai", "conversations", "list")
+    assert listed.returncode == 0, listed.stderr
+    assert "Stopped servers" in listed.stdout and "2030" not in listed.stdout, listed.stdout
+    topup = await qa_sandbox.command("run", "--", "ai", "topup", "pack_small")
+    assert topup.returncode == 0, topup.stderr
+    assert "https://checkout.stripe.com/c/pay/cs_example" in topup.stdout, topup.stdout
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
 async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox, journey):
     from e2e.harness.ca_sshd import ADMIN_USER, BOOTSTRAP_KEY_NAME, HOST_NAME, LOGIN
     from e2e.harness.fake_cloud.routes_vault import TEAM_SLUG
