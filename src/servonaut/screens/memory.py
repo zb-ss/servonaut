@@ -12,7 +12,6 @@ import hashlib
 import inspect
 import logging
 import os
-import shlex
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +39,7 @@ from servonaut.services.memory.status import (
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.editor import editor_argv
 
 logger = logging.getLogger(__name__)
 
@@ -1136,19 +1136,7 @@ class MemoryScreen(Screen):
     @staticmethod
     def _editor_argv(path: Path) -> List[str]:
         """Build the editor argv from ``$VISUAL`` / ``$EDITOR`` (default ``vi``)."""
-        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-        # $EDITOR / $VISUAL may include flags (e.g. "emacsclient -c -a emacs")
-        # so split with shlex rather than passing the raw string as argv[0];
-        # otherwise subprocess tries to exec the whole thing as a binary name
-        # and crashes with FileNotFoundError.
-        try:
-            argv = shlex.split(editor)
-        except ValueError:
-            argv = [editor]
-        if not argv:
-            argv = ["vi"]
-        argv.append(str(path))
-        return argv
+        return editor_argv(path)
 
     def _run_external_editor(self, argv: List[str]) -> Optional[subprocess.CompletedProcess]:
         """Run the editor in the real terminal while the app is suspended.

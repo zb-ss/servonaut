@@ -372,6 +372,40 @@ class TestAnnotate:
         assert calls[0][0] == "vi"
 
 
+    def test_annotate_splits_an_editor_with_flags(self, tmp_path: Path, monkeypatch: Any) -> None:
+        """$VISUAL="code --wait" runs ``code --wait <file>``, not a program named "code --wait"."""
+        from servonaut.cli.memory import _cmd_annotate
+        import subprocess as _subprocess
+
+        monkeypatch.setenv("VISUAL", "code --wait")
+        memory_service = _make_memory_service(tmp_path)
+        memory_service._store = MemoryStore(root=tmp_path)
+        calls: List[Any] = []
+        monkeypatch.setattr(_subprocess, "run", lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0))
+
+        rc = _cmd_annotate(_make_args(memory_command="annotate", instance="i-abc123"), _fake_config(),
+                           memory_service, _make_inst())
+
+        assert rc == 0
+        assert calls[0][:2] == ["code", "--wait"]
+
+    def test_annotate_reports_a_missing_editor(self, tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+        """An editor that is not installed is reported in words, not as a traceback."""
+        from servonaut.cli.memory import _cmd_annotate
+
+        monkeypatch.setenv("VISUAL", "no-such-editor-e2e")
+        memory_service = _make_memory_service(tmp_path)
+        memory_service._store = MemoryStore(root=tmp_path)
+
+        rc = _cmd_annotate(_make_args(memory_command="annotate", instance="i-abc123"), _fake_config(),
+                           memory_service, _make_inst())
+
+        assert rc == 6
+        err = capsys.readouterr().err
+        assert "Could not start the editor 'no-such-editor-e2e'" in err
+        assert "Set $VISUAL or $EDITOR" in err
+
+
 # ---------------------------------------------------------------------------
 # memory show snapshot
 # ---------------------------------------------------------------------------
