@@ -100,6 +100,11 @@ class AccountFleet:
     # ------------------------------------------------------------------
 
     @property
+    def credentials_missing(self) -> bool:
+        """True when no account found credentials on the last refresh (AWS not set up here)."""
+        return all(getattr(b.service, "credentials_missing", False) is True for b in self.bindings)
+
+    @property
     def multi(self) -> bool:
         """True when this provider's servers name their account."""
         return self._qualified
