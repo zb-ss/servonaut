@@ -27,9 +27,9 @@ pytestmark = [pytest.mark.e2e_pr]
 
 OWNER_ID = 4242
 MEMBER_ID = 4243
-MEMBER_EMAIL = "member@example.test"
+MEMBER_EMAIL = "member@example.com"
 SECOND_ID = 4244
-SECOND_EMAIL = "second@example.test"
+SECOND_EMAIL = "second@example.com"
 
 
 def _client(fake_cloud) -> httpx.Client:
@@ -82,7 +82,7 @@ def test_an_added_user_is_answered_as_themselves(fake_cloud):
         (MEMBER_ID, 200), (None, 200), (None, 401), (None, 401), (None, 200),
     ]
     with pytest.raises(ValueError):
-        fake_cloud.add_user(OWNER_ID, email="again@example.test")
+        fake_cloud.add_user(OWNER_ID, email="again@example.com")
 
 
 def test_a_device_sign_in_completes_as_the_user_who_approved_it(fake_cloud):
@@ -127,7 +127,7 @@ async def test_a_managed_team_follows_the_documented_member_rules(fake_cloud):
     detail = await owner.get_team(slug)
     assert (detail["role"], detail["max_seats"]) == ("owner", 3)
     assert [(m["invitation_email"], m["role"], m["is_accepted"]) for m in detail["members"]] == [
-        ("owner@example.test", "owner", True), (MEMBER_EMAIL, "member", False),
+        ("owner@example.com", "owner", True), (MEMBER_EMAIL, "member", False),
     ]
     pending = detail["members"][1]
     assert pending["accept_url"] == invited["accept_url"] and pending["invitation_expires_at"]
@@ -139,7 +139,7 @@ async def test_a_managed_team_follows_the_documented_member_rules(fake_cloud):
             await call
         assert (caught.value.status, caught.value.code) == (status, code), caught.value.message
 
-    await refused(owner.invite_member(slug, "owner2@example.test", "owner"), 400, "invalid_role")
+    await refused(owner.invite_member(slug, "owner2@example.com", "owner"), 400, "invalid_role")
     await refused(owner.invite_member(slug, "not-an-address", "member"), 400, "invalid_email")
     await refused(owner.invite_member(slug, MEMBER_EMAIL, "viewer"), 409, "already_member")
     await refused(owner.update_role(slug, "999", "viewer"), 404, "not_found")
@@ -171,7 +171,7 @@ async def test_a_managed_team_follows_the_documented_member_rules(fake_cloud):
     fake_cloud.accept_invitation(SECOND_EMAIL)
     viewer_view = await second.get_team(slug)
     assert all("accept_url" not in row for row in viewer_view["members"])
-    await refused(owner.invite_member(slug, "fourth@example.test", "member"), 422, "seat_limit_reached")
+    await refused(owner.invite_member(slug, "fourth@example.com", "member"), 422, "seat_limit_reached")
 
     # Shared servers: managers add and remove them, by name; hostnames are unique.
     shared = await admin.push_server(slug, {"name": "web-9", "hostname": "10.0.0.9", "port": 2222})
@@ -189,7 +189,7 @@ async def test_a_managed_team_follows_the_documented_member_rules(fake_cloud):
 
     # A team without seats (no Teams subscription) refuses invitations with 402.
     lapsed = fake_cloud.account.create_team(name="Lapsed", owner_user_id=SECOND_ID, max_seats=0)
-    await refused(second.invite_member(lapsed["slug"], "x@example.test", "member"), 402, "subscription_inactive")
+    await refused(second.invite_member(lapsed["slug"], "x@example.com", "member"), 402, "subscription_inactive")
 
 
 @pytest.mark.asyncio

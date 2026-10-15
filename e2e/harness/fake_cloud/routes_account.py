@@ -63,7 +63,7 @@ VAULT_SHARED_SERVER_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHm1Vi6P5lT5
 
 # Who the scenario's account is when a managed team lists it (its
 # entitlements carry no e-mail address).
-SCENARIO_ACCOUNT_EMAIL = "owner@example.test"
+SCENARIO_ACCOUNT_EMAIL = "owner@example.com"
 SCENARIO_ACCOUNT_NAME = "Team owner"
 
 

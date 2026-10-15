@@ -24,9 +24,9 @@ from e2e.harness.session_seed import seed_session
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
 TEAM = "Example team"
-OWNER_EMAIL = "owner@example.test"
+OWNER_EMAIL = "owner@example.com"
 COLLEAGUE_ID = 4243
-COLLEAGUE = "colleague@example.test"
+COLLEAGUE = "colleague@example.com"
 OWNER_ROW = [OWNER_EMAIL, "owner", "Active"]
 
 

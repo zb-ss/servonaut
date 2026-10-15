@@ -560,11 +560,11 @@ signed in to the local API.
   It needs a short `--root`, such as `/tmp/svt` (`up` says how short): the
   private SSH agent of a certificate login keeps its socket under it.
 - With `--teams` there is also a second person, a member to be:
-  `member@example.test`, with a home of their own (`<root>/member`), signed
+  `member@example.com`, with a home of their own (`<root>/member`), signed
   out and not yet in the team. `python -m e2e.sandbox run --as member --
   <args>` runs their CLI; their `login` is approved as them. Invite them on
   the Teams screen, then `python -m e2e.sandbox accept-invite
-  member@example.test` accepts the invitation the way their browser would.
+  member@example.com` accepts the invitation the way their browser would.
   From there the member walk is `run --as member -- login`, `run --as member
   -- vault setup`, the owner's `run -- vault grants process`, then the
   member's `vault list` and, once the owner enrolled `server-1` in the

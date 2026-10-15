@@ -49,7 +49,7 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
 
 OWNER_ID = 4242
 MEMBER_ID = 4243
-MEMBER_EMAIL = "member@example.test"
+MEMBER_EMAIL = "member@example.com"
 
 
 @pytest.fixture

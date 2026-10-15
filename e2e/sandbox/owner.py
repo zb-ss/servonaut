@@ -120,7 +120,7 @@ _TEAMS_PLAN = "teams"
 # With --teams, a second person beside the owner: a team member to be, with
 # a home of their own (<root>/member) and a FakeCloud account, signed out.
 MEMBER = "member"
-MEMBER_EMAIL = "member@example.test"
+MEMBER_EMAIL = "member@example.com"
 MEMBER_NAME = "Team member"
 _OWNER_DIR = "user"
 # Each person's home; the longest decides how long a --teams root may be.

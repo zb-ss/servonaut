@@ -22,7 +22,7 @@ examples:
   python -m e2e.sandbox up --scenario multi-account &
   python -m e2e.sandbox status
   python -m e2e.sandbox run -- servonaut hetzner list
-  python -m e2e.sandbox accept-invite member@example.test   # up --teams
+  python -m e2e.sandbox accept-invite member@example.com   # up --teams
   python -m e2e.sandbox run --as member -- login           # up --teams
   python -m e2e.sandbox mcp-call list_instances
   python -m e2e.sandbox desktop
@@ -56,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
                     help="on the Teams plan, owning a team whose shared server (server-1) runs "
                          "an sshd that honours SSH certificates, to walk Team Vault and SSH "
                          "certificates end to end; with a second person, a member to be "
-                         "(member@example.test, own home, signed out: run --as member, "
+                         "(member@example.com, own home, signed out: run --as member, "
                          "accept-invite); needs a short --root, such as /tmp/svt")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
