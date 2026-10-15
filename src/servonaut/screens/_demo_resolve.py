@@ -213,7 +213,9 @@ def replace_instances(
       rows, so demo mode can always map a row back to its real record;
     * ``app.instances`` gets them as displayed — redacted in demo mode;
     * a row already listed for the same server keeps its dict, refilled in
-      place, so a screen holding that dict follows the refresh.
+      place, so a screen holding that dict follows the refresh;
+    * the slice stays where it was in the list (a provider listed for the
+      first time goes last).
 
     Returns the new ``app.instances``. The caller's dicts are never modified.
     """
@@ -261,7 +263,11 @@ def replace_instances(
     staying = [row for row in current if kept(row)]
     if displaced:
         _redraw_displaced(app, redaction, staying, displaced)
-    app.instances = staying + shown_rows
+    # The slice keeps its place: refreshing one provider, or deleting one of
+    # its servers, must not move that provider's servers below the others.
+    first = next((i for i, row in enumerate(current) if not kept(row)), len(current))
+    before = sum(1 for row in current[:first] if kept(row))
+    app.instances = staying[:before] + shown_rows + staying[before:]
     return app.instances
 
 

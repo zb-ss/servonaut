@@ -42,7 +42,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text, replace_instances
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     account_ref,
@@ -205,7 +205,12 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             name="aws_mgr_load",
         )
 
-    async def _load_instances(self) -> None:
+    async def _load_instances(self, *, update_fleet: bool = False) -> None:
+        """Fetch every account's servers into the table.
+
+        *update_fleet* also puts them in the server list, after this screen
+        changed the fleet (a server deleted here must leave it too).
+        """
         # Every AWS account's instances: a refresh after acting on one
         # account must never leave the table showing that account alone.
         fleet = inventory(self.app, "aws")  # guard ran in _refresh
@@ -214,6 +219,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             # Keep the fetched rows untouched; what the table draws is
             # derived from them (demo-mode fakes when demo mode is on).
             self._raw_instances = list(instances)
+            if update_fleet:
+                replace_instances(self.app, "aws", instances)
             self._apply_display_rows()
             self._render_table()
             n = len(instances)
@@ -614,11 +621,8 @@ class AWSManagerScreen(DemoRowsMixin, Screen):
             )
             return
 
-        self.notify(
-            f"EC2 instance {self._display_id(instance_id)} terminating.",
-            severity="information", markup=False,
-        )
-        await self._load_instances()
+        self.notify(f"EC2 instance {name} terminating.", severity="information", markup=False)
+        await self._load_instances(update_fleet=True)
 
     # ------------------------------------------------------------------
     # Helpers

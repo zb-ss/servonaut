@@ -14,6 +14,7 @@ CloudTrail reads the trail again when the account changes.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -270,3 +271,44 @@ async def test_object_storage_lists_the_picked_accounts_buckets(tui, seed, moto)
         await t.wait_until(
             lambda: _column(t, "#s3_table", 1) == ["e2e-second-assets"], desc="second buckets"
         )
+
+
+def _ec2_manager_state(t, name: str) -> str:
+    """The EC2 manager's State cell for the row named *name*."""
+    return next(row[4] for row in table_text(t, "#aws_mgr_table") if row[1] == name)
+
+
+def _list_state(t, name: str) -> Optional[str]:
+    """The server list's State cell for the row named *name* (account/name)."""
+    return next((row[2] for row in table_text(t, "InstanceTable") if row[1] == name), None)
+
+
+async def test_terminating_updates_the_server_list(tui, seed, moto):
+    """Terminate names the instance, and the server list shows it going away."""
+    role = _seed_accounts(seed, moto)
+    target = f"{SECOND}/jobs-1"
+    async with tui() as t:
+        await _open_manager(t)
+        table = t.on_screen("#aws_mgr_table")
+        await click_row(t, table, _column(t, "#aws_mgr_table", 1).index(target))
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Terminate EC2 Instance", target, screen_only=True)
+        await t.fill("#confirm_input", "terminate")
+        await t.wait_until(lambda: not t.on_screen("#btn_confirm").disabled, desc="confirm enabled")
+        await t.click("#btn_confirm")
+        await t.wait_for_screen("AWSManagerScreen")
+        await t.wait_for_toast(rf"^EC2 instance {re.escape(target)} terminating\.$")
+        await t.wait_until(
+            lambda: _states(moto, role)["jobs-1"] in ("shutting-down", "terminated"),
+            desc="jobs-1 terminating in the second account",
+        )
+        await t.wait_until(
+            lambda: _ec2_manager_state(t, target) in ("shutting-down", "terminated"),
+            desc="row redrawn",
+        )
+
+        await t.nav("nav_list")
+        await t.wait_for_screen("InstanceListScreen")
+        await t.wait_until(lambda: _list_state(t, target) is not None, desc="server list rows")
+        assert _list_state(t, target) in ("shutting-down", "terminated")
