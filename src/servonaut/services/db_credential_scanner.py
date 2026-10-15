@@ -36,6 +36,32 @@ _SCHEME_ENGINE = {
     "postgres": "postgres", "postgresql": "postgres", "pgsql": "postgres",
 }
 
+# Engine as people write it, for the lists the CLI and the TUI show.
+_ENGINE_DISPLAY_NAMES = {
+    "mysql": "MySQL", "mariadb": "MariaDB",
+    "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
+}
+
+
+def engine_display_name(engine: str) -> str:
+    """``mysql`` → ``MySQL``; an engine without a known name is returned as is.
+
+    The fallback is raw text from a config file: callers escape or sanitise
+    it for their surface.
+    """
+    return _ENGINE_DISPLAY_NAMES.get(str(engine).lower(), str(engine))
+
+
+def connection_text(candidate: Dict[str, object]) -> str:
+    """``user@host:port/database`` of a :func:`redact` preview, as listed.
+
+    Raw text from a config file: callers escape or sanitise it.
+    """
+    where = (f"{candidate.get('user', '?')}@{candidate.get('host', '?')}"
+             f":{candidate.get('port', '?')}")
+    database = candidate.get("database")
+    return f"{where}/{database}" if database else where
+
 
 @dataclass
 class DBCandidate:
