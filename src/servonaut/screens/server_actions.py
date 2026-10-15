@@ -26,6 +26,7 @@ from servonaut.services.ssh_host_keys import (
     identity_file_args,
     trusted_host_keys,
 )
+from servonaut.utils.instance_resolver import is_aws_row
 from servonaut.utils.ssh_utils import run_ssh
 from servonaut.services.live_stats_service import LiveStatsError
 from servonaut.utils.live_stats_panel import format_live_stats
@@ -803,7 +804,21 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             f"[dim]Account:[/dim] {field('account', '-')}\n"
             if self._instance.get('account_qualified') else ""
         )
-        credential_line = self._credential_source_line()
+        credential_line = self._credential_source_line() + self._shared_with_line()
+
+        if self._instance.get('is_shared') is True:
+            port = escape(str(self._instance.get('port') or 22))
+            return (
+                f"[bold $text-accent]Team server: {name}[/bold $text-accent]\n\n"
+                f"[dim]Team:[/dim] {field('team_name', '-')}\n"
+                f"[dim]Host:[/dim] {public_ip}\n"
+                f"[dim]Port:[/dim] {port}\n"
+                f"[dim]Login:[/dim] {field('username', '-')}\n"
+                f"[dim]State:[/dim] [dim]N/A (shared by the team)[/dim]\n\n"
+                f"{credential_line}"
+                f"[$text-accent]Direct Connection[/$text-accent]\n"
+                f"[dim]Target:[/dim] {public_ip}"
+            )
 
         if self._instance.get('is_ovh'):
             provider_type = escape(str(self._instance.get('provider_type', 'unknown')))
@@ -885,6 +900,20 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             f"{connection_info}\n"
             f"[dim]Target:[/dim] {target_ip}"
         )
+
+    def _shared_with_line(self) -> str:
+        """``Also shared with: team …`` for one of the user's own servers a team shares too."""
+        from servonaut.services.shared_servers import fold_shared
+
+        if self._instance.get('is_shared') is True:
+            return ""
+        rows = getattr(self.app, "instances", None)
+        if not isinstance(rows, list):
+            return ""
+        teams = fold_shared(rows)[1].get(id(self._instance))
+        if not teams:
+            return ""
+        return f"[dim]Also shared with:[/dim] {escape(', '.join(teams))}\n"
 
     def _credential_source_line(self) -> str:
         """Describe the configured SSH credential without exposing its reference."""
@@ -1288,10 +1317,9 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         import logging
         logger = logging.getLogger(__name__)
 
-        # Custom servers, OVH and Hetzner instances don't require running state for connection
-        if (not self._instance.get('is_custom')
-                and not self._instance.get('is_ovh')
-                and not self._instance.get('is_hetzner')):
+        # Only EC2 instances have a running state to check: custom servers,
+        # OVH and Hetzner instances and team shared servers connect as they are.
+        if is_aws_row(self._instance):
             state = self._instance.get('state', 'unknown')
             if state != 'running':
                 self.app.notify(
@@ -1657,6 +1685,30 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         "SSH connect (custom): host=%s, user=%s, port=%s", host, username, port,
                     )
 
+                elif instance.get("is_shared") is True:
+                    # A team's shared server with no team key here: the
+                    # team's login and port, a key from ~/.ssh.
+                    profile = self.app.connection_service.resolve_profile(instance)
+                    host = self.app.connection_service.get_target_host(instance, profile)
+                    username = (
+                        (profile.username if profile else None)
+                        or instance.get("username")
+                        or self.app.config_manager.get().default_username
+                    )
+                    key_path = resolved.local_key_path
+                    proxy_args = (
+                        self.app.connection_service.get_proxy_args(profile) if profile else []
+                    )
+                    extra_options = self.app.connection_service.get_extra_options(instance, profile)
+                    ssh_cmd = self.app.ssh_service.build_ssh_command(
+                        host=host, username=username, key_path=key_path,
+                        proxy_args=proxy_args, port=instance.get("port"),
+                        extra_options=extra_options,
+                    )
+                    logger.info(
+                        "SSH connect (team shared): host=%s, user=%s", host, username,
+                    )
+
                 elif instance.get("is_hetzner"):
                     host = instance.get("public_ip") or instance.get("private_ip")
                     username = instance.get("username") or "root"
@@ -1718,9 +1770,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         severity="warning",
                         markup=True,
                     )
-                    if (instance.get("is_ovh")
-                            or instance.get("is_custom")
-                            or instance.get("is_hetzner")):
+                    if not is_aws_row(instance):
                         self.app.notify(
                             f"Connected via local ~/.ssh: {rich_escape(name)}",
                             markup=True,

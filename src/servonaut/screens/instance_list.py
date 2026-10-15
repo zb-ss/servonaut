@@ -27,17 +27,13 @@ from servonaut.screens._demo_resolve import (
     replace_instances,
 )
 from servonaut.services.memory.provider import instance_provider
-from servonaut.utils.instance_resolver import display_name
+from servonaut.utils.instance_resolver import display_name, is_aws_row
 if TYPE_CHECKING:
     from servonaut.app import ServonautApp
 
-# Rows the AWS fetch does not return; everything else in the table is EC2.
-_NON_AWS_FLAGS = ('is_custom', 'is_ovh', 'is_hetzner')
-
-
 def _is_aws_row(instance: dict) -> bool:
     """Whether a fleet-table row came from the AWS fetch."""
-    return not any(instance.get(flag) for flag in _NON_AWS_FLAGS)
+    return is_aws_row(instance)
 
 
 class FleetSearchInput(Input):
@@ -247,6 +243,9 @@ class InstanceListScreen(Screen):
                 logger.info("Loaded %d instances from cache file (age: %s)",
                             len(stale_data), self.app.cache_service.get_age())
 
+        # The teams' shared servers are never cached: listed on every start.
+        self._fetch_shared_servers()
+
         # A fresh AWS cache skips the AWS fetch only: OVH and Hetzner keep
         # their own caches and are refreshed when theirs have expired. With
         # several accounts, a provider counts as fresh only when every one of
@@ -349,6 +348,55 @@ class InstanceListScreen(Screen):
             exit_on_error=False,
         )
 
+    def _fetch_shared_servers(self) -> None:
+        """List the servers the user's teams share, in the background.
+
+        Signed out, nothing is asked and any shared rows still listed leave
+        the list. They are never cached on disk: a member removed from a
+        team stops seeing its servers at the next start.
+        """
+        from servonaut.services.shared_servers import load_shared_servers
+
+        team_service = getattr(self.app, "team_service", None)
+        auth = getattr(self.app, "auth_service", None)
+        if team_service is None or auth is None or not auth.is_authenticated:
+            if any(row.get("is_shared") is True for row in self.app.instances or []):
+                self._instances = replace_instances(self.app, "shared", [])
+                self._update_table()
+                self._update_status_bar()
+            return
+        self.run_worker(
+            load_shared_servers(team_service),
+            name="shared_refresh",
+            group="shared_servers",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _shared_servers_loaded(self, worker: Worker) -> None:
+        """List what :meth:`_fetch_shared_servers` found."""
+        import logging
+
+        if worker.error:
+            # No team plan, no network: the user's own servers are the list,
+            # as before; nothing to warn about at every start.
+            logging.getLogger(__name__).info(
+                "Team shared servers not listed: %s", worker.error,
+            )
+            return
+        found = worker.result
+        # The team key tier of SSH connect reads the user's teams from here.
+        self.app.teams = found.teams
+        self._instances = replace_instances(self.app, "shared", found.rows)
+        self._update_table()
+        self._update_status_bar()
+        if found.problems:
+            self.app.notify(
+                "Some team servers could not be listed: " + "; ".join(found.problems),
+                severity="warning",
+                markup=False,
+            )
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes.
 
@@ -360,6 +408,10 @@ class InstanceListScreen(Screen):
             # Pressing R cancels the refreshes still running and starts new
             # ones; reading the cancelled ones as empty would clear rows or
             # report "no instances" before the new results arrive.
+            return
+
+        if event.worker.name == "shared_refresh" and event.worker.is_finished:
+            self._shared_servers_loaded(event.worker)
             return
 
         if event.worker.name == "ovh_refresh" and event.worker.is_finished:
@@ -631,8 +683,9 @@ class InstanceListScreen(Screen):
         status_bar = self.query_one(StatusBar)
         table = self.query_one(InstanceTable)
 
-        # Update counts
-        total = len(self._instances)
+        # Update counts: the servers listed (a shared server that is also
+        # one of the user's own is listed once).
+        total = len(table._all_instances)
         filtered = len(table._filtered_instances)
         status_bar.update_instance_count(total, filtered)
 
@@ -775,10 +828,11 @@ class InstanceListScreen(Screen):
 
 
     def action_refresh(self) -> None:
-        """Force-refresh the instance list from AWS, OVH and Hetzner."""
+        """Force-refresh the instance list from AWS, OVH, Hetzner and the teams."""
         self._fetch_instances(force_refresh=True)
         self._fetch_ovh_instances()
         self._fetch_hetzner_instances()
+        self._fetch_shared_servers()
 
     def action_focus_search(self) -> None:
         """Focus the search input."""
@@ -869,7 +923,8 @@ class InstanceListScreen(Screen):
     def _get_selected_running_instance(self) -> Optional[dict]:
         """Get the selected instance, validate it's connectable.
 
-        Custom servers skip the state check since they don't have AWS state.
+        Only EC2 instances are checked for state: the other providers' rows,
+        custom servers and team shared servers have no AWS state.
 
         Returns:
             Instance dict if valid, None otherwise.
@@ -881,9 +936,7 @@ class InstanceListScreen(Screen):
             self.app.notify("No instance selected", severity="warning")
             return None
 
-        if (not instance.get('is_custom') and not instance.get('is_ovh')
-                and not instance.get('is_hetzner')
-                and instance.get('state') != 'running'):
+        if _is_aws_row(instance) and instance.get('state') != 'running':
             self.app.notify(
                 f"Instance is {instance.get('state')}. Only running instances can connect.",
                 severity="warning"
@@ -916,7 +969,17 @@ class InstanceListScreen(Screen):
                 proxy_args = self.app.connection_service.get_proxy_args(profile)
 
             # Custom servers use their own username/port/key; OVH uses provider defaults; AWS uses config defaults
-            if instance.get('is_custom'):
+            if instance.get('is_shared') is True:
+                # The team's login and port; the team's key (vault or SSH
+                # certificate) is applied when the session starts.
+                username = (
+                    (profile.username if profile else None)
+                    or instance.get('username')
+                    or self.app.config_manager.get().default_username
+                )
+                port = instance.get('port') or None
+                key_path = None
+            elif instance.get('is_custom'):
                 username = instance.get('username') or 'root'
                 port = instance.get('port') or 22
                 key_path = instance.get('ssh_key') or instance.get('key_name') or None

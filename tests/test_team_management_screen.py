@@ -1435,3 +1435,90 @@ class TestTeamManagementShareServer:
             await pilot.pause()
             assert screen.query_one("#input_share_username", Input).value == "ubuntu"
             assert screen.query_one("#input_share_port", Input).value == ""
+
+
+# ---------------------------------------------------------------------------
+# Shared servers: listed in the server list, connected from here
+# ---------------------------------------------------------------------------
+
+
+class TestSharedServerConnect:
+    _SERVERS = [
+        {"id": "srv-1", "name": "web-01", "hostname": "web.example.com", "port": 22},
+        {"id": "srv-2", "name": "db-01", "hostname": "db.example.com", "port": 2222},
+    ]
+
+    @staticmethod
+    def _stub_server_actions(opened: list):
+        from textual.screen import Screen
+
+        class _ServerActions(Screen):
+            def __init__(self, instance):
+                super().__init__()
+                opened.append(instance)
+
+            def action_action_3(self) -> None:
+                opened.append("connect")
+
+        return _ServerActions
+
+    @pytest.mark.asyncio
+    async def test_a_viewed_team_s_servers_join_the_server_list(self):
+        team_svc = _make_team_service(_SAMPLE_TEAMS)
+        team_svc.list_shared_servers = AsyncMock(return_value=list(self._SERVERS))
+        app = _WrapperApp(
+            auth_service=_make_auth_service(), team_service=team_svc,
+            instances=[{"id": "i-0abc", "name": "app-1"}],
+        )
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            await pilot.pause()
+            await app.screen._load_team_detail("ops")
+            await pilot.pause()
+
+        names = [(row["name"], row.get("team_slug")) for row in app.instances]
+        assert names == [("app-1", None), ("web-01", "ops"), ("db-01", "ops")]
+        assert app.instances[2]["provider"] == "Team Engineering"
+
+    @pytest.mark.asyncio
+    async def test_connect_opens_the_selected_server_and_starts_ssh(self):
+        from unittest.mock import patch
+
+        team_svc = _make_team_service(_SAMPLE_TEAMS)
+        team_svc.list_shared_servers = AsyncMock(return_value=list(self._SERVERS))
+        app = _WrapperApp(auth_service=_make_auth_service(), team_service=team_svc)
+        opened: list = []
+        with patch(
+            "servonaut.screens.server_actions.ServerActionsScreen",
+            self._stub_server_actions(opened),
+        ):
+            async with app.run_test(headless=True, size=(160, 50)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                screen._current_team_slug = "ops"
+                await screen._load_team_detail("ops")
+                await pilot.pause()
+                screen.query_one("#servers_table", DataTable).move_cursor(row=1)
+                screen.query_one("#btn_connect_shared", Button).press()
+                await pilot.pause()
+
+        assert opened[0]["id"] == "srv-2"
+        assert opened[0]["is_shared"] is True
+        assert opened[0]["public_ip"] == "db.example.com"
+        assert opened[0]["port"] == 2222
+        assert opened[1] == "connect"
+
+    @pytest.mark.asyncio
+    async def test_connect_with_nothing_shared_says_so(self):
+        team_svc = _make_team_service(_SAMPLE_TEAMS)
+        team_svc.list_shared_servers = AsyncMock(return_value=[])
+        app = _WrapperApp(auth_service=_make_auth_service(), team_service=team_svc)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen._current_team_slug = "ops"
+            await screen._load_team_detail("ops")
+            screen.query_one("#btn_connect_shared", Button).press()
+            await pilot.pause()
+            messages = [str(n.message) for n in app._notifications]
+
+        assert "This team shares no servers yet." in messages

@@ -118,6 +118,13 @@ class LogViewerService(LogViewerServiceInterface):
         """
         config = self._config_manager.get()
 
+        if instance.get("is_shared") is True:
+            from servonaut.services.connection_service import server_connection
+
+            # The headless surfaces' rule for a team's shared server.
+            return server_connection(
+                instance, connection_service, ssh_service, config.default_username,
+            )
         if instance.get("is_custom"):
             return {
                 "host": instance.get("public_ip") or instance.get("private_ip"),

@@ -189,11 +189,13 @@ class keep_cursor:  # noqa: N801 — reads as a statement: ``with keep_cursor(sc
 
 
 # Which slice of the fleet a row belongs to. AWS rows carry no flag.
-_SOURCE_FLAGS = {"custom": "is_custom", "ovh": "is_ovh", "hetzner": "is_hetzner"}
+_SOURCE_FLAGS = {
+    "shared": "is_shared", "custom": "is_custom", "ovh": "is_ovh", "hetzner": "is_hetzner",
+}
 
 
 def row_source(row: Dict[str, Any]) -> str:
-    """``"custom"``, ``"ovh"``, ``"hetzner"`` or ``"aws"``."""
+    """``"shared"``, ``"custom"``, ``"ovh"``, ``"hetzner"`` or ``"aws"``."""
     for source, flag in _SOURCE_FLAGS.items():
         if row.get(flag):
             return source
@@ -208,7 +210,10 @@ def replace_instances(
     The single way to change the fleet, in or out of demo mode:
 
     * *source* names the slice the rows replace (``"aws"``, ``"custom"``,
-      ``"ovh"``, ``"hetzner"``); ``None`` replaces the whole fleet;
+      ``"ovh"``, ``"hetzner"``, ``"shared"``); ``None`` replaces the whole
+      fleet, except the team shared servers when *rows* has none of them:
+      those are fetched on their own (``"shared"``), so refreshing the
+      user's own servers never drops them;
     * the pre-redaction copy (``app._instances_pristine``) gets the real
       rows, so demo mode can always map a row back to its real record;
     * ``app.instances`` gets them as displayed — redacted in demo mode;
@@ -220,9 +225,12 @@ def replace_instances(
     Returns the new ``app.instances``. The caller's dicts are never modified.
     """
     fresh = [copy.deepcopy(row) for row in rows]
+    keep_shared = source is None and not any(row_source(row) == "shared" for row in fresh)
 
     def kept(row: Dict[str, Any]) -> bool:
-        return source is not None and row_source(row) != source
+        if source is None:
+            return keep_shared and row_source(row) == "shared"
+        return row_source(row) != source
 
     pristine = getattr(app, "_instances_pristine", None)
     pristine = pristine if isinstance(pristine, list) else []

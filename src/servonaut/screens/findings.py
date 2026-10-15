@@ -1148,7 +1148,7 @@ class FindingDetailScreen(Screen[bool]):
 
     #: Flags a provider service stamps on its instance dicts. AWS stamps
     #: none of them, so any one of these means "not an EC2 instance".
-    _NON_AWS_INSTANCE_FLAGS = ("is_custom", "is_ovh", "is_hetzner")
+    _NON_AWS_INSTANCE_FLAGS = ("is_custom", "is_ovh", "is_hetzner", "is_shared")
 
     #: ``provider`` values that still mean EC2. AWS instances carry no
     #: ``provider`` key at all; the others are belt-and-braces for

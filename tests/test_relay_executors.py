@@ -242,7 +242,10 @@ class TestNativeVaultRelay:
             )))
 
         assert response.status == "success"
-        assert runtime.resolved == [shared]
+        # The team's record, kept whole, as a server-list row with its host.
+        resolved = runtime.resolved[0]
+        assert {key: resolved[key] for key in shared} == shared
+        assert resolved["public_ip"] == "shared.example.test"
         assert lease.closed == 1
 
     def test_native_scp_uses_agent_metadata_and_closes_lease(self, tmp_path, monkeypatch):
@@ -835,3 +838,48 @@ class TestExecuteDispatch:
         resp = run(ex.execute(request))
         assert resp.status == "error"
         assert "boom" in resp.error_message
+
+
+class _PinnedLease(_VaultLease):
+    target_host = "pinned.example.com"
+    target_port = 2200
+
+
+class TestSharedServerRelayTarget:
+    """A team's shared server found through the vault, as the relay reaches it."""
+
+    _TARGET = {
+        "id": "srv-1", "name": "team-web-1", "hostname": "team-web.example.com",
+        "port": 22, "login_user": "deploy", "is_shared": True, "team_slug": "ops",
+    }
+
+    def test_the_team_record_becomes_a_row_with_its_host(self):
+        executor = make_executors(instances=[])
+        runtime = _VaultRuntime(lease=_VaultLease(), target=dict(self._TARGET))
+        executor.set_vault_runtime(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                target="srv-1", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "success"
+        resolved = runtime.resolved[0]
+        assert resolved["public_ip"] == "team-web.example.com"
+        assert resolved["team_slug"] == "ops"
+        # A team's server never gets a local key guessed from its id.
+        executor._ssh_service.get_key_path.assert_not_called()
+
+    def test_commands_and_transfers_connect_where_the_lease_points(self):
+        executor = make_executors(instances=[])
+        executor.set_vault_runtime(_VaultRuntime(lease=_PinnedLease(), target=dict(self._TARGET)))
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            run(executor.execute(make_request(target="srv-1", payload={"command": "uptime"})))
+
+        command = executor._ssh_service.build_ssh_command.call_args.kwargs
+        assert (command["host"], command["port"]) == ("pinned.example.com", 2200)

@@ -321,6 +321,11 @@ class RelayExecutors:
                     return None, CommandResponse(
                         request_id=request.id, status="error", error_message=str(exc),
                     )
+                if isinstance(instance, Mapping):
+                    from servonaut.services.shared_servers import as_shared_row
+
+                    # The team's record, with the host every path reads.
+                    instance = as_shared_row(instance)
         if not isinstance(instance, Mapping):
             return None, CommandResponse(
                 request_id=request.id,
@@ -377,6 +382,13 @@ class RelayExecutors:
                 raise RuntimeError("native vault SSH lease has an invalid certificate path")
             options.append(f"CertificateFile={certificate}")
         return options
+
+    @staticmethod
+    def _lease_destination(lease: Any | None, conn: Mapping[str, Any]) -> tuple[Any, Any]:
+        """``(host, port)``: where a vault lease's pinned host keys point, else *conn*'s."""
+        from servonaut.services.ssh_credentials import lease_destination
+
+        return lease_destination(lease, conn['host'], conn.get('port'))
 
     @staticmethod
     def _lease_login(lease: Any | None, fallback: str) -> str:
@@ -458,13 +470,14 @@ class RelayExecutors:
             # the same values through its explicit builder arguments.
             self._lease_options(lease)
             conn = self._resolve_connection(instance)
+            host, port = self._lease_destination(lease, conn)
             ssh_cmd = self._ssh_service.build_ssh_command(
-                host=conn['host'],
+                host=host,
                 username=self._lease_login(lease, conn['username']),
                 key_path=None if lease is not None else conn['key_path'],
                 proxy_args=conn['proxy_args'],
                 remote_command=command,
-                port=conn.get('port'),
+                port=port,
                 identity_agent=getattr(lease, "identity_agent", None),
                 identity_file=getattr(lease, "identity_file", None),
                 certificate_file=getattr(lease, "certificate_path", None),
@@ -592,12 +605,11 @@ class RelayExecutors:
         lease = await self._vault_lease(instance)
         try:
             conn = self._resolve_connection(instance)
-            host = conn['host']
+            host, port = self._lease_destination(lease, conn)
             username = self._lease_login(lease, conn['username'])
             key_path = None if lease is not None else conn['key_path']
             proxy_args = conn['proxy_args']
             profile = conn['profile']
-            port = conn.get('port')
             # Nobody can answer a prompt here.
             extra_options = ["BatchMode=yes", *(conn.get('extra_options') or [])]
 
