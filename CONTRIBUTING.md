@@ -555,9 +555,20 @@ signed in to the local API.
   certificates. Your home already holds the key that logs in to it as its
   admin user, so you can walk `vault setup`, `ca enable`, `ca enroll
   server-1` and a certificate login end to end; `status` says where it
-  listens. It needs a short `--root`, such as `/tmp/svt` (`up` says how
-  short): the private SSH agent of a certificate login keeps its socket
-  under it.
+  listens. The team keeps its members, so the Teams screen can invite,
+  resend, change roles, copy accept URLs, remove members and share servers.
+  It needs a short `--root`, such as `/tmp/svt` (`up` says how short): the
+  private SSH agent of a certificate login keeps its socket under it.
+- With `--teams` there is also a second person, a member to be:
+  `member@example.com`, with a home of their own (`<root>/member`), signed
+  out and not yet in the team. `python -m e2e.sandbox run --as member --
+  <args>` runs their CLI; their `login` is approved as them. Invite them on
+  the Teams screen, then `python -m e2e.sandbox accept-invite
+  member@example.com` accepts the invitation the way their browser would.
+  From there the member walk is `run --as member -- login`, `run --as member
+  -- vault setup`, the owner's `run -- vault grants process`, then the
+  member's `vault list` and, once the owner enrolled `server-1` in the
+  team's SSH CA, `run --as member -- ssh server-1`.
 - CLI: `python -m e2e.sandbox run -- ssh web-1 -- uptime` runs the
   checkout's `servonaut` in the sandbox and exits with its status.
 - MCP: `python -m e2e.sandbox mcp-call list_instances '{"account": "prod"}'`
