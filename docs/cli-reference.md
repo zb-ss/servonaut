@@ -734,13 +734,15 @@ them. With a single result the question is `Store it? [Y/n]`. Each database
 is stored under a label (suggested from its folder; Enter keeps it). When a
 server has several, name the site with `app=` in `db_processlist` /
 `db_top_queries`. Two databases cannot share a label on one server, because
-the second would replace the first. Neither the password nor any part of it
-is printed.
+the second would replace the first; labels that differ only in case, spaces
+or punctuation (`My Shop`, `my-shop`) count as the same. With `--label` and
+several results, the question asks for one number. Neither the password nor
+any part of it is printed.
 
 | Flag | Description |
 |------|-------------|
 | `--search-path PATH` | Folders on the server to search, separated by spaces (default: the SSH user's home folder, `/var/www`, `/srv`, `/home`, `/opt` and `/usr/share/nginx`), or a local `.env` file with `--source local` |
-| `--source` | `auto` (default) and `ssh` read the server over SSH; `local` reads the file given with `--search-path` |
+| `--source` | `auto` (default) and `ssh` read the server over SSH; `local` reads the file given with `--search-path` on this computer (required with `local`) |
 | `--yes` | Store everything found without asking |
 | `--pick N[,M]` | Store these numbers from the list without asking (`1`, `1,3`, `1-3`) |
 | `--label NAME` | Store the database under this label instead of the suggested one (only when storing exactly one) |
@@ -748,7 +750,8 @@ is printed.
 | `--manual` | Do not scan: type the engine, host, port, user, database and label, then the password (not shown as you type). Needs a terminal |
 
 When nothing is found, the command says where it looked and exits `0`; point
-it at the app's folder with `--search-path`. Without a terminal (a script, a
+it at the app's folder with `--search-path`. When the server cannot be
+reached over SSH, it says so and exits `1`. Without a terminal (a script, a
 pipe) it lists what it found, stores nothing and exits `5`, unless `--yes` or
 `--pick` says what to store.
 
@@ -757,7 +760,7 @@ pipe) it lists what it found, stores nothing and exits `5`, unless `--yes` or
 | Code | Meaning |
 |------|---------|
 | `0` | Stored what was chosen, nothing was chosen, or nothing was found |
-| `1` | No secret store is active (nothing is scanned; run `servonaut login`, and `servonaut secrets status` shows your plan), the scan failed, or something could not be stored |
+| `1` | No secret store is active (nothing is scanned; run `servonaut login`, and `servonaut secrets status` shows your plan), the server was not found or could not be reached, or something could not be stored |
 | `2` | Invalid flags, or `--pick` names a number that is not in the list |
 | `5` | No terminal and neither `--yes` nor `--pick`: nothing stored |
 | `130` | Cancelled with Ctrl+C |

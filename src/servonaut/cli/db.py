@@ -17,11 +17,14 @@ import asyncio
 import getpass
 import json
 import logging
+import os
 import re
 import sys
 import unicodedata
 from collections.abc import Sequence
 from typing import Any
+
+from servonaut.cli.prompting import ctrl_c_interrupts
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,9 @@ _MANUAL_ENGINES = {
 }
 _DEFAULT_PORTS = {"mysql": 3306, "mariadb": 3306, "postgres": 5432}
 _CHOICE_SPLIT = re.compile(r"[,\s]+")
-_RANGE = re.compile(r"^(\d+)-(\d+)$")
+# ASCII digits only: str.isdigit() and \d also accept digits int() rejects (²).
+_NUMBER = re.compile(r"[0-9]+")
+_RANGE = re.compile(r"([0-9]+)-([0-9]+)")
 
 # (list number, reason) for a candidate that was not stored.
 Refusal = tuple[int, str]
@@ -175,8 +180,11 @@ async def _run_setup(args: argparse.Namespace) -> int:
 
     if not args.json:
         print(f"Scanning {_printable(args.instance)} for database settings (read-only)...")
+    # The batch store has no count cap, so a box with many sites cannot
+    # evict its own earliest results before they are stored.
     result = await tools.db_scan_stage(
-        args.instance, search_path=args.search_path, source=args.source,
+        args.instance, search_path=args.search_path, source=_scan_source(args),
+        staging=tools.open_db_staging_batch(),
     )
     if result.get("error"):
         return _fail(args, _scan_error_message(args, str(result["error"])), _EXIT_ERROR)
@@ -187,6 +195,20 @@ async def _run_setup(args: argparse.Namespace) -> int:
     if args.json:
         return await _finish_json(tools, args, candidates)
     return await _finish_in_terminal(tools, args, candidates, secret_provider)
+
+
+def _scan_source(args: argparse.Namespace) -> str:
+    """The source to scan with: ``auto`` without a local file is ``ssh``.
+
+    ``auto`` falls back to reading --search-path locally, and for that
+    fallback it hides SSH failures. Without a local file to fall back to
+    there is nothing to gain, and a refused host key or an unusable SSH key
+    would read as "nothing found".
+    """
+    if args.source != "auto":
+        return args.source
+    path = os.path.expanduser(args.search_path) if args.search_path else ""
+    return "auto" if path and os.path.isfile(path) else "ssh"
 
 
 def _flag_problem(args: argparse.Namespace) -> str:
@@ -200,6 +222,8 @@ def _flag_problem(args: argparse.Namespace) -> str:
         if clashing:
             return f"--manual does not scan, so it cannot be combined with {', '.join(clashing)}."
         return ""
+    if args.source == "local" and not args.search_path:
+        return "--source local reads the file given with --search-path, so name one."
     if args.pick is not None and _parse_numbers(args.pick, None) is None:
         return f"--pick takes numbers from the list, like 1 or 1,3 (got {args.pick!r})."
     if args.source in ("auto", "ssh"):
@@ -227,6 +251,8 @@ async def _finish_in_terminal(tools, args, candidates, secret_provider) -> int:
         numbers = _parse_numbers(args.pick, len(candidates))
         if numbers is None:
             return _fail(args, _out_of_range(args.pick, len(candidates)), _EXIT_USAGE)
+    elif args.label and len(candidates) > 1:
+        numbers = _ask_one(candidates, args.label)
     else:
         numbers = _ask_which(candidates)
     if not numbers:
@@ -287,6 +313,11 @@ async def _run_manual(args: argparse.Namespace) -> int:
     tools, secret_provider = _build_tools()
     if secret_provider is None:
         return _fail(args, _no_secret_store_message(), _EXIT_ERROR)
+    # Checked before the questions, so a mistyped name does not throw away
+    # everything typed, password included.
+    problem = await _unknown_instance(tools, args.instance)
+    if problem:
+        return _fail(args, problem, _EXIT_ERROR)
 
     from servonaut.services.db_credential_scanner import DBCandidate
 
@@ -301,7 +332,8 @@ async def _run_manual(args: argparse.Namespace) -> int:
     }
     password = ""
     while not password:
-        password = getpass.getpass("Password (not shown): ")
+        with ctrl_c_interrupts():
+            password = getpass.getpass("Password (not shown): ")
     label = args.label.strip() or _ask_text("Label", default="", default_hint="none")
 
     token = tools.open_db_staging_batch().stage(DBCandidate(password=password, **preview))
@@ -310,12 +342,30 @@ async def _run_manual(args: argparse.Namespace) -> int:
     return _EXIT_ERROR if failed else _EXIT_OK
 
 
+async def _unknown_instance(tools, instance: str) -> str:
+    """Why *instance* cannot be saved under, or ``""`` when it can."""
+    from servonaut.services.accounts.registry import UnknownAccountError
+    from servonaut.utils.instance_resolver import AmbiguousInstanceError
+
+    try:
+        found = await tools.find_db_setup_instance(instance)
+    except (AmbiguousInstanceError, UnknownAccountError) as exc:
+        return _printable(exc)
+    return "" if found else f"Instance not found: {_printable(instance)}"
+
+
 # ---------------------------------------------------------------------------
 # Choosing and labelling
 # ---------------------------------------------------------------------------
 
 def _is_interactive() -> bool:
     return bool(sys.stdin and sys.stdin.isatty())
+
+
+def _prompt(text: str) -> str:
+    """``input()`` that Ctrl+C interrupts, although asyncio.run is running."""
+    with ctrl_c_interrupts():
+        return input(text)
 
 
 def _parse_numbers(text: str, count: int | None) -> list[int] | None:
@@ -332,10 +382,10 @@ def _parse_numbers(text: str, count: int | None) -> list[int] | None:
         return list(range(1, count + 1)) if count is not None else []
     chosen = set()
     for word in words:
-        span = _RANGE.match(word)
+        span = _RANGE.fullmatch(word)
         if span:
             first, last = int(span.group(1)), int(span.group(2))
-        elif word.isdigit():
+        elif _NUMBER.fullmatch(word):
             first = last = int(word)
         else:
             return None
@@ -349,11 +399,16 @@ def _ask_which(candidates: Sequence[dict[str, Any]]) -> list[int]:
     """Ask which candidates to store; ``[]`` means store nothing."""
     count = len(candidates)
     if count == 1:
-        answer = input("Store it? [Y/n]: ").strip().lower()
-        return [] if answer in ("n", "no") else [1]
-    shown = ", ".join(str(n) for n in range(1, count + 1)) if count <= 4 else f"1-{count}"
+        while True:
+            answer = _prompt("Store it? [Y/n]: ").strip().lower()
+            if answer in ("", "y", "yes"):
+                return [1]
+            if answer in ("n", "no", "none"):
+                return []
+            print("Type y to store it or n to leave it.")
     while True:
-        answer = input(f"Store which? [{shown}, all, none — Enter = all]: ").strip().lower()
+        answer = _prompt(f"Store which? [{_shown(count)}, all, none — Enter = all]: ")
+        answer = answer.strip().lower()
         if answer in ("", "all"):
             return list(range(1, count + 1))
         if answer in ("none", "n", "no"):
@@ -362,6 +417,35 @@ def _ask_which(candidates: Sequence[dict[str, Any]]) -> list[int]:
         if numbers:
             return numbers
         print(f"Type a number from 1 to {count}, a list like 1,2, all, or none.")
+
+
+def _ask_one(candidates: Sequence[dict[str, Any]], label: str) -> list[int]:
+    """With --label only one database can be stored: ask for one number."""
+    count = len(candidates)
+    while True:
+        answer = _prompt(f"Store which one as '{_printable(label)}'? "
+                         f"[{_shown(count)}, none]: ").strip().lower()
+        if answer in ("none", "n", "no"):
+            return []
+        numbers = _parse_numbers(answer, count)
+        if numbers and len(numbers) == 1:
+            return numbers
+        print(f"--label names one database: type one number from 1 to {count}, or none.")
+
+
+def _shown(count: int) -> str:
+    return ", ".join(str(n) for n in range(1, count + 1)) if count <= 4 else f"1-{count}"
+
+
+def _stored_as(label: str) -> str:
+    """The part of the secret name db_setup_save derives from *label*.
+
+    Labels that differ only in case, spaces or punctuation ("My Shop" and
+    "my-shop") name the same secret, so they count as one label here.
+    """
+    from servonaut.services.db_credential_scanner import sanitize_label
+
+    return "/" + sanitize_label(label) if label.strip() else ""
 
 
 def _labels_for(args, candidates, numbers, *, ask: bool) -> tuple[dict[int, str], list[Refusal]]:
@@ -382,12 +466,12 @@ def _labels_for(args, candidates, numbers, *, ask: bool) -> tuple[dict[int, str]
             label = _ask_label(number, derived, used)
         else:
             label = derived
-        key = label.lower()
+        key = _stored_as(label)
         if key in used:
             name = f"'{_printable(label)}'" if label else "no label"
             skipped.append((number, (
-                f"it has the same label as #{used[key]} ({name}), so storing it "
-                f"would replace #{used[key]}. Store it on its own with "
+                f"its label ({name}) is stored under the same name as #{used[key]}, "
+                f"so storing it would replace #{used[key]}. Store it on its own with "
                 f"--pick {number} --label NAME."
             )))
             continue
@@ -400,11 +484,12 @@ def _ask_label(number: int, derived: str, used: dict[str, int]) -> str:
     """Ask for a label, pre-filled with the one derived from the config path."""
     hint = _printable(derived) if derived else "none"
     while True:
-        answer = input(f"Label for #{number} (Enter = {hint}): ").strip() or derived
-        if answer.lower() not in used:
+        answer = _prompt(f"Label for #{number} (Enter = {hint}): ").strip() or derived
+        key = _stored_as(answer)
+        if key not in used:
             return answer
-        print(f"#{used[answer.lower()]} already uses that label; choose another so "
-              "one does not replace the other.")
+        print(f"#{used[key]} is already stored under that name; choose another label "
+              "so one does not replace the other.")
 
 
 def _ask_text(prompt: str, *, default: str | None = None, default_hint: str = "") -> str:
@@ -412,7 +497,7 @@ def _ask_text(prompt: str, *, default: str | None = None, default_hint: str = ""
     hint = default_hint or default
     suffix = f" (Enter = {hint})" if default is not None else ""
     while True:
-        answer = input(f"{prompt}{suffix}: ").strip()
+        answer = _prompt(f"{prompt}{suffix}: ").strip()
         if answer:
             return answer
         if default is not None:
@@ -422,7 +507,7 @@ def _ask_text(prompt: str, *, default: str | None = None, default_hint: str = ""
 
 def _ask_engine() -> str:
     while True:
-        answer = input("Engine [mysql, mariadb, postgres] (Enter = mysql): ").strip().lower()
+        answer = _prompt("Engine [mysql, mariadb, postgres] (Enter = mysql): ").strip().lower()
         engine = _MANUAL_ENGINES.get(answer or "mysql")
         if engine:
             return engine
@@ -431,10 +516,10 @@ def _ask_engine() -> str:
 
 def _ask_port(default: int) -> int:
     while True:
-        answer = input(f"Port (Enter = {default}): ").strip()
+        answer = _prompt(f"Port (Enter = {default}): ").strip()
         if not answer:
             return default
-        if answer.isdigit() and 0 < int(answer) < 65536:
+        if _NUMBER.fullmatch(answer) and 0 < int(answer) < 65536:
             return int(answer)
         print("Type a port number from 1 to 65535.")
 
@@ -463,6 +548,9 @@ async def _store(tools, instance: str, candidates, labels: dict[int, str]):
 def _save_error(out: str) -> str:
     """Turn a db_setup_save refusal into a sentence for a person."""
     text = out.strip()
+    if "staging token" in text and "dropped because too many" in text:
+        return ("too many results were waiting to be stored at once. Store fewer "
+                "at a time with --pick, or narrow the scan with --search-path.")
     if "staging token" in text:
         # The staged password expired while a prompt waited.
         return "the scan result expired before it was stored. Run the command again."
@@ -562,6 +650,11 @@ def _report_nothing_found(args: argparse.Namespace) -> int:
         })
         return _EXIT_OK
     instance = _printable(args.instance)
+    if args.source == "local":
+        print(f"No database settings found in {_printable(args.search_path)}.")
+        print("--source local reads one file on this computer; name the app's "
+              "settings file itself, not its folder.")
+        return _EXIT_OK
     print(f"No database settings found on {instance}.")
     if places:
         shown = ["the SSH user's home folder" if p == "." else _printable(p) for p in places]

@@ -42,12 +42,11 @@ import argparse
 import asyncio
 import json
 import logging
-import signal
 import sys
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Coroutine, Iterator, List, Optional
+from typing import Any, Coroutine, List, Optional
 
+from servonaut.cli.prompting import ctrl_c_interrupts
 from servonaut.services.accounts import QUALIFIED_KEY, UnknownAccountError
 from servonaut.utils.instance_resolver import AmbiguousInstanceError, display_name
 
@@ -388,29 +387,6 @@ def _stdin_is_terminal() -> bool:
         return False
 
 
-@contextmanager
-def _ctrl_c_interrupts() -> Iterator[None]:
-    """Make Ctrl-C raise KeyboardInterrupt while a prompt waits for input.
-
-    The create question is asked from inside ``asyncio.run``, which (from
-    Python 3.11) handles Ctrl-C by cancelling its task instead of raising.
-    ``input()`` would then keep waiting and a later "y" would still create
-    the server. Python's default handler raises at the prompt instead, where
-    it counts as "no", so nothing is created.
-    """
-    try:
-        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    except ValueError:
-        # Not the main thread: asyncio.run installed no handler there either.
-        yield
-        return
-    try:
-        yield
-    finally:
-        if previous is not None:
-            signal.signal(signal.SIGINT, previous)
-
-
 def _confirm_create(summary: dict, out) -> bool:
     """Show what is about to be created and ask y/N (default: no).
 
@@ -429,7 +405,7 @@ def _confirm_create(summary: dict, out) -> bool:
           file=out)
     print("Create it? [y/N]: ", end='', file=out, flush=True)
     try:
-        with _ctrl_c_interrupts():
+        with ctrl_c_interrupts():
             answer = input()
     except (EOFError, KeyboardInterrupt):
         print(file=out)

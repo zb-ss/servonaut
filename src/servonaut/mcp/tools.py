@@ -6530,6 +6530,19 @@ class ServonautTools:
         )
         return self._db_staging_batch
 
+    async def find_db_setup_instance(self, instance_id: str) -> Optional[Dict]:
+        """Resolve *instance_id* exactly as :meth:`db_setup_save` will.
+
+        Lets a human surface refuse a server name that cannot be saved
+        under before it asks for connection details and a password.
+
+        Raises:
+            AmbiguousInstanceError: The reference names several servers.
+            UnknownAccountError: It is qualified with an account that
+                cannot connect.
+        """
+        return await self._find_instance(instance_id.strip())
+
     def _staged_db_entry(self, token: str):
         """Return ``(store, entry)`` for a live staging token, else ``(None, None)``."""
         for store in (self._db_staging, self._db_staging_batch):

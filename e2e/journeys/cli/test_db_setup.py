@@ -11,8 +11,9 @@ the instance id rather than the name typed. Neither the plaintext password,
 its masked preview nor the staging token appears in the output, and the
 password is in no request to the service, in any encoding. ``--yes`` stores
 everything without asking; without a terminal and without ``--yes`` or
-``--pick`` the command lists what it found and stores nothing; and without a
-secret store it refuses to scan.
+``--pick`` the command lists what it found and stores nothing; Ctrl+C at the
+question cancels with nothing stored; and without a secret store it refuses
+to scan.
 
 Observation, not a gap: ``bws secret create`` takes the value as an
 argument, so the password is on ``bws``'s command line (and in the process
@@ -45,6 +46,7 @@ HOST = fleet.EDGE_1
 SHOP_SECRET = f"db/{HOST.instance_id}/shop"
 BLOG_SECRET = f"db/{HOST.instance_id}/blog"
 TOKEN_VARIABLE = "BWS_ACCESS_TOKEN"
+CTRL_C = "\x03"
 # The list rows, built from parts so no line holds a literal login@host string.
 SHOP_ROW = "@".join((
     r"1  MySQL\s+shop", r"localhost:3306/shop\s+from /var/www/shop/configuration\.php",
@@ -62,7 +64,10 @@ def _bitwarden_store(journey, cli, home) -> tuple[FakeBitwarden, str]:
 
 
 def _on_terminal(journey, home, servonaut_cmd, exchange: list[tuple[str, str]]) -> tuple[int, str]:
-    """Run ``db setup edge-1`` on a pty; answer each prompt pattern in turn."""
+    """Run ``db setup edge-1`` on a pty; answer each prompt pattern in turn.
+
+    An answer of :data:`CTRL_C` presses Ctrl+C instead of typing a line.
+    """
     process, master = _start_on_pty(
         [*servonaut_cmd, "db", "setup", HOST.name],
         env=journey.child_env(home), cwd=home.base, size=(160, 50),
@@ -74,7 +79,8 @@ def _on_terminal(journey, home, servonaut_cmd, exchange: list[tuple[str, str]]) 
                 master, screen, lambda text, prompt=prompt: re.search(prompt, text) is not None,
                 time.monotonic() + 30, f"the prompt /{prompt}/",
             )
-            os.write(master, (answer + "\n").encode("utf-8"))
+            # Ctrl+C is a keystroke, not a line: the terminal turns it into SIGINT.
+            os.write(master, (answer if answer == CTRL_C else answer + "\n").encode("utf-8"))
         _read_until(master, screen, lambda _text: False, time.monotonic() + 30, "the result")
         returncode = process.wait(timeout=30)
     finally:
@@ -133,6 +139,26 @@ def test_db_setup_stores_the_password_in_the_vault(
     # Observation (a bws CLI limitation): the value itself is an argument.
     assert create.argv[4:] == [SHOP_SECRET, digest(SHOP_PASSWORD), project]
     fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
+
+
+def test_ctrl_c_at_the_question_cancels_and_stores_nothing(
+    journey, fake_cloud, cli, account_home, servonaut_cmd
+):
+    home = account_home("db-setup-ctrl-c")
+    vault, project = _bitwarden_store(journey, cli, home)
+    script_db_scan(journey.shims, HOST)
+
+    # The question defaults to "all": a Ctrl+C that only cancelled in the
+    # background would leave it waiting, and the next Enter would store both.
+    returncode, text = _on_terminal(journey, home, servonaut_cmd, [
+        (r"Store which\? \[1, 2, all, none — Enter = all\]: ", CTRL_C),
+    ])
+    assert returncode == 130, text
+    assert text.rstrip().endswith("Cancelled."), text
+    assert "Saved" not in text and "Label for" not in text
+    _assert_nothing_secret(text)
+    assert vault.secrets(project) == {}
+    assert _profiles(home) == []
 
 
 def test_yes_stores_everything_found(journey, fake_cloud, cli, account_home):

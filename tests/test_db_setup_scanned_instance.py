@@ -299,7 +299,11 @@ def test_cli_db_setup_passes_the_named_instance():
     with patch.object(cli_db, "_build_tools", return_value=(tools, MagicMock())):
         assert asyncio.run(cli_db._run_setup(args)) == 0
 
-    tools.db_scan_stage.assert_awaited_once_with("web-1", search_path="", source="auto")
+    # Without a local file to fall back to, auto scans over SSH only, into
+    # the uncapped batch store.
+    tools.db_scan_stage.assert_awaited_once_with(
+        "web-1", search_path="", source="ssh", staging=tools.open_db_staging_batch.return_value,
+    )
     tools.db_setup_save.assert_awaited_once_with(
         "dbstg_x", instance_id="web-1", label="shop.example.com",
     )
