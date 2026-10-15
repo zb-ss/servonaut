@@ -562,3 +562,14 @@ def test_manual_needs_a_terminal_and_no_scan_flags(capsys):
 ])
 def test_parse_numbers(text: str, count: Any, expected: Any):
     assert cli_db._parse_numbers(text, count) == expected
+
+
+def test_the_local_store_is_named_without_the_home_folder():
+    from pathlib import Path
+
+    from servonaut.services.secrets_status import describe_secret_store
+
+    provider = SimpleNamespace(
+        provider_name="local", path=Path.home() / ".servonaut" / "secrets.json",
+    )
+    assert describe_secret_store(provider) == "the local secret store (~/.servonaut/secrets.json)"

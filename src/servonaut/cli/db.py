@@ -103,6 +103,12 @@ def handle_db_command(args: argparse.Namespace) -> int:
               "[--source auto|ssh|local] [--yes | --pick N[,M]] [--label NAME] "
               "[--json] [--manual]")
         return _EXIT_ERROR
+    # The list goes to stdout and notices to stderr: line by line, so a
+    # piped run keeps them in the order they were written.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):  # a replaced or detached stdout
+        pass
     try:
         return asyncio.run(_run_setup(args))
     except (KeyboardInterrupt, EOFError):

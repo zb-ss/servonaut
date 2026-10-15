@@ -425,7 +425,9 @@ class SecretsScreen(Screen):
             pill.update(
                 f"[bold $text-success]● Local{self._scope_suffix(s)} — active[/bold $text-success]"
             )
-        path = escape(s.local_secrets_path or "~/.servonaut/secrets.json")
+        from servonaut.services.ssh_host_keys import home_relative
+
+        path = escape(home_relative(s.local_secrets_path or "~/.servonaut/secrets.json"))
         children = [
             self._kv_grid(
                 ("Active provider", f"Local{self._scope_suffix(s)}"),
