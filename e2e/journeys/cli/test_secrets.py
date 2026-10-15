@@ -100,6 +100,22 @@ def test_setup_signed_out_asks_for_login(journey, fake_cloud, cli, account_home)
     assert fake_cloud.requests() == []
 
 
+def test_setup_on_the_free_plan_names_the_plan_it_needs(journey, fake_cloud, cli, account_home):
+    """A Free user is told which plan secrets need and where to upgrade, in words."""
+    vault, _ = _vault(journey)
+    journey.env_overrides[TOKEN_VARIABLE] = vault.access_token
+    fake_cloud.configure(plan="free")
+    home = account_home("secrets-free-plan")
+
+    result = cli(home, "secrets", "setup", "--yes")
+    assert result.returncode != 0, result.describe()
+    assert result.stdout.strip() == (
+        "Secrets management needs the Solo plan. "
+        "Compare plans and upgrade at https://servonaut.dev/pricing."
+    ), result.describe()
+    assert vault.calls("bws") == []
+
+
 def test_setup_with_a_custom_token_variable(journey, fake_cloud, cli, account_home):
     vault, project = _vault(journey)
     journey.env_overrides[CUSTOM_VARIABLE] = vault.access_token

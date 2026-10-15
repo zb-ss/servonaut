@@ -42,7 +42,10 @@ class TestEntitlementGuard:
     def test_free_user_blocked_from_solo_features(self, free_guard):
         allowed, reason = free_guard.check("config_sync")
         assert not allowed
-        assert "paid subscription" in reason
+        assert reason == (
+            "Config sync across machines needs the Solo plan. "
+            "Compare plans and upgrade at https://servonaut.dev/pricing."
+        )
 
     def test_free_user_blocked_from_team_features(self, free_guard):
         allowed, reason = free_guard.check("team_workspace")
@@ -55,7 +58,21 @@ class TestEntitlementGuard:
     def test_solo_user_blocked_from_team_features(self, solo_guard):
         allowed, reason = solo_guard.check("team_workspace")
         assert not allowed
-        assert "teams plan" in reason
+        assert reason == (
+            "This feature needs the Teams plan; you are on Solo. "
+            "Upgrade at https://servonaut.dev/pricing."
+        )
+
+    def test_refusal_names_the_feature_as_the_account_screen_does(self, solo_guard):
+        allowed, reason = solo_guard.check("team_vault")
+        assert not allowed
+        assert reason.startswith("Team vault shared with your team needs the Teams plan;")
+        assert "team_vault" not in reason
+
+    def test_refusal_never_names_a_command_that_does_not_exist(self, free_guard):
+        for feature in FEATURE_PLANS:
+            _, reason = free_guard.check(feature)
+            assert "--subscribe" not in reason and "_" not in reason.split(" needs ")[0], reason
 
     def test_teams_user_allowed_all_features(self, teams_guard):
         for feature in FEATURE_PLANS:

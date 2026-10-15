@@ -5,6 +5,8 @@ import logging
 from functools import wraps
 from typing import Callable, TYPE_CHECKING
 
+from servonaut.services.plan_labels import PRICING_URL, feature_label, plan_label
+
 if TYPE_CHECKING:
     from servonaut.services.auth_service import AuthService
 
@@ -69,12 +71,15 @@ class EntitlementGuard:
         if plan_level >= required_level:
             return True, "OK"
 
+        return False, self._refusal(feature, required_plan, plan)
+
+    @staticmethod
+    def _refusal(feature: str, required_plan: str, plan: str) -> str:
+        """Why *feature* is not available on *plan*, and where to upgrade."""
+        needs = f"{feature_label(feature, 'This feature')} needs the {plan_label(required_plan)} plan"
         if plan == "free":
-            return False, (
-                f"'{feature}' requires a paid subscription. "
-                f"Run 'servonaut --subscribe' to upgrade."
-            )
-        return False, f"'{feature}' requires the {required_plan} plan (you have {plan})."
+            return f"{needs}. Compare plans and upgrade at {PRICING_URL}."
+        return f"{needs}; you are on {plan_label(plan)}. Upgrade at {PRICING_URL}."
 
     def require(self, feature: str) -> Callable:
         """Decorator for async methods that require a feature."""
