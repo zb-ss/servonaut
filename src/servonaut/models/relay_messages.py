@@ -25,6 +25,11 @@ class CommandRequest:
     target_server_id: str
     payload: dict = field(default_factory=dict)
     ttl_seconds: int = 60
+    # Set only by a local caller that composes the command itself (a log
+    # read, a remediation): what was asked for, in plain words, so a
+    # refusal names that rather than the internal command. Never read
+    # from a hub event.
+    requested_as: str = ""
 
 
 @dataclass

@@ -117,7 +117,7 @@ class TestGuardForTarget:
         guard = _guard(_shared("viewer"))
         assert guard.refusal("run_command", "uptime") == (
             "Blocked: on team Ops's shared servers your agents run at the readonly "
-            "level (set by the team), and run_command is not available there."
+            "level (set by the team), and running commands is not available there."
         )
         assert guard.refusal("check_status") is None
         assert guard.refusal("get_server_info") is None
@@ -132,6 +132,68 @@ class TestGuardForTarget:
     def test_the_team_slug_names_the_team_without_a_name(self):
         refusal = _guard(_shared(team_name="")).refusal("transfer_file")
         assert refusal.startswith("Blocked: on team ops's shared servers")
+
+    def test_a_team_without_a_name_or_slug_reads_naturally(self):
+        refusal = _guard(_shared(team_name="", team_slug="")).refusal("transfer_file")
+        assert refusal == (
+            "Blocked: on this team's shared servers your agents run at the standard "
+            "level (set by the team), and file transfers are not available there."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_an_option_the_standard_level_refuses_keeps_the_reason(self):
+        refusal = _guard(_shared()).refusal("run_command", "find / -name x -delete")
+        assert refusal.endswith(
+            "and 'find / -name x -delete' is refused there: find actions that run "
+            "programs, delete or write files are not allowed."
+        )
+
+    def test_an_ip_change_says_what_ip_allows(self):
+        refusal = _guard(_shared()).refusal("run_command", "ip addr add 10.0.0.1/24 dev eth0")
+        assert "is refused there: " in refusal
+        assert "not an allowed command" not in refusal
+
+    def test_a_command_list_is_refused_without_advice_to_raise_the_level(self):
+        refusal = _guard(_shared()).refusal("run_command", "uptime; id")
+        assert refusal.endswith(
+            "and 'uptime; id' is refused there: only single pipes between "
+            "allowlisted commands are allowed in standard mode."
+        )
+        assert "dangerous tier" not in refusal
+
+    def test_a_blocklisted_command_names_the_pattern(self):
+        guard = _guard(_shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bcat\b"])
+        assert guard.refusal("run_command", "cat /etc/hostname").endswith(
+            "and 'cat /etc/hostname' is refused there: it matches the blocked "
+            "pattern \\bcat\\b."
+        )
+
+    def test_a_request_named_in_plain_words_is_refused_by_that_name(self):
+        viewer = _guard(_shared("viewer"))
+        assert viewer.refusal(
+            "run_command", "tail -n 10 -- /var/log/syslog", requested_as="reading logs",
+        ).endswith("and reading logs is not available there.")
+        member = _guard(_shared())
+        refusal = member.refusal(
+            "run_command", "(sudo -n systemctl restart nginx); rc=$?",
+            requested_as="the restart_service remediation",
+        )
+        assert refusal.endswith("and the restart_service remediation is not allowed there.")
+        assert member.refusal("run_command", "uptime", requested_as="reading logs") is None
+
+    def test_the_actor_names_who_runs_under_the_rule(self):
+        refusal = _guard(_shared()).refusal(
+            "run_command", "systemctl restart nginx", actor="relayed commands",
+        )
+        assert refusal.startswith(
+            "Blocked: on team Ops's shared servers relayed commands run at the standard level"
+        )
+        assert is_team_refusal(refusal)
+
+    def test_other_blocked_messages_are_not_team_refusals(self):
+        assert not is_team_refusal("Blocked: Command matches blocklist pattern: x")
+        assert not is_team_refusal("Blocked: on hold")
+        assert not is_team_refusal(None)
 
     def test_a_long_command_is_shortened_in_the_message(self):
         command = "systemctl " + "x" * 200

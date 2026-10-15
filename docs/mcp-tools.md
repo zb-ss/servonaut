@@ -28,16 +28,18 @@ Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, argumen
 
 ### Team shared servers
 
-On a server one of your teams shares with you, the team decides what your agents may do. This covers the MCP server, the tools of the AI chat and commands relayed to this machine. Your own settings can make it stricter, never looser:
+On a server one of your teams shares with you, the team decides what your agents may do. This covers the MCP server, the tools of the AI chat and everything relayed to this machine (see below). Your own settings can make it stricter, never looser:
 
 - Your agents run at the stricter of your `guard_level` and the level your role in the team gets: owners, admins and members get `standard`, viewers get `readonly`. If Servonaut cannot tell your role, it uses `readonly`.
-- At `standard`, only the built-in command allowlist applies. Commands you added to your own allowlist do not work on a team's servers, and commands you removed from it stay refused.
+- At `standard`, only the built-in command allowlist applies, with the same option rules as on your own servers (no `find -delete`, no `ip ... add`, and so on). Commands you added to your own allowlist do not work on a team's servers, and commands you removed from it stay refused.
 - The built-in blocklist always applies, and so do the patterns you added to your own blocklist.
 - `transfer_file` and the other `dangerous` tools are not available on a team's servers.
 
-A refusal names the team and the level, for example: *Blocked: on team Ops's shared servers your agents run at the standard level (set by the team), and 'systemctl restart nginx' is not an allowed command there.* The audit log records it with the reason `team_rule`.
+A refusal names the team, the level and what was refused, for example: *Blocked: on team Ops's shared servers your agents run at the standard level (set by the team), and 'systemctl restart nginx' is not an allowed command there.* When the command is on the allowlist but one of its options is not allowed, the refusal says which rule it broke. The audit log records every refusal with the reason `team_rule`.
 
-Your own servers keep your own settings, including a server you also have in your own inventory. Commands you type yourself (in the TUI or with `servonaut ssh`) do not fall under team rules.
+Relayed requests follow the same rule: commands you type in the web console, remediation fixes you approve and on-box IP bans. A remediation fix runs several commands in one go, which the `standard` level does not allow, so fixes are refused on a team's servers and the refusal names the fix.
+
+Your own servers keep your own settings. A server that is both in your own inventory and shared by a team keeps your own settings when your agent names it by your own name or id; named through the team (`ops/<name>`, or the team's id for it), the team's rule applies. Commands you type yourself in the TUI or with `servonaut ssh` do not fall under team rules.
 
 ## Several accounts per provider
 

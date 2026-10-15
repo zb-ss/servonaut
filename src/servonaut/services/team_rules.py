@@ -31,9 +31,29 @@ from servonaut.services.shared_servers import is_shared_row
 
 # The audit reason code of every refusal a team rule causes.
 TEAM_RULE_REASON = "team_rule"
-# Every refusal message starts with this, so a caller that only sees the
-# message (the relay's response) can still tell a team refusal apart.
+# Every refusal message starts with one of these (a named team, or a team
+# the row does not name), so a caller that only sees the message (the
+# relay's response) can still tell a team refusal apart.
 REFUSAL_PREFIX = "Blocked: on team "
+_UNNAMED_TEAM = "this team's"
+_REFUSAL_PREFIXES: Tuple[str, ...] = (
+    REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared servers ",
+)
+# Who a refusal says runs under the rule, per surface.
+AGENTS = "your agents"
+RELAYED_COMMANDS = "relayed commands"
+# Plain words for the tools a team's level can take away entirely.
+_UNAVAILABLE = {
+    "run_command": "running commands is not available there",
+    "transfer_file": "file transfers are not available there",
+}
+# The guard's reasons, as worded for a person's own server.
+_NOT_ALLOWLISTED = "not in allowlist"
+_STANDARD_PREFIX = "Not allowed in standard mode: "
+_BLOCKLIST_PREFIX = "Command matches blocklist pattern: "
+# On a team's server a higher local tier does not help, so the guard's
+# advice to use one is left out.
+_TIER_ADVICE = "; use the dangerous tier"
 
 # Least to most permissive.
 GUARD_LEVELS: Tuple[str, ...] = (
@@ -102,6 +122,16 @@ def _team_label(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def _command_reason(reason: str) -> str:
+    """The guard's *reason* for refusing a command, worded for a team's server."""
+    reason = reason.split(_TIER_ADVICE, 1)[0]
+    if reason.startswith(_BLOCKLIST_PREFIX):
+        return f"it matches the blocked pattern {reason[len(_BLOCKLIST_PREFIX):]}"
+    if reason.startswith(_STANDARD_PREFIX):
+        return reason[len(_STANDARD_PREFIX):]
+    return reason[:1].lower() + reason[1:]
+
+
 def _reported(command: str) -> str:
     text = " ".join(command.split())
     if len(text) <= _REPORTED_COMMAND_LIMIT:
@@ -118,34 +148,52 @@ class TeamGuard:
     team_level: str
     team: str
 
-    def refusal(self, tool_name: str, command: Optional[str] = None) -> Optional[str]:
-        """Why *tool_name* (running *command*, if given) is refused; None if allowed."""
+    def refusal(
+        self, tool_name: str, command: Optional[str] = None,
+        *, requested_as: str = "", actor: str = AGENTS,
+    ) -> Optional[str]:
+        """Why *tool_name* (running *command*, if given) is refused; None if allowed.
+
+        *requested_as* names what was asked for in plain words ("reading
+        logs") when *command* is something the caller built rather than
+        the words the requester wrote: the message then names that instead
+        of the command. *actor* says who runs under the rule on this
+        surface.
+        """
         allowed, _ = self.guard.check_tool(tool_name)
         if not allowed:
-            return self._message(f"{tool_name} is not available there")
-        if command is not None:
-            allowed, _ = self.guard.check_command(command)
-            if not allowed:
-                return self._message(
-                    f"'{_reported(command)}' is not an allowed command there",
-                )
-        return None
+            what = (
+                f"{requested_as} is not available there" if requested_as
+                else _UNAVAILABLE.get(tool_name, f"{tool_name} is not available there")
+            )
+            return self._message(actor, what)
+        if command is None:
+            return None
+        allowed, reason = self.guard.check_command(command)
+        if allowed:
+            return None
+        if requested_as:
+            return self._message(actor, f"{requested_as} is not allowed there")
+        shown = _reported(command)
+        if _NOT_ALLOWLISTED in reason:
+            return self._message(actor, f"'{shown}' is not an allowed command there")
+        return self._message(actor, f"'{shown}' is refused there: {_command_reason(reason)}")
 
-    def _message(self, what: str) -> str:
-        team = f"{self.team}'s" if self.team else "this team's"
+    def _message(self, actor: str, what: str) -> str:
+        team = f"team {self.team}'s" if self.team else _UNNAMED_TEAM
         setter = (
             "set by the team" if _level_rank(self.team_level) <= _level_rank(self.level)
             else "set by your MCP settings"
         )
         return (
-            f"{REFUSAL_PREFIX}{team} shared servers your agents run at the "
+            f"Blocked: on {team} shared servers {actor} run at the "
             f"{self.level} level ({setter}), and {what}."
         )
 
 
 def is_team_refusal(message: Any) -> bool:
     """Whether *message* is a refusal :class:`TeamGuard` wrote."""
-    return isinstance(message, str) and message.startswith(REFUSAL_PREFIX)
+    return isinstance(message, str) and message.startswith(_REFUSAL_PREFIXES)
 
 
 def guard_for_target(

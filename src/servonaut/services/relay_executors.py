@@ -10,7 +10,9 @@ from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
-from servonaut.services.team_rules import TEAM_RULE_REASON, TeamGuard, guard_for_target
+from servonaut.services.team_rules import (
+    RELAYED_COMMANDS, TEAM_RULE_REASON, TeamGuard, guard_for_target,
+)
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
@@ -51,8 +53,12 @@ class RelayExecutors:
 
     def __init__(self, config_manager, aws_service, custom_server_service,
                  ssh_service, connection_service, scp_service,
-                 accounts=None, vault_runtime: Any | None = None) -> None:
+                 accounts=None, vault_runtime: Any | None = None,
+                 audit: Any | None = None) -> None:
         self._config_manager = config_manager
+        # Where team-rule refusals are recorded (an AuditTrail). None: the
+        # MCP audit trail of the current config, opened on first refusal.
+        self._audit = audit
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
         # Every provider account (AccountRegistry). None: only the AWS
@@ -445,18 +451,49 @@ class RelayExecutors:
         self, request: CommandRequest, instance: Mapping[str, Any],
         team_guard: TeamGuard, tool_name: str, command: Optional[str] = None,
     ) -> Optional[CommandResponse]:
-        """A rejection when the team's rule refuses *tool_name* here, else None."""
-        refusal = team_guard.refusal(tool_name, command)
+        """A rejection when the team's rule refuses *tool_name* here, else None.
+
+        Every refusal writes an audit row with the reason ``team_rule``.
+        """
+        refusal = team_guard.refusal(
+            tool_name, command,
+            requested_as=request.requested_as, actor=RELAYED_COMMANDS,
+        )
         if refusal is None:
             return None
+        target = instance.get('id') or request.target_server_id
         logger.warning(
             "Relay %s on shared server %s refused (%s): %s",
-            tool_name, instance.get('id') or request.target_server_id,
-            TEAM_RULE_REASON, refusal,
+            tool_name, target, TEAM_RULE_REASON, refusal,
         )
+        self._audit_team_refusal(request, tool_name, target, command)
         return CommandResponse(
             request_id=request.id, status="rejected", error_message=refusal,
         )
+
+    def _audit_team_refusal(
+        self, request: CommandRequest, tool_name: str, target: Any,
+        command: Optional[str],
+    ) -> None:
+        """Record a team-rule refusal; a failing audit write never unblocks it."""
+        args: Dict[str, Any] = {
+            'instance_id': str(target or ''), 'request_type': request.type.value,
+        }
+        if request.requested_as:
+            args['requested_as'] = request.requested_as
+        elif command is not None:
+            args['command'] = command
+        try:
+            if self._audit is None:
+                from servonaut.mcp.audit import AuditTrail
+
+                self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
+            self._audit.log(
+                tool_name, args, '', False, TEAM_RULE_REASON,
+                source='relay', request_id=request.id,
+            )
+        except Exception as exc:  # noqa: BLE001 - the refusal stands either way
+            logger.warning("Could not audit a team-rule refusal: %s", exc)
 
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""
@@ -601,6 +638,7 @@ class RelayExecutors:
             target_server_id=request.target_server_id,
             payload={'command': f'tail -n {lines} {log_path}'},
             ttl_seconds=request.ttl_seconds,
+            requested_as=request.requested_as or "reading logs",
         )
         return await self._run_command(run_request)
 

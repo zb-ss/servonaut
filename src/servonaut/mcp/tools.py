@@ -557,7 +557,7 @@ class ServonautTools:
 
     async def _lookup_instance(
         self, tool_name: str, args: Dict[str, Any], instance_id: str,
-        *, audit_result: str = '', for_agent: bool = True,
+        *, audit_result: str = '', for_agent: bool = True, requested_as: str = '',
     ):
         """Resolve *instance_id* for a tool call.
 
@@ -568,7 +568,9 @@ class ServonautTools:
         account that cannot connect (the message says why), or
         ``team_rule`` when the server is a team's shared server whose rule
         does not let an agent run *tool_name* (for ``run_command``, the
-        command in ``args``) there. *for_agent* False is for a surface where
+        command in ``args``) there. *requested_as* names the request in a
+        team refusal when the command is one the tool built (see
+        :meth:`TeamGuard.refusal`). *for_agent* False is for a surface where
         a person made the request: team rules do not apply to it.
         """
         try:
@@ -621,7 +623,7 @@ class ServonautTools:
         team_guard = self._team_guard(instance) if for_agent else None
         if team_guard is not None:
             command = args.get('command', '') if tool_name == 'run_command' else None
-            refusal = team_guard.refusal(tool_name, command)
+            refusal = team_guard.refusal(tool_name, command, requested_as=requested_as)
             if refusal is not None:
                 self._audit.log(tool_name, args, '', False, TEAM_RULE_REASON)
                 return None, refusal
@@ -780,6 +782,18 @@ class ServonautTools:
             timed out / unreachable) and the instance is AWS + SSM-managed,
             fall back to SSM. The result is annotated with which channel won.
         """
+        return await self._run_command(instance_id, command, transport)
+
+    async def _run_command(
+        self, instance_id: str, command: str, transport: str = "auto",
+        *, requested_as: str = "",
+    ) -> str:
+        """:meth:`run_command`; *requested_as* names a command the caller built.
+
+        A tool that runs a command it composed (``get_logs``) passes what
+        was asked for in plain words, so a team refusal names that instead
+        of the internal command.
+        """
         args = {
             'instance_id': instance_id, 'command': command, 'transport': transport,
         }
@@ -794,7 +808,7 @@ class ServonautTools:
             return f"Blocked: {cmd_reason}"
 
         instance, error = await self._lookup_instance(
-            'run_command', args, instance_id,
+            'run_command', args, instance_id, requested_as=requested_as,
         )
         if error is not None:
             return error
@@ -1112,8 +1126,9 @@ class ServonautTools:
             return "validation: lines must be an integer (1-10000)"
         if not 1 <= count <= 10000:
             return "validation: lines must be an integer (1-10000)"
-        return await self.run_command(
-            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}"
+        return await self._run_command(
+            instance_id, f"tail -n {count} -- {shlex.quote(log_path)}",
+            requested_as="reading logs",
         )
 
     async def check_status(self, instance_id: str) -> str:

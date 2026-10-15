@@ -432,21 +432,23 @@ class TestRunCommand:
 class TestGetLogs:
     def test_calls_run_command_with_tail(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="log output")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="log output")) as mock_rc:
             result = run(tools.get_logs("i-abc123", "/var/log/syslog", 50))
-        mock_rc.assert_called_once_with("i-abc123", "tail -n 50 -- /var/log/syslog")
+        mock_rc.assert_called_once_with(
+            "i-abc123", "tail -n 50 -- /var/log/syslog", requested_as="reading logs",
+        )
         assert result == "log output"
 
     def test_default_log_path(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="ok")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="ok")) as mock_rc:
             run(tools.get_logs("i-abc123"))
         call_args = mock_rc.call_args
         assert "/var/log/syslog" in call_args[0][1]
 
     def test_default_lines(self):
         tools = make_tools(guard_level=GuardLevel.DANGEROUS)
-        with patch.object(tools, "run_command", new=AsyncMock(return_value="ok")) as mock_rc:
+        with patch.object(tools, "_run_command", new=AsyncMock(return_value="ok")) as mock_rc:
             run(tools.get_logs("i-abc123"))
         call_args = mock_rc.call_args
         assert "tail -n 100" in call_args[0][1]
@@ -1591,7 +1593,7 @@ class TestTeamRulesOnSharedServers:
 
         assert result == (
             "Blocked: on team Ops's shared servers your agents run at the readonly "
-            "level (set by the team), and run_command is not available there."
+            "level (set by the team), and running commands is not available there."
         )
         assert _audit_reasons(tools)[-1] == "team_rule"
 
@@ -1604,19 +1606,43 @@ class TestTeamRulesOnSharedServers:
         assert _audit_reasons(tools)[-1] == "team_rule"
 
     def test_a_local_readonly_level_stays_readonly(self):
+        # The local guard refuses before the server is looked up; the team
+        # guard's own handling of a stricter local level is covered by the
+        # relay tests, where only the team guard reads the level.
         tools = _team_tools(role="owner", level=GuardLevel.READONLY)
         result = run(tools.run_command("ops/team-web-1", "uptime"))
 
-        assert result.startswith("Blocked:")
+        assert result == "Blocked: Tool 'run_command' not available in readonly mode"
         tools._ssh_service.build_ssh_command.assert_not_called()
 
     def test_a_local_blocklist_addition_applies(self):
+        # Here too the local guard (same blocklist) refuses first; the team
+        # guard's merge of local patterns is covered by the relay tests.
         blocklist = [*MCPConfig().command_blocklist, r"\buptime\b"]
         tools = _team_tools(blocklist=blocklist)
         result = run(tools.run_command("ops/team-web-1", "uptime"))
 
-        assert result.startswith("Blocked:")
+        assert result == "Blocked: Command matches blocklist pattern: \\buptime\\b"
         tools._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_an_option_the_team_level_refuses_is_named(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        result = run(tools.run_command("ops/team-web-1", "find / -name x -delete"))
+
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'find / -name x -delete' is refused there: "
+            "find actions that run programs, delete or write files are not allowed."
+        )
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_viewer_reading_logs_is_told_logs_are_refused(self):
+        tools = _team_tools(role="viewer")
+        result = run(tools.get_logs("ops/team-web-1", "/var/log/syslog", 10))
+
+        assert result.endswith("and reading logs is not available there.")
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
 
     def test_a_local_allowlist_addition_does_not_apply(self):
         allowlist = [*MCPConfig().command_allowlist, "systemctl"]
@@ -1642,7 +1668,7 @@ class TestTeamRulesOnSharedServers:
         tools = _team_tools(role="owner", level=GuardLevel.DANGEROUS)
         result = run(tools.transfer_file("ops/team-web-1", "/tmp/a", "/tmp/b", "download"))
 
-        assert "transfer_file is not available there" in result
+        assert "file transfers are not available there" in result
         tools._scp_service.execute_transfer.assert_not_called()
         assert _audit_reasons(tools)[-1] == "team_rule"
 
