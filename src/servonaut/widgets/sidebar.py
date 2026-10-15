@@ -79,6 +79,17 @@ def _provider_available(app, provider: str) -> bool:
     return getattr(app, f"{provider}_service", None) is not None
 
 
+def _aws_switched_on(app) -> bool:
+    """Whether AWS is switched on in Settings; hosts without a config count as on."""
+    from servonaut.config.accounts import aws_enabled
+
+    manager = getattr(app, "config_manager", None)
+    try:
+        return aws_enabled(manager.get()) if manager is not None else True
+    except Exception:  # noqa: BLE001 — a stand-in host must never hide AWS
+        return True
+
+
 class Sidebar(Widget):
     """Top-level navigation widget mounted on every screen."""
 
@@ -310,8 +321,11 @@ class Sidebar(Widget):
             if not hetzner_s3:
                 self._hide_button("nav_hetzner_s3")
 
-        # AWS — section always visible, S3 button gated independently.
-        if getattr(self.app, "aws_object_storage_service", None) is None:
+        # AWS — visible unless switched off in Settings → AWS; its S3 button
+        # is gated independently.
+        if not _aws_switched_on(self.app):
+            self._hide_section("section_aws")
+        elif getattr(self.app, "aws_object_storage_service", None) is None:
             self._hide_button("nav_aws_s3")
 
         # ----- Per-button entitlement gating (inside still-visible sections) -----

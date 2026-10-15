@@ -300,6 +300,27 @@ class ServonautTools:
     # private attributes.
 
     @property
+    def has_aws(self) -> bool:
+        """False while AWS is switched off in Settings → AWS (``aws.enabled``)."""
+        from servonaut.config.accounts import aws_enabled
+
+        return aws_enabled(self._config_manager.get())
+
+    def refusal(self, name: str) -> Optional[str]:
+        """Why tool *name* cannot run now (audited), or None.
+
+        Every dispatcher (MCP, AI chat, relay) asks before calling a tool:
+        the AWS tools are unavailable while AWS is switched off.
+        """
+        from servonaut.config.accounts import AWS_SWITCHED_OFF
+        from servonaut.mcp.tool_schemas import TOOL_SCHEMAS
+
+        if TOOL_SCHEMAS.get(name, {}).get("required_service") == "aws" and not self.has_aws:
+            self._audit.log(name, {}, '', False, 'aws_switched_off')
+            return f"Error: {AWS_SWITCHED_OFF}"
+        return None
+
+    @property
     def has_ovh(self) -> bool:
         return self._has_provider('ovh', self._ovh_service)
 
@@ -4870,12 +4891,19 @@ class ServonautTools:
         """Return the ObjectStorageService for the given provider, or None."""
         if provider not in _S3_PROVIDERS:
             return None  # caller converts to validation: invalid_provider error
+        if provider == "aws" and not self.has_aws:
+            return None  # caller reports AWS switched off (_s3_unavailable)
         return getattr(self, f'_{provider}_object_storage_service', None)
 
     def _s3_unavailable(
         self, tool_name: str, provider: str, payload: Dict[str, Any],
     ) -> str:
         """Return a structured 'not configured' error + audit row for S3."""
+        if provider == "aws" and not self.has_aws:
+            from servonaut.config.accounts import AWS_SWITCHED_OFF
+
+            self._audit.log(tool_name, payload, '', False, 'aws_switched_off')
+            return f"Error: {AWS_SWITCHED_OFF}"
         msg = (
             f"S3 ({provider}) is not configured. Set "
             f"config.{provider}.object_storage.access_key and "

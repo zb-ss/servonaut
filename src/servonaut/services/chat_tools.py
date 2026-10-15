@@ -180,6 +180,10 @@ class ChatToolExecutor:
         handler = getattr(self._tools, tool_name, None)
         if handler is None:
             return f"Tool handler not available: {tool_name}"
+        refusal = getattr(self._tools, "refusal", None)
+        refused = refusal(tool_name) if callable(refusal) else None
+        if refused:
+            return refused
 
         try:
             result = await handler(**arguments)

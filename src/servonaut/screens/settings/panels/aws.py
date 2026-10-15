@@ -27,7 +27,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Input, Select, Static, Switch
 
-from servonaut.screens.settings.accounts import rebuild_accounts
+from servonaut.screens.settings.accounts import rebuild_accounts, refresh_provider_fleet
 from servonaut.screens.settings.aws_accounts import AwsAccountsSection
 from servonaut.screens.settings.base import SettingsPanel, ValidationError
 from servonaut.screens.settings.widgets import EnvVarInput, KeyValueEditor
@@ -368,9 +368,12 @@ class AwsPanel(SettingsPanel):
             region=fields["s3_region"],
             endpoint_url=fields["s3_endpoint_url"],
         )
+        switched = fields["enabled"] != config.aws.enabled
         new_aws = dataclasses.replace(
             config.aws,
             enabled=fields["enabled"],
+            # Switched off here, the user knows why AWS servers are hidden.
+            off_notice_shown=config.aws.off_notice_shown or not fields["enabled"],
             default_region=fields["default_region"],
             cache_ttl_seconds=fields["cache_ttl_seconds"],
             cache_path=fields["cache_path"],
@@ -385,7 +388,9 @@ class AwsPanel(SettingsPanel):
         )
         self.app.config_manager.update(aws=new_aws)
         # Every account's services, S3 included, are built from these settings.
-        rebuild_accounts(self.app)
+        if rebuild_accounts(self.app) and switched:
+            # Off: the AWS servers leave the list. On: they come back, refreshed.
+            refresh_provider_fleet(self.app, "aws")
         self.query_one(AwsAccountsSection).refresh_accounts()
         self._update_status_label(new_aws)
         self._finish_save("AWS settings saved")

@@ -270,6 +270,49 @@ async def test_aws_preserves_control_plane_and_roundtrips_secret(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("switch_to", [False, True])
+async def test_aws_switch_change_relists_the_aws_servers(tmp_path, switch_to):
+    """Flipping the AWS switch reloads the accounts and re-lists AWS at once."""
+    from unittest.mock import patch
+
+    manager = _temp_config_manager(tmp_path, AppConfig(aws=AWSConfig(enabled=not switch_to)))
+    app = _PanelHost(AwsPanel, manager)
+    with (
+        patch("servonaut.screens.settings.panels.aws.rebuild_accounts", return_value=True),
+        patch("servonaut.screens.settings.panels.aws.refresh_provider_fleet") as relist,
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.panel.query_one("#aws_enabled", Switch).value = switch_to
+            app.panel.persist()
+            await pilot.pause()
+            relist.assert_called_once_with(app, "aws")
+
+    aws = _reload(tmp_path).aws
+    assert aws.enabled is switch_to
+    # Switched off here, the user knows why AWS servers are hidden.
+    assert aws.off_notice_shown is (not switch_to)
+
+
+@pytest.mark.asyncio
+async def test_aws_save_without_a_switch_change_does_not_relist(tmp_path):
+    from unittest.mock import patch
+
+    manager = _temp_config_manager(tmp_path, AppConfig())
+    app = _PanelHost(AwsPanel, manager)
+    with (
+        patch("servonaut.screens.settings.panels.aws.rebuild_accounts", return_value=True),
+        patch("servonaut.screens.settings.panels.aws.refresh_provider_fleet") as relist,
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.panel.query_one("#aws_default_region", Input).value = "eu-west-1"
+            app.panel.persist()
+            await pilot.pause()
+    relist.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_aws_rejects_negative_cache_ttl(tmp_path):
     """collect() raises ValidationError for a negative cache TTL."""
     manager = _temp_config_manager(tmp_path, AppConfig())
