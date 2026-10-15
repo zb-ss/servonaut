@@ -36,10 +36,17 @@ def _status(screen: CaScreen) -> str:
     return str(screen.query_one("#ca_status", Static).render())
 
 
+def _ready_modal(app: App) -> Any:
+    """The switch-on confirmation once its buttons are mounted (a pushed screen composes later)."""
+    screen = app.screen
+    if not isinstance(screen, CaEnableConfirmModal):
+        return None
+    return screen if screen.query("#ca_enable_cancel") and screen.query("#ca_enable_confirm") else None
+
+
 async def _modal(app: App, *, open_: bool) -> Any:
     return await wait_for_async(
-        lambda: (app.screen if isinstance(app.screen, CaEnableConfirmModal) else None) if open_
-        else not isinstance(app.screen, CaEnableConfirmModal),
+        (lambda: _ready_modal(app)) if open_ else (lambda: not isinstance(app.screen, CaEnableConfirmModal)),
         desc="the switch-on confirmation" + ("" if open_ else " to close"),
     )
 
