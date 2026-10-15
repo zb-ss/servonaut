@@ -904,3 +904,90 @@ def test_auto_bind_yes_binds_the_ready_servers_and_reports_json(monkeypatch, cap
     report = json.loads(capsys.readouterr().out)
     results = {server["server"]: (server["status"], server["result"]) for server in report["servers"]}
     assert results == {"web-1": ("ready", "bound"), "db-1": ("no_key", None)}
+
+
+def _vault_record(name, kind, vault_id, team=None, items=0):
+    """A vault as the service lists it, with the signed material a person never needs to read."""
+    return {
+        "vault_id": vault_id, "kind": kind, "name": name, "team": team,
+        "counts": {"items": items, "open_exposures": 0, "pending_recipients": 0},
+        "my_grant": {"sealed_private_key": "c2VhbGVk", "signature": "c2lnbmF0dXJl"},
+        "versions": [{"version": 1, "signature": "c2lnbmF0dXJl", "creator_identity_id": "creator-1"}],
+    }
+
+
+TEAM_VAULT_ID = "6b2c3d4e-5f60-4b7c-9d8e-0f1a2b3c4d5e"
+
+
+def _run_with(service, argv):
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        return vault.handle_vault_command(_parser().parse_args(argv))
+    finally:
+        vault.set_vault_service_factory(None)
+
+
+def test_vault_list_shows_one_line_per_vault(capsys) -> None:
+    service = SimpleNamespace(list_vaults=AsyncMock(return_value=[
+        _vault_record("Personal", "personal", VAULT_ID, items=2),
+        _vault_record("Team vault", "team", TEAM_VAULT_ID, team={"slug": "example-team"}),
+    ]))
+
+    assert _run_with(service, ["vault", "list"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].split() == ["Name", "Kind", "Items", "Open", "exposures", "Vault", "ID"]
+    assert lines[1].split() == ["Personal", "personal", "2", "0", VAULT_ID]
+    assert lines[2].split() == ["Team", "vault", "team", "example-team", "0", "0", TEAM_VAULT_ID]
+    assert len(lines) == 3
+
+
+def test_vault_list_without_vaults_says_how_to_create_one(capsys) -> None:
+    assert _run_with(SimpleNamespace(list_vaults=AsyncMock(return_value=[])), ["vault", "list"]) == 0
+
+    assert capsys.readouterr().out.strip() == "You have no vaults yet: run `servonaut vault create`."
+
+
+def test_vault_list_json_keeps_the_full_records(capsys) -> None:
+    record = _vault_record("Personal", "personal", VAULT_ID)
+    assert _run_with(SimpleNamespace(list_vaults=AsyncMock(return_value=[record])), ["vault", "list", "--json"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == [record]
+
+
+def test_vault_create_names_the_vault_and_the_next_step(capsys) -> None:
+    created = _vault_record("Personal", "personal", VAULT_ID)
+    service = SimpleNamespace(create_vault=AsyncMock(return_value=created))
+
+    assert _run_with(service, ["vault", "create", "--name", "Personal"]) == 0
+
+    assert capsys.readouterr().out.splitlines() == [
+        f'Created your personal vault "Personal" (ID {VAULT_ID}).',
+        f"Next: import an SSH key with `servonaut vault import ssh --vault {VAULT_ID} --path ~/.ssh/<key>`.",
+    ]
+
+
+def test_vault_create_for_a_team_names_the_team(capsys) -> None:
+    created = _vault_record("Team vault", "team", TEAM_VAULT_ID, team={"slug": "example-team"})
+    service = SimpleNamespace(create_vault=AsyncMock(return_value=created))
+
+    assert _run_with(service, ["vault", "create", "--team", "example-team", "--name", "Team vault"]) == 0
+
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first == f'Created the team vault "Team vault" for example-team (ID {TEAM_VAULT_ID}).'
+
+
+def test_vault_grants_process_says_what_happened(capsys) -> None:
+    results = [{
+        "accepted": [{"recipient_user_id": 7, "recipient_identity_id": "identity-7"}],
+        "skipped": [],
+        "pending_confirmation": [{"user_id": 8, "identity_id": "identity-8", "safety_number": "12345",
+                                  "identity_changed": False}],
+    }]
+    service = SimpleNamespace(process_grants=AsyncMock(return_value=results))
+
+    assert _run_with(service, ["vault", "grants", "process", "--yes"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.strip() == "Granted access to 1 member. 1 member still needs approval before getting access."
+    assert "identity-7" not in out
