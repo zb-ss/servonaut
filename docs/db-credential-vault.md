@@ -51,10 +51,15 @@ db_top_queries(instance_id, app="shop.example.com")
 instance has several DBs and you omit `app`, the tool lists the stored sites so
 you can name one.
 
-## Coverage & management (TUI)
+## Scanning, coverage & management
 
-- **Scan a server:** click an instance → **Scan DB creds** (or `servonaut db
-  setup <instance>` on the CLI). Already-vaulted sites are flagged on re-scan.
+- **Scan a server:** click an instance → **Scan DB creds**. Already-vaulted
+  sites are flagged on re-scan.
+- **From the command line:** `servonaut db setup <instance>` lists what it
+  found by number and stores your pick in one step (`--yes` stores everything,
+  `--pick 1,3` stores by number, `--manual` lets you type the details instead
+  of scanning). The CLI prints neither the password nor its masked preview.
+  See the [CLI reference](cli-reference.md#servonaut-db-setup).
 - **Coverage view:** **Secrets → DB coverage** lists one row per stored site
   (Server · Site · Secret · status) so you can see which instances are covered
   and which are gaps across the fleet.
