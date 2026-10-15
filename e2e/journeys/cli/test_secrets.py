@@ -119,6 +119,21 @@ def test_setup_on_the_free_plan_names_the_plan_it_needs(journey, fake_cloud, cli
     assert vault.calls("bws") == []
 
 
+def test_status_on_the_free_plan_points_at_the_plans(journey, fake_cloud, cli, account_home):
+    """A Free user's status says where SSH keys come from and links the plans."""
+    fake_cloud.configure(plan="free")
+    home = account_home("secrets-free-status")
+
+    result = cli(home, "secrets", "status")
+    assert result.returncode == 0, result.describe()
+    assert result.stdout.strip().splitlines() == [
+        "Signed in on the Free plan.",
+        "Your plan has no secret store (Solo and Teams plans do), so SSH keys "
+        "are looked up in ~/.ssh.",
+        "Plans: https://servonaut.dev/pricing",
+    ], result.describe()
+
+
 def test_setup_with_a_custom_token_variable(journey, fake_cloud, cli, account_home):
     vault, project = _vault(journey)
     journey.env_overrides[CUSTOM_VARIABLE] = vault.access_token
