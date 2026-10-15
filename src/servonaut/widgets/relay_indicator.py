@@ -93,20 +93,28 @@ class RelayIndicator(Widget):
         self.state = new_state
 
     def on_click(self) -> None:
-        # Session-expired is the one state where the user can't fix
-        # anything from the relay status screen — sign-in is the
-        # required next step. Skip RelayStatusScreen and go straight
-        # to LoginScreen so the click does the obvious thing.
-        if self.state is RelayState.SESSION_EXPIRED:
-            try:
-                from servonaut.screens.login import LoginScreen
-                self.app.push_screen(LoginScreen())
-                return
-            except Exception:
-                # Fall through to the relay status screen as a last
-                # resort if login screen isn't available for some reason.
-                pass
-        self.app.push_screen(RelayStatusScreen())
+        open_relay_status(self.app, self.state)
+
+
+def open_relay_status(app, state=None) -> None:
+    """What clicking the relay indicator does; the command palette offers it too.
+
+    Session-expired is the one state where the user can't fix anything from
+    the relay status screen: sign-in is the required next step, so it opens
+    the sign-in screen instead. *state* defaults to the app's relay state.
+    """
+    if state is None:
+        state = getattr(app, "relay_state", None)
+    if state is RelayState.SESSION_EXPIRED:
+        try:
+            from servonaut.screens.login import LoginScreen
+            app.push_screen(LoginScreen())
+            return
+        except Exception:
+            # Fall through to the relay status screen as a last
+            # resort if login screen isn't available for some reason.
+            pass
+    app.push_screen(RelayStatusScreen())
 
 
 class RelayStatusScreen(Screen):

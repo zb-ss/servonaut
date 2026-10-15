@@ -226,3 +226,16 @@ async def test_dangerous_mcp_guard_level_warns_and_is_saved(tui, seed):
         await t.wait_for_toast(r"^Saved$")
 
     assert seed.read_config()["mcp"]["guard_level"] == "dangerous"
+
+
+async def test_the_relay_status_opens_from_the_palette(tui, seed, fake_cloud):
+    """The sidebar's relay indicator only opens on a click; the palette reaches it by keyboard."""
+    seed.config()
+    seed.cache(fleet.cache_rows(), fresh=True)
+    seed_session(seed.home, fake_cloud)
+
+    async with tui() as t:
+        await t.palette("Relay status")
+        await t.wait_for_screen("RelayStatusScreen")
+        await t.press("escape")
+        await t.wait_until(lambda: t.screen_name() != "RelayStatusScreen", desc="relay status closed")
