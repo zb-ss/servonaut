@@ -273,7 +273,15 @@ def replace_instances(
         _redraw_displaced(app, redaction, staying, displaced)
     # The slice keeps its place: refreshing one provider, or deleting one of
     # its servers, must not move that provider's servers below the others.
-    first = next((i for i, row in enumerate(current) if not kept(row)), len(current))
+    # A provider listed for the first time goes after the user's own servers
+    # but before the teams' shared servers, which always come last.
+    first = next((i for i, row in enumerate(current) if not kept(row)), None)
+    if first is None:
+        first = len(current)
+        if source != "shared":
+            first = next(
+                (i for i, row in enumerate(current) if row_source(row) == "shared"), first,
+            )
     before = sum(1 for row in current[:first] if kept(row))
     app.instances = staying[:before] + shown_rows + staying[before:]
     return app.instances

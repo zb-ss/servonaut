@@ -219,7 +219,8 @@ class TestFleetSlice:
         app = _app([])
         replace_instances(app, "shared", [shared_row(_server(), TEAM)])
         replace_instances(app, None, [_own()])
-        assert [row["name"] for row in app.instances] == ["web-1", "app-1"]
+        # The user's own servers first, the team's after them.
+        assert [row["name"] for row in app.instances] == ["app-1", "web-1"]
 
     def test_the_shared_slice_is_replaced_on_its_own(self):
         app = _app([])
@@ -301,3 +302,97 @@ async def test_the_table_lists_a_shared_own_server_once_with_a_mark() -> None:
         assert [row["name"] for row in table._filtered_instances] == ["app-1", "build-1"]
         table.filter("app-1")
         assert [row["name"] for row in table._filtered_instances] == ["app-1"]
+
+
+# ---------------------------------------------------------------------------
+# Every connection path: the team's login; the user's own configured key
+# until a team key or certificate replaces it
+# ---------------------------------------------------------------------------
+
+
+def _connection_service(default_username: str = "ec2-user"):
+    from unittest.mock import MagicMock
+
+    from servonaut.config.schema import AppConfig
+    from servonaut.services.connection_service import ConnectionService
+
+    manager = MagicMock()
+    manager.get.return_value = AppConfig(default_username=default_username)
+    return ConnectionService(manager), manager
+
+
+def _ssh_service():
+    from unittest.mock import MagicMock
+
+    ssh = MagicMock()
+    ssh.get_key_path.return_value = "~/.ssh/default.pem"
+    ssh.discover_key.return_value = None
+    return ssh
+
+
+def test_the_keyword_scan_uses_the_team_login():
+    from servonaut.services.scan_service import ScanService
+
+    connections, manager = _connection_service()
+    scan = ScanService.__new__(ScanService)
+    scan._config_manager = manager
+    target = scan._resolve_target(shared_row(_server(), TEAM), _ssh_service(), connections)
+    assert (target.host, target.username, target.key_path) == (
+        "web.example.com", "deploy", "~/.ssh/default.pem",
+    )
+
+
+def test_file_transfers_use_the_team_login():
+    from servonaut.screens.scp_transfer import SCPTransferScreen
+
+    connections, manager = _connection_service()
+    ssh = _ssh_service()
+    screen = SimpleNamespace(app=SimpleNamespace(
+        connection_service=connections, config_manager=manager, ssh_service=ssh,
+    ))
+    options = SCPTransferScreen._transfer_options(screen, shared_row(_server(), TEAM))
+    assert (options["host"], options["username"], options["key_path"], options["port"]) == (
+        "web.example.com", "deploy", "~/.ssh/default.pem", 2222,
+    )
+
+
+def test_the_file_browser_uses_the_team_login():
+    from servonaut.screens.file_browser import build_remote_tree
+
+    connections, manager = _connection_service()
+    app = SimpleNamespace(
+        connection_service=connections, config_manager=manager, ssh_service=_ssh_service(),
+    )
+    tree = build_remote_tree(app, shared_row(_server(), TEAM))
+    assert (tree._username, tree._key_path, tree._port) == ("deploy", "~/.ssh/default.pem", 2222)
+
+
+def test_server_memory_probes_use_the_team_login():
+    from unittest.mock import AsyncMock, patch
+
+    from servonaut.services.memory.service import MemoryService
+
+    connections, manager = _connection_service()
+    ssh = _ssh_service()
+    ssh._config_manager = manager
+    ssh.build_ssh_command.return_value = ["ssh"]
+    memory = MemoryService.__new__(MemoryService)
+    memory._ssh_service, memory._connection_service = ssh, connections
+    memory._vault_runtime = memory._vault_leases = None
+    # No team key here (a vault-bound server without a vault refuses to connect).
+    runner = MemoryService._make_ssh_runner(memory, shared_row(_server(credential_binding=None), TEAM))
+    with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", new=AsyncMock(return_value=(b"Linux", b""))):
+        asyncio.run(runner("uname"))
+    command = ssh.build_ssh_command.call_args.kwargs
+    assert (command["host"], command["username"], command["key_path"]) == (
+        "web.example.com", "deploy", "~/.ssh/default.pem",
+    )
+    assert command.get("port") == 2222
+
+
+def test_a_provider_listed_for_the_first_time_goes_before_the_team_servers():
+    app = _app([])
+    replace_instances(app, None, [_own()])
+    replace_instances(app, "shared", [shared_row(_server(), TEAM)])
+    replace_instances(app, "hetzner", [{"id": "42", "name": "cache-1", "is_hetzner": True}])
+    assert [row["name"] for row in app.instances] == ["app-1", "cache-1", "web-1"]

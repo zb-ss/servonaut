@@ -66,7 +66,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
         {
             "id": str(server.get("id") or ""),
             "name": str(server.get("name") or host),
-            "type": "shared",
+            # The team list says nothing about the machine's size; the
+            # state column already says "shared".
+            "type": "",
             "state": SHARED_STATE,
             # Like a custom server, the host stands in for both addresses:
             # a connection rule with a bastion reaches it the same way.
@@ -92,10 +94,21 @@ def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
     ``is_shared`` and ``team_slug`` added; this fills the plain fields the
     connection paths read (the host above all). A row is returned as is.
     """
-    if target.get("type") == "shared" and "public_ip" in target:
+    if target.get("is_shared") is True and target.get("state") == SHARED_STATE:
         return dict(target)
     team = {"slug": target.get("team_slug") or "", "name": target.get("team_name") or ""}
     return shared_row(target, team)
+
+
+def shared_login(row: Mapping[str, Any], profile: Any, default_username: str) -> str:
+    """The login for a team's shared server: a matching connection rule's,
+    else the team's, else the configured default.
+
+    A team vault key or SSH certificate names its own login and replaces
+    this one when the session starts.
+    """
+    rule_login = getattr(profile, "username", None) if profile is not None else None
+    return rule_login or str(row.get("username") or "") or default_username
 
 
 def _own_port(row: Mapping[str, Any]) -> int:
