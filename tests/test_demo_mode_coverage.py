@@ -3346,7 +3346,7 @@ class TestRelayStatusDemoMode:
     def test_client_ids_redacted(self) -> None:
         text = self._run_refresh(_make_mock_app(demo=True))
         assert "alice-thinkpad-x1-deadbeef" not in text
-        assert "client_ids=" in text
+        assert "listening: " in text
 
     def test_raw_without_demo(self) -> None:
         text = self._run_refresh(_make_mock_app(demo=False))

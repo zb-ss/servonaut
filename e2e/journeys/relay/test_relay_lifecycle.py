@@ -45,6 +45,8 @@ def test_background_start_status_reconnect_and_stop(journey, fake_cloud, account
     assert started.returncode == 0, started.describe()
     pid = _started_pid(started)
     assert connect.background_pid() == pid
+    # The PID file is named home-relative, like every path the CLI prints.
+    assert "PID file: ~/" in started.stdout, started.stdout
     first_client = _heartbeat_from_new_client(fake_cloud, seen)
     wait_for(lambda: connect.armed(pid), desc="background listener guard armed")
     assert connect.lock_owner()["pid"] == pid
@@ -54,7 +56,10 @@ def test_background_start_status_reconnect_and_stop(journey, fake_cloud, account
     assert status.returncode == 0, status.describe()
     assert f"Local view:   running (mode=bg, PID {pid})" in status.stdout
     assert "Backend view: connected" in status.stdout
-    assert first_client in status.stdout
+    # Said in words: how long ago the last heartbeat was, and who listens.
+    assert f"listening: {first_client}" in status.stdout
+    assert re.search(r"last heartbeat (just now|\d+s ago)", status.stdout), status.stdout
+    assert "client_ids=" not in status.stdout and "last_heartbeat_at=" not in status.stdout
 
     again = connect.run("--bg")
     assert f"Relay listener already running (PID {pid})" in again.stdout
@@ -112,6 +117,8 @@ def test_status_warns_when_the_service_does_not_see_the_listener(
     assert "WARNING: listener is running locally but the backend does not see it" in (
         status.stdout
     )
+    assert "no heartbeat yet" in status.stdout or "last heartbeat" in status.stdout
+    assert "staging" not in status.stdout
 
 
 def test_status_signed_out_shows_only_the_local_view(journey, fake_cloud, account_home, relay):

@@ -864,8 +864,10 @@ def _relay_start_background(runtime=None) -> None:
             print(f"Could not clean up unrecorded relay listener: {cleanup_error}")
         print(f"Could not record relay listener PID: {exc}")
         raise SystemExit(1)
+    from servonaut.services.ssh_host_keys import home_relative
+
     print(f"Relay listener started in background (PID {process.pid})")
-    print(f"PID file: {pid_path}")
+    print(f"PID file: {home_relative(str(pid_path))}")
 
 
 def _relay_stop(runtime=None) -> bool:
@@ -955,18 +957,20 @@ def _relay_status() -> None:
         print(f"Backend view: error — {backend['error']}")
         return
 
+    from servonaut.utils.formatting import format_time_ago
+
     connected = bool(backend.get("connected"))
-    last_hb = backend.get("last_heartbeat_at") or "never"
-    clients = backend.get("client_ids") or []
-    print(
-        f"Backend view: {'connected' if connected else 'disconnected'}"
-        f" (last_heartbeat_at={last_hb}, client_ids={clients})"
-    )
+    last_hb = backend.get("last_heartbeat_at")
+    details = [f"last heartbeat {format_time_ago(str(last_hb))}" if last_hb else "no heartbeat yet"]
+    clients = [str(client) for client in backend.get("client_ids") or []]
+    if clients:
+        details.append(f"listening: {', '.join(clients)}")
+    print(f"Backend view: {'connected' if connected else 'disconnected'} ({'; '.join(details)})")
 
     if local_running and not connected:
         print(
             "WARNING: listener is running locally but the backend does not see "
-            "it. Heartbeats may not be reaching staging/production. Try "
+            "it. Heartbeats may not be reaching Servonaut. Try "
             "'servonaut connect --reconnect'."
         )
     elif connected and not local_running:
