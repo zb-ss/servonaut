@@ -30,6 +30,7 @@ from textual.worker import Worker
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.services.vault import onboarding
+from servonaut.services.vault.display import grant_summary
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -2046,7 +2047,7 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Could not process grants ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Grant processing finished: {escape(str(result))}")
+        self._status(grant_summary(result))
 
     def action_rotate(self) -> None:
         if not self._allows_identity_action("ready"):

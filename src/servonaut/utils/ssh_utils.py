@@ -285,6 +285,58 @@ def ssh_diagnostics(output: Any) -> str:
     return getattr(output, "diagnostics", None) or ""
 
 
+#: Exit status OpenSSH uses for its own failures (not the remote command's).
+_SSH_OWN_FAILURE_EXIT_CODE = 255
+
+_SSH_AUTH_FAILURE_MARKERS = (
+    "permission denied",
+    "too many authentication failures",
+    "no supported authentication methods",
+    "authentication failed",
+)
+_SSH_UNREACHABLE_MARKERS = (
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "no route to host",
+    "network is unreachable",
+    "could not resolve hostname",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "connection closed by",
+    "connection reset",
+    "kex_exchange_identification",
+)
+
+
+def ssh_connection_failure(returncode: Optional[int], stdout: Any, diagnostics: str) -> Optional[str]:
+    """Why ssh itself failed before the remote command ran, or None.
+
+    ssh exits 255 for its own failures, but a remote command can exit 255
+    too, so this also requires an empty stdout and a message from ssh in its
+    private log (``SshLog``), which a remote command cannot write to.
+    Warnings such as "Permanently added ... to the list of known hosts" do
+    not count.
+
+    Returns:
+        ``"ssh_auth_failed"``, ``"ssh_unreachable"`` or ``"ssh_failed"``.
+    """
+    if returncode != _SSH_OWN_FAILURE_EXIT_CODE or stdout:
+        return None
+    messages = [
+        line.strip().lower() for line in (diagnostics or "").splitlines()
+        if line.strip() and not line.strip().lower().startswith("warning:")
+    ]
+    if not messages:
+        return None
+    text = "\n".join(messages)
+    if any(marker in text for marker in _SSH_AUTH_FAILURE_MARKERS):
+        return "ssh_auth_failed"
+    if any(marker in text for marker in _SSH_UNREACHABLE_MARKERS):
+        return "ssh_unreachable"
+    return "ssh_failed"
+
+
 def run_ssh(argv: Sequence[Union[str, os.PathLike]], **kwargs: Any) -> subprocess.CompletedProcess:
     """``subprocess.run`` for an unattended ssh or scp.
 

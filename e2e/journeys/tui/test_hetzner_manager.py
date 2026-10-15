@@ -81,6 +81,11 @@ async def _select(t, name: str) -> None:
     await t.settle()
 
 
+def _fleet_names(t) -> list[str]:
+    """Server names in the main server list."""
+    return [row[1] for row in t.table_rows("InstanceTable")]
+
+
 def _enabled(t, selector: str) -> bool:
     return not t.on_screen(selector).disabled
 
@@ -236,9 +241,17 @@ async def test_delete_needs_the_typed_word(tui, seed, providers):
         await t.wait_until(lambda: _enabled(t, "#btn_confirm"), desc="confirm enabled")
         await t.click("#btn_confirm")
         await t.wait_for_screen("HetznerManagerScreen")
-        await t.wait_for_toast(rf"^Server {doomed.server_id} deleted\.$")
+        await t.wait_for_toast(rf"^Server {re.escape(doomed.name)} deleted\.$")
         await t.wait_until(lambda: doomed.name not in _rows(t), desc="row removed")
         assert set(_rows(t)) == {fleet.HZ_BUILD_1.name}
+
+        # The server list no longer offers the deleted server.
+        await t.nav("nav_list")
+        await t.wait_for_screen("InstanceListScreen")
+        await t.wait_until(
+            lambda: fleet.HZ_BUILD_1.name in _fleet_names(t), desc="server list rows"
+        )
+        assert doomed.name not in _fleet_names(t)
 
     assert [e["api_path"] for e in deletes()] == [f"/servers/{doomed.server_id}"]
     assert providers.hetzner.server(doomed.server_id) is None
@@ -272,3 +285,32 @@ async def test_manager_reports_a_refused_token(tui, seed, providers):
         assert "unable to authenticate" in str(status.render())
         assert t.table_rows(TABLE) == []
     assert providers.mutations("hetzner") == []
+
+
+async def test_the_next_key_acts_on_the_server_the_action_was_for(tui, seed, providers):
+    """An action redraws the list; the cursor stays on the server it was for.
+
+    Delete pressed right after starting the second server asks about that
+    server, not about the first row.
+    """
+    _seed(seed, providers)
+    build = fleet.HZ_BUILD_1
+
+    async with tui() as t:
+        await _open_manager(t)
+        assert list(_rows(t)).index(build.name) > 0
+        await _select(t, build.name)
+        await _power(
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", "started", "running",
+            asks=False,
+        )
+        await t.settle()
+        assert t.on_screen(TABLE).cursor_row == list(_rows(t)).index(build.name)
+
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Delete Hetzner Server", build.name, screen_only=True)
+        await t.press("escape")
+        await t.wait_for_screen("HetznerManagerScreen")
+
+    assert providers.requests("hetzner", method="DELETE") == []

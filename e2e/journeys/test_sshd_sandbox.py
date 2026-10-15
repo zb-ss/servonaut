@@ -7,6 +7,7 @@ remote commands see the remote root as their machine.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -111,6 +112,39 @@ def test_non_loopback_destinations_are_refused(journey, sshd):
     assert result.returncode == 255
     assert "refused to connect: '9.9.9.9' is not a loopback address" in result.stderr
     assert sshd.target.sessions() == []
+
+
+def test_a_refused_destination_is_logged_like_an_unreachable_host(journey, sshd):
+    """ssh writes its connection errors to its private log, not to stderr."""
+    log = journey.directory / "ssh-refused.log"
+
+    result = _ssh(journey, sshd, "-E", str(log), "deploy@9.9.9.9", "true")
+
+    assert result.returncode == 255
+    assert result.stdout == ""
+    assert "Connection refused" in log.read_text()
+
+
+def test_a_log_file_in_another_write_root_is_allowed(journey, monkeypatch):
+    """A QA sandbox under a long root gives its children a short temp directory.
+
+    That directory is one of the children's write roots but lies outside the
+    test root, and the product puts ssh's private log (-E) in it.
+    """
+    from e2e.harness import openssh_shim
+
+    root = os.path.realpath(journey.ctx.root)
+    short_tmp = "/tmp/servonaut-qa-abcdefgh"
+    assert not short_tmp.startswith(root + os.sep)
+    args = ["-E", f"{short_tmp}/servonaut-ssh-1.log", f"deploy@{LOOPBACK}", "true"]
+
+    monkeypatch.setenv(GUARD.ENV_WRITE_ROOTS, os.pathsep.join([root, short_tmp]))
+    assert openssh_shim._argv_problem(GUARD, "ssh", args, "unused-config", root) == ""
+
+    monkeypatch.setenv(GUARD.ENV_WRITE_ROOTS, root)
+    assert "a log file (-E) outside the test root" in openssh_shim._argv_problem(
+        GUARD, "ssh", args, "unused-config", root,
+    )
 
 
 def test_non_loopback_jump_hosts_are_refused(journey, sshd):

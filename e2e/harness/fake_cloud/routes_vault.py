@@ -65,6 +65,9 @@ MAX_SKEW_SECONDS = 300
 TEAM_SLUG = "example-team"
 TEAM_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 SERVER_ID = "c2a4e6f8-1b3d-4f5a-9c7e-0a2b4c6d8e1f"
+# The account's ``/api/v1/teams`` row for that team, as its owner sees it
+# (``FakeCloud.account.configure(teams=[TEAM_ROW])``).
+TEAM_ROW = {"id": TEAM_ID, "slug": TEAM_SLUG, "name": "Example team", "role": "owner", "member_count": 2}
 # The shared server the CA knows, when no inventory is wired in.
 DEFAULT_SHARED_SERVER = {"id": SERVER_ID, "name": "server-1", "hostname": "server-1.example.test", "port": 22}
 
@@ -217,12 +220,16 @@ class VaultCloud:
     def __init__(
         self, user_id: Callable[[], int], *,
         shared_servers: Optional[Callable[[str], list[dict[str, Any]]]] = None,
+        team_members: Optional[Callable[[str], Optional[list[dict[str, Any]]]]] = None,
     ) -> None:
         self._user_id = user_id
         # The team inventory (``AccountData.shared_servers``): where a CA host is.
         self._shared_servers = shared_servers or (
             lambda slug: [dict(DEFAULT_SHARED_SERVER)] if slug == TEAM_SLUG else []
         )
+        # The active members of a managed team (``AccountData.team_members``),
+        # or None for a team whose membership the fake does not keep.
+        self._team_members = team_members or (lambda slug: None)
         self._lock = threading.RLock()
         self.reset()
 
@@ -627,24 +634,91 @@ class VaultCloud:
     def _role(self, vault: dict[str, Any], user_id: int) -> Optional[str]:
         if vault["kind"] == "personal":
             return "owner" if vault["owner_user_id"] == user_id else None
-        for entry in vault["roster"]:
+        for entry in self._roster(vault):
             if entry["user_id"] == user_id and entry["status"] not in {"removed", "revoked", "identity_compromised"}:
                 return entry["role"]
         return None
 
+    def _roster(self, vault: dict[str, Any]) -> list[dict[str, Any]]:
+        """A team vault's roster: its own entries, then the team's other active members.
+
+        For a team whose membership the fake keeps (``AccountData.create_team``),
+        every active member is on the roster, as on the service: a member who
+        accepted an invitation appears, one who was removed is gone. Their
+        status follows their Vault identity and grant (see :meth:`_member_entry`).
+        """
+        own = vault["roster"]
+        if vault["kind"] != "team":
+            return own
+        members = self._team_members(str((vault.get("team") or {}).get("slug", "")))
+        if not members:
+            return own
+        # The team knows its people's names: the vault's own entries use them too.
+        people = {int(m["user_id"]): m for m in members}
+        named = [
+            {**entry, "email": people[entry["user_id"]]["email"], "name": people[entry["user_id"]]["name"],
+             "display_name": people[entry["user_id"]]["name"]}
+            if entry["user_id"] in people else entry
+            for entry in own
+        ]
+        listed = {entry["user_id"] for entry in own}
+        return [*named, *(self._member_entry(vault, m) for m in members if m["user_id"] not in listed)]
+
+    def _member_entry(self, vault: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
+        """A team member's roster entry, as the grant processor reads it.
+
+        ``not_eligible`` for a viewer, ``awaiting_identity`` before their
+        Vault set-up, ``awaiting_confirmation`` while their identity is
+        unconfirmed, ``granted`` once they hold the current version's grant,
+        otherwise ``awaiting_grant`` (an owner's or admin's client grants it).
+        """
+        user_id = int(member["user_id"])
+        identity = self._identity(user_id)
+        grant = vault["grants"].get(user_id)
+        if member["role"] == "viewer":
+            status = "not_eligible"
+        elif identity is None:
+            status = "awaiting_identity"
+        elif not identity.get("grantable"):
+            status = "awaiting_confirmation"
+        elif grant is not None and grant["version"] == vault["current_version"]:
+            status = "granted"
+        else:
+            status = "awaiting_grant"
+        return {
+            "user_id": user_id, "email": member["email"], "name": member["name"],
+            "display_name": member["name"], "role": member["role"], "status": status,
+            "identity_id": identity["identity_id"] if identity else None,
+            "fingerprint": identity["fingerprint"] if identity else None,
+            "identity": self._public_identity(identity) if identity else None,
+            "grant_status": status, "joined_at": member["joined_at"],
+        }
+
+    def _referenced_identities(self, vault: dict[str, Any], roster: list[dict[str, Any]]) -> dict[str, Any]:
+        """The identities a team vault response names: its roster's, its versions'
+        creators and its grants' granters (never an unrelated user's)."""
+        wanted = {entry.get("identity_id") for entry in roster}
+        wanted |= {version.get("creator_identity_id") for version in vault["versions"]}
+        wanted |= {grant.get("granter_identity_id") for grant in vault["grants"].values()}
+        return {
+            identity["identity_id"]: self._public_identity(identity)
+            for identity in self._identities.values() if identity["identity_id"] in wanted
+        }
+
     def _vault_payload(self, vault: dict[str, Any], user_id: int) -> dict[str, Any]:
         role = self._role(vault, user_id)
         write = role in {"owner", "admin"}
-        identities = {identity["identity_id"]: self._public_identity(identity) for identity in self._identities.values()}
+        roster = self._roster(vault)
         answer = {key: copy.deepcopy(vault[key]) for key in ("vault_id", "kind", "scope", "team", "owner_user_id", "name", "grant_policy", "current_version", "rotation", "created_at", "updated_at")}
         answer.update({"versions": copy.deepcopy(vault["versions"]), "my_grant": copy.deepcopy(vault["grants"].get(user_id)), "my_role": role,
                        "permissions": {"read_items": role in {"owner", "admin", "member"}, "write_items": write,
                                        "grant": write, "rotate": write, "manage": write, "view_exposures": write},
-                       "counts": {"items": len(self._items.get(vault["vault_id"], {})), "open_exposures": len(self._exposures.get(vault["vault_id"], [])), "pending_recipients": 0},
+                       "counts": {"items": len(self._items.get(vault["vault_id"], {})), "open_exposures": len(self._exposures.get(vault["vault_id"], [])),
+                                  "pending_recipients": sum(entry["status"] == "awaiting_grant" for entry in roster)},
                        "poll_after_seconds": 300, "access_recovery": None})
         if vault["kind"] == "team":
-            answer["roster"] = copy.deepcopy(vault["roster"])
-            answer["identities"] = identities
+            answer["roster"] = copy.deepcopy(roster)
+            answer["identities"] = self._referenced_identities(vault, roster)
         return answer
 
     def create_personal(self, user_id: int, body: dict[str, Any], *, team_slug: Optional[str] = None) -> tuple[int, dict[str, Any]]:
@@ -894,6 +968,10 @@ class VaultCloud:
                 return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
             if not device.ssh_public_key:
                 return _refusal(403, "no_device_ssh_key", "Register a device SSH key before issuing a certificate")
+            members = self._team_members(slug)
+            if members is not None and all(int(m["user_id"]) != device.user_id for m in members):
+                # A team whose membership the fake keeps certifies its members only.
+                return _refusal(403, "forbidden", "Only members of this team can get SSH certificates for it")
             server_ids = body.get("server_ids")
             if not isinstance(server_ids, list) or not server_ids:
                 return _refusal(422, "validation_failed", "server_ids is required", field="server_ids")

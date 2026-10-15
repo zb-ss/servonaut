@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 
 from e2e.harness.fake_cloud.session import ACCESS_TOKEN, REFRESH_TOKEN, TokenSession
+from e2e.harness.fake_cloud.users import Accounts, current_account
 
 __all__ = ["ACCESS_TOKEN", "REFRESH_TOKEN", "USER_CODE", "Scenario", "ScenarioStore"]
 
@@ -28,6 +29,11 @@ class Scenario:
     device_expires_in: int = 60
     plan: str = "solo"
     user_id: int = 4242
+    # The account's e-mail address in tokens and entitlements ("" = none).
+    email: str = ""
+    # The sign-in page the device flow names; None = this fake's own /device.
+    # Display only: the fake approves the sign-in itself.
+    verification_uri: Optional[str] = None
     premium_ai: bool = True
     # Relay listeners the plan allows (0 keeps the relay off).
     mcp_connections: int = 1
@@ -61,6 +67,8 @@ class ScenarioStore:
         self._scenario = self._fresh()
         self._device_codes = 0
         self.session = TokenSession()
+        # Users beyond the scenario's account (see ``users.py``).
+        self.accounts = Accounts()
 
     def _fresh(self) -> Scenario:
         return Scenario(pypi_version=self._default_pypi_version)
@@ -70,6 +78,13 @@ class ScenarioStore:
             self._scenario = self._fresh()
             self._device_codes = 0
         self.session.reset()
+        self.accounts.reset()
+
+    def bearer_valid(self, authorization: Optional[str]) -> bool:
+        """True when *authorization* carries a current access token of any user."""
+        return self.session.bearer_valid(authorization) or (
+            self.accounts.for_bearer(authorization) is not None
+        )
 
     def configure(self, **changes: Any) -> None:
         known = {f.name for f in fields(Scenario)}
@@ -87,9 +102,18 @@ class ScenarioStore:
                 setattr(self._scenario, key, list(value) if key in _LIST_KEYS else value)
 
     def snapshot(self) -> Scenario:
+        """The scenario, as the user the current request was made by sees it.
+
+        For a request with an added user's token, ``user_id`` and ``plan``
+        are that user's; everything else is the scenario's.
+        """
         with self._lock:
             current = self._scenario
-            return Scenario(**{f.name: getattr(current, f.name) for f in fields(Scenario)})
+            scenario = Scenario(**{f.name: getattr(current, f.name) for f in fields(Scenario)})
+        account = current_account()
+        if account is not None:
+            scenario.user_id, scenario.plan = account.user_id, account.plan
+        return scenario
 
     def next_token_outcome(self) -> str:
         with self._lock:
@@ -100,4 +124,6 @@ class ScenarioStore:
     def next_device_code(self) -> str:
         with self._lock:
             self._device_codes += 1
-            return f"dc-fake-{self._device_codes}"
+            code = f"dc-fake-{self._device_codes}"
+        self.accounts.claim_device_code(code)
+        return code

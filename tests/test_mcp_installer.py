@@ -833,3 +833,33 @@ def test_opencode_reinstall_preserves_disabled_state_and_custom_env(
     assert entry["enabled"] is False
     assert entry["environment"]["CUSTOM"] == "kept"
     assert entry["environment"]["SSH_AUTH_SOCK"] == "{env:SSH_AUTH_SOCK}"
+
+
+def test_the_install_message_writes_paths_home_relative(fake_home, monkeypatch, capsys):
+    """The message can be shared (an issue, a screenshot) without the user's name in it."""
+    venv_python = str(fake_home / ".local" / "share" / "pipx" / "venvs" / "servonaut" / "bin" / "python")
+    monkeypatch.setattr(
+        installer, "_resolve_mcp_command",
+        lambda _runtime=None: (venv_python, ["-m", "servonaut.main", "--mcp"]),
+    )
+
+    install_mcp_server("claude")
+
+    out = capsys.readouterr().out
+    assert "Installed servonaut MCP server in ~/.claude.json" in out
+    assert "command: ~/.local/share/pipx/venvs/servonaut/bin/python -m servonaut.main --mcp" in out
+    assert str(fake_home) not in out
+    # The config itself keeps the full path the agent needs.
+    entry = json.loads((fake_home / ".claude.json").read_text())["mcpServers"]["servonaut"]
+    assert entry["command"] == venv_python
+
+
+def test_the_opencode_message_shows_a_command_line(fake_home, monkeypatch, capsys):
+    monkeypatch.setattr(installer, "_get_os", lambda: "linux")
+    monkeypatch.setattr(installer, "_installed_major_version", lambda _name: 1)
+
+    install_mcp_server("opencode")
+
+    out = capsys.readouterr().out
+    assert "Installed servonaut MCP server in ~/.config/opencode/opencode.json" in out
+    assert "command: /usr/bin/servonaut --mcp" in out and "['" not in out

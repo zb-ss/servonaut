@@ -22,6 +22,8 @@ examples:
   python -m e2e.sandbox up --scenario multi-account &
   python -m e2e.sandbox status
   python -m e2e.sandbox run -- servonaut hetzner list
+  python -m e2e.sandbox accept-invite member@example.com   # up --teams
+  python -m e2e.sandbox run --as member -- login           # up --teams
   python -m e2e.sandbox mcp-call list_instances
   python -m e2e.sandbox desktop
   python -m e2e.sandbox down
@@ -50,9 +52,28 @@ def _parser() -> argparse.ArgumentParser:
                     help="start signed in to the local Servonaut API")
     up.add_argument("--ssh-ca-off", action="store_true",
                     help="answer like a service with SSH certificates switched off")
+    up.add_argument("--teams", action="store_true",
+                    help="on the Teams plan, owning a team whose shared server (server-1) runs "
+                         "an sshd that honours SSH certificates, to walk Team Vault and SSH "
+                         "certificates end to end; with a second person, a member to be "
+                         "(member@example.com, own home, signed out: run --as member, "
+                         "accept-invite); needs a short --root, such as /tmp/svt")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
+    up.add_argument("--account-email", default="", metavar="EMAIL",
+                    help="give the signed-in account this e-mail address (use a reserved "
+                         "example domain), so screens that show it have one")
+    up.add_argument("--verification-uri", default=None, metavar="URL",
+                    help="the sign-in page `servonaut login` names, for recordings that must "
+                         "not show the local address (display only: the sandbox still approves "
+                         "the sign-in itself)")
+    up.add_argument("--hostname", default=None, metavar="NAME",
+                    help="the machine name every sandbox child sees, so names derived from it "
+                         "(relay client IDs, vault device names) do not show the real one")
+    up.add_argument("--ai-script", type=Path, default=None, metavar="FILE",
+                    help="answer `servonaut ai` from FILE: chat replies, the AI quota and stored "
+                         "conversations (see e2e/sandbox/ai_script.py for the format)")
     up.add_argument("--keep", action="store_true",
                     help="keep the sandbox directory after it stops, renamed to "
                          "<root>.kept-<time> (for inspection; delete it yourself)")
@@ -61,7 +82,18 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", help="print state.json")
 
     run = commands.add_parser("run", help="run the Servonaut CLI in the sandbox: run -- <args>")
+    run.add_argument("--as", dest="as_person", default=None, metavar="PERSON",
+                     help="run as another person of a --teams sandbox, in their own home: member "
+                          "(default: the owner); the member's `login` is approved as the member")
     run.add_argument("args", nargs=argparse.REMAINDER, help="servonaut arguments")
+
+    accept = commands.add_parser(
+        "accept-invite",
+        help="accept a team invitation as the member of a --teams sandbox (their browser step)",
+    )
+    accept.add_argument("email", help="the address the invitation was sent to")
+    accept.add_argument("--as", dest="as_person", default="member", metavar="PERSON",
+                        help="who accepts it (default: %(default)s)")
 
     mcp_call = commands.add_parser("mcp-call", help="call one tool of the real MCP server")
     mcp_call.add_argument("tool")
@@ -103,7 +135,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from e2e.sandbox import owner
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
-                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay)
+                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay,
+                        teams=args.teams, account_email=args.account_email,
+                        verification_uri=args.verification_uri, hostname=args.hostname,
+                        ai_script=args.ai_script)
 
     from e2e.sandbox import client
 
@@ -111,7 +146,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "status":
             return client.status(as_json=args.json)
         if args.command == "run":
-            return client.run(args.args)
+            return client.run(args.args, as_person=args.as_person)
+        if args.command == "accept-invite":
+            return client.accept_invite(args.email, as_person=args.as_person)
         if args.command == "mcp-call":
             return client.mcp_call(args.tool, args.arguments, timeout=args.timeout)
         if args.command == "mcp":

@@ -850,9 +850,12 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "successes (list of module names), failures (list of "
             "{module, reason, message}), and — when count=0 — an overall "
             "'reason' code (opt_out | disabled | no_modules_matched | "
-            "all_probers_failed). If reason='all_probers_failed' the failures "
+            "all_probers_failed | host_key_verification_failed | "
+            "ssh_connection_failed). If reason='all_probers_failed' the failures "
             "list explains per-module (usually an SSH reachability / auth "
-            "problem — fix that before retrying)."
+            "problem — fix that before retrying). host_key_verification_failed "
+            "and ssh_connection_failed mean nothing reached the server and the "
+            "stored memory was kept; 'message' says why."
         ),
         "schema": {
             "type": "object",

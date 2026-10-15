@@ -34,13 +34,14 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text, replace_instances
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     fetched_row,
     inventory,
     row_service,
 )
+from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
@@ -202,7 +203,12 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             name="hetzner_mgr_load",
         )
 
-    async def _load_instances(self) -> None:
+    async def _load_instances(self, *, update_fleet: bool = False) -> None:
+        """Fetch every account's servers into the table.
+
+        *update_fleet* also puts them in the server list, after this screen
+        changed the fleet (a server deleted here must leave it too).
+        """
         # Every project at once: the table lists all of them.
         svc = inventory(self.app, "hetzner")
         try:
@@ -210,6 +216,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             # Keep the fetched rows untouched; what the table draws is
             # derived from them (demo-mode fakes when demo mode is on).
             self._raw_instances = list(instances)
+            if update_fleet:
+                replace_instances(self.app, "hetzner", instances)
             self._apply_display_rows()
             self._render_table()
             n = len(instances)
@@ -236,19 +244,21 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#hetzner_mgr_table", DataTable)
-        table.clear()
-        for idx, inst in enumerate(self._instances, start=1):
-            table.add_row(
-                str(idx),
-                display_name(inst),
-                str(inst.get("id", "")),
-                str(inst.get("type", "")),
-                self._colorize_state(str(inst.get("state", ""))),
-                str(inst.get("public_ip", "") or "—"),
-                str(inst.get("region", "")),
-                str(inst.get("created_at", "") or "—")[:19],
-                key=str(inst.get("id", idx)),
-            )
+        # The next action must reach the server the user picked, not row 1.
+        with keep_selected_row(table):
+            table.clear()
+            for idx, inst in enumerate(self._instances, start=1):
+                table.add_row(
+                    str(idx),
+                    display_name(inst),
+                    str(inst.get("id", "")),
+                    str(inst.get("type", "")),
+                    self._colorize_state(str(inst.get("state", ""))),
+                    str(inst.get("public_ip", "") or "—"),
+                    str(inst.get("region", "")),
+                    str(inst.get("created_at", "") or "—")[:19],
+                    key=str(inst.get("id", idx)),
+                )
         self._sync_action_buttons()
 
     @staticmethod
@@ -520,11 +530,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
                 severity="error", markup=False,
             )
             return
-        self.notify(
-            f"Server {self._display_id(identifier)} deleted.",
-            severity="information", markup=False,
-        )
-        await self._load_instances()
+        self.notify(f"Server {label} deleted.", severity="information", markup=False)
+        await self._load_instances(update_fleet=True)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -57,17 +57,17 @@ async def test_build_refresh_export_and_clear(tui, seed, journey, sshd):
         await _open_memory(t)
         await t.click("#btn_empty_probe")
         await t.wait_for_toast(r"^Memory refreshed\.$")
-        assert _observed(t, "os")["pretty_name"] == "E2E Linux 12 (fixture)"
+        assert _observed(t, "os")["pretty_name"] == "Debian GNU/Linux 12 (bookworm)"
         assert "web-app" in " ".join(_observed(t, "containers").values())
         assert "nginx" in " ".join(_observed(t, "services").values())
 
-        remote.write("/etc/os-release", OS_RELEASE.replace("12 (fixture)", "13 (fixture)"))
+        remote.write("/etc/os-release", OS_RELEASE.replace("12 (bookworm)", "13 (trixie)"))
         probes = sshd.target.commands().count("cat /etc/os-release")
         await _cursor_to_row(t, "os::pretty_name")
         await t.press("m")
         await t.wait_for_toast(r"^Module 'os' refreshed\.$")
         await t.wait_until(
-            lambda: _observed(t, "os").get("pretty_name") == "E2E Linux 13 (fixture)",
+            lambda: _observed(t, "os").get("pretty_name") == "Debian GNU/Linux 13 (trixie)",
             desc="refreshed value",
         )
         assert sshd.target.commands().count("cat /etc/os-release") == probes + 1
@@ -76,7 +76,7 @@ async def test_build_refresh_export_and_clear(tui, seed, journey, sshd):
         exported = await t.wait_for_toast("^Exported to ")
         summary = Path(exported.removeprefix("Exported to "))
         assert summary.is_file()
-        assert "E2E Linux 13 (fixture)" in summary.read_text(encoding="utf-8")
+        assert "Debian GNU/Linux 13 (trixie)" in summary.read_text(encoding="utf-8")
 
         await _cursor_to_row(t, "os::pretty_name")
         await t.press("c")

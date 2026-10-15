@@ -20,6 +20,7 @@ from textual.widgets import Button, Footer, Static
 
 from servonaut.services.relay_manager import RelayState
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.utils.formatting import format_time_ago
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -93,20 +94,28 @@ class RelayIndicator(Widget):
         self.state = new_state
 
     def on_click(self) -> None:
-        # Session-expired is the one state where the user can't fix
-        # anything from the relay status screen — sign-in is the
-        # required next step. Skip RelayStatusScreen and go straight
-        # to LoginScreen so the click does the obvious thing.
-        if self.state is RelayState.SESSION_EXPIRED:
-            try:
-                from servonaut.screens.login import LoginScreen
-                self.app.push_screen(LoginScreen())
-                return
-            except Exception:
-                # Fall through to the relay status screen as a last
-                # resort if login screen isn't available for some reason.
-                pass
-        self.app.push_screen(RelayStatusScreen())
+        open_relay_status(self.app, self.state)
+
+
+def open_relay_status(app, state=None) -> None:
+    """What clicking the relay indicator does; the command palette offers it too.
+
+    Session-expired is the one state where the user can't fix anything from
+    the relay status screen: sign-in is the required next step, so it opens
+    the sign-in screen instead. *state* defaults to the app's relay state.
+    """
+    if state is None:
+        state = getattr(app, "relay_state", None)
+    if state is RelayState.SESSION_EXPIRED:
+        try:
+            from servonaut.screens.login import LoginScreen
+            app.push_screen(LoginScreen())
+            return
+        except Exception:
+            # Fall through to the relay status screen as a last
+            # resort if login screen isn't available for some reason.
+            pass
+    app.push_screen(RelayStatusScreen())
 
 
 class RelayStatusScreen(Screen):
@@ -240,12 +249,12 @@ class RelayStatusScreen(Screen):
         flag = "[$text-success]connected[/$text-success]" if connected else "[$text-warning]disconnected[/$text-warning]"
         parts = [f"Backend: {flag}"]
         if last_hb:
-            parts.append(f"last heartbeat {last_hb}")
+            parts.append(f"last heartbeat {escape(format_time_ago(str(last_hb)))}")
         if clients:
             if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None):
                 # A client id embeds the OS user and the machine model.
                 clients = [self.app.redaction_service.redact_name(str(c)) for c in clients]
-            parts.append(f"client_ids={clients}")
+            parts.append(f"listening: {escape(', '.join(str(c) for c in clients))}")
         self.query_one("#backend_status", Static).update(" · ".join(parts))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

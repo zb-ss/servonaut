@@ -266,6 +266,17 @@ def _parse_iso(iso_str: str) -> Optional[datetime]:
         return None
 
 
+def format_time_ago(iso_str: str, now: Optional[datetime] = None) -> str:
+    """An ISO 8601 moment as "12s ago" / "5m ago"; "just now" for the future; as given if unparsable."""
+    moment = _parse_iso(iso_str)
+    if moment is None:
+        return iso_str
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    seconds = ((now or datetime.now(timezone.utc)) - moment).total_seconds()
+    return "just now" if seconds < 1 else f"{_format_age(seconds)} ago"
+
+
 def _format_age(seconds: float) -> str:
     """Compact human-readable age — '5m', '2h', '3d'. Floors to the unit."""
     if seconds < 60:

@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from e2e.harness.fake_cloud.routes_account import VAULT_SHARED_SERVER_HOST_KEY
+from e2e.harness.fake_cloud.routes_vault import TEAM_ROW
 from e2e.harness.interactive import InteractiveCli
 from e2e.harness.processes import require_armed
 from e2e.harness.terminal import _PlainText, _read_until, _start_on_pty
@@ -28,13 +29,7 @@ pytestmark = [pytest.mark.e2e_pr]
 
 _RECOVERY_KEY = re.compile(r"(SVRK1-(?:[A-Z0-9]+-)+[A-Z0-9]+)")
 _RECOVERY_PROMPT = re.compile(r"Re-enter recovery group (\d+):")
-_VAULT_TEAM = {
-    "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-    "slug": "example-team",
-    "name": "Example team",
-    "role": "owner",
-    "member_count": 2,
-}
+_VAULT_TEAM = dict(TEAM_ROW)
 
 
 def _configure_test_custody(journey) -> None:

@@ -37,7 +37,7 @@ from textual.widgets import Button, DataTable, Footer, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin, display_text
+from servonaut.screens._demo_resolve import DemoRowsMixin, display_text, replace_instances
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     fetched_row,
@@ -48,6 +48,7 @@ from servonaut.screens._provider_accounts import (
     row_service,
     with_account,
 )
+from servonaut.screens._table_cursor import keep_selected_row
 from servonaut.screens.power_confirm import confirm_and_run_power_action
 from servonaut.services.accounts import AccountFleet
 from servonaut.utils.instance_resolver import display_name
@@ -202,8 +203,12 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             name="ovh_mgr_load",
         )
 
-    async def _load_instances(self) -> None:
-        # Every account at once: the table lists all of them.
+    async def _load_instances(self, *, update_fleet: bool = False) -> None:
+        """Fetch every account's instances into the table.
+
+        *update_fleet* also puts them in the server list, after this screen
+        changed the fleet (an instance deleted here must leave it too).
+        """
         svc = inventory(self.app, "ovh")
         try:
             instances = await svc.fetch_instances_cached(force_refresh=True)
@@ -213,6 +218,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             self._apply_display_rows()
             self._render_table()
             n = len(instances)
+            cred_error: Optional[str] = None
             if n == 0:
                 # fetch_instances() swallows API errors and returns [], so an
                 # empty list can't tell "no instances" from "credentials
@@ -234,6 +240,9 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
                     f"[dim]{n} instance{'s' if n != 1 else ''}.[/dim]"
                     + self._account_errors(svc)
                 )
+            # An empty answer from refused credentials is not an empty fleet.
+            if update_fleet and not cred_error:
+                replace_instances(self.app, "ovh", instances)
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
             err_msg = escape(self._provider_error(exc))
@@ -273,19 +282,21 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
     def _render_table(self) -> None:
         table = self.query_one("#ovh_mgr_table", DataTable)
-        table.clear()
-        for idx, inst in enumerate(self._instances, start=1):
-            table.add_row(
-                str(idx),
-                display_name(inst),
-                str(inst.get("type", "")),
-                str(inst.get("provider_type", "—")),
-                self._colorize_state(str(inst.get("state", ""))),
-                str(inst.get("public_ip", "") or "—"),
-                str(inst.get("region", "")),
-                str(inst.get("id", "")),
-                key=str(inst.get("id", idx)),
-            )
+        # The next action must reach the server the user picked, not row 1.
+        with keep_selected_row(table):
+            table.clear()
+            for idx, inst in enumerate(self._instances, start=1):
+                table.add_row(
+                    str(idx),
+                    display_name(inst),
+                    str(inst.get("type", "")),
+                    str(inst.get("provider_type", "—")),
+                    self._colorize_state(str(inst.get("state", ""))),
+                    str(inst.get("public_ip", "") or "—"),
+                    str(inst.get("region", "")),
+                    str(inst.get("id", "")),
+                    key=str(inst.get("id", idx)),
+                )
         self._sync_action_buttons()
 
     @staticmethod
@@ -610,11 +621,8 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
 
         self._audit_action("cloud_delete", composite_id, ptype,
                            success=True, confirmed=True, account=account)
-        self.notify(
-            f"OVH instance {self._display_id(composite_id)} deleted.",
-            severity="information", markup=False,
-        )
-        await self._load_instances()
+        self.notify(f"OVH instance {label} deleted.", severity="information", markup=False)
+        await self._load_instances(update_fleet=True)
 
     # ------------------------------------------------------------------
     # Audit

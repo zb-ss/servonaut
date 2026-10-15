@@ -31,7 +31,7 @@ class AwsHost:
     region: str
     private_ip: Optional[str]
     public_ip: Optional[str] = None
-    key_name: str = "e2e-key"
+    key_name: str = "ops-key"
 
     def cache_row(self) -> dict:
         """The dict ``AWSService`` stores in the instance cache for this host."""
@@ -84,7 +84,7 @@ WEB_1 = CustomHost(
     host="10.0.0.11",
     username="deploy",
     port=2222,
-    ssh_key="~/.ssh/e2e_web1",
+    ssh_key="~/.ssh/web1_deploy",
 )
 
 # Connection profile that reaches private-only AWS hosts through bastion-1.

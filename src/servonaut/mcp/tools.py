@@ -2388,7 +2388,10 @@ class ServonautTools:
             "successes": successes,
             "failures": failures,
         }
-        from servonaut.services.memory.service import HOST_KEY_BUILD_REASON
+        from servonaut.services.memory.service import (
+            HOST_KEY_BUILD_REASON,
+            SSH_FAILED_BUILD_REASON,
+        )
         if overall_reason:
             response["reason"] = overall_reason
             if overall_reason == "all_probers_failed":
@@ -2408,7 +2411,7 @@ class ServonautTools:
                 )
             elif overall_reason == "opt_out":
                 response["message"] = f"Memory disabled for {iid}."
-            elif overall_reason == HOST_KEY_BUILD_REASON and failures:
+            elif overall_reason in (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON) and failures:
                 response["message"] = failures[0]["message"]
 
         payload = json.dumps(response)

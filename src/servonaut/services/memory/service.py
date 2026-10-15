@@ -47,6 +47,48 @@ if TYPE_CHECKING:
 # persisted in that case: no output came from the real host.
 HOST_KEY_BUILD_REASON = "host_key_verification_failed"
 
+# ``BuildReport.overall_reason`` when no probe command reached the server
+# (login refused, host unreachable, unusable vault key, no answer in time).
+# Nothing is persisted: empty output would overwrite the stored snapshot.
+SSH_FAILED_BUILD_REASON = "ssh_connection_failed"
+
+#: ``ModuleBuildFailure.reason`` when the server's vault key cannot be used.
+VAULT_CREDENTIAL_FAILURE = "vault_credential_unavailable"
+#: ``ModuleBuildFailure.reason`` when no probe command answered in time.
+SSH_NO_RESPONSE = "ssh_no_response"
+
+# What each connection failure means. No host names: the text reaches MCP
+# clients and hosted AI, and in demo mode the TUI.
+_SSH_FAILURE_MESSAGES: Dict[str, str] = {
+    "ssh_auth_failed": (
+        "SSH refused the login. Check the server's SSH key, login user or vault binding."
+    ),
+    "ssh_unreachable": "The server could not be reached over SSH.",
+    "ssh_failed": "SSH failed before any probe command ran.",
+    SSH_NO_RESPONSE: "The server did not answer any probe command over SSH in time.",
+}
+_SNAPSHOT_KEPT = "Nothing was probed; the stored memory was kept."
+
+
+@dataclass(frozen=True)
+class SshConnectionProblem:
+    """Why a runner's commands cannot reach the server (see ``_make_ssh_runner``)."""
+
+    reason: str
+    message: str
+
+
+def _runner_connection_problem(runner: Any) -> Optional[SshConnectionProblem]:
+    """Why none of *runner*'s commands reached the server, or None."""
+    problem = getattr(runner, "connection_problem", None)
+    if isinstance(problem, SshConnectionProblem):
+        return problem
+    started = getattr(runner, "commands_started", None)
+    answered = getattr(runner, "commands_answered", None)
+    if isinstance(started, int) and started > 0 and answered == 0:
+        return SshConnectionProblem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
+    return None
+
 
 @dataclass
 class ModuleBuildFailure:
@@ -54,9 +96,11 @@ class ModuleBuildFailure:
 
     Attributes:
         module: Prober name (``"os"``, ``"runtimes"``, …), or ``"ssh"``
-            for a refused host key.
+            for a refused host key or a failed connection.
         reason: Machine-readable code: ``"timeout"`` | ``"exception"`` |
-            ``"ssh_host_key_<kind>"``.
+            ``"ssh_host_key_<kind>"`` | ``"ssh_auth_failed"`` |
+            ``"ssh_unreachable"`` | ``"ssh_failed"`` | ``"ssh_no_response"`` |
+            ``"vault_credential_unavailable"``.
         message: Short human-readable detail (redacted exception message).
     """
 
@@ -74,8 +118,8 @@ class BuildReport:
         failures: Per-module probe failures (timeouts, exceptions).
         overall_reason: Machine-readable code when ``successes`` is empty
             (``"opt_out"`` | ``"disabled"`` | ``"no_modules_matched"`` |
-            ``"all_probers_failed"`` | ``HOST_KEY_BUILD_REASON``); ``None``
-            on partial / full success.
+            ``"all_probers_failed"`` | ``HOST_KEY_BUILD_REASON`` |
+            ``SSH_FAILED_BUILD_REASON``); ``None`` on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
@@ -89,6 +133,17 @@ class BuildReport:
     @property
     def has_any_success(self) -> bool:
         return bool(self.successes)
+
+    @property
+    def unreached_message(self) -> Optional[str]:
+        """Why no probe command reached the server, or None.
+
+        Set for a refused host key and a failed SSH connection; nothing was
+        stored in either case.
+        """
+        if self.overall_reason in (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON) and self.failures:
+            return self.failures[0].message
+        return None
 
 if TYPE_CHECKING:
     from servonaut.services.interfaces import SSHServiceInterface, ConnectionServiceInterface
@@ -331,6 +386,20 @@ class MemoryService(MemoryServiceInterface):
                     message=host_key_problem.agent_message,
                 )],
                 overall_reason=HOST_KEY_BUILD_REASON,
+            )
+
+        connection_problem = _runner_connection_problem(ssh_runner)
+        if connection_problem is not None:
+            logger.warning(
+                "Memory build for %s skipped: %s", instance_id, connection_problem.reason,
+            )
+            return BuildReport(
+                failures=[ModuleBuildFailure(
+                    module="ssh",
+                    reason=connection_problem.reason,
+                    message=f"{connection_problem.message} {_SNAPSHOT_KEPT}",
+                )],
+                overall_reason=SSH_FAILED_BUILD_REASON,
             )
 
         successes: Dict[str, ModuleResult] = {}
@@ -1346,7 +1415,10 @@ class MemoryService(MemoryServiceInterface):
 
         # Import here to avoid circular imports at module level.
         from subprocess import CalledProcessError
-        from servonaut.utils.ssh_utils import run_ssh_subprocess  # noqa: PLC0415
+        from servonaut.utils.ssh_utils import (  # noqa: PLC0415
+            run_ssh_subprocess,
+            ssh_connection_failure,
+        )
 
         # Resolve connection parameters once (not per command call).
         profile = None
@@ -1397,6 +1469,7 @@ class MemoryService(MemoryServiceInterface):
             }
 
         from servonaut.services.ssh_credentials import (  # noqa: PLC0415
+            VaultCredentialError,
             resolve_with_vault,
             ssh_identity_kwargs,
         )
@@ -1406,15 +1479,34 @@ class MemoryService(MemoryServiceInterface):
         # event loop); later commands reuse it.
         resolved: Dict[str, Any] = {}
 
+        def _record_problem(reason: str, message: str) -> None:
+            # Concurrent probers fail alike; keep and log the first.
+            if _real_runner.connection_problem is None:  # type: ignore[attr-defined]
+                logger.warning(
+                    "Memory probe of %s cannot connect: %s", instance.get("id", "?"), reason,
+                )
+                _real_runner.connection_problem = SshConnectionProblem(reason, message)  # type: ignore[attr-defined]
+
         async def _real_runner(command: str) -> tuple[str, str, int]:
             """Execute *command* on the remote host and return (stdout, stderr, rc)."""
+            _real_runner.commands_started += 1  # type: ignore[attr-defined]
+            known: Optional[SshConnectionProblem] = _real_runner.connection_problem  # type: ignore[attr-defined]
+            if known is not None:
+                # Every later command would fail the same way: stop connecting.
+                if known.reason == VAULT_CREDENTIAL_FAILURE:
+                    raise VaultCredentialError(known.message)
+                return "", known.message, SSH_FAILURE_EXIT_CODE
             if not resolved:
                 # A VaultCredentialError propagates: probers record it as the
                 # module's error instead of trying a local key.
-                resolved.update(await resolve_with_vault(
-                    conn, instance, vault_runtime=vault_runtime,
-                    connection_service=connection_service, cache=vault_leases,
-                ))
+                try:
+                    resolved.update(await resolve_with_vault(
+                        conn, instance, vault_runtime=vault_runtime,
+                        connection_service=connection_service, cache=vault_leases,
+                    ))
+                except VaultCredentialError as exc:
+                    _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))
+                    raise
             ssh_cmd = ssh_service.build_ssh_command(
                 host=resolved["host"],
                 username=resolved["username"],
@@ -1433,12 +1525,18 @@ class MemoryService(MemoryServiceInterface):
                 )
                 stdout = stdout_bytes.decode("utf-8", errors="replace")
                 stderr = stderr_bytes.decode("utf-8", errors="replace")
+                _real_runner.commands_answered += 1  # type: ignore[attr-defined]
                 return stdout, stderr, 0
             except CalledProcessError as exc:
                 stderr = exc.stderr.decode("utf-8", errors="replace")
+                diagnostics = getattr(exc, "diagnostics", "") or ""
+                failure = ssh_connection_failure(exc.returncode, exc.output, diagnostics)
+                if failure is None:
+                    # The remote command ran and exited non-zero.
+                    _real_runner.commands_answered += 1  # type: ignore[attr-defined]
                 if exc.returncode == SSH_FAILURE_EXIT_CODE:
                     problem = detect_host_key_problem(
-                        getattr(exc, "diagnostics", "") or "", exc.returncode,
+                        diagnostics, exc.returncode,
                         HostKeyTarget.for_connection(
                             resolved.get("host", conn["host"]), resolved.get("port", conn.get("port")),
                             instance=instance, profile=profile,
@@ -1453,6 +1551,8 @@ class MemoryService(MemoryServiceInterface):
                             instance.get("id", "?"), problem.message,
                         )
                         _real_runner.host_key_problem = problem  # type: ignore[attr-defined]
+                if failure is not None:
+                    _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
                 return (
                     exc.output.decode("utf-8", errors="replace"),
                     stderr,
@@ -1471,6 +1571,7 @@ class MemoryService(MemoryServiceInterface):
                     instance.get("id", "?"),
                     exc,
                 )
+                _record_problem("ssh_failed", _SSH_FAILURE_MESSAGES["ssh_failed"])
                 return "", str(exc), 1
 
         # Attach instance so LogsProber can read it from the runner directly,
@@ -1478,4 +1579,12 @@ class MemoryService(MemoryServiceInterface):
         _real_runner.instance = instance  # type: ignore[attr-defined]
         # Set when ssh refuses the host key; build_report() reports it.
         _real_runner.host_key_problem = None  # type: ignore[attr-defined]
+        # Set when no command can reach the server (login refused, host
+        # unreachable, unusable vault key); build_report() reports it and
+        # keeps the stored snapshot. Later commands fail without connecting.
+        _real_runner.connection_problem = None  # type: ignore[attr-defined]
+        # A build whose commands all started but none answered (every one
+        # timed out) has nothing from the server either.
+        _real_runner.commands_started = 0  # type: ignore[attr-defined]
+        _real_runner.commands_answered = 0  # type: ignore[attr-defined]
         return _real_runner

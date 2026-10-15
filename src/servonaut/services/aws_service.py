@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 import logging
 
 import boto3
-from botocore.exceptions import BotoCoreError
+from botocore.exceptions import BotoCoreError, NoCredentialsError
 
 from servonaut.services.cache_service import CacheService
 from servonaut.services.interfaces import InstanceServiceInterface
@@ -39,6 +39,10 @@ class AWSFetchError(AWSError):
     from "the call never succeeded" (profile, credentials, network), so a
     failed refresh is never persisted as an empty fleet.
     """
+
+
+class AWSNoCredentialsError(AWSFetchError):
+    """Raised when no AWS credentials were found at all: AWS is not set up here."""
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +93,10 @@ class AWSService(InstanceServiceInterface):
         # The error behind a failed refresh (None after a complete or partial
         # one), so a caller can tell a timeout from an error response.
         self.last_fetch_exception: Optional[BaseException] = None
+        # True after a refresh that found no AWS credentials and no earlier
+        # listing: AWS is simply not set up on this machine, which is not a
+        # failure to report on every refresh.
+        self.credentials_missing: bool = False
         self._failed_regions: List[str] = []
         # Set by limit_listing_time: botocore timeouts, and when to stop listing.
         self._client_config: Any = None
@@ -223,9 +231,17 @@ class AWSService(InstanceServiceInterface):
         try:
             instances = await self.fetch_instances()
         except AWSFetchError as exc:
-            self.last_fetch_error = str(exc)
-            self.last_fetch_exception = exc
             stale = self.cache_service.load_any()
+            self.last_fetch_exception = exc
+            if isinstance(exc, AWSNoCredentialsError) and stale is None:
+                # Nothing was ever listed and nothing can be: AWS is not set
+                # up here (a Hetzner- or OVH-only user, a new team member).
+                self.last_fetch_error = None
+                self.credentials_missing = True
+                logger.info("No AWS credentials found; not listing AWS instances")
+                return []
+            self.credentials_missing = False
+            self.last_fetch_error = str(exc)
             if stale is not None:
                 logger.warning(
                     "AWS fetch failed (%s); keeping %d cached instances",
@@ -245,6 +261,7 @@ class AWSService(InstanceServiceInterface):
 
         self.last_fetch_error = None
         self.last_fetch_exception = None
+        self.credentials_missing = False
         self.cache_service.save(instances)
         return instances
 
@@ -293,6 +310,8 @@ class AWSService(InstanceServiceInterface):
             try:
                 ec2_client = self._client('ec2')
                 regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+            except NoCredentialsError as e:
+                raise AWSNoCredentialsError(f"could not list AWS regions: {e}") from e
             except Exception as e:
                 logger.error(f"Error fetching AWS regions: {e}")
                 raise AWSFetchError(f"could not list AWS regions: {e}") from e
@@ -300,6 +319,7 @@ class AWSService(InstanceServiceInterface):
 
         instances: List[dict] = []
         last_error: Optional[Exception] = None
+        errors: List[Exception] = []
         for region in regions:
             if self._listing_deadline is not None and time.monotonic() >= self._listing_deadline:
                 self._failed_regions.append(region)
@@ -313,8 +333,11 @@ class AWSService(InstanceServiceInterface):
                 logger.error(f"Error fetching instances from {region}: {e}")
                 self._failed_regions.append(region)
                 last_error = e
+                errors.append(e)
 
         if regions and len(self._failed_regions) == len(regions):
+            if errors and len(errors) == len(regions) and all(isinstance(e, NoCredentialsError) for e in errors):
+                raise AWSNoCredentialsError(f"no AWS credentials found: {last_error}") from last_error
             raise AWSFetchError(
                 f"all {len(regions)} AWS regions failed: {last_error}"
             ) from last_error

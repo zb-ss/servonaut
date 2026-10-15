@@ -1,0 +1,388 @@
+name: Release mirror
+
+# Copies every release's files to the release mirror, which stays fast on
+# slow or lossy connections. GitHub stays the source of truth:
+#
+#   resolve  decides which release to mirror, from the finished workflow that
+#            attached its files or from the inputs;
+#   mirror   downloads the release's files from GitHub, checks each against
+#            the SHA256SUMS asset that lists it and the desktop package
+#            against its build-provenance attestation, uploads them under
+#            <tag>/ without ever replacing a different file, downloads them
+#            again through the public URL, then points latest.json (newest
+#            stable release) and channels/pre.json (newest release,
+#            candidates included) at the release when it is the newest;
+#   notes    links the mirrored desktop package from the release notes, and
+#            removes that link once the package is gone from the release;
+#   audit    every day, re-checks the channel files and every file they list
+#            against GitHub, and opens an issue when they disagree.
+#
+# Every trigger runs the default branch's copy of this workflow, and no job
+# checks out a tag. The upload credentials live in the release-mirror
+# environment, which only the default branch can use.
+#
+# The repository variable RELEASE_MIRROR (on or off) switches the mirror;
+# while it is off, runs end without uploading. A dry run works either way:
+#   gh workflow run release-mirror.yml -f tag=vX.Y.Z -f dry_run=true
+# Mirror a release again, or an older one; files already mirrored are kept:
+#   gh workflow run release-mirror.yml -f tag=vX.Y.Z
+# Audit now instead of waiting for the schedule:
+#   gh workflow run release-mirror.yml -f audit=true
+
+on:
+  workflow_run:
+    workflows: ["Desktop preview .deb", "Release install scripts"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag vX.Y.Z or vX.Y.ZrcN to mirror"
+        required: false
+        default: ""
+      dry_run:
+        description: "Download and verify, but upload and edit nothing"
+        type: boolean
+        default: false
+      audit:
+        description: "Run the audit instead of mirroring a release"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "41 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-mirror-${{ github.event.workflow_run.head_branch || inputs.tag || 'audit' }}
+  cancel-in-progress: false
+
+env:
+  DOWNLOAD_PAGE: https://servonaut.dev/download
+
+jobs:
+  resolve:
+    name: resolve
+    # Never for forks.
+    if: github.repository == 'zb-ss/servonaut' && github.event_name != 'schedule' && inputs.audit != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      mirror: ${{ steps.resolve.outputs.mirror }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+    steps:
+      - name: Decide what to mirror
+        id: resolve
+        env:
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          MIRROR_SWITCH: ${{ vars.RELEASE_MIRROR }}
+        run: |
+          set -euo pipefail
+          version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
+          skip() {
+            echo "::notice::$1"
+            echo "$1" >> "${GITHUB_STEP_SUMMARY}"
+            echo "mirror=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          }
+          dry_run=false
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_run)
+              tag="${RUN_TAG}"
+              [ "${RUN_CONCLUSION}" = "success" ] || skip "The workflow that attaches release files did not succeed, so there is nothing new to mirror."
+              # Only runs for a release, never a branch rehearsal or a fork.
+              case "${RUN_EVENT}" in release|workflow_dispatch) ;; *) skip "Runs started by ${RUN_EVENT} attach no release files." ;; esac
+              [ "${RUN_REPOSITORY}" = "${GITHUB_REPOSITORY}" ] || skip "Files from another repository are never mirrored."
+              [[ "${tag}" =~ ^v${version}$ ]] || skip "${tag} is not a release tag, so there is nothing to mirror."
+              ;;
+            workflow_dispatch)
+              tag="${INPUT_TAG}"
+              if [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::error::tag must be a release vX.Y.Z or a release candidate vX.Y.ZrcN."
+                exit 1
+              fi
+              if [ "${INPUT_DRY_RUN}" = "true" ]; then dry_run=true; fi
+              ;;
+            *)
+              echo "::error::This workflow mirrors releases on request or after their files are attached."
+              exit 1
+              ;;
+          esac
+          case "$(printf '%s' "${MIRROR_SWITCH}" | tr '[:upper:]' '[:lower:]')" in
+            on) ;;
+            ""|off)
+              if [ "${dry_run}" != "true" ]; then
+                skip "RELEASE_MIRROR is off, so ${tag} is not mirrored. Later: gh workflow run release-mirror.yml -f tag=${tag}"
+              fi
+              ;;
+            *)
+              echo "::error::The repository variable RELEASE_MIRROR must be on or off, not '${MIRROR_SWITCH}'."
+              exit 1
+              ;;
+          esac
+          {
+            echo "mirror=true"
+            echo "tag=${tag}"
+            echo "dry-run=${dry_run}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ "${dry_run}" = "true" ]; then
+            echo "Dry run for ${tag}: nothing is uploaded or edited." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Mirroring ${tag}." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  mirror:
+    name: mirror
+    needs: resolve
+    if: needs.resolve.outputs.mirror == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-mirror
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      desktop-deb: ${{ steps.verify.outputs.desktop-deb }}
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry-run }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the uploader
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Download the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MIRROR_PUBLIC_BASE}" ]; then
+            echo "::error::The repository variable MIRROR_PUBLIC_BASE is not set."
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/mirror/files"
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" > "${RUNNER_TEMP}/mirror/release.json"
+          gh release download "${TAG}" --dir "${RUNNER_TEMP}/mirror/files"
+
+      - name: Verify the files against their checksums
+        id: verify
+        run: |
+          set -euo pipefail
+          python .github/scripts/release-mirror.py verify \
+            --dir "${RUNNER_TEMP}/mirror/files" \
+            --release-json "${RUNNER_TEMP}/mirror/release.json" \
+            --out "${RUNNER_TEMP}/mirror/plan.json"
+
+      # The package must come from this repository's desktop preview workflow,
+      # run for this very tag.
+      - name: Verify the desktop package's build provenance
+        if: steps.verify.outputs.desktop-deb != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEB: ${{ steps.verify.outputs.desktop-deb }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "${RUNNER_TEMP}/mirror/files/${DEB}" \
+            --repo "${GH_REPO}" \
+            --signer-workflow "${GH_REPO}/.github/workflows/desktop-preview-deb.yml" \
+            --source-ref "refs/tags/${TAG}"
+
+      # Error text from the storage client can name the endpoint's host,
+      # which the endpoint secret alone would not mask.
+      - name: Mask the bucket's address
+        if: env.DRY_RUN != 'true' && steps.verify.outputs.asset-count != '0'
+        env:
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          host="${MIRROR_ENDPOINT#*://}"
+          host="${host%%/*}"
+          echo "::add-mask::${host}"
+          echo "::add-mask::${host%%.*}"
+
+      - name: Upload the files
+        if: env.DRY_RUN != 'true' && steps.verify.outputs.asset-count != '0'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          set -euo pipefail
+          python .github/scripts/release-mirror.py upload \
+            --dir "${RUNNER_TEMP}/mirror/files" \
+            --plan "${RUNNER_TEMP}/mirror/plan.json"
+
+      - name: Download the files again through the mirror
+        if: env.DRY_RUN != 'true' && steps.verify.outputs.asset-count != '0'
+        run: |
+          set -euo pipefail
+          python .github/scripts/release-mirror.py check-public \
+            --plan "${RUNNER_TEMP}/mirror/plan.json" \
+            --base "${MIRROR_PUBLIC_BASE}"
+
+      - name: Point the channel files at the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          set -euo pipefail
+          # GitHub's latest release: the only one latest.json may name.
+          latest="$(gh release list --limit 100 --exclude-drafts --json tagName,isLatest \
+            --jq '.[] | select(.isLatest) | .tagName')"
+          dry_run_flag=()
+          if [ "${DRY_RUN}" = "true" ]; then dry_run_flag=(--dry-run); fi
+          python .github/scripts/release-mirror.py channels \
+            --plan "${RUNNER_TEMP}/mirror/plan.json" \
+            --base "${MIRROR_PUBLIC_BASE}" \
+            --repo "${GH_REPO}" \
+            --github-latest-tag "${latest}" \
+            "${dry_run_flag[@]}"
+
+      # The notes job needs the plan, not the files.
+      - name: Hand the plan to the notes job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-mirror-plan
+          path: ${{ runner.temp }}/mirror/plan.json
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+          include-hidden-files: false
+
+  # Runs after every real mirror run: it adds the link once the package is
+  # mirrored and removes it again if the package was taken off the release.
+  notes:
+    name: notes
+    needs: [resolve, mirror]
+    if: needs.mirror.result == 'success' && needs.resolve.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The only job that can write to the repository: it edits the release notes.
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Receive the plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-mirror-plan
+          path: ${{ runner.temp }}/plan
+
+      - name: Link the mirrored package from the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" > "${RUNNER_TEMP}/release.json"
+          release_id="$(jq -r '.id' "${RUNNER_TEMP}/release.json")"
+          jq -j '.body // ""' "${RUNNER_TEMP}/release.json" > "${RUNNER_TEMP}/body.md"
+          python .github/scripts/release-mirror.py notes \
+            --plan "${RUNNER_TEMP}/plan/plan.json" \
+            --base "${MIRROR_PUBLIC_BASE}" \
+            --download-page "${DOWNLOAD_PAGE}" \
+            --body-file "${RUNNER_TEMP}/body.md" \
+            --out "${RUNNER_TEMP}/new-body.md" > "${RUNNER_TEMP}/notes.log"
+          cat "${RUNNER_TEMP}/notes.log"
+          if grep -qx 'release notes changed' "${RUNNER_TEMP}/notes.log"; then
+            gh api -X PATCH "repos/${GH_REPO}/releases/${release_id}" -F "body=@${RUNNER_TEMP}/new-body.md" --jq '.html_url'
+          fi
+
+  audit:
+    name: audit
+    if: >-
+      github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
+      (github.event_name == 'schedule' || inputs.audit == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      MIRROR_PUBLIC_BASE: ${{ vars.MIRROR_PUBLIC_BASE }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Compare the mirror with GitHub
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --exclude-drafts --json tagName,isLatest,publishedAt \
+            --jq '.[] | select(.isLatest)' > "${RUNNER_TEMP}/latest.json"
+          python .github/scripts/release-mirror.py audit \
+            --base "${MIRROR_PUBLIC_BASE}" \
+            --repo "${GH_REPO}" \
+            --github-latest-tag "$(jq -r '.tagName // empty' "${RUNNER_TEMP}/latest.json")" \
+            --github-latest-published-at "$(jq -r '.publishedAt // empty' "${RUNNER_TEMP}/latest.json")" \
+            --report "${RUNNER_TEMP}/audit.md"
+
+      - name: Report the failed audit
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Release mirror audit failed"
+          {
+            if [ -f "${RUNNER_TEMP}/audit.md" ]; then cat "${RUNNER_TEMP}/audit.md"; else echo "The audit stopped before it finished."; fi
+            echo ""
+            echo "Run: ${RUN_URL}"
+          } > "${RUNNER_TEMP}/issue.md"
+          existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body-file "${RUNNER_TEMP}/issue.md"
+          else
+            gh issue create --title "${title}" --body-file "${RUNNER_TEMP}/issue.md"
+          fi

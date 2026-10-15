@@ -22,12 +22,21 @@ seeds one home for the scenario and records everything a driver needs in
     and the module redirects;
 ``urls``, ``logs``, ``fleet``, ``notes``
     the fakes, where their request logs are, and the seeded servers;
+``teams``
+    with ``--teams``, the team the account owns and its shared server (see
+    :meth:`Owner._teams_record`); otherwise None;
+``personas``
+    with ``--teams``, the people beside the owner: ``member``, with their
+    e-mail address, FakeCloud user id, home and complete child environment
+    (``run --as member``); otherwise empty;
 ``desktop``
     the desktop child last started on request (``python -m e2e.sandbox desktop``).
 
 Then it prints ``SANDBOX READY <state.json>`` and serves: it writes the
-fakes' request logs to disk and answers desktop requests, which arrive as
-files in ``<root>/control`` (no signal is ever needed to reach it). SIGINT,
+fakes' request logs to disk and answers desktop requests and, with
+``--teams``, the member's requests (accept an invitation, approve their next
+sign-in), which arrive as files in ``<root>/control`` (no signal is ever
+needed to reach it). SIGINT,
 SIGTERM or SIGHUP stop it, also during start-up: it stops everything,
 removes the root (unless ``--keep``) and releases the pointer. Every child it
 starts also stops by itself once the owner or the root is gone
@@ -36,6 +45,7 @@ starts also stops by itself once the owner or the root is gone
 
 from __future__ import annotations
 
+import base64
 import importlib.metadata
 import json
 import logging
@@ -56,6 +66,90 @@ from typing import Any, Callable, Iterator, Optional
 
 from e2e.harness import bootstrap
 from e2e.sandbox import state
+
+# A Vault key's private SSH agent puts its socket under TMPDIR, and uses /tmp
+# when TMPDIR leaves too little room for a Unix socket path ("svn-agent-",
+# eight random characters, separators and "agent-<pid>-<16 hex>.sock", with
+# slack). The guard keeps the sandbox's children out of /tmp, so a sandbox
+# whose own temp directory is that long gives its children a short one.
+_UNIX_SOCKET_PATH_MAX = 107 if sys.platform.startswith("linux") else 103
+_AGENT_SOCKET_ROOM = 60
+_SHORT_TMP_BASE = "/tmp"
+
+
+def needs_short_temp_dir(tmp: Path) -> bool:
+    """Whether *tmp* is too long to hold a private SSH agent's socket."""
+    return len(os.fsencode(os.path.realpath(tmp))) + _AGENT_SOCKET_ROOM > _UNIX_SOCKET_PATH_MAX
+
+
+def _short_temp_base() -> Optional[str]:
+    """Where a short temp directory may go, or None.
+
+    /tmp, unless an outer e2e guard confines this process (a sandbox started
+    by a journey): then only one of its write roots that is short enough, and
+    otherwise none, since even an attempt outside them counts as an escape.
+    """
+    confined = os.environ.get("SERVONAUT_E2E_WRITE_ROOTS")
+    if not confined:
+        return _SHORT_TMP_BASE if os.path.isdir(_SHORT_TMP_BASE) else None
+    for root in sorted(filter(None, confined.split(os.pathsep)), key=len):
+        if not needs_short_temp_dir(Path(root) / "servonaut-qa-xxxxxxxx"):
+            return root
+    return None
+
+
+def make_short_temp_dir(user_base: Path) -> Optional[Path]:
+    """A new private temp directory when *user_base*/tmp is too long, else None."""
+    from e2e.harness.bootstrap import Sandbox
+
+    base = _short_temp_base() if needs_short_temp_dir(Sandbox(user_base).tmp) else None
+    if base is None:
+        return None
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="servonaut-qa-", dir=base)).resolve()
+
+
+# With --teams, a certificate login's private SSH agent listens in the home's
+# Vault custody directory, the only place the sandbox's OpenSSH pass-through
+# accepts one (as agent-<pid>-<16 hex>.sock; the pid has up to 7 digits).
+_CUSTODY_AGENT_SOCKET = Path(".servonaut", "vault", "tmp", "agent-4194304-0123456789abcdef.sock")
+# The Vault custody key of a --teams sandbox's children, which have no OS keyring.
+VAULT_DEVICE_KEY_ENV = "SERVONAUT_VAULT_DEVICE_KEY"
+_TEAMS_PLAN = "teams"
+# With --teams, a second person beside the owner: a team member to be, with
+# a home of their own (<root>/member) and a FakeCloud account, signed out.
+MEMBER = "member"
+MEMBER_EMAIL = "member@example.com"
+MEMBER_NAME = "Team member"
+_OWNER_DIR = "user"
+# Each person's home; the longest decides how long a --teams root may be.
+_PERSONA_DIRS = (_OWNER_DIR, MEMBER)
+# Requests to act for the member (accept an invitation, approve a sign-in),
+# which arrive as files in <root>/control like the desktop requests.
+_TEAM_REQUEST_FILE = re.compile(r"^team-([0-9a-f]{32})\.request\.json$")
+
+
+def teams_root_problem(root: Path) -> Optional[str]:
+    """Why *root* leaves no room for a --teams certificate login, or None."""
+    from e2e.harness.bootstrap import Sandbox
+
+    real_root = Path(os.path.realpath(root))
+    socket = max(
+        (Sandbox(real_root / name).home / _CUSTODY_AGENT_SOCKET for name in _PERSONA_DIRS),
+        key=lambda path: len(os.fsencode(path)),
+    )
+    excess = len(os.fsencode(socket)) - _UNIX_SOCKET_PATH_MAX
+    if excess <= 0:
+        return None
+    length = len(os.fsencode(real_root))
+    return (
+        f"--teams needs a shorter --root: a certificate login's private SSH agent listens in "
+        f"<root>/{socket.parent.relative_to(real_root)}, and a Unix socket path holds at most "
+        f"{_UNIX_SOCKET_PATH_MAX} bytes, so the root may be {length - excess} bytes long "
+        f"({root} is {length}); for example --root /tmp/svt"
+    )
+
 
 READY_PREFIX = "SANDBOX READY"
 # How often the owner looks for desktop requests and writes the request logs.
@@ -261,7 +355,10 @@ class Owner:
 
     def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict,
                  lock: state.OwnerLock, stop_request: StopRequest, *,
-                 signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0) -> None:
+                 signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
+                 teams: bool = False, account_email: str = "",
+                 verification_uri: Optional[str] = None, hostname: Optional[str] = None,
+                 ai_script: Optional[dict] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -272,6 +369,11 @@ class Owner:
         self.keep = keep
         self.ssh_ca_off = ssh_ca_off
         self.api_delay = api_delay
+        self.teams = teams
+        self.account_email = account_email
+        self.verification_uri = verification_uri
+        self.hostname = hostname
+        self.ai_script = ai_script
         self.logs = root / "logs"
         self.control = root / state.CONTROL_DIR
         self.state_path = root / state.STATE_FILE
@@ -284,6 +386,14 @@ class Owner:
         self.shims: Any = None
         self.user: Any = None
         self.child_env: Optional[dict] = None
+        # --teams: the team's shared server, and the owner's key for it.
+        self.ca_host: Any = None
+        self.admin_key: Optional[Path] = None
+        # --teams: the member's home and child environment.
+        self.member: Any = None
+        self.member_env: Optional[dict] = None
+        # Short temp directory for the children, when the root makes theirs too long.
+        self.agent_tmp: Optional[Path] = None
         self._state_lock = threading.Lock()
         self._state: dict = {}
         self._started: list[Any] = []  # things with .stop(), in start order
@@ -303,6 +413,8 @@ class Owner:
 
     def start(self) -> None:
         with self.stop_request.deferred():
+            # Made before this process's guard is armed: it lies outside the root.
+            self.agent_tmp = make_short_temp_dir(self.root / "user")
             self.ctx = bootstrap.bootstrap(self.root)
             self.logs.mkdir()
             self.control.mkdir()
@@ -356,6 +468,14 @@ class Owner:
             self.fake_cloud.switch_off_ssh_ca()
         if self.api_delay:
             self.fake_cloud.slow_down(self.api_delay)
+        if self.account_email or self.verification_uri:
+            self.fake_cloud.configure(email=self.account_email, verification_uri=self.verification_uri)
+        if self.ai_script is not None:
+            from e2e.sandbox import ai_script
+
+            ai_script.apply(self.fake_cloud, self.ai_script)
+        if self.teams:
+            self._join_team()
         self.moto = self._start(MotoAws().start())
         # CloudWatch filter patterns are evaluated as AWS documents them.
         self._monkeypatch = pytest.MonkeyPatch()
@@ -372,6 +492,8 @@ class Owner:
         )
         self._start(self.world.start())
         self.world.install_clients(self.shims.directory)
+        if self.teams:
+            self._start_team_server()
         # Host keys the user accepted with the real ssh are found again with
         # the real ssh-keygen (Use Vault Key and Auto-bind read them).
         from e2e.harness import keygen_lookup_shim
@@ -381,19 +503,32 @@ class Owner:
             keygen_lookup_shim.install(str(self.shims.directory), keygen, str(ctx.root))
 
     def _seed_and_record(self) -> None:
-        from e2e.harness import endpoints, session_seed
-        from e2e.harness.bootstrap import Sandbox, build_env
+        from e2e.harness import session_seed
+        from e2e.harness.bootstrap import Sandbox
         from e2e.sandbox.scenarios import ScenarioSeeder
 
-        self.user = Sandbox(self.root / "user").create()
+        self.user = Sandbox(self.root / _OWNER_DIR).create()
         seeded = ScenarioSeeder(
             home=self.user.home, moto=self.moto, cloudtrail=self.cloudtrail,
             providers=self.providers, world=self.world, api_url=self.fake_cloud.url,
         ).seed(self.scenario)
+        if self.teams:
+            seeded.notes.extend(self._seed_team_owner())
         if self.signed_in:
             session_seed.seed_session(self.user.home, self.fake_cloud)
-        self.child_env = build_env(
-            self.user,
+        self.child_env = self._child_env(self.user)
+        if self.teams:
+            seeded.notes.extend(self._seed_member())
+        self._state = self._record(seeded)
+        self._write_state()
+
+    def _child_env(self, sandbox: Any) -> dict:
+        """The complete environment of a child living in *sandbox* (a person's home)."""
+        from e2e.harness import endpoints
+        from e2e.harness.bootstrap import build_env
+
+        env = build_env(
+            sandbox,
             shim_dir=self.shims.directory,
             guard_log=self.logs / "guard.jsonl",
             armed_log=self.logs / "armed.jsonl",
@@ -404,8 +539,19 @@ class Owner:
                 **endpoints.providers_env(self.providers),
             },
         )
-        self._state = self._record(seeded)
-        self._write_state()
+        if self.agent_tmp is not None:
+            for name in ("TMPDIR", "TMP", "TEMP"):
+                env[name] = str(self.agent_tmp)
+            env["SERVONAUT_E2E_WRITE_ROOTS"] = os.pathsep.join(
+                filter(None, [env.get("SERVONAUT_E2E_WRITE_ROOTS", ""), str(self.agent_tmp)])
+            )
+        if self.teams:
+            # A throwaway Vault custody key: the children have no OS keyring.
+            env[VAULT_DEVICE_KEY_ENV] = base64.b64encode(os.urandom(32)).decode("ascii")
+        if self.hostname:
+            # child_guard.ENV_HOSTNAME (that file is loaded by path, not imported).
+            env["SERVONAUT_E2E_HOSTNAME"] = self.hostname
+        return env
 
     def _record(self, seeded: Any) -> dict:
         """The contents of ``state.json`` (see the module docstring)."""
@@ -414,7 +560,7 @@ class Owner:
         from e2e.harness.bootstrap import SRC_DIR
         from e2e.sandbox.scenarios import fleet_summary
 
-        return {
+        record = {
             "schema": state.SCHEMA,
             "scenario": self.scenario,
             "signed_in": self.signed_in,
@@ -457,7 +603,134 @@ class Owner:
             },
             "fleet": fleet_summary(seeded.fleet),
             "notes": seeded.notes,
+            "teams": self._teams_record(),
+            "personas": self._personas_record(),
             "desktop": None,
+        }
+        if self.ca_host is not None:
+            record["urls"]["ssh_team_host"] = f"127.0.0.1:{self.ca_host.port}"
+        return record
+
+    # -- --teams -----------------------------------------------------------
+
+    def _join_team(self) -> None:
+        """The account is on the Teams plan and owns the team the fake's Vault and CA serve.
+
+        Before any session is seeded: ``auth.json`` keeps the plan it was
+        signed in with. The team keeps its members (invitations, roles), and
+        the member to be has an account of their own, not yet in the team.
+        """
+        from e2e.harness.fake_cloud.routes_vault import MEMBER_USER_ID, TEAM_ID, TEAM_ROW, TEAM_SLUG
+
+        self.fake_cloud.configure(plan=_TEAMS_PLAN)
+        self.fake_cloud.account.configure(teams=[])
+        self.fake_cloud.account.create_team(
+            name=TEAM_ROW["name"], slug=TEAM_SLUG, team_id=TEAM_ID,
+            owner_user_id=self.fake_cloud.entitlements()["user_id"],
+        )
+        self.fake_cloud.add_user(MEMBER_USER_ID, email=MEMBER_EMAIL, name=MEMBER_NAME, plan=_TEAMS_PLAN)
+
+    def _start_team_server(self) -> None:
+        """The team's shared server: a loopback host whose sshd honours SSH certificates."""
+        from e2e.harness.ca_sshd import start_ca_host
+        from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_SLUG
+        from e2e.harness.sshd import LOOPBACK
+
+        ctx = self.ctx
+        self.ca_host = self._start(start_ca_host(
+            log=self.world.log, remote_dir=self.world.remote_dir,
+            hidden=[*ctx.protected_dirs, str(ctx.root)],
+        ))
+        self.fake_cloud.account.place_shared_server(
+            TEAM_SLUG, SERVER_ID, hostname=LOOPBACK, port=self.ca_host.port,
+        )
+
+    def _seed_team_owner(self) -> list[str]:
+        """Give the home the owner's existing access to the shared server; return the notes.
+
+        Nothing of the Vault or the CA is set up: that is what a person walks.
+        """
+        from e2e.harness.ca_sshd import ADMIN_USER, HOST_NAME, LOGIN, install_owner_credential
+        from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_SLUG
+
+        self.admin_key = install_owner_credential(self.user.home, self.ca_host, SERVER_ID)
+        key = f"~/{self.admin_key.relative_to(self.user.home)}"
+        return [
+            f"Teams: you own the team {TEAM_SLUG} (Teams plan). Its shared server {HOST_NAME} "
+            f"listens on 127.0.0.1:{self.ca_host.port} with an sshd that honours the team's SSH "
+            f"certificates for the login {LOGIN}; your existing key {key} logs in as "
+            f"{ADMIN_USER} (passwordless sudo), and its host key is in ~/.servonaut/known_hosts.",
+            f"Teams walk (nothing is set up yet): vault setup; vault create --team {TEAM_SLUG}; "
+            f"ca enable --team {TEAM_SLUG}; ca enroll {HOST_NAME} --team {TEAM_SLUG} (type "
+            f"127.0.0.1 to confirm); ssh {HOST_NAME}. The vault's custody key is in "
+            f"{VAULT_DEVICE_KEY_ENV} (the sandbox has no OS keyring).",
+        ]
+
+    def _seed_member(self) -> list[str]:
+        """The second person: a home of their own, signed out; return the notes."""
+        from e2e.harness.bootstrap import Sandbox
+        from e2e.harness.ca_sshd import HOST_NAME
+        from e2e.harness.fake_cloud.routes_vault import TEAM_SLUG
+        from e2e.harness.seed import HomeSeeder
+
+        self.member = Sandbox(self.root / MEMBER).create()
+        # A teammate with no cloud accounts of their own: AWS stays off.
+        HomeSeeder(self.member.home, api_url=self.fake_cloud.url).config(
+            aws=HomeSeeder.aws_config(enabled=False),
+        )
+        self.member_env = self._child_env(self.member)
+        # Nor AWS credentials: the product lists AWS servers whenever it finds
+        # credentials, and a new teammate's list starts empty.
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            self.member_env.pop(name, None)
+        self.member_env["AWS_SHARED_CREDENTIALS_FILE"] = str(self.member.home / ".aws" / "credentials")
+        self.member_env["AWS_CONFIG_FILE"] = str(self.member.home / ".aws" / "config")
+        run_member = "python -m e2e.sandbox run --as member --"
+        return [
+            f"Team member: {MEMBER_EMAIL} has a home of their own ({self.member.home}), is signed "
+            f"out and is not in {TEAM_SLUG} yet. Run their commands with `{run_member} <args>`.",
+            f"Member walk: invite {MEMBER_EMAIL} on the Teams screen; accept the invitation with "
+            f"`python -m e2e.sandbox accept-invite {MEMBER_EMAIL}` (their browser step); "
+            f"`{run_member} login` (approved as the member); `{run_member} vault setup`; the owner "
+            f"runs `vault grants process`; then `{run_member} vault list` and `{run_member} ssh "
+            f"{HOST_NAME}` (once the owner has enrolled it in the team's SSH CA).",
+        ]
+
+    def _personas_record(self) -> dict:
+        """The ``personas`` entry of ``state.json``: the people beside the owner."""
+        if self.member is None:
+            return {}
+        from e2e.harness.fake_cloud.routes_vault import MEMBER_USER_ID
+
+        return {
+            MEMBER: {
+                "email": MEMBER_EMAIL,
+                "user_id": MEMBER_USER_ID,
+                "sandbox": {"base": str(self.member.base), "home": str(self.member.home)},
+                "env": self.member_env,
+            },
+        }
+
+    def _teams_record(self) -> Optional[dict]:
+        """The ``teams`` entry of ``state.json`` (None without ``--teams``)."""
+        if self.ca_host is None:
+            return None
+        from e2e.harness.ca_sshd import ADMIN_USER, HOST_NAME, LOGIN
+        from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_ROW
+
+        return {
+            "plan": _TEAMS_PLAN,
+            "team": TEAM_ROW["slug"],
+            "role": TEAM_ROW["role"],
+            "shared_server": {
+                "name": HOST_NAME,
+                "id": SERVER_ID,
+                "address": f"127.0.0.1:{self.ca_host.port}",
+                "login": LOGIN,
+                "admin_login": ADMIN_USER,
+                "admin_key": str(self.admin_key),
+            },
+            "member": {"email": MEMBER_EMAIL, "home": str(self.member.home) if self.member else None},
         }
 
     def _write_state(self) -> None:
@@ -475,7 +748,43 @@ class Owner:
         self._desktop_worker.start()
         while not self.stop_request.event.wait(_POLL_SECONDS):
             self._queue_desktop_requests()
+            self._answer_team_requests()
             self._flush_logs()
+
+    # -- the member's requests ---------------------------------------------------
+
+    def _answer_team_requests(self) -> None:
+        """Act for the member as their browser would, one request file at a time."""
+        for path in sorted(self.control.iterdir()):
+            match = _TEAM_REQUEST_FILE.match(path.name)
+            if match is None:
+                continue
+            try:
+                answer = self._team_action(state.read_json(path) or {})
+            except (KeyError, ValueError) as exc:
+                answer = {"error": str(exc.args[0]) if exc.args else type(exc).__name__}
+            state.write_json(self.control / f"team-{match.group(1)}.answer.json", answer)
+            path.unlink(missing_ok=True)
+
+    def _team_action(self, request: dict) -> dict:
+        """``accept-invite`` (their browser's accept), ``sign-in`` (their browser
+        approves the next device code) and ``sign-in-done`` (drop an unused one)."""
+        from e2e.harness.fake_cloud.routes_vault import MEMBER_USER_ID
+
+        persona, action = request.get("persona"), request.get("action")
+        if self.member is None or persona != MEMBER:
+            raise ValueError(f"this sandbox has no person called {persona!r} (start it with --teams)")
+        if action == "accept-invite":
+            accepted = self.fake_cloud.accept_invitation(str(request.get("email", "")), user_id=MEMBER_USER_ID)
+            return {"persona": persona, "team": accepted["team"], "role": accepted["role"],
+                    "email": accepted["invitation_email"]}
+        if action == "sign-in":
+            self.fake_cloud.sign_in_next_as(MEMBER_USER_ID)
+            return {"persona": persona}
+        if action == "sign-in-done":
+            self.fake_cloud.cancel_sign_in(MEMBER_USER_ID)
+            return {"persona": persona}
+        raise ValueError(f"unknown request {action!r}")
 
     def _flush_logs(self) -> None:
         from e2e.harness import aws_logs_filter
@@ -619,6 +928,7 @@ class Owner:
             # Nothing of the sandbox runs any more; what is left lies
             # outside the root: the pointer, and a kept root's new name.
             ("lift this process's guard", bootstrap.load_guard().disarm_filesystem_and_spawns),
+            ("remove the short temp directory", self._remove_agent_tmp),
             ("release the pointer", lambda: release(self.pointer, self.claim_record)),
             ("put the kept sandbox directory aside", self._set_kept_root_aside),
             ("remove the sandbox directory", self._remove_root),
@@ -629,6 +939,11 @@ class Owner:
             except Exception as exc:  # noqa: BLE001 - stopping must finish
                 _say(f"could not {description}: {type(exc).__name__}: {exc}")
         self.lock.release()
+
+    def _remove_agent_tmp(self) -> None:
+        """Remove the children's short temp directory (kept roots keep only the root)."""
+        if self.agent_tmp is not None:
+            shutil.rmtree(self.agent_tmp, ignore_errors=True)
 
     def _flush_kept_logs(self) -> None:
         if self.keep and self.logs.is_dir():
@@ -723,7 +1038,9 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
 
 def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
-    ssh_ca_off: bool = False, api_delay: float = 0.0,
+    ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
+    account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
+    ai_script: Optional[Path] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -736,10 +1053,19 @@ def up(
     repo_root = bootstrap.REPO_ROOT
     # Resolved: children carry this exact path, and `down` finds them by it.
     root = (root or state.default_root(repo_root)).resolve()
-    problem = root_problem(root, repo_root)
+    problem = root_problem(root, repo_root) or (teams_root_problem(root) if teams else None)
     if problem:
         _say(f"not starting: {problem}")
         return 2
+    script = None
+    if ai_script is not None:
+        from e2e.sandbox import ai_script as ai_script_module
+
+        try:
+            script = ai_script_module.load(ai_script)
+        except ai_script_module.ScriptError as exc:
+            _say(f"not starting: {exc}")
+            return 2
     pointer = state.pointer_path()
     owner: Optional[Owner] = None
     try:
@@ -752,7 +1078,9 @@ def up(
                 _say(f"not starting: {exc}")
                 return 2
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
-                          signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay)
+                          signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
+                          teams=teams, account_email=account_email,
+                          verification_uri=verification_uri, hostname=hostname, ai_script=script)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

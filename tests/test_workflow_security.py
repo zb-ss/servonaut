@@ -31,6 +31,7 @@ SHA_PINNED_WORKFLOWS = (
     "publish.yml",
     "release-candidate.yml",
     "release-install-scripts.yml",
+    "release-mirror.yml",
     "release.yml",
 )
 

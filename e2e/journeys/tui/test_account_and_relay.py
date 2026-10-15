@@ -173,6 +173,19 @@ async def test_stale_token_is_refreshed_and_the_request_retried(tui, seed, fake_
         assert saved["access_token"] == fake_cloud.tokens()[0]
 
 
+async def test_the_account_screen_names_the_plan_and_its_features(tui, seed, fake_cloud):
+    _seed(seed, fake_cloud)
+    async with tui() as t:
+        await t.nav("nav_login")
+        await t.wait_for_screen("LoginScreen")
+        plan = t.on_screen("#plan_info")
+        await t.wait_until(lambda: "Plan: Solo" in str(plan.render()), desc="the plan")
+        features = str(t.on_screen("#entitlements_info").render())
+        assert "Personal vault for SSH keys and secrets" in features
+        # Every feature is named in words, never by its raw identifier.
+        assert not re.search(r"\b[a-z]+_[a-z_]+\b", features), features
+
+
 async def test_logout_revokes_the_session_and_stops_the_relay(tui, seed, fake_cloud):
     _seed(seed, fake_cloud)
     async with tui() as t:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 
+import boto3
 import pytest
 
 from e2e.harness import fleet
@@ -79,6 +80,8 @@ async def test_first_launch_with_an_empty_home(tui, seed, fake_cloud):
         # is reported, and the app keeps running.
         await t.wait_for_toast(r"AWS refresh failed", severity="warning")
         assert t.table_rows("InstanceTable") == []
+        # Nothing was cached, so the warning does not promise cached rows.
+        assert not any("Showing cached instances" in message for _, message in t.toasts())
         assert t.screen_name() == "InstanceListScreen"
         # The update check asked the (fake) package index and found nothing newer.
         await t.wait_until(
@@ -215,3 +218,26 @@ async def test_a_frozen_interface_logs_where_it_was_stuck(tui, seed, monkeypatch
             return bool(stalls) and any("responding again" in m for m in logged[stalls[0]:])
 
         await t.wait_until(stall_logged, desc="the stall and its end logged")
+
+
+async def test_a_home_without_aws_credentials_says_nothing_about_aws(tui, seed, monkeypatch):
+    """A Hetzner- or OVH-only user, or a new teammate, has no AWS credentials at all.
+
+    Nothing was ever listed and nothing can be, so the fleet stays empty without
+    an "AWS refresh failed" warning or a "no EC2 instances" note on every start.
+    """
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(seed.home / "no-aws" / "credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(seed.home / "no-aws" / "config"))
+    # boto3's process-wide session keeps the credentials an earlier journey
+    # found; a freshly started app has none.
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+    seed.config()
+    async with tui() as t:
+        aws = t.app.provider_inventory("aws").bindings[0].service
+        await t.wait_until(lambda: aws.last_fetch_exception is not None, desc="the AWS refresh")
+        await t.settle()
+        assert t.table_rows("InstanceTable") == []
+        assert not [message for _, message in t.toasts() if "AWS" in message or "EC2" in message]
+        assert aws.credentials_missing

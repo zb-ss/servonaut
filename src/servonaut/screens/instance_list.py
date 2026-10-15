@@ -474,12 +474,11 @@ class InstanceListScreen(Screen):
                         if getattr(aws, "last_fetch_partial", False) is True:
                             message = f"AWS refresh incomplete. {fetch_error}"
                         else:
-                            message = (
-                                f"AWS refresh failed: {fetch_error}. "
-                                "Showing cached instances."
-                            )
+                            message = f"AWS refresh failed: {fetch_error}."
+                            if new_instances:
+                                message += " Showing cached instances."
                         self.app.notify(message, severity="warning", markup=False)
-                    elif not new_instances:
+                    elif not new_instances and not getattr(aws, "credentials_missing", False):
                         self.app.notify(
                             "No EC2 instances found in any region.",
                             severity="information"

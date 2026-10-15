@@ -9,6 +9,12 @@ none of the sandbox's processes runs, its root is gone, and nothing was left
 outside it: the pointer was the only file written there, and ``down``
 removed it again.
 
+With ``--teams`` the sandbox also holds a second person, a member to be:
+the owner invites them, ``accept-invite`` stands in for their browser,
+``run --as member`` signs them in and sets up their Vault identity in their
+own home, and after the owner's grants they reach the team's shared server
+with a certificate of their own.
+
 The others cover what can go wrong around it: a pointer naming a process
 that is no longer the owner (never signalled), a stop request during
 start-up, and a long-lived host (the TUI inside an MCP server) that outlives
@@ -20,9 +26,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
+import signal
+import ssl
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -262,6 +272,293 @@ async def test_multi_account_scenario_names_every_account(qa_sandbox):
     assert ambiguous.returncode != 0 and "prod/web-1" in ambiguous.stdout + ambiguous.stderr
     reached = await qa_sandbox.command("run", "--", "ssh", "custom/web-1", "--", "hostname")
     assert reached.returncode == 0 and reached.stdout.strip() == "web-1", reached.stderr
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_recording_options_name_the_account_and_the_sign_in_page(qa_sandbox):
+    """--account-email and --verification-uri: what a recording shows instead of blanks or 127.0.0.1."""
+    email, page = "you@example.com", "https://example.com/device"
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up(
+        "--signed-in", "--account-email", email, "--verification-uri", page, "--hostname", "laptop",
+    )
+    session = Path(current["sandbox"]["home"]) / ".servonaut" / "auth.json"
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Signing in again names the given page, never the local address, and the
+    # sandbox still approves it. BROWSER keeps the page from being opened.
+    qa_sandbox.env["BROWSER"] = "true"
+    logout = await qa_sandbox.command("run", "--", "logout")
+    assert logout.returncode == 0, logout.stderr
+    login = await qa_sandbox.command("run", "--", "login", "--no-browser")
+    assert login.returncode == 0, login.stderr
+    assert page in login.stdout and "127.0.0.1" not in login.stdout, login.stdout
+    assert json.loads(session.read_text(encoding="utf-8"))["email"] == email
+
+    # Names derived from the machine name use the given one: the relay's
+    # client ID starts with it.
+    started = await qa_sandbox.command("run", "--", "connect", "--bg")
+    assert started.returncode == 0, started.stderr
+    try:
+        for _ in range(40):  # until the first heartbeat lands
+            status = await qa_sandbox.command("run", "--", "connect", "--status")
+            if "Backend view: connected" in status.stdout:
+                break
+            await asyncio.sleep(0.5)
+        assert "laptop-" in status.stdout and os.uname().nodename not in status.stdout, status.stdout
+    finally:
+        await qa_sandbox.command("run", "--", "connect", "--stop")
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, journey):
+    """--ai-script FILE: what `servonaut ai` shows, written in advance."""
+    bad = journey.directory / "bad-ai.json"
+    bad.write_text('{"turns": [{"text": "no reply key"}]}', encoding="utf-8")
+    refused = await qa_sandbox.command("up", "--ai-script", str(bad), "--root", str(qa_sandbox.root))
+    assert refused.returncode == 2 and "turns must be a list" in refused.stderr, refused.stderr
+
+    script = journey.directory / "ai.json"
+    script.write_text(json.dumps({
+        "model": "hosted-model",
+        "topup_url": "https://checkout.stripe.com/c/pay/cs_example",
+        "quota": {"tokens_used": 41200, "resets_in_days": 18},
+        "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
+        "conversations": [{
+            "id": "conv-1", "title": "Stopped servers", "minutes_ago": 45,
+            "messages": [{"role": "user", "content": "Which servers are stopped?"},
+                         {"role": "assistant", "content": "db-1 and build-1."}],
+        }],
+    }), encoding="utf-8")
+    before = _files(qa_sandbox.person.base)
+    await qa_sandbox.up("--signed-in", "--ai-script", str(script))
+
+    # Streamed: the fake service answers chat as a stream only.
+    chat = await qa_sandbox.command("run", "--", "ai", "chat", "--stream", "Which servers are stopped?")
+    assert chat.returncode == 0, chat.stderr
+    assert "Two servers are stopped: db-1 and build-1." in chat.stdout, chat.stdout
+    assert "model=hosted-model" in chat.stderr and "e2e" not in chat.stderr, chat.stderr
+    quota = await qa_sandbox.command("run", "--", "ai", "quota")
+    assert quota.returncode == 0, quota.stderr
+    assert re.search(r"Resets: in 1[78] days", quota.stdout), quota.stdout
+    listed = await qa_sandbox.command("run", "--", "ai", "conversations", "list")
+    assert listed.returncode == 0, listed.stderr
+    assert "Stopped servers" in listed.stdout and "2030" not in listed.stdout, listed.stdout
+    topup = await qa_sandbox.command("run", "--", "ai", "topup", "pack_small")
+    assert topup.returncode == 0, topup.stderr
+    assert "https://checkout.stripe.com/c/pay/cs_example" in topup.stdout, topup.stdout
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox, journey):
+    from e2e.harness.ca_sshd import ADMIN_USER, BOOTSTRAP_KEY_NAME, HOST_NAME, LOGIN
+    from e2e.harness.fake_cloud.routes_vault import TEAM_SLUG
+    from e2e.sandbox import owner
+
+    # A root too long for a certificate login's SSH agent socket is refused
+    # before anything is claimed or started.
+    assert owner.teams_root_problem(qa_sandbox.root) is not None
+    refused = await qa_sandbox.command("up", "--teams", "--root", str(qa_sandbox.root))
+    assert refused.returncode == 2 and "--teams needs a shorter --root" in refused.stderr, refused.stderr
+    assert not qa_sandbox.root.exists() and not qa_sandbox.pointer.exists()
+
+    qa_sandbox.root = journey.ctx.root / f"q{journey.directory.name[:2]}"
+    if owner.teams_root_problem(qa_sandbox.root):
+        pytest.skip(f"the e2e root is too long for a --teams sandbox: {journey.ctx.root}")
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--teams")
+    teams = current["teams"]
+    server = teams["shared_server"]
+    assert (teams["plan"], teams["team"], teams["role"]) == ("teams", TEAM_SLUG, "owner")
+    assert (server["name"], server["login"], server["admin_login"]) == (HOST_NAME, LOGIN, ADMIN_USER)
+    assert current["urls"]["ssh_team_host"] == server["address"]
+    assert server["admin_key"] == str(Path(current["sandbox"]["home"]) / ".ssh" / BOOTSTRAP_KEY_NAME)
+    # Vault custody works in every child (the sandbox has no OS keyring).
+    assert current["env"][owner.VAULT_DEVICE_KEY_ENV]
+
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 0, status.stderr
+    assert ", teams," in status.stdout.splitlines()[0]
+    assert f"you own the team {TEAM_SLUG}" in status.stdout
+    assert f"shared server {HOST_NAME} listens on {server['address']}" in status.stdout
+    assert f"for the login {LOGIN}" in status.stdout
+
+    # Nothing of the Vault or the CA is set up yet: that is what a person walks.
+    vault = await qa_sandbox.command("run", "--", "vault", "status")
+    assert vault.returncode == 0 and "Run: servonaut vault setup" in vault.stdout, vault.stdout + vault.stderr
+
+    # The service lists the shared server at the loopback host, and the owner's
+    # existing credential (admin key, trusted host key) reaches it.
+    reached = await qa_sandbox.command("run", "--", "ssh", HOST_NAME, "--", "hostname")
+    assert reached.returncode == 0, reached.stdout + reached.stderr
+    assert reached.stdout.splitlines()[-1] == HOST_NAME
+    sessions = [json.loads(line) for line in Path(current["logs"]["ssh_sessions"]).read_text().splitlines()]
+    logins = [entry for entry in sessions if entry.get("host") == HOST_NAME and entry.get("event") == "auth"]
+    assert logins and all(
+        (entry["user"], entry["accepted"], entry["reason"]) == (ADMIN_USER, True, "authorized key")
+        for entry in logins
+    ), logins
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+_RECOVERY_KEY = re.compile(r"(SVRK1-(?:[A-Z0-9]+-)+[A-Z0-9]+)")
+_RECOVERY_PROMPT = re.compile(r"Re-enter recovery group (\d+):")
+
+
+def _on_terminal(qa_sandbox: QaSandbox, args: tuple[str, ...], reply) -> tuple[int, str]:
+    """Run ``python -m e2e.sandbox <args>`` on a terminal, as a person types into it.
+
+    *reply(screen, sent)* returns what to type next once its prompt is on
+    the screen (``sent`` replies so far), or None to keep reading.
+    """
+    from e2e.harness.terminal import _PlainText, _read_until, _start_on_pty
+
+    process, master = _start_on_pty(qa_sandbox.argv(*args), env=qa_sandbox.env, cwd=REPO_ROOT,
+                                    size=(160, 50))
+    screen, sent = _PlainText(), 0
+    deadline = time.monotonic() + COMMAND_TIMEOUT
+    try:
+        while True:
+            answer = reply(screen.text, sent)
+            if answer is not None:
+                os.write(master, (answer + "\n").encode("ascii"))
+                sent += 1
+                continue
+            if not _read_until(master, screen, lambda text: reply(text, sent) is not None, deadline,
+                               " ".join(args)):
+                break
+        code = process.wait(timeout=30)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        os.close(master)
+    return code, screen.text
+
+
+def _recovery_groups(screen: str, sent: int) -> Optional[str]:
+    """``vault setup``: the recovery-key group each confirmation prompt asks for."""
+    key, prompts = _RECOVERY_KEY.search(screen), _RECOVERY_PROMPT.findall(screen)
+    if key is None or len(prompts) <= sent or sent >= 2:
+        return None
+    return key.group(1).split("-")[int(prompts[sent]) - 1]
+
+
+def _host_confirmation(screen: str, sent: int) -> Optional[str]:
+    """``ca enroll``: the host address typed to confirm the job."""
+    return "127.0.0.1" if sent == 0 and "Type 127.0.0.1 to continue:" in screen else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT * 2)
+async def test_teams_member_joins_by_invitation_and_reaches_the_shared_server(qa_sandbox, journey):
+    import httpx
+
+    from e2e.harness.ca_sshd import HOST_NAME, LOGIN
+    from e2e.harness.fake_cloud.routes_vault import MEMBER_USER_ID, TEAM_SLUG
+    from e2e.harness.session_seed import read_session
+    from e2e.sandbox import owner
+
+    qa_sandbox.root = journey.ctx.root / "qm"
+    if owner.teams_root_problem(qa_sandbox.root):
+        pytest.skip(f"the e2e root is too long for a --teams sandbox: {journey.ctx.root}")
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--teams")
+    member = current["personas"][owner.MEMBER]
+    member_home = Path(member["sandbox"]["home"])
+    owner_home = Path(current["sandbox"]["home"])
+    assert (member["email"], member["user_id"]) == (owner.MEMBER_EMAIL, MEMBER_USER_ID)
+    assert member_home == qa_sandbox.root.resolve() / owner.MEMBER / "home"
+    assert current["teams"]["member"] == {"email": owner.MEMBER_EMAIL, "home": str(member_home)}
+    assert member["env"]["HOME"] == str(member_home)
+    # Each person keeps their own Vault custody key.
+    assert member["env"][owner.VAULT_DEVICE_KEY_ENV] != current["env"][owner.VAULT_DEVICE_KEY_ENV]
+    # A new teammate has no AWS credentials, so their server list starts empty.
+    assert not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} & set(member["env"])
+
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 0, status.stderr
+    assert f"member:     {member_home} ({owner.MEMBER_EMAIL}; run --as member)" in status.stdout
+    assert f"accept-invite {owner.MEMBER_EMAIL}" in status.stdout
+
+    # Nobody invited the member yet, and only the people the sandbox has can act.
+    early = await qa_sandbox.command("accept-invite", owner.MEMBER_EMAIL)
+    assert early.returncode == 1 and f"no pending invitation for {owner.MEMBER_EMAIL}" in early.stderr, early.stderr
+    nobody = await qa_sandbox.command("run", "--as", "nobody", "--", "vault", "status")
+    assert nobody.returncode == 1 and "no person called 'nobody'" in nobody.stderr, nobody.stderr
+    assert read_session(member_home) is None
+
+    # The owner invites the member (the call the Teams screen makes); they accept.
+    trusted = ssl.create_default_context(cafile=current["env"]["SSL_CERT_FILE"])
+    async with httpx.AsyncClient(verify=trusted, timeout=30) as http:
+        invited = await http.post(
+            f"{current['urls']['servonaut_api']}/api/v1/teams/{TEAM_SLUG}/members",
+            json={"email": owner.MEMBER_EMAIL, "role": "member"},
+            headers={"Authorization": f"Bearer {read_session(owner_home)['access_token']}"},
+        )
+    assert invited.status_code == 201, invited.text
+    accepted = await qa_sandbox.command("accept-invite", owner.MEMBER_EMAIL)
+    assert accepted.returncode == 0, accepted.stderr
+    assert f"now a member of {TEAM_SLUG} with the role member" in accepted.stdout
+
+    # The member signs in as themselves, in their own home.
+    login = await qa_sandbox.command("run", "--as", "member", "--", "login", "--no-browser")
+    assert login.returncode == 0 and "Signed in successfully (plan: teams)" in login.stdout, login.stdout + login.stderr
+    assert read_session(member_home)["user_id"] == MEMBER_USER_ID
+    assert read_session(owner_home)["user_id"] != MEMBER_USER_ID
+
+    # The owner: Vault identity, team vault, SSH CA on server-1.
+    code, text = await asyncio.to_thread(_on_terminal, qa_sandbox, ("run", "--", "vault", "setup"), _recovery_groups)
+    assert code == 0, text
+    created = await qa_sandbox.command("run", "--", "vault", "create", "--team", TEAM_SLUG, "--json")
+    assert created.returncode == 0, created.stdout + created.stderr
+    vault_id = json.loads(created.stdout)["vault_id"]
+    enabled = await qa_sandbox.command("run", "--", "ca", "enable", "--team", TEAM_SLUG, "--yes")
+    assert enabled.returncode == 0, enabled.stdout + enabled.stderr
+    code, text = await asyncio.to_thread(
+        _on_terminal, qa_sandbox, ("run", "--", "ca", "enroll", HOST_NAME, "--team", TEAM_SLUG), _host_confirmation,
+    )
+    assert code == 0 and "result.status: succeeded" in text, text
+
+    # The member's Vault identity; the owner's client grants them the team vault.
+    code, text = await asyncio.to_thread(
+        _on_terminal, qa_sandbox, ("run", "--as", "member", "--", "vault", "setup"), _recovery_groups,
+    )
+    assert code == 0, text
+    granted = await qa_sandbox.command("run", "--", "vault", "grants", "process", "--yes", "--json")
+    assert granted.returncode == 0, granted.stdout + granted.stderr
+    assert [g["recipient_user_id"] for r in json.loads(granted.stdout) for g in r["accepted"]] == [MEMBER_USER_ID]
+    listed = await qa_sandbox.command("run", "--as", "member", "--", "vault", "list", "--json")
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    [team_vault] = [row for row in json.loads(listed.stdout) if row["vault_id"] == vault_id]
+    assert team_vault["my_role"] == "member" and team_vault["my_grant"] is not None
+
+    # The member logs in to the shared server with a certificate for their own device.
+    reached = await qa_sandbox.command("run", "--as", "member", "--", "ssh", HOST_NAME, "--", "hostname")
+    assert reached.returncode == 0, reached.stdout + reached.stderr
+    assert reached.stdout.splitlines()[-1] == HOST_NAME
+    assert "SSH resolution tier: ca" in reached.stderr
+    sessions = [json.loads(line) for line in Path(current["logs"]["ssh_sessions"]).read_text().splitlines()]
+    certificate_logins = [entry for entry in sessions if entry.get("host") == HOST_NAME
+                          and entry.get("event") == "auth"
+                          and str(entry.get("key", "")).startswith("certificate serial")]
+    assert certificate_logins, sessions
+    last = certificate_logins[-1]
+    assert (last["user"], last["accepted"], last["reason"]) == (LOGIN, True, "trusted CA"), last
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)
@@ -619,3 +916,49 @@ async def test_unusable_roots_are_refused_with_the_reason(qa_sandbox, journey):
         refused = await qa_sandbox.command("up", "--root", str(inside))
         assert refused.returncode == 2 and "is inside the checkout" in refused.stderr
         assert not inside.exists()
+
+
+def test_a_long_root_gives_the_children_a_short_temp_dir(journey, monkeypatch):
+    """A Vault key's private SSH agent needs room for its socket under TMPDIR.
+
+    Under a deep checkout the sandbox's own temp directory leaves too little
+    room, and the agent's fallback (/tmp) is outside the guard's write roots,
+    so such a sandbox gives its children a short private temp directory.
+    """
+    from e2e.sandbox import owner
+
+    short_base = journey.directory / "s"
+    short_base.mkdir()
+    monkeypatch.setattr(owner, "_SHORT_TMP_BASE", str(short_base))
+    monkeypatch.delenv("SERVONAUT_E2E_WRITE_ROOTS", raising=False)
+    deep = journey.directory / ("d" * 60) / "user"
+    shallow = journey.directory / "u"
+
+    assert owner.needs_short_temp_dir(Sandbox(deep).tmp)
+    # Only a temp directory that is too long gets a short stand-in.
+    assert (owner.make_short_temp_dir(shallow) is None) == (not owner.needs_short_temp_dir(Sandbox(shallow).tmp))
+
+    made = owner.make_short_temp_dir(deep)
+    assert made is not None and made.parent == short_base.resolve()
+    assert made.is_dir() and (made.stat().st_mode & 0o777) == 0o700
+    # The real base, /tmp, leaves room for the socket.
+    assert not owner.needs_short_temp_dir(Path("/tmp/servonaut-qa-abcdefgh"))
+
+
+def test_a_confined_sandbox_never_reaches_outside_its_write_roots(journey, monkeypatch):
+    """A sandbox started inside a guarded journey keeps to that journey's roots."""
+    from e2e.sandbox import owner
+
+    deep = journey.directory / ("d" * 60) / "user"
+    monkeypatch.setenv("SERVONAUT_E2E_WRITE_ROOTS", str(journey.directory / ("r" * 60)))
+    assert owner.make_short_temp_dir(deep) is None
+
+    short_root = journey.directory / "s2"
+    short_root.mkdir()
+    monkeypatch.setattr(owner, "_SHORT_TMP_BASE", "/nonexistent-base")
+    monkeypatch.setenv("SERVONAUT_E2E_WRITE_ROOTS", os.pathsep.join([str(journey.directory / ("r" * 60)), str(short_root)]))
+    made = owner.make_short_temp_dir(deep)
+    if owner.needs_short_temp_dir(short_root / "servonaut-qa-xxxxxxxx"):
+        assert made is None  # even the shortest root is too long here
+    else:
+        assert made is not None and made.parent == short_root.resolve()

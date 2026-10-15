@@ -54,14 +54,14 @@ async def test_scan_a_private_instance_through_the_bastion(tui, seed, journey, s
         assert t.toasts()[-1] == ("information", f"Scan completed: {len(SOURCES)} results")
         rows = t.table_rows("#results_table")
         assert [row[0] for row in rows] == SOURCES
-        assert 'PRETTY_NAME="E2E Linux 12 (fixture)"' in rows[2][1]
+        assert 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"' in rows[2][1]
 
     # The full output is stored per instance for later keyword searches.
     stored = {r["source"]: r["content"] for r in _stored(seed)[fleet.APP_1.instance_id]}
     assert list(stored) == SOURCES
     assert stored["path:/var/www/"].splitlines()[-1].split()[-1] == "html"
     assert stored["command:cat /etc/os-release"].splitlines()[0] == (
-        'PRETTY_NAME="E2E Linux 12 (fixture)"'
+        'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"'
     )
     assert sshd.target.commands(user=fleet.BASTION_USER) == [
         "true",  # the one connection check before the scan's own commands

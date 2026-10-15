@@ -125,7 +125,7 @@ class TestLoginScreenLoggedIn:
             await pilot.pause()
             plan = app.screen.query_one("#plan_info", Static)
             assert plan.display is True
-            assert "solo" in str(plan.content)
+            assert "Solo" in str(plan.content)
 
     @pytest.mark.asyncio
     async def test_login_button_hidden_when_logged_in(self):
@@ -357,3 +357,14 @@ class TestLoginTriggersRelayHook:
                 await pilot.pause()
 
         assert app.login_success_calls == 0
+
+
+def test_every_feature_the_plan_map_names_has_a_label():
+    """A feature without a label shows its raw slug (``personal_vault``) on the Account screen."""
+    from servonaut.screens.login import _ADMIN_ONLY_FEATURES, _FEATURE_LABELS, _UNRELEASED_FEATURES
+    from servonaut.services.auth_service import AuthService
+
+    named = {feature for plan in AuthService._PLAN_FEATURES.values() for feature in plan}
+    named |= set(AuthService._KNOWN_BOOL_FEATURES)
+    shown = named - _UNRELEASED_FEATURES - _ADMIN_ONLY_FEATURES
+    assert sorted(shown - set(_FEATURE_LABELS)) == []

@@ -181,6 +181,31 @@
     width: 1fr;
 }
 
+/* The Teams cards' button rows are Horizontal containers, which default to
+   ``height: 1fr``: in the scrolling Teams screen each row then took all the
+   free height, so a card filled the view and pushed the next one (the
+   members after View Team) below the fold. */
+#team_actions_row,
+#member_actions_row,
+#config_actions_row,
+#server_actions_row {
+    height: auto;
+}
+
+/* Narrow terminals (see TeamManagementScreen.HORIZONTAL_BREAKPOINTS): the
+   five member buttons do not fit on one row, so they wrap onto a grid. */
+TeamManagementScreen.-narrow #member_actions_row {
+    layout: grid;
+    grid-size: 3;
+    grid-rows: 3;
+    grid-gutter: 0 1;
+}
+
+TeamManagementScreen.-narrow #member_actions_row Button {
+    width: 1fr;
+    margin: 0;
+}
+
 .form_actions_row {
     layout: horizontal;
     height: auto;

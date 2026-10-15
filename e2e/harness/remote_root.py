@@ -74,12 +74,11 @@ _REMOTE_PATH = re.compile(
 )
 
 OS_RELEASE = """\
-PRETTY_NAME="E2E Linux 12 (fixture)"
-NAME="E2E Linux"
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
 VERSION_ID="12"
-VERSION="12 (fixture)"
-ID=e2elinux
-ID_LIKE=debian
+VERSION="12 (bookworm)"
+ID=debian
 HOME_URL="https://example.com/"
 """
 
@@ -95,7 +94,7 @@ def _stub_docker() -> str:
       *) printf '%s\n' 'CONTAINER ID   IMAGE        STATUS       NAMES' \
                        '0a1b2c3d4e5f   nginx:1.27   Up 3 hours   web-app' ;;
     esac ;;
-  version|--version) echo "Docker version 27.0.0, build e2e0000" ;;
+  version|--version) echo "Docker version 27.0.0, build 7cd2da1" ;;
   logs) printf '%s\n' "web-app started" "web-app ready" ;;
   *) : ;;
 esac
@@ -119,7 +118,7 @@ def _stub_systemctl() -> str:
                              "app-worker.service loaded active running App worker" ;;
   is-active) echo active ;;
   is-enabled) echo enabled ;;
-  status) printf '%s\n' "* $2 - fixture service" "     Active: active (running)" ;;
+  status) printf '%s\n' "* $2" "     Active: active (running)" ;;
   *) : ;;
 esac
 exit 0
@@ -133,10 +132,21 @@ def _stub_hostname(hostname_file: str) -> str:
 def _stub_uname(hostname_file: str) -> str:
     name = f"$(cat {shlex.quote(hostname_file)})"
     return _STUB_HEADER + f"""case "$*" in
-  *a*) echo "Linux {name} 6.1.0-e2e #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux" ;;
-  *r*) echo "6.1.0-e2e" ;;
+  *a*) echo "Linux {name} 6.1.0-28-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux" ;;
+  *r*) echo "6.1.0-28-amd64" ;;
   *m*) echo "x86_64" ;;
   *) echo "Linux" ;;
+esac
+"""
+
+
+def _stub_df() -> str:
+    # The memory prober asks for the --output columns; ``df -h`` answers in full.
+    return _STUB_HEADER + r"""case "$*" in
+  *--output=source,pcent,target*) printf '%s\n' "Filesystem      Use% Mounted on" \
+                                    "/dev/vda1        30% /" ;;
+  *) printf '%s\n' "Filesystem      Size  Used Avail Use% Mounted on" \
+                    "/dev/vda1        40G   12G   28G  30% /" ;;
 esac
 """
 
@@ -157,12 +167,7 @@ def _stubs(hostname_file: str) -> dict[str, str]:
         "uptime": _stub_print(
             [" 10:00:00 up 3 days,  2:14,  1 user,  load average: 0.10, 0.05, 0.01"]
         ),
-        "df": _stub_print(
-            [
-                "Filesystem      Size  Used Avail Use% Mounted on",
-                "/dev/vda1        40G   12G   28G  30% /",
-            ]
-        ),
+        "df": _stub_df(),
         "free": _stub_print(
             [
                 "               total        used        free      shared  buff/cache   available",

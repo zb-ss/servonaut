@@ -1,4 +1,4 @@
-"""The commands that drive a running sandbox: status, run, mcp-call, mcp, desktop, down.
+"""The commands that drive a running sandbox: status, run, accept-invite, mcp-call, mcp, desktop, down.
 
 They run in the caller's own shell, unguarded, and never import
 ``servonaut``: they read the live sandbox's ``state.json`` and start the
@@ -27,6 +27,8 @@ SERVONAUT_MODULE = "servonaut.main"
 # The owner starts the desktop child within the launcher's own start-up
 # timeout (e2e/harness/desktop.py); this adds room for a busy machine.
 DESKTOP_WAIT_SECONDS = 60.0
+# The owner answers a person's request (accept, sign-in) at its next poll.
+TEAM_REQUEST_SECONDS = 15.0
 CHILDREN_STOP_SECONDS = 15.0
 _POLL_SECONDS = 0.1
 
@@ -215,10 +217,15 @@ def status(*, as_json: bool) -> int:
         desktop_line = "not started (python -m e2e.sandbox desktop)"
     lines = [
         f"QA sandbox: running, owner pid {current['owner_pid']}, scenario {current['scenario']}"
-        f"{', signed in' if current.get('signed_in') else ''}, since {current['started_at']}",
+        f"{', signed in' if current.get('signed_in') else ''}"
+        f"{', teams' if current.get('teams') else ''}, since {current['started_at']}",
         f"checkout:   {current['repo_root']}",
         f"root:       {current['root']}",
         f"home:       {current['sandbox']['home']}",
+        *(
+            f"{name + ':':<11} {person['sandbox']['home']} ({person['email']}; run --as {name})"
+            for name, person in (current.get("personas") or {}).items()
+        ),
         f"pointer:    {state.pointer_path()}",
         f"desktop:    {desktop_line}",
         "",
@@ -251,28 +258,96 @@ def _strip_program(args: Sequence[str]) -> list[str]:
     return args
 
 
-def run(args: Sequence[str]) -> int:
-    """Run ``servonaut <args>`` in the sandbox; stream its output; return its exit code."""
+OWNER = "owner"
+
+
+def _person(current: dict, name: Optional[str]) -> dict:
+    """The home and environment of *name*: the owner (default) or a ``personas`` entry."""
+    if name in (None, OWNER):
+        return {"env": current["env"], "sandbox": current["sandbox"]}
+    personas = current.get("personas") or {}
+    if name not in personas:
+        known = ", ".join([OWNER, *personas]) if personas else f"{OWNER} (start with `up --teams` for a member)"
+        raise ClientError(f"this sandbox has no person called {name!r}; it has: {known}")
+    return personas[name]
+
+
+def run(args: Sequence[str], *, as_person: Optional[str] = None) -> int:
+    """Run ``servonaut <args>`` in the sandbox as *as_person*; stream its output; return its exit code.
+
+    A member's ``login`` is approved as that member, as their own browser
+    would: the next device code the service issues belongs to them.
+    """
     from e2e.harness.processes import UnguardedChildError, require_armed
 
     current = live_state()
-    process = subprocess.Popen(
-        _servonaut_argv(current, _strip_program(args)),
-        env=current["env"],
-        cwd=current["sandbox"]["base"],
-    )
-    while True:
-        try:
-            code = process.wait()
-            break
-        except KeyboardInterrupt:
-            continue  # the child got the same interrupt from the terminal
+    person = _person(current, as_person)
+    argv = _strip_program(args)
+    signs_in = as_person not in (None, OWNER) and argv[:1] == ["login"]
+    if signs_in:
+        _team_request(current, {"action": "sign-in", "persona": as_person})
+    try:
+        process = subprocess.Popen(
+            _servonaut_argv(current, argv), env=person["env"], cwd=person["sandbox"]["base"],
+        )
+        while True:
+            try:
+                code = process.wait()
+                break
+            except KeyboardInterrupt:
+                continue  # the child got the same interrupt from the terminal
+    finally:
+        if signs_in:  # a login that never asked for a code leaves no approval behind
+            _team_request(current, {"action": "sign-in-done", "persona": as_person})
     try:
         require_armed(Path(current["logs"]["armed"]), pid=process.pid)
     except UnguardedChildError as exc:
         _say(str(exc))
         return 70
     return code
+
+
+def accept_invite(email: str, *, as_person: str) -> int:
+    """Accept the team invitation sent to *email* as *as_person* (their browser's step)."""
+    current = live_state()
+    _person(current, as_person)
+    if as_person == OWNER:
+        raise ClientError("the owner is already in the team; accept as another person (--as member)")
+    answered = _team_request(current, {"action": "accept-invite", "email": email, "persona": as_person})
+    print(f"{as_person} accepted the invitation sent to {answered['email']}: now a member of "
+          f"{answered['team']} with the role {answered['role']}.")
+    return 0
+
+
+def _team_request(current: dict, request: dict) -> dict:
+    """Have the owner act for a person (see ``Owner._team_action``); its answer."""
+    root = Path(current["root"])
+    control = root / state.CONTROL_DIR
+    request_id = uuid.uuid4().hex
+    request_file = control / f"team-{request_id}.request.json"
+    answer_file = control / f"team-{request_id}.answer.json"
+    # The owner looks for requests about twice a second; no signal needed.
+    state.write_json(request_file, {"id": request_id, **request})
+    answered: dict = {}
+
+    def answer() -> bool:
+        found = state.read_json(answer_file)
+        if found is not None:
+            answered.update(found)
+            return True
+        if not state.owner_alive(root):
+            raise ClientError("the sandbox stopped before it answered")
+        return False
+
+    try:
+        if not _wait(answer, TEAM_REQUEST_SECONDS):
+            raise ClientError(f"no answer from the sandbox after {TEAM_REQUEST_SECONDS:.0f}s; see {root / 'logs'}")
+    finally:
+        request_file.unlink(missing_ok=True)
+        answer_file.unlink(missing_ok=True)
+    if answered.get("error"):
+        raise ClientError(answered["error"])
+    return answered
 
 
 async def _call_tool(current: dict, tool: str, arguments: dict, timeout: float) -> Any:

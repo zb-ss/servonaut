@@ -40,6 +40,11 @@ def _rows(t) -> dict[str, list[str]]:
     return {row[1]: [plain(cell) for cell in row] for row in t.table_rows(TABLE)}
 
 
+def _fleet_names(t) -> list[str]:
+    """Server names in the main server list."""
+    return [row[1] for row in t.table_rows("InstanceTable")]
+
+
 def _state(t, name: str) -> str:
     return _rows(t)[name][4]
 
@@ -179,8 +184,14 @@ async def test_deleting_a_cloud_instance_needs_the_typed_confirmation(tui, seed,
         await t.fill("#confirm_input", "delete")
         await t.wait_until(lambda: not confirm.disabled, desc="confirm enabled")
         await press(t, confirm)
-        await t.wait_for_toast(r"OVH instance .* deleted\.")
+        await t.wait_for_toast(rf"^OVH instance {re.escape(BATCH_1.name)} deleted\.$")
         await t.wait_until(lambda: BATCH_1.name not in _rows(t), desc="batch-1 row gone")
+
+        # The server list no longer offers the deleted instance.
+        await t.nav("nav_list")
+        await t.wait_for_screen("InstanceListScreen")
+        await t.wait_until(lambda: BATCH_2.name in _fleet_names(t), desc="server list rows")
+        assert BATCH_1.name not in _fleet_names(t)
 
     assert [(r["method"], r["api_path"]) for r in providers.mutations("ovh")] == [
         ("DELETE", delete_path)
@@ -248,3 +259,26 @@ async def test_create_a_cloud_instance_through_the_wizard(tui, seed, providers):
     }
     creates = [row for row in ovh_audit(seed) if row["action"] == "cloud_create"]
     assert [row["confirmed"] for row in creates] == [False, True]
+
+
+async def test_the_next_key_acts_on_the_instance_the_action_was_for(tui, seed, providers):
+    """An action redraws the list; the cursor stays on the instance it was for."""
+    _seed(seed, providers)
+
+    async with tui() as t:
+        await _open_manager(t)
+        table = t.on_screen(TABLE)
+        assert list(_rows(t)).index(BATCH_2.name) > 0
+        await select_row(t, TABLE, 1, BATCH_2.name)
+        await _act(t, "start", r"OVH cloud .*: started")
+        await t.wait_until(lambda: _state(t, BATCH_2.name) == "running", desc="batch-2 up")
+        await t.settle()
+        assert table.cursor_row == list(_rows(t)).index(BATCH_2.name)
+
+        await t.press("d")
+        await t.wait_for_screen("ConfirmActionScreen")
+        await t.wait_for_text("Delete OVH Cloud Instance", BATCH_2.name, screen_only=True)
+        await t.press("escape")
+        await t.wait_for_screen("OVHManagerScreen")
+
+    assert [r["method"] for r in providers.mutations("ovh")] == ["POST"]
