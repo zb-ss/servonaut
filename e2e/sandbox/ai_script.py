@@ -5,6 +5,7 @@ advance. This loads them from one JSON file, with the account's AI quota and
 the stored conversations ``servonaut ai conversations`` lists::
 
     {
+      "model": "hosted-model",
       "quota": {"tokens_used": 41200, "resets_in_days": 18},
       "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
       "conversations": [
@@ -45,6 +46,8 @@ def load(path: Path) -> dict[str, Any]:
         raise ScriptError(f"cannot read the AI script {path}: {exc}") from exc
     if not isinstance(spec, dict):
         raise ScriptError("the AI script must be a JSON object")
+    if not isinstance(spec.get("model", ""), str):
+        raise ScriptError("model must be a string")
     quota = spec.get("quota", {})
     if not isinstance(quota, dict) or set(quota) - _QUOTA_KEYS - {"resets_in_days"}:
         raise ScriptError(f"quota takes only: {', '.join(sorted(_QUOTA_KEYS | {'resets_in_days'}))}")
@@ -103,7 +106,11 @@ def apply(fake_cloud: Any, spec: dict[str, Any], *, now: Optional[datetime] = No
     fake_cloud.configure(quota=quota)
     usage_quota = {k: v for k, v in quota.items() if k in _QUOTA_KEYS | {"resets_at"}}
     fake_cloud.ai.script(*(
-        ChatTurn.of(*[token(piece) for piece in _pieces(turn["reply"])], usage(**usage_quota), gap=0.03)
+        ChatTurn.of(
+            *[token(piece) for piece in _pieces(turn["reply"])],
+            usage(model=spec.get("model") or "hosted-model", **usage_quota),
+            gap=0.03,
+        )
         for turn in spec.get("turns", [])
     ))
     rows, exports = [], {}

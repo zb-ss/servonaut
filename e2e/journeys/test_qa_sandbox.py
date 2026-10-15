@@ -319,6 +319,7 @@ async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, jou
 
     script = journey.directory / "ai.json"
     script.write_text(json.dumps({
+        "model": "hosted-model",
         "quota": {"tokens_used": 41200, "resets_in_days": 18},
         "turns": [{"reply": "Two servers are stopped: db-1 and build-1."}],
         "conversations": [{
@@ -334,6 +335,7 @@ async def test_an_ai_script_answers_chat_quota_and_conversations(qa_sandbox, jou
     chat = await qa_sandbox.command("run", "--", "ai", "chat", "--stream", "Which servers are stopped?")
     assert chat.returncode == 0, chat.stderr
     assert "Two servers are stopped: db-1 and build-1." in chat.stdout, chat.stdout
+    assert "model=hosted-model" in chat.stderr and "e2e" not in chat.stderr, chat.stderr
     quota = await qa_sandbox.command("run", "--", "ai", "quota")
     assert quota.returncode == 0, quota.stderr
     assert re.search(r"Resets: in 1[78] days", quota.stdout), quota.stdout
