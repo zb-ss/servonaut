@@ -2,21 +2,23 @@
 
 Refresh rotates the pair and retires the refresh token presented (see
 ``session.TokenSession``); protected routes accept only the current,
-unexpired access token.
+unexpired access token. A user added with ``FakeCloud.add_user`` signs in,
+refreshes and signs out with a pair of their own (see ``users.py``).
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from aiohttp import web
 
 from e2e.harness.fake_cloud.state import USER_CODE, ScenarioStore
+from e2e.harness.fake_cloud.users import Account, current_account
 
 
 def bearer_ok(request: web.Request, store: ScenarioStore) -> bool:
-    """True when the request carries the account's current access token."""
-    return store.session.bearer_valid(request.headers.get("Authorization"))
+    """True when the request carries a user's current access token."""
+    return store.bearer_valid(request.headers.get("Authorization"))
 
 
 def unauthorized() -> web.Response:
@@ -40,12 +42,13 @@ async def json_body(request: web.Request) -> dict[str, Any]:
 
 
 def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
-    """The ``/api/entitlements`` document for the current scenario."""
+    """The ``/api/entitlements`` document for the current scenario (and user)."""
     scenario = store.snapshot()
+    account = current_account()
     return {
         "plan": scenario.plan,
         "user_id": scenario.user_id,
-        "email": scenario.email,
+        "email": account.email if account is not None else scenario.email,
         "premium_ai": scenario.premium_ai,
         "mcp_connections": scenario.mcp_connections,
         "quota": scenario.quota,
@@ -53,7 +56,9 @@ def entitlements_payload(store: ScenarioStore) -> dict[str, Any]:
     }
 
 
-def _token_payload(store: ScenarioStore, pair: tuple[str, str]) -> dict[str, Any]:
+def _token_payload(
+    store: ScenarioStore, pair: tuple[str, str], account: Optional[Account] = None
+) -> dict[str, Any]:
     scenario = store.snapshot()
     access, refresh = pair
     return {
@@ -61,9 +66,9 @@ def _token_payload(store: ScenarioStore, pair: tuple[str, str]) -> dict[str, Any
         "refresh_token": refresh,
         "token_type": "Bearer",
         "expires_in": 3600,
-        "plan": scenario.plan,
-        "user_id": scenario.user_id,
-        "email": scenario.email,
+        "plan": account.plan if account is not None else scenario.plan,
+        "user_id": account.user_id if account is not None else scenario.user_id,
+        "email": account.email if account is not None else scenario.email,
     }
 
 
@@ -96,18 +101,26 @@ def add_routes(
             return web.json_response({"error": "expired_token"}, status=410)
         if outcome == "denied":
             return web.json_response({"error": "access_denied"}, status=400)
+        account = store.accounts.for_device_code((await json_body(request)).get("device_code"))
+        if account is not None:
+            return web.json_response(_token_payload(store, account.session.issue_login(), account))
         return web.json_response(_token_payload(store, store.session.issue_login()))
 
     async def refresh(request: web.Request) -> web.Response:
         body = await json_body(request)
         pair = store.session.rotate(body.get("refresh_token"))
-        if pair is None:
+        if pair is not None:
+            return web.json_response(_token_payload(store, pair))
+        rotated = store.accounts.rotate(body.get("refresh_token"))
+        if rotated is None:
             return web.json_response({"error": "invalid_grant"}, status=400)
-        return web.json_response(_token_payload(store, pair))
+        account, pair = rotated
+        return web.json_response(_token_payload(store, pair, account))
 
     async def revoke(request: web.Request) -> web.Response:
         body = await json_body(request)
-        store.session.revoke_token(body.get("token"))
+        if not store.session.revoke_token(body.get("token")):
+            store.accounts.revoke_token(body.get("token"))
         return web.json_response({"revoked": True})
 
     async def entitlements(request: web.Request) -> web.Response:
