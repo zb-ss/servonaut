@@ -115,7 +115,7 @@ async def test_power_off_reaches_the_servers_own_project(tui, seed, providers):
         await select_row(t, HZ_TABLE, 1, f"{STAGING}/{WEB_1}")
         await press(t, "#btn_hetzner_mgr_power_off")
         await _answer_power_prompt(t, "HetznerManagerScreen")
-        await t.wait_for_toast(rf"^Powered off {re.escape(f'{STAGING}/{WEB_1}')}\.$")
+        await t.wait_for_toast(rf"^Power off sent to {re.escape(f'{STAGING}/{WEB_1}')}\.$")
         await t.wait_until(
             lambda: _states(t, HZ_TABLE)[f"{STAGING}/{WEB_1}"] == "stopped",
             desc="staging/web-1 stopped",

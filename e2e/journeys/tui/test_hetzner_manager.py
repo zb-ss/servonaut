@@ -157,7 +157,7 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         await _select(t, build.name)
         assert [_enabled(t, b) for b in POWER_BUTTONS] == [True, False, False, False]
         await _power(
-            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Started {build.name}.",
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Start sent to {build.name}.",
             "running", asks=False,
         )
 
@@ -188,7 +188,7 @@ async def test_power_actions_hit_the_api_once_each(tui, seed, providers):
         await _select(t, build.name)
         await _power(
             t, providers, "#btn_hetzner_mgr_power_off", build, "poweroff",
-            f"Powered off {build.name}.", "stopped",
+            f"Power off sent to {build.name}.", "stopped",
         )
 
     assert providers.hetzner.server(cache.server_id)["status"] == "off"
@@ -310,7 +310,7 @@ async def test_the_next_key_acts_on_the_server_the_action_was_for(tui, seed, pro
         assert list(_rows(t)).index(build.name) > 0
         await _select(t, build.name)
         await _power(
-            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Started {build.name}.",
+            t, providers, "#btn_hetzner_mgr_power_on", build, "poweron", f"Start sent to {build.name}.",
             "running", asks=False,
         )
         await t.settle()

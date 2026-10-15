@@ -457,17 +457,17 @@ _MANAGERS = {
 
 # (provider, button, service method, row state, asks first, notice)
 _POWER_NOTICES = [
-    ("hetzner", "btn_hetzner_mgr_power_on", "power_on", "off", False, "Started web-[b]1[/b]."),
+    ("hetzner", "btn_hetzner_mgr_power_on", "power_on", "off", False, "Start sent to web-[b]1[/b]."),
     ("hetzner", "btn_hetzner_mgr_shutdown", "shutdown", "running", True,
      "Shutdown sent to web-[b]1[/b]."),
     ("hetzner", "btn_hetzner_mgr_power_off", "power_off", "running", True,
-     "Powered off web-[b]1[/b]."),
+     "Power off sent to web-[b]1[/b]."),
     ("hetzner", "btn_hetzner_mgr_reboot", "reboot", "running", True,
      "Reboot sent to web-[b]1[/b]."),
-    ("aws", "btn_aws_mgr_start", "start_instance", "stopped", False, "Started app-1."),
+    ("aws", "btn_aws_mgr_start", "start_instance", "stopped", False, "Start sent to app-1."),
     ("aws", "btn_aws_mgr_stop", "stop_instance", "running", True, "Stop sent to app-1."),
     ("aws", "btn_aws_mgr_reboot", "reboot_instance", "running", True, "Reboot sent to app-1."),
-    ("ovh", "btn_ovh_mgr_start", "start_instance", "stopped", False, "Started mail-1."),
+    ("ovh", "btn_ovh_mgr_start", "start_instance", "stopped", False, "Start sent to mail-1."),
     ("ovh", "btn_ovh_mgr_stop", "stop_instance", "running", True, "Stop sent to mail-1."),
     ("ovh", "btn_ovh_mgr_reboot", "reboot_instance", "running", True, "Reboot sent to mail-1."),
 ]
@@ -544,7 +544,7 @@ async def test_failed_power_action_names_the_server(
 # (provider, button, row state, asks first, notice before the server's name)
 _DEMO_NOTICES = [
     ("hetzner", "btn_hetzner_mgr_shutdown", "running", True, "Shutdown sent to "),
-    ("aws", "btn_aws_mgr_start", "stopped", False, "Started "),
+    ("aws", "btn_aws_mgr_start", "stopped", False, "Start sent to "),
     ("ovh", "btn_ovh_mgr_reboot", "running", True, "Reboot sent to "),
 ]
 

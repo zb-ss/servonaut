@@ -97,7 +97,7 @@ _CONFIRM_POWER = {
 # What each power action tells the user, naming the instance as its row does.
 _POWER_TEXT = {
     "start_instance": PowerActionText(
-        "Starting", "Started {server}.", "Could not start {server}",
+        "Starting", "Start sent to {server}.", "Could not start {server}",
     ),
     "stop_instance": PowerActionText(
         "Stopping", "Stop sent to {server}.", "Could not stop {server}",

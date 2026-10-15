@@ -90,13 +90,13 @@ _CONFIRM_POWER = {
 # What each power action tells the user, naming the server as its row does.
 _POWER_TEXT = {
     "power_on": PowerActionText(
-        "Starting", "Started {server}.", "Could not start {server}",
+        "Starting", "Start sent to {server}.", "Could not start {server}",
     ),
     "shutdown": PowerActionText(
         "Shutting down", "Shutdown sent to {server}.", "Could not shut down {server}",
     ),
     "power_off": PowerActionText(
-        "Powering off", "Powered off {server}.", "Could not power off {server}",
+        "Powering off", "Power off sent to {server}.", "Could not power off {server}",
     ),
     "reboot": PowerActionText(
         "Rebooting", "Reboot sent to {server}.", "Could not reboot {server}",
