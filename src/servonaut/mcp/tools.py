@@ -375,7 +375,7 @@ class ServonautTools:
         """
         self._secret_provider = provider
 
-    def _describe_secret_store(self) -> str:
+    def describe_secret_store(self) -> str:
         """Human-readable name of the backend the DB tools read/write.
 
         The provider is resolved at boot from the user's secrets config, so
@@ -5853,7 +5853,7 @@ class ServonautTools:
                 self._audit.log(tool_name, args, '', False, 'secret_not_found')
                 return None, None, None, (
                     f"Secret {profile.password_secret!r} not found in "
-                    f"{self._describe_secret_store()}."
+                    f"{self.describe_secret_store()}."
                 )
 
         return instance, profile, (password or ""), ""
@@ -7029,7 +7029,7 @@ class ServonautTools:
         result = (
             f"Saved db_profile for {_who}{_label_note}: {eff_engine} "
             f"{eff_user}@{eff_host}:{eff_port}/{eff_db or '?'} "
-            f"(password stored in {self._describe_secret_store()} as "
+            f"(password stored in {self.describe_secret_store()} as "
             f"{secret_name!r})."
             + _select_hint + "\n"
             f"  tip: {eff_user!r} looks like the app user — for routine "
@@ -7239,7 +7239,7 @@ class ServonautTools:
         if delete_secret and match.password_secret and self._secret_provider is not None:
             try:
                 deleted = await self._secret_provider.delete_secret(match.password_secret)
-                _store = self._describe_secret_store()
+                _store = self.describe_secret_store()
                 secret_note = (
                     f" Secret {match.password_secret!r} "
                     + (f"deleted from {_store}." if deleted

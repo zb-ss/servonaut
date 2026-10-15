@@ -1,4 +1,4 @@
-"""DbCredentialScanScreen — human scan→store surface (Layer B2).
+"""DbCredentialScanScreen — find a server's database settings and store them.
 
 The TUI twin of ``servonaut db setup <instance>``. It wraps the SAME
 agent pipeline — :meth:`ServonautTools.db_scan_stage` (read-only on-box
@@ -9,8 +9,17 @@ the stored secret BY NAME — no re-SSH to read.
 
 Security invariant (pinned by test): the plaintext password is held
 server-side in staging and NEVER rendered here — only ``redact()``
-previews (``pw=****xyz``) and the opaque staging token cross this
+previews (``****xyz``) and the opaque staging token cross this
 boundary.
+
+The CLI prints not even that masked preview, because its output outlives
+the run (scrollback, logs, ``--json`` piped into scripts). Nothing on this
+screen is written anywhere, and the last characters are what tell two
+settings files for the same database apart (a stale copy next to the
+live one), so the list keeps them.
+
+The highlighted row is the selection: the Store button and Enter both act
+on it, and a finished scan highlights the first database not stored yet.
 """
 from __future__ import annotations
 
@@ -26,15 +35,32 @@ from textual.widgets import Button, Footer, Input, Static
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
+from servonaut.services.db_credential_scanner import (
+    connection_text,
+    engine_display_name,
+)
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.screens._demo_resolve import connection_instance
 
 logger = logging.getLogger(__name__)
 
+# Plain-text marker on a row whose database is in the secret store.
+_STORED_BADGE = "✓ stored  "
+
+
+def _store_error(out: str) -> str:
+    """Turn a db_setup_save refusal into the end of a sentence for a person."""
+    text = str(out).strip()
+    if "staging token" in text:
+        # The staged password expired (or was evicted) before it was stored.
+        return "the scan result expired before it was stored. Press s to scan again."
+    text = text.removeprefix("Error: ")
+    return text.splitlines()[0] if text else "unknown error"
+
 
 class _DbLabelPromptModal(ModalScreen[Optional[str]]):
-    """Confirm/override the site label before a candidate is stored.
+    """Confirm/override the name (site label) a database is stored under.
 
     Pre-filled with the auto-derived label (from the config path). The user can
     accept it, edit it (e.g. to separate prod vs staging DBs on one site), or
@@ -60,16 +86,16 @@ class _DbLabelPromptModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         yield Container(
-            Static("[bold]Label this DB credential[/bold]", id="db_label_modal_title"),
+            Static("[bold]Name this database[/bold]", id="db_label_modal_title"),
             Static(
-                "[dim]Names the site so you can load it by name later. Leave "
-                "blank for the instance's single/default DB. Give each site on "
-                "a multi-DB box its own label.[/dim]",
+                "[dim]A short name, such as the site it belongs to. Leave it "
+                "blank if this server has only one database. Storing another "
+                "database under the same name replaces it.[/dim]",
                 id="db_label_modal_hint",
             ),
             Input(
                 value=self._initial,
-                placeholder="e.g. shop.example.com",
+                placeholder="e.g. shop",
                 id="db_label_input",
             ),
             Horizontal(
@@ -101,7 +127,7 @@ class _DbLabelPromptModal(ModalScreen[Optional[str]]):
 
 
 class DbCredentialScanScreen(Screen):
-    """Scan a server for DB credentials, review redacted candidates, store one."""
+    """Scan a server for database settings, review masked rows, store them."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
@@ -114,10 +140,18 @@ class DbCredentialScanScreen(Screen):
         self._instance = instance
         self._candidates: List[Dict[str, Any]] = []
         self._selected_token: str = ""
+        # Token → the lowercased name its database is stored under, for every
+        # row marked stored (found in config by the scan, or stored here).
+        # db_setup_save keeps one database per (instance, name), so storing
+        # under a row's name replaces that row's database.
+        self._stored: Dict[str, str] = {}
 
     def _instance_ref(self) -> str:
         real = connection_instance(self.app, self._instance)
         return str(real.get("id") or real.get("name") or "")
+
+    def _display_name(self) -> str:
+        return str(self._instance.get("name") or self._instance.get("id") or "?")
 
     def _custom_roots(self) -> List[str]:
         """Per-instance extra scan roots from config, if any."""
@@ -159,16 +193,15 @@ class DbCredentialScanScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield SafeHeader()
-        name = escape(str(self._instance.get("name") or self._instance.get("id") or "?"))
+        name = escape(self._display_name())
         with Horizontal(id="main-layout"):
             yield Sidebar()
             yield Container(
                 Static("🔐 Scan for DB credentials", id="db_scan_title"),
                 Static(
-                    f"Read-only scan of [b]{name}[/b] for .env / DATABASE_URL / "
-                    "wp-config / configuration.php. Passwords are held "
-                    "server-side — only masked previews are shown. Store one to "
-                    "make db_processlist resolve it by name.",
+                    f"Finds the database settings of the apps on [b]{name}[/b], "
+                    "without changing anything. Passwords stay hidden: you see "
+                    "at most their last 3 characters.",
                     id="db_scan_subtitle",
                 ),
                 VerticalScroll(
@@ -176,7 +209,7 @@ class DbCredentialScanScreen(Screen):
                     Static("Scanning…", id="db_scan_status"),
                     OptionList(id="db_scan_candidates"),
                     Horizontal(
-                        Button("Store in vault", id="db_scan_store", variant="success"),
+                        Button("Store", id="db_scan_store", variant="success"),
                         Button("Rescan", id="db_scan_rescan"),
                         Button("Scan roots…", id="db_scan_roots_btn"),
                         id="db_scan_buttons",
@@ -203,11 +236,11 @@ class DbCredentialScanScreen(Screen):
             shown = escape(joined) + (
                 f" +{len(roots) - 3}" if len(roots) > 3 else ""
             )
-            line.update(f"[dim]Custom scan roots ([b]p[/b] to edit): {shown}[/dim]")
+            line.update(f"[dim]Looks in: {shown} ([b]p[/b] to change).[/dim]")
         else:
             line.update(
-                "[dim]Scanning built-in web roots. Missing an app? Add its path "
-                "with [b]p[/b] (Scan roots).[/dim]"
+                "[dim]Looks in the usual web folders. App somewhere else? Add "
+                "its folder with [b]p[/b] (Scan roots).[/dim]"
             )
 
     # ------------------------------------------------------------------
@@ -230,6 +263,75 @@ class DbCredentialScanScreen(Screen):
     def _tools(self):
         return getattr(self.app, "servonaut_tools", None)
 
+    def _store_name(self) -> str:
+        """Where a stored password lands, named like the CLI names it."""
+        describe = getattr(self._tools(), "describe_secret_store", None)
+        name = describe() if callable(describe) else None
+        return name if isinstance(name, str) and name else "your secret store"
+
+    # ------------------------------------------------------------------
+    # Rows
+    # ------------------------------------------------------------------
+
+    def _candidate(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token:
+            return None
+        return next((c for c in self._candidates if c.get("token") == token), None)
+
+    @staticmethod
+    def _row_prompt(candidate: Dict[str, Any], *, stored: bool) -> str:
+        """One list row: name, engine, connection, masked password, file.
+
+        The whole row is escaped (it carries server-controlled strings); only
+        the neutral, plain-text stored badge is prepended.
+        """
+        source = str(candidate.get("source") or "")
+        parts = [
+            str(candidate.get("label") or "").strip(),
+            engine_display_name(str(candidate.get("engine") or "?")),
+            connection_text(candidate),
+            f"password {candidate.get('password_preview') or '****'}",
+            f"from {source}" if source else "",
+        ]
+        row = "  ".join(part for part in parts if part)
+        return (_STORED_BADGE if stored else "") + escape(row)
+
+    def _render_row(self, token: str) -> None:
+        candidate = self._candidate(token)
+        if candidate is None:
+            return
+        self.query_one("#db_scan_candidates", OptionList).replace_option_prompt(
+            token, self._row_prompt(candidate, stored=token in self._stored),
+        )
+
+    def _first_unstored_index(self) -> Optional[int]:
+        return next(
+            (i for i, c in enumerate(self._candidates)
+             if c.get("token") not in self._stored),
+            None,
+        )
+
+    def _highlight(self, index: int) -> None:
+        """Highlight a row and make it the selection."""
+        option_list = self.query_one("#db_scan_candidates", OptionList)
+        option_list.highlighted = index
+        self._selected_token = str(self._candidates[index].get("token") or "")
+        option_list.focus()
+
+    def _found_status(self) -> str:
+        count = len(self._candidates)
+        stored = sum(1 for c in self._candidates if c.get("token") in self._stored)
+        if count == 1:
+            if stored:
+                return "Found 1 database; it is already stored. Press Enter to store it again."
+            return "Found 1 database. Press Enter to store it."
+        found = f"Found {count} databases"
+        if stored == count:
+            return f"{found}; all are already stored. Pick one to store it again."
+        if stored:
+            found += f", {stored} already stored"
+        return f"{found}. Pick one and press Enter to store it; each is saved under its own name."
+
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
@@ -244,15 +346,17 @@ class DbCredentialScanScreen(Screen):
         tools = self._tools()
         if tools is None:
             self._set_status(
-                "DB tooling unavailable — sign in (secret store is a "
-                "Solo/Teams feature) and retry.",
+                "Database setup is unavailable. Sign in with a Solo or Teams "
+                "plan (they include a secret store) and try again.",
                 error=True,
             )
             return
-        self._set_status("Scanning (read-only over SSH)…")
+        name = self._display_name()
+        self._set_status(f"Scanning {name} for database settings (read-only)…")
         option_list = self.query_one("#db_scan_candidates", OptionList)
         option_list.clear_options()
         self._candidates = []
+        self._stored = {}
         self._selected_token = ""
         # Custom roots (if configured) are passed as a space-separated
         # search_path; the scanner iterates each. Empty → built-in defaults.
@@ -263,101 +367,113 @@ class DbCredentialScanScreen(Screen):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("db_scan_stage failed: %s", exc)
-            self._set_status(f"Scan failed: {exc}", error=True)
+            self._set_status(f"Could not scan {name}: {exc}", error=True)
             return
         if result.get("error"):
-            self._set_status(str(result["error"]), error=True)
+            kind, _, detail = str(result["error"]).partition(": ")
+            message = (
+                f"Could not scan {name} over SSH: {detail}" if kind == "ssh_error"
+                else str(result["error"])
+            )
+            self._set_status(message, error=True)
             return
         candidates = result.get("candidates") or []
         if not candidates:
             self._set_status(
-                "No DB credentials found. Try a different search path or "
-                "confirm the app config lives under a standard web root.",
+                f"No database settings found on {name}. If the app lives "
+                "somewhere else, add its folder with p (Scan roots).",
             )
             return
         self._candidates = candidates
-        self._stored_tokens: set = getattr(self, "_stored_tokens", set())
         stored_labels, has_default = self._stored_label_info()
-        multi = len(candidates) > 1
-        vaulted_count = 0
         for c in candidates:
-            label = (c.get("label") or "").strip()
-            already_stored = (
-                label.lower() in stored_labels if label else has_default
-            )
-            if already_stored:
-                vaulted_count += 1
-            db = c.get("database") or "?"
-            site = f"[{c['label']}] " if c.get("label") else ""
-            row = (
-                f"{site}{c.get('engine', '?')}  {c.get('user', '?')}@"
-                f"{c.get('host', '?')}:{c.get('port', '?')}/{db}  "
-                f"pw={c.get('password_preview', '****')}  (from {c.get('source', '?')})"
-            )
-            # Prepend a neutral, plain-text badge so the whole prompt (which
-            # carries server-controlled strings) stays escaped — no markup on
-            # the dynamic content.
-            badge = "✓ stored  " if already_stored else ""
-            option_list.add_option(Option(badge + escape(row), id=c.get("token")))
-        hint = (
-            "Store each site you want — they're saved under their own labels."
-            if multi else "Select the candidate and Store in vault."
-        )
-        vaulted = (
-            f" {vaulted_count} already vaulted." if vaulted_count else ""
-        )
-        self._set_status(
-            f"Found {len(candidates)} candidate(s).{vaulted} {hint}"
-        )
+            label = (c.get("label") or "").strip().lower()
+            if (label in stored_labels) if label else has_default:
+                self._stored[str(c.get("token"))] = label
+            option_list.add_option(Option(
+                self._row_prompt(c, stored=str(c.get("token")) in self._stored),
+                id=c.get("token"),
+            ))
+        first = self._first_unstored_index()
+        self._highlight(0 if first is None else first)
+        self._set_status(self._found_status())
 
-    async def _store_worker(self, label: str = "") -> None:
-        if not self._selected_token:
-            self._set_status("Select a candidate first.", error=True)
+    async def _store_worker(self, token: str, label: str = "") -> None:
+        candidate = self._candidate(token)
+        if candidate is None:
+            self._set_status("Pick a database first.", error=True)
             return
         tools = self._tools()
         if tools is None:
-            self._set_status("DB tooling unavailable.", error=True)
+            self._set_status("Database setup is unavailable.", error=True)
             return
-        self._set_status("Storing in your secret vault…")
+        name = label or connection_text(candidate)
+        self._set_status(f"Storing {name}…")
         try:
             out = await tools.db_setup_save(
-                self._selected_token, instance_id=self._instance_ref(),
-                label=label,
+                token, instance_id=self._instance_ref(), label=label,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("db_setup_save failed: %s", exc)
-            self._set_status(f"Store failed: {exc}", error=True)
+            self._set_status(f"Could not store {name}: {exc}", error=True)
             return
         # db_setup_save returns a human string starting with "Saved" on success.
-        if isinstance(out, str) and out.startswith("Saved"):
-            # Remember which rows are stored so the user can keep storing the
-            # OTHER sites on this instance (one box can host several DBs).
-            stored = getattr(self, "_stored_tokens", set())
-            stored.add(self._selected_token)
-            self._stored_tokens = stored
-            remaining = len(self._candidates) - len(stored)
-            more = (
-                f" Select another site to store ({remaining} left)."
-                if remaining > 0 else ""
-            )
-            self._set_status(
-                "Stored. db_processlist / db_top_queries now resolve it by "
-                "site name." + more
-            )
-            self.notify("DB credential stored in vault.", severity="information")
-            self._selected_token = ""
-        else:
-            self._set_status(str(out), error=True)
+        if not (isinstance(out, str) and out.startswith("Saved")):
+            self._set_status(f"Could not store {name}: {_store_error(out)}", error=True)
+            return
+        self._mark_stored(token, label)
+        remaining = sum(
+            1 for c in self._candidates if c.get("token") not in self._stored
+        )
+        more = f" {remaining} more to store." if remaining else ""
+        self._set_status(f"Stored {name}. Agents and the TUI can now use it.{more}")
+        # markup=False: the name comes from a config file on the server.
+        self.notify(
+            f"Stored {name} in {self._store_name()}.",
+            severity="information", markup=False,
+        )
+        # Keep storing the OTHER sites on this instance (one box can host
+        # several databases): move on to the next row not stored yet.
+        following = self._first_unstored_index()
+        if following is not None:
+            self._highlight(following)
+
+    def _mark_stored(self, token: str, label: str) -> None:
+        """Badge the stored row; un-badge a row whose database it replaced."""
+        key = label.strip().lower()
+        replaced = [
+            other for other, other_key in self._stored.items()
+            if other != token and other_key == key
+        ]
+        for other in replaced:
+            del self._stored[other]
+            self._render_row(other)
+        self._stored[token] = key
+        self._render_row(token)
 
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
 
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted,
+    ) -> None:
+        # The highlighted row IS the selection: arrowing to a row and then
+        # pressing the Store button stores that row.
+        if event.option_list.id == "db_scan_candidates":
+            token = str(event.option.id or "")
+            if self._candidate(token) is not None:
+                self._selected_token = token
+
     def on_option_list_option_selected(
         self, event: OptionList.OptionSelected,
     ) -> None:
+        # Enter (or a click) on a row goes straight to the store prompt.
         if event.option_list.id == "db_scan_candidates":
-            self._selected_token = str(event.option.id or "")
+            token = str(event.option.id or "")
+            if self._candidate(token) is not None:
+                self._selected_token = token
+                self._open_store_prompt()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "db_scan_store":
@@ -368,22 +484,20 @@ class DbCredentialScanScreen(Screen):
             self.action_edit_roots()
 
     def _open_store_prompt(self) -> None:
-        """Prompt for the site label (pre-filled with the derived one), then
-        store the selected candidate under it."""
-        if not self._selected_token:
-            self._set_status("Select a candidate first.", error=True)
+        """Ask for the name (pre-filled with the derived label), then store
+        the selected row under it."""
+        token = self._selected_token
+        candidate = self._candidate(token)
+        if candidate is None:
+            self._set_status("Pick a database first.", error=True)
             return
-        derived = ""
-        for c in self._candidates:
-            if c.get("token") == self._selected_token:
-                derived = (c.get("label") or "").strip()
-                break
+        derived = (candidate.get("label") or "").strip()
 
         def _after(label: Optional[str]) -> None:
             if label is None:
                 return  # cancelled
             self.run_worker(
-                self._store_worker(label.strip()),
+                self._store_worker(token, label.strip()),
                 group="db_scan", exclusive=True, name="db_scan_store",
             )
 

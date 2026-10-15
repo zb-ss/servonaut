@@ -6,8 +6,8 @@ the only visible project is picked by name, the connection is tested by
 listing its secrets, and the choice is saved to the (fake) service as a
 pointer: the project id and the *name* of the token variable. The token
 reaches ``bws`` through the environment only, never on its command line,
-in a request or in the output. ``secrets status`` then reports Bitwarden
-as the active store. Signed out, setup asks for a sign-in and never runs
+in a request or in the output. ``secrets status`` then says secrets are kept in
+Bitwarden. Signed out, setup asks for a sign-in and never runs
 ``bws``.
 
 ``--token-env`` names another variable for the token; ``bws`` only reads
@@ -53,8 +53,9 @@ def test_setup_saves_a_pointer_and_status_reports_it(journey, fake_cloud, cli, a
 
     before = cli(home, "secrets", "status")
     assert before.returncode == 0, before.describe()
-    assert "Authenticated: True" in before.stdout
-    assert "Entitled to secrets_management: True" in before.stdout
+    assert "Signed in on the Solo plan." in before.stdout
+    assert "Secrets are kept in the local secret store (~/.servonaut/secrets.json)" in before.stdout
+    assert "run `servonaut secrets setup`" in before.stdout
 
     setup = cli(home, "secrets", "setup", "--yes")
     assert setup.returncode == 0, setup.describe()
@@ -80,10 +81,12 @@ def test_setup_saves_a_pointer_and_status_reports_it(journey, fake_cloud, cli, a
 
     after = cli(home, "secrets", "status")
     assert after.returncode == 0, after.describe()
-    assert "Active provider: bitwarden" in after.stdout
-    assert f"Bitwarden project_id: {project}" in after.stdout
-    assert f"Token env var: {TOKEN_VARIABLE} (set)" in after.stdout
-    assert "bws CLI: not installed" not in after.stdout
+    assert (
+        f"Secrets are kept in Bitwarden Secrets Manager (project {project}), chosen by you."
+        in after.stdout
+    )
+    assert f"The access token is read from {TOKEN_VARIABLE}, which is set." in after.stdout
+    assert "The bws program is not installed" not in after.stdout
     _assert_token_kept_out(vault, fake_cloud, before, setup, after)
     fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))
 
