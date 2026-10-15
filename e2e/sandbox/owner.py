@@ -664,6 +664,12 @@ class Owner:
             aws=HomeSeeder.aws_config(enabled=False),
         )
         self.member_env = self._child_env(self.member)
+        # Nor AWS credentials: the product lists AWS servers whenever it finds
+        # credentials, and a new teammate's list starts empty.
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            self.member_env.pop(name, None)
+        self.member_env["AWS_SHARED_CREDENTIALS_FILE"] = str(self.member.home / ".aws" / "credentials")
+        self.member_env["AWS_CONFIG_FILE"] = str(self.member.home / ".aws" / "config")
         run_member = "python -m e2e.sandbox run --as member --"
         return [
             f"Team member: {MEMBER_EMAIL} has a home of their own ({self.member.home}), is signed "

@@ -404,6 +404,8 @@ async def test_teams_member_joins_by_invitation_and_reaches_the_shared_server(qa
     assert member["env"]["HOME"] == str(member_home)
     # Each person keeps their own Vault custody key.
     assert member["env"][owner.VAULT_DEVICE_KEY_ENV] != current["env"][owner.VAULT_DEVICE_KEY_ENV]
+    # A new teammate has no AWS credentials, so their server list starts empty.
+    assert not {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} & set(member["env"])
 
     status = await qa_sandbox.command("status")
     assert status.returncode == 0, status.stderr
