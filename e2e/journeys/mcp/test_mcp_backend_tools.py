@@ -3,7 +3,10 @@
 Against the (fake) service, signed in: ``whoami`` describes the session
 without revealing the token; ``api_request`` calls the API with the CLI's
 session and recovers from an expired access token by refreshing it;
-``mcp_tool_call`` forwards a tool call to the hosted MCP server;
+``mcp_tool_call`` runs a tool on the hosted MCP server over its event
+stream (closing the stream after each call), returns the server's JSON-RPC
+errors (an unknown tool, a capacity refusal) as answers and refreshes an
+expired access token refused on the stream;
 ``relay_status`` reports the service's view of the relay; and
 ``relay_reconnect`` starts a background listener when the service does not
 see one, without writing anything to the protocol stream, then leaves a
@@ -57,18 +60,37 @@ async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, accou
             session, "mcp_tool_call",
             {"name": "fleet_summary", "arguments": {"region": "us-east-1"}},
         )
-        assert hosted["status"] == 200
-        assert hosted["response"]["result"]["content"][0]["text"] == (
-            "hosted fleet_summary: 1 argument(s)"
-        )
-        forwarded = fake_cloud.ai.hosted_calls()[-1]
-        assert forwarded["method"] == "tools/call"
-        assert forwarded["params"] == {
+        assert hosted == {"status": 200, "response": {"result": {
+            "content": [{"type": "text", "text": "hosted fleet_summary: 1 argument(s)"}],
+            "isError": False,
+        }}}
+        first = fake_cloud.hosted_mcp.streams()[0]
+        assert [m["method"] for m in first["messages"]] == [
+            "initialize", "notifications/initialized", "tools/call",
+        ]
+        assert first["messages"][-1]["params"] == {
             "name": "fleet_summary", "arguments": {"region": "us-east-1"}
         }
-        assert fake_cloud.requests("/mcp/message")[-1]["bearer_ok"]
         unknown = await _json(session, "mcp_tool_call", {"name": "no_such_tool"})
         assert unknown["response"]["error"]["code"] == -32602
+        fake_cloud.hosted_mcp.refuse()  # the service's capacity refusal
+        refused = await _json(session, "mcp_tool_call", {"name": "fleet_summary"})
+        assert refused["response"]["error"]["code"] == -32050
+
+        # The stream refuses an expired access token; the call refreshes it.
+        fake_cloud.expire_access_token()
+        again = await _json(session, "mcp_tool_call", {"name": "fleet_summary"})
+        assert again["response"]["result"]["isError"] is False
+        assert fake_cloud.statuses("/api/oauth/refresh") == [200, 200]
+        # Every call closed its stream: the service caps the open ones.
+        await wait_for_async(
+            lambda: all(s["closed"] for s in fake_cloud.hosted_mcp.streams()),
+            desc="hosted MCP streams closed",
+        )
+        assert len(fake_cloud.hosted_mcp.streams()) == 4
+        assert 401 in fake_cloud.statuses("/mcp/sse")
+        assert all(r["bearer_ok"] for r in fake_cloud.requests("/mcp/message"))
+        assert set(fake_cloud.statuses("/mcp/message")) == {200}
 
         status = await _json(session, "relay_status")
         assert status == {"connected": False, "last_heartbeat_at": None, "client_ids": []}

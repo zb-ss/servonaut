@@ -77,6 +77,9 @@ _ALLOWED_REQUEST_HEADERS = frozenset({
 # payloads through the CLI.
 _MAX_RESPONSE_BYTES = 1024 * 1024
 
+# How long one hosted MCP tool call (connect, initialize, call) may take.
+_HOSTED_MCP_CALL_TIMEOUT_SECONDS = 30.0
+
 # CLI-side sliding-window rate limit for api_request.
 _API_REQUEST_WINDOW_SECONDS = 60.0
 _API_REQUEST_MAX_PER_WINDOW = 30
@@ -2063,120 +2066,101 @@ class ServonautTools:
                             arguments: Optional[Dict[str, Any]] = None) -> str:
         """Invoke a tool on the hosted MCP server at mcp.servonaut.dev.
 
-        Wraps ``(name, arguments)`` into a JSON-RPC 2.0 ``tools/call`` envelope
-        and POSTs to ``$SERVONAUT_MCP_URL/mcp/message`` with the CLI's OAuth
-        bearer. Returns the raw JSON-RPC response so agents can inspect
-        ``result`` or ``error`` without constructing the envelope themselves.
-        One-shot 401 refresh + retry mirrors ``api_request``.
+        Opens the hosted server's event stream at ``$SERVONAUT_MCP_URL/mcp/sse``
+        with the CLI's OAuth bearer, runs ``initialize`` and one ``tools/call``
+        over it and closes the stream again (see
+        :mod:`servonaut.mcp.hosted_call`). Returns
+        ``{"status": 200, "response": {"result": ...}}``, with the server's
+        JSON-RPC ``error`` in place of ``result`` when it refused the call, so
+        agents can inspect either without building the envelope themselves.
+        A refused session token is refreshed once and the call retried, as in
+        ``api_request``.
         """
+        audit_args = {"name": name, "has_arguments": bool(arguments)}
         allowed, reason = self._guard.check_tool('mcp_tool_call')
         if not allowed:
-            self._audit.log(
-                'mcp_tool_call', {"name": name, "has_arguments": bool(arguments)}, '', False, reason
-            )
+            self._audit.log('mcp_tool_call', audit_args, '', False, reason)
             return json.dumps(_error("guard_denied", f"Blocked: {reason}"))
 
-        import uuid
-        request_id = str(uuid.uuid4())
-        envelope: Dict[str, Any] = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments or {}},
-            "id": request_id,
-        }
-
-        started = time.monotonic()
-        audit_args = {"name": name, "has_arguments": bool(arguments)}
+        def refuse(payload: Dict[str, Any]) -> str:
+            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
+            return json.dumps(payload)
 
         auth = self._auth_service
         if auth is None or not getattr(auth, "is_authenticated", False):
-            payload = _error("not_logged_in", "Run `servonaut login` first.")
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
+            return refuse(_error("not_logged_in", "Run `servonaut login` first."))
         access_token = getattr(auth, "access_token", None)
         if not access_token:
-            payload = _error("not_logged_in", "Run `servonaut login` first.")
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
+            return refuse(_error("not_logged_in", "Run `servonaut login` first."))
 
-        try:
-            import httpx
-        except ImportError:
-            payload = _error(
-                "httpx_missing",
-                "httpx is not installed. Install with `pip install 'servonaut[ai]'`.",
-            )
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
-
+        from servonaut.mcp.hosted_call import HostedCallError
         from servonaut.mcp.remote_client import _mcp_base
         try:
-            url = f"{_mcp_base()}/mcp/message"
+            base = _mcp_base()
         except EndpointOverrideError as exc:
-            payload = _error(_INVALID_ENDPOINT, str(exc))
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
-        request_headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        }
+            return refuse(_error(_INVALID_ENDPOINT, str(exc)))
 
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url, json=envelope, headers=request_headers, timeout=30.0,
-                )
-                if response.status_code == 401 and hasattr(auth, "refresh_token"):
-                    if await auth.refresh_token():
-                        new_token = getattr(auth, "access_token", None)
-                        if new_token:
-                            request_headers["Authorization"] = f"Bearer {new_token}"
-                            response = await client.post(
-                                url, json=envelope,
-                                headers=request_headers, timeout=30.0,
-                            )
-        except httpx.TimeoutException:
-            payload = _error("timeout", "Request exceeded 30 second timeout.")
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
-        except httpx.HTTPError as e:
-            payload = _error("network_error", str(e))
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
-
+            outcome = await self._call_hosted_tool(base, access_token, name, arguments or {})
+        except ImportError as exc:
+            if (exc.name or "").partition(".")[0] != "mcp":
+                raise
+            return refuse(_error(
+                "mcp_missing",
+                "The mcp package is not installed. Install with `pip install 'servonaut[mcp]'`.",
+            ))
+        except HostedCallError as exc:
+            return refuse(_error(exc.code, str(exc)))
         duration_ms = int((time.monotonic() - started) * 1000)
-        content = response.content or b""
-        if len(content) > _MAX_RESPONSE_BYTES:
-            payload = _error(
+
+        # "status" is the event stream's HTTP status: always 200 once the
+        # server answered, and kept for agents that read it.
+        encoded = json.dumps({"status": 200, "response": outcome})
+        size = len(encoded.encode("utf-8"))
+        if size > _MAX_RESPONSE_BYTES:
+            return refuse(_error(
                 "response_too_large",
-                f"MCP response is {len(content)} bytes (max {_MAX_RESPONSE_BYTES}).",
-            )
-            self._audit.log("mcp_tool_call", audit_args, "", False, payload["error"]["code"])
-            return json.dumps(payload)
+                f"MCP response is {size} bytes (max {_MAX_RESPONSE_BYTES}).",
+            ))
+
+        audit_result = {**audit_args, "status": 200, "duration_ms": duration_ms}
+        rpc_error = outcome.get("error")
+        if isinstance(rpc_error, dict):
+            audit_result["rpc_error"] = rpc_error.get("code")
+        self._audit.log("mcp_tool_call", audit_result, "", True)
+        logger.info(
+            "mcp_tool_call %s -> %s (%dms)",
+            name, "error" if rpc_error else "result", duration_ms,
+        )
+        return encoded
+
+    async def _call_hosted_tool(self, base: str, access_token: str, name: str,
+                                arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one hosted tool call, refreshing a refused session token once.
+
+        The server refuses an expired token on the event-stream GET, before
+        any JSON-RPC is exchanged, so a retry cannot repeat a tool call.
+        """
+        from servonaut.mcp.hosted_call import HostedCallError, call_hosted_tool
 
         try:
-            parsed: Any = response.json() if content else {}
-        except ValueError:
-            parsed = {"raw": content.decode("utf-8", errors="replace")}
-
-        # Forward the JSON-RPC response verbatim so the agent sees either
-        # `result` or `error` per the JSON-RPC spec.
-        result_envelope = {
-            "status": response.status_code,
-            "response": parsed,
-        }
-        self._audit.log(
-            "mcp_tool_call",
-            {**audit_args, "status": response.status_code, "duration_ms": duration_ms},
-            "",
-            200 <= response.status_code < 300,
+            return await call_hosted_tool(
+                base, access_token, name, arguments,
+                timeout=_HOSTED_MCP_CALL_TIMEOUT_SECONDS,
+            )
+        except HostedCallError as exc:
+            auth = self._auth_service
+            if exc.code != "unauthorized" or not hasattr(auth, "refresh_token"):
+                raise
+            if not await auth.refresh_token():
+                raise
+            new_token = getattr(auth, "access_token", None)
+            if not new_token:
+                raise
+        return await call_hosted_tool(
+            base, new_token, name, arguments, timeout=_HOSTED_MCP_CALL_TIMEOUT_SECONDS,
         )
-        logger.info(
-            "mcp_tool_call %s -> status=%s (%dms)",
-            name, response.status_code, duration_ms,
-        )
-        return json.dumps(result_envelope)
 
     async def relay_reconnect(self, force: bool = False) -> str:
         """Heal a stale relay connection.
