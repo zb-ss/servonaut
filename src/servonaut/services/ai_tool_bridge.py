@@ -1174,6 +1174,7 @@ class AIToolBridge(_FloorDangerousMixin):
             )
 
         text = output if isinstance(output, str) else str(output)
+        failure = _local_tool_failure(text)
         if dropped_args:
             text = (
                 "note: this CLI version does not support the argument(s) "
@@ -1184,14 +1185,18 @@ class AIToolBridge(_FloorDangerousMixin):
         result = ToolResult(
             tool_call_id=call.tool_call_id,
             conversation_id=call.conversation_id,
-            status="ok",
+            status="ok" if failure is None else "error",
             result=text,
+            error=failure,
             bytes=_utf8_len(text),
         )
-        self._audit_tool_call(
-            call, result, allowed=True,
-            reason="ok_local_dropped_args" if dropped_args else "ok_local",
-        )
+        if failure is not None:
+            reason = "error_local"
+        elif dropped_args:
+            reason = "ok_local_dropped_args"
+        else:
+            reason = "ok_local"
+        self._audit_tool_call(call, result, allowed=True, reason=reason)
         return result
 
     async def _execute_ip_ban_status(self, call: ToolCall) -> ToolResult:
@@ -1507,6 +1512,32 @@ def _split_supported_args(handler: Any, args: Dict[str, Any]) -> Tuple[Dict[str,
     accepted = {k: v for k, v in args.items() if k in parameters}
     dropped = sorted(k for k in args if k not in parameters)
     return accepted, dropped
+
+
+def _local_tool_failure(text: str) -> Optional[str]:
+    """The failure a local tool reported in its output, or ``None``.
+
+    ServonautTools handlers report a failure in the text they return
+    rather than by raising: ``"Error: <reason>"``, or the JSON envelope
+    ``{"error": {"code": ..., "message": ...}}``. The text still reaches the
+    model unchanged; this only decides the result's status, so the server
+    can mark the call as failed instead of successful.
+    """
+    stripped = text.lstrip()
+    if stripped.startswith("Error:"):
+        return stripped.splitlines()[0][len("Error:"):].strip() or "error"
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        return None
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not error:
+        return None
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or "error")
+    return str(error)
 
 
 def _utf8_len(value: Any) -> int:

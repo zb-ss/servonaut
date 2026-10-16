@@ -54,6 +54,8 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     home = account_home(custom_servers=[_web_1()])
     journey.shims.when("ssh", r"deploy@10\.0\.0\.11 .*uptime", stdout=" 10:00:00 up 3 days\n")
     journey.shims.when("ssh", r"tail -n 5 /var/log/syslog", stdout="line one\nline two\n")
+    # disk_usage on a server whose df prints nothing: the tool reports a failure.
+    journey.shims.when("ssh", r"===FS===", stdout="===FS===\n===INODES===\n===TOP===\n")
     listener = relay(home).start()
     user_id = wait_until_connected(fake_cloud, listener)
     output = listener.output()
@@ -106,6 +108,17 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     assert tool["status"] == "ok", tool
     assert tool["conversation_id"] == "conv-e2e-1"
     assert fleet.APP_1.name in json.dumps(tool["result"])
+
+    # A local tool that reports a failure answers with an error result, so
+    # the service does not record the call as successful.
+    publish(
+        tool_call_event("tc-disk", user_id, "disk_usage", {"instance_id": WEB_1.name}),
+        topic="ai-tool-calls",
+    )
+    failed = wait_for_tool_result(fake_cloud, "tc-disk", listener)
+    assert failed["status"] == "error", failed
+    assert failed["result"] == "Error: df_not_available"
+    assert failed["error"] == "df_not_available"
 
     # A monitoring probe answers on the command-result route with JSON output.
     publish(probe_event("probe-list", user_id, "list_instances"))
