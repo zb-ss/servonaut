@@ -11,7 +11,13 @@ from servonaut.models.relay_messages import CommandRequest, CommandResponse, Com
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.shared_servers import is_shared_row
-from servonaut.services.team_rules import TEAM_RULE_REASON, TeamGuard, guard_for_target
+from servonaut.services.team_rules import (
+    TEAM_RULE_REASON,
+    TeamGuard,
+    credential_rules_row,
+    credential_team_of,
+    guard_for_target,
+)
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
@@ -466,12 +472,24 @@ class RelayExecutors:
     async def _agent_team_guard(
         self, request: CommandRequest, instance: Mapping[str, Any],
     ) -> Optional[TeamGuard]:
-        """:meth:`_team_guard`, with the team's rules fetched when they must be."""
+        """:meth:`_team_guard`, with the team's rules fetched when they must be.
+
+        A server of the user's own that connects with a key from a team's
+        vault runs under that team's rules (see ``team_rules``).
+
+        Raises:
+            Exception: that key could not be checked; the request fails
+                rather than take a team's key for a personal one.
+        """
         if not request.from_agent:
             return None
-        if is_shared_row(instance) and self._team_policy is not None:
-            await self._team_policy.ensure_loaded(instance.get('team_slug'))
-        return self._team_guard(request, instance)
+        row: Mapping[str, Any] = instance
+        slug = await credential_team_of(instance, self._vault_runtime)
+        if slug is not None:
+            row = await credential_rules_row(instance, slug, self._vault_runtime.teams)
+        if is_shared_row(row) and self._team_policy is not None:
+            await self._team_policy.ensure_loaded(row.get('team_slug'))
+        return self._team_guard(request, row)
 
     def _team_refusal(
         self, request: CommandRequest, instance: Mapping[str, Any],

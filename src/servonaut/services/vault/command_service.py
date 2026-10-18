@@ -2012,6 +2012,39 @@ class VaultCommandService:
         binding, _ = await self._personal_binding(*instance_target(instance))
         return binding
 
+    async def credential_team(self, instance: Mapping[str, Any]) -> str | None:
+        """The slug of the team whose vault holds the key an own server connects with.
+
+        A server of the user's own can be bound to a key in a team vault the
+        user administers; :meth:`resolve_ssh` then connects with that team's
+        key. None for any other server: a shared one (its team's rules apply
+        already), one without a native binding, or one bound to a personal
+        vault key. '' for a team vault that does not name its team. Decides
+        as :meth:`resolve_ssh` does: a locked vault resolves no native key.
+
+        Raises:
+            Exception: the binding or its vault could not be read; the
+                caller must not take the key for a personal one.
+        """
+        if instance.get("is_shared") is True or self.store.identity is None:
+            return None
+        try:
+            target = instance_target(instance)
+        except ValueError:
+            return None
+        binding, _ = await self._personal_binding(*target)
+        if not isinstance(binding, Mapping) or binding.get("source") != "servonaut_vault":
+            return None
+        vault_id = binding.get("vault_id")
+        if not isinstance(vault_id, str) or not vault_id:
+            raise VaultStateError("native credential binding is malformed")
+        vault = await self.vaults.get_vault(vault_id)
+        if vault.get("kind") == "personal":
+            return None
+        team = vault.get("team") if isinstance(vault.get("team"), Mapping) else {}
+        slug = team.get("slug")
+        return slug if isinstance(slug, str) else ""
+
     async def _credential_binding(
         self, instance: Mapping[str, Any],
     ) -> tuple[Mapping[str, Any] | None, str]:

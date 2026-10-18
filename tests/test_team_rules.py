@@ -1,6 +1,9 @@
 """Team rules: what agents may do on a team's shared servers."""
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from servonaut.config.schema import MCPConfig
@@ -8,13 +11,15 @@ from servonaut.mcp.guards import CommandGuard
 from servonaut.services.team_rules import (
     DEFAULT_TEAM_RULES,
     TeamRules,
+    credential_rules_row,
+    credential_team_of,
     guard_for_target,
     guard_for_target_from,
     is_team_refusal,
     stricter,
 )
 
-from tests._team_policy_fixtures import trust_signed_team_rules
+from tests._team_policy_fixtures import agent_rules_with, trust_signed_team_rules
 
 BUILTIN_ALLOWLIST = MCPConfig().command_allowlist
 BUILTIN_BLOCKLIST = MCPConfig().command_blocklist
@@ -246,3 +251,92 @@ class TestFromLocalGuard:
 def test_only_team_refusals_are_recognised():
     assert not is_team_refusal("Blocked: Command 'x' not in allowlist for standard mode")
     assert not is_team_refusal(None)
+
+
+def _own_row(**changes):
+    row = {"id": "i-1", "name": "app-1", "public_ip": "web.example.com", "port": 22}
+    row.update(changes)
+    return row
+
+
+def _teams(*rows, servers=()):
+    service = MagicMock()
+    service.list_teams = AsyncMock(return_value=list(rows))
+    service.list_shared_servers = AsyncMock(return_value=list(servers))
+    return service
+
+
+class TestCredentialRules:
+    """An own server reached with a team's vault key runs under that team's rules."""
+
+    def test_the_team_s_shared_row_for_the_same_server_is_used(self):
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[{"id": "srv-1", "name": "web-1", "hostname": "web.example.com"}],
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["is_shared"] is True
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("srv-1", "ops", "member")
+
+    def test_the_strictest_of_two_shared_copies_is_used(self):
+        trust_signed_team_rules("ops", agent_rules_with(
+            servers={"srv-2": {"role_levels": {"member": "readonly"}}},
+        ), version=2)
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[
+                {"id": "srv-1", "name": "web-1", "hostname": "web.example.com"},
+                {"id": "srv-2", "name": "web-1b", "instance_id": "i-1"},
+            ],
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["id"] == "srv-2"
+
+    def test_a_server_the_team_does_not_share_gets_the_team_wide_level(self):
+        service = _teams({"slug": "ops", "name": "Ops", "role": "admin"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("", "ops", "admin")
+        assert _guard(row).level == "standard"
+
+    def test_rows_already_read_are_used_instead_of_reading_the_team_s_servers(self):
+        from servonaut.services.shared_servers import shared_row
+
+        service = _teams({"slug": "ops", "name": "Ops", "role": "member"})
+        shared = shared_row({"id": "srv-1", "instance_id": "i-1"}, {"slug": "ops", "role": "member"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service, [shared]))
+
+        assert row["id"] == "srv-1"
+        service.list_shared_servers.assert_not_awaited()
+
+    def test_a_team_the_user_is_not_in_gives_no_role(self):
+        service = _teams({"slug": "dev", "name": "Dev", "role": "owner"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["team_role"] == ""
+        assert _guard(row).level == "readonly"
+        service.list_shared_servers.assert_not_awaited()
+
+    def test_an_unreadable_team_list_is_raised_for_the_caller_to_refuse(self):
+        service = _teams()
+        service.list_teams = AsyncMock(side_effect=RuntimeError("offline"))
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+
+class TestCredentialTeamOf:
+    def test_a_shared_server_or_no_vault_runtime_has_none(self):
+        runtime = MagicMock(credential_team=AsyncMock(return_value="ops"))
+        assert asyncio.run(credential_team_of(_shared(), runtime)) is None
+        assert asyncio.run(credential_team_of(_own_row(), None)) is None
+        runtime.credential_team.assert_not_awaited()
+
+    def test_the_vault_runtime_names_the_team(self):
+        runtime = MagicMock(credential_team=AsyncMock(return_value="ops"))
+        assert asyncio.run(credential_team_of(_own_row(), runtime)) == "ops"
+
+    def test_a_runtime_without_the_check_has_none(self):
+        assert asyncio.run(credential_team_of(_own_row(), object())) is None

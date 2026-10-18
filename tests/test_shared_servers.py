@@ -20,6 +20,7 @@ from servonaut.services.shared_servers import (
     as_shared_row,
     fold_shared,
     fold_shared_rows,
+    is_same_server,
     load_shared_servers,
     shared_row,
 )
@@ -158,6 +159,24 @@ class TestFoldShared:
         own = _own()
         shared = shared_row(_server(), TEAM)
         assert fold_shared_rows([own, shared]) == [own, shared]
+
+
+class TestIsSameServer:
+    """The one-row test agrees with the listing (fold_shared)."""
+
+    @pytest.mark.parametrize("own, server, same", [
+        (_own(), _server(instance_id="i-0abc"), True),
+        (_own(public_ip="web.example.com", port=2222, is_custom=True), _server(), True),
+        (_own(public_ip="WEB.example.com ", port=2222), _server(), True),
+        (_own(public_ip="web.example.com", is_custom=True), _server(), False),
+        (_own(public_ip="", private_ip="10.0.0.5"), _server(hostname="10.0.0.5", port=22), False),
+        (_own(public_ip=""), _server(hostname="", port=22), False),
+        (_own(), _server(), False),
+    ])
+    def test_matches_what_the_listing_folds(self, own, server, same):
+        shared = shared_row(server, TEAM)
+        assert is_same_server(shared, own) is same
+        assert (fold_shared_rows([own, shared]) == [own]) is same
 
 
 class _Teams:

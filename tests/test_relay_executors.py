@@ -1181,6 +1181,25 @@ class TestTeamRulesOnRelay:
         executor._ssh_service.build_ssh_command.assert_not_called()
 
 
+class _TeamKeyRuntime(_VaultRuntime):
+    """A vault runtime whose own-server binding uses team *slug*'s vault key."""
+
+    def __init__(self, slug="ops", error=None, servers=()) -> None:
+        super().__init__(lease=None)
+        self.slug = slug
+        self.check_error = error
+        self.teams = MagicMock()
+        self.teams.list_teams = AsyncMock(
+            return_value=[{"id": "team-id-ops", "slug": "ops", "name": "Ops", "role": "member"}],
+        )
+        self.teams.list_shared_servers = AsyncMock(return_value=list(servers))
+
+    async def credential_team(self, instance):
+        if self.check_error is not None:
+            raise self.check_error
+        return self.slug
+
+
 class TestTeamRulesFetchedOnRelay:
     """The relay fetches a team's rules before an agent acts, when they are not in force."""
 
@@ -1220,3 +1239,86 @@ class TestTeamRulesFetchedOnRelay:
             run(executor.execute(make_request(target="srv-1", payload={"command": "uptime"})))
 
         refresher.ensure_loaded.assert_not_awaited()
+
+
+class TestTeamKeyOnAnOwnServerOnRelay:
+    """An own server reached with a team's vault key runs an agent's request under that team's rules."""
+
+    def _executor(self, runtime, level="dangerous"):
+        executor = make_executors()
+        executor.set_vault_runtime(runtime)
+        executor._config_manager.get.return_value = AppConfig(mcp=MCPConfig(guard_level=level))
+        executor._audit = MagicMock()
+        return executor
+
+    def test_the_teams_rule_refuses_what_local_settings_allow(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "readonly", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": [],
+        })
+        executor = self._executor(_TeamKeyRuntime())
+        response = run(executor.execute(make_request(
+            from_agent=True, target="i-abc123", payload={"command": "uptime"},
+        )))
+
+        # Without the check the own server ran it under the local dangerous level.
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Blocked: on team Ops's shared servers your agents run at the "
+            "readonly level (set by the team), and running commands is not "
+            "available there."
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_the_teams_server_override_applies_when_the_team_shares_it(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "standard", "viewer": "readonly"},
+            "servers": {"srv-1": {"role_levels": {"member": "readonly"}}},
+            "command_allowlist": None, "command_blocklist": [],
+        })
+        shared_copy = {"id": "srv-1", "name": "web-server", "hostname": "54.1.2.3", "port": 22}
+        executor = self._executor(_TeamKeyRuntime(servers=[shared_copy]))
+        response = run(executor.execute(make_request(
+            from_agent=True, target="i-abc123", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "rejected"
+        assert "run at the readonly level (set by the team)" in response.error_message
+
+    def test_a_personal_key_keeps_the_local_rules(self):
+        executor = self._executor(_TeamKeyRuntime(slug=None))
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123",
+                payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+
+    def test_a_key_that_cannot_be_checked_fails_the_request(self):
+        executor = self._executor(_TeamKeyRuntime(error=RuntimeError("vault offline")))
+        response = run(executor.execute(make_request(
+            from_agent=True, target="i-abc123", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "error"
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_what_a_person_sends_keeps_todays_rules(self):
+        trust_signed_team_rules("ops")
+        runtime = _TeamKeyRuntime()
+        executor = self._executor(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                target="i-abc123", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"

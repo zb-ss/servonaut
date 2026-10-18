@@ -18,7 +18,10 @@ settings can only tighten it, never loosen it:
 
 The user's own servers keep their local rules, and nothing here applies to
 what a person sends: commands typed in the TUI, with ``servonaut ssh`` or in
-the web console, and remediations a person approved.
+the web console, and remediations a person approved. One exception: a server
+of the user's own that connects with a key from a team's vault is reached
+with the team's credentials, so that team's rules apply to it too (see
+:func:`credential_rules_row`).
 
 The team service signs each team's rules; :func:`rules_for` reads the rules
 ``team_policy`` verified. When a team has no valid signed rules (not loaded
@@ -27,14 +30,15 @@ for every role, and refusals say why.
 """
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
-from servonaut.services.shared_servers import is_shared_row
+from servonaut.services.shared_servers import is_same_server, is_shared_row, shared_row
 
 # The audit reason code of every refusal a team rule causes.
 TEAM_RULE_REASON = "team_rule"
@@ -182,6 +186,69 @@ def rules_for(row: Mapping[str, Any]) -> TeamRules:
     slug = row.get("team_slug")
     rules = team_policy_store().rules_for_team(slug if isinstance(slug, str) else "")
     return rules.for_server(row.get("id"))
+
+
+async def credential_team_of(row: Mapping[str, Any], vault_runtime: Any) -> Optional[str]:
+    """The team whose vault key the user's own server *row* connects with.
+
+    None for a shared server, without a vault runtime, or when the key is
+    not a team's (see ``VaultCommandService.credential_team``).
+
+    Raises:
+        Exception: the key could not be checked.
+    """
+    check = getattr(vault_runtime, "credential_team", None) if vault_runtime is not None else None
+    if is_shared_row(row) or not callable(check):
+        return None
+    result = check(dict(row))
+    slug = await result if inspect.isawaitable(result) else result
+    return slug if isinstance(slug, str) else None
+
+
+async def credential_rules_row(
+    row: Mapping[str, Any],
+    team_slug: str,
+    team_service: Any,
+    shared_rows: Optional[Iterable[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """The row whose team rules apply to the user's own server *row*.
+
+    *row* connects with a key from the vault of team *team_slug*: the
+    team's shared row for the same server (see ``shared_servers.fold_shared``;
+    the strictest when the team shares it twice), else a row of that team
+    without a server, which gets the team-wide level of the user's role.
+    *shared_rows* are the shared rows the caller already holds; without them
+    the team's servers are read.
+
+    Raises:
+        Exception: the team list or the team's servers could not be read;
+            the caller refuses rather than apply no rule.
+    """
+    teams = await team_service.list_teams()
+    team = next(
+        (team for team in teams or [] if isinstance(team, Mapping) and team.get("slug") == team_slug),
+        None,
+    )
+    if team is None:
+        # Not (or no longer) a member: no role, so the strictest level.
+        team = {"slug": team_slug}
+    elif shared_rows is None:
+        shared_rows = [
+            shared_row(server, team)
+            for server in await team_service.list_shared_servers(team_slug) or []
+            if isinstance(server, Mapping)
+        ]
+    same = [
+        dict(shared) for shared in shared_rows or []
+        if is_shared_row(shared) and shared.get("team_slug") == team_slug
+        and is_same_server(shared, row)
+    ]
+    if same:
+        return min(same, key=lambda shared: _level_rank(
+            rules_for(shared).level_for(shared.get("team_role")),
+        ))
+    # No server id: no team override can name it.
+    return shared_row({"name": row.get("name") or ""}, team)
 
 
 def _team_label(row: Mapping[str, Any]) -> str:

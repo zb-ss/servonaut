@@ -131,6 +131,19 @@ def _own_port(row: Mapping[str, Any]) -> int:
     return _port(row.get("port"))
 
 
+def _public_address(row: Mapping[str, Any]) -> Tuple[str, int]:
+    return str(row.get("public_ip") or "").strip().lower(), _own_port(row)
+
+
+def is_same_server(shared: Mapping[str, Any], own: Mapping[str, Any]) -> bool:
+    """Whether the *shared* row is the user's own row *own* (see :func:`fold_shared`)."""
+    recorded = str(shared.get("instance_id") or "")
+    if recorded and recorded == str(own.get("id") or ""):
+        return True
+    address = _public_address(own)
+    return bool(address[0]) and _public_address(shared) == address
+
+
 def fold_shared(
     rows: Sequence[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[int, List[str]]]:
@@ -151,9 +164,9 @@ def fold_shared(
         row_id = str(row.get("id") or "")
         if row_id:
             by_id.setdefault(row_id, row)
-        address = str(row.get("public_ip") or "").strip().lower()
-        if address:
-            by_address.setdefault((address, _own_port(row)), row)
+        address = _public_address(row)
+        if address[0]:
+            by_address.setdefault(address, row)
 
     shared_by: Dict[int, List[str]] = {}
     listed: List[Dict[str, Any]] = []
@@ -162,8 +175,7 @@ def fold_shared(
             listed.append(row)
             continue
         recorded = str(row.get("instance_id") or "")
-        address = (str(row.get("public_ip") or "").strip().lower(), _own_port(row))
-        owner = (by_id.get(recorded) if recorded else None) or by_address.get(address)
+        owner = (by_id.get(recorded) if recorded else None) or by_address.get(_public_address(row))
         if owner is None:
             listed.append(row)
             continue

@@ -1792,3 +1792,101 @@ class TestTeamRulesFetchedWithSharedServers:
             "Blocked: on team Ops's shared servers your agents run at the readonly "
             "level (set by the team), and running commands is not available there."
         )
+
+
+# ---------------------------------------------------------------------------
+# An own server reached with a team's vault key
+# ---------------------------------------------------------------------------
+
+def _team_key_runtime(slug="ops", error=None):
+    """A vault runtime whose own-server binding uses team *slug*'s vault key."""
+    runtime = MagicMock()
+    runtime.resolve_relay_target = AsyncMock(return_value=None)
+    runtime.resolve_ssh = AsyncMock(return_value=None)
+    runtime.credential_team = AsyncMock(return_value=slug, side_effect=error)
+    return runtime
+
+
+class TestTeamKeyOnAnOwnServer:
+    """A server of the user's own that connects with a team's vault key runs under that team's rules."""
+
+    def _tools(self, runtime, servers=None, level=GuardLevel.DANGEROUS):
+        tools = make_tools(
+            guard_level=level, vault_runtime=runtime,
+            team_service=_team_service(servers=servers if servers is not None else []),
+        )
+        return tools
+
+    def test_the_teams_rule_refuses_what_local_settings_allow(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        tools = self._tools(_team_key_runtime())
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        # Without the check the own server ran it under the local dangerous level.
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (set by the team), and running commands is not available there."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_an_allowed_command_runs_as_the_team_guard_rendered_it(self):
+        trust_signed_team_rules("ops")
+        tools = self._tools(_team_key_runtime())
+        with _ssh_ok():
+            refused = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+            result = run(tools.run_command("i-abc123", "ps aux | grep 'nginx'"))
+
+        assert "'systemctl restart nginx' is not an allowed command there" in refused
+        assert "[transport_used: ssh]" in result
+        remote = tools._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
+        assert remote == "ps aux | grep nginx"
+
+    def test_the_teams_server_override_applies_when_the_team_shares_it(self):
+        trust_signed_team_rules("ops", agent_rules_with(
+            servers={"srv-1": {"role_levels": {"member": "readonly"}}},
+        ))
+        shared_copy = _shared_server(instance_id="i-abc123")
+        tools = self._tools(_team_key_runtime(), servers=[shared_copy])
+        result = run(tools.run_command("i-abc123", "uptime"))
+
+        # The team-wide level (standard) would have let it run.
+        assert "run at the readonly level (set by the team)" in result
+
+    def test_a_personal_key_keeps_the_local_rules(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        tools = self._tools(_team_key_runtime(slug=None))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result
+
+    def test_a_key_that_cannot_be_checked_is_refused(self):
+        tools = self._tools(_team_key_runtime(error=RuntimeError("vault offline")))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert "could not check which vault key this server uses" in result
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "credential_check_failed"
+
+    def test_a_person_run_surface_does_not_check_the_key(self):
+        runtime = _team_key_runtime()
+        tools = self._tools(runtime)
+        tools._apply_team_rules = False
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result
+        runtime.credential_team.assert_not_awaited()
+
+    def test_whose_key_it_is_is_remembered_between_calls(self):
+        trust_signed_team_rules("ops")
+        runtime = _team_key_runtime()
+        tools = self._tools(runtime)
+        with _ssh_ok():
+            run(tools.run_command("i-abc123", "uptime"))
+            run(tools.run_command("i-abc123", "uptime"))
+
+        runtime.credential_team.assert_awaited_once()
