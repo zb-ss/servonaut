@@ -1489,6 +1489,10 @@ def _main() -> None:
     from servonaut.cli.servers import add_servers_parser, handle_servers_command
     add_servers_parser(subparsers)
 
+    # ---- team subcommand (agent rules, read-only) ----
+    from servonaut.cli.team import add_team_parser, handle_team_command
+    add_team_parser(subparsers)
+
     # ---- db subcommand (DB credential setup for db_processlist/db_top_queries) ----
     from servonaut.cli.db import add_db_parser
     add_db_parser(subparsers)
@@ -1536,6 +1540,10 @@ def _main() -> None:
     if getattr(args, 'subcommand', None) == 'servers':
         _setup_logging(debug=args.debug)
         sys.exit(handle_servers_command(args))
+
+    if getattr(args, 'subcommand', None) == 'team':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_team_command(args))
 
     if getattr(args, 'subcommand', None) == 'db':
         _setup_logging(debug=args.debug)
