@@ -7,15 +7,20 @@ client that skips a step fails against the fake as it would for real:
   and opens an event stream. Its first event is ``endpoint``, carrying the
   relative URI ``/mcp/message?connection_id=<id>``; ``: ping`` comments
   follow as heartbeats;
+* the account may hold :data:`STREAM_LIMIT` streams; a GET beyond that
+  answers 429. Like the service, the fake frees a closed stream's slot only
+  a moment after the client left (:meth:`HostedMcpState.hold_slots`), so a
+  call made right after another one is refused at first;
 * ``POST /mcp/message?connection_id=<id>`` takes one JSON-RPC message and
   answers 200 ``{"status": "accepted"}``. Without the id of an open stream
   it answers 400 ``{"error": "Invalid connection"}``. A reply is never in
   the POST response: it goes out on the stream as a ``message`` event;
 * ``initialize``, ``ping``, ``tools/list`` and ``tools/call`` are answered,
   notifications are not, and any other method gets ``-32601``.
-  ``tools/call`` answers the tools in :data:`HOSTED_TOOLS` (``-32602`` for
-  any other name) unless :meth:`HostedMcpState.refuse` queued a refusal,
-  such as the service's ``-32050`` capacity refusal.
+  ``tools/call`` answers the tools in :data:`HOSTED_TOOLS`, and any other
+  name with an ``isError`` result ("Unknown tool: …") as the service does,
+  unless :meth:`HostedMcpState.refuse` queued a refusal, such as the
+  service's ``-32050`` capacity refusal.
 
 :class:`HostedMcpState` (``FakeCloud.hosted_mcp``) records every stream with
 the messages it received and whether it has closed, so a journey can check
@@ -49,6 +54,12 @@ HOSTED_TOOLS = frozenset({"fleet_summary"})
 CAPACITY_REFUSED = -32050
 # Short, so every journey's stream carries heartbeats the client must skip.
 HEARTBEAT_SECONDS = 0.2
+# Open streams one account may hold: the Solo plan's grant.
+STREAM_LIMIT = 1
+# How long a closed stream keeps its slot by default. The service takes
+# about two seconds (it notices the client left only on its own schedule);
+# journeys keep it short unless they test the wait (hold_slots).
+SLOT_HOLD_SECONDS = 0.3
 
 
 @dataclass
@@ -76,6 +87,19 @@ class HostedMcpState:
             self._streams: list[dict[str, Any]] = []
             self._refusals: deque[dict[str, Any]] = deque()
             self._numbers = itertools.count(1)
+            self._held_until: list[float] = []  # closed streams still holding a slot
+            self._slot_hold = SLOT_HOLD_SECONDS
+            self._refused_streams = 0
+
+    def hold_slots(self, seconds: float) -> None:
+        """Keep a closed stream's slot for *seconds* after it closes (from the next close on)."""
+        with self._lock:
+            self._slot_hold = seconds
+
+    def refused_streams(self) -> int:
+        """How many GETs were refused because every slot was taken."""
+        with self._lock:
+            return self._refused_streams
 
     def drop_streams(self) -> None:
         """End every open stream (they check between heartbeats)."""
@@ -107,8 +131,14 @@ class HostedMcpState:
         with self._lock:
             return self._generation
 
-    def open_connection(self) -> _Connection:
+    def open_connection(self) -> Optional[_Connection]:
+        """Open a stream, or None when the account's slots are all taken."""
         with self._lock:
+            now = time.monotonic()
+            self._held_until = [until for until in self._held_until if until > now]
+            if len(self._connections) + len(self._held_until) >= STREAM_LIMIT:
+                self._refused_streams += 1
+                return None
             connection_id = f"conn-e2e-{next(self._numbers)}"
             record = {"connection_id": connection_id, "messages": [], "closed": False,
                       "opened_at": time.time()}
@@ -119,7 +149,8 @@ class HostedMcpState:
 
     def close_connection(self, connection: _Connection) -> None:
         with self._lock:
-            self._connections.pop(connection.connection_id, None)
+            if self._connections.pop(connection.connection_id, None) is not None:
+                self._held_until.append(time.monotonic() + self._slot_hold)
             connection.record["closed"] = True
 
     def connection(self, connection_id: Optional[str]) -> Optional[_Connection]:
@@ -149,6 +180,11 @@ def add_routes(app: web.Application, store: ScenarioStore, state: HostedMcpState
             return unauthorized()
         generation = state.generation()
         connection = state.open_connection()
+        if connection is None:
+            return web.Response(
+                status=429, content_type="text/event-stream",
+                body=frame(json.dumps({"error": "Connection limit exceeded"}), event="error"),
+            )
         response = web.StreamResponse(
             headers={"Content-Type": "text/event-stream", "Cache-Control": "no-store"}
         )
@@ -224,7 +260,9 @@ def _answer(message: dict[str, Any]) -> dict[str, Any]:
     if method == "tools/call":
         name = params.get("name")
         if name not in HOSTED_TOOLS:
-            return _rpc_error(request_id, -32602, f"Unknown tool: {name}")
+            return _rpc_result(request_id, {
+                "content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True,
+            })
         arguments = params.get("arguments") or {}
         text = f"hosted {name}: {len(arguments)} argument(s)"
         return _rpc_result(

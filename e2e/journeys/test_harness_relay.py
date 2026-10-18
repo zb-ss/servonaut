@@ -220,6 +220,30 @@ def test_hosted_mcp_keeps_the_services_transport(fake_cloud):
     ]
 
 
+def test_hosted_mcp_frees_a_closed_streams_slot_late(fake_cloud):
+    fake_cloud.hosted_mcp.hold_slots(1.0)
+    with _client(fake_cloud) as client:
+        with client.stream("GET", "/mcp/sse") as stream:
+            assert stream.status_code == 200
+            # The account may hold one stream (the Solo plan's grant).
+            assert client.get("/mcp/sse").status_code == 429
+        wait_for(
+            lambda: all(s["closed"] for s in fake_cloud.hosted_mcp.streams()), desc="stream closed"
+        )
+        # Closed, but its slot stays taken for a moment, as on the service ...
+        refused = client.get("/mcp/sse")
+        assert refused.status_code == 429
+        assert "Connection limit exceeded" in refused.text
+
+        def accepted() -> bool:
+            with client.stream("GET", "/mcp/sse") as again:
+                return again.status_code == 200
+
+        # ... and is free again afterwards.
+        wait_for(accepted, desc="slot freed")
+    assert fake_cloud.hosted_mcp.refused_streams() >= 2
+
+
 def test_credentials_change_on_every_reset(fake_cloud):
     first_pair = fake_cloud.tokens()
     with _client(fake_cloud) as client:

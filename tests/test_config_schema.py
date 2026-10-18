@@ -129,6 +129,12 @@ class TestMCPConfigTimeouts:
         assert cfg.command_timeout_seconds == 300
         assert cfg.transfer_timeout_seconds == 600
 
+    def test_default_hosted_call_settings(self):
+        cfg = MCPConfig()
+        assert cfg.hosted_call_timeout_seconds == 30.0
+        assert cfg.hosted_connect_retry_seconds == 5.0
+        assert cfg.hosted_connect_retry_interval_seconds == 0.5
+
 
 class TestAppConfigAdditiveSshField:
 

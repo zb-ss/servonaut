@@ -16,6 +16,7 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Mapping, Optional
 
 from servonaut.config.accounts import PROVIDER_TITLES, primary_label
+from servonaut.config.schema import MCPConfig
 from servonaut.utils.endpoints import EndpointOverrideError
 from servonaut.mcp.db_staging import (
     DEFAULT_MAX_TOKENS as DEFAULT_STAGING_MAX_TOKENS,
@@ -76,9 +77,6 @@ _ALLOWED_REQUEST_HEADERS = frozenset({
 # Response bodies > 1 MiB are refused — agents should not be hoovering large
 # payloads through the CLI.
 _MAX_RESPONSE_BYTES = 1024 * 1024
-
-# How long one hosted MCP tool call (connect, initialize, call) may take.
-_HOSTED_MCP_CALL_TIMEOUT_SECONDS = 30.0
 
 # CLI-side sliding-window rate limit for api_request.
 _API_REQUEST_WINDOW_SECONDS = 60.0
@@ -172,6 +170,17 @@ def _positive_int(value: Any, default: int) -> int:
     """Return *value* when it is a positive int (bools excluded), else *default*."""
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
+    return default
+
+
+def _seconds(value: Any, default: float, *, allow_zero: bool = False) -> float:
+    """Return *value* when it is a positive number of seconds (bools excluded), else *default*.
+
+    With *allow_zero*, ``0`` is accepted too.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value > 0 or (allow_zero and value == 0):
+            return float(value)
     return default
 
 
@@ -284,6 +293,9 @@ class ServonautTools:
         self._directory = self._new_directory()
         self._max_lines = config_manager.get().mcp.max_output_lines
         self._api_request_window: Deque[float] = deque()
+        # When this process last closed a stream to the hosted MCP server
+        # (monotonic seconds); see _call_hosted_tool_in_free_slot.
+        self._hosted_stream_closed_at: Optional[float] = None
         # Server-side staging for db_setup_scan → db_setup_save. Holds plaintext
         # DBCandidate objects keyed by an opaque token so the secret is committed
         # to the secret store WITHOUT ever entering a tool result / model context.
@@ -2142,13 +2154,10 @@ class ServonautTools:
         The server refuses an expired token on the event-stream GET, before
         any JSON-RPC is exchanged, so a retry cannot repeat a tool call.
         """
-        from servonaut.mcp.hosted_call import HostedCallError, call_hosted_tool
+        from servonaut.mcp.hosted_call import HostedCallError
 
         try:
-            return await call_hosted_tool(
-                base, access_token, name, arguments,
-                timeout=_HOSTED_MCP_CALL_TIMEOUT_SECONDS,
-            )
+            return await self._call_hosted_tool_in_free_slot(base, access_token, name, arguments)
         except HostedCallError as exc:
             auth = self._auth_service
             if exc.code != "unauthorized" or not hasattr(auth, "refresh_token"):
@@ -2158,9 +2167,52 @@ class ServonautTools:
             new_token = getattr(auth, "access_token", None)
             if not new_token:
                 raise
-        return await call_hosted_tool(
-            base, new_token, name, arguments, timeout=_HOSTED_MCP_CALL_TIMEOUT_SECONDS,
+        return await self._call_hosted_tool_in_free_slot(base, new_token, name, arguments)
+
+    async def _call_hosted_tool_in_free_slot(self, base: str, access_token: str, name: str,
+                                             arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one hosted tool call, waiting for the slot of this process's last stream.
+
+        The hosted server frees a closed stream's connection slot only when it
+        notices the client has gone, about two seconds later, so a call made
+        right after the previous one is refused for the connection limit
+        although nothing is open any more. That refusal is retried until
+        ``mcp.hosted_connect_retry_seconds`` have passed since the stream
+        closed. Any other refusal (another client holds the slots, or the
+        plan has none) is reported at once. Like an expired token, the refusal
+        comes on the event-stream GET, so a retry cannot repeat a tool call.
+        """
+        from servonaut.mcp.hosted_call import HostedCallError, call_hosted_tool
+
+        config = self._config_manager.get().mcp
+        timeout = _seconds(
+            getattr(config, "hosted_call_timeout_seconds", None),
+            MCPConfig.hosted_call_timeout_seconds,
         )
+        retry_for = _seconds(
+            getattr(config, "hosted_connect_retry_seconds", None),
+            MCPConfig.hosted_connect_retry_seconds, allow_zero=True,
+        )
+        interval = _seconds(
+            getattr(config, "hosted_connect_retry_interval_seconds", None),
+            MCPConfig.hosted_connect_retry_interval_seconds,
+        )
+        while True:
+            try:
+                outcome = await call_hosted_tool(
+                    base, access_token, name, arguments, timeout=timeout,
+                )
+            except HostedCallError as exc:
+                if exc.status is None:  # not refused: a stream may have held a slot
+                    self._hosted_stream_closed_at = time.monotonic()
+                closed_at = self._hosted_stream_closed_at
+                if (exc.code != "connection_limit" or closed_at is None
+                        or time.monotonic() + interval > closed_at + retry_for):
+                    raise
+                await asyncio.sleep(interval)
+                continue
+            self._hosted_stream_closed_at = time.monotonic()
+            return outcome
 
     async def relay_reconnect(self, force: bool = False) -> str:
         """Heal a stale relay connection.

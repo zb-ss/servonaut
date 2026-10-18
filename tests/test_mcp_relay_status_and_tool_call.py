@@ -24,8 +24,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _make_tools(auth_service, guard_level=GuardLevel.STANDARD):
-    config = AppConfig(mcp=MCPConfig(guard_level=guard_level))
+def _make_tools(auth_service, guard_level=GuardLevel.STANDARD, **mcp_options):
+    config = AppConfig(mcp=MCPConfig(guard_level=guard_level, **mcp_options))
     cm = MagicMock()
     cm.get.return_value = config
     audit = MagicMock()
@@ -315,29 +315,116 @@ class TestMcpToolCall:
         (429, "connection_limit"), (503, "http_error"),
     ])
     def test_refused_stream_is_a_structured_error(self, hosted, status, code):
-        hosted(sse_statuses=[status])
-        tools, _ = _make_tools(auth_service=_authed_stub())
+        server = hosted(sse_statuses=[status])
+        tools, audit = _make_tools(auth_service=_authed_stub())
 
         result = json.loads(_run(tools.mcp_tool_call("ping")))
 
         assert result["error"]["code"] == code
+        # No stream of this process was closing, so nothing is retried.
+        assert len(server.gets) == 1
+        assert audit.log.call_args.args[3:] == (False, code)
 
-    def test_no_answer_times_out_and_closes_the_stream(self, hosted, monkeypatch):
-        import servonaut.mcp.tools as tools_module
-        monkeypatch.setattr(tools_module, "_HOSTED_MCP_CALL_TIMEOUT_SECONDS", 0.5)
+    def test_call_right_after_another_waits_for_the_freed_slot(self, hosted):
+        server = hosted()
+        tools, audit = _make_tools(
+            auth_service=_authed_stub(),
+            hosted_connect_retry_seconds=5.0, hosted_connect_retry_interval_seconds=0.01,
+        )
+
+        async def two_calls():
+            first = await tools.mcp_tool_call("ping")
+            # The service still counts the stream the first call closed.
+            server.sse_statuses = [429, 429]
+            return first, await tools.mcp_tool_call("ping")
+
+        first, second = (json.loads(answer) for answer in _run(two_calls()))
+
+        assert first["response"]["result"]["isError"] is False
+        assert second["response"]["result"]["isError"] is False
+        assert len(server.gets) == 4
+        assert server.methods().count("tools/call") == 2
+        assert audit.log.call_args.args[3] is True
+
+    def test_slot_wait_gives_up_after_the_retry_window(self, hosted):
+        server = hosted()
+        tools, audit = _make_tools(
+            auth_service=_authed_stub(),
+            hosted_connect_retry_seconds=0.5, hosted_connect_retry_interval_seconds=0.05,
+        )
+
+        async def two_calls():
+            await tools.mcp_tool_call("ping")
+            server.sse_statuses = [429] * 1000
+            started = time.monotonic()
+            return await tools.mcp_tool_call("ping"), time.monotonic() - started
+
+        answer, took = _run(two_calls())
+
+        assert json.loads(answer)["error"]["code"] == "connection_limit"
+        assert len(server.gets) - 1 >= 2  # retried ...
+        assert took < 3.0                 # ... but not past the window
+        assert audit.log.call_args.args[3:] == (False, "connection_limit")
+
+    def test_zero_retry_window_turns_the_slot_wait_off(self, hosted):
+        server = hosted()
+        tools, _ = _make_tools(auth_service=_authed_stub(), hosted_connect_retry_seconds=0)
+
+        async def two_calls():
+            await tools.mcp_tool_call("ping")
+            server.sse_statuses = [429]
+            return await tools.mcp_tool_call("ping")
+
+        assert json.loads(_run(two_calls()))["error"]["code"] == "connection_limit"
+        assert len(server.gets) == 2
+
+    def test_other_refusals_after_a_call_are_not_retried(self, hosted):
+        server = hosted()
+        tools, _ = _make_tools(
+            auth_service=_authed_stub(), hosted_connect_retry_interval_seconds=0.01,
+        )
+
+        async def two_calls():
+            await tools.mcp_tool_call("ping")
+            server.sse_statuses = [503]
+            return await tools.mcp_tool_call("ping")
+
+        assert json.loads(_run(two_calls()))["error"]["code"] == "http_error"
+        assert len(server.gets) == 2
+
+    def test_refreshed_token_also_waits_for_the_freed_slot(self, hosted):
+        server = hosted()
+        svc = _authed_stub()
+
+        async def _refresh():
+            svc.access_token = "tok2"
+            return True
+        svc.refresh_token = AsyncMock(side_effect=_refresh)
+        tools, _ = _make_tools(auth_service=svc, hosted_connect_retry_interval_seconds=0.01)
+
+        async def two_calls():
+            await tools.mcp_tool_call("ping")
+            server.sse_statuses = [401, 429]
+            return await tools.mcp_tool_call("ping")
+
+        assert json.loads(_run(two_calls()))["response"]["result"]["isError"] is False
+        svc.refresh_token.assert_awaited_once()
+        assert [r.headers["authorization"] for r in server.gets] == [
+            "Bearer tok", "Bearer tok", "Bearer tok2", "Bearer tok2",
+        ]
+
+    def test_no_answer_times_out_and_closes_the_stream(self, hosted):
         server = hosted(silent=True)
-        tools, _ = _make_tools(auth_service=_authed_stub())
+        tools, _ = _make_tools(auth_service=_authed_stub(), hosted_call_timeout_seconds=0.5)
 
         result = json.loads(_run(tools.mcp_tool_call("slow")))
 
         assert result["error"]["code"] == "timeout"
         assert server.streams_closed == server.streams_opened == 1
 
-    def test_endpoint_on_another_origin_gets_no_token(self, hosted, monkeypatch):
-        import servonaut.mcp.tools as tools_module
-        monkeypatch.setattr(tools_module, "_HOSTED_MCP_CALL_TIMEOUT_SECONDS", 0.5)
+    def test_endpoint_on_another_origin_gets_no_token(self, hosted):
         server = hosted(endpoint="https://collector.example.com/mcp/message?connection_id=c1")
-        tools, _ = _make_tools(auth_service=_authed_stub())
+        tools, _ = _make_tools(auth_service=_authed_stub(), hosted_call_timeout_seconds=0.5)
 
         result = json.loads(_run(tools.mcp_tool_call("ping")))
 
@@ -398,6 +485,18 @@ class TestMcpToolCall:
         assert "rpc_error" not in args[1]
         assert args[3] is True
         assert "tok" not in json.dumps(audit.log.call_args, default=str)
+
+
+class TestHostedCallSettings:
+    @pytest.mark.parametrize("value, allow_zero, expected", [
+        (2, False, 2.0), (0.25, False, 0.25), (0, True, 0.0),
+        (0, False, 7.0), (-1, True, 7.0), (True, False, 7.0),
+        ("5", False, 7.0), (None, False, 7.0),
+    ])
+    def test_unusable_values_fall_back_to_the_default(self, value, allow_zero, expected):
+        from servonaut.mcp.tools import _seconds
+
+        assert _seconds(value, 7.0, allow_zero=allow_zero) == expected
 
 
 class TestHostedCallErrors:
