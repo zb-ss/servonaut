@@ -546,21 +546,30 @@ class TeamPolicyStore:
             states = [self._teams[team_id] for team_id in dict.fromkeys(self._slugs.values())]
         return [self._status_of(state) for state in states]
 
-    def seconds_until_refresh(self) -> Optional[float]:
-        """Seconds until the first team's rules are due for a refresh.
+    def load(self) -> None:
+        """Read the rules saved on this device, so they apply before any fetch."""
+        with self._lock:
+            self._ensure_loaded()
 
-        0 when one is due already (half its lifetime passed, or expired);
-        None when no team has valid rules to keep fresh.
+    def seconds_until_refresh(self) -> Optional[float]:
+        """Seconds until the rules should be fetched again (by the API clock).
+
+        Each team's rules are due halfway through their lifetime. Once that
+        is past (the fetch then failed), the next try is halfway through the
+        time left until they expire, so the tries come closer together and
+        stop at expiry; expired rules are left to the next listing of the
+        teams. None when no team has rules in force.
         """
         now = self._clock()
         with self._lock:
             self._ensure_loaded()
-            due = [
-                state.policy.refresh_at() - (now + state.clock_offset)
+            waits = [
+                _next_try(state.policy, now + state.clock_offset)
                 for state in self._teams.values()
                 if state.policy is not None and state.rejection is None
             ]
-        return max(0.0, min(due)) if due else None
+        waits = [wait for wait in waits if wait is not None]
+        return min(waits) if waits else None
 
     def _status_of(self, state: _TeamState) -> TeamPolicyStatus:
         policy = state.policy
@@ -775,6 +784,15 @@ class TeamPolicyStore:
                 write_json_atomic(self._path, {"format": _STATE_FORMAT, "origins": origins})
             except (OSError, TypeError) as exc:
                 logger.warning("Could not save the team agent rules to %s: %s", self._path, exc)
+
+
+def _next_try(policy: SignedPolicy, server_now: float) -> Optional[float]:
+    """Seconds until *policy* should be fetched again; None once it expired."""
+    left = policy.expires_at.timestamp() - server_now
+    if left <= 0:
+        return None
+    due = policy.refresh_at() - server_now
+    return due if due > 0 else left / 2
 
 
 def _check_order(previous: _TeamState, policy: SignedPolicy) -> None:

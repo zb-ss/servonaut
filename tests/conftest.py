@@ -42,14 +42,17 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.fixture(autouse=True)
-def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch):
+def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Start every test with no team agent rules loaded and only the bundled keys.
 
     A test that trusts a test key or loads signed rules (see
-    ``_team_policy_fixtures``) leaves nothing behind for the next one.
+    ``_team_policy_fixtures``) leaves nothing behind for the next one: the
+    process store starts empty, on a state file of the test's own.
     """
     monkeypatch.setattr(team_policy, "_default_store", None)
     monkeypatch.setattr(team_policy_keys, "TEAM_POLICY_KEYS", team_policy_keys.TEAM_POLICY_KEYS)
+    state_path = tmp_path / "team_policy_state" / team_policy.STATE_FILENAME
+    monkeypatch.setattr(team_policy, "default_state_path", lambda: state_path)
 
 
 # ---------------------------------------------------------------------------

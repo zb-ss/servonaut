@@ -65,6 +65,16 @@ def default_agent_rules() -> Dict[str, Any]:
     return team_policy.format_1_default_agent_rules()
 
 
+def agent_rules_with(
+    *, role_levels: Optional[Dict[str, str]] = None, **changes: Any,
+) -> Dict[str, Any]:
+    """The format 1 defaults with *role_levels* merged in and other keys replaced."""
+    rules = default_agent_rules()
+    rules["role_levels"].update(role_levels or {})
+    rules.update(changes)
+    return rules
+
+
 def payload(
     team_id: str,
     agent_rules: Optional[Dict[str, Any]] = None,

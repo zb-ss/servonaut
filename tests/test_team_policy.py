@@ -639,8 +639,38 @@ class TestExpiry:
         assert store.seconds_until_refresh() is None
         apply(store, signed())
         assert store.seconds_until_refresh() == LIFETIME.total_seconds() / 2
+
+    def test_after_a_failed_refresh_the_tries_halve_toward_expiry(self, store, clock):
+        apply(store, signed())
         clock.advance(LIFETIME / 2)
-        assert store.seconds_until_refresh() == 0.0
+        # Never 0 once due: a fetch that keeps failing must not spin.
+        assert store.seconds_until_refresh() == LIFETIME.total_seconds() / 4
+        clock.advance(LIFETIME / 4)
+        assert store.seconds_until_refresh() == LIFETIME.total_seconds() / 8
+
+    def test_expired_rules_are_not_scheduled(self, store, clock):
+        apply(store, signed())
+        clock.advance(LIFETIME)
+        assert store.seconds_until_refresh() is None
+
+    def test_the_soonest_team_sets_the_next_refresh(self, store, clock):
+        apply(store, signed())
+        other = envelope(team_id_for("db-team"), version=1, issued_at=NOW - LIFETIME / 4)
+        store.apply_response(team_row("db-team"), response(other))
+        assert store.seconds_until_refresh() == LIFETIME.total_seconds() / 4
+
+    def test_refused_rules_are_not_scheduled(self, store, clock):
+        apply(store, signed(version=2))
+        apply(store, signed(version=1))
+        assert store.status("ops-team").problem == REPLAYED
+        assert store.seconds_until_refresh() is None
+
+    def test_load_reads_the_saved_rules_before_any_fetch(self, store, clock):
+        apply(store, signed(version=4))
+        again = new_store(state_path=store.state_path, origin=lambda: PRODUCTION_ORIGIN, clock=clock)
+        again.load()
+        assert again.status("ops-team").version == 4
+        assert again.rules_for_team("ops-team").fallback_reason == ""
 
     def test_the_refresh_time_follows_the_api_clock(self, store):
         apply(store, signed(), date=http_date(NOW + timedelta(minutes=10)))
