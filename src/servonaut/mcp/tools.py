@@ -873,7 +873,7 @@ class ServonautTools:
         if state:
             instances = [i for i in instances if i.get('state') == state]
 
-        result = self._format_instances(instances)
+        result = self._format_instances(instances) + self._agent_levels(instances)
         inventories = self._provider_inventories()
         for provider, label in (("aws", "AWS"), ("ovh", "OVH"), ("hetzner", "Hetzner")):
             if only_provider is not None and provider != only_provider:
@@ -4664,6 +4664,20 @@ class ServonautTools:
                 cannot connect.
         """
         return await self._directory.find(instance_id)
+
+    def _agent_levels(self, instances: List[Dict]) -> str:
+        """The level agents run at on each listed team shared server, and why."""
+        lines = []
+        for row in instances:
+            team_guard = self._team_guard(row)
+            if team_guard is not None:
+                lines.append(f"  {qualified_reference(row)}: {team_guard.describe_level()}")
+        if not lines:
+            return ""
+        return (
+            "\n\nAgents on team shared servers (the team's rule for your role; "
+            "your MCP settings can only make it stricter):\n" + "\n".join(lines)
+        )
 
     def _format_instances(self, instances: List[Dict]) -> str:
         lines = [f"{'Name':<30} {'ID':<20} {'State':<10} {'Public IP':<16} {'Region':<14}"]

@@ -253,6 +253,27 @@ def test_only_team_refusals_are_recognised():
     assert not is_team_refusal(None)
 
 
+class TestDescribeLevel:
+    def test_names_the_level_and_who_set_it(self):
+        assert _guard(_shared()).describe_level() == "standard (set by the team)"
+        assert _guard(_shared(), level="readonly").describe_level() == (
+            "readonly (set by your MCP settings)"
+        )
+
+    def test_a_fallback_says_why(self):
+        rules = TeamRules.readonly("the team's agent rules expired")
+        assert _guard(_shared(), rules=rules).describe_level() == (
+            "readonly (because the team's agent rules expired)"
+        )
+
+    def test_a_pattern_servonaut_cannot_use_is_named(self):
+        rules = TeamRules(command_blocklist=("(unclosed",))
+        assert _guard(_shared(), rules=rules).describe_level().endswith(
+            "no command can run there because Servonaut cannot use the team's "
+            "blocked pattern '(unclosed'"
+        )
+
+
 def _own_row(**changes):
     row = {"id": "i-1", "name": "app-1", "public_ip": "web.example.com", "port": 22}
     row.update(changes)

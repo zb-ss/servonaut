@@ -1794,6 +1794,41 @@ class TestTeamRulesFetchedWithSharedServers:
         )
 
 
+class TestAgentLevelsInTheServerList:
+    def test_each_shared_server_names_the_level_agents_run_at(self):
+        trust_signed_team_rules("ops")
+        result = run(make_tools(team_service=_team_service()).list_instances())
+
+        assert "Agents on team shared servers" in result
+        assert "  ops/team-web-1: standard (set by the team)" in result
+
+    def test_a_fallback_says_why(self):
+        result = run(make_tools(team_service=_team_service()).list_instances())
+
+        assert (
+            "  ops/team-web-1: readonly (because the team's agent rules have not "
+            "been loaded yet)"
+        ) in result
+
+    def test_stricter_local_settings_are_named(self):
+        trust_signed_team_rules("ops")
+        tools = make_tools(guard_level=GuardLevel.READONLY, team_service=_team_service())
+        result = run(tools.list_instances())
+
+        assert "  ops/team-web-1: readonly (set by your MCP settings)" in result
+
+    def test_a_pattern_servonaut_cannot_use_is_named(self):
+        trust_signed_team_rules("ops", agent_rules_with(command_blocklist=["(unclosed"]))
+        result = run(make_tools(team_service=_team_service()).list_instances())
+
+        assert "cannot use the team's blocked pattern '(unclosed'" in result
+
+    def test_own_servers_only_list_no_agent_levels(self):
+        result = run(make_tools().list_instances())
+
+        assert "Agents on team shared servers" not in result
+
+
 # ---------------------------------------------------------------------------
 # An own server reached with a team's vault key
 # ---------------------------------------------------------------------------

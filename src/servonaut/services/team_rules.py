@@ -322,6 +322,16 @@ class TeamGuard:
             return self._message(actor, f"'{shown}' is not an allowed command there")
         return self._message(actor, f"'{shown}' is refused there: {_command_reason(reason)}")
 
+    def describe_level(self) -> str:
+        """The level agents run at here and who set it, e.g. ``standard (set by the team)``."""
+        text = f"{self.level} ({self._setter()})"
+        if self.unusable_pattern:
+            text += (
+                "; no command can run there because Servonaut cannot use the team's "
+                f"blocked pattern '{_reported(self.unusable_pattern)}'"
+            )
+        return text
+
     def _unusable_pattern_refusal(self, requested_as: str) -> str:
         what = (
             f"{requested_as} is not allowed there" if requested_as
