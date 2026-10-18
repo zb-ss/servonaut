@@ -6,19 +6,24 @@ settings can only tighten it, never loosen it:
 
 - The guard level is the stricter of the local ``mcp.guard_level`` and the
   level the team gives the member's role.
-- At the standard level only the team's command allowlist applies (today
-  the built-in one): commands added to the local allowlist do not reach a
-  team's server, commands removed from it stay refused.
-- The team's blocklist (today the built-in one) always applies, and so do
-  the patterns added to the local blocklist.
+- A team can give a role a different level on one of its servers; the
+  roles that override leaves out keep the team-wide level.
+- At the standard level only the team's command allowlist applies (the
+  built-in one unless the team names its own): commands added to the local
+  allowlist do not reach a team's server, commands removed from it stay
+  refused.
+- The built-in blocklist always applies, and so do the patterns the team
+  and the local blocklist add. A team pattern Servonaut cannot use refuses
+  every command on that team's servers.
 
 The user's own servers keep their local rules, and nothing here applies to
 what a person sends: commands typed in the TUI, with ``servonaut ssh`` or in
 the web console, and remediations a person approved.
 
-``team_policy`` verifies the rules the team service signs, as
-:class:`TeamRules`; :func:`rules_for` does not read them yet and returns
-:data:`DEFAULT_TEAM_RULES`.
+The team service signs each team's rules; :func:`rules_for` reads the rules
+``team_policy`` verified. When a team has no valid signed rules (not loaded
+yet, expired, not verifiable), its shared servers run at the readonly level
+for every role, and refusals say why.
 """
 from __future__ import annotations
 
@@ -64,6 +69,10 @@ _RANK = {level: rank for rank, level in enumerate(GUARD_LEVELS)}
 # The roles a team gives its members.
 TEAM_ROLES: Tuple[str, ...] = ("owner", "admin", "member", "viewer")
 _REPORTED_COMMAND_LIMIT = 64
+# Put in a team guard's blocklist in place of a team pattern Servonaut cannot
+# compile: the empty pattern matches every command, so the guard itself
+# refuses them all as well as the refusal message saying so.
+_MATCH_EVERY_COMMAND = ""
 
 
 def _level_rank(level: Any) -> int:
@@ -161,11 +170,18 @@ DEFAULT_TEAM_RULES = TeamRules()
 
 
 def rules_for(row: Mapping[str, Any]) -> TeamRules:
-    """The rules of the team that shares *row*.
+    """The rules of the team that shares *row*, for that server.
 
-    Always the defaults for now: the team service publishes no rules yet.
+    The team's verified signed rules with the override of the row's server
+    (``id``) applied; the readonly fallback, with its reason, when the team
+    (``team_slug``) has no valid signed rules.
     """
-    return DEFAULT_TEAM_RULES
+    # team_policy builds TeamRules, so it is imported here, not at the top.
+    from servonaut.services.team_policy import team_policy_store
+
+    slug = row.get("team_slug")
+    rules = team_policy_store().rules_for_team(slug if isinstance(slug, str) else "")
+    return rules.for_server(row.get("id"))
 
 
 def _team_label(row: Mapping[str, Any]) -> str:
@@ -201,6 +217,10 @@ class TeamGuard:
     level: str
     team_level: str
     team: str
+    # Why the team's rules fell back to readonly (see TeamRules); '' if not.
+    fallback_reason: str = ""
+    # A team blocklist pattern Servonaut cannot use: every command is refused.
+    unusable_pattern: str = ""
 
     def refusal(
         self, tool_name: str, command: Optional[str] = None,
@@ -223,6 +243,8 @@ class TeamGuard:
             return self._message(actor, what)
         if command is None:
             return None
+        if self.unusable_pattern:
+            return self._message(actor, self._unusable_pattern_refusal(requested_as))
         allowed, reason = self.guard.check_command(command)
         if allowed:
             return None
@@ -233,12 +255,27 @@ class TeamGuard:
             return self._message(actor, f"'{shown}' is not an allowed command there")
         return self._message(actor, f"'{shown}' is refused there: {_command_reason(reason)}")
 
+    def _unusable_pattern_refusal(self, requested_as: str) -> str:
+        what = (
+            f"{requested_as} is not allowed there" if requested_as
+            else "no command can run there"
+        )
+        return (
+            f"{what} because Servonaut cannot use the team's blocked pattern "
+            f"'{_reported(self.unusable_pattern)}' (a team owner or admin can change it)"
+        )
+
+    def _setter(self) -> str:
+        """Who set the level: the team (or why it fell back), or the local settings."""
+        if _level_rank(self.team_level) > _level_rank(self.level):
+            return "set by your MCP settings"
+        if self.fallback_reason:
+            return f"because {self.fallback_reason}"
+        return "set by the team"
+
     def _message(self, actor: str, what: str) -> str:
         team = f"team {self.team}'s" if self.team else _UNNAMED_TEAM
-        setter = (
-            "set by the team" if _level_rank(self.team_level) <= _level_rank(self.level)
-            else "set by your MCP settings"
-        )
+        setter = self._setter()
         return (
             f"Blocked: on {team} shared servers {actor} run at the "
             f"{self.level} level ({setter}), and {what}."
@@ -260,24 +297,32 @@ def guard_for_target(
     """The guard an agent runs under on *row*; None for the user's own server.
 
     A team shared server gets the stricter of *local_level* and the level
-    the team gives the caller's role (``team_role``). The allowlist is the
-    team's, less anything the local allowlist leaves out; the blocklist is
-    the team's plus the local patterns. The local settings are read, never
-    changed.
+    the team gives the caller's role (``team_role``) on that server (``id``).
+    The allowlist is the team's, less anything the local allowlist leaves
+    out; the blocklist is the team's plus the local patterns. A team pattern
+    that does not compile refuses every command instead of breaking the
+    guard. The local settings are read, never changed.
     """
     if not is_shared_row(row):
         return None
     rules = rules or rules_for(row)
-    team_level = rules.level_for(row.get("team_role"))
+    team_level = rules.level_for_server(row.get("id"), row.get("team_role"))
     local = set(local_allowlist)
     allowlist = [command for command in rules.command_allowlist if command in local]
-    blocklist = list(rules.command_blocklist)
+    unusable = _unusable_patterns(rules.command_blocklist)
+    blocklist = [pattern for pattern in rules.command_blocklist if pattern not in unusable]
+    if unusable:
+        blocklist.append(_MATCH_EVERY_COMMAND)
     blocklist += [pattern for pattern in local_blocklist if pattern not in blocklist]
     level = stricter(local_level, team_level)
     guard = CommandGuard(MCPConfig(
         guard_level=level, command_allowlist=allowlist, command_blocklist=blocklist,
     ))
-    return TeamGuard(guard=guard, level=level, team_level=team_level, team=_team_label(row))
+    return TeamGuard(
+        guard=guard, level=level, team_level=team_level, team=_team_label(row),
+        fallback_reason=rules.fallback_reason,
+        unusable_pattern=unusable[0] if unusable else "",
+    )
 
 
 def guard_for_target_from(

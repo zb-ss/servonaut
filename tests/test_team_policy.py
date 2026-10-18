@@ -7,6 +7,7 @@ import json
 import os
 import stat
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,7 +34,13 @@ from servonaut.services.team_policy import (
     verify_envelope,
 )
 from servonaut.services.team_policy_keys import PRODUCTION_ORIGIN, api_origin
-from servonaut.services.team_rules import DEFAULT_TEAM_RULES
+from servonaut.services.team_rules import (
+    DEFAULT_TEAM_RULES,
+    TeamRules,
+    guard_for_target,
+    is_team_refusal,
+    rules_for,
+)
 
 from tests._team_policy_fixtures import (
     LIFETIME,
@@ -49,6 +56,7 @@ from tests._team_policy_fixtures import (
     sign,
     team_id_for,
     team_row,
+    trust_signed_team_rules,
     trust_test_key,
 )
 
@@ -105,6 +113,13 @@ def store(clock, tmp_path):
 
 def apply(store, signed_envelope, *, slug="ops-team", date=None):
     return store.apply_response(team_row(slug), response(signed_envelope), date)
+
+
+def shared_row(role="member", server_id="srv-1", slug="ops-team"):
+    return {
+        "id": server_id, "name": "web-1", "is_shared": True,
+        "team_slug": slug, "team_name": "Ops", "team_role": role,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -856,3 +871,198 @@ class TestRefresh:
     def test_apply_response_needs_a_slug_and_an_id(self, store):
         with pytest.raises(ValueError):
             store.apply_response({"slug": "ops-team"}, response(signed()))
+
+
+# ---------------------------------------------------------------------------
+# What applies on a shared server
+# ---------------------------------------------------------------------------
+
+class TestRulesForRows:
+    def test_a_team_never_loaded_is_readonly_with_a_reason(self):
+        rules = rules_for(shared_row("owner"))
+        assert rules.level_for("owner") == "readonly"
+        assert rules.fallback_reason == NOT_LOADED.reason
+
+    def test_a_row_without_a_team_slug_is_readonly(self):
+        row = shared_row()
+        del row["team_slug"]
+        assert rules_for(row).fallback_reason == NOT_LOADED.reason
+
+    def test_signed_rules_apply_to_the_teams_rows(self):
+        trust_signed_team_rules("ops-team", rules(role_levels={"member": "readonly"}))
+        assert rules_for(shared_row("member")).level_for("member") == "readonly"
+        assert rules_for(shared_row("member", slug="db-team")).fallback_reason == NOT_LOADED.reason
+
+    def test_a_server_override_replaces_the_team_wide_level_there(self):
+        trust_signed_team_rules("ops-team", rules(servers={
+            "srv-2": {"role_levels": {"member": "readonly", "owner": "dangerous"}},
+        }))
+        on_override = rules_for(shared_row(server_id="srv-2"))
+        assert on_override.level_for("member") == "readonly"
+        assert on_override.level_for("owner") == "dangerous"
+        # Roles the override leaves out keep the team-wide level.
+        assert on_override.level_for("admin") == "standard"
+        assert on_override.level_for("viewer") == "readonly"
+        assert rules_for(shared_row(server_id="srv-1")).level_for("member") == "standard"
+
+    def test_an_override_for_a_server_not_listed_changes_nothing(self):
+        trust_signed_team_rules("ops-team", rules(servers={
+            "gone-server": {"role_levels": {"member": "readonly"}},
+        }))
+        assert rules_for(shared_row(server_id="srv-1")).level_for("member") == "standard"
+
+    def test_the_guard_applies_the_server_override(self):
+        trust_signed_team_rules("ops-team", rules(servers={
+            "srv-2": {"role_levels": {"member": "readonly"}},
+        }))
+        guard = guard_for_target(
+            shared_row(server_id="srv-2"), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
+        )
+        assert guard.level == "readonly"
+        assert guard.refusal("run_command", "uptime").endswith(
+            "(set by the team), and running commands is not available there."
+        )
+
+    def test_explicit_rules_with_a_server_override_are_applied_too(self):
+        explicit = TeamRules(servers=MappingProxyType({"srv-2": {"member": "readonly"}}))
+        guard = guard_for_target(
+            shared_row(server_id="srv-2"), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
+            explicit,
+        )
+        assert guard.level == "readonly"
+
+
+def team_guard(role="member", level="dangerous", allowlist=BUILTIN_ALLOWLIST,
+               blocklist=BUILTIN_BLOCKLIST, server_id="srv-1"):
+    return guard_for_target(shared_row(role, server_id), level, allowlist, blocklist)
+
+
+class TestTeamGuardOnSignedRules:
+    def test_the_stricter_of_the_team_and_the_local_level_applies(self):
+        trust_signed_team_rules("ops-team", rules(role_levels={
+            "owner": "dangerous", "member": "dangerous", "viewer": "readonly",
+        }))
+        assert team_guard("member", "standard").level == "standard"
+        assert team_guard("member", "dangerous").level == "dangerous"
+        assert team_guard("viewer", "dangerous").level == "readonly"
+        assert team_guard("member", "readonly").level == "readonly"
+
+    def test_a_viewer_is_readonly_by_default(self):
+        trust_signed_team_rules("ops-team")
+        guard = team_guard("viewer")
+        assert guard.refusal("run_command", "uptime") == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (set by the team), and running commands is not available there."
+        )
+        assert guard.refusal("check_status") is None
+
+    @pytest.mark.parametrize("role", ["guest", "", None, "member-ish"])
+    def test_an_unknown_role_is_readonly(self, role):
+        trust_signed_team_rules("ops-team", rules(role_levels={
+            "owner": "dangerous", "admin": "dangerous", "member": "dangerous",
+            "viewer": "dangerous",
+        }))
+        assert team_guard(role).level == "readonly"
+        assert team_guard(" Member ").level == "dangerous"
+
+    def test_the_team_allowlist_meets_the_local_one(self):
+        trust_signed_team_rules("ops-team", rules(command_allowlist=["uptime", "systemctl"]))
+        local = [*BUILTIN_ALLOWLIST, "systemctl"]
+        assert team_guard(allowlist=local).refusal("run_command", "systemctl status nginx") is None
+        assert team_guard().refusal("run_command", "systemctl status nginx") is not None
+        assert team_guard(allowlist=local).refusal("run_command", "ls /") is not None
+
+    def test_allowlist_names_are_exact_not_prefixes(self):
+        trust_signed_team_rules("ops-team", rules(command_allowlist=["up", "Uptime"]))
+        guard = team_guard(allowlist=["up", "uptime", "Uptime"])
+        assert guard.refusal("run_command", "uptime") is not None
+        assert guard.refusal("run_command", "sudo uptime") is not None
+
+    def test_a_team_pattern_is_added_to_the_local_blocklist(self):
+        trust_signed_team_rules("ops-team", rules(command_blocklist=[r"\buptime\b"]))
+        refusal = team_guard().refusal("run_command", "uptime")
+        assert refusal.endswith("it matches the blocked pattern \\buptime\\b.")
+
+    def test_an_unusable_team_pattern_refuses_every_command(self):
+        status = trust_signed_team_rules("ops-team", rules(command_blocklist=["x(", r"\bcurl\b"]))
+        assert status.rules.unusable_pattern() == "x("
+        guard = team_guard()
+        assert guard.refusal("run_command", "uptime") == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and no command can run there because Servonaut "
+            "cannot use the team's blocked pattern 'x(' (a team owner or admin can change it)."
+        )
+        assert guard.refusal(
+            "run_command", "tail -n 5 /var/log/syslog", requested_as="reading logs",
+        ).endswith("and reading logs is not allowed there because Servonaut cannot use "
+                   "the team's blocked pattern 'x(' (a team owner or admin can change it).")
+        # Other tools keep the team's level.
+        assert guard.refusal("check_status") is None
+        assert guard.refusal("get_server_info") is None
+        # The guard itself refuses too, whoever asks it.
+        assert guard.guard.check_command("uptime")[0] is False
+
+    @pytest.mark.parametrize("pattern", ["a{99999999999}", "(" * 5000 + ")" * 5000, "(?<=a+)b"])
+    def test_any_pattern_python_cannot_compile_is_unusable(self, pattern):
+        trust_signed_team_rules("ops-team", rules(command_blocklist=[pattern]))
+        assert team_guard().refusal("run_command", "uptime").startswith(
+            "Blocked: on team Ops's shared servers"
+        )
+
+    def test_an_unusable_pattern_on_a_readonly_level_names_the_level(self):
+        trust_signed_team_rules("ops-team", rules(command_blocklist=["x("]))
+        refusal = team_guard("viewer").refusal("run_command", "uptime")
+        assert refusal.endswith("and running commands is not available there.")
+
+
+class TestFallbackRefusals:
+    def test_a_refusal_says_the_rules_are_not_loaded(self):
+        guard = team_guard("owner")
+        refusal = guard.refusal("run_command", "uptime")
+        assert refusal == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (because the team's agent rules have not been loaded yet), and "
+            "running commands is not available there."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_a_refusal_says_the_rules_expired(self, monkeypatch):
+        clock = Clock()
+        trust_test_key()
+        store = new_store(clock=clock)
+        monkeypatch.setattr(team_policy, "_default_store", store)
+        store.apply_response(team_row("ops-team"), response(signed()))
+        clock.advance(2 * LIFETIME)
+
+        refusal = team_guard("owner").refusal("run_command", "uptime")
+        assert "(because the team's agent rules expired and could not be refreshed; " \
+               "check that you are online and signed in)" in refusal
+
+    def test_a_refusal_asks_for_an_update_when_no_key_is_known(self, monkeypatch):
+        store = new_store()
+        monkeypatch.setattr(team_policy, "_default_store", store)
+        store.apply_response(team_row("ops-team"), response(signed()))
+
+        refusal = team_guard("admin").refusal("transfer_file")
+        assert "(because this Servonaut cannot verify the team's agent rules; " \
+               "update Servonaut)" in refusal
+
+    def test_a_refusal_says_the_rules_could_not_be_verified(self, monkeypatch):
+        trust_test_key()
+        store = new_store()
+        monkeypatch.setattr(team_policy, "_default_store", store)
+        good = signed()
+        store.apply_response(team_row("ops-team"), response({**good, "signatures": [
+            {"key_id": TEST_KEY_ID, "signature": b64url(b"\x01" * 64)},
+        ]}))
+
+        refusal = team_guard().refusal("run_command", "uptime")
+        assert "(because the team's agent rules could not be verified)" in refusal
+
+    def test_a_stricter_local_level_is_still_named_as_the_setter(self):
+        trust_signed_team_rules("ops-team")
+        refusal = team_guard(level="readonly").refusal("run_command", "uptime")
+        assert "(set by your MCP settings)" in refusal
+
+    def test_owners_fall_back_to_readonly_too(self):
+        assert team_guard("owner").level == "readonly"

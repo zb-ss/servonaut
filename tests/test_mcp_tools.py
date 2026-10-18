@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests._key_fixtures import OPENSSH_HEADER, openssh_armor
+from tests._team_policy_fixtures import trust_signed_team_rules
 from servonaut.config.schema import AppConfig, MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
@@ -342,6 +343,7 @@ class TestRunCommand:
         assert audit_call.kwargs["key_source"] == "ssh_agent"
 
     def test_shared_vault_target_uses_native_lease_after_local_lookup_misses(self):
+        trust_signed_team_rules("team-a")
         shared_target = {
             "id": "shared-server-1",
             "name": "team-web-1",
@@ -391,6 +393,7 @@ class TestRunCommand:
         lease.close.assert_called_once()
 
     def test_shared_vault_connection_failure_never_falls_back_to_ssm(self):
+        trust_signed_team_rules("team-a")
         shared_target = {
             "id": "shared-server-1",
             "name": "team-web-1",
@@ -1103,6 +1106,7 @@ class TestBwVaultKeyResolution:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     def test_shared_team_ref_is_resolved_after_personal_miss(self):
+        trust_signed_team_rules("team-a")
         team = MagicMock()
         team.get_team_server_ssh_ref = AsyncMock(return_value={
             "ssh_credential_provider": "bitwarden_pm",
@@ -1438,6 +1442,10 @@ def _team_service(servers=None, teams=None):
 
 
 class TestSharedServers:
+    @pytest.fixture(autouse=True)
+    def _signed_team_rules(self):
+        trust_signed_team_rules("ops")
+
     def test_list_instances_lists_them_by_team_reference(self):
         tools = make_tools(team_service=_team_service())
         result = run(tools.list_instances())
@@ -1525,7 +1533,11 @@ class TestSharedServers:
 # ---------------------------------------------------------------------------
 
 def _team_tools(role="member", level=GuardLevel.DANGEROUS, allowlist=None, blocklist=None):
-    """Tools whose user is a *role* of team Ops, with these local MCP settings."""
+    """Tools whose user is a *role* of team Ops, with these local MCP settings.
+
+    Team Ops has verified signed rules: the format 1 defaults.
+    """
+    trust_signed_team_rules("ops")
     teams = [{"slug": "ops", "name": "Ops", "role": role}] if role is not None else [
         {"slug": "ops", "name": "Ops"},
     ]
@@ -1679,6 +1691,7 @@ class TestTeamRulesOnSharedServers:
         assert "log line" in result
 
     def test_a_vault_target_without_a_role_is_readonly(self):
+        trust_signed_team_rules("ops")
         runtime = MagicMock()
         runtime.resolve_relay_target = AsyncMock(return_value={
             "id": "srv-9", "name": "team-db-1", "is_shared": True,
@@ -1687,7 +1700,33 @@ class TestTeamRulesOnSharedServers:
         tools = make_tools(guard_level=GuardLevel.DANGEROUS, vault_runtime=runtime)
         result = run(tools.run_command("team-db-1", "uptime"))
 
-        assert "run at the readonly level" in result
+        assert "run at the readonly level (set by the team)" in result
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_team_without_verified_rules_is_readonly_and_says_why(self):
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS, team_service=_team_service(
+            teams=[{"slug": "ops", "name": "Ops", "role": "owner"}],
+        ))
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (because the team's agent rules have not been loaded yet), and "
+            "running commands is not available there."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_signed_team_rules_set_the_level_on_a_shared_server(self):
+        tools = _team_tools(role="member", level=GuardLevel.DANGEROUS)
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "readonly", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": [],
+        }, version=2)
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert "run at the readonly level (set by the team)" in result
         assert _audit_reasons(tools)[-1] == "team_rule"
 
     def test_a_person_scanning_in_the_tui_is_not_held_to_team_rules(self):

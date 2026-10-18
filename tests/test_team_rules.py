@@ -14,8 +14,16 @@ from servonaut.services.team_rules import (
     stricter,
 )
 
+from tests._team_policy_fixtures import trust_signed_team_rules
+
 BUILTIN_ALLOWLIST = MCPConfig().command_allowlist
 BUILTIN_BLOCKLIST = MCPConfig().command_blocklist
+
+
+@pytest.fixture(autouse=True)
+def _signed_team_rules():
+    """Team ops has verified signed rules: the format 1 defaults."""
+    trust_signed_team_rules("ops")
 
 
 def _shared(role="member", **changes):
@@ -134,7 +142,19 @@ class TestGuardForTarget:
         assert refusal.startswith("Blocked: on team ops's shared servers")
 
     def test_a_team_without_a_name_or_slug_reads_naturally(self):
+        # Without a slug no signed rules can be found: the readonly fallback.
         refusal = _guard(_shared(team_name="", team_slug="")).refusal("transfer_file")
+        assert refusal == (
+            "Blocked: on this team's shared servers your agents run at the readonly "
+            "level (because the team's agent rules have not been loaded yet), and "
+            "file transfers are not available there."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_a_team_without_a_name_reads_naturally_with_explicit_rules(self):
+        refusal = _guard(_shared(team_name="", team_slug=""), rules=DEFAULT_TEAM_RULES).refusal(
+            "transfer_file",
+        )
         assert refusal == (
             "Blocked: on this team's shared servers your agents run at the standard "
             "level (set by the team), and file transfers are not available there."

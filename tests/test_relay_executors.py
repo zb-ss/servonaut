@@ -10,6 +10,7 @@ import pytest
 from servonaut.config.schema import AppConfig, MCPConfig
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.relay_executors import RelayExecutors, _TRANSFERS_DIR
+from tests._team_policy_fixtures import trust_signed_team_rules
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +897,11 @@ class TestTeamRulesOnRelay:
         "team_name": "Ops",
     }
 
+    @pytest.fixture(autouse=True)
+    def _signed_team_rules(self):
+        # Team Ops has verified signed rules: the format 1 defaults.
+        trust_signed_team_rules("ops")
+
     def _executor(self, role="member", level="dangerous", allowlist=None, blocklist=None,
                   target=None):
         executor = make_executors()
@@ -1157,3 +1163,19 @@ class TestTeamRulesOnRelay:
         assert response.error_message.startswith(
             "Blocked: on this team's shared servers your agents run at"
         )
+
+    def test_a_team_without_verified_rules_runs_nothing_and_says_why(self):
+        target = {**self._TARGET, "team_slug": "db-team", "team_name": "DB"}
+        executor = self._executor(role="owner", target=target)
+        response = run(executor.execute(make_request(from_agent=True,
+            target="srv-1", payload={"command": "uptime"},
+        )))
+
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Blocked: on team DB's shared servers your agents run at the readonly "
+            "level (because the team's agent rules have not been loaded yet), and "
+            "running commands is not available there."
+        )
+        assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
+        executor._ssh_service.build_ssh_command.assert_not_called()
