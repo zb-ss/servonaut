@@ -637,16 +637,23 @@ Manage a team SSH certificate authority. SSH certificates are part of the
 Teams plan. The team owner switches them on with `ca enable`, or with
 **Switch on SSH certificates** on the TUI's SSH Certificates screen. Switching
 them on and enrolling a server need a recent MFA sign-in (`servonaut login`).
-These commands change access on real hosts, so enrollment, refresh,
-unenrollment and enablement require an interactive confirmation or `--yes`.
+The [SSH certificates guide](https://servonaut.dev/docs/ssh-certificates)
+covers requirements, certificate lifetimes, rollovers and troubleshooting.
+
+These commands change access on real hosts, so they ask before they act.
+`ca enroll`, `ca refresh` and `ca unenroll` run only in an interactive terminal
+and need the host name typed to confirm; `--yes` on `ca refresh` and
+`ca unenroll` skips only the yes/no question before it. `ca enable` and
+`ca revoke` ask yes/no, or take `--yes` in a script.
 
 ```
 servonaut ca status --team TEAM
-servonaut ca enable --team TEAM --yes
+servonaut ca enable --team TEAM [--yes]
 servonaut ca policy --team TEAM [--set '{"...": "..."}']
 servonaut ca enroll SERVER --team TEAM [--break-glass-item ITEM_ID]
-servonaut ca refresh SERVER --team TEAM --yes
-servonaut ca unenroll SERVER --team TEAM --yes
+servonaut ca refresh SERVER --team TEAM [--yes]
+servonaut ca unenroll SERVER --team TEAM [--yes]
+servonaut ca revoke SERIAL --team TEAM [--note TEXT] [--yes]
 servonaut ca krl --team TEAM [--server SERVER]
 servonaut ca audit --team TEAM
 servonaut ca break-glass-scan --team TEAM [--server SERVER ...] [--hours 24]
@@ -679,7 +686,9 @@ fingerprint.
 
 The enrollment path uses a versioned local script and structured enrollment
 data. It refuses unrecognised script versions and does not execute server
-supplied shell text. `ca krl` delivers the signed revocation list to selected
+supplied shell text. `ca revoke` revokes one issued certificate by its serial
+number; `--note` records why. Enrolled hosts refuse the certificate once they
+have the new revocation list: `ca krl` delivers the signed list to selected
 enrolled hosts. `ca audit` verifies the append-only certificate issuance log.
 
 A break-glass key is an emergency root key for when certificate logins fail.
