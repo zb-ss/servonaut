@@ -1639,3 +1639,22 @@ class TestAgentRulesCard:
             text = await self._open(app, pilot)
 
         assert "[bold]x[/bold]" in text
+
+    @pytest.mark.asyncio
+    async def test_demo_mode_redacts_server_names_and_team_text(self):
+        from servonaut.services.redaction_service import RedactionService
+        from tests._team_policy_fixtures import agent_rules_with
+
+        team_svc = self._team_service(agent_rules_with(
+            servers={"srv-1": {"role_levels": {"admin": "dangerous"}}},
+            command_blocklist=[r"ssh 10\.50\.20\.1|10.50.20.1"],
+        ))
+        app = self._app(team_svc)
+        app.demo_mode = True
+        app.redaction_service = RedactionService()
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = await self._open(app, pilot)
+
+        assert "web-01" not in text
+        assert ": Admin dangerous" in text
+        assert "10.50.20.1" not in text

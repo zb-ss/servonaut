@@ -160,7 +160,13 @@ class TestSchedule:
     def test_signing_out_stops_the_schedule(self):
         store = ScheduledStore([0.05])
         service = {"current": object()}
-        refresher = TeamPolicyRefresher(store, lambda: service["current"])
+        asked = []
+
+        def signed_in_service():
+            asked.append(service["current"])
+            return service["current"]
+
+        refresher = TeamPolicyRefresher(store, signed_in_service)
 
         async def scenario():
             await refresher.refresh()
@@ -170,6 +176,8 @@ class TestSchedule:
 
         run(scenario())
         assert len(store.refreshed) == 1
+        # No scheduled refresh came after the one that found no session.
+        assert len(asked) == 2
 
     def test_close_stops_the_schedule(self):
         store = ScheduledStore([0.02, 0.02, 0.02])

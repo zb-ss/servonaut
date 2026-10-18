@@ -2664,8 +2664,9 @@ async def test_an_own_server_bound_to_a_team_vault_key_names_that_team(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_a_team_vault_that_names_no_team_is_still_a_teams(tmp_path) -> None:
-    service = _team_key_service(tmp_path, _NATIVE, {"kind": "team"})
+@pytest.mark.parametrize("vault", [{"kind": "team"}, {}, {"kind": "shared"}])
+async def test_a_vault_that_is_not_personal_and_names_no_team_is_still_a_teams(tmp_path, vault) -> None:
+    service = _team_key_service(tmp_path, _NATIVE, vault)
 
     assert await service.credential_team(_OWN_SERVER) == ""
 

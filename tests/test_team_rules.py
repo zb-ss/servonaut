@@ -315,6 +315,17 @@ class TestCredentialRules:
 
         assert row["id"] == "srv-2"
 
+    def test_another_team_s_copy_of_the_server_is_not_used(self):
+        from servonaut.services.shared_servers import shared_row
+
+        service = _teams({"slug": "ops", "name": "Ops", "role": "member"})
+        other = shared_row(
+            {"id": "srv-9", "instance_id": "i-1"}, {"slug": "dev", "name": "Dev", "role": "owner"},
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service, [other]))
+
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("", "ops", "member")
+
     def test_a_server_the_team_does_not_share_gets_the_team_wide_level(self):
         service = _teams({"slug": "ops", "name": "Ops", "role": "admin"})
         row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
