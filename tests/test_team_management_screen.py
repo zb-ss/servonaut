@@ -1522,3 +1522,120 @@ class TestSharedServerConnect:
             messages = [str(n.message) for n in app._notifications]
 
         assert "This team shares no servers yet." in messages
+
+
+# ---------------------------------------------------------------------------
+# What agents may do here (the team's agent rules, read-only)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentRulesCard:
+    """Viewing a team shows what members' agents may do on its servers now."""
+
+    _SERVERS = [{"id": "srv-1", "name": "web-01", "hostname": "web.example.com"}]
+
+    @staticmethod
+    def _team_service(agent_rules=None):
+        from tests._team_policy_fixtures import envelope, response, team_id_for
+
+        team_svc = _make_team_service(
+            [{"id": team_id_for("ops"), "slug": "ops", "name": "Ops", "role": "member",
+              "member_count": 3}],
+        )
+        team_svc.get_team = AsyncMock(return_value={"name": "Ops", "slug": "ops", "members": []})
+        team_svc.list_shared_servers = AsyncMock(return_value=list(TestAgentRulesCard._SERVERS))
+        team_svc.get_team_policy_with_date = AsyncMock(
+            return_value=(response(envelope(team_id_for("ops"), agent_rules)), None),
+        )
+        return team_svc
+
+    @staticmethod
+    def _app(team_svc, *, refresher=True):
+        from servonaut.services.team_policy_refresh import TeamPolicyRefresher
+        from tests._team_policy_fixtures import process_store, trust_test_key
+
+        trust_test_key()
+        app = _WrapperApp(auth_service=_make_auth_service(), team_service=team_svc)
+        app.team_policy = (
+            TeamPolicyRefresher(process_store(), lambda: team_svc) if refresher else None
+        )
+        return app
+
+    @staticmethod
+    async def _open(app, pilot):
+        await pilot.pause()
+        screen = app.screen
+        screen._current_team_slug = "ops"
+        await screen._load_team_detail("ops")
+        await pilot.pause()
+        return str(screen.query_one("#agent_rules_body", Static).render())
+
+    @pytest.mark.asyncio
+    async def test_the_team_s_rules_are_fetched_and_shown(self):
+        from tests._team_policy_fixtures import agent_rules_with, team_id_for
+
+        team_svc = self._team_service(agent_rules_with(
+            role_levels={"member": "readonly"},
+            servers={"srv-1": {"role_levels": {"admin": "dangerous"}}},
+            command_blocklist=[r"\bcurl\b"],
+        ))
+        app = self._app(team_svc)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = await self._open(app, pilot)
+            card = app.screen.query_one("#agent_rules_section")
+            assert card.display is True
+
+        assert "Owner: standard · Admin: standard · Member: readonly · Viewer: readonly" in text
+        assert "Your role: member (readonly)" in text
+        assert "web-01: Admin dangerous" in text
+        assert "Servonaut's built-in list" in text
+        assert r"\bcurl\b" in text
+        assert "Version 1 · last refreshed" in text
+        # Fetched by the team's id, without a second team-list request.
+        team_svc.get_team_policy_with_date.assert_awaited_once_with("ops")
+        assert team_svc.list_teams.await_count == 1
+        assert app.team_policy.store.status("ops").team_id == team_id_for("ops")
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_says_agents_run_readonly_and_why(self):
+        from servonaut.services.team_policy import MISSING
+        from tests._team_policy_fixtures import response
+
+        team_svc = self._team_service()
+        team_svc.get_team_policy_with_date = AsyncMock(return_value=(response(None), None))
+        app = self._app(team_svc)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = await self._open(app, pilot)
+
+        assert (
+            "Agents run at the readonly level on this team's shared servers, owners "
+            f"included, because {MISSING.reason}."
+        ) in " ".join(text.split())
+
+    @pytest.mark.asyncio
+    async def test_without_a_refresher_the_rules_this_device_has_are_shown(self):
+        team_svc = self._team_service()
+        app = self._app(team_svc, refresher=False)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = await self._open(app, pilot)
+
+        assert "have not been loaded yet" in " ".join(text.split())
+        team_svc.get_team_policy_with_date.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_card_is_hidden_until_a_team_is_opened(self):
+        app = self._app(self._team_service())
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            assert app.screen.query_one("#agent_rules_section").display is False
+
+    @pytest.mark.asyncio
+    async def test_team_text_is_shown_as_text_not_markup(self):
+        from tests._team_policy_fixtures import agent_rules_with
+
+        team_svc = self._team_service(agent_rules_with(command_blocklist=["[bold]x[/bold]"]))
+        app = self._app(team_svc)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = await self._open(app, pilot)
+
+        assert "[bold]x[/bold]" in text
