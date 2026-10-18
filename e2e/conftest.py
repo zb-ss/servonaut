@@ -295,6 +295,18 @@ def _enter_journey(journey: Journey, monkeypatch: pytest.MonkeyPatch) -> None:
     GUARD.clear()
     reset_app_class_state()
     _reset_browser_registry()
+    _reset_team_agent_rules(monkeypatch)
+
+
+def _reset_team_agent_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start with no team agent rules in memory: the process store is per process.
+
+    An in-process app reads the process's store; a journey must not see the
+    versions an earlier journey accepted (the wiped home holds none either).
+    """
+    from servonaut.services import team_policy
+
+    monkeypatch.setattr(team_policy, "_default_store", None)
 
 
 def _close_journey(request: pytest.FixtureRequest, journey: Journey) -> list[dict]:
@@ -355,7 +367,7 @@ def _fake_cloud_server(e2e_ctx: E2EContext) -> Any:
 @pytest.fixture
 def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.MonkeyPatch) -> Any:
     """FakeCloud, reset, with the Servonaut API and package index pointed at it."""
-    from servonaut.services import update_service
+    from servonaut.services import team_policy_keys, update_service
 
     _fake_cloud_server.reset()
     journey.fake_cloud = _fake_cloud_server
@@ -369,6 +381,11 @@ def fake_cloud(_fake_cloud_server: Any, journey: Journey, monkeypatch: pytest.Mo
     # The update check reads the package index URL from a module constant:
     # patched here, and redirected in children by child_guard.py.
     monkeypatch.setattr(update_service, "PYPI_URL", _fake_cloud_server.pypi_json_url)
+    # So are the keys that verify team agent rules: FakeCloud's key is
+    # trusted for FakeCloud's origin, as a release trusts its bundled key.
+    monkeypatch.setattr(
+        team_policy_keys, "TEAM_POLICY_KEYS", endpoints.team_policy_trust(_fake_cloud_server),
+    )
     return _fake_cloud_server
 
 

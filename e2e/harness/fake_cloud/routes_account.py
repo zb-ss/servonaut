@@ -218,6 +218,20 @@ class AccountData:
                 return None
             return copy.deepcopy({**row, "members": row.get("members", [])})
 
+    def team_id_of(self, slug: str, user_id: int, *, scenario_account: bool) -> Optional[str]:
+        """The id of team *slug* when *user_id* can see it, else None.
+
+        A scenario row without an id gets one derived from its slug.
+        """
+        with self._lock:
+            team = self._managed.get(slug)
+            if team is not None:
+                return str(team.id) if team.role_of(user_id) else None
+            row = next((t for t in self._teams if t.get("slug") == slug), None)
+            if row is None or not scenario_account:
+                return None
+            return str(row.get("id") or f"team-{slug}")
+
     def caller_role(self, slug: str, user_id: int, *, scenario_account: bool) -> Optional[str]:
         """*user_id*'s role on team *slug*, or None when they cannot see the team."""
         with self._lock:

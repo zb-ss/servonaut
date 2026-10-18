@@ -31,6 +31,7 @@ from aiohttp import web
 from e2e.harness.fake_cloud import (
     control,
     routes_account,
+    routes_agent_rules,
     routes_ai,
     routes_auth,
     routes_configs,
@@ -45,6 +46,7 @@ from e2e.harness.fake_cloud import (
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
 from e2e.harness.fake_cloud.routes_account import AccountData
+from e2e.harness.fake_cloud.routes_agent_rules import AgentRulesCloud
 from e2e.harness.fake_cloud.routes_ai import AiState
 from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
 from e2e.harness.fake_cloud.routes_findings import FindingsCloud
@@ -53,7 +55,7 @@ from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.routes_vault import VaultCloud
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
-from e2e.harness.fake_cloud.users import REQUEST_ACCOUNT, Account
+from e2e.harness.fake_cloud.users import REQUEST_ACCOUNT, Account, current_account
 from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 from e2e.harness.loopback import LoopbackServer
 
@@ -78,6 +80,8 @@ class FakeCloud(LoopbackServer):
         # stream that outlived its journey) is not logged into the next one.
         self._epoch = 0
         self.account = AccountData()
+        # The teams' signed agent rules (GET /api/v1/teams/{slug}/policy).
+        self.agent_rules = AgentRulesCloud()
         self.ai = AiState()
         self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
         self.configs = ConfigSnapshots()
@@ -120,6 +124,7 @@ class FakeCloud(LoopbackServer):
         self._wire.clear()
         self.relay.reset()
         self.account.reset()
+        self.agent_rules.reset()
         self.ai.reset()
         self.memory.reset()
         self.configs.reset()
@@ -302,6 +307,12 @@ class FakeCloud(LoopbackServer):
         with self._held_lock:
             return path in self._held_paths
 
+    def _team_id_of(self, slug: str) -> Optional[str]:
+        """The id of team *slug* when the requesting user is a member."""
+        return self.account.team_id_of(
+            slug, self._store.snapshot().user_id, scenario_account=current_account() is None,
+        )
+
     def ssl_context(self) -> ssl.SSLContext:
         return self._tls.server_context()
 
@@ -313,6 +324,7 @@ class FakeCloud(LoopbackServer):
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field,
                                   base_url=lambda: self.url)
+        routes_agent_rules.add_routes(app, self._store, self.agent_rules, self._team_id_of)
         routes_ai.add_routes(app, self._store, self.ai)
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)
