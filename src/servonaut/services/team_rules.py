@@ -16,15 +16,16 @@ The user's own servers keep their local rules, and nothing here applies to
 what a person sends: commands typed in the TUI, with ``servonaut ssh`` or in
 the web console, and remediations a person approved.
 
-The team service does not publish rules yet: :data:`DEFAULT_TEAM_RULES`
-holds the defaults and :func:`rules_for` is where published rules will be
-read once it does.
+``team_policy`` verifies the rules the team service signs, as
+:class:`TeamRules`; :func:`rules_for` does not read them yet and returns
+:data:`DEFAULT_TEAM_RULES`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
@@ -60,6 +61,8 @@ GUARD_LEVELS: Tuple[str, ...] = (
     GuardLevel.READONLY, GuardLevel.STANDARD, GuardLevel.DANGEROUS,
 )
 _RANK = {level: rank for rank, level in enumerate(GUARD_LEVELS)}
+# The roles a team gives its members.
+TEAM_ROLES: Tuple[str, ...] = ("owner", "admin", "member", "viewer")
 _REPORTED_COMMAND_LIMIT = 64
 
 
@@ -96,11 +99,62 @@ class TeamRules:
     unknown_role_level: str = GuardLevel.READONLY
     command_allowlist: Tuple[str, ...] = field(default_factory=_builtin_allowlist)
     command_blocklist: Tuple[str, ...] = field(default_factory=_builtin_blocklist)
+    # Per shared server id: the levels that replace the team-wide ones there.
+    servers: Mapping[str, Mapping[str, str]] = field(
+        default_factory=lambda: MappingProxyType({}),
+    )
+    # Why these are the readonly rules a team falls back to, in plain words
+    # that follow "because"; empty for rules the team set.
+    fallback_reason: str = ""
+
+    @classmethod
+    def readonly(cls, reason: str) -> "TeamRules":
+        """Every role at the readonly level, owners included, because of *reason*."""
+        return cls(role_levels=MappingProxyType({}), fallback_reason=reason)
 
     def level_for(self, role: Any) -> str:
         """The guard level for a member with *role*."""
-        key = role.strip().lower() if isinstance(role, str) else ""
+        key = _role_key(role)
         return self.role_levels.get(key, self.unknown_role_level)
+
+    def level_for_server(self, server_id: Any, role: Any) -> str:
+        """The guard level for a member with *role* on the server *server_id*.
+
+        The server's override, when it names the role; else the team-wide level.
+        """
+        override = self.servers.get(str(server_id or ""))
+        key = _role_key(role)
+        if override is not None and key in override:
+            return override[key]
+        return self.level_for(role)
+
+    def for_server(self, server_id: Any) -> "TeamRules":
+        """These rules with the override of *server_id* applied team-wide."""
+        if not self.servers:
+            return self
+        role_levels = dict(self.role_levels)
+        role_levels.update(self.servers.get(str(server_id or "")) or {})
+        return replace(
+            self, role_levels=MappingProxyType(role_levels), servers=MappingProxyType({}),
+        )
+
+    def unusable_pattern(self) -> str:
+        """The first blocklist pattern Servonaut cannot compile; '' if none."""
+        return next(iter(_unusable_patterns(self.command_blocklist)), "")
+
+
+def _role_key(role: Any) -> str:
+    return role.strip().lower() if isinstance(role, str) else ""
+
+
+def _unusable_patterns(patterns: Iterable[str]) -> List[str]:
+    unusable = []
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except (re.error, TypeError, ValueError, OverflowError, RecursionError):
+            unusable.append(pattern)
+    return unusable
 
 
 DEFAULT_TEAM_RULES = TeamRules()

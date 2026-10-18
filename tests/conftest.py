@@ -21,6 +21,7 @@ from servonaut.config.schema import (  # noqa: E402
     ScanRule,
 )
 from servonaut.services import ssh_host_keys
+from servonaut.services import team_policy, team_policy_keys  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -38,6 +39,17 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         ssh_host_keys, "servonaut_known_hosts_path", lambda: _session_known_hosts,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch):
+    """Start every test with no team agent rules loaded and only the bundled keys.
+
+    A test that trusts a test key or loads signed rules (see
+    ``_team_policy_fixtures``) leaves nothing behind for the next one.
+    """
+    monkeypatch.setattr(team_policy, "_default_store", None)
+    monkeypatch.setattr(team_policy_keys, "TEAM_POLICY_KEYS", team_policy_keys.TEAM_POLICY_KEYS)
 
 
 # ---------------------------------------------------------------------------
