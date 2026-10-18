@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
+from servonaut.services.shared_servers import is_shared_row
 from servonaut.services.team_rules import TEAM_RULE_REASON, TeamGuard, guard_for_target
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
@@ -52,7 +53,7 @@ class RelayExecutors:
     def __init__(self, config_manager, aws_service, custom_server_service,
                  ssh_service, connection_service, scp_service,
                  accounts=None, vault_runtime: Any | None = None,
-                 audit: Any | None = None) -> None:
+                 audit: Any | None = None, team_policy: Any | None = None) -> None:
         self._config_manager = config_manager
         # Where team-rule refusals are recorded (an AuditTrail). None: the
         # MCP audit trail of the current config, opened on first refusal.
@@ -72,6 +73,10 @@ class RelayExecutors:
         # private-agent lifetime.  It is optional for older sessions, but a
         # native target must fail closed when it cannot resolve a lease.
         self._vault_runtime = vault_runtime
+        # Fetches a team's agent rules before an agent acts on its server
+        # when they are not in force for want of a fetch (a
+        # TeamPolicyRefresher); None: only the rules already fetched apply.
+        self._team_policy = team_policy
         # Load additional blocklist patterns from config
         mcp_config = config_manager.get().mcp
         self._extra_blocklist: List[re.Pattern] = [
@@ -81,6 +86,10 @@ class RelayExecutors:
     def set_vault_runtime(self, service: Any | None) -> None:
         """Install the composed native-vault runtime after relay construction."""
         self._vault_runtime = service
+
+    def set_team_policy(self, refresher: Any | None) -> None:
+        """Install the process's TeamPolicyRefresher after relay construction."""
+        self._team_policy = refresher
 
     async def execute(self, request: CommandRequest) -> CommandResponse:
         """Dispatch a CommandRequest to the appropriate executor."""
@@ -454,6 +463,16 @@ class RelayExecutors:
             instance, mcp.guard_level, mcp.command_allowlist, mcp.command_blocklist,
         )
 
+    async def _agent_team_guard(
+        self, request: CommandRequest, instance: Mapping[str, Any],
+    ) -> Optional[TeamGuard]:
+        """:meth:`_team_guard`, with the team's rules fetched when they must be."""
+        if not request.from_agent:
+            return None
+        if is_shared_row(instance) and self._team_policy is not None:
+            await self._team_policy.ensure_loaded(instance.get('team_slug'))
+        return self._team_guard(request, instance)
+
     def _team_refusal(
         self, request: CommandRequest, instance: Mapping[str, Any],
         team_guard: TeamGuard, tool_name: str, command: Optional[str] = None,
@@ -532,7 +551,7 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
-        team_guard = self._team_guard(request, instance)
+        team_guard = await self._agent_team_guard(request, instance)
         if team_guard is not None:
             rejection = self._team_refusal(
                 request, instance, team_guard, 'run_command', command,
@@ -682,7 +701,7 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
-        team_guard = self._team_guard(request, instance)
+        team_guard = await self._agent_team_guard(request, instance)
         if team_guard is not None:
             rejection = self._team_refusal(request, instance, team_guard, 'transfer_file')
             if rejection is not None:

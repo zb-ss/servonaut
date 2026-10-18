@@ -7,7 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests._key_fixtures import OPENSSH_HEADER, openssh_armor
-from tests._team_policy_fixtures import trust_signed_team_rules
+from tests._team_policy_fixtures import (
+    agent_rules_with,
+    envelope,
+    process_store,
+    response,
+    team_id_for,
+    trust_signed_team_rules,
+    trust_test_key,
+)
 from servonaut.config.schema import AppConfig, MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
@@ -74,7 +82,8 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
                ovh_instances=None, ovh_ip_service=None,
                ovh_snapshot_service=None, ovh_dns_service=None, ovh_billing_service=None,
                ovh_service=None, aws_service=None, aws_object_storage_service=None,
-               bw_ssh_config_service=None, team_service=None, vault_runtime=None):
+               bw_ssh_config_service=None, team_service=None, vault_runtime=None,
+               team_policy=None):
     if instances is None:
         instances = SAMPLE_INSTANCES
 
@@ -135,6 +144,7 @@ def make_tools(guard_level=GuardLevel.STANDARD, instances=None, custom_instances
         bw_ssh_config_service=bw_ssh_config_service,
         team_service=team_service,
         vault_runtime=vault_runtime,
+        team_policy=team_policy,
     )
     return tools
 
@@ -1744,3 +1754,41 @@ class TestTeamRulesOnSharedServers:
             result = run(tools.run_command("ops/team-web-1", NOT_ALLOWLISTED))
 
         assert "[transport_used: ssh]" in result
+
+
+# ---------------------------------------------------------------------------
+# Fetching the team rules with the shared servers
+# ---------------------------------------------------------------------------
+
+class TestTeamRulesFetchedWithSharedServers:
+    def test_reading_the_shared_servers_fetches_the_same_teams_rules(self):
+        refresher = MagicMock()
+        refresher.refresh = AsyncMock(return_value=[])
+        service = _team_service()
+        tools = make_tools(team_service=service, team_policy=refresher)
+        run(tools.list_instances())
+
+        refresher.refresh.assert_awaited_once_with(service.list_teams.return_value)
+        service.list_teams.assert_awaited_once()
+
+    def test_the_rules_fetched_apply_to_the_next_agent_call(self):
+        from servonaut.services.team_policy_refresh import TeamPolicyRefresher
+
+        trust_test_key()
+        service = _team_service(teams=[{"id": team_id_for("ops"), "slug": "ops",
+                                        "name": "Ops", "role": "member"}])
+        rules = agent_rules_with(role_levels={"member": "readonly"})
+        service.get_team_policy_with_date = AsyncMock(
+            return_value=(response(envelope(team_id_for("ops"), rules)), None),
+        )
+        refresher = TeamPolicyRefresher(process_store(), lambda: service)
+        tools = make_tools(
+            guard_level=GuardLevel.DANGEROUS, team_service=service, team_policy=refresher,
+        )
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        # Without the fetch: "because the team's agent rules have not been loaded yet".
+        assert result == (
+            "Blocked: on team Ops's shared servers your agents run at the readonly "
+            "level (set by the team), and running commands is not available there."
+        )

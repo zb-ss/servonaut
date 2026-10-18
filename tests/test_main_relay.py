@@ -248,7 +248,7 @@ def foreground_relay(relay_runtime, monkeypatch, tmp_path) -> Path:
     monkeypatch.setattr("servonaut.config.manager.ConfigManager", lambda: config_manager)
     monkeypatch.setattr(
         "servonaut.mcp.server.build_headless_tools",
-        lambda _config_manager, **_accounts: MagicMock(),
+        lambda _config_manager, **_accounts: MagicMock(team_policy=None),
     )
     relay_log = tmp_path / "relay.log"
     monkeypatch.setattr("servonaut.utils.relay_log._DEFAULT_LOG_PATH", relay_log)
@@ -479,3 +479,42 @@ class TestRelayForegroundPersistentRejection:
         events = _relay_events(foreground_relay)
         assert not any(e["event"] == "session_expired" for e in events)
         assert events[-1]["reason"] == "shutdown"
+
+
+class _Refresher:
+    """Records what the relay asks of its team rules refresher."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def refresh(self, teams=None):
+        self.events.append("refresh")
+        return []
+
+    def close(self) -> None:
+        self.events.append("close")
+
+
+class TestRelayKeepsTeamRulesFresh:
+    def test_the_rules_are_fetched_at_start_and_the_schedule_stops_at_the_end(self):
+        refresher = _Refresher()
+
+        class Listener:
+            async def run(self):
+                await asyncio.sleep(0)  # the first fetch starts meanwhile
+                refresher.events.append("listened")
+
+        asyncio.run(servonaut_main._run_relay(Listener(), None, refresher))
+
+        assert refresher.events == ["refresh", "listened", "close"]
+
+    def test_without_a_refresher_the_relay_still_runs(self):
+        ran = []
+
+        class Listener:
+            async def run(self):
+                ran.append(True)
+
+        asyncio.run(servonaut_main._run_relay(Listener(), None, None))
+
+        assert ran == [True]

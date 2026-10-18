@@ -1179,3 +1179,44 @@ class TestTeamRulesOnRelay:
         )
         assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
         executor._ssh_service.build_ssh_command.assert_not_called()
+
+
+class TestTeamRulesFetchedOnRelay:
+    """The relay fetches a team's rules before an agent acts, when they are not in force."""
+
+    _TARGET = TestTeamRulesOnRelay._TARGET
+
+    def _executor(self, refresher):
+        executor = make_executors()
+        executor.set_vault_runtime(_VaultRuntime(lease=_VaultLease(), target=dict(
+            self._TARGET, team_role="member",
+        )))
+        executor.set_team_policy(refresher)
+        executor._audit = MagicMock()
+        return executor
+
+    def test_an_agents_request_makes_sure_the_teams_rules_are_loaded(self):
+        trust_signed_team_rules("ops")
+        refresher = MagicMock(ensure_loaded=AsyncMock())
+        executor = self._executor(refresher)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                from_agent=True, target="srv-1", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "success"
+        refresher.ensure_loaded.assert_awaited_once_with("ops")
+
+    def test_what_a_person_sends_fetches_nothing(self):
+        refresher = MagicMock(ensure_loaded=AsyncMock())
+        executor = self._executor(refresher)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            run(executor.execute(make_request(target="srv-1", payload={"command": "uptime"})))
+
+        refresher.ensure_loaded.assert_not_awaited()

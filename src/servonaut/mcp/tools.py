@@ -224,7 +224,8 @@ class ServonautTools:
                  team_service=None,
                  account_registry=None,
                  vault_runtime=None,
-                 apply_team_rules: bool = True) -> None:
+                 apply_team_rules: bool = True,
+                 team_policy=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -269,6 +270,10 @@ class ServonautTools:
         # (services/team_rules.py). False only for a surface where a person
         # typed the request, which team rules do not govern.
         self._apply_team_rules = apply_team_rules
+        # Fetches the teams' signed agent rules (a TeamPolicyRefresher)
+        # whenever the shared servers are read; None: nothing fetches them
+        # here and teams without saved rules stay at the readonly level.
+        self._team_policy = team_policy
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -306,6 +311,11 @@ class ServonautTools:
         # token -> {signature, expires_at}. The op cannot execute until a second
         # call echoes a token whose signature matches the exact call.
         self._aws_confirm_staging: Dict[str, Dict[str, Any]] = {}
+
+    @property
+    def team_policy(self):
+        """The TeamPolicyRefresher this surface fetches team agent rules with, or None."""
+        return self._team_policy
 
     @property
     def config_manager(self):
@@ -4502,7 +4512,8 @@ class ServonautTools:
 
         One read serves every call for a minute. A failed read lists none
         (and is remembered for the same minute): the user's own servers
-        never wait on the team service.
+        never wait on the team service. Each read also fetches the same
+        teams' agent rules, so the rules on these rows are as fresh as they.
         """
         now = time.monotonic()
         if self._shared_memo is not None and self._shared_memo[0] > now:
@@ -4513,11 +4524,22 @@ class ServonautTools:
             from servonaut.services.shared_servers import load_shared_servers
 
             try:
-                rows = (await load_shared_servers(team_service)).rows
+                teams = await team_service.list_teams()
+                found, _statuses = await asyncio.gather(
+                    load_shared_servers(team_service, teams),
+                    self._refresh_team_rules(teams),
+                )
+                rows = found.rows
             except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
                 logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
         self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows)
         return [dict(row) for row in rows]
+
+    async def _refresh_team_rules(self, teams: Any) -> List[Any]:
+        """Fetch the agent rules of *teams*; nothing without a refresher."""
+        if self._team_policy is None:
+            return []
+        return await self._team_policy.refresh(teams)
 
     async def _find_shared(self, reference: str) -> Optional[Dict]:
         """The team shared server *reference* names (id, name or ``<team>/<name>``).
