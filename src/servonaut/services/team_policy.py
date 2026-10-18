@@ -543,7 +543,7 @@ class TeamPolicyStore:
         """What applies to every team seen, by slug."""
         with self._lock:
             self._ensure_loaded()
-            states = [self._teams[team_id] for team_id in self._slugs.values()]
+            states = [self._teams[team_id] for team_id in dict.fromkeys(self._slugs.values())]
         return [self._status_of(state) for state in states]
 
     def seconds_until_refresh(self) -> Optional[float]:

@@ -868,6 +868,19 @@ class TestRefresh:
         )
         assert status.problem is None
 
+    def test_statuses_list_each_team_once(self, store):
+        apply(store, signed())
+        store.apply_response(
+            team_row("ops-renamed", id=TEAM_ID), response(signed(version=2)),
+        )
+        store.apply_response(
+            team_row("db-team"), response(envelope(team_id_for("db-team"), issued_at=NOW)),
+        )
+        statuses = store.statuses()
+        assert [(status.slug, status.version) for status in statuses] == [
+            ("ops-renamed", 2), ("db-team", 1),
+        ]
+
     def test_apply_response_needs_a_slug_and_an_id(self, store):
         with pytest.raises(ValueError):
             store.apply_response({"slug": "ops-team"}, response(signed()))
