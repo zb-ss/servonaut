@@ -2714,3 +2714,54 @@ async def test_a_binding_without_a_vault_cannot_be_taken_for_a_personal_key(tmp_
 
     with pytest.raises(VaultStateError, match="malformed"):
         await service.credential_team(_OWN_SERVER)
+
+
+def test_the_vault_says_whether_it_is_unlocked(tmp_path) -> None:
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    assert service.is_unlocked is False
+
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    assert service.is_unlocked is True
+
+
+def _personal_bind_service(put_personal_binding) -> VaultCommandService:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = put_personal_binding  # type: ignore[method-assign]
+    return service
+
+
+async def _bind_web_1(service: VaultCommandService):
+    return await service.bind_personal(
+        vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+        provider="aws", instance_id="i-1", hostname="192.0.2.10", port=22, login="deploy",
+        host_keys=["ssh-ed25519 AAAA"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_binding_an_own_server_changes_the_binding_generation(tmp_path) -> None:
+    service = _personal_bind_service(AsyncMock(return_value={"ok": True}))
+    before = service.binding_generation
+
+    assert await _bind_web_1(service) == {"ok": True}
+    assert service.binding_generation != before
+
+
+@pytest.mark.asyncio
+async def test_a_binding_that_fails_leaves_the_generation(tmp_path) -> None:
+    service = _personal_bind_service(AsyncMock(side_effect=APIError(code="x", message="x", status=500)))
+    before = service.binding_generation
+
+    with pytest.raises(APIError):
+        await _bind_web_1(service)
+    assert service.binding_generation == before

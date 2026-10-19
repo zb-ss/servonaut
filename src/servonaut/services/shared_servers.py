@@ -199,6 +199,8 @@ class SharedServers:
     teams: List[Dict[str, Any]] = field(default_factory=list)
     # One line per team whose servers could not be read.
     problems: List[str] = field(default_factory=list)
+    # The slugs of the teams whose servers were read (their rows are all here).
+    read: List[str] = field(default_factory=list)
 
 
 async def load_shared_servers(
@@ -230,4 +232,5 @@ async def load_shared_servers(
         found.rows.extend(
             shared_row(server, team) for server in servers or [] if isinstance(server, Mapping)
         )
+        found.read.append(slug)
     return found

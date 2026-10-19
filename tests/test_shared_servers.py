@@ -218,6 +218,8 @@ class TestLoadSharedServers:
         found = asyncio.run(load_shared_servers(service))
         assert [row["name"] for row in found.rows] == ["build-1"]
         assert found.problems == ["team Ops: 503 Service Unavailable"]
+        # Only dev's rows are complete: ops's servers are unknown, not none.
+        assert found.read == ["dev"]
 
     def test_each_row_carries_the_role_from_its_team(self):
         service = _Teams(

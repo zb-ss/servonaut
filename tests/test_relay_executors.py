@@ -1340,14 +1340,76 @@ class TestTeamKeyOnAnOwnServerOnRelay:
 
         assert response.status == "success"
 
-    def test_a_key_that_cannot_be_checked_fails_the_request(self):
+    def test_a_key_that_cannot_be_checked_refuses_the_request_and_is_audited(self):
         executor = self._executor(_TeamKeyRuntime(error=RuntimeError("vault offline")))
         response = run(executor.execute(make_request(
             from_agent=True, target="i-abc123", payload={"command": "uptime"},
         )))
 
-        assert response.status == "error"
+        assert response.status == "rejected"
+        assert response.error_message == (
+            "Error: could not check which vault key this server uses, so agents "
+            "cannot act on it right now. Try again shortly."
+        )
+        assert "vault offline" not in response.error_message
         executor._ssh_service.build_ssh_command.assert_not_called()
+        assert [
+            (call.args[0], call.args[4], call.kwargs.get("source"))
+            for call in executor._audit.log.call_args_list
+        ] == [("run_command", "credential_check_failed", "relay")]
+
+    def test_a_transfer_whose_key_cannot_be_checked_is_audited_too(self):
+        executor = self._executor(_TeamKeyRuntime(error=RuntimeError("vault offline")))
+        response = run(executor.execute(make_request(
+            cmd_type=CommandType.TRANSFER_FILE, from_agent=True, target="i-abc123",
+            payload={"local_path": str(_TRANSFERS_DIR / "a.txt"), "remote_path": "/tmp/b",
+                     "direction": "download"},
+        )))
+
+        assert response.status == "rejected"
+        assert executor._audit.log.call_args.args[4] == "credential_check_failed"
+        executor._scp_service.execute_transfer.assert_not_called()
+
+    def test_whose_key_it_is_is_remembered_between_requests(self):
+        trust_signed_team_rules("ops")
+        runtime = _TeamKeyRuntime()
+        runtime.credential_team = AsyncMock(return_value="ops")
+        executor = self._executor(runtime)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            for request_id in ("req-1", "req-2"):
+                response = run(executor.execute(make_request(
+                    from_agent=True, req_id=request_id, target="i-abc123",
+                    payload={"command": "uptime"},
+                )))
+                assert response.status == "success"
+
+        # Without the memo every request cost these API calls again.
+        runtime.credential_team.assert_awaited_once()
+        runtime.teams.list_teams.assert_awaited_once()
+        runtime.teams.list_shared_servers.assert_awaited_once()
+
+    def test_a_new_vault_runtime_checks_the_key_again(self):
+        trust_signed_team_rules("ops")
+        first = _TeamKeyRuntime()
+        first.credential_team = AsyncMock(return_value="ops")
+        executor = self._executor(first)
+        run(executor.execute(make_request(
+            from_agent=True, target="i-abc123", payload={"command": "systemctl restart nginx"},
+        )))
+        second = _TeamKeyRuntime(slug=None)
+        executor.set_vault_runtime(second)
+        with patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        ):
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123", payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
 
     def test_what_a_person_sends_keeps_todays_rules(self):
         trust_signed_team_rules("ops")

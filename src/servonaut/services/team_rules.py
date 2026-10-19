@@ -38,16 +38,29 @@ import math
 import time
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import regex
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
+from servonaut.services.memory.provider import instance_provider
 from servonaut.services.shared_servers import is_same_server, is_shared_row, shared_row
 
 # The audit reason code of every refusal a team rule causes.
 TEAM_RULE_REASON = "team_rule"
+# The audit reason, and what the agent is told, when Servonaut cannot tell
+# whether a server of the user's own connects with a team's vault key: the
+# agent may not act on it then (a team's key is never taken for a personal one).
+CREDENTIAL_CHECK_FAILED_REASON = "credential_check_failed"
+CREDENTIAL_CHECK_FAILED = (
+    "Error: could not check which vault key this server uses, so agents "
+    "cannot act on it right now. Try again shortly."
+)
+# How long one such check serves the agent's next calls on the same server,
+# so a tool loop does not cost several API requests per call. An internal
+# coalescing window like the ssh-ref lookups', not an ops setting.
+CREDENTIAL_MEMO_SECONDS = 60.0
 # Every refusal message starts with one of these (a named team, or a team
 # the row does not name), so a caller that only sees the message (the
 # relay's response) can still tell a team refusal apart.
@@ -269,6 +282,69 @@ async def credential_rules_row(
         ))
     # No server id: no team override can name it.
     return shared_row({"name": row.get("name") or ""}, team)
+
+
+def _vault_unlocked(vault_runtime: Any) -> bool:
+    return getattr(vault_runtime, "is_unlocked", False) is True
+
+
+class CredentialRulesMemo:
+    """Whose rules apply to the user's own servers, remembered a while.
+
+    A server of the user's own that connects with a key from a team's vault
+    runs under that team's rules (:func:`credential_rules_row`). Finding
+    that out takes a few API calls, so each answer is kept for
+    *ttl_seconds*. A check that failed is never kept, nor "not a team's
+    key" while the vault is locked: once it unlocks, the server may connect
+    with a team's key. A binding this process makes since (the vault
+    runtime's ``binding_generation``) starts the server over.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = CREDENTIAL_MEMO_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._clock = clock
+        # (provider, id, name) -> (expiry, binding generation, rules row or None)
+        self._entries: Dict[Tuple[str, str, str], Tuple[float, Any, Optional[Dict[str, Any]]]] = {}
+
+    def clear(self) -> None:
+        """Forget every answer (a new vault runtime, for example)."""
+        self._entries.clear()
+
+    async def rules_row(
+        self,
+        row: Mapping[str, Any],
+        vault_runtime: Any,
+        team_row: Callable[[str], Awaitable[Mapping[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """The row whose team rules apply to *row*; None where the local rules apply.
+
+        *team_row(slug)* builds that row (see :func:`credential_rules_row`)
+        once *row* turns out to connect with team *slug*'s key.
+
+        Raises:
+            Exception: the key or the team could not be checked; the caller
+                refuses rather than apply no rule.
+        """
+        if is_shared_row(row) or vault_runtime is None:
+            return None
+        key = (instance_provider(row), str(row.get("id") or ""), str(row.get("name") or ""))
+        generation = getattr(vault_runtime, "binding_generation", None)
+        now = self._clock()
+        hit = self._entries.get(key)
+        if hit is not None and hit[0] > now and hit[1] == generation:
+            return dict(hit[2]) if hit[2] is not None else None
+        slug = await credential_team_of(row, vault_runtime)
+        if slug is None:
+            if _vault_unlocked(vault_runtime):
+                self._entries[key] = (now + self._ttl, generation, None)
+            return None
+        rules_row = dict(await team_row(slug))
+        self._entries[key] = (now + self._ttl, generation, rules_row)
+        return dict(rules_row)
 
 
 def _team_label(row: Mapping[str, Any]) -> str:

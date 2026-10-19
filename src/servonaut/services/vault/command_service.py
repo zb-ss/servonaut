@@ -238,6 +238,8 @@ class VaultCommandService:
         self.connection_service = connection_service
         self.ssh_ref_resolver = ssh_ref_resolver
         self._leases: list[VaultSshLease] = []
+        # Bumped by every own-server binding made here (see binding_generation).
+        self._binding_generation = 0
         self._pending_identity_reset: PendingIdentityReset | None = None
         self._device_pending_events: list[dict[str, Any]] = []
         self._device_pending_callback: Callable[[Mapping[str, Any]], Any] | None = None
@@ -280,6 +282,20 @@ class VaultCommandService:
         """Pick up a Settings change to file key storage without a restart."""
         if self._owns_store:
             self.store.allow_file_key_store = bool(self.config.vault.allow_file_key_store)
+
+    @property
+    def is_unlocked(self) -> bool:
+        """Whether the vault identity is unlocked, so native vault keys can be used."""
+        return self.store.identity is not None
+
+    @property
+    def binding_generation(self) -> int:
+        """Changes whenever this process binds one of the user's own servers to a key.
+
+        A caller that remembers whose key an own server uses (see
+        :meth:`credential_team`) checks again once it changed.
+        """
+        return self._binding_generation
 
     def unlock_existing_identity(self) -> bool:
         """Unlock persisted custody only after the caller opts into vault use.
@@ -1559,7 +1575,7 @@ class VaultCommandService:
             public_fingerprint=fingerprint, host_keys=host_keys, binding_revision=revision,
         )
         try:
-            return await self.bindings.put_personal_binding(
+            result = await self.bindings.put_personal_binding(
                 normalized_provider, normalized_instance_id, binding,
             )
         except APIError as exc:
@@ -1568,6 +1584,8 @@ class VaultCommandService:
                     "this Servonaut service does not accept vault keys for custom servers yet"
                 ) from exc
             raise
+        self._binding_generation += 1
+        return result
 
     async def bind_imported_bitwarden_ref(
         self,

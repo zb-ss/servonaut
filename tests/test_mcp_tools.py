@@ -1958,3 +1958,77 @@ class TestTeamKeyOnAnOwnServer:
             run(tools.run_command("i-abc123", "uptime"))
 
         runtime.credential_team.assert_awaited_once()
+
+    def test_a_team_whose_servers_did_not_list_is_read_again(self):
+        trust_signed_team_rules("ops", agent_rules_with(
+            servers={"srv-1": {"role_levels": {"member": "readonly"}}},
+        ))
+        shared_copy = _shared_server(instance_id="i-abc123")
+        tools = self._tools(_team_key_runtime())
+        tools._team_service.list_shared_servers = AsyncMock(
+            side_effect=[RuntimeError("503 Service Unavailable"), [shared_copy]],
+        )
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        # Not the team-wide standard level: the server's override applies.
+        assert "run at the readonly level (set by the team)" in result
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_a_team_whose_servers_cannot_be_read_is_refused(self):
+        trust_signed_team_rules("ops", agent_rules_with(
+            servers={"srv-1": {"role_levels": {"member": "readonly"}}},
+        ))
+        tools = self._tools(_team_key_runtime())
+        tools._team_service.list_shared_servers = AsyncMock(
+            side_effect=RuntimeError("503 Service Unavailable"),
+        )
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert result == (
+            "Error: could not check which vault key this server uses, so agents "
+            "cannot act on it right now. Try again shortly."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "credential_check_failed"
+
+    def test_no_team_key_found_while_the_vault_is_locked_is_not_remembered(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        runtime = _team_key_runtime()
+        runtime.is_unlocked = False
+        runtime.credential_team = AsyncMock(side_effect=[None, "ops"])
+        tools = self._tools(runtime)
+        with _ssh_ok():
+            locked = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+            runtime.is_unlocked = True
+            unlocked = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in locked
+        # Unlocked, the server connects with the team's key: the team's rule applies.
+        assert "run at the readonly level (set by the team)" in unlocked
+
+    def test_no_team_key_found_with_the_vault_unlocked_is_remembered(self):
+        runtime = _team_key_runtime(slug=None)
+        runtime.is_unlocked = True
+        tools = self._tools(runtime)
+        with _ssh_ok():
+            run(tools.run_command("i-abc123", "uptime"))
+            run(tools.run_command("i-abc123", "uptime"))
+
+        runtime.credential_team.assert_awaited_once()
+
+    def test_a_binding_made_since_is_checked_again(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        runtime = _team_key_runtime()
+        runtime.is_unlocked = True
+        runtime.binding_generation = 0
+        runtime.credential_team = AsyncMock(side_effect=[None, "ops"])
+        tools = self._tools(runtime)
+        with _ssh_ok():
+            before = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+            runtime.binding_generation = 1
+            after = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in before
+        assert "run at the readonly level (set by the team)" in after

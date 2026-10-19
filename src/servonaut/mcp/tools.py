@@ -36,12 +36,14 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
-from servonaut.services.shared_servers import as_shared_row, fold_shared_rows, is_shared_row
+from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
 from servonaut.services.team_rules import (
+    CREDENTIAL_CHECK_FAILED,
+    CREDENTIAL_CHECK_FAILED_REASON,
     TEAM_RULE_REASON,
+    CredentialRulesMemo,
     TeamGuard,
     credential_rules_row,
-    credential_team_of,
     guard_for_target_from,
 )
 from servonaut.utils.instance_resolver import (
@@ -276,9 +278,8 @@ class ServonautTools:
         # whenever the shared servers are read; None: nothing fetches them
         # here and teams without saved rules stay at the readonly level.
         self._team_policy = team_policy
-        # (provider, id, name) -> (monotonic_expiry, team slug or None): whose
-        # vault key an own server connects with (see _credential_rules_row).
-        self._credential_team_memo: Dict[tuple, tuple] = {}
+        # Whose vault key an own server connects with (see _credential_rules_row).
+        self._credential_memo = CredentialRulesMemo()
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -429,7 +430,7 @@ class ServonautTools:
         """Install the optional native Vault SSH boundary."""
         self._vault_runtime = service
         self._bw_ref_memo.clear()
-        self._credential_team_memo.clear()
+        self._credential_memo.clear()
 
     # ------------------------------------------------------------------
     # Provider accounts
@@ -728,41 +729,31 @@ class ServonautTools:
                 "Could not check the vault key of %s (%s)",
                 instance.get('id') or instance.get('name'), type(exc).__name__,
             )
-            self._audit.log(tool_name, args, '', False, 'credential_check_failed')
-            return None, (
-                "Error: could not check which vault key this server uses, so agents "
-                "cannot act on it right now. Try again shortly."
-            )
+            self._audit.log(tool_name, args, '', False, CREDENTIAL_CHECK_FAILED_REASON)
+            return None, CREDENTIAL_CHECK_FAILED
         return self._team_guard(rules_row if rules_row is not None else instance), None
 
     async def _credential_rules_row(self, instance: Dict) -> Optional[Dict]:
         """The team row whose rules apply to *instance*, an own server reached
         with a team's vault key; None for any other server.
 
-        Whose key a server uses is remembered as long as an ssh-ref lookup.
+        The answer is remembered a while (see ``CredentialRulesMemo``).
 
         Raises:
             Exception: the key or the team could not be checked.
         """
-        if is_shared_row(instance) or self._vault_runtime is None:
-            return None
-        key = (
-            instance_provider(instance), str(instance.get('id') or ''),
-            str(instance.get('name') or ''),
-        )
-        now = time.monotonic()
-        hit = self._credential_team_memo.get(key)
-        if hit is not None and hit[0] > now:
-            slug = hit[1]
-        else:
-            slug = await credential_team_of(instance, self._vault_runtime)
-            self._credential_team_memo[key] = (now + _BW_REF_MEMO_TTL_SECONDS, slug)
-        if slug is None:
-            return None
         team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
-        return await credential_rules_row(
-            instance, slug, team_service, await self._shared_server_rows(),
-        )
+
+        async def team_row(slug: str) -> Dict:
+            shared = await self._shared_server_rows()
+            if slug not in self._shared_teams_read:
+                # The team's servers were not read (a failed listing): read
+                # them again, so a failure refuses rather than lose the
+                # override the team may give this server.
+                shared = None
+            return await credential_rules_row(instance, slug, team_service, shared)
+
+        return await self._credential_memo.rules_row(instance, self._vault_runtime, team_row)
 
     async def _provider_target(
         self, provider: str, reference: str, account: str,
@@ -4617,6 +4608,7 @@ class ServonautTools:
             return [dict(row) for row in self._shared_memo[1]]
         team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
         rows: List[Dict] = []
+        read: frozenset = frozenset()
         if team_service is not None:
             from servonaut.services.shared_servers import load_shared_servers
 
@@ -4626,11 +4618,16 @@ class ServonautTools:
                     load_shared_servers(team_service, teams),
                     self._refresh_team_rules(teams),
                 )
-                rows = found.rows
+                rows, read = found.rows, frozenset(found.read)
             except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
                 logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
-        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows)
+        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows, read)
         return [dict(row) for row in rows]
+
+    @property
+    def _shared_teams_read(self) -> frozenset:
+        """The teams whose servers the last :meth:`_shared_server_rows` read in full."""
+        return self._shared_memo[2] if self._shared_memo is not None else frozenset()
 
     async def _refresh_team_rules(self, teams: Any) -> List[Any]:
         """Fetch the agent rules of *teams*; nothing without a refresher."""

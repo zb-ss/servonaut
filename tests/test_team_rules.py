@@ -13,6 +13,7 @@ from servonaut.mcp.guards import CommandGuard
 from servonaut.services import team_rules
 from servonaut.services.team_rules import (
     DEFAULT_TEAM_RULES,
+    CredentialRulesMemo,
     TeamRules,
     credential_rules_row,
     credential_team_of,
@@ -536,3 +537,104 @@ class TestCredentialTeamOf:
 
     def test_a_runtime_without_the_check_has_none(self):
         assert asyncio.run(credential_team_of(_own_row(), object())) is None
+
+
+class _MemoClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def _runtime(*answers, unlocked=True):
+    runtime = MagicMock(spec=["credential_team", "is_unlocked", "binding_generation"])
+    runtime.credential_team = AsyncMock(side_effect=list(answers))
+    runtime.is_unlocked = unlocked
+    runtime.binding_generation = 0
+    return runtime
+
+
+class TestCredentialRulesMemo:
+    """Whose vault key an own server uses is remembered, except when that could mislead."""
+
+    @staticmethod
+    def _team_row(calls):
+        async def team_row(slug):
+            calls.append(slug)
+            return {"id": "", "is_shared": True, "team_slug": slug, "team_role": "member"}
+        return team_row
+
+    def test_an_answer_serves_later_calls_until_it_expires(self):
+        clock = _MemoClock()
+        memo = CredentialRulesMemo(ttl_seconds=60, clock=clock)
+        runtime, calls = _runtime("ops", "ops"), []
+
+        first = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+        again = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+        clock.now += 61
+        later = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+
+        assert first == again == later
+        assert first["team_slug"] == "ops"
+        assert runtime.credential_team.await_count == 2
+        assert calls == ["ops", "ops"]
+
+    def test_a_check_that_fails_is_not_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(RuntimeError("vault offline"), "ops")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_a_team_row_that_cannot_be_built_is_not_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops", "ops")
+
+        async def failing(slug):
+            raise RuntimeError("503")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(memo.rules_row(_own_row(), runtime, failing))
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is not None
+
+    def test_no_team_key_is_not_remembered_while_the_vault_is_locked(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(None, "ops", unlocked=False)
+
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+        runtime.is_unlocked = True
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_a_new_binding_checks_the_server_again(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(None, "ops")
+
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+        runtime.binding_generation = 1
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_clearing_forgets_every_answer(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops", None)
+
+        asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        memo.clear()
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+
+    def test_shared_servers_and_no_runtime_are_left_to_the_local_rules(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops")
+
+        assert asyncio.run(memo.rules_row(_shared(), runtime, self._team_row([]))) is None
+        assert asyncio.run(memo.rules_row(_own_row(), None, self._team_row([]))) is None
+        runtime.credential_team.assert_not_awaited()
+
+    def test_a_returned_row_cannot_change_what_is_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops")
+
+        row = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        row["team_role"] = "owner"
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_role"] == "member"
