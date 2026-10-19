@@ -89,6 +89,7 @@ async def _team_servers(team_service: Any, slug: str) -> List[Mapping[str, Any]]
 
 async def _rules_view(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     """The team's agent rules as :func:`agent_rules_view` data; None after saying why not."""
+    from servonaut.services.shared_servers import team_id_text
     from servonaut.services.team_policy import team_policy_store
     from servonaut.services.team_policy_refresh import TeamPolicyRefresher
     from servonaut.services.team_rules_view import agent_rules_view
@@ -111,7 +112,8 @@ async def _rules_view(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     refresher.load()
     await refresher.refresh([team])
     servers = await _team_servers(team_service, slug)
-    return agent_rules_view(slug, refresher.store.status(slug), servers, team.get("role"))
+    status = refresher.store.status(slug, team_id_text(team) or None)
+    return agent_rules_view(slug, status, servers, team.get("role"))
 
 
 def _print_view(view: Mapping[str, Any], as_json: bool) -> None:

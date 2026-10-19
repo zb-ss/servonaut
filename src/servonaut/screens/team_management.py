@@ -629,6 +629,7 @@ class TeamManagementScreen(Screen):
         Without the app's refresher (no team service) only the rules this
         device has are shown.
         """
+        from servonaut.services.shared_servers import team_id_text
         from servonaut.services.team_policy import team_policy_store
 
         refresher = getattr(self.app, "team_policy", None)
@@ -638,18 +639,21 @@ class TeamManagementScreen(Screen):
             redact = self.app.redaction_service.redact_name
             servers = [dict(server, name=redact(str(server.get("name") or ""))) for server in servers]
 
-        def show() -> None:
-            self._render_agent_rules(
-                agent_rules_view(slug, store.status(slug), servers, self._current_team_role),
-            )
-
-        show()
-        if refresher is None:
-            return
         row = dict(self._teams_by_slug.get(slug) or {})
         row.setdefault("slug", slug)
         if not row.get("id") and team.get("id"):
             row["id"] = team.get("id")
+        # By id: another team may have used this slug before a rename.
+        team_id = team_id_text(row) or None
+
+        def show() -> None:
+            self._render_agent_rules(agent_rules_view(
+                slug, store.status(slug, team_id), servers, self._current_team_role,
+            ))
+
+        show()
+        if refresher is None:
+            return
         # Never raises: a failed fetch shows as the readonly fallback.
         await refresher.refresh([row])
         show()

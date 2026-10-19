@@ -1623,6 +1623,23 @@ class TestAgentRulesCard:
         team_svc.get_team_policy_with_date.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_rules_of_a_team_that_used_the_slug_before_are_not_shown(self):
+        from tests._team_policy_fixtures import agent_rules_with, envelope, process_store, response
+
+        team_svc = self._team_service()
+        app = self._app(team_svc, refresher=False)
+        renamed = {"id": "team-id-renamed", "slug": "ops", "name": "Old Ops", "role": "member"}
+        process_store().apply_response(renamed, response(envelope(
+            "team-id-renamed", agent_rules_with(role_levels={"member": "dangerous"}),
+        )))
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            text = " ".join((await self._open(app, pilot)).split())
+
+        # The team opened is the team list's "ops", not the one saved under it.
+        assert "Member: dangerous" not in text
+        assert "have not been loaded yet" in text
+
+    @pytest.mark.asyncio
     async def test_the_card_is_hidden_until_a_team_is_opened(self):
         app = self._app(self._team_service())
         async with app.run_test(headless=True) as pilot:
