@@ -576,6 +576,9 @@ class TeamPolicyStore:
         problem = state.rejection
         if problem is None and policy is None:
             problem = state.fetch_problem or NOT_LOADED
+        if problem is None and policy.version < state.highest_version:
+            # This device accepted a newer copy whose rules are not here.
+            problem = REPLAYED
         if problem is None and policy.expired(self._clock() + state.clock_offset):
             problem = EXPIRED
         rules = TeamRules.readonly(problem.reason) if problem is not None else policy.rules
@@ -722,8 +725,10 @@ class TeamPolicyStore:
     def _absorb_disk(self) -> None:
         """Take in the state file's teams.
 
-        A team known here only by a failed fetch takes the saved copy whole;
-        for the others only a higher saved version counts (a replay check).
+        A team known here only by a failed fetch takes the saved copy whole.
+        For the others a newer valid copy another process saved replaces the
+        one held here (an answer refused here still stands), and a higher
+        saved version counts (a replay check).
         """
         origin = self._loaded_origin
         if origin is None:
@@ -738,10 +743,18 @@ class TeamPolicyStore:
                 and stored.policy is not None
             ):
                 self._remember(stored)
-            elif stored.highest_version > current.highest_version:
-                self._teams[team_id] = replace(
-                    current, highest_version=stored.highest_version,
+                continue
+            merged = current
+            if _is_newer_copy(stored, current):
+                merged = replace(
+                    merged, policy=stored.policy, clock_offset=stored.clock_offset,
+                    fetched_at=(
+                        stored.fetched_at if stored.fetched_at is not None else merged.fetched_at
+                    ),
                 )
+            if stored.highest_version > merged.highest_version:
+                merged = replace(merged, highest_version=stored.highest_version)
+            self._teams[team_id] = merged
 
     def _read_document(self) -> Dict[str, Any]:
         try:
@@ -778,12 +791,21 @@ class TeamPolicyStore:
             current = origins.get(origin)
             current = current if isinstance(current, dict) else {}
             for team_id, entry in entries.items():
-                current[team_id] = _newer_entry(current.get(team_id), entry)
+                current[team_id] = _newer_entry(
+                    current.get(team_id), entry, origin=origin, team_id=team_id,
+                )
             origins[origin] = current
             try:
                 write_json_atomic(self._path, {"format": _STATE_FORMAT, "origins": origins})
             except (OSError, TypeError) as exc:
                 logger.warning("Could not save the team agent rules to %s: %s", self._path, exc)
+
+
+def _is_newer_copy(stored: _TeamState, current: _TeamState) -> bool:
+    """Whether *stored* holds a valid copy newer than the one *current* holds."""
+    if stored.policy is None or stored.rejection is not None:
+        return False
+    return current.policy is None or stored.policy.version > current.policy.version
 
 
 def _next_try(policy: SignedPolicy, server_now: float) -> Optional[float]:
@@ -818,22 +840,37 @@ def _state_to_disk(state: _TeamState) -> Dict[str, Any]:
     }
 
 
-def _entry_rank(entry: Any) -> Tuple[int, float]:
+def _highest_saved(entry: Any) -> int:
+    version = entry.get("highest_version") if isinstance(entry, dict) else None
+    return version if _is_int(version) else -1
+
+
+def _entry_rank(entry: Any, origin: str, team_id: str) -> Tuple[int, float]:
+    """(signed version of the saved envelope, when it was fetched); -1 if it does not verify."""
     if not isinstance(entry, dict):
         return (-1, -math.inf)
-    version = entry.get("highest_version")
+    try:
+        version = verify_envelope(entry.get("envelope"), origin=origin, team_id=team_id).version
+    except PolicyRejected:
+        version = -1
     fetched = _number(entry.get("fetched_at"))
-    return (
-        version if _is_int(version) else -1,
-        fetched if fetched is not None else -math.inf,
+    return (version, fetched if fetched is not None else -math.inf)
+
+
+def _newer_entry(
+    on_disk: Any, ours: Dict[str, Any], *, origin: str, team_id: str,
+) -> Dict[str, Any]:
+    """The saved entry of one team with the newer envelope; the highest version is kept.
+
+    Envelopes are ranked by their signed version, then by when they were
+    fetched, so an older copy held here never replaces a newer one saved.
+    """
+    newer = (
+        on_disk if _entry_rank(on_disk, origin, team_id) > _entry_rank(ours, origin, team_id)
+        else ours
     )
-
-
-def _newer_entry(on_disk: Any, ours: Dict[str, Any]) -> Dict[str, Any]:
-    """The newer of two saved entries of one team; the highest version is kept."""
-    newer = on_disk if _entry_rank(on_disk) > _entry_rank(ours) else ours
     merged = dict(newer)
-    merged["highest_version"] = max(_entry_rank(on_disk)[0], _entry_rank(ours)[0])
+    merged["highest_version"] = max(_highest_saved(on_disk), _highest_saved(ours))
     return merged
 
 

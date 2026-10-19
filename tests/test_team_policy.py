@@ -793,6 +793,59 @@ class TestStateFile:
         assert status.problem is None
         assert status.version == 3
 
+    def test_a_newer_copy_another_process_saved_replaces_the_one_held_here(self, store, clock):
+        other = reopened(store, clock)
+        apply(store, signed(rules(role_levels={"member": "standard"}), version=5))
+        apply(other, signed(rules(role_levels={"member": "readonly"}), version=6))
+        offline = policy_service({"ops-team": ConnectionError("offline")})
+
+        status = run(store.refresh(offline, [team_row("ops-team")]))[0]
+
+        # Not the older, looser v5 this process held while the fetch failed.
+        assert status.problem is None
+        assert status.version == 6
+        assert status.rules.level_for("member") == "readonly"
+
+    def test_rules_older_than_a_version_this_device_accepted_are_not_used(self, store, clock):
+        apply(store, signed(version=5))
+        document = json.loads(store.state_path.read_text())
+        entry = document["origins"][PRODUCTION_ORIGIN][TEAM_ID]
+        # Another process accepted v7, but its copy here cannot be used.
+        entry["highest_version"] = 7
+        entry["envelope"]["signatures"] = []
+        store.state_path.write_text(json.dumps(document))
+        offline = policy_service({"ops-team": ConnectionError("offline")})
+
+        status = run(store.refresh(offline, [team_row("ops-team")]))[0]
+
+        assert status.problem == REPLAYED
+        assert status.rules.level_for("member") == "readonly"
+
+    def test_an_older_copy_never_replaces_a_newer_saved_one(self, store, clock):
+        older = {"slug": "ops-team", "highest_version": 6,
+                 "envelope": signed(version=5), "clock_offset": 0.0, "fetched_at": 200.0}
+        newer = {"slug": "ops-team", "highest_version": 6,
+                 "envelope": signed(version=6), "clock_offset": 0.0, "fetched_at": 100.0}
+
+        kept = team_policy._newer_entry(newer, older, origin=PRODUCTION_ORIGIN, team_id=TEAM_ID)
+
+        # Fetched later, but the older version: the saved v6 stays.
+        assert kept["envelope"] == newer["envelope"]
+        assert kept["highest_version"] == 6
+
+    def test_a_saved_copy_that_does_not_verify_never_wins(self, store, clock):
+        ours = {"slug": "ops-team", "highest_version": 2,
+                "envelope": signed(version=2), "clock_offset": 0.0, "fetched_at": 100.0}
+        forged = {"slug": "ops-team", "highest_version": 9,
+                  "envelope": {**signed(version=9), "signatures": []},
+                  "clock_offset": 0.0, "fetched_at": 300.0}
+
+        kept = team_policy._newer_entry(forged, ours, origin=PRODUCTION_ORIGIN, team_id=TEAM_ID)
+
+        assert kept["envelope"] == ours["envelope"]
+        # A higher version on disk still counts against replays.
+        assert kept["highest_version"] == 9
+
     def test_a_version_another_process_accepted_counts_on_refresh(self, store, clock):
         other = reopened(store, clock)
         apply(store, signed(version=1))
