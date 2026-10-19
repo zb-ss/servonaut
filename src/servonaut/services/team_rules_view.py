@@ -21,15 +21,24 @@ _JSON_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _utc_text(moment: Optional[datetime]) -> Optional[str]:
+    """*moment* as UTC text; None when there is none or it has no UTC form."""
     if moment is None:
         return None
-    return moment.astimezone(timezone.utc).strftime(_JSON_TIME_FORMAT)
+    try:
+        return moment.astimezone(timezone.utc).strftime(_JSON_TIME_FORMAT)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _epoch_text(epoch: Optional[float]) -> Optional[str]:
+    """*epoch* as UTC text; None when there is none or it is out of range (an edited file)."""
     if epoch is None:
         return None
-    return _utc_text(datetime.fromtimestamp(epoch, tz=timezone.utc))
+    try:
+        moment = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+    return _utc_text(moment)
 
 
 def _server_names(servers: Iterable[Mapping[str, Any]]) -> Dict[str, str]:

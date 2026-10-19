@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from servonaut.config.schema import MCPConfig
 from servonaut.services.team_policy import EXPIRED, NOT_LOADED, TeamPolicyStatus
@@ -117,3 +117,26 @@ class TestFallback:
             f"included, because {EXPIRED.reason}.",
             "Version 4 · last refreshed 2026-10-18 12:30 UTC",
         ]
+
+
+class TestTimesOutOfRange:
+    """An edited state file must not break the card or `servonaut team rules`."""
+
+    def _status(self, **changes):
+        status = trust_signed_team_rules("ops-team", version=3)
+        fields = {**status.__dict__, **changes}
+        return TeamPolicyStatus(**fields)
+
+    def test_a_fetch_time_no_date_can_hold_reads_as_not_fetched(self):
+        view = agent_rules_view("ops-team", self._status(fetched_at=1e20), SERVERS, "member")
+
+        assert view["last_refreshed"] is None
+        assert agent_rules_lines(view)[-1].startswith("Version 3 · not fetched yet")
+        json.dumps(view)
+
+    def test_an_expiry_with_no_utc_form_is_left_out(self):
+        moment = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1)))
+        view = agent_rules_view("ops-team", self._status(expires_at=moment), SERVERS, "member")
+
+        assert view["expires_at"] is None
+        assert " · valid until " not in agent_rules_lines(view)[-1]
