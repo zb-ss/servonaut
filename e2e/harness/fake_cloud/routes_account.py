@@ -12,7 +12,8 @@ served exactly as given, to the scenario's account only. *Managed teams*
 members: each member sees the team through their own role, and owners and
 admins invite (``POST …/members``), resend (``…/members/{id}/resend``),
 change roles (``PUT …/members/{id}``) and remove members (``DELETE``), as
-the CLI's ``TeamService`` calls them. Shared servers (``POST`` and ``DELETE
+the CLI's ``TeamService`` calls them (``join_team`` puts a user in one
+directly, for a journey's set-up). Shared servers (``POST`` and ``DELETE
 …/servers``), their SSH-verify results (``…/servers/{id}/ssh-verify-*``) and
 shared configs (``…/configs``) work for both kinds.
 """
@@ -167,6 +168,16 @@ class AccountData:
             number += 1
             slug = f"{base}-{number}"
         return slug
+
+    def join_team(self, slug: str, *, user_id: int, role: str, email: str,
+                  name: Optional[str] = None) -> None:
+        """*user_id* is an active member of managed team *slug* with *role* already.
+
+        A journey's set-up, for any user (the scenario's account too): no
+        invitation, no seat check.
+        """
+        with self._lock:
+            self._managed[slug].add_member(user_id, email, name or email.split("@")[0], role)
 
     def team_members(self, slug: str) -> Optional[list[dict[str, Any]]]:
         """The active members of managed team *slug*; None for a scenario row (or no team)."""
