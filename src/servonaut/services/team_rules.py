@@ -71,9 +71,18 @@ CREDENTIAL_MEMO_SECONDS = 60.0
 # relay's response) can still tell a team refusal apart.
 REFUSAL_PREFIX = "Blocked: on team "
 _UNNAMED_TEAM = "this team's"
+# A server of the user's own reached with a team's vault key is not one of
+# the team's shared servers: its refusals say which key brings it under them.
+_VIA_TEAM_KEY = "Blocked: on this server, which connects with a key from "
 _REFUSAL_PREFIXES: Tuple[str, ...] = (
-    REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared servers ",
+    REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared servers ", _VIA_TEAM_KEY,
 )
+# Why such a server runs at readonly when its key's team gives the user no
+# rules at all (the key stays the team's either way).
+_KEY_OF_A_TEAM_YOU_ARE_NOT_IN = (
+    "the vault key it connects with belongs to a team you are not a member of"
+)
+_KEY_OF_AN_UNNAMED_TEAM = "the team vault of the key it connects with names no team"
 # Who a refusal says runs under the rule.
 AGENTS = "your agents"
 # Plain words for the tools a team's level can take away entirely.
@@ -221,6 +230,9 @@ def rules_for(row: Mapping[str, Any]) -> TeamRules:
     # team_policy builds TeamRules, so it is imported here, not at the top.
     from servonaut.services.team_policy import team_policy_store
 
+    fallback = row.get("team_rules_fallback")
+    if isinstance(fallback, str) and fallback:
+        return TeamRules.readonly(fallback)
     slug, team_id = row.get("team_slug"), row.get("team_id")
     rules = team_policy_store().rules_for_team(
         slug if isinstance(slug, str) else "",
@@ -259,7 +271,9 @@ async def credential_rules_row(
     the strictest when the team shares it twice), else a row of that team
     without a server, which gets the team-wide level of the user's role.
     *shared_rows* are the shared rows the caller already holds; without them
-    the team's servers are read.
+    the team's servers are read. The row is marked ``via_team_key``; when
+    the team is not one of the user's (or the vault names none) it carries
+    the readonly fallback and why (``team_rules_fallback``).
 
     Raises:
         Exception: the team list or the team's servers could not be read;
@@ -272,8 +286,15 @@ async def credential_rules_row(
     )
     if team is None:
         # Not (or no longer) a member: no role, so the strictest level.
-        team = {"slug": team_slug}
-    elif shared_rows is None:
+        unknown = shared_row({"name": row.get("name") or ""}, {"slug": team_slug})
+        unknown.update(
+            via_team_key=True,
+            team_rules_fallback=(
+                _KEY_OF_A_TEAM_YOU_ARE_NOT_IN if team_slug else _KEY_OF_AN_UNNAMED_TEAM
+            ),
+        )
+        return unknown
+    if shared_rows is None:
         shared_rows = [
             shared_row(server, team)
             for server in await team_service.list_shared_servers(team_slug) or []
@@ -285,11 +306,14 @@ async def credential_rules_row(
         and is_same_server(shared, row)
     ]
     if same:
-        return min(same, key=lambda shared: _level_rank(
+        chosen = min(same, key=lambda shared: _level_rank(
             rules_for(shared).level_for(shared.get("team_role")),
         ))
-    # No server id: no team override can name it.
-    return shared_row({"name": row.get("name") or ""}, team)
+    else:
+        # No server id: no team override can name it.
+        chosen = shared_row({"name": row.get("name") or ""}, team)
+    chosen["via_team_key"] = True
+    return chosen
 
 
 def _vault_unlocked(vault_runtime: Any) -> bool:
@@ -401,6 +425,9 @@ class TeamGuard:
     team_patterns: Tuple[Any, ...] = ()
     # Commands the team allows that the local allowlist leaves out.
     locally_refused: Tuple[str, ...] = ()
+    # A server of the user's own that connects with a key from the team's
+    # vault, not one of the team's shared servers.
+    via_team_key: bool = False
     # Seconds checking one command against every team pattern may take.
     pattern_budget: float = field(
         default_factory=lambda: _pattern_budget(MCPConfig().team_pattern_timeout_ms),
@@ -533,12 +560,13 @@ class TeamGuard:
         return "set by the team"
 
     def _message(self, actor: str, what: str) -> str:
-        team = f"team {self.team}'s" if self.team else _UNNAMED_TEAM
-        setter = self._setter()
-        return (
-            f"Blocked: on {team} shared servers {actor} run at the "
-            f"{self.level} level ({setter}), and {what}."
-        )
+        if self.via_team_key:
+            vault = f"team {self.team}'s vault" if self.team else "a team's vault"
+            where = f"{_VIA_TEAM_KEY}{vault},"
+        else:
+            team = f"team {self.team}'s" if self.team else _UNNAMED_TEAM
+            where = f"Blocked: on {team} shared servers"
+        return f"{where} {actor} run at the {self.level} level ({self._setter()}), and {what}."
 
 
 def is_team_refusal(message: Any) -> bool:
@@ -590,6 +618,7 @@ def guard_for_target(
         fallback_reason=rules.fallback_reason,
         unusable_pattern=unusable[0] if unusable else "",
         team_patterns=() if unusable else tuple(regex.compile(p) for p in team_patterns),
+        via_team_key=row.get("via_team_key") is True,
         locally_refused=tuple(
             command for command in rules.command_allowlist if command not in local
         ),

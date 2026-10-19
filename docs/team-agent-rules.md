@@ -179,7 +179,9 @@ why:
   key keeps your own rules when an agent names it as your server. Named
   through the team (`ops/web-1`), the team's rules apply. If your own entry
   connects with a key from the team's vault, the team's rules apply to it as
-  well.
+  well, and its refusals say so ("on this server, which connects with a key
+  from team Ops's vault, ..."). If that team is not one of yours, agents run
+  at `readonly` there until the server uses another key.
 - **A modified Servonaut.** The rules are applied by the Servonaut on the
   member's machine. For Servonaut AI, servonaut.dev also checks each role's
   level before it sends a tool call to a member's machine, which holds even

@@ -249,6 +249,17 @@ class TestGuardForTarget:
         )
         assert is_team_refusal(refusal)
 
+    def test_an_own_server_reached_with_a_team_s_key_says_so(self):
+        row = {**_shared(), "via_team_key": True}
+        refusal = _guard(row).refusal("transfer_file")
+
+        assert refusal == (
+            "Blocked: on this server, which connects with a key from team Ops's "
+            "vault, your agents run at the standard level (set by the team), and "
+            "file transfers are not available there."
+        )
+        assert is_team_refusal(refusal)
+
     def test_other_blocked_messages_are_not_team_refusals(self):
         assert not is_team_refusal("Blocked: Command matches blocklist pattern: x")
         assert not is_team_refusal("Blocked: on hold")
@@ -545,6 +556,29 @@ class TestCredentialRules:
         assert row["team_role"] == ""
         assert _guard(row).level == "readonly"
         service.list_shared_servers.assert_not_awaited()
+
+    def test_every_row_says_the_server_is_reached_with_the_team_s_key(self):
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[{"id": "srv-1", "name": "web-1", "hostname": "web.example.com"}],
+        )
+        shared = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+        team_wide = asyncio.run(credential_rules_row(_own_row(public_ip="other.example.com"), "ops", service))
+
+        assert shared["via_team_key"] is True and shared["id"] == "srv-1"
+        assert team_wide["via_team_key"] is True and team_wide["id"] == ""
+
+    def test_a_team_the_user_is_not_in_falls_back_with_a_reason(self):
+        service = _teams({"slug": "dev", "name": "Dev", "role": "owner"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+        unnamed = asyncio.run(credential_rules_row(_own_row(), "", service))
+
+        assert team_rules.rules_for(row).fallback_reason == (
+            "the vault key it connects with belongs to a team you are not a member of"
+        )
+        assert team_rules.rules_for(unnamed).fallback_reason == (
+            "the team vault of the key it connects with names no team"
+        )
 
     def test_an_unreadable_team_list_is_raised_for_the_caller_to_refuse(self):
         service = _teams()

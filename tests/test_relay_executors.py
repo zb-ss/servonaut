@@ -1305,10 +1305,11 @@ class TestTeamKeyOnAnOwnServerOnRelay:
         # Without the check the own server ran it under the local dangerous level.
         assert response.status == "rejected"
         assert response.error_message == (
-            "Blocked: on team Ops's shared servers your agents run at the "
-            "readonly level (set by the team), and running commands is not "
-            "available there."
+            "Blocked: on this server, which connects with a key from team Ops's "
+            "vault, your agents run at the readonly level (set by the team), and "
+            "running commands is not available there."
         )
+        assert [call.args[4] for call in executor._audit.log.call_args_list] == ["team_rule"]
         executor._ssh_service.build_ssh_command.assert_not_called()
 
     def test_the_teams_server_override_applies_when_the_team_shares_it(self):

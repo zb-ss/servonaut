@@ -1893,11 +1893,34 @@ class TestTeamKeyOnAnOwnServer:
 
         # Without the check the own server ran it under the local dangerous level.
         assert result == (
-            "Blocked: on team Ops's shared servers your agents run at the readonly "
-            "level (set by the team), and running commands is not available there."
+            "Blocked: on this server, which connects with a key from team Ops's vault, "
+            "your agents run at the readonly level (set by the team), and running "
+            "commands is not available there."
         )
         tools._ssh_service.build_ssh_command.assert_not_called()
         assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_a_key_of_a_team_the_user_is_not_in_says_so(self):
+        tools = self._tools(_team_key_runtime(slug="old-team"))
+        result = run(tools.run_command("i-abc123", "uptime"))
+
+        # Not "the team's agent rules have not been loaded yet": they never will be.
+        assert result == (
+            "Blocked: on this server, which connects with a key from team old-team's "
+            "vault, your agents run at the readonly level (because the vault key it "
+            "connects with belongs to a team you are not a member of), and running "
+            "commands is not available there."
+        )
+
+    def test_a_key_of_a_team_vault_that_names_no_team_says_so(self):
+        tools = self._tools(_team_key_runtime(slug=""))
+        result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert result.startswith(
+            "Blocked: on this server, which connects with a key from a team's vault, "
+            "your agents run at the readonly level (because the team vault of the key "
+            "it connects with names no team)"
+        )
 
     def test_an_allowed_command_runs_as_the_team_guard_rendered_it(self):
         trust_signed_team_rules("ops")
