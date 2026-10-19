@@ -1739,6 +1739,16 @@ class TestTeamRulesOnSharedServers:
         assert "run at the readonly level (set by the team)" in result
         assert _audit_reasons(tools)[-1] == "team_rule"
 
+    def test_quoting_does_not_hide_a_command_from_a_team_pattern(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        trust_signed_team_rules("ops", agent_rules_with(command_blocklist=["/etc/shadow"]), version=2)
+        with _ssh_ok():
+            result = run(tools.run_command("ops/team-web-1", "cat /etc/sh'adow'"))
+
+        assert result.endswith("is refused there: it matches the blocked pattern /etc/shadow.")
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
     def test_a_team_pattern_too_slow_to_check_refuses_the_command(self):
         tools = _team_tools(level=GuardLevel.DANGEROUS)
         trust_signed_team_rules("ops", agent_rules_with(

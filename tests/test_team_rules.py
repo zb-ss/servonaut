@@ -234,6 +234,32 @@ class TestGuardForTarget:
         assert guard.guard.command_for_execution("ps aux | grep 'nginx'") == "ps aux | grep nginx"
 
 
+class TestTheCommandAsItRuns:
+    """At the standard level the command runs rebuilt from its words, quotes removed."""
+
+    def test_quoting_part_of_a_word_does_not_hide_it_from_a_team_pattern(self):
+        rules = TeamRules(command_blocklist=(*BUILTIN_BLOCKLIST, "/etc/shadow"))
+        guard = _guard(_shared(), rules=rules)
+
+        assert guard.guard.command_for_execution("cat /etc/sh'adow'") == "cat /etc/shadow"
+        assert guard.refusal("run_command", "cat /etc/sh'adow'") == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'cat /etc/sh'adow'' is refused there: it "
+            "matches the blocked pattern /etc/shadow."
+        )
+
+    def test_quoting_does_not_hide_it_from_a_local_pattern_either(self):
+        guard = _guard(_shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bshadow\b"])
+
+        assert guard.refusal("run_command", 'cat /etc/sha""dow').endswith(
+            "is refused there: it matches the blocked pattern \\bshadow\\b."
+        )
+
+    def test_a_quoted_command_that_matches_nothing_still_runs(self):
+        rules = TeamRules(command_blocklist=(*BUILTIN_BLOCKLIST, "/etc/shadow"))
+        assert _guard(_shared(), rules=rules).refusal("run_command", "grep 'a b' /etc/hosts") is None
+
+
 class TestFromLocalGuard:
     def test_the_local_guard_is_read_not_changed(self):
         config = MCPConfig(guard_level="dangerous", command_allowlist=[*BUILTIN_ALLOWLIST, "systemctl"])

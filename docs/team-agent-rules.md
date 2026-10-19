@@ -60,7 +60,8 @@ Blocked patterns are regular expressions in Python's
 [`regex`](https://pypi.org/project/regex/) syntax, which also reads common
 PCRE forms such as `\h` and `\p{L}`. Each is searched for anywhere in the
 command, for example `\.env\b` to keep agents away from applications' `.env`
-files. They are added to Servonaut's built-in blocklist (`rm -rf`,
+files. At the `standard` level the command is also checked as it will run,
+with its quotes removed, so `cat .e'nv'` is refused like `cat .env`. They are added to Servonaut's built-in blocklist (`rm -rf`,
 `shutdown`, `dd`, ...), which always applies, and to the member's own blocked
 patterns. They apply at every level, `dangerous` included.
 

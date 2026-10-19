@@ -354,36 +354,48 @@ class TeamGuard:
         return self._message(actor, what)
 
     def _command_refusal(self, command: str) -> Optional[str]:
-        """Why *command* may not run here, worded for a refusal; None if it may."""
+        """Why *command* may not run here, worded for a refusal; None if it may.
+
+        At the standard level the command runs as the guard rebuilds it
+        from its words, without their quotes, so that form is checked as
+        well: quoting part of a word cannot hide it from a blocked pattern.
+        """
         shown = _reported(command)
+        forms = [command]
         allowed, reason = self.guard.check_command(command)
+        if allowed:
+            executed = self.guard.command_for_execution(command)
+            if executed != command:
+                forms.append(executed)
+                allowed, reason = self.guard.check_command(executed)
         if not allowed:
             if _NOT_ALLOWLISTED in reason:
                 return f"'{shown}' is not an allowed command there"
             return f"'{shown}' is refused there: {_command_reason(reason)}"
-        reason = self._team_pattern_reason(command)
+        reason = self._team_pattern_reason(forms)
         return f"'{shown}' is refused there: {reason}" if reason else None
 
-    def _team_pattern_reason(self, command: str) -> str:
-        """Why the team's patterns refuse *command*; '' when none does.
+    def _team_pattern_reason(self, forms: Iterable[str]) -> str:
+        """Why the team's patterns refuse a command (its *forms*); '' if none does.
 
-        One time budget covers every pattern: a pattern that is still
-        searching when it runs out refuses the command.
+        One time budget covers every pattern and form: a pattern that is
+        still searching when it runs out refuses the command.
         """
         deadline = time.monotonic() + self.pattern_budget
-        for pattern in self.team_patterns:
-            remaining = deadline - time.monotonic()
-            try:
-                if remaining <= 0:
-                    raise TimeoutError
-                matched = pattern.search(command, timeout=remaining)
-            except TimeoutError:
-                return (
-                    f"the team's blocked pattern '{_reported(pattern.pattern)}' takes too "
-                    "long to check (a team owner or admin can change it)"
-                )
-            if matched:
-                return f"it matches the blocked pattern {pattern.pattern}"
+        for form in forms:
+            for pattern in self.team_patterns:
+                remaining = deadline - time.monotonic()
+                try:
+                    if remaining <= 0:
+                        raise TimeoutError
+                    matched = pattern.search(form, timeout=remaining)
+                except TimeoutError:
+                    return (
+                        f"the team's blocked pattern '{_reported(pattern.pattern)}' takes "
+                        "too long to check (a team owner or admin can change it)"
+                    )
+                if matched:
+                    return f"it matches the blocked pattern {pattern.pattern}"
         return ""
 
     def describe_level(self) -> str:

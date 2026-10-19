@@ -983,6 +983,25 @@ class TestTeamRulesOnRelay:
         remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
         assert remote == "ps aux | grep nginx"
 
+    def test_quoting_does_not_hide_a_command_from_a_team_pattern(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "standard", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": ["/etc/shadow"],
+        }, version=2)
+        executor = self._executor(level="dangerous")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="srv-1", payload={"command": "cat /etc/sh'adow'"},
+            )))
+
+        assert response.status == "rejected"
+        assert response.error_message.endswith(
+            "is refused there: it matches the blocked pattern /etc/shadow."
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+        assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
+
     def test_a_team_pattern_too_slow_to_check_refuses_the_command(self):
         trust_signed_team_rules("ops", {
             "role_levels": {"owner": "standard", "admin": "standard",
