@@ -467,6 +467,7 @@ class RelayExecutors:
         mcp = self._config_manager.get().mcp
         return guard_for_target(
             instance, mcp.guard_level, mcp.command_allowlist, mcp.command_blocklist,
+            pattern_timeout_ms=getattr(mcp, 'team_pattern_timeout_ms', None),
         )
 
     async def _agent_team_guard(

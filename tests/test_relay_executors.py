@@ -983,6 +983,27 @@ class TestTeamRulesOnRelay:
         remote = executor._ssh_service.build_ssh_command.call_args.kwargs["remote_command"]
         assert remote == "ps aux | grep nginx"
 
+    def test_a_team_pattern_too_slow_to_check_refuses_the_command(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "dangerous", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": [r"^(a|aa)+$"],
+        }, version=2)
+        executor = self._executor(level="dangerous")
+        executor._config_manager.get.return_value.mcp.team_pattern_timeout_ms = 20
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="srv-1", payload={"command": "a" * 60 + "b"},
+            )))
+
+        assert response.status == "rejected"
+        assert response.error_message.endswith(
+            "the team's blocked pattern '^(a|aa)+$' takes too long to check "
+            "(a team owner or admin can change it)."
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+        assert self._audit_rows(executor) == [("run_command", "team_rule", "relay")]
+
     def test_a_local_allowlist_addition_does_not_apply(self):
         allowlist = [*MCPConfig().command_allowlist, "systemctl"]
         executor = self._executor(level="standard", allowlist=allowlist)

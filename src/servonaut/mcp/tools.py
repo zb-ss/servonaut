@@ -703,7 +703,11 @@ class ServonautTools:
         """The guard agents run under on *instance*: None unless a team shares it."""
         if not self._apply_team_rules:
             return None
-        return guard_for_target_from(instance, self._guard)
+        mcp = getattr(self._config_manager.get(), 'mcp', None)
+        return guard_for_target_from(
+            instance, self._guard,
+            pattern_timeout_ms=getattr(mcp, 'team_pattern_timeout_ms', None),
+        )
 
     async def _agent_team_guard(
         self, tool_name: str, args: Dict[str, Any], instance: Dict,

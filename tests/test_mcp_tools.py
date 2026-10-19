@@ -1739,6 +1739,29 @@ class TestTeamRulesOnSharedServers:
         assert "run at the readonly level (set by the team)" in result
         assert _audit_reasons(tools)[-1] == "team_rule"
 
+    def test_a_team_pattern_too_slow_to_check_refuses_the_command(self):
+        tools = _team_tools(level=GuardLevel.DANGEROUS)
+        trust_signed_team_rules("ops", agent_rules_with(
+            role_levels={"member": "dangerous"}, command_blocklist=[r"^(a|aa)+$"],
+        ), version=2)
+        tools._config_manager.get.return_value.mcp.team_pattern_timeout_ms = 20
+        with _ssh_ok():
+            result = run(tools.run_command("ops/team-web-1", "a" * 60 + "b"))
+
+        assert result.endswith(
+            "the team's blocked pattern '^(a|aa)+$' takes too long to check "
+            "(a team owner or admin can change it)."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+        assert _audit_reasons(tools)[-1] == "team_rule"
+
+    def test_the_configured_pattern_time_limit_applies(self):
+        tools = _team_tools()
+        tools._config_manager.get.return_value.mcp.team_pattern_timeout_ms = 7
+        row = {"id": "srv-1", "is_shared": True, "team_slug": "ops", "team_role": "member"}
+
+        assert tools._team_guard(row).pattern_budget == pytest.approx(0.007)
+
     def test_a_person_scanning_in_the_tui_is_not_held_to_team_rules(self):
         tools = _team_tools(role="viewer", level=GuardLevel.STANDARD)
         tools._scan_db_and_stage = AsyncMock(return_value=([], None))

@@ -1045,8 +1045,8 @@ class TestTeamGuardOnSignedRules:
         # The guard itself refuses too, whoever asks it.
         assert guard.guard.check_command("uptime")[0] is False
 
-    @pytest.mark.parametrize("pattern", ["a{99999999999}", "(" * 5000 + ")" * 5000, "(?<=a+)b"])
-    def test_any_pattern_python_cannot_compile_is_unusable(self, pattern):
+    @pytest.mark.parametrize("pattern", ["a{99999999999}", "(" * 5000 + ")" * 5000, "[z-a]"])
+    def test_any_pattern_servonaut_cannot_compile_is_unusable(self, pattern):
         trust_signed_team_rules("ops-team", rules(command_blocklist=[pattern]))
         assert team_guard().refusal("run_command", "uptime").startswith(
             "Blocked: on team Ops's shared servers"

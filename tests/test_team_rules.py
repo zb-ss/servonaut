@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard
+from servonaut.services import team_rules
 from servonaut.services.team_rules import (
     DEFAULT_TEAM_RULES,
     TeamRules,
@@ -246,6 +249,141 @@ class TestFromLocalGuard:
     def test_own_servers_keep_the_local_guard(self):
         local = CommandGuard(MCPConfig(guard_level="dangerous"))
         assert guard_for_target_from({"id": "i-1"}, local) is None
+
+    def test_the_pattern_time_limit_is_passed_on(self):
+        local = CommandGuard(MCPConfig(guard_level="dangerous"))
+        team = guard_for_target_from(_shared(), local, pattern_timeout_ms=7)
+        assert team.pattern_budget == pytest.approx(0.007)
+
+
+def _dangerous_rules(*patterns):
+    """Members at dangerous, so only the blocked patterns decide."""
+    return TeamRules(
+        role_levels={"member": "dangerous"},
+        command_blocklist=(*BUILTIN_BLOCKLIST, *patterns),
+    )
+
+
+def _timed_guard(*patterns, timeout_ms=50):
+    return guard_for_target(
+        _shared(), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
+        _dangerous_rules(*patterns), pattern_timeout_ms=timeout_ms,
+    )
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+class _SlowPattern:
+    """A compiled pattern that takes *cost* seconds on any command, by *clock*.
+
+    It stops at its timeout, as ``regex`` does, unless *overruns*: ``regex``
+    looks at the clock only now and then, so a search can end a little late.
+    """
+
+    def __init__(self, name, cost, clock, overruns=False):
+        self.pattern = name
+        self._cost = cost
+        self._clock = clock
+        self._overruns = overruns
+        self.timeouts = []
+
+    def search(self, command, timeout=None):
+        self.timeouts.append(timeout)
+        if timeout < self._cost and not self._overruns:
+            self._clock.now += timeout
+            raise TimeoutError("regex timed out")
+        self._clock.now += self._cost
+        return None
+
+
+class TestTeamPatternTimeLimit:
+    """A team's blocked patterns cannot hang the tools that check them."""
+
+    def test_a_catastrophic_pattern_is_refused_within_the_time_limit(self):
+        guard = _timed_guard(r"^(a|aa)+$")
+        command = "a" * 60 + "b"
+        started = time.monotonic()
+        refusal = guard.refusal("run_command", command)
+        elapsed = time.monotonic() - started
+
+        # Without a limit this one search outlasts the suite's 60 s timeout.
+        assert elapsed < 1.0
+        assert refusal == (
+            "Blocked: on team Ops's shared servers your agents run at the dangerous "
+            f"level (set by the team), and '{command}' is refused there: the team's "
+            "blocked pattern '^(a|aa)+$' takes too long to check (a team owner or "
+            "admin can change it)."
+        )
+
+    def test_one_time_limit_covers_all_of_the_team_s_patterns(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(team_rules, "time", clock)
+        first, second, third = (_SlowPattern(name, 0.03, clock) for name in ("p1", "p2", "p3"))
+        guard = replace(_timed_guard(), team_patterns=(first, second, third))
+
+        refusal = guard.refusal("run_command", "uptime")
+
+        assert first.timeouts == [pytest.approx(0.05)]
+        # The second gets what the first left, not a budget of its own.
+        assert second.timeouts == [pytest.approx(0.02)]
+        assert third.timeouts == []
+        assert "the team's blocked pattern 'p2' takes too long to check" in refusal
+
+    def test_a_used_up_budget_refuses_without_searching_again(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(team_rules, "time", clock)
+        first = _SlowPattern("p1", 0.06, clock, overruns=True)
+        second = _SlowPattern("p2", 0.0, clock)
+        guard = replace(_timed_guard(), team_patterns=(first, second))
+
+        refusal = guard.refusal("run_command", "uptime")
+
+        assert second.timeouts == []
+        assert "the team's blocked pattern 'p2' takes too long to check" in refusal
+
+    def test_patterns_that_do_not_match_let_the_command_run(self):
+        guard = _timed_guard(r"^(a|aa)+$", r"\.env\b")
+        assert guard.refusal("run_command", "uptime") is None
+        assert guard.refusal("run_command", "aaaa").endswith(
+            "it matches the blocked pattern ^(a|aa)+$."
+        )
+
+    def test_pcre_forms_python_s_re_cannot_read_are_used(self):
+        rules = _dangerous_rules(r"\h--force\b", r"\p{Lu}{3}_TOKEN")
+        assert rules.unusable_pattern() == ""
+        guard = _guard(_shared(), rules=rules)
+        assert guard.refusal("run_command", "git push\t--force").endswith(
+            "it matches the blocked pattern \\h--force\\b."
+        )
+        assert guard.refusal("run_command", "echo $API_TOKEN") is not None
+        assert guard.refusal("run_command", "git push origin main") is None
+
+    @pytest.mark.parametrize("pattern", ["x(", "[z-a]", "a{99999999999}", "(" * 5000 + ")" * 5000])
+    def test_a_pattern_regex_cannot_compile_still_refuses_every_command(self, pattern):
+        guard = _guard(_shared(), rules=_dangerous_rules(pattern))
+        assert "Servonaut cannot use the team's blocked pattern" in guard.refusal(
+            "run_command", "uptime",
+        )
+        assert guard.guard.check_command("uptime")[0] is False
+
+    @pytest.mark.parametrize("timeout_ms", [None, 0, -5, "100", float("nan"), True])
+    def test_a_time_limit_that_is_not_a_positive_number_is_the_default(self, timeout_ms):
+        guard = _timed_guard(timeout_ms=timeout_ms)
+        assert guard.pattern_budget == MCPConfig().team_pattern_timeout_ms / 1000
+
+    def test_servonaut_s_own_and_local_patterns_stay_on_the_guard(self):
+        guard = _guard(
+            _shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bcurl\b"],
+            rules=_dangerous_rules(r"\.env\b"),
+        )
+        assert guard.guard.blocklist == [*BUILTIN_BLOCKLIST, r"\bcurl\b"]
+        assert [pattern.pattern for pattern in guard.team_patterns] == [r"\.env\b"]
 
 
 def test_only_team_refusals_are_recognised():

@@ -912,6 +912,11 @@ class MCPConfig:
     # its own, so this cap does not limit how many boxes it can cover.
     db_staging_ttl_seconds: int = 900
     db_staging_max_tokens: int = 50
+    # On a team's shared servers, how long (in milliseconds, for all of the
+    # team's blocked patterns together) checking one command may take. A
+    # command that takes longer is refused, so a slow pattern cannot hang the
+    # tools; raising this never lets a command through that a pattern blocks.
+    team_pattern_timeout_ms: int = 100
 
 
 @dataclass

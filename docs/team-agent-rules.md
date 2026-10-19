@@ -56,17 +56,25 @@ settings, or `mcp.command_allowlist` in `~/.servonaut/config.json`).
 
 ### Blocked patterns
 
-Blocked patterns are regular expressions (Python syntax), each searched for
-anywhere in the command as written, for example `\.env\b` to keep agents away
-from applications' `.env` files. They are added to Servonaut's built-in
-blocklist (`rm -rf`, `shutdown`, `dd`, ...), which always applies, and to the
-member's own blocked patterns. They apply at every level, `dangerous`
-included.
+Blocked patterns are regular expressions in Python's
+[`regex`](https://pypi.org/project/regex/) syntax, which also reads common
+PCRE forms such as `\h` and `\p{L}`. Each is searched for anywhere in the
+command, for example `\.env\b` to keep agents away from applications' `.env`
+files. They are added to Servonaut's built-in blocklist (`rm -rf`,
+`shutdown`, `dd`, ...), which always applies, and to the member's own blocked
+patterns. They apply at every level, `dangerous` included.
 
 If Servonaut cannot use one of the team's patterns, it runs no command at all
 on the team's servers until an owner or admin changes the pattern. Other tools
 keep their level. The Teams screen and `servonaut team rules` name the
 pattern.
+
+Checking a command against all of the team's patterns may take at most
+`mcp.team_pattern_timeout_ms` (100 milliseconds unless the member changes it).
+A command that a pattern takes longer to check is refused, and the refusal
+names the pattern, so a slow pattern cannot hang a member's agents. Keep
+patterns simple: a pattern that can backtrack a lot (such as `(a|aa)+$`)
+refuses ordinary commands.
 
 ## What members see
 

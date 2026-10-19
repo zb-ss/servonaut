@@ -14,7 +14,10 @@ settings can only tighten it, never loosen it:
   refused.
 - The built-in blocklist always applies, and so do the patterns the team
   and the local blocklist add. A team pattern Servonaut cannot use refuses
-  every command on that team's servers.
+  every command on that team's servers. The team's patterns are searched
+  with the ``regex`` module under one time limit per command
+  (``mcp.team_pattern_timeout_ms``): a command they take longer to check is
+  refused, so a slow pattern cannot hang the tools.
 
 The user's own servers keep their local rules, and nothing here applies to
 what a person sends: commands typed in the TUI, with ``servonaut ssh`` or in
@@ -31,10 +34,13 @@ for every role, and refusals say why.
 from __future__ import annotations
 
 import inspect
-import re
+import math
+import time
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+
+import regex
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard, GuardLevel
@@ -77,6 +83,8 @@ _REPORTED_COMMAND_LIMIT = 64
 # compile: the empty pattern matches every command, so the guard itself
 # refuses them all as well as the refusal message saying so.
 _MATCH_EVERY_COMMAND = ""
+# What compiling a team's pattern can raise; any of them makes it unusable.
+_PATTERN_ERRORS = (regex.error, TypeError, ValueError, OverflowError, RecursionError)
 
 
 def _level_rank(level: Any) -> int:
@@ -95,6 +103,17 @@ def _builtin_allowlist() -> Tuple[str, ...]:
 
 def _builtin_blocklist() -> Tuple[str, ...]:
     return tuple(MCPConfig().command_blocklist)
+
+
+def _pattern_budget(timeout_ms: Any) -> float:
+    """*timeout_ms* (``mcp.team_pattern_timeout_ms``) in seconds; the default
+    when it is not a positive number."""
+    if (
+        isinstance(timeout_ms, bool) or not isinstance(timeout_ms, (int, float))
+        or not math.isfinite(timeout_ms) or timeout_ms <= 0
+    ):
+        timeout_ms = MCPConfig().team_pattern_timeout_ms
+    return timeout_ms / 1000
 
 
 @dataclass(frozen=True)
@@ -161,11 +180,12 @@ def _role_key(role: Any) -> str:
 
 
 def _unusable_patterns(patterns: Iterable[str]) -> List[str]:
+    """The patterns of *patterns* that ``regex`` cannot compile."""
     unusable = []
     for pattern in patterns:
         try:
-            re.compile(pattern)
-        except (re.error, TypeError, ValueError, OverflowError, RecursionError):
+            regex.compile(pattern)
+        except _PATTERN_ERRORS:
             unusable.append(pattern)
     return unusable
 
@@ -278,7 +298,12 @@ def _reported(command: str) -> str:
 
 @dataclass(frozen=True)
 class TeamGuard:
-    """The guard an agent runs under on one team shared server."""
+    """The guard an agent runs under on one team shared server.
+
+    ``guard`` holds the level, the allowlist and Servonaut's own and the
+    local blocked patterns; the team's own patterns are searched here, with
+    a time limit (see :meth:`refusal`).
+    """
 
     guard: CommandGuard
     level: str
@@ -288,6 +313,12 @@ class TeamGuard:
     fallback_reason: str = ""
     # A team blocklist pattern Servonaut cannot use: every command is refused.
     unusable_pattern: str = ""
+    # The patterns the team adds, compiled with ``regex``.
+    team_patterns: Tuple[Any, ...] = ()
+    # Seconds checking one command against every team pattern may take.
+    pattern_budget: float = field(
+        default_factory=lambda: _pattern_budget(MCPConfig().team_pattern_timeout_ms),
+    )
 
     def refusal(
         self, tool_name: str, command: Optional[str] = None,
@@ -300,6 +331,9 @@ class TeamGuard:
         the words the requester wrote: the message then names that instead
         of the command. *actor* says who runs under the rule on this
         surface.
+
+        The team's patterns are searched in at most :attr:`pattern_budget`
+        seconds for the whole command; one that takes longer refuses it.
         """
         allowed, _ = self.guard.check_tool(tool_name)
         if not allowed:
@@ -312,15 +346,45 @@ class TeamGuard:
             return None
         if self.unusable_pattern:
             return self._message(actor, self._unusable_pattern_refusal(requested_as))
-        allowed, reason = self.guard.check_command(command)
-        if allowed:
+        what = self._command_refusal(command)
+        if what is None:
             return None
         if requested_as:
             return self._message(actor, f"{requested_as} is not allowed there")
+        return self._message(actor, what)
+
+    def _command_refusal(self, command: str) -> Optional[str]:
+        """Why *command* may not run here, worded for a refusal; None if it may."""
         shown = _reported(command)
-        if _NOT_ALLOWLISTED in reason:
-            return self._message(actor, f"'{shown}' is not an allowed command there")
-        return self._message(actor, f"'{shown}' is refused there: {_command_reason(reason)}")
+        allowed, reason = self.guard.check_command(command)
+        if not allowed:
+            if _NOT_ALLOWLISTED in reason:
+                return f"'{shown}' is not an allowed command there"
+            return f"'{shown}' is refused there: {_command_reason(reason)}"
+        reason = self._team_pattern_reason(command)
+        return f"'{shown}' is refused there: {reason}" if reason else None
+
+    def _team_pattern_reason(self, command: str) -> str:
+        """Why the team's patterns refuse *command*; '' when none does.
+
+        One time budget covers every pattern: a pattern that is still
+        searching when it runs out refuses the command.
+        """
+        deadline = time.monotonic() + self.pattern_budget
+        for pattern in self.team_patterns:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise TimeoutError
+                matched = pattern.search(command, timeout=remaining)
+            except TimeoutError:
+                return (
+                    f"the team's blocked pattern '{_reported(pattern.pattern)}' takes too "
+                    "long to check (a team owner or admin can change it)"
+                )
+            if matched:
+                return f"it matches the blocked pattern {pattern.pattern}"
+        return ""
 
     def describe_level(self) -> str:
         """The level agents run at here and who set it, e.g. ``standard (set by the team)``."""
@@ -370,6 +434,8 @@ def guard_for_target(
     local_allowlist: Iterable[str],
     local_blocklist: Iterable[str],
     rules: Optional[TeamRules] = None,
+    *,
+    pattern_timeout_ms: Any = None,
 ) -> Optional[TeamGuard]:
     """The guard an agent runs under on *row*; None for the user's own server.
 
@@ -378,7 +444,9 @@ def guard_for_target(
     The allowlist is the team's, less anything the local allowlist leaves
     out; the blocklist is the team's plus the local patterns. A team pattern
     that does not compile refuses every command instead of breaking the
-    guard. The local settings are read, never changed.
+    guard. *pattern_timeout_ms* (``mcp.team_pattern_timeout_ms``) limits how
+    long the team's patterns may take on one command. The local settings are
+    read, never changed.
     """
     if not is_shared_row(row):
         return None
@@ -386,8 +454,12 @@ def guard_for_target(
     team_level = rules.level_for_server(row.get("id"), row.get("team_role"))
     local = set(local_allowlist)
     allowlist = [command for command in rules.command_allowlist if command in local]
-    unusable = _unusable_patterns(rules.command_blocklist)
-    blocklist = [pattern for pattern in rules.command_blocklist if pattern not in unusable]
+    # Servonaut's own patterns stay on the guard; the team's are searched
+    # with a time limit (TeamGuard.refusal).
+    builtin = set(_builtin_blocklist())
+    blocklist = [pattern for pattern in rules.command_blocklist if pattern in builtin]
+    team_patterns = [pattern for pattern in rules.command_blocklist if pattern not in builtin]
+    unusable = _unusable_patterns(team_patterns)
     if unusable:
         blocklist.append(_MATCH_EVERY_COMMAND)
     blocklist += [pattern for pattern in local_blocklist if pattern not in blocklist]
@@ -399,15 +471,19 @@ def guard_for_target(
         guard=guard, level=level, team_level=team_level, team=_team_label(row),
         fallback_reason=rules.fallback_reason,
         unusable_pattern=unusable[0] if unusable else "",
+        team_patterns=() if unusable else tuple(regex.compile(p) for p in team_patterns),
+        pattern_budget=_pattern_budget(pattern_timeout_ms),
     )
 
 
 def guard_for_target_from(
     row: Mapping[str, Any], local_guard: CommandGuard, rules: Optional[TeamRules] = None,
+    *, pattern_timeout_ms: Any = None,
 ) -> Optional[TeamGuard]:
     """:func:`guard_for_target` with the local settings of *local_guard*."""
     if not is_shared_row(row):
         return None
     return guard_for_target(
         row, local_guard.level, local_guard.allowlist, local_guard.blocklist, rules,
+        pattern_timeout_ms=pattern_timeout_ms,
     )
