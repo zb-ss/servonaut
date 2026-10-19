@@ -54,9 +54,11 @@ _CHANGE_SECONDS = 15.0
 _POLL_SECONDS = 0.1
 
 
-def _blocked(level: str, setter: str, what: str) -> str:
+def _blocked(level: str, setter: str, what: str, server: str = "") -> str:
+    """A team refusal; *server* when the team set the level for that server alone."""
+    where = f"shared server {server}" if server else "shared servers"
     return (
-        f"Blocked: on team Ops's shared servers your agents run at the {level} level "
+        f"Blocked: on team Ops's {where} your agents run at the {level} level "
         f"({setter}), and {what}."
     )
 
@@ -134,7 +136,8 @@ async def test_an_admin_tightening_the_rules_reaches_a_running_agent(
         )
         refused = await session.call("run_command", uptime)
 
-    assert refused == _blocked("readonly", "set by the team", NO_COMMANDS)
+    # The override holds on server-1 alone, so the refusal names it.
+    assert refused == _blocked("readonly", "set by the team", NO_COMMANDS, server="server-1")
     assert len(journey.shims.calls("ssh")) == 1
     # The same process fetched the new version on its own schedule.
     assert {"version": version, "serving": served.SIGNED, "status": 200} in fake_cloud.agent_rules.served(SLUG)

@@ -38,7 +38,9 @@ import math
 import time
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import (
+    Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple,
+)
 
 import regex
 
@@ -74,8 +76,10 @@ _UNNAMED_TEAM = "this team's"
 # A server of the user's own reached with a team's vault key is not one of
 # the team's shared servers: its refusals say which key brings it under them.
 _VIA_TEAM_KEY = "Blocked: on this server, which connects with a key from "
+# "shared server" also starts "shared servers": one prefix for a refusal
+# that names the server and one that speaks of all of them.
 _REFUSAL_PREFIXES: Tuple[str, ...] = (
-    REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared servers ", _VIA_TEAM_KEY,
+    REFUSAL_PREFIX, f"Blocked: on {_UNNAMED_TEAM} shared server", _VIA_TEAM_KEY,
 )
 # Why such a server runs at readonly when its key's team gives the user no
 # rules at all (the key stays the team's either way).
@@ -165,6 +169,8 @@ class TeamRules:
     # Why these are the readonly rules a team falls back to, in plain words
     # that follow "because"; empty for rules the team set.
     fallback_reason: str = ""
+    # The roles whose level one server's override set (see for_server).
+    server_override_roles: FrozenSet[str] = frozenset()
 
     @classmethod
     def readonly(cls, reason: str) -> "TeamRules":
@@ -187,14 +193,22 @@ class TeamRules:
             return override[key]
         return self.level_for(role)
 
+    def sets_server_level(self, server_id: Any, role: Any) -> bool:
+        """Whether *role*'s level on *server_id* is that server's own, not the team-wide one."""
+        key = _role_key(role)
+        override = self.servers.get(str(server_id or ""))
+        return key in self.server_override_roles or (override is not None and key in override)
+
     def for_server(self, server_id: Any) -> "TeamRules":
         """These rules with the override of *server_id* applied team-wide."""
         if not self.servers:
             return self
+        override = self.servers.get(str(server_id or "")) or {}
         role_levels = dict(self.role_levels)
-        role_levels.update(self.servers.get(str(server_id or "")) or {})
+        role_levels.update(override)
         return replace(
             self, role_levels=MappingProxyType(role_levels), servers=MappingProxyType({}),
+            server_override_roles=frozenset(override),
         )
 
     def unusable_pattern(self) -> str:
@@ -428,6 +442,9 @@ class TeamGuard:
     # A server of the user's own that connects with a key from the team's
     # vault, not one of the team's shared servers.
     via_team_key: bool = False
+    # The server's name when the team sets the caller's level for it alone,
+    # so a refusal does not speak for the team's other servers; '' otherwise.
+    server: str = ""
     # Seconds checking one command against every team pattern may take.
     pattern_budget: float = field(
         default_factory=lambda: _pattern_budget(MCPConfig().team_pattern_timeout_ms),
@@ -565,7 +582,8 @@ class TeamGuard:
             where = f"{_VIA_TEAM_KEY}{vault},"
         else:
             team = f"team {self.team}'s" if self.team else _UNNAMED_TEAM
-            where = f"Blocked: on {team} shared servers"
+            servers = f"shared server {self.server}" if self.server else "shared servers"
+            where = f"Blocked: on {team} {servers}"
         return f"{where} {actor} run at the {self.level} level ({self._setter()}), and {what}."
 
 
@@ -619,6 +637,10 @@ def guard_for_target(
         unusable_pattern=unusable[0] if unusable else "",
         team_patterns=() if unusable else tuple(regex.compile(p) for p in team_patterns),
         via_team_key=row.get("via_team_key") is True,
+        server=(
+            str(row.get("name") or "")
+            if rules.sets_server_level(row.get("id"), row.get("team_role")) else ""
+        ),
         locally_refused=tuple(
             command for command in rules.command_allowlist if command not in local
         ),

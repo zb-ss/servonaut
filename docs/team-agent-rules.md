@@ -98,6 +98,9 @@ refuses ordinary commands.
   > level (set by the team), and 'cat /srv/app/.env' is refused there: it
   > matches the blocked pattern \.env\b.
 
+  When a per-server level decided it, the refusal names that server instead
+  ("on team Ops's shared server web-1 your agents run at …").
+
   The MCP audit log (`~/.servonaut/mcp_audit.jsonl`) records every refusal
   with the reason `team_rule`.
 

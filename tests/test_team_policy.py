@@ -1077,9 +1077,34 @@ class TestRulesForRows:
             shared_row(server_id="srv-2"), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
         )
         assert guard.level == "readonly"
-        assert guard.refusal("run_command", "uptime").endswith(
-            "(set by the team), and running commands is not available there."
+        # The override holds on this server only, so the refusal names it.
+        assert guard.refusal("run_command", "uptime") == (
+            "Blocked: on team Ops's shared server web-1 your agents run at the readonly "
+            "level (set by the team), and running commands is not available there."
         )
+
+    def test_a_server_override_for_other_roles_leaves_the_refusal_team_wide(self):
+        trust_signed_team_rules("ops-team", rules(
+            role_levels={"member": "readonly"},
+            servers={"srv-2": {"role_levels": {"owner": "readonly"}}},
+        ))
+        guard = guard_for_target(
+            shared_row(server_id="srv-2"), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
+        )
+        assert guard.refusal("run_command", "uptime").startswith(
+            "Blocked: on team Ops's shared servers your agents run at the readonly level"
+        )
+
+    def test_a_refusal_naming_the_server_of_an_unnamed_team_is_a_team_refusal(self):
+        trust_signed_team_rules("ops-team", rules(servers={
+            "srv-2": {"role_levels": {"member": "readonly"}},
+        }))
+        row = {**shared_row(server_id="srv-2"), "team_name": ""}
+        row["team_slug"] = "ops-team"
+        guard = guard_for_target(row, "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST)
+        refusal = guard.refusal("run_command", "uptime")
+        assert "shared server web-1 your agents" in refusal
+        assert is_team_refusal(refusal)
 
     def test_explicit_rules_with_a_server_override_are_applied_too(self):
         explicit = TeamRules(servers=MappingProxyType({"srv-2": {"member": "readonly"}}))
@@ -1088,6 +1113,7 @@ class TestRulesForRows:
             explicit,
         )
         assert guard.level == "readonly"
+        assert guard.server == "web-1"
 
 
 def team_guard(role="member", level="dangerous", allowlist=BUILTIN_ALLOWLIST,
