@@ -154,9 +154,14 @@ why:
 | the team's agent rules expired and could not be refreshed; check that you are online and signed in | As above: the last copy ran out while servonaut.dev could not be reached. |
 | this Servonaut cannot verify the team's agent rules; update Servonaut | Update Servonaut (`servonaut --update`): the rules were signed with a key this release does not have. |
 | the team's agent rules need a newer Servonaut; update Servonaut | Update Servonaut. |
+| the team's agent rules use a setting this Servonaut does not know; update Servonaut | Update Servonaut: the team uses a setting newer than this release, which may limit agents in a way this release cannot apply. |
+| this Servonaut trusts no key for agent rules from the API address it is set to use | Servonaut is set to use another API address (`SERVONAUT_API_URL`). Releases trust only the Servonaut service's signing keys, so updating does not help: unset it to use the team's rules. |
 | the team service sent no signed agent rules | Try again later. |
+| the team's agent rules could not be read | Update Servonaut. If that does not help, ask a team owner or admin to save the rules again. |
 | the team's agent rules could not be verified | The rules were changed on their way to your machine, for example by a proxy. Check your network. |
+| the team service sent another team's agent rules | The answer was not the one asked for, for example because of a proxy. Check your network. |
 | the team service sent older agent rules than this device already has | An older copy came back after a newer one. Check your network. |
+| the team service sent different agent rules under a version this device already has | Ask a team owner or admin to save the rules again: the new version replaces the copy on your machine. |
 
 ## What the rules do not cover
 

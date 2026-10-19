@@ -24,12 +24,13 @@ Format 1 ``agent_rules`` has exactly these keys::
 
 Anything wrong fails closed: the team's shared servers then run at the
 readonly level for every role, owners included, and refusals say why in
-plain words (:class:`PolicyProblem`). That covers a missing envelope, no
-trusted key, a bad signature, another team's rules, an unknown format, a
-malformed payload (an unknown key in ``agent_rules`` too: it may be a
-restriction this release cannot apply), a version older than one this device
-accepted (a replay), the same version with different rules, and rules that
-expired without a fresh copy.
+plain words (:class:`PolicyProblem`). That covers a missing envelope, an API
+origin this release trusts no key for, no trusted key, a bad signature,
+another team's rules, an unknown format, a malformed payload, a setting in
+``agent_rules`` this release does not know (it may be a restriction it
+cannot apply), a version older than one this device accepted (a replay),
+the same version with different rules, and rules that expired without a
+fresh copy.
 
 Expiry is judged by the API's clock: every fetch records how far the
 response's ``Date`` header is from the local clock. Rules are due for a
@@ -132,6 +133,10 @@ UNREACHABLE = PolicyProblem(
     "unreachable", f"the team's agent rules could not be fetched; {_RETRY}",
 )
 MISSING = PolicyProblem("missing", "the team service sent no signed agent rules")
+UNTRUSTED_ORIGIN = PolicyProblem(
+    "untrusted_origin",
+    "this Servonaut trusts no key for agent rules from the API address it is set to use",
+)
 UNKNOWN_KEY = PolicyProblem(
     "unknown_key", f"this Servonaut cannot verify the team's agent rules; {_UPDATE}",
 )
@@ -141,6 +146,10 @@ UNSUPPORTED_FORMAT = PolicyProblem(
 BAD_SIGNATURE = PolicyProblem("bad_signature", "the team's agent rules could not be verified")
 WRONG_TEAM = PolicyProblem("wrong_team", "the team service sent another team's agent rules")
 MALFORMED = PolicyProblem("malformed", "the team's agent rules could not be read")
+UNKNOWN_SETTING = PolicyProblem(
+    "unknown_setting",
+    f"the team's agent rules use a setting this Servonaut does not know; {_UPDATE}",
+)
 REPLAYED = PolicyProblem(
     "replayed", "the team service sent older agent rules than this device already has",
 )
@@ -243,8 +252,10 @@ def verify_envelope(envelope: Any, *, origin: Optional[str], team_id: str) -> Si
     encoded, signatures = envelope.get("payload"), envelope.get("signatures")
     if not isinstance(encoded, str) or not isinstance(signatures, list):
         raise PolicyRejected(MALFORMED, "envelope lacks a payload or signatures")
-    keys = team_policy_keys.keys_for_origin(origin) if origin else {}
-    trusted = _trusted_signatures(signatures, keys)
+    if not origin or not team_policy_keys.knows_origin(origin):
+        # No release will trust a key for it: updating cannot help.
+        raise PolicyRejected(UNTRUSTED_ORIGIN)
+    trusted = _trusted_signatures(signatures, team_policy_keys.keys_for_origin(origin))
     if not trusted:
         raise PolicyRejected(UNKNOWN_KEY)
     if len(encoded) > _MAX_ENCODED_PAYLOAD:
@@ -355,10 +366,22 @@ def _servers(value: Any) -> Mapping[str, Mapping[str, str]]:
     for server_id, override in value.items():
         if not server_id or not isinstance(override, dict):
             raise PolicyRejected(MALFORMED, "servers entry")
-        if set(override) != _SERVER_OVERRIDE_KEYS:
-            raise PolicyRejected(MALFORMED, "servers entry keys")
+        _check_keys(override, _SERVER_OVERRIDE_KEYS, "servers entry keys")
         servers[server_id] = _role_levels(override["role_levels"])
     return MappingProxyType(servers)
+
+
+def _check_keys(document: Dict[str, Any], keys: frozenset, name: str) -> None:
+    """*document* has exactly *keys*.
+
+    Raises:
+        PolicyRejected: UNKNOWN_SETTING for a key this release does not know
+            (a newer release may), else MALFORMED for a missing one.
+    """
+    if set(document) - keys:
+        raise PolicyRejected(UNKNOWN_SETTING, name)
+    if set(document) != keys:
+        raise PolicyRejected(MALFORMED, name)
 
 
 def _strings(value: Any, name: str) -> List[str]:
@@ -371,11 +394,13 @@ def parse_agent_rules(agent_rules: Any) -> TeamRules:
     """Format 1 *agent_rules* as the :class:`TeamRules` they set.
 
     Raises:
-        PolicyRejected: A key is missing or unknown, or a value has the wrong
-            shape (a level, role or list entry this release does not know).
+        PolicyRejected: A key is unknown (UNKNOWN_SETTING) or missing, or a
+            value has the wrong shape (a level, role or list entry this
+            release does not know).
     """
-    if not isinstance(agent_rules, dict) or set(agent_rules) != _AGENT_RULES_KEYS:
-        raise PolicyRejected(MALFORMED, "agent_rules keys")
+    if not isinstance(agent_rules, dict):
+        raise PolicyRejected(MALFORMED, "agent_rules")
+    _check_keys(agent_rules, _AGENT_RULES_KEYS, "agent_rules keys")
     role_levels = _role_levels(agent_rules["role_levels"])
     servers = _servers(agent_rules["servers"])
     allowlist = agent_rules["command_allowlist"]

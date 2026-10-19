@@ -83,6 +83,16 @@ def api_origin(base_url: str) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def knows_origin(origin: str) -> bool:
+    """Whether this release lists API *origin* at all.
+
+    Rules from a listed origin verify once a release bundles their key (the
+    production origin is listed before its first key is); rules from any
+    other origin never do, whichever release runs.
+    """
+    return origin in TEAM_POLICY_KEYS
+
+
 def keys_for_origin(origin: str) -> Dict[str, bytes]:
     """The trusted keys (key id -> raw public key) for API *origin*.
 

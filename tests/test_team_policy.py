@@ -25,7 +25,9 @@ from servonaut.services.team_policy import (
     NOT_LOADED,
     REPLAYED,
     UNKNOWN_KEY,
+    UNKNOWN_SETTING,
     UNREACHABLE,
+    UNTRUSTED_ORIGIN,
     UNSUPPORTED_FORMAT,
     WRONG_TEAM,
     clock_offset,
@@ -240,15 +242,30 @@ class TestKeys:
 
     def test_a_key_for_one_origin_is_refused_for_another(self, clock, tmp_path):
         trust_test_key(PRODUCTION_ORIGIN)
+        trust_test_key(STAGING_ORIGIN, key=Ed25519PrivateKey.generate())
         store = new_store(
             state_path=tmp_path / "s.json", origin=lambda: STAGING_ORIGIN, clock=clock,
         )
         assert apply(store, signed()).problem == UNKNOWN_KEY
 
+    def test_an_origin_no_release_trusts_does_not_ask_for_an_update(self, clock, tmp_path):
+        trust_test_key(PRODUCTION_ORIGIN)
+        store = new_store(
+            state_path=tmp_path / "s.json", origin=lambda: STAGING_ORIGIN, clock=clock,
+        )
+        status = apply(store, signed())
+
+        # Updating cannot help: releases bundle the production keys only.
+        assert status.problem == UNTRUSTED_ORIGIN
+        assert "update Servonaut" not in status.rules.fallback_reason
+        assert status.rules.fallback_reason == (
+            "this Servonaut trusts no key for agent rules from the API address it is set to use"
+        )
+
     def test_no_origin_trusts_no_key(self, clock, tmp_path):
         trust_test_key(PRODUCTION_ORIGIN)
         store = new_store(state_path=tmp_path / "s.json", origin=lambda: None, clock=clock)
-        assert apply(store, signed()).problem == UNKNOWN_KEY
+        assert apply(store, signed()).problem == UNTRUSTED_ORIGIN
 
 
 # ---------------------------------------------------------------------------
@@ -466,10 +483,19 @@ class TestAgentRules:
         assert status.problem == MALFORMED
 
     @pytest.mark.parametrize("key", ["approvals", "max_connections", "Role_levels"])
-    def test_an_unknown_agent_rules_key_fails_closed(self, store, key):
+    def test_an_unknown_agent_rules_key_fails_closed_and_asks_for_an_update(self, store, key):
         agent_rules = rules()
         agent_rules[key] = []
-        assert apply(store, signed(agent_rules)).problem == MALFORMED
+        status = apply(store, signed(agent_rules))
+
+        # It may be a restriction this release cannot apply.
+        assert status.problem == UNKNOWN_SETTING
+        assert status.rules.fallback_reason.endswith("update Servonaut")
+        assert status.rules.level_for("owner") == "readonly"
+
+    def test_an_unknown_server_override_key_asks_for_an_update(self, store):
+        servers = {"srv-1": {"role_levels": {"member": "readonly"}, "note": "x"}}
+        assert apply(store, signed(rules(servers=servers))).problem == UNKNOWN_SETTING
 
     @pytest.mark.parametrize("key", [
         "role_levels", "servers", "command_allowlist", "command_blocklist",
@@ -495,7 +521,6 @@ class TestAgentRules:
         [],
         {"srv-1": "readonly"},
         {"srv-1": {"role_levels": {"member": "Readonly"}}},
-        {"srv-1": {"role_levels": {"member": "readonly"}, "note": "x"}},
         {"srv-1": {}},
         {"": {"role_levels": {}}},
     ])
