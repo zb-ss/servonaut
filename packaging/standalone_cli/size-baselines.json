@@ -144,7 +144,7 @@
         "symlink_count": 0
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for windows-x64 with 15% headroom.",
-      "requirements_lock_sha256": "e0875b13668d3caf6dbb5a66af1448f20571ea9306e279d9a4279e85c7e89572",
+      "requirements_lock_sha256": "bc7015081922254fd3e368959049e9d98377a5e79dbf65fdcc18d287154d835c",
       "schema_version": 1,
       "source_date_epoch": 1792445179,
       "target": "windows-x64",
