@@ -333,12 +333,16 @@ class RelayExecutors:
 
     async def _target(self, request: CommandRequest):
         """``(instance, None)``, or ``(None, error response)`` for the target."""
+        account_error: Optional[UnknownAccountError] = None
         try:
             instance = await self._find_instance(request.target_server_id)
-        except (AmbiguousInstanceError, UnknownAccountError) as exc:
+        except AmbiguousInstanceError as exc:
             return None, CommandResponse(
                 request_id=request.id, status="error", error_message=str(exc),
             )
+        except UnknownAccountError as exc:
+            # "<team>/<name>" names a team's shared server, not an account.
+            account_error, instance = exc, None
         if not instance and self._vault_runtime is not None:
             resolver = getattr(self._vault_runtime, "resolve_relay_target", None)
             if resolver is not None:
@@ -357,7 +361,10 @@ class RelayExecutors:
             return None, CommandResponse(
                 request_id=request.id,
                 status="error",
-                error_message=f"Instance not found: {request.target_server_id}",
+                error_message=(
+                    str(account_error) if account_error is not None
+                    else f"Instance not found: {request.target_server_id}"
+                ),
             )
         return dict(instance), None
 

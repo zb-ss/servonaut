@@ -2106,6 +2106,8 @@ class VaultCommandService:
         Relay code calls this only when its ordinary provider directory did
         not find a target.  The result carries the canonical team and server
         identifiers required by certificate/native-binding resolution.
+        *identifier* is the server's id, its name, or ``<team>/<name>`` (the
+        reference ``list_instances`` gives it).
         """
         if not isinstance(identifier, str) or not identifier:
             return None
@@ -2119,7 +2121,8 @@ class VaultCommandService:
             for server in await self.teams.list_shared_servers(slug):
                 if not isinstance(server, Mapping):
                     continue
-                if identifier not in {str(server.get("id", "")), str(server.get("name", ""))}:
+                name = str(server.get("name", ""))
+                if identifier not in {str(server.get("id", "")), name, f"{slug}/{name}"}:
                     continue
                 matches.append({
                     **server, "is_shared": True, "team_slug": slug, "team_id": team_id_text(team),

@@ -7,12 +7,9 @@ refused before anything reaches the server, and the model is told why; the
 allowed one runs. The rules live in Servonaut's tools, not in the model, so
 the provider makes no difference.
 
-With Servonaut AI the same should hold for the tool calls the service sends
-to the chat: the user confirms the command (typing RUN), and it is still the
-AI's command, so Ops's rule refuses it and the service is told why. Today
-that call does not get as far as the rule: Servonaut AI in the TUI cannot
-find a team's shared server at all (a known bug, recorded below), so nothing
-reaches the server either way.
+With Servonaut AI the same holds for the tool calls the service sends to the
+chat: the user confirms the command (typing RUN), and it is still the AI's
+command, so Ops's rule refuses it and the service is told why.
 """
 
 from __future__ import annotations
@@ -23,7 +20,6 @@ from e2e.harness.ai_chat import open_chat, seed_byo, seed_hosted, send, wait_for
 from e2e.harness.fake_ai import reply, tool_call
 from e2e.harness.fake_cloud.chat_script import ChatTurn, token, usage
 from e2e.harness.fake_cloud.chat_script import tool_call as hosted_tool_call
-from e2e.harness.known_bugs import ProductBug, known_bug
 from e2e.harness.team_agent_rules import (
     ENV_FILES,
     SERVER_1,
@@ -46,10 +42,6 @@ REFUSED = (
 
 def _team_refusals(home) -> list[dict]:
     return [row for row in audit_rows(home, "run_command") if row.get("reason") == "team_rule"]
-
-
-class TeamServerNotFound(ProductBug):
-    """Servonaut AI's tool call in the TUI does not find the team's shared server."""
 
 
 async def test_your_own_model_runs_under_the_team_rules(tui, seed, fake_cloud, fake_ai, journey):
@@ -76,11 +68,6 @@ async def test_your_own_model_runs_under_the_team_rules(tui, seed, fake_cloud, f
     assert [row["args"]["command"] for row in _team_refusals(seed.home)] == [READ_ENV]
 
 
-@known_bug(
-    "the TUI runs Servonaut AI's tool calls without the team server lookup, so a team's "
-    "shared server is not found and the call ends before the team's rules are applied",
-    raises=TeamServerNotFound,
-)
 async def test_servonaut_ai_runs_under_the_team_rules_even_once_you_confirm(
     tui, seed, fake_cloud, journey,
 ):
@@ -109,8 +96,6 @@ async def test_servonaut_ai_runs_under_the_team_rules_even_once_you_confirm(
         )
 
     assert journey.shims.calls("ssh") == []
-    if posted["result"] == f"Instance not found: {SERVER_1['name']}":
-        raise TeamServerNotFound(posted["result"])
     assert posted["status"] == "error" and posted["result"] == REFUSED
     [row] = [row for row in _team_refusals(seed.home) if row.get("source") == "ai_chat"]
     assert row["tool_call_id"] == "tc-env"

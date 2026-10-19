@@ -888,6 +888,39 @@ class TestSharedServerRelayTarget:
         assert (command["host"], command["port"]) == ("pinned.example.com", 2200)
 
 
+class TestTeamReferenceOnRelay:
+    """A relayed request may name a team's server as ``<team>/<name>``."""
+
+    def _executor(self, found):
+        from servonaut.services.accounts.registry import UnknownAccountError
+
+        executor = make_executors()
+        executor._find_instance = AsyncMock(side_effect=UnknownAccountError("Unknown account 'ops'"))
+        runtime = MagicMock()
+        runtime.resolve_relay_target = AsyncMock(return_value=found)
+        executor.set_vault_runtime(runtime)
+        return executor, runtime
+
+    def test_a_team_reference_is_looked_up_as_a_team_s_server(self):
+        executor, runtime = self._executor({
+            "id": "srv-1", "name": "web-1", "hostname": "web.example.com",
+            "is_shared": True, "team_slug": "ops",
+        })
+        instance, failure = run(executor._target(make_request(target="ops/web-1")))
+
+        assert failure is None
+        assert (instance["id"], instance["team_slug"]) == ("srv-1", "ops")
+        runtime.resolve_relay_target.assert_awaited_once_with("ops/web-1")
+
+    def test_an_unknown_account_that_is_no_team_s_says_so(self):
+        executor, _runtime = self._executor(None)
+        instance, failure = run(executor._target(make_request(target="ops/web-1")))
+
+        assert instance is None
+        assert failure.status == "error"
+        assert "Unknown account 'ops'" in failure.error_message
+
+
 class TestTeamRulesOnRelay:
     """An agent's relayed requests on a team's shared server run under the team's rule."""
 

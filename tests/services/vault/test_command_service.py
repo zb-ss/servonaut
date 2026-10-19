@@ -2634,6 +2634,23 @@ async def test_a_relay_target_names_the_team_and_the_callers_role_in_it() -> Non
     }
 
 
+@pytest.mark.asyncio
+async def test_a_relay_target_can_be_named_through_its_team() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[
+        {"id": 7, "slug": "ops", "name": "Ops", "role": "member"},
+        {"id": 8, "slug": "dev", "name": "Dev", "role": "member"},
+    ])
+    service.teams.list_shared_servers = AsyncMock(return_value=[{"id": "srv-1", "name": "web-1"}])
+
+    # The reference list_instances gives it: only that team's copy matches.
+    target = await service.resolve_relay_target("ops/web-1")
+
+    assert (target["id"], target["team_slug"]) == ("srv-1", "ops")
+    assert await service.resolve_relay_target("qa/web-1") is None
+
+
 # ---------------------------------------------------------------------------
 # Whose vault key an own server connects with (team agent rules)
 # ---------------------------------------------------------------------------

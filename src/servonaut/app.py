@@ -1353,6 +1353,9 @@ class ServonautApp(App):
                     self.connection_service,
                     self.scp_service,
                     accounts=self.accounts,
+                    # Finds the teams' shared servers (and their vault keys)
+                    # for Servonaut AI's tool calls, as the relay does.
+                    vault_runtime=self.vault_command_service,
                     team_policy=self.team_policy,
                 )
                 self.ai_relay_executors = relay

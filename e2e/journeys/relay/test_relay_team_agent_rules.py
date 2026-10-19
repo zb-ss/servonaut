@@ -9,8 +9,7 @@ server, and the AI is told why; an allowed command runs. Every refusal is in
 the audit trail with the reason ``team_rule``.
 
 The AI may also name the server the way ``list_instances`` lists it,
-``ops/server-1``. The listener does not find a server by that name yet (a
-known bug, recorded below); nothing reaches the server either way.
+``ops/server-1``; the same rule applies.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import pytest
 
 from e2e.harness import fleet
 from e2e.harness.bootstrap import Sandbox
-from e2e.harness.known_bugs import ProductBug, known_bug
 from e2e.harness.relay_events import tool_call_event, wait_for_tool_result, wait_until_connected
 from e2e.harness.session_seed import grant_dangerous_ai_tools, seed_session
 from e2e.harness.team_agent_rules import (
@@ -42,10 +40,6 @@ REFUSED = (
     f"(set by the team), and '{READ_ENV}' is refused there: it matches the blocked "
     f"pattern {ENV_FILES}."
 )
-
-
-class TeamReferenceNotFound(ProductBug):
-    """A relayed tool call naming ``<team>/<server>`` does not find the server."""
 
 
 def _member_home(journey, fake_cloud) -> Sandbox:
@@ -104,16 +98,9 @@ def test_relayed_tool_calls_run_under_the_team_rules(journey, fake_cloud, relay)
     assert "Traceback" not in listener.output()
 
 
-@known_bug(
-    "the relay listener finds a team's server by its id or name, not by the "
-    "<team>/<name> reference list_instances gives it",
-    raises=TeamReferenceNotFound,
-)
 def test_a_relayed_tool_call_may_name_the_server_through_its_team(journey, fake_cloud, relay):
     _home, _listener, ask = _listening(journey, fake_cloud, relay)
 
     refused = ask("tc-ref", READ_ENV, SERVER_1_REF)
     assert journey.shims.calls("ssh") == []
-    if refused["result"] == f"Instance not found: {SERVER_1_REF}":
-        raise TeamReferenceNotFound(refused["result"])
     assert refused["result"] == REFUSED

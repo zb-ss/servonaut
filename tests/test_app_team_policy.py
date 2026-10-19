@@ -75,3 +75,14 @@ def test_the_hosted_ai_relay_asks_the_same_refresher(tmp_path):
     relay = getattr(app, "ai_relay_executors", None)
     assert relay is not None
     assert relay._team_policy is app.team_policy
+
+
+def test_the_hosted_ai_relay_finds_team_servers_through_the_vault(tmp_path):
+    app = _app(tmp_path)
+    app.auth_service = MagicMock(is_authenticated=True)
+    app.run_worker = MagicMock(side_effect=lambda work, **_kw: work.close() if hasattr(work, "close") else None)
+    app.init_paid_services()
+
+    # Without it Servonaut AI's tool calls in the TUI found no team's shared
+    # server, so the team's rules were never reached.
+    assert app.ai_relay_executors._vault_runtime is app.vault_command_service
