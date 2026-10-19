@@ -43,7 +43,12 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 import regex
 
 from servonaut.config.schema import MCPConfig
-from servonaut.mcp.guards import CommandGuard, GuardLevel
+from servonaut.mcp.guards import (
+    CommandGuard,
+    GuardLevel,
+    check_standard_command,
+    standard_command_names,
+)
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.shared_servers import is_same_server, is_shared_row, shared_row
 
@@ -391,6 +396,8 @@ class TeamGuard:
     unusable_pattern: str = ""
     # The patterns the team adds, compiled with ``regex``.
     team_patterns: Tuple[Any, ...] = ()
+    # Commands the team allows that the local allowlist leaves out.
+    locally_refused: Tuple[str, ...] = ()
     # Seconds checking one command against every team pattern may take.
     pattern_budget: float = field(
         default_factory=lambda: _pattern_budget(MCPConfig().team_pattern_timeout_ms),
@@ -446,10 +453,30 @@ class TeamGuard:
                 allowed, reason = self.guard.check_command(executed)
         if not allowed:
             if _NOT_ALLOWLISTED in reason:
-                return f"'{shown}' is not an allowed command there"
+                return self._not_allowed(command)
             return f"'{shown}' is refused there: {_command_reason(reason)}"
         reason = self._team_pattern_reason(forms)
         return f"'{shown}' is refused there: {reason}" if reason else None
+
+    def _not_allowed(self, command: str) -> str:
+        """Why *command* is not on the allowlist here, and whose list left it out.
+
+        When the team allows it and only the member's own allowlist does
+        not, the message says so: the team cannot change that.
+        """
+        local_only = [
+            name for name in dict.fromkeys(standard_command_names(command))
+            if name in self.locally_refused
+        ]
+        if local_only and check_standard_command(command, [*self.guard.allowlist, *local_only])[0]:
+            names = ", ".join(f"'{_reported(name)}'" for name in local_only)
+            verb, pronoun = ("is", "it") if len(local_only) == 1 else ("are", "them")
+            return (
+                f"{names} {verb} allowed by the team but not by the command_allowlist "
+                f"in your MCP settings; add {pronoun} there to use {pronoun} on this "
+                "team's servers"
+            )
+        return f"'{_reported(command)}' is not an allowed command there"
 
     def _team_pattern_reason(self, forms: Iterable[str]) -> str:
         """Why the team's patterns refuse a command (its *forms*); '' if none does.
@@ -560,6 +587,9 @@ def guard_for_target(
         fallback_reason=rules.fallback_reason,
         unusable_pattern=unusable[0] if unusable else "",
         team_patterns=() if unusable else tuple(regex.compile(p) for p in team_patterns),
+        locally_refused=tuple(
+            command for command in rules.command_allowlist if command not in local
+        ),
         pattern_budget=_pattern_budget(pattern_timeout_ms),
     )
 

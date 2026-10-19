@@ -52,7 +52,9 @@ exactly and case-sensitively. An entry that is not a plain command name
 A member's own `command_allowlist` still applies: on a team's server a
 command must be on both lists. If the team allows a command that Servonaut's
 built-in list does not have, members add it to their own list too (MCP
-settings, or `mcp.command_allowlist` in `~/.servonaut/config.json`).
+settings, or `mcp.command_allowlist` in `~/.servonaut/config.json`). Until
+then, a refusal of that command says the team allows it and the member's own
+list does not.
 
 ### Blocked patterns
 

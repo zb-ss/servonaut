@@ -121,6 +121,36 @@ class TestGuardForTarget:
         guard = _guard(_shared(), allowlist=allowlist)
         assert guard.refusal("run_command", "uptime") is not None
 
+    def test_a_command_only_the_local_allowlist_leaves_out_names_that_list(self):
+        rules = TeamRules(command_allowlist=(*BUILTIN_ALLOWLIST, "systemctl"))
+        refusal = _guard(_shared(), rules=rules).refusal("run_command", "systemctl status nginx")
+
+        # Not "set by the team ... not an allowed command": the team allows it.
+        assert refusal == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'systemctl' is allowed by the team but not "
+            "by the command_allowlist in your MCP settings; add it there to use it "
+            "on this team's servers."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_a_built_in_command_removed_locally_names_the_local_list(self):
+        allowlist = [command for command in BUILTIN_ALLOWLIST if command not in ("cat", "grep")]
+        refusal = _guard(_shared(), allowlist=allowlist).refusal(
+            "run_command", "cat /etc/hostname | grep web",
+        )
+        assert refusal.endswith(
+            "and 'cat', 'grep' are allowed by the team but not by the command_allowlist "
+            "in your MCP settings; add them there to use them on this team's servers."
+        )
+
+    def test_a_command_the_team_does_not_allow_either_is_the_team_s_refusal(self):
+        allowlist = [command for command in BUILTIN_ALLOWLIST if command != "cat"]
+        refusal = _guard(_shared(), allowlist=allowlist).refusal(
+            "run_command", "cat x | systemctl status",
+        )
+        assert refusal.endswith("and 'cat x | systemctl status' is not an allowed command there.")
+
     def test_a_local_blocklist_addition_applies(self):
         guard = _guard(_shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bcat\b"])
         assert guard.refusal("run_command", "cat /etc/hostname") is not None
