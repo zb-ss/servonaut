@@ -1427,3 +1427,30 @@ class TestHeartbeatRejectionOnValidSession:
         _run(manager._handle_degraded())
 
         assert states == [RelayState.SESSION_EXPIRED]
+
+
+def test_the_tui_relay_uses_the_app_s_team_rules_refresher(monkeypatch):
+    """The in-TUI relay asks the app's refresher before an agent's request."""
+    from servonaut.services import relay_manager
+
+    built = []
+    real_build = relay_manager._build_executors
+
+    def recording_build(config_manager, accounts=None):
+        built.append(real_build(config_manager, accounts=accounts))
+        return built[-1]
+
+    monkeypatch.setattr(relay_manager, "_build_executors", recording_build)
+    monkeypatch.setattr(relay_manager, "_extract_user_id", lambda auth: "42")
+    monkeypatch.setattr(
+        "servonaut.services.relay_listener.RelayListener", lambda **kwargs: MagicMock(),
+    )
+    refresher = MagicMock()
+    app = SimpleNamespace(accounts=None, vault_command_service=None, team_policy=refresher)
+    manager = RelayManager(_make_config(), _make_auth(), app=app)
+    manager._build_probe_bridge = lambda executors: None
+
+    manager._default_listener_factory(on_connected=None, on_disconnected=None)
+
+    [executors] = built
+    assert executors._team_policy is refresher

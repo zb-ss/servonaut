@@ -518,3 +518,38 @@ class TestRelayKeepsTeamRulesFresh:
         asyncio.run(servonaut_main._run_relay(Listener(), None, None))
 
         assert ran == [True]
+
+
+class TestRelayForegroundHandsTheRefresherToTheRelay:
+    def test_the_relayed_requests_use_the_headless_team_rules_refresher(
+        self, relay_runtime, foreground_relay, monkeypatch,
+    ) -> None:
+        from servonaut.services.relay_executors import RelayExecutors
+
+        refresher = _Refresher()
+        monkeypatch.setattr(
+            "servonaut.mcp.server.build_headless_tools",
+            lambda _config_manager, **_accounts: MagicMock(team_policy=refresher),
+        )
+        installed = []
+        real_set = RelayExecutors.set_team_policy
+
+        def recording_set(executors, value):
+            installed.append(value)
+            real_set(executors, value)
+
+        monkeypatch.setattr(RelayExecutors, "set_team_policy", recording_set)
+        FakeRelayServer(
+            heartbeat_statuses=[401], heartbeat_waits_for_subscription=True,
+        ).install(monkeypatch)
+        _use_auth(monkeypatch, session=_StoredSession(revoked_by_refresh=True))
+
+        async def bounded(coro):
+            await finishes_within(coro)
+
+        _drive_listener(monkeypatch, bounded)
+        with pytest.raises(SystemExit):
+            servonaut_main._relay_run_foreground()
+
+        # Without it the relay never fetches rules before an agent's request.
+        assert installed == [refresher]
