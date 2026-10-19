@@ -12,21 +12,21 @@
       "max_archive_bytes": 70030610,
       "max_expanded_bytes": 130615702,
       "measurement": {
-        "measured_on": "2026-10-10",
-        "source_commit": "cee979c4bb7485180386efd84613101e69fc8f94",
-        "wheel_sha256": "c1036dc4dce1c3f690563fab93ea48d19c4e6709960df1019ccc51d84616ec75"
+        "measured_on": "2026-10-19",
+        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
+        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
       },
       "observed": {
-        "archive_bytes": 62000221,
-        "directory_count": 998,
-        "expanded_regular_bytes": 115336103,
-        "regular_file_count": 2197,
+        "archive_bytes": 62980981,
+        "directory_count": 999,
+        "expanded_regular_bytes": 118213703,
+        "regular_file_count": 2198,
         "symlink_count": 0
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for linux-x64-ubuntu-22.04 with 15% headroom.",
-      "requirements_lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
+      "requirements_lock_sha256": "8ff8757dc1dd75b168d32389837a64ff385222fa036cd57e734882bfb7f5ed3a",
       "schema_version": 1,
-      "source_date_epoch": 1791642018,
+      "source_date_epoch": 1792445179,
       "target": "linux-x64-ubuntu-22.04",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
@@ -52,21 +52,21 @@
       "max_archive_bytes": 51173343,
       "max_expanded_bytes": 87183817,
       "measurement": {
-        "measured_on": "2026-10-10",
-        "source_commit": "cee979c4bb7485180386efd84613101e69fc8f94",
-        "wheel_sha256": "c1036dc4dce1c3f690563fab93ea48d19c4e6709960df1019ccc51d84616ec75"
+        "measured_on": "2026-10-19",
+        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
+        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
       },
       "observed": {
-        "archive_bytes": 45597714,
-        "directory_count": 1001,
-        "expanded_regular_bytes": 77556798,
-        "regular_file_count": 2193,
+        "archive_bytes": 46072556,
+        "directory_count": 1002,
+        "expanded_regular_bytes": 78666990,
+        "regular_file_count": 2194,
         "symlink_count": 4
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for macos-arm64 with 15% headroom.",
-      "requirements_lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
+      "requirements_lock_sha256": "3a2d25c164b01e45420b87313040bfa7f792b7ade17bec6ec3baeee58a6e75b4",
       "schema_version": 1,
-      "source_date_epoch": 1791642018,
+      "source_date_epoch": 1792445179,
       "target": "macos-arm64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
@@ -92,21 +92,21 @@
       "max_archive_bytes": 52408664,
       "max_expanded_bytes": 88489807,
       "measurement": {
-        "measured_on": "2026-10-10",
-        "source_commit": "cee979c4bb7485180386efd84613101e69fc8f94",
-        "wheel_sha256": "c1036dc4dce1c3f690563fab93ea48d19c4e6709960df1019ccc51d84616ec75"
+        "measured_on": "2026-10-19",
+        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
+        "wheel_sha256": "f1faaeaf75aa933ea9faa383a64c6504c6319e25d4743d6a766043f4972574c5"
       },
       "observed": {
-        "archive_bytes": 46680702,
-        "directory_count": 1001,
-        "expanded_regular_bytes": 78692410,
-        "regular_file_count": 2193,
+        "archive_bytes": 47167836,
+        "directory_count": 1002,
+        "expanded_regular_bytes": 79799930,
+        "regular_file_count": 2194,
         "symlink_count": 4
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for macos-x64 with 15% headroom.",
-      "requirements_lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
+      "requirements_lock_sha256": "629d61b75fd9fec266bf248d63a0401477c22a90801d887cf27b314b2292794b",
       "schema_version": 1,
-      "source_date_epoch": 1791642018,
+      "source_date_epoch": 1792445179,
       "target": "macos-x64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
@@ -132,21 +132,21 @@
       "max_archive_bytes": 53668631,
       "max_expanded_bytes": 85270643,
       "measurement": {
-        "measured_on": "2026-10-10",
-        "source_commit": "cee979c4bb7485180386efd84613101e69fc8f94",
-        "wheel_sha256": "fcd8912ea837948ec030a492625cc9ae7dcd3c1dc9e5767e1b6a5d43f5f17d06"
+        "measured_on": "2026-10-19",
+        "source_commit": "5356e0570e987ccc9b2255a668dcc742c5ae960a",
+        "wheel_sha256": "2277d48bdfc5cca2137be02c108f66b1d43bfe4cb6fa6fba71ed0799e4331bc1"
       },
       "observed": {
-        "archive_bytes": 47785520,
-        "directory_count": 1019,
-        "expanded_regular_bytes": 75902080,
-        "regular_file_count": 2816,
+        "archive_bytes": 48248751,
+        "directory_count": 1020,
+        "expanded_regular_bytes": 76919479,
+        "regular_file_count": 2817,
         "symlink_count": 0
       },
       "rationale": "Initial reviewed standalone CLI qualification baseline for windows-x64 with 15% headroom.",
-      "requirements_lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
+      "requirements_lock_sha256": "e0875b13668d3caf6dbb5a66af1448f20571ea9306e279d9a4279e85c7e89572",
       "schema_version": 1,
-      "source_date_epoch": 1791642018,
+      "source_date_epoch": 1792445179,
       "target": "windows-x64",
       "toolchain": {
         "cyclonedx_bom_version": "7.3.1",
