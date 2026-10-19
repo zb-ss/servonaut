@@ -216,13 +216,16 @@ def rules_for(row: Mapping[str, Any]) -> TeamRules:
 
     The team's verified signed rules with the override of the row's server
     (``id``) applied; the readonly fallback, with its reason, when the team
-    (``team_slug``) has no valid signed rules.
+    (``team_id``, else ``team_slug``) has no valid signed rules.
     """
     # team_policy builds TeamRules, so it is imported here, not at the top.
     from servonaut.services.team_policy import team_policy_store
 
-    slug = row.get("team_slug")
-    rules = team_policy_store().rules_for_team(slug if isinstance(slug, str) else "")
+    slug, team_id = row.get("team_slug"), row.get("team_id")
+    rules = team_policy_store().rules_for_team(
+        slug if isinstance(slug, str) else "",
+        team_id if isinstance(team_id, str) and team_id else None,
+    )
     return rules.for_server(row.get("id"))
 
 

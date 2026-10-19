@@ -51,6 +51,7 @@ from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
+from servonaut.services.shared_servers import team_id_text
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
 from .rotation import RotationService
@@ -2121,7 +2122,7 @@ class VaultCommandService:
                 if identifier not in {str(server.get("id", "")), str(server.get("name", ""))}:
                     continue
                 matches.append({
-                    **server, "is_shared": True, "team_slug": slug,
+                    **server, "is_shared": True, "team_slug": slug, "team_id": team_id_text(team),
                     # What the caller's agents may do there follows the
                     # caller's role in the team (see team_rules).
                     "team_name": team.get("name") if isinstance(team.get("name"), str) else "",

@@ -951,6 +951,29 @@ class TestRefresh:
         )
         assert status.problem is None
 
+    def test_the_team_list_says_which_team_a_slug_names_before_any_answer(self, store):
+        trust_test_key(PRODUCTION_ORIGIN)
+        renamed = {"id": "team-id-renamed", "slug": "ops-team", "name": "Ops", "role": "member"}
+        store.apply_response(renamed, response(envelope(
+            "team-id-renamed", rules(role_levels={"member": "dangerous"}), issued_at=NOW,
+        )))
+        newcomer = team_row("ops-team")
+        seen_during_fetch = []
+
+        async def fetch(slug):
+            # While the new team's answer is on its way.
+            seen_during_fetch.append(store.status("ops-team"))
+            raise ConnectionError("offline")
+
+        service = policy_service({})
+        service.get_team_policy_with_date = AsyncMock(side_effect=fetch)
+        run(store.refresh(service, [newcomer]))
+
+        assert seen_during_fetch == [None]
+        assert store.rules_for_team("ops-team").level_for("member") == "readonly"
+        # The renamed team's rules are still found by its id.
+        assert store.status("", "team-id-renamed").rules.level_for("member") == "dangerous"
+
     def test_statuses_list_each_team_once(self, store):
         apply(store, signed())
         store.apply_response(
@@ -988,6 +1011,20 @@ class TestRulesForRows:
         trust_signed_team_rules("ops-team", rules(role_levels={"member": "readonly"}))
         assert rules_for(shared_row("member")).level_for("member") == "readonly"
         assert rules_for(shared_row("member", slug="db-team")).fallback_reason == NOT_LOADED.reason
+
+    def test_a_row_naming_its_team_by_id_finds_that_team_s_rules(self):
+        trust_signed_team_rules("ops-team", rules(role_levels={"member": "readonly"}))
+        row = {**shared_row("member"), "team_id": team_id_for("ops-team")}
+        assert rules_for(row).level_for("member") == "readonly"
+
+    def test_a_slug_another_team_now_uses_does_not_find_the_old_team_s_rules(self):
+        # Rules saved for the team that used the slug before a rename.
+        trust_signed_team_rules("ops-team", rules(role_levels={"member": "dangerous"}))
+        row = {**shared_row("member"), "team_id": "team-id-of-another-team"}
+
+        found = rules_for(row)
+        assert found.level_for("member") == "readonly"
+        assert found.fallback_reason == NOT_LOADED.reason
 
     def test_a_server_override_replaces_the_team_wide_level_there(self):
         trust_signed_team_rules("ops-team", rules(servers={

@@ -510,7 +510,7 @@ class RelayExecutors:
             )
         row = row if row is not None else instance
         if is_shared_row(row) and self._team_policy is not None:
-            await self._team_policy.ensure_loaded(row.get('team_slug'))
+            await self._team_policy.ensure_loaded(row.get('team_slug'), row.get('team_id'))
         return self._team_guard(request, row), None
 
     def _team_refusal(

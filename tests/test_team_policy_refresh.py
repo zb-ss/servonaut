@@ -64,7 +64,8 @@ class ScheduledStore:
     def seconds_until_refresh(self):
         return self.delays.pop(0) if self.delays else None
 
-    def status(self, slug):
+    def status(self, slug, team_id=None):
+        self.asked = (slug, team_id)
         return self._status
 
 
@@ -205,6 +206,15 @@ class TestEnsureLoaded:
         store = ScheduledStore([None], status=status)
         run(TeamPolicyRefresher(store, lambda: object()).ensure_loaded("ops"))
         assert store.refreshed == []
+
+    def test_the_team_is_asked_for_by_its_id_when_known(self):
+        store = ScheduledStore([None], status=status_with(None))
+        refresher = TeamPolicyRefresher(store, lambda: object())
+
+        run(refresher.ensure_loaded("ops", team_id_for("ops")))
+        assert store.asked == ("ops", team_id_for("ops"))
+        run(refresher.ensure_loaded("ops", ""))
+        assert store.asked == ("ops", None)
 
 
 class TestKeptFresh:

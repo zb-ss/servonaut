@@ -46,6 +46,16 @@ def team_label(team: Mapping[str, Any]) -> str:
     return ""
 
 
+def team_id_text(team: Mapping[str, Any]) -> str:
+    """The id of *team* (a team-list row) as text; '' when it has none."""
+    value = team.get("id")
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    return value if isinstance(value, str) else ""
+
+
 def _port(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
         return _DEFAULT_SSH_PORT
@@ -88,6 +98,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
             "key_name": "",
             "is_shared": True,
             "team_slug": slug,
+            # The team's agent rules are found by its id: a slug can pass to
+            # another team after a rename. '' when the team list did not say.
+            "team_id": team_id_text(team),
             "team_name": label,
             # "" when the team list did not say: agents then get the
             # strictest level there.
@@ -101,13 +114,15 @@ def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
     """A shared server record that names its team (``team_slug``) as a row.
 
     The vault's shared-target lookup returns the team's record with
-    ``is_shared``, ``team_slug``, ``team_name`` and ``team_role`` added;
+    ``is_shared``, ``team_slug``, ``team_id``, ``team_name`` and
+    ``team_role`` added;
     this fills the plain fields the connection paths read (the host above
     all). A row is returned as is.
     """
     if target.get("is_shared") is True and target.get("state") == SHARED_STATE:
         return dict(target)
     team = {
+        "id": target.get("team_id"),
         "slug": target.get("team_slug") or "",
         "name": target.get("team_name") or "",
         "role": target.get("team_role") or "",

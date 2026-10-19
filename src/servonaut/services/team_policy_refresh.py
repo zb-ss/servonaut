@@ -84,13 +84,15 @@ class TeamPolicyRefresher:
         self._schedule()
         return statuses
 
-    async def ensure_loaded(self, slug: Any) -> None:
+    async def ensure_loaded(self, slug: Any, team_id: Any = None) -> None:
         """Fetch the rules again when team *slug*'s are not in force for want of a fetch.
 
         That is: never fetched, the last fetch failed, or they expired.
         Rules the team service sent and this device refused are left alone.
+        *team_id*, when known, names the team (see ``TeamPolicyStore.status``).
         """
-        status = self._store.status(slug) if isinstance(slug, str) else None
+        team_id = team_id if isinstance(team_id, str) and team_id else None
+        status = self._store.status(slug, team_id) if isinstance(slug, str) else None
         if status is not None and (status.problem is None or status.problem.code not in _FETCH_AGAIN):
             return
         await self.refresh()

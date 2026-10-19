@@ -1248,7 +1248,7 @@ class TestTeamRulesFetchedOnRelay:
     def _executor(self, refresher):
         executor = make_executors()
         executor.set_vault_runtime(_VaultRuntime(lease=_VaultLease(), target=dict(
-            self._TARGET, team_role="member",
+            self._TARGET, team_role="member", team_id="team-id-ops",
         )))
         executor.set_team_policy(refresher)
         executor._audit = MagicMock()
@@ -1267,7 +1267,7 @@ class TestTeamRulesFetchedOnRelay:
             )))
 
         assert response.status == "success"
-        refresher.ensure_loaded.assert_awaited_once_with("ops")
+        refresher.ensure_loaded.assert_awaited_once_with("ops", "team-id-ops")
 
     def test_what_a_person_sends_fetches_nothing(self):
         refresher = MagicMock(ensure_loaded=AsyncMock())

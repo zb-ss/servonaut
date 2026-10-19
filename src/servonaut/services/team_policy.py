@@ -526,17 +526,24 @@ class TeamPolicyStore:
 
     # -- reading -------------------------------------------------------------
 
-    def rules_for_team(self, slug: str) -> TeamRules:
-        """What the agents may do on team *slug*'s servers now (team-wide)."""
-        status = self.status(slug)
+    def rules_for_team(self, slug: str, team_id: Optional[str] = None) -> TeamRules:
+        """What the agents may do on team *slug*'s servers now (team-wide).
+
+        The team is the one with *team_id* when that is given (see :meth:`status`).
+        """
+        status = self.status(slug, team_id)
         return status.rules if status is not None else TeamRules.readonly(NOT_LOADED.reason)
 
-    def status(self, slug: str) -> Optional[TeamPolicyStatus]:
-        """What applies to team *slug* now; None for a team never seen."""
+    def status(self, slug: str, team_id: Optional[str] = None) -> Optional[TeamPolicyStatus]:
+        """What applies to team *slug* now; None for a team never seen.
+
+        With *team_id* the team is found by its id, not its slug: a slug can
+        pass to another team after a rename.
+        """
         with self._lock:
             self._ensure_loaded()
-            team_id = self._slugs.get(slug)
-            state = self._teams.get(team_id) if team_id is not None else None
+            key = team_id if team_id else self._slugs.get(slug)
+            state = self._teams.get(key) if key is not None else None
         return self._status_of(state) if state is not None else None
 
     def statuses(self) -> List[TeamPolicyStatus]:
@@ -606,16 +613,22 @@ class TeamPolicyStore:
         """
         if teams is None:
             teams = await team_service.list_teams()
-        with self._lock:
-            self._ensure_loaded()
-            self._absorb_disk()
-        statuses = []
+        identities = []
         for team in teams or []:
             identity = _team_identity(team)
             if identity is None:
                 logger.warning("A team in the team list has no slug or id; its rules are skipped")
                 continue
-            slug, team_id = identity
+            identities.append(identity)
+        with self._lock:
+            self._ensure_loaded()
+            self._absorb_disk()
+            # The team list says which team each slug names now: a slug
+            # another team had before a rename must not find that team's rules.
+            for slug, team_id in identities:
+                self._slugs[slug] = team_id
+        statuses = []
+        for slug, team_id in identities:
             sequence = self._begin(team_id)
             try:
                 body, server_date = await team_service.get_team_policy_with_date(slug)
