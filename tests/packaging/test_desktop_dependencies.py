@@ -53,7 +53,7 @@ _DIRECT_REQUIREMENTS = {
     "httpx>=0.25.0",
     "httpx-sse>=0.4",
     "keyring>=24",
-    "mcp>=1.0.0,<2",
+    "mcp>=1.30.0,<2",
     "ovh",
     "hcloud>=2.0",
     "textual-serve==1.1.3",
