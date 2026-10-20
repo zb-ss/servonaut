@@ -156,7 +156,7 @@ async def test_stale_token_is_refreshed_and_the_request_retried(tui, seed, fake_
             and fake_cloud.requests("/api/v1/me/secrets-config"),
             desc="start-up requests",
         )
-        before = len(fake_cloud.requests("/api/v1/teams"))
+        mark = len(fake_cloud.requests())
 
         fake_cloud.expire_access_token()
         await t.nav("nav_teams")
@@ -164,9 +164,20 @@ async def test_stale_token_is_refreshed_and_the_request_retried(tui, seed, fake_
         rows = await t.wait_until(lambda: t.table_rows("#teams_table"), desc="teams listed")
         assert rows == [["Ops", "owner", "2"]]
 
-        teams = [r["status"] for r in fake_cloud.requests("/api/v1/teams")[before:]]
-        assert teams == [401, 200]
+        # A start-up request still in flight (the team's server list) can
+        # meet the stale token before the Teams screen asks, or both can.
+        # Whichever did: the token was refreshed once, and each refused
+        # request was sent again and answered.
+        after = fake_cloud.requests()[mark:]
         assert [r["status"] for r in fake_cloud.requests("/api/oauth/refresh")] == [200]
+        refused = [i for i, r in enumerate(after) if r["status"] == 401]
+        assert refused, after
+        for i in refused:
+            method, path = after[i]["method"], after[i]["path"]
+            assert any(
+                (r["method"], r["path"], r["status"]) == (method, path, 200)
+                for r in after[i + 1:]
+            ), (after[i], after)
         # The refresh token rotated and the new pair replaced the old on disk.
         saved = read_session(seed.home)
         assert saved["refresh_token"] == fake_cloud.tokens()[1] != first_refresh_token
