@@ -136,6 +136,15 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     assert probe["status"] == "success", probe
     assert isinstance(json.loads(probe["output"]), (dict, list))
 
+    # A probe of an unknown server names why it was skipped.
+    publish({
+        **probe_event("probe-lost", user_id, "describe_instance", "no-such-host"),
+        "payload": {"instance_id": "no-such-host"},
+    })
+    lost_probe = wait_for_result(fake_cloud, "probe-lost", listener)
+    assert lost_probe["status"] == "error", lost_probe
+    assert lost_probe["error_message"].startswith("instance_not_found:"), lost_probe
+
     # Probes that are not read-only are refused with a slug-first error.
     publish(probe_event("probe-shell", user_id, "ssh_exec_readonly", WEB_1.name))
     denied = wait_for_result(fake_cloud, "probe-shell", listener)
