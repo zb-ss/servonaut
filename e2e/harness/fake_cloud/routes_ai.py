@@ -1,6 +1,7 @@
 """AI routes: everything under ``/api/ai/`` plus the hosted-MCP endpoint.
 
-This module owns those paths. :class:`AiState` (``FakeCloud.ai``) records
+This module owns those paths (the hosted MCP server is
+``routes_hosted_mcp``). :class:`AiState` (``FakeCloud.ai``) records
 what clients sent and holds the scripted answers:
 
 * ``POST /api/ai/chat``: the hosted chat, streamed as server-sent events
@@ -17,10 +18,7 @@ what clients sent and holds the scripted answers:
   (a Stripe URL unless :meth:`AiState.configure` sets another); read back
   with :meth:`AiState.topups`;
 * ``/api/ai/conversations``: the chat history (list, get, archive via
-  ``PATCH``, delete, Markdown/JSON export), set with :meth:`AiState.configure`;
-* ``POST /mcp/message``: a JSON-RPC 2.0 ``tools/call`` for the hosted MCP
-  server, which answers the tools in :data:`HOSTED_TOOLS`; read back with
-  :meth:`AiState.hosted_calls`.
+  ``PATCH``, delete, Markdown/JSON export), set with :meth:`AiState.configure`.
 
 Every route needs the account's current access token.
 """
@@ -51,9 +49,6 @@ TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
 TOPUP_PATH = "/api/ai/topup/checkout"
 TOPUP_PACKS_PATH = "/api/ai/topup/packs"
 CONVERSATIONS_PATH = "/api/ai/conversations"
-HOSTED_MCP_PATH = "/mcp/message"
-# Tools the fake hosted MCP server answers; any other name is an error.
-HOSTED_TOOLS = frozenset({"fleet_summary"})
 TOOL_RESULT_STATUSES = frozenset({"ok", "error", "timeout", "denied"})
 DEFAULT_TOPUP_PACKS = (
     {"key": "pack_small", "label": "Starter", "price_minor": 500, "currency": "GBP", "credit_micros": 5_000_000},
@@ -75,7 +70,6 @@ class AiState:
         with self._lock:
             self._streams += 1
             self._tool_results: list[dict[str, Any]] = []
-            self._hosted_calls: list[dict[str, Any]] = []
             self._conversations: list[dict[str, Any]] = []
             self._exports: dict[str, str] = {}
             self._turns: deque[ChatTurn] = deque()
@@ -130,11 +124,6 @@ class AiState:
             rows = [dict(r) for r in self._tool_results]
         return [r for r in rows if tool_call_id is None or r["tool_call_id"] == tool_call_id]
 
-    def hosted_calls(self) -> list[dict[str, Any]]:
-        """JSON-RPC envelopes the hosted-MCP endpoint received, oldest first."""
-        with self._lock:
-            return [dict(c) for c in self._hosted_calls]
-
     def topups(self) -> list[dict[str, Any]]:
         """Top-up checkouts requested, oldest first."""
         with self._lock:
@@ -157,10 +146,6 @@ class AiState:
     def record_tool_result(self, body: dict[str, Any]) -> None:
         with self._lock:
             self._tool_results.append({**body, "at": time.time()})
-
-    def record_hosted_call(self, body: dict[str, Any]) -> None:
-        with self._lock:
-            self._hosted_calls.append({**body, "at": time.time()})
 
     def record_topup(self, pack: str) -> str:
         with self._lock:
@@ -308,13 +293,6 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
         content_type = "text/markdown" if suffix == "md" else "application/octet-stream"
         return web.Response(body=text.encode("utf-8"), content_type=content_type)
 
-    async def hosted_mcp(request: web.Request) -> web.Response:
-        envelope = await json_body(request)
-        if envelope.get("jsonrpc") != "2.0" or "id" not in envelope:
-            return web.json_response(_rpc_error(None, -32600, "Invalid Request"), status=400)
-        state.record_hosted_call(envelope)
-        return web.json_response(_hosted_answer(envelope))
-
     one = f"{CONVERSATIONS_PATH}/{{conversation_id}}"
     app.router.add_post(CHAT_PATH, guarded(chat))
     app.router.add_post(TOOL_RESULT_PATH, guarded(tool_result))
@@ -325,7 +303,6 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
     app.router.add_get(one, guarded(get_conversation))
     app.router.add_patch(one, guarded(patch_conversation))
     app.router.add_delete(one, guarded(delete_conversation))
-    app.router.add_post(HOSTED_MCP_PATH, guarded(hosted_mcp))
 
 
 # ---------------------------------------------------------------------------
@@ -335,25 +312,3 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
 
 def _error(status: int, code: str, message: str) -> web.Response:
     return web.json_response({"error": {"code": code, "message": message}}, status=status)
-
-
-def _hosted_answer(envelope: dict[str, Any]) -> dict[str, Any]:
-    """A JSON-RPC 2.0 answer from the fake hosted MCP server."""
-    request_id = envelope.get("id")
-    params = envelope.get("params") if isinstance(envelope.get("params"), dict) else {}
-    name = params.get("name")
-    if envelope.get("method") != "tools/call":
-        return _rpc_error(request_id, -32601, "Method not found")
-    if name not in HOSTED_TOOLS:
-        return _rpc_error(request_id, -32602, f"Unknown tool: {name}")
-    arguments = params.get("arguments") or {}
-    text = f"hosted {name}: {len(arguments)} argument(s)"
-    return {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "result": {"content": [{"type": "text", "text": text}], "isError": False},
-    }
-
-
-def _rpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
