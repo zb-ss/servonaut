@@ -8,6 +8,8 @@
 * FakeCloud refuses what the service refuses: malformed heartbeats and
   results, and topics a subscriber token does not cover. Tokens are new
   after every reset, and each route belongs to one module.
+* The hosted MCP server keeps the service's HTTP+SSE transport: messages
+  need a stream's connection id, and replies come only on the stream.
 * Failure artifacts keep JSON valid and hide the machine's host name.
 """
 
@@ -180,6 +182,66 @@ def test_hub_serves_only_the_topics_the_token_covers(fake_cloud):
         )
         assert refused.status_code == 401
     wait_for(lambda: not fake_cloud.relay.subscriptions(live=True), desc="stream closed")
+
+
+def _data_lines(lines):
+    """The ``data:`` values of an event stream, as JSON (comments skipped)."""
+    return (json.loads(line[len("data: "):]) for line in lines if line.startswith("data: "))
+
+
+def test_hosted_mcp_keeps_the_services_transport(fake_cloud):
+    ping = {"jsonrpc": "2.0", "id": 7, "method": "ping"}
+    with _client(fake_cloud) as client:
+        bare = client.post("/mcp/message", json=ping)
+        assert (bare.status_code, bare.json()) == (400, {"error": "Invalid connection"})
+        forged = client.get("/mcp/sse", headers={"Authorization": "Bearer forged"})
+        assert forged.status_code == 401
+        with client.stream("GET", "/mcp/sse") as stream:
+            assert stream.status_code == 200
+            lines = stream.iter_lines()
+            assert next(lines) == "event: endpoint"
+            endpoint = next(lines)[len("data: "):]
+            assert endpoint.startswith("/mcp/message?connection_id=")
+            accepted = client.post(endpoint, json=ping)
+            # The POST only acknowledges; the reply comes on the stream.
+            assert accepted.json() == {"status": "accepted"}
+            replies = _data_lines(lines)
+            assert next(replies) == {"jsonrpc": "2.0", "id": 7, "result": {}}
+            client.post(endpoint, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+            client.post(endpoint, json={"jsonrpc": "2.0", "id": 8, "method": "resources/list"})
+            # The notification got no reply, so the next one answers id 8.
+            unknown = next(replies)
+            assert (unknown["id"], unknown["error"]["code"]) == (8, -32601)
+    stream = wait_for(
+        lambda: [s for s in fake_cloud.hosted_mcp.streams() if s["closed"]], desc="stream closed"
+    )[0]
+    assert [m["method"] for m in stream["messages"]] == [
+        "ping", "notifications/initialized", "resources/list",
+    ]
+
+
+def test_hosted_mcp_frees_a_closed_streams_slot_late(fake_cloud):
+    fake_cloud.hosted_mcp.hold_slots(1.0)
+    with _client(fake_cloud) as client:
+        with client.stream("GET", "/mcp/sse") as stream:
+            assert stream.status_code == 200
+            # The account may hold one stream (the Solo plan's grant).
+            assert client.get("/mcp/sse").status_code == 429
+        wait_for(
+            lambda: all(s["closed"] for s in fake_cloud.hosted_mcp.streams()), desc="stream closed"
+        )
+        # Closed, but its slot stays taken for a moment, as on the service ...
+        refused = client.get("/mcp/sse")
+        assert refused.status_code == 429
+        assert "Connection limit exceeded" in refused.text
+
+        def accepted() -> bool:
+            with client.stream("GET", "/mcp/sse") as again:
+                return again.status_code == 200
+
+        # ... and is free again afterwards.
+        wait_for(accepted, desc="slot freed")
+    assert fake_cloud.hosted_mcp.refused_streams() >= 2
 
 
 def test_credentials_change_on_every_reset(fake_cloud):

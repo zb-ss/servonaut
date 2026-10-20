@@ -176,10 +176,12 @@ def parse_mercure_tool_call(raw: Dict[str, Any]) -> Optional[ToolCall]:
     if not conversation_id and raw.get("source") != "proactive":
         # Proactive probe envelopes legitimately carry no
         # conversation_id — their results go to the command-result
-        # route, not the chat tool-result route.
-        logger.warning(
-            "ai-tool-call %s arrived without conversation_id — the "
-            "tool-result POST will be rejected with validation_failed",
+        # route, not the chat tool-result route. Calls relayed from the
+        # hosted MCP server carry none either: current servers match the
+        # result by its tool_call_id alone; older ones refuse it.
+        logger.info(
+            "ai-tool-call %s arrived without conversation_id — posting "
+            "its result by tool_call_id alone",
             tool_call_id,
         )
 
@@ -304,9 +306,9 @@ class RelayAIToolExecutor:
             hint = ""
             if not result.conversation_id:
                 hint = (
-                    " (the dispatch envelope carried no conversation_id, "
-                    "which /api/ai/chat/tool-result requires — known "
-                    "server-side contract gap)"
+                    " (the dispatch envelope carried no conversation_id; "
+                    "servers that cannot match a result by its "
+                    "tool_call_id alone refuse it)"
                 )
             logger.warning(
                 "tool-result POST failed for %s status=%s — server will "

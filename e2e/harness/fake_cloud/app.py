@@ -35,6 +35,7 @@ from e2e.harness.fake_cloud import (
     routes_auth,
     routes_configs,
     routes_findings,
+    routes_hosted_mcp,
     routes_memory,
     routes_misc,
     routes_pypi,
@@ -48,6 +49,7 @@ from e2e.harness.fake_cloud.routes_account import AccountData
 from e2e.harness.fake_cloud.routes_ai import AiState
 from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
 from e2e.harness.fake_cloud.routes_findings import FindingsCloud
+from e2e.harness.fake_cloud.routes_hosted_mcp import HostedMcpState
 from e2e.harness.fake_cloud.routes_memory import MemoryCloud
 from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.routes_vault import VaultCloud
@@ -79,6 +81,7 @@ class FakeCloud(LoopbackServer):
         self._epoch = 0
         self.account = AccountData()
         self.ai = AiState()
+        self.hosted_mcp = HostedMcpState()
         self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
@@ -121,6 +124,7 @@ class FakeCloud(LoopbackServer):
         self.relay.reset()
         self.account.reset()
         self.ai.reset()
+        self.hosted_mcp.reset()
         self.memory.reset()
         self.configs.reset()
         self.secrets.reset()
@@ -260,6 +264,7 @@ class FakeCloud(LoopbackServer):
         self.release()  # so would a request still waiting for release()
         self.relay.drop_streams()  # open subscriptions would hold up shutdown
         self.ai.drop_streams()  # so would an open chat stream
+        self.hosted_mcp.drop_streams()  # or hosted MCP stream
 
     def switch_off_ssh_ca(self) -> None:
         """Answer like a service with SSH certificates switched off.
@@ -314,6 +319,7 @@ class FakeCloud(LoopbackServer):
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field,
                                   base_url=lambda: self.url)
         routes_ai.add_routes(app, self._store, self.ai)
+        routes_hosted_mcp.add_routes(app, self._store, self.hosted_mcp)
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)
         routes_secrets.add_routes(app, self._store, self.secrets)

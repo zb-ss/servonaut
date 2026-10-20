@@ -3,7 +3,12 @@
 Against the (fake) service, signed in: ``whoami`` describes the session
 without revealing the token; ``api_request`` calls the API with the CLI's
 session and recovers from an expired access token by refreshing it;
-``mcp_tool_call`` forwards a tool call to the hosted MCP server;
+``mcp_tool_call`` runs a tool on the hosted MCP server over its event
+stream (closing the stream after each call), passes the server's answer for
+an unknown tool through, returns its JSON-RPC errors (a capacity refusal) as
+answers, refreshes an expired access token refused on the stream and, when
+called right after another call, waits for the server to free the closed
+stream's connection slot instead of failing;
 ``relay_status`` reports the service's view of the relay; and
 ``relay_reconnect`` starts a background listener when the service does not
 see one, without writing anything to the protocol stream, then leaves a
@@ -57,18 +62,49 @@ async def test_account_and_relay_tools_signed_in(mcp, journey, fake_cloud, accou
             session, "mcp_tool_call",
             {"name": "fleet_summary", "arguments": {"region": "us-east-1"}},
         )
-        assert hosted["status"] == 200
-        assert hosted["response"]["result"]["content"][0]["text"] == (
-            "hosted fleet_summary: 1 argument(s)"
-        )
-        forwarded = fake_cloud.ai.hosted_calls()[-1]
-        assert forwarded["method"] == "tools/call"
-        assert forwarded["params"] == {
+        assert hosted == {"status": 200, "response": {"result": {
+            "content": [{"type": "text", "text": "hosted fleet_summary: 1 argument(s)"}],
+            "isError": False,
+        }}}
+        first = fake_cloud.hosted_mcp.streams()[0]
+        assert [m["method"] for m in first["messages"]] == [
+            "initialize", "notifications/initialized", "tools/call",
+        ]
+        assert first["messages"][-1]["params"] == {
             "name": "fleet_summary", "arguments": {"region": "us-east-1"}
         }
-        assert fake_cloud.requests("/mcp/message")[-1]["bearer_ok"]
         unknown = await _json(session, "mcp_tool_call", {"name": "no_such_tool"})
-        assert unknown["response"]["error"]["code"] == -32602
+        assert unknown["response"] == {"result": {
+            "content": [{"type": "text", "text": "Unknown tool: no_such_tool"}], "isError": True,
+        }}
+        fake_cloud.hosted_mcp.refuse()  # the service's capacity refusal
+        refused = await _json(session, "mcp_tool_call", {"name": "fleet_summary"})
+        assert refused["response"]["error"]["code"] == -32050
+
+        # The stream refuses an expired access token; the call refreshes it.
+        fake_cloud.expire_access_token()
+        again = await _json(session, "mcp_tool_call", {"name": "fleet_summary"})
+        assert again["response"]["result"]["isError"] is False
+        assert fake_cloud.statuses("/api/oauth/refresh") == [200, 200]
+
+        # The service frees a closed stream's slot about two seconds after
+        # the client left: a call made right after another one waits for it.
+        fake_cloud.hosted_mcp.hold_slots(2.0)
+        refused_before = fake_cloud.hosted_mcp.refused_streams()
+        for _ in range(2):
+            quick = await _json(session, "mcp_tool_call", {"name": "fleet_summary"})
+            assert quick["response"]["result"]["isError"] is False, quick
+        assert fake_cloud.hosted_mcp.refused_streams() > refused_before
+        assert 429 in fake_cloud.statuses("/mcp/sse")
+        # Every call closed its stream: the service caps the open ones.
+        await wait_for_async(
+            lambda: all(s["closed"] for s in fake_cloud.hosted_mcp.streams()),
+            desc="hosted MCP streams closed",
+        )
+        assert len(fake_cloud.hosted_mcp.streams()) == 6
+        assert 401 in fake_cloud.statuses("/mcp/sse")
+        assert all(r["bearer_ok"] for r in fake_cloud.requests("/mcp/message"))
+        assert set(fake_cloud.statuses("/mcp/message")) == {200}
 
         status = await _json(session, "relay_status")
         assert status == {"connected": False, "last_heartbeat_at": None, "client_ids": []}

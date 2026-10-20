@@ -289,3 +289,64 @@ class TestUnsupportedArgumentTolerance:
         )))
         assert result.status == "ok"
         tools.list_instances.assert_called_once_with(anything="goes")
+
+
+# ---------------------------------------------------------------------------
+# Failures a local tool reports in its output
+# ---------------------------------------------------------------------------
+
+class TestLocalToolFailureStatus:
+    """Local tools report failure as text ("Error: …" or a JSON ``error``
+    envelope). The result must say so (status "error"), so the server can
+    flag the call as failed, while the model still gets the text as is."""
+
+    def _run(self, output, args=None):
+        bridge, _ = _make_bridge_with_tools({"disk_usage": output})
+        return run(bridge.handle_tool_call(ToolCall(
+            tool_call_id="tc-fail", tool="disk_usage", args=args or {},
+            guard_level="dangerous", conversation_id="conv-1",
+        ))), bridge
+
+    def test_error_text_is_an_error_result(self):
+        result, bridge = self._run("Error: df_not_available")
+
+        assert (result.status, result.error) == ("error", "df_not_available")
+        assert result.result == "Error: df_not_available"
+        assert result.skipped is False
+        reasons = [c.args[4] for c in bridge._audit.log.call_args_list]
+        assert reasons[-1] == "error_local"
+
+    def test_json_error_envelope_is_an_error_result(self):
+        output = '{"error": {"code": "not_logged_in", "message": "Run `servonaut login` first."}}'
+        result, _ = self._run(output)
+
+        assert result.status == "error"
+        assert result.error == "Run `servonaut login` first."
+        assert result.result == output
+
+    @pytest.mark.parametrize("output", [
+        "No errors found in the last hour.",
+        '{"error": null, "candidates": []}',
+        '{"rows": [{"name": "web-1", "error": "timeout"}]}',
+        "{not json",
+    ])
+    def test_successful_output_stays_ok(self, output):
+        result, _ = self._run(output)
+
+        assert (result.status, result.error) == ("ok", None)
+
+    def test_failure_is_detected_before_the_dropped_argument_note(self):
+        bridge, tools = _make_bridge_with_tools({})
+
+        async def disk_usage(instance_id: str) -> str:
+            return "Error: df_not_available"
+        tools.disk_usage = disk_usage
+
+        result = run(bridge.handle_tool_call(ToolCall(
+            tool_call_id="tc-fail", tool="disk_usage",
+            args={"instance_id": "web-1", "bogus_knob": 1},
+            guard_level="dangerous", conversation_id="conv-1",
+        )))
+
+        assert result.status == "error"
+        assert "bogus_knob" in result.result and result.result.endswith("df_not_available")
