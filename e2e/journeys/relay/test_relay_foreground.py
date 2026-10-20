@@ -120,6 +120,16 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     assert failed["result"] == "Error: df_not_available"
     assert failed["error"] == "df_not_available"
 
+    # So is a failure worded without the "Error:" prefix: the tool's audit
+    # row says it failed.
+    publish(
+        tool_call_event("tc-lost", user_id, "describe_instance", {"instance_id": "no-such-host"}),
+        topic="ai-tool-calls",
+    )
+    lost_tool = wait_for_tool_result(fake_cloud, "tc-lost", listener)
+    assert lost_tool["status"] == "error", lost_tool
+    assert lost_tool["error"] == lost_tool["result"] == "Instance not found: no-such-host"
+
     # A monitoring probe answers on the command-result route with JSON output.
     publish(probe_event("probe-list", user_id, "list_instances"))
     probe = wait_for_result(fake_cloud, "probe-list", listener)

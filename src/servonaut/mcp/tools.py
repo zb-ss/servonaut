@@ -1159,9 +1159,15 @@ class ServonautTools:
         try:
             count = int(lines)
         except (TypeError, ValueError):
-            return "validation: lines must be an integer (1-10000)"
+            count = 0
         if not 1 <= count <= 10000:
-            return "validation: lines must be an integer (1-10000)"
+            message = "validation: lines must be an integer (1-10000)"
+            self._audit.log(
+                'get_logs',
+                {'instance_id': instance_id, 'log_path': log_path, 'lines': lines},
+                '', False, message,
+            )
+            return message
         return await self._run_command(
             instance_id, f"tail -n {count} -- {shlex.quote(log_path)}",
             requested_as="reading logs",
