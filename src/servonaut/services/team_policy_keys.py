@@ -11,10 +11,6 @@ let them sign any rules for themselves. A key is rotated by shipping the next
 one here before the API starts signing with it; signatures by keys this
 release does not know are ignored. A key's id is derived from the key itself
 (:func:`key_id_for`); an entry whose id does not match its key is ignored.
-
-No production key is bundled yet. Until a release bundles one, rules from the
-production API cannot be verified, so agents run at the read-only level on
-every team's shared servers.
 """
 from __future__ import annotations
 
@@ -31,7 +27,9 @@ PRODUCTION_ORIGIN = "https://api.servonaut.dev"
 # API origin -> key id -> the raw 32-byte Ed25519 public key in standard
 # base64 (the form a key is published in).
 TEAM_POLICY_KEYS: Mapping[str, Mapping[str, str]] = MappingProxyType({
-    PRODUCTION_ORIGIN: MappingProxyType({}),
+    PRODUCTION_ORIGIN: MappingProxyType({
+        "ddab938be92e4573": "jzEqA4TczRbiz31ITQ6J2VuvNMP3lQhtWigGnliwEjk=",
+    }),
 })
 
 _DEFAULT_PORTS = {"https": 443, "http": 80}

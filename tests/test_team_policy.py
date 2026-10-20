@@ -166,9 +166,16 @@ class TestDefaults:
 # ---------------------------------------------------------------------------
 
 class TestKeys:
-    def test_no_production_key_is_bundled_yet(self):
-        # The rollout gate: bundling the production key is a deliberate change.
-        assert dict(team_policy_keys.TEAM_POLICY_KEYS) == {PRODUCTION_ORIGIN: {}}
+    def test_only_the_production_key_is_bundled(self):
+        # Pinned so that adding, rotating or dropping a trusted key is a
+        # deliberate change, and no other origin's key (staging) ships.
+        assert {
+            origin: dict(keys) for origin, keys in team_policy_keys.TEAM_POLICY_KEYS.items()
+        } == {
+            PRODUCTION_ORIGIN: {
+                "ddab938be92e4573": "jzEqA4TczRbiz31ITQ6J2VuvNMP3lQhtWigGnliwEjk=",
+            },
+        }
 
     def test_every_bundled_key_matches_its_id(self):
         for keys in team_policy_keys.TEAM_POLICY_KEYS.values():
