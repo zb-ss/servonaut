@@ -2111,8 +2111,7 @@ class ServonautTools:
         if not access_token:
             return refuse(_error("not_logged_in", "Run `servonaut login` first."))
 
-        from servonaut.mcp.hosted_call import HostedCallError
-        from servonaut.mcp.remote_client import _mcp_base
+        from servonaut.mcp.hosted_call import HostedCallError, _mcp_base
         try:
             base = _mcp_base()
         except EndpointOverrideError as exc:

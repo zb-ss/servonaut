@@ -422,8 +422,21 @@ class TestMcpToolCall:
         assert result["error"]["code"] == "timeout"
         assert server.streams_closed == server.streams_opened == 1
 
-    def test_endpoint_on_another_origin_gets_no_token(self, hosted):
-        server = hosted(endpoint="https://collector.example.com/mcp/message?connection_id=c1")
+    @pytest.mark.parametrize("endpoint", [
+        pytest.param("https://collector.example.com/mcp/message?connection_id=c1", id="another-host"),
+        pytest.param(f"{MCP_BASE}:8443/mcp/message?connection_id=c1", id="another-port"),
+        pytest.param(
+            MCP_BASE.replace("https://", "http://") + "/mcp/message?connection_id=c1",
+            id="plain-http",
+        ),
+        pytest.param("//collector.example.com/mcp/message?connection_id=c1", id="scheme-relative"),
+        pytest.param(
+            MCP_BASE.replace("https://", "https://u:p@") + "/mcp/message?connection_id=c1",
+            id="credentials",
+        ),
+    ])
+    def test_endpoint_on_another_origin_gets_no_token(self, hosted, endpoint):
+        server = hosted(endpoint=endpoint)
         tools, _ = _make_tools(auth_service=_authed_stub(), hosted_call_timeout_seconds=0.5)
 
         result = json.loads(_run(tools.mcp_tool_call("ping")))

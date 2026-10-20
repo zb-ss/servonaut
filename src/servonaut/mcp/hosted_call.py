@@ -21,12 +21,28 @@ from typing import Any, Dict, Iterator, Optional
 
 import httpx
 
+from servonaut.utils.endpoints import MCP_URL_ENV, endpoint_or_default
+
 if sys.version_info >= (3, 11):
     _ExceptionGroup = BaseExceptionGroup  # noqa: F821 - builtin from 3.11
 else:  # anyio raises the backport on Python 3.10
     from exceptiongroup import BaseExceptionGroup as _ExceptionGroup
 
 SSE_PATH = "/mcp/sse"
+
+_DEFAULT_MCP_BASE = "https://mcp.servonaut.dev"
+
+
+def _mcp_base() -> str:
+    """Return the hosted MCP base URL, honouring a valid ``SERVONAUT_MCP_URL``.
+
+    Read at call time so secrets loaded after import are picked up.
+
+    Raises:
+        EndpointOverrideError: ``SERVONAUT_MCP_URL`` is not https (or http to
+            a loopback host). Raised before the bearer token is attached.
+    """
+    return endpoint_or_default(MCP_URL_ENV, _DEFAULT_MCP_BASE)
 
 
 class HostedCallError(Exception):
