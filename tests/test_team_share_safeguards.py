@@ -1,14 +1,18 @@
 """The Teams screen asks before servers leave for a team.
 
 Share All lists every server it would share and sends nothing until the user
-confirms.
+confirms; the push-config form shares only the custom servers the user ticks
+(none by default) and shows the connection profiles that go with them.
 """
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from textual.widgets import Button, SelectionList, Static
 
+from servonaut.config.schema import AppConfig, ConnectionProfile, CustomServer
 from servonaut.screens.team_management import TeamManagementScreen
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal
 from servonaut.services.redaction_service import RedactionService
@@ -30,6 +34,17 @@ SHAREABLE = [
 ]
 
 
+class _ConfigApp(_WrapperApp):
+    """The test host plus a config manager, for the push-config form."""
+
+    def __init__(self, *, config: AppConfig, config_manager=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        if config_manager is None:
+            config_manager = MagicMock()
+            config_manager.get.return_value = config
+        self.config_manager = config_manager
+
+
 async def _open_team(app, pilot) -> TeamManagementScreen:
     await _until(pilot, lambda: isinstance(app.screen, TeamManagementScreen), "the Teams screen")
     screen = app.screen
@@ -37,6 +52,7 @@ async def _open_team(app, pilot) -> TeamManagementScreen:
     screen._current_team_name = TEAM
     screen._current_team_role = "owner"
     screen._shared_servers = []
+    screen._show_detail_section()  # as View Team does: the team's cards are on screen
     return screen
 
 
@@ -187,4 +203,129 @@ class TestShareAllConfirmation:
             assert [ticked for _label, ticked in _rows(modal.query_one("#share_confirm_list"))] == [
                 False, True, True,
             ]
+
+
+def _push_config() -> AppConfig:
+    config = AppConfig()
+    config.custom_servers = [
+        CustomServer(name="team-box", host="10.0.0.5", ssh_key="/keys/team"),
+        CustomServer(name="private-box", host="10.0.0.6"),
+    ]
+    config.connection_profiles = [
+        ConnectionProfile(name="via-bastion", bastion_host="10.0.0.1", bastion_user="ec2-user",
+                          bastion_key="/keys/bastion"),
+        ConnectionProfile(name="plain"),
+    ]
+    return config
+
+
+def _push_app(config: AppConfig) -> tuple[_ConfigApp, MagicMock]:
+    team_svc = _make_team_service()
+    team_svc.push_team_config = AsyncMock(return_value={"version": 1})
+    team_svc.list_team_configs = AsyncMock(return_value=[])
+    return _ConfigApp(config=config, auth_service=_make_auth_service(), team_service=team_svc), team_svc
+
+
+async def _open_push_form(app, pilot) -> TeamManagementScreen:
+    screen = await _open_team(app, pilot)
+    screen._action_push_config()
+    await _until(pilot, lambda: screen.query_one("#push_config_form").display, "the push form")
+    return screen
+
+
+class TestPushConfigServerPicker:
+    async def test_lists_custom_servers_unticked_and_the_profiles_that_go_out(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            listing = screen.query_one("#push_config_servers", SelectionList)
+            assert _rows(listing) == [("team-box     10.0.0.5", False), ("private-box  10.0.0.6", False)]
+            await _until(pilot, lambda: listing.has_focus, "the picker to take focus")
+            assert _text(screen.query_one("#push_config_profiles", Static)) == (
+                "Connection profiles — all of them are shared\n"
+                "  • via-bastion  bastion ec2-user@10.0.0.1\n"
+                "  • plain        no bastion"
+            )
+            # Only the bastion key is stripped while no server is ticked.
+            assert _text(screen.query_one("#push_config_preview", Static)) == (
+                "Will share: 0 of 2 custom servers, 2 connection profiles, 0 connection rules, "
+                "0 scan rules.\n1 local SSH key path(s) will be stripped — teammates must "
+                "re-bind them locally."
+            )
+
+    async def test_pushing_with_nothing_ticked_sends_no_custom_server(self):
+        app, team_svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            screen.query_one("#btn_confirm_push_config", Button).press()
+            await _until(pilot, lambda: team_svc.push_team_config.await_count == 1, "the push")
+            payload = team_svc.push_team_config.await_args.args[1]
+            assert payload["custom_servers"] == []
+            assert [p["name"] for p in payload["connection_profiles"]] == ["via-bastion", "plain"]
+
+    async def test_only_the_ticked_server_is_pushed_and_counted(self):
+        app, team_svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            preview = screen.query_one("#push_config_preview", Static)
+            listing = screen.query_one("#push_config_servers", SelectionList)
+            await _until(pilot, lambda: listing.has_focus, "the picker to take focus")
+            await pilot.press("space")  # ticks the highlighted first row: team-box
+            await _until(pilot, lambda: "1 of 2 custom servers" in _text(preview), "the preview to follow")
+            assert "2 local SSH key path(s)" in _text(preview)
+
+            screen.query_one("#btn_confirm_push_config", Button).press()
+            await _until(pilot, lambda: team_svc.push_team_config.await_count == 1, "the push")
+            [server] = team_svc.push_team_config.await_args.args[1]["custom_servers"]
+            assert (server["name"], server["host"], server["ssh_key"]) == ("team-box", "10.0.0.5", "")
+
+    async def test_select_all_and_select_none(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            listing = screen.query_one("#push_config_servers", SelectionList)
+            preview = screen.query_one("#push_config_preview", Static)
+            screen.query_one("#btn_push_servers_all", Button).press()
+            await _until(pilot, lambda: "2 of 2 custom servers" in _text(preview), "all ticked")
+            assert sorted(listing.selected) == ["private-box", "team-box"]
+            screen.query_one("#btn_push_servers_none", Button).press()
+            await _until(pilot, lambda: "0 of 2 custom servers" in _text(preview), "none ticked")
+            assert listing.selected == []
+
+    async def test_reopening_the_form_starts_with_nothing_ticked(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            screen.query_one("#btn_push_servers_all", Button).press()
+            listing = screen.query_one("#push_config_servers", SelectionList)
+            await _until(pilot, lambda: len(listing.selected) == 2, "all ticked")
+            screen.query_one("#btn_cancel_push_config", Button).press()
+            await _until(pilot, lambda: not screen.query_one("#push_config_form").display, "form closed")
+            await _open_push_form(app, pilot)
+            assert listing.selected == []
+
+    async def test_no_custom_servers_hides_the_picker(self):
+        config = _push_config()
+        config.custom_servers = []
+        app, _svc = _push_app(config)
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_push_form(app, pilot)
+            assert not screen.query_one("#push_config_servers").display
+            assert not screen.query_one("#push_config_server_actions").display
+            assert _text(screen.query_one("#push_config_servers_label", Static)) == (
+                "No custom servers in your config."
+            )
+            description = screen.query_one("#input_push_description")
+            await _until(pilot, lambda: description.has_focus, "the description to take focus")
+
+    async def test_demo_mode_hides_server_and_profile_names(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            app.demo_mode = True
+            app.redaction_service = RedactionService()
+            screen = await _open_push_form(app, pilot)
+            shown = " ".join(label for label, _ in _rows(screen.query_one("#push_config_servers")))
+            shown += _text(screen.query_one("#push_config_profiles", Static))
+            for real in ("team-box", "private-box", "10.0.0.5", "10.0.0.6", "via-bastion", "10.0.0.1"):
+                assert real not in shown, real
 

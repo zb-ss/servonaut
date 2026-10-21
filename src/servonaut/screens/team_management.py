@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import List, Optional, Tuple
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Input, Select, Static
+from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
+from textual.widgets.selection_list import Selection
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
@@ -69,6 +71,8 @@ class TeamManagementScreen(Screen):
         self._team_configs: list[dict] = []
         # Holds the parsed remote payload between "Pull Latest" and Apply confirm.
         self._pending_pull_payload: Optional[dict] = None
+        # Custom-server names the open push form offers (ticked or not).
+        self._push_server_names: list[str] = []
 
     # ------------------------------------------------------------------
     # Compose
@@ -180,6 +184,15 @@ class TeamManagementScreen(Screen):
                     ),
                     Container(
                         Static("[bold]Push Current Config[/bold]", classes="section_header"),
+                        Static("", id="push_config_servers_label"),
+                        SelectionList(id="push_config_servers"),
+                        Horizontal(
+                            Button("Select All", variant="default", id="btn_push_servers_all"),
+                            Button("Select None", variant="default", id="btn_push_servers_none"),
+                            classes="form_actions_row",
+                            id="push_config_server_actions",
+                        ),
+                        Static("", id="push_config_profiles"),
                         Static("", id="push_config_preview"),
                         Input(
                             placeholder="Description (optional — e.g. 'Adds staging bastion')",
@@ -898,18 +911,104 @@ class TeamManagementScreen(Screen):
         self.query_one("#pull_config_form").display = False
 
     def _show_push_config_form(self) -> None:
-        from servonaut.services.team_config_subset import build_shareable_subset
+        """Open the push form with every custom server listed and none ticked.
+
+        Only the custom servers the user ticks are pushed. Connection
+        profiles, connection rules and scan rules go out whole, so the
+        profiles are listed by name and bastion host for review.
+        """
         config_manager = getattr(self.app, "config_manager", None)
         config = config_manager.get() if config_manager is not None else None
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
-        _payload, summary = build_shareable_subset(config)
+        servers = list(config.custom_servers)
+        self._push_server_names = [server.name for server in servers]
+        self._render_push_config_servers(servers, selected=set())
+        self._render_push_config_preview(config)
+        self.query_one("#input_push_description", Input).value = ""
+        form = self.query_one("#push_config_form")
+        form.display = True
+        if servers:
+            self.query_one("#push_config_servers", SelectionList).focus()
+        else:
+            self.query_one("#input_push_description", Input).focus()
+        # The form opens at the foot of the page: bring all of it into view once
+        # it is laid out, so the summary and Push are not below the fold.
+        self.call_after_refresh(form.scroll_visible, top=True, animate=False)
+
+    def _render_push_config_servers(self, servers: list, *, selected: set) -> None:
+        """List the custom servers by name and host, ticking the ones named in *selected*."""
+        demo = self.app.demo_mode and self.app.redaction_service
+
+        def _name(x: str) -> str:
+            return self.app.redaction_service.redact_name(x) if demo else x
+
+        def _host(x: str) -> str:
+            return self.app.redaction_service.scrub_stream(x) if demo else x
+
+        names = [_name(server.name) for server in servers]
+        # Names padded to the longest one, so the hosts line up in a column.
+        width = max((len(name) for name in names), default=0)
+        listing = self.query_one("#push_config_servers", SelectionList)
+        listing.clear_options()
+        listing.add_options([
+            Selection(
+                f"{escape(name.ljust(width))}  [dim]{escape(_host(server.host))}[/dim]",
+                server.name,
+                server.name in selected,
+            )
+            for name, server in zip(names, servers)
+        ])
+        if servers:
+            listing.highlighted = 0  # so Space ticks the first row straight away
+        listing.display = bool(servers)
+        self.query_one("#push_config_server_actions").display = bool(servers)
+        self.query_one("#push_config_servers_label", Static).update(
+            "[bold]Custom servers[/bold] [dim]— only the ticked ones are shared[/dim]"
+            if servers
+            else "[dim]No custom servers in your config.[/dim]"
+        )
+
+    def _push_selected_servers(self) -> list[str]:
+        """Names of the custom servers ticked in the push form."""
+        return list(self.query_one("#push_config_servers", SelectionList).selected)
+
+    def _render_push_config_preview(self, config) -> None:
+        """Show what Push sends with the current ticks: profiles, counts, stripped paths."""
+        from servonaut.services.team_config_subset import build_shareable_subset
+
+        payload, summary = build_shareable_subset(
+            config, custom_servers=self._push_selected_servers()
+        )
+        demo = self.app.demo_mode and self.app.redaction_service
+
+        def _name(x: str) -> str:
+            return self.app.redaction_service.redact_name(x) if demo else x
+
+        def _host(x: str) -> str:
+            return self.app.redaction_service.scrub_stream(x) if demo else x
+
+        profiles = payload["connection_profiles"]
+        if profiles:
+            names = [_name(profile["name"]) for profile in profiles]
+            width = max(len(name) for name in names)
+            lines = ["[bold]Connection profiles[/bold] [dim]— all of them are shared[/dim]"]
+            lines += [
+                f"  • {escape(name.ljust(width))}  "
+                f"[dim]{escape(_host(self._profile_route(profile)))}[/dim]"
+                for name, profile in zip(names, profiles)
+            ]
+        else:
+            lines = ["[dim]No connection profiles in your config.[/dim]"]
+        self.query_one("#push_config_profiles", Static).update("\n".join(lines))
+
         preview = (
-            f"Will share: [bold]{summary['connection_profiles']}[/bold] connection profiles, "
+            f"Will share: [bold]{summary['custom_servers']}[/bold] of "
+            f"{len(self._push_server_names)} custom servers, "
+            f"[bold]{summary['connection_profiles']}[/bold] connection profiles, "
             f"[bold]{summary['connection_rules']}[/bold] connection rules, "
-            f"[bold]{summary['scan_rules']}[/bold] scan rules, "
-            f"[bold]{summary['custom_servers']}[/bold] custom servers."
+            f"[bold]{summary['scan_rules']}[/bold] scan rules."
         )
         if summary["stripped_paths"]:
             preview += (
@@ -917,10 +1016,26 @@ class TeamManagementScreen(Screen):
                 "stripped — teammates must re-bind them locally.[/$text-warning]"
             )
         self.query_one("#push_config_preview", Static).update(preview)
-        self.query_one("#input_push_description", Input).value = ""
-        form = self.query_one("#push_config_form")
-        form.display = True
-        self.query_one("#input_push_description", Input).focus()
+
+    @staticmethod
+    def _profile_route(profile: dict) -> str:
+        """How a connection profile reaches its servers, as the push sends it."""
+        bastion = profile.get("bastion_host") or ""
+        if bastion:
+            user = profile.get("bastion_user") or ""
+            return f"bastion {user}@{bastion}" if user else f"bastion {bastion}"
+        if profile.get("proxy_command"):
+            return f"proxy command {profile['proxy_command']}"
+        return "no bastion"
+
+    def on_selection_list_selected_changed(self, event: SelectionList.SelectedChanged) -> None:
+        """Keep the push preview in step with the ticked custom servers."""
+        if event.selection_list.id != "push_config_servers":
+            return
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
+        if config is not None:
+            self._render_push_config_preview(config)
 
     def _show_pull_config_form(self, remote_payload: dict) -> None:
         from servonaut.services.team_config_subset import diff_against_local
@@ -1033,6 +1148,12 @@ class TeamManagementScreen(Screen):
 
         elif button_id == "btn_confirm_push_config":
             self._submit_push_config()
+
+        elif button_id == "btn_push_servers_all":
+            self.query_one("#push_config_servers", SelectionList).select_all()
+
+        elif button_id == "btn_push_servers_none":
+            self.query_one("#push_config_servers", SelectionList).deselect_all()
 
         elif button_id == "btn_cancel_push_config":
             self._hide_push_config_form()
@@ -1293,7 +1414,9 @@ class TeamManagementScreen(Screen):
             self.notify("Local config not available.", severity="error")
             return
         from servonaut.services.team_config_subset import build_shareable_subset
-        payload, _summary = build_shareable_subset(config)
+        payload, _summary = build_shareable_subset(
+            config, custom_servers=self._push_selected_servers()
+        )
         description = self.query_one("#input_push_description", Input).value.strip() or None
         self.run_worker(
             self._do_push_config(self._current_team_slug, payload, description),

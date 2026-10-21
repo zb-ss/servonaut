@@ -163,12 +163,31 @@
 #create_team_form,
 #invite_form,
 #change_role_form,
-#share_server_form {
+#share_server_form,
+#push_config_form {
     height: auto;
     padding: 1;
     margin: 1 0 0 0;
     border: round $accent;
     background: $boost;
+}
+
+/* The push form's custom-server picker: as tall as its rows, then it scrolls,
+   so a long server list leaves the profiles and the Push button in reach. */
+#push_config_servers {
+    height: auto;
+    max-height: 12;
+    margin: 0 0 1 0;
+}
+
+#push_config_profiles,
+#push_config_preview {
+    margin: 0 0 1 0;
+}
+
+#push_config_form Input {
+    margin: 0 0 1 0;
+    width: 1fr;
 }
 
 #create_team_form Input,
