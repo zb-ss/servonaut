@@ -16,9 +16,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,38 @@ ROTATE_MAX_HISTORY = 5
 #: Stat-on-every-write is fine for most installs but unnecessary; a
 #: small batch keeps cost amortised on tight tool-call loops.
 _ROTATE_CHECK_EVERY = 25
+
+
+@dataclass(frozen=True)
+class AuditOutcome:
+    """What one audit row recorded about a call: its tool and whether it
+    was allowed (tools write ``allowed=False`` on every refusal and failure)."""
+
+    tool: str
+    allowed: bool
+    reason: str
+
+
+_recorded_outcomes: ContextVar[Optional[List[AuditOutcome]]] = ContextVar(
+    "servonaut_audit_outcomes", default=None,
+)
+
+
+@contextmanager
+def record_outcomes() -> Iterator[List[AuditOutcome]]:
+    """Collect the outcome of every audit row written inside the block.
+
+    A caller that only gets a tool's text back (the AI tool bridge) learns
+    from the rows the tool wrote whether the call failed, instead of
+    guessing from the text, which can be raw server output. The list is
+    per context, so concurrent calls on other tasks do not mix.
+    """
+    outcomes: List[AuditOutcome] = []
+    token = _recorded_outcomes.set(outcomes)
+    try:
+        yield outcomes
+    finally:
+        _recorded_outcomes.reset(token)
 
 
 class AuditTrail:
@@ -88,6 +123,9 @@ class AuditTrail:
         for key, value in extras.items():
             if key not in entry:
                 entry[key] = value
+        outcomes = _recorded_outcomes.get()
+        if outcomes is not None:
+            outcomes.append(AuditOutcome(tool, bool(allowed), str(reason or "")))
         try:
             with open(self._path, 'a') as f:
                 f.write(json.dumps(entry) + '\n')
