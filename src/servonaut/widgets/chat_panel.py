@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 import time
 import webbrowser
@@ -377,6 +378,17 @@ def resolve_spoken_sentence(
             return ""
         stripped = scrubbed.strip()
     return stripped
+
+
+def _respond_by(value: Any) -> Optional[float]:
+    """The paused turn's continue deadline from a ``tool_call`` event, if any.
+
+    The provider adds it (a :func:`time.monotonic` value) to calls of a turn
+    the service paused; anything else means the turn is not paused.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
 
 # Cap on the speech-to-text vocabulary hint. Whisper-family models treat
 # the initial prompt as leading context and degrade once it dominates the
@@ -3813,6 +3825,10 @@ class ChatPanel(Widget):
         :meth:`_do_send_servonaut` short (C1) and gives test code a
         single seam to mock — patch this method, not the underlying
         provider, when exercising the orchestrator.
+
+        ``split_turns`` is on because the panel runs each ``tool_call`` and
+        posts its result before it reads the next event, which is what lets
+        the service pause the turn while tools run.
         """
         async for event in provider.stream_chat(
             body_kwargs["messages"],
@@ -3821,6 +3837,7 @@ class ChatPanel(Widget):
             conversation_id=body_kwargs["conversation_id"],
             context=body_kwargs["context"],
             allow_tools=body_kwargs["allow_tools"],
+            split_turns=True,
         ):
             yield event
 
@@ -4089,6 +4106,7 @@ class ChatPanel(Widget):
             # As sent ("" when absent) so audit rows don't record our default.
             server_guard_level=str(data.get("guard_level") or ""),
             conversation_id=self._remote_conversation_id or "",
+            respond_by=_respond_by(data.get("respond_by")),
         )
 
         # INFO-level so users running without --debug can see the flow.

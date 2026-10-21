@@ -125,3 +125,58 @@ def test_sse_frames_keep_data_exactly():
     assert event == sse.ParsedEvent("token", data, "7")
     # A field with no space after the colon, and a bare data line.
     assert sse.parse("event:ping\ndata:\n\n") == [sse.ParsedEvent("ping", "")]
+
+
+def test_a_pause_deadline_counts_from_when_it_is_sent():
+    import json
+    import time
+    from datetime import datetime
+
+    from e2e.harness.fake_cloud.chat_script import turn_suspended
+
+    event = turn_suspended("cont-1", ["tc-1"], expires_in=300)
+    [parsed] = sse.parse(event.frame().decode("utf-8"))
+    data = json.loads(parsed.data)
+    assert (data["continuation_id"], data["tool_call_ids"]) == ("cont-1", ["tc-1"])
+    left = datetime.fromisoformat(data["expires_at"]).timestamp() - time.time()
+    assert 295 < left <= 300
+
+
+def _scripted(spec: dict) -> list:
+    from unittest.mock import MagicMock
+
+    from e2e.sandbox import ai_script
+
+    fake_cloud = MagicMock()
+    fake_cloud.entitlements.return_value = {"quota": {}}
+    ai_script.apply(fake_cloud, ai_script.load_spec(spec))
+    return [turn for call in fake_cloud.ai.script.call_args_list for turn in call.args]
+
+
+NOTE_CALL = {"tool": "remember_server_finding", "args": {"instance_id": "web-1"}, "result": "Saved."}
+
+
+def test_a_sandbox_tool_turn_pauses_like_the_service():
+    first, rest = _scripted({"turns": [{"reply": "On it.", "after": " Done.", "tool_call": NOTE_CALL}]})
+    assert [e.name for e in first.events] == ["token", "token", "tool_call", "turn_suspended"]
+    assert [e.name for e in rest.events] == ["tool_result", "token", "token", "usage"]
+    assert first.pauses and first.says_it_pauses and rest.says_it_pauses
+
+
+def test_a_sandbox_tool_turn_can_keep_the_stream_open():
+    [turn] = _scripted({"turns": [{"reply": "On it.", "pause": False, "tool_call": NOTE_CALL}]})
+    assert [e.name for e in turn.events] == ["token", "token", "tool_call", "tool_result", "usage"]
+    assert not turn.pauses and not turn.says_it_pauses
+
+
+@pytest.mark.parametrize("turn,says", [
+    ({"reply": "x", "tool_call": "run it"}, 'with a "tool" name'),
+    ({"reply": "x", "tool_call": {"tool": "t", "args": ["a"]}}, "args must be an object"),
+    ({"reply": "x", "tool_call": {"tool": "t", "result": 3}}, "result must be a string"),
+    ({"reply": "x", "pause": "yes", "tool_call": {"tool": "t"}}, "pause true or false"),
+])
+def test_a_malformed_sandbox_tool_turn_is_refused(turn, says):
+    from e2e.sandbox import ai_script
+
+    with pytest.raises(ai_script.ScriptError, match=says):
+        ai_script.load_spec({"turns": [turn]})

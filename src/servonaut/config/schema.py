@@ -278,7 +278,9 @@ class AIProviderConfig:
         tool_confirm_timeout_seconds: Hosted Servonaut AI only. How long a
             tool confirmation prompt stays open. Once it passes, the prompt
             closes and the tool is not run. The service waits about 60 s for
-            a tool result by default, so keep this below that.
+            a tool result by default, so keep this below that. When the
+            service pauses the reply while the tools run, its own time
+            limit applies instead.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # legacy single-key field; kept for backward compat
