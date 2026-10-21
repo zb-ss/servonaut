@@ -557,9 +557,45 @@ class TestRejectionStateMachine:
             )
             await svc.drain_now()
 
-        # Should have tried to save
-        assert config_manager.save.called
+        # Saved the config it changed
+        config_manager.save.assert_called_once_with(config_manager.get.return_value)
         assert svc._halted_reason is None  # Not halted
+
+    @pytest.mark.asyncio
+    async def test_memory_disabled_opt_out_reaches_the_config_file(self, tmp_path):
+        """memory_disabled: the opt-out is written to disk, not just to memory."""
+        from servonaut.config.manager import ConfigManager
+
+        config_path = tmp_path / "config.json"
+        ConfigManager(config_path=config_path).save(ConfigManager(config_path=config_path).get())
+        api = _make_api_client(post_return=self._make_batch_response("memory_disabled"))
+        svc = _make_service(
+            api_client=api, config_manager=ConfigManager(config_path=config_path), tmp_path=tmp_path
+        )
+        svc._self_pubkey = b"\x01" * 32
+        svc._self_user_id = 42
+        svc._self_privkey = b"\x02" * 32
+        svc._pending.append(
+            SyncEnvelope("web-01", "os", "", 86400, False, False, False, False, None, {})
+        )
+
+        with patch(
+            "servonaut.services.memory.sync_service.encrypt_envelope"
+        ) as mock_enc:
+            mock_enc.return_value = MagicMock(
+                to_dict=lambda: {
+                    "iv": "AAAAAAAAAAAAAAAA",
+                    "tag": "AAAAAAAAAAAAAAAA",
+                    "ciphertext": "AA==",
+                    "encryption": "aes-256-gcm",
+                    "salt": None,
+                    "dek_wraps": [],
+                }
+            )
+            await svc.drain_now()
+
+        saved = ConfigManager(config_path=config_path).load()
+        assert saved.memory.per_server_overrides == {"web-01": {"memory_disabled": True}}
 
     @pytest.mark.asyncio
     async def test_quota_exceeded_halts_with_backoff(self, tmp_path):

@@ -38,9 +38,12 @@ def _seeded_config() -> AppConfig:
     return cfg
 
 
+_ALL_SERVERS = ("db-1", "cache-1")
+
+
 class TestBuildShareableSubset:
     def test_includes_the_four_shareable_sections(self):
-        payload, summary = build_shareable_subset(_seeded_config())
+        payload, summary = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
         assert payload["subset_version"] == SHAREABLE_SUBSET_VERSION
         assert summary == {
             "connection_profiles": 2,
@@ -51,21 +54,21 @@ class TestBuildShareableSubset:
         }
 
     def test_strips_bastion_key_local_path(self):
-        payload, _ = build_shareable_subset(_seeded_config())
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
         profile_with_bastion = next(
             p for p in payload["connection_profiles"] if p["name"] == "prod-bastion"
         )
         assert profile_with_bastion["bastion_key"] == ""
 
     def test_strips_custom_server_ssh_key_local_path(self):
-        payload, _ = build_shareable_subset(_seeded_config())
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
         db_server = next(s for s in payload["custom_servers"] if s["name"] == "db-1")
         assert db_server["ssh_key"] == ""
         cache_server = next(s for s in payload["custom_servers"] if s["name"] == "cache-1")
         assert cache_server["ssh_key"] == ""
 
     def test_does_NOT_include_credential_or_personal_sections(self):
-        payload, _ = build_shareable_subset(_seeded_config())
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
         # The four shareable keys + subset_version marker — nothing else.
         assert set(payload.keys()) == {
             "subset_version",
@@ -81,10 +84,60 @@ class TestBuildShareableSubset:
             assert forbidden not in payload
 
     def test_internal_strip_marker_not_present_in_final_payload(self):
-        payload, _ = build_shareable_subset(_seeded_config())
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
         for section in ("connection_profiles", "custom_servers"):
             for entry in payload[section]:
                 assert "_stripped" not in entry, "_stripped marker leaked to wire format"
+
+
+class TestCustomServerSelection:
+    """Only the custom servers the caller names are shared."""
+
+    def test_only_the_named_servers_are_sent(self):
+        payload, summary = build_shareable_subset(_seeded_config(), custom_servers=["cache-1"])
+        assert [s["name"] for s in payload["custom_servers"]] == ["cache-1"]
+        assert summary["custom_servers"] == 1
+        # Profiles and rules still go out whole.
+        assert [p["name"] for p in payload["connection_profiles"]] == ["prod-bastion", "staging"]
+        assert summary["connection_rules"] == 1 and summary["scan_rules"] == 1
+
+    def test_no_server_named_sends_none(self):
+        payload, summary = build_shareable_subset(_seeded_config(), custom_servers=[])
+        assert payload["custom_servers"] == []
+        assert summary["custom_servers"] == 0
+        assert summary["connection_profiles"] == 2
+
+    def test_stripped_paths_count_only_what_is_sent(self):
+        # db-1 has a key path, cache-1 has none; the bastion key is always sent (stripped).
+        _payload, without_db = build_shareable_subset(_seeded_config(), custom_servers=["cache-1"])
+        _payload, with_db = build_shareable_subset(_seeded_config(), custom_servers=["db-1"])
+        assert without_db["stripped_paths"] == 1
+        assert with_db["stripped_paths"] == 2
+
+    def test_names_not_in_the_config_are_ignored(self):
+        payload, summary = build_shareable_subset(_seeded_config(), custom_servers=["gone", "db-1"])
+        assert [s["name"] for s in payload["custom_servers"]] == ["db-1"]
+        assert summary["custom_servers"] == 1
+
+    def test_the_selection_is_required(self):
+        import pytest
+
+        with pytest.raises(TypeError):
+            build_shareable_subset(_seeded_config())  # type: ignore[call-arg]
+
+    def test_a_partial_push_applies_cleanly_on_the_receiving_side(self):
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=["db-1"])
+        member = AppConfig()
+        member.custom_servers = [CustomServer(name="own-box", host="10.9.9.9")]
+        diff = diff_against_local(member, payload)
+        assert diff["custom_servers"] == {"local": 1, "remote": 1, "after": 1}
+
+        apply_team_config(member, payload)
+        [server] = member.custom_servers
+        assert (server.name, server.host, server.username, server.ssh_key) == ("db-1", "10.0.0.1", "ubuntu", "")
+        assert [p.name for p in member.connection_profiles] == ["prod-bastion", "staging"]
+        assert [r.profile_name for r in member.connection_rules] == ["prod-bastion"]
+        assert [r.name for r in member.scan_rules] == ["nginx-logs"]
 
 
 class TestApplyTeamConfig:
