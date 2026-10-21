@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import List, Optional, Tuple
 
 from textual.app import ComposeResult
@@ -14,6 +15,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Select, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
 from servonaut.services.api_client import APIError
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -1385,11 +1387,12 @@ class TeamManagementScreen(Screen):
         )
 
     def _action_share_all_servers(self) -> None:
-        """Bulk-share every eligible instance, skipping ones already on the team.
+        """Offer every eligible instance not yet on the team, then share the ones confirmed.
 
         Eligible = has a routable hostname (public or private IP). Dedupe is
         applied client-side via instance_id first (most reliable), then by
-        hostname (handles non-cloud custom servers without an id).
+        hostname (handles non-cloud custom servers without an id). Nothing is
+        sent until the user confirms the list in ShareServersConfirmModal.
         """
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
@@ -1415,7 +1418,7 @@ class TeamManagementScreen(Screen):
         skipped_existing = 0
         skipped_no_ip = 0
         for instance in instances:
-            hostname = instance.get("public_ip") or instance.get("private_ip")
+            hostname = server_address(instance)
             if not hostname:
                 skipped_no_ip += 1
                 continue
@@ -1435,8 +1438,33 @@ class TeamManagementScreen(Screen):
             return
 
         slug = self._current_team_slug
+        self.app.push_screen(
+            ShareServersConfirmModal(
+                self._current_team_name or slug,
+                to_share,
+                skipped_existing=skipped_existing,
+                skipped_no_address=skipped_no_ip,
+            ),
+            callback=partial(
+                self._share_all_confirmed, slug, len(to_share), skipped_existing, skipped_no_ip
+            ),
+        )
+
+    def _share_all_confirmed(
+        self,
+        slug: str,
+        offered: int,
+        skipped_existing: int,
+        skipped_no_ip: int,
+        chosen: Optional[list[dict]],
+    ) -> None:
+        """Share the servers ticked in Share All's confirmation; nothing when it was cancelled."""
+        if not chosen:
+            return
         self.run_worker(
-            self._do_share_all(slug, to_share, skipped_existing, skipped_no_ip),
+            self._do_share_all(
+                slug, chosen, skipped_existing, skipped_no_ip, left_out=offered - len(chosen)
+            ),
             exclusive=True,
             name="share_all_servers",
         )
@@ -1447,6 +1475,8 @@ class TeamManagementScreen(Screen):
         instances: list[dict],
         skipped_existing: int,
         skipped_no_ip: int,
+        *,
+        left_out: int = 0,
     ) -> None:
         team_svc = getattr(self.app, "team_service", None)
         if team_svc is None:
@@ -1456,7 +1486,7 @@ class TeamManagementScreen(Screen):
         for instance in instances:
             payload: dict = {
                 "name": instance.get("name") or instance.get("id", ""),
-                "hostname": instance.get("public_ip") or instance.get("private_ip"),
+                "hostname": server_address(instance),
             }
             if instance.get("id"):
                 payload["instance_id"] = instance["id"]
@@ -1478,6 +1508,8 @@ class TeamManagementScreen(Screen):
                 failed.append(f"{payload['name']} ({exc})")
 
         parts = [f"Shared {succeeded}"]
+        if left_out:
+            parts.append(f"left out {left_out}")
         if skipped_existing:
             parts.append(f"skipped {skipped_existing} already shared")
         if skipped_no_ip:

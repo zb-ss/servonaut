@@ -821,6 +821,11 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "push_config_form",
         "push_config_preview",
         "section_configs",
+        # Share All confirmation (ShareServersConfirmModal): buttons inherit the
+        # #share_confirm_pick / #share_confirm_actions rows in its DEFAULT_CSS.
+        "share_confirm_all",
+        "share_confirm_none",
+        "share_confirm_share",
         # ---- Settings refactor (master/detail panels, screens/settings/**) ----
         # Panel root containers carry the .settings-panel class (styled in
         # app.css); form Inputs/Selects/Switches sit in .setting_row and inherit
