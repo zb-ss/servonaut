@@ -1121,9 +1121,15 @@ class RelayListener:
                             status = "success"
                             output = ensure_json_probe_output(output)
                     else:
-                        status = str(result.status)
-                        error_message = ensure_probe_error_slug(
-                            str(result.error or output or ""),
+                        # A refusal ("denied") is not a probe-contract
+                        # status; it answers as an error, slugged from the
+                        # tool's text like the ok-but-errorish case.
+                        status = "timeout" if result.status == "timeout" else "error"
+                        error_message = (
+                            probe_error_from_tool_text(output)
+                            or ensure_probe_error_slug(
+                                str(result.error or output or ""),
+                            )
                         )
                         output = ""
             except Exception as exc:  # noqa: BLE001 — must still answer

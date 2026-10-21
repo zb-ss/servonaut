@@ -26,7 +26,7 @@ from textual.app import App
 from textual.widgets import Button, Input
 
 from servonaut.config.schema import AppConfig, MCPConfig, RelayConfig
-from servonaut.mcp import remote_client
+from servonaut.mcp import hosted_call
 from servonaut.mcp.guards import CommandGuard, GuardLevel
 from servonaut.mcp.tools import ServonautTools
 from servonaut.services import api_client, auth_service
@@ -75,7 +75,7 @@ _REFUSED = [
 _READERS = [
     pytest.param(API_URL_ENV, auth_service._api_base, id="auth_service"),
     pytest.param(API_URL_ENV, api_client._api_base, id="api_client"),
-    pytest.param(MCP_URL_ENV, remote_client._mcp_base, id="remote_mcp"),
+    pytest.param(MCP_URL_ENV, hosted_call._mcp_base, id="hosted_mcp"),
 ]
 
 
@@ -278,103 +278,6 @@ def test_ai_stream_refuses_before_connecting(monkeypatch):
     assert requests == []
 
 
-def test_remote_mcp_client_refuses_before_connecting(monkeypatch, sent):
-    monkeypatch.setenv(MCP_URL_ENV, "http://mcp.example.com")
-    client = remote_client.RemoteMCPClient(MagicMock(access_token="access-token-value"))
-    with pytest.raises(EndpointOverrideError, match=MCP_URL_ENV):
-        asyncio.run(client.connect())
-    assert sent == []
-    assert not client.is_connected
-
-
-def _connect_with_advertised_endpoint(monkeypatch, advertised: object) -> List[httpx.Request]:
-    """Connect, with the server advertising *advertised*, then make one tool call.
-
-    Returns every request sent, so a test can see where the bearer went.
-    """
-    requests: List[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.url.path == "/mcp/sse":
-            return httpx.Response(200, json={"session_id": "s1", "message_endpoint": advertised})
-        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
-
-    real_client = httpx.AsyncClient
-
-    class _Client(real_client):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    monkeypatch.setenv(MCP_URL_ENV, "https://mcp.example.com")
-    client = remote_client.RemoteMCPClient(MagicMock(access_token="access-token-value"))
-    assert asyncio.run(client.connect()) is True
-    assert asyncio.run(client.call_tool("deploy", {})) == "ok"
-    return requests
-
-
-@pytest.mark.parametrize(
-    "advertised",
-    [
-        pytest.param("https://collector.example.com/mcp/message", id="another-https-host"),
-        pytest.param("https://mcp.example.com:8443/mcp/message", id="another-port"),
-        pytest.param("http://mcp.example.com/mcp/message", id="plain-http"),
-        pytest.param("//collector.example.com/mcp/message", id="scheme-relative"),
-        pytest.param(f"https://u:{_SECRET}@mcp.example.com/m", id="credentials"),
-        pytest.param("https://mcp.example.com/m#frag", id="fragment"),
-        pytest.param(42, id="not-a-string"),
-    ],
-)
-def test_remote_mcp_client_ignores_a_cross_origin_message_endpoint(
-    monkeypatch, caplog, advertised
-):
-    """Tool calls carry the bearer: only the base's own origin may receive them."""
-    requests = _connect_with_advertised_endpoint(monkeypatch, advertised)
-
-    tool_call = requests[-1]
-    assert str(tool_call.url) == "https://mcp.example.com/mcp/message"
-    assert tool_call.headers["Authorization"] == "Bearer access-token-value"
-    assert all(r.url.host == "mcp.example.com" and r.url.port is None for r in requests)
-    assert "Using the default message endpoint" in caplog.text
-    assert "collector" not in caplog.text and _SECRET not in caplog.text
-
-
-@pytest.mark.parametrize(
-    ("advertised", "expected"),
-    [
-        ("https://mcp.example.com/session/s1/message", "https://mcp.example.com/session/s1/message"),
-        # Same origin once case and the default port are normalised.
-        ("https://MCP.example.com:443/m?session_id=s1", "https://mcp.example.com/m?session_id=s1"),
-        ("/session/s1/message", "https://mcp.example.com/session/s1/message"),
-        ("", "https://mcp.example.com/mcp/message"),
-    ],
-)
-def test_remote_mcp_client_uses_a_same_origin_message_endpoint(monkeypatch, advertised, expected):
-    requests = _connect_with_advertised_endpoint(monkeypatch, advertised)
-    assert str(requests[-1].url) == expected
-
-
-def test_remote_mcp_reconnect_stops_on_a_refused_url(monkeypatch, sent, caplog):
-    """Waiting cannot fix configuration: report once, then give up."""
-    monkeypatch.setenv(MCP_URL_ENV, "http://mcp.example.com")
-    sleeps: List[float] = []
-
-    async def no_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(remote_client.asyncio, "sleep", no_sleep)
-    client = remote_client.RemoteMCPClient(MagicMock(access_token="access-token-value"))
-
-    assert asyncio.run(client.reconnect()) is False
-
-    assert len(sleeps) == 1
-    assert sent == []
-    refusals = [r for r in caplog.records if "Not reconnecting" in r.getMessage()]
-    assert len(refusals) == 1
-    assert MCP_URL_ENV in refusals[0].getMessage()
-
-
 # ---------------------------------------------------------------------------
 # MCP tools: a structured error and an audit row, never a request
 # ---------------------------------------------------------------------------
@@ -536,7 +439,7 @@ def test_cli_backstop_turns_an_unhandled_refusal_into_one_line(monkeypatch, caps
     import servonaut.main as main_mod
 
     monkeypatch.setenv(MCP_URL_ENV, "http://mcp.example.com")
-    monkeypatch.setattr(main_mod, "_main", lambda: remote_client._mcp_base())
+    monkeypatch.setattr(main_mod, "_main", lambda: hosted_call._mcp_base())
 
     with pytest.raises(SystemExit) as excinfo:
         main_mod.main()

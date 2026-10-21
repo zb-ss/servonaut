@@ -103,7 +103,7 @@ def test_setup_logging_reports_the_pruned_names(fake_home, monkeypatch):
     [
         ("servonaut.services.api_client", "_api_base", "SERVONAUT_API_URL", "_DEFAULT_API_BASE"),
         ("servonaut.services.auth_service", "_api_base", "SERVONAUT_API_URL", "_DEFAULT_API_BASE"),
-        ("servonaut.mcp.remote_client", "_mcp_base", "SERVONAUT_MCP_URL", "_DEFAULT_MCP_BASE"),
+        ("servonaut.mcp.hosted_call", "_mcp_base", "SERVONAUT_MCP_URL", "_DEFAULT_MCP_BASE"),
     ],
 )
 def test_empty_url_override_falls_back_to_the_default(monkeypatch, module_path, func, var, default_attr):
