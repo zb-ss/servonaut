@@ -20,6 +20,13 @@ from urllib.parse import urlsplit
 
 from ..interfaces import AIProviderInterface
 from ._guards import require_premium_ai, require_premium_ai_stream
+from servonaut.services.ai_split_turns import (
+    TURN_SUSPENDED_EVENT,
+    Suspension,
+    awaited_tool_calls,
+    continuation_lost,
+    stream_continuation,
+)
 from servonaut.services.api_client import APIError
 
 if TYPE_CHECKING:
@@ -390,6 +397,7 @@ class ServonautProvider(AIProviderInterface):
         context: Optional[Dict[str, Any]] = None,
         allow_tools: bool = True,
         task: str = _DEFAULT_TASK,
+        split_turns: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream a chat turn over Server-Sent Events.
 
@@ -403,10 +411,21 @@ class ServonautProvider(AIProviderInterface):
         - ``{"event": "done", "data": {}}`` — synthesised after the
           stream closes naturally so consumers can detect graceful end-of-turn.
 
+        ``split_turns`` lets the service pause the turn while its tools run
+        here (see :mod:`servonaut.services.ai_split_turns`). Only a caller
+        that runs every ``tool_call`` and posts its result before asking for
+        the next event may set it: when the service pauses, this generator
+        continues the turn itself, so the caller still sees one stream. A
+        ``tool_call`` yielded while the service is known to pause carries
+        ``respond_by``, the :func:`time.monotonic` deadline for continuing,
+        when the window could be measured.
+
         Surfaces:
 
         - :class:`servonaut.services.ai_sse.SSEStreamError` — terminal
-          server error event (T5 error handler maps to UX action).
+          server error event (the error handler maps it to a UX action); code
+          ``continuation_not_found`` when a paused turn could not be
+          continued.
         - :class:`servonaut.services.ai_sse.SSEStreamDead` — heartbeat
           watchdog tripped; the server sent nothing for longer than
           ``config.stream_silence_timeout_seconds`` (default 35 s).
@@ -426,32 +445,74 @@ class ServonautProvider(AIProviderInterface):
             allow_tools=allow_tools,
             stream=True,
         )
+        if split_turns:
+            body["split_turns"] = True
 
         logger.debug(
             "ServonautProvider stream chat: task=%s messages=%d "
-            "allow_tools=%s conversation_id=%s",
+            "allow_tools=%s conversation_id=%s split_turns=%s",
             task,
             len(body["messages"]),
             allow_tools,
             conversation_id or "<new>",
+            split_turns,
         )
 
         # Invalid or missing values fall back to the SSE module default.
         silence_timeout = getattr(config, "stream_silence_timeout_seconds", None)
-        async for event in self._api_client.stream_sse(
+        segment = self._api_client.stream_sse(
             _CHAT_PATH,
             body,
             silence_timeout=silence_timeout,
             drain_terminal_error=True,
-        ):
-            if event.get("event") == "tool_catalog":
-                # PR5' audit-only consumer. The static _LOCAL_TOOL_HANDLERS map
-                # in ai_tool_bridge.py is source of truth for dispatch; the
-                # received catalog is logged but not used for routing yet.
-                # PR6'+ will build the live-catalog consumer on this wire.
-                self._handle_tool_catalog_event(event.get("data") or {})
-                continue
-            yield event
+        )
+        # Whether the service said it pauses this turn. Until it does, a
+        # tool_call is handed on at once: a service that ignores the flag
+        # waits on each one before sending anything else.
+        pauses = False
+        while True:
+            suspension: Optional[Suspension] = None
+            held: List[Dict[str, Any]] = []
+            async for event in segment:
+                name = event.get("event")
+                data = event.get("data") or {}
+                if name == "tool_catalog":
+                    # Audit-only consumer. The static _LOCAL_TOOL_HANDLERS map
+                    # in ai_tool_bridge.py is source of truth for dispatch; the
+                    # received catalog is logged but not used for routing yet.
+                    self._handle_tool_catalog_event(data)
+                    continue
+                if split_turns and name == "conversation" and data.get("split_turns") is True:
+                    pauses = True
+                if split_turns and name == TURN_SUSPENDED_EVENT:
+                    suspension = Suspension.from_event(data)
+                    if suspension is None:
+                        raise continuation_lost("turn_suspended named no continuation")
+                    continue
+                if pauses and name == "tool_call":
+                    # Held until turn_suspended says which calls are awaited
+                    # and by when.
+                    held.append(event)
+                    continue
+                yield event
+
+            if suspension is None:
+                if held:
+                    logger.info(
+                        "ai stream: %d tool call(s) the service did not wait on",
+                        len(held),
+                    )
+                break
+            for event in awaited_tool_calls(held, suspension):
+                yield event
+            logger.info(
+                "ai turn paused for %d tool call(s); continuing %s",
+                len(suspension.tool_call_ids), suspension.continuation_id,
+            )
+            segment = stream_continuation(
+                self._api_client, suspension, silence_timeout=silence_timeout,
+            )
+            pauses = True
 
         # Synthesise a terminal ``done`` event so callers can distinguish
         # graceful stream-close from an exception-raising terminal event.
