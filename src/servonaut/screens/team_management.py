@@ -1496,7 +1496,7 @@ class TeamManagementScreen(Screen):
         payload = self._pending_pull_payload
         try:
             apply_team_config(config, payload)
-            config_manager.save()
+            config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
             self.notify(f"Apply failed: {exc}", severity="error", markup=False)

@@ -329,3 +329,26 @@ class TestPushConfigServerPicker:
             for real in ("team-box", "private-box", "10.0.0.5", "10.0.0.6", "via-bastion", "10.0.0.1"):
                 assert real not in shown, real
 
+
+class TestPullApply:
+    """A pulled team config is applied and saved, also when it carries only some servers."""
+
+    async def test_applying_a_partial_push_saves_it(self, tmp_path):
+        from servonaut.config.manager import ConfigManager
+        from servonaut.services.team_config_subset import build_shareable_subset
+
+        manager = ConfigManager(config_path=tmp_path / "config.json")
+        manager.save(_push_config())
+        payload, _ = build_shareable_subset(_push_config(), custom_servers=["team-box"])
+        app = _ConfigApp(config=manager.get(), config_manager=manager,
+                         auth_service=_make_auth_service(), team_service=_make_team_service())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_team(app, pilot)
+            notes = _capture_notifications(screen)
+            screen._show_pull_config_form(payload)
+            screen.query_one("#btn_confirm_pull_config", Button).press()
+            await _until(pilot, lambda: any("Team config applied" in msg for _, msg in notes), "the apply")
+
+        saved = ConfigManager(config_path=tmp_path / "config.json").load()
+        assert [(s.name, s.host, s.ssh_key) for s in saved.custom_servers] == [("team-box", "10.0.0.5", "")]
+        assert [p.name for p in saved.connection_profiles] == ["via-bastion", "plain"]
