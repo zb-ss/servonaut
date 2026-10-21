@@ -40,3 +40,16 @@ def test_request_urls_with_tokens_stay_out_of_the_log(tmp_path, restore_logging)
     text = log_file.read_text(encoding="utf-8")
     assert "app line" in text
     assert "fake-subscriber-token" not in text
+
+
+def test_hosted_mcp_session_ids_stay_out_of_the_log(tmp_path, restore_logging):
+    log_file = configure_rotating_log(tmp_path)
+    client_log = logging.getLogger("mcp.client.streamable_http")
+    client_log.info("Received session ID: fake-session-id")
+    client_log.warning("Session termination failed: 503")
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    text = log_file.read_text(encoding="utf-8")
+    assert "fake-session-id" not in text
+    assert "Session termination failed: 503" in text

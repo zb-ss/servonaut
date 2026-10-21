@@ -907,10 +907,10 @@ class MCPConfig:
     transfer_timeout_seconds: int = 300
     # mcp_tool_call: how long one call on the hosted MCP server (connect,
     # initialize, tools/call) may take. The hosted server frees a closed
-    # stream's connection slot only a moment later, so a call made right
-    # after the previous one is refused for the connection limit; it is
-    # retried every hosted_connect_retry_interval_seconds until
-    # hosted_connect_retry_seconds have passed since that stream closed
+    # event stream's connection slot only a moment later, so a call made
+    # right after the previous one can be refused for the connection limit;
+    # it is retried every hosted_connect_retry_interval_seconds until
+    # hosted_connect_retry_seconds have passed since that session closed
     # (0 turns the retry off).
     hosted_call_timeout_seconds: float = 30.0
     hosted_connect_retry_seconds: float = 5.0
