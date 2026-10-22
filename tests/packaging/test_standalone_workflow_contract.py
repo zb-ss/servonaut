@@ -119,9 +119,9 @@ def test_qualification_uses_separate_hash_locked_environment_and_final_gate() ->
     assert "-m scripts.standalone_cli.ci_qualify" in WORKFLOW
     assert "continue-on-error: true" in WORKFLOW
     assert "Sanitize public qualification status" in WORKFLOW
-    assert (
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
-        in WORKFLOW
+    # Pinned to a full commit SHA; the version itself is Dependabot's to bump.
+    assert re.search(
+        r"uses: actions/upload-artifact@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+\n", WORKFLOW
     )
     assert "retention-days: 1" in WORKFLOW
     assert "if-no-files-found: error" in WORKFLOW
