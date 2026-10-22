@@ -42,7 +42,7 @@ from servonaut.screens._provider_accounts import (
     row_service,
 )
 from servonaut.screens._table_cursor import keep_selected_row
-from servonaut.screens.power_confirm import confirm_and_run_power_action
+from servonaut.screens.power_confirm import PowerActionText, confirm_and_run_power_action
 from servonaut.utils.instance_resolver import display_name
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
@@ -84,6 +84,22 @@ _CONFIRM_POWER = {
         "Reboot",
         "The server restarts and its services are unavailable until it is "
         "back up.",
+    ),
+}
+
+# What each power action tells the user, naming the server as its row does.
+_POWER_TEXT = {
+    "power_on": PowerActionText(
+        "Starting", "Start sent to {server}.", "Could not start {server}",
+    ),
+    "shutdown": PowerActionText(
+        "Shutting down", "Shutdown sent to {server}.", "Could not shut down {server}",
+    ),
+    "power_off": PowerActionText(
+        "Powering off", "Power off sent to {server}.", "Could not power off {server}",
+    ),
+    "reboot": PowerActionText(
+        "Rebooting", "Reboot sent to {server}.", "Could not reboot {server}",
     ),
 }
 
@@ -326,13 +342,6 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             error = self.app.redaction_service.scrub_stream(error)
         return f"\n[$text-warning]⚠ {escape(error)}[/$text-warning]"
 
-    def _display_id(self, api_id: str) -> str:
-        """An API id as the table shows it (a placeholder in demo mode)."""
-        if not self.app.demo_mode:
-            return api_id
-        redactor = self.app.redaction_service
-        return redactor.redact_instance_id(api_id) if redactor else "Hidden"
-
     def _sync_action_buttons(self) -> None:
         """Toggle button enabled state based on the selected row's state.
 
@@ -402,16 +411,16 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             self._refresh()
 
     def action_power_on(self) -> None:
-        self._run_lifecycle("power_on", "Starting", "started")
+        self._run_lifecycle("power_on")
 
     def action_shutdown(self) -> None:
-        self._run_lifecycle("shutdown", "Shutting down", "shutdown sent")
+        self._run_lifecycle("shutdown")
 
     def action_power_off(self) -> None:
-        self._run_lifecycle("power_off", "Powering off", "powered off")
+        self._run_lifecycle("power_off")
 
     def action_reboot(self) -> None:
-        self._run_lifecycle("reboot", "Rebooting", "reboot sent")
+        self._run_lifecycle("reboot")
 
     def action_delete(self) -> None:
         inst = self._selected_instance()
@@ -427,9 +436,8 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
     # Workers
     # ------------------------------------------------------------------
 
-    def _run_lifecycle(
-        self, method: str, in_progress_verb: str, done_verb: str,
-    ) -> None:
+    def _run_lifecycle(self, method: str) -> None:
+        """Run power action *method* on the selected server, asking first if it interrupts."""
         inst = self._selected_instance()
         if inst is None:
             return
@@ -443,23 +451,29 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
         svc = self._owning_service(inst)
         if svc is None:
             return
+        label = self._row_label(inst)
         self.run_worker(
             confirm_and_run_power_action(
                 self.app,
                 prompt=_CONFIRM_POWER.get(method),
-                server_name=self._row_label(inst),
+                server_name=label,
                 provider="Hetzner Cloud",
-                in_progress_verb=in_progress_verb,
+                in_progress_verb=_POWER_TEXT[method].in_progress,
                 set_status=self._set_status,
-                run=lambda: self._do_lifecycle(svc, method, identifier, done_verb),
+                run=lambda: self._do_lifecycle(svc, method, identifier, label),
             ),
             exclusive=False,
             name=f"hetzner_mgr_{method}",
         )
 
     async def _do_lifecycle(
-        self, svc, method: str, identifier: str, done_verb: str,
+        self, svc, method: str, identifier: str, label: str,
     ) -> None:
+        """Send *method* for *identifier* (the API id); the notices say *label*.
+
+        *label* is the name the row shows, so demo mode never shows the real one.
+        """
+        text = _POWER_TEXT[method]
         try:
             await getattr(svc, method)(identifier)
         except Exception as exc:
@@ -469,18 +483,11 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             err_msg = self._short_err(exc)
             if self.app.demo_mode and self.app.redaction_service:
                 err_msg = self.app.redaction_service.scrub_stream(err_msg)
-            self._set_status(
-                f"[$text-error]{method} failed: {err_msg}[/$text-error]"
-            )
-            self.notify(
-                f"{method} failed: {err_msg}",
-                severity="error", markup=False,
-            )
+            message = text.failed_message(label, err_msg)
+            self._set_status(f"[$text-error]{escape(message)}[/$text-error]")
+            self.notify(message, severity="error", markup=False)
             return
-        self.notify(
-            f"Server {self._display_id(identifier)}: {done_verb}.",
-            severity="information", markup=False,
-        )
+        self.notify(text.done_message(label), severity="information", markup=False)
         # Re-fetch so the table reflects the new state (running/stopped).
         await self._load_instances()
 

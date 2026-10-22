@@ -98,14 +98,12 @@ async def test_power_actions_reach_ovh_once_each(tui, seed, providers):
         # Dedicated: reboot only.
         await select_row(t, TABLE, 1, STORAGE.reverse)
         assert _enabled(t) == {"start": False, "stop": False, "reboot": True, "delete": False}
-        await _act(
-            t, "reboot", rf"OVH dedicated {re.escape(STORAGE.service_name)}: reboot sent", asks=True
-        )
+        await _act(t, "reboot", rf"^Reboot sent to {re.escape(STORAGE.reverse)}\.$", asks=True)
 
         # A stopped VPS can be started, nothing else.
         await select_row(t, TABLE, 1, PROXY.display_name)
         assert _enabled(t) == {"start": True, "stop": False, "reboot": False, "delete": False}
-        await _act(t, "start", rf"OVH vps {re.escape(PROXY.service_name)}: started")
+        await _act(t, "start", rf"^Start sent to {re.escape(PROXY.display_name)}\.$")
         await t.wait_until(lambda: _state(t, PROXY.display_name) == "running", desc="proxy-1 up")
 
         # A running VPS can be stopped or rebooted.
@@ -118,16 +116,16 @@ async def test_power_actions_reach_ovh_once_each(tui, seed, providers):
         await t.settle()
         assert len(providers.mutations("ovh")) == mutations
         assert _state(t, MAIL.display_name) == "running"
-        await _act(t, "stop", rf"OVH vps {re.escape(MAIL.service_name)}: stop sent", asks=True)
+        await _act(t, "stop", rf"^Stop sent to {re.escape(MAIL.display_name)}\.$", asks=True)
         await t.wait_until(lambda: _state(t, MAIL.display_name) == "stopped", desc="mail-1 down")
 
         # Cloud: a running instance reboots, a stopped one starts.
         await select_row(t, TABLE, 1, BATCH_1.name)
         assert _enabled(t) == {"start": False, "stop": True, "reboot": True, "delete": True}
-        await _act(t, "reboot", r"OVH cloud .*: reboot sent", asks=True)
+        await _act(t, "reboot", rf"^Reboot sent to {re.escape(BATCH_1.name)}\.$", asks=True)
         await select_row(t, TABLE, 1, BATCH_2.name)
         assert _enabled(t) == {"start": True, "stop": False, "reboot": False, "delete": True}
-        await _act(t, "start", r"OVH cloud .*: started")
+        await _act(t, "start", rf"^Start sent to {re.escape(BATCH_2.name)}\.$")
         await t.wait_until(lambda: _state(t, BATCH_2.name) == "running", desc="batch-2 up")
 
     assert [(r["method"], r["api_path"], r["body"]) for r in providers.mutations("ovh")] == [
@@ -270,7 +268,7 @@ async def test_the_next_key_acts_on_the_instance_the_action_was_for(tui, seed, p
         table = t.on_screen(TABLE)
         assert list(_rows(t)).index(BATCH_2.name) > 0
         await select_row(t, TABLE, 1, BATCH_2.name)
-        await _act(t, "start", r"OVH cloud .*: started")
+        await _act(t, "start", rf"^Start sent to {re.escape(BATCH_2.name)}\.$")
         await t.wait_until(lambda: _state(t, BATCH_2.name) == "running", desc="batch-2 up")
         await t.settle()
         assert table.cursor_row == list(_rows(t)).index(BATCH_2.name)

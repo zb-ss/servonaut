@@ -12,7 +12,7 @@ httpx-sse>=0.4
 keyring>=24
 
 # Supported non-desktop integrations bundled in every desktop shell target.
-mcp>=1.0.0,<2
+mcp>=1.30.0,<2
 ovh
 hcloud>=2.0
 

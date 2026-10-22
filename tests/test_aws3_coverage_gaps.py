@@ -475,7 +475,7 @@ class TestAWSManagerDoLifecycle:
              patch.object(screen, "_set_status"), \
              patch.object(screen, "notify"), \
              patch.object(screen, "_load_instances", new_callable=AsyncMock):
-            asyncio.run(screen._do_lifecycle("start_instance", "i-0abc12345678def90", "us-east-1", "started"))
+            asyncio.run(screen._do_lifecycle("start_instance", "i-0abc12345678def90", "us-east-1", "app-1"))
 
         audit.log_action.assert_called_once()
 
@@ -493,7 +493,7 @@ class TestAWSManagerDoLifecycle:
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_set_status", side_effect=lambda t: status_set.append(t)), \
              patch.object(screen, "notify"):
-            asyncio.run(screen._do_lifecycle("stop_instance", "i-0abc12345678def90", "us-east-1", "stopped"))
+            asyncio.run(screen._do_lifecycle("stop_instance", "i-0abc12345678def90", "us-east-1", "app-1"))
 
         assert any("[$text-error]" in s for s in status_set)
 
@@ -1877,7 +1877,7 @@ class TestAWSManagerRunLifecycleMissingId:
              patch.object(screen, "_set_status"), \
              patch.object(screen, "run_worker") as mock_rw, \
              patch.object(screen, "notify", side_effect=lambda *a, **kw: notified.append(a[0])):
-            screen._run_lifecycle("stop_instance", "Stopping", "stopped")
+            screen._run_lifecycle("stop_instance")
         mock_rw.assert_not_called()
         assert notified
 
@@ -1889,7 +1889,7 @@ class TestAWSManagerRunLifecycleMissingId:
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_selected_instance", return_value=None), \
              patch.object(screen, "run_worker") as mock_rw:
-            screen._run_lifecycle("stop_instance", "Stopping", "stopped")
+            screen._run_lifecycle("stop_instance")
         mock_rw.assert_not_called()
 
 
@@ -1910,7 +1910,7 @@ class TestAWSManagerDoLifecycleDemoRedaction:
         with patch.object(type(screen), "app", new_callable=PropertyMock, return_value=app), \
              patch.object(screen, "_set_status"), \
              patch.object(screen, "notify"):
-            asyncio.run(screen._do_lifecycle("start_instance", "i-0abc", "us-east-1", "started"))
+            asyncio.run(screen._do_lifecycle("start_instance", "i-0abc", "us-east-1", "app-1"))
 
 
 class TestAWSManagerDoTerminateAuditAndFailure:

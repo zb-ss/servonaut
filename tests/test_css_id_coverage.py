@@ -821,6 +821,17 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "push_config_form",
         "push_config_preview",
         "section_configs",
+        # Push form's custom-server picker: buttons and the label inherit the
+        # form's .form_actions_row / Static styling; the list has its own rule.
+        "btn_push_servers_all",
+        "btn_push_servers_none",
+        "push_config_server_actions",
+        "push_config_servers_label",
+        # Share All confirmation (ShareServersConfirmModal): buttons inherit the
+        # #share_confirm_pick / #share_confirm_actions rows in its DEFAULT_CSS.
+        "share_confirm_all",
+        "share_confirm_none",
+        "share_confirm_share",
         # ---- Settings refactor (master/detail panels, screens/settings/**) ----
         # Panel root containers carry the .settings-panel class (styled in
         # app.css); form Inputs/Selects/Switches sit in .setting_row and inherit

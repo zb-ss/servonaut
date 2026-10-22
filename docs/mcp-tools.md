@@ -195,7 +195,15 @@ Operational: report / heal the Mercure relay connection.  Not chat-exposed.
 
 ### `mcp_tool_call(name, arguments?)`
 
-Invoke a tool on the hosted MCP server at `mcp.servonaut.dev`.  Wraps name + arguments in a JSON-RPC 2.0 `tools/call` envelope.
+Invoke a tool on the hosted MCP server at `mcp.servonaut.dev` (or `SERVONAUT_MCP_URL`).  Each call opens one session on the server with your CLI login, runs one JSON-RPC 2.0 `tools/call` and closes the session again. It uses the server's Streamable HTTP endpoint (`/mcp`); a server without that endpoint gets the event stream at `/mcp/sse` instead.  The answer is `{"status": 200, "response": {"result": …}}`, with the server's JSON-RPC `error` in place of `result` when it refused the call.  An expired session is refreshed once.
+
+Over the event stream, the server can keep a closed stream's connection slot for a moment, so a call made right after another one waits for it instead of failing with `connection_limit`.  Settings, in the `mcp` section of `config.json`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `hosted_call_timeout_seconds` | `30` | How long one call (connect, initialize, call) may take |
+| `hosted_connect_retry_seconds` | `5` | How long after the previous call's session closed a refused connection is retried; `0` turns the wait off |
+| `hosted_connect_retry_interval_seconds` | `0.5` | The pause between those retries |
 
 ---
 

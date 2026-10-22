@@ -54,6 +54,8 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     home = account_home(custom_servers=[_web_1()])
     journey.shims.when("ssh", r"deploy@10\.0\.0\.11 .*uptime", stdout=" 10:00:00 up 3 days\n")
     journey.shims.when("ssh", r"tail -n 5 /var/log/syslog", stdout="line one\nline two\n")
+    # disk_usage on a server whose df prints nothing: the tool reports a failure.
+    journey.shims.when("ssh", r"===FS===", stdout="===FS===\n===INODES===\n===TOP===\n")
     listener = relay(home).start()
     user_id = wait_until_connected(fake_cloud, listener)
     output = listener.output()
@@ -107,11 +109,41 @@ def test_listener_answers_every_event_kind(journey, fake_cloud, account_home, re
     assert tool["conversation_id"] == "conv-e2e-1"
     assert fleet.APP_1.name in json.dumps(tool["result"])
 
+    # A local tool that reports a failure answers with an error result, so
+    # the service does not record the call as successful.
+    publish(
+        tool_call_event("tc-disk", user_id, "disk_usage", {"instance_id": WEB_1.name}),
+        topic="ai-tool-calls",
+    )
+    failed = wait_for_tool_result(fake_cloud, "tc-disk", listener)
+    assert failed["status"] == "error", failed
+    assert failed["result"] == "Error: df_not_available"
+    assert failed["error"] == "df_not_available"
+
+    # So is a failure worded without the "Error:" prefix: the tool's audit
+    # row says it failed.
+    publish(
+        tool_call_event("tc-lost", user_id, "describe_instance", {"instance_id": "no-such-host"}),
+        topic="ai-tool-calls",
+    )
+    lost_tool = wait_for_tool_result(fake_cloud, "tc-lost", listener)
+    assert lost_tool["status"] == "error", lost_tool
+    assert lost_tool["error"] == lost_tool["result"] == "Instance not found: no-such-host"
+
     # A monitoring probe answers on the command-result route with JSON output.
     publish(probe_event("probe-list", user_id, "list_instances"))
     probe = wait_for_result(fake_cloud, "probe-list", listener)
     assert probe["status"] == "success", probe
     assert isinstance(json.loads(probe["output"]), (dict, list))
+
+    # A probe of an unknown server names why it was skipped.
+    publish({
+        **probe_event("probe-lost", user_id, "describe_instance", "no-such-host"),
+        "payload": {"instance_id": "no-such-host"},
+    })
+    lost_probe = wait_for_result(fake_cloud, "probe-lost", listener)
+    assert lost_probe["status"] == "error", lost_probe
+    assert lost_probe["error_message"].startswith("instance_not_found:"), lost_probe
 
     # Probes that are not read-only are refused with a slug-first error.
     publish(probe_event("probe-shell", user_id, "ssh_exec_readonly", WEB_1.name))

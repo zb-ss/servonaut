@@ -278,7 +278,9 @@ class AIProviderConfig:
         tool_confirm_timeout_seconds: Hosted Servonaut AI only. How long a
             tool confirmation prompt stays open. Once it passes, the prompt
             closes and the tool is not run. The service waits about 60 s for
-            a tool result by default, so keep this below that.
+            a tool result by default, so keep this below that. When the
+            service pauses the reply while the tools run, its own time
+            limit applies instead.
     """
     provider: str = "openai"  # openai, anthropic, ollama, gemini, servonaut
     api_key: str = ""  # legacy single-key field; kept for backward compat
@@ -905,6 +907,16 @@ class MCPConfig:
     # Configurable SCP transfer timeout. Large files or slow links may need
     # more than the default 300 s; set higher rather than retrying blind.
     transfer_timeout_seconds: int = 300
+    # mcp_tool_call: how long one call on the hosted MCP server (connect,
+    # initialize, tools/call) may take. The hosted server frees a closed
+    # event stream's connection slot only a moment later, so a call made
+    # right after the previous one can be refused for the connection limit;
+    # it is retried every hosted_connect_retry_interval_seconds until
+    # hosted_connect_retry_seconds have passed since that session closed
+    # (0 turns the retry off).
+    hosted_call_timeout_seconds: float = 30.0
+    hosted_connect_retry_seconds: float = 5.0
+    hosted_connect_retry_interval_seconds: float = 0.5
     # db_setup_scan holds each discovered DB password in memory under a
     # staging token until db_setup_save commits it. Tokens expire after this
     # many seconds, and at most db_staging_max_tokens are held at once (the

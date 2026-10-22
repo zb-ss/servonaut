@@ -113,7 +113,9 @@ async def test_manager_stops_a_server_in_its_own_account(tui, seed, moto):
         await t.click("#btn_aws_mgr_stop")
         await t.wait_for_screen("PowerActionConfirmModal")
         await t.click("#btn_power_confirm_yes")
-        await t.wait_for_toast(r"^EC2 i-[0-9a-f]+: stop sent\.$", severity="information")
+        await t.wait_for_toast(
+            rf"^Stop sent to {re.escape(f'{SECOND}/web-1')}\.$", severity="information"
+        )
         await t.wait_until(
             lambda: _states(moto, role)["web-1"] in ("stopping", "stopped"),
             desc="web-1 stopping in the second account",

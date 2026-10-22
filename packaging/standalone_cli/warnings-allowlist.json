@@ -3389,6 +3389,73 @@
       {
         "classification": {
           "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "9467c8bc71bd5fd5a9b9f25eeae3a5be9644dd2e633149b202d9ef684c5cdeb1",
+        "importers": [
+          {
+            "module": "anyio._backends._asyncio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._backends._trio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._exceptions",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._sockets",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "servonaut.mcp.hosted_call",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "sse_starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          },
+          {
+            "module": "starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          }
+        ],
+        "module": "exceptiongroup",
+        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
+        "target_facts": {
+          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
+          "target": "linux-x64-ubuntu-22.04",
+          "toolchain_sha256": "1f49ab859bd3da8ae8205918495772e688ed99ddfc534a89e7fec6d977b71d07"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
           "conditional": false,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -6284,67 +6351,6 @@
         ],
         "module": "pyodide",
         "reason": "Reviewed PyInstaller missing-module for pyodide.",
-        "target_facts": {
-          "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
-          "target": "linux-x64-ubuntu-22.04",
-          "toolchain_sha256": "1f49ab859bd3da8ae8205918495772e688ed99ddfc534a89e7fec6d977b71d07"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "f71c4b945a041ea4a316abb50511a90377c798841c7fd103ce4a204682f35e00",
-        "importers": [
-          {
-            "module": "anyio._backends._asyncio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._backends._trio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._exceptions",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._sockets",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "sse_starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          },
-          {
-            "module": "starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          }
-        ],
-        "module": "exceptiongroup",
-        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
         "target_facts": {
           "lock_sha256": "ca73b9e776828be294847b374de1b25dda19c4497835148c797377a136ae82ac",
           "target": "linux-x64-ubuntu-22.04",
@@ -10197,67 +10203,6 @@
       {
         "classification": {
           "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "a23f017bf08ca3b289d4e4d908bd2c01a866aa12fbb84da49a2c1e6d266b257c",
-        "importers": [
-          {
-            "module": "anyio._backends._asyncio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._backends._trio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._exceptions",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._sockets",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "sse_starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          },
-          {
-            "module": "starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          }
-        ],
-        "module": "exceptiongroup",
-        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
-        "target_facts": {
-          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
-          "target": "macos-arm64",
-          "toolchain_sha256": "4b271ecacd2fbde75cf47b71d782fbb8f2d2ece3b2cd5b32485a0b0e979ddf5e"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
           "conditional": false,
           "optional": false,
           "origin_class": "hook-or-source"
@@ -10290,6 +10235,73 @@
         ],
         "module": "pydantic.PydanticUserError",
         "reason": "Reviewed PyInstaller missing-module for pydantic.PydanticUserError.",
+        "target_facts": {
+          "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
+          "target": "macos-arm64",
+          "toolchain_sha256": "4b271ecacd2fbde75cf47b71d782fbb8f2d2ece3b2cd5b32485a0b0e979ddf5e"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "a421437fa908d55b6bfcf5585e60aef4e50e5e0d391b3c5505711de88f0a92f0",
+        "importers": [
+          {
+            "module": "anyio._backends._asyncio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._backends._trio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._exceptions",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._sockets",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "servonaut.mcp.hosted_call",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "sse_starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          },
+          {
+            "module": "starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          }
+        ],
+        "module": "exceptiongroup",
+        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
         "target_facts": {
           "lock_sha256": "7859f4bf6dc2eae0e39e3efdcc818593e455e1fadfc91229e45e87fd0499e821",
           "target": "macos-arm64",
@@ -18460,67 +18472,6 @@
       {
         "classification": {
           "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "db0666842467a1983ee6e6f504bf7cedf3bb1a2a0b5ea591d48ac462d2aa8a85",
-        "importers": [
-          {
-            "module": "anyio._backends._asyncio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._backends._trio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._exceptions",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._sockets",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "sse_starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          },
-          {
-            "module": "starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          }
-        ],
-        "module": "exceptiongroup",
-        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
-        "target_facts": {
-          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
-          "target": "macos-x64",
-          "toolchain_sha256": "44a3cc5839fa6c591b293f920a6b34e52671285fbb8cba4c594ac98d84d8895f"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
           "conditional": false,
           "optional": true,
           "origin_class": "hook-or-source"
@@ -18986,6 +18937,73 @@
         ],
         "module": "socksio",
         "reason": "Reviewed PyInstaller missing-module for socksio.",
+        "target_facts": {
+          "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
+          "target": "macos-x64",
+          "toolchain_sha256": "44a3cc5839fa6c591b293f920a6b34e52671285fbb8cba4c594ac98d84d8895f"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "ebca3e068645d020d665d947fdf1bb310bcbf1b089b988c8f5726ef49f1b81b0",
+        "importers": [
+          {
+            "module": "anyio._backends._asyncio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._backends._trio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._exceptions",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._sockets",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "servonaut.mcp.hosted_call",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "sse_starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          },
+          {
+            "module": "starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          }
+        ],
+        "module": "exceptiongroup",
+        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
         "target_facts": {
           "lock_sha256": "6a59c183b245c5eb37938c6092d7cd517fcc447e3d49cdefe36614842fb108d9",
           "target": "macos-x64",
@@ -19794,67 +19812,6 @@
         ],
         "module": "posix",
         "reason": "Reviewed PyInstaller missing-module for posix.",
-        "target_facts": {
-          "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
-          "target": "windows-x64",
-          "toolchain_sha256": "fc0d29704c282e0bfee70959e9c8537747289b353a892b62e28f887f9df20f0b"
-        }
-      },
-      {
-        "classification": {
-          "collected": false,
-          "conditional": true,
-          "optional": true,
-          "origin_class": "hook-or-source"
-        },
-        "code": "missing-module",
-        "collection_facts": {
-          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
-        },
-        "expires_on": "2027-09-18",
-        "fingerprint": "07bddd5450e7a49ace206c287c75cf33f18fab0b9f694c9f138778b4f94e8ce4",
-        "importers": [
-          {
-            "module": "anyio._backends._asyncio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._backends._trio",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._exceptions",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "anyio._core._sockets",
-            "qualifiers": [
-              "conditional"
-            ]
-          },
-          {
-            "module": "sse_starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          },
-          {
-            "module": "starlette._utils",
-            "qualifiers": [
-              "conditional",
-              "optional"
-            ]
-          }
-        ],
-        "module": "exceptiongroup",
-        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
         "target_facts": {
           "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
           "target": "windows-x64",
@@ -23224,6 +23181,73 @@
         ],
         "module": "usercustomize",
         "reason": "Reviewed PyInstaller missing-module for usercustomize.",
+        "target_facts": {
+          "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
+          "target": "windows-x64",
+          "toolchain_sha256": "fc0d29704c282e0bfee70959e9c8537747289b353a892b62e28f887f9df20f0b"
+        }
+      },
+      {
+        "classification": {
+          "collected": false,
+          "conditional": true,
+          "optional": true,
+          "origin_class": "hook-or-source"
+        },
+        "code": "missing-module",
+        "collection_facts": {
+          "preamble_sha256": "9d32fd5e4bb29d37a5b2722bde2f1e3da09297e3743c3310f3fda87bf3738646"
+        },
+        "expires_on": "2027-09-18",
+        "fingerprint": "96fd4e50c29c1f877ffd06f34146c598ce9c1111a9ddd9757b592eae03d66739",
+        "importers": [
+          {
+            "module": "anyio._backends._asyncio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._backends._trio",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._exceptions",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "anyio._core._sockets",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "servonaut.mcp.hosted_call",
+            "qualifiers": [
+              "conditional"
+            ]
+          },
+          {
+            "module": "sse_starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          },
+          {
+            "module": "starlette._utils",
+            "qualifiers": [
+              "conditional",
+              "optional"
+            ]
+          }
+        ],
+        "module": "exceptiongroup",
+        "reason": "Reviewed PyInstaller missing-module for exceptiongroup.",
         "target_facts": {
           "lock_sha256": "fb782fdedb10a384b426bd6c0cf27aefce51f1d73d63eeff892e92a4857b12da",
           "target": "windows-x64",
