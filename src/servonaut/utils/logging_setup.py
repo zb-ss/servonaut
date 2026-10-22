@@ -16,8 +16,12 @@ _LOG_BACKUP_COUNT: Final = 5
 _LOG_FORMAT: Final = "%(asctime)s %(levelname)-7s [%(name)s] %(message)s"
 # httpx and httpcore log every request URL at INFO; some URLs carry tokens
 # in their query string (the relay hub's subscriber token), so they stay at
-# WARNING like the other chatty libraries.
-_NOISY_LOGGERS: Final = ("botocore", "boto3", "urllib3", "textual", "httpx", "httpcore")
+# WARNING like the other chatty libraries. The MCP SDK's Streamable HTTP
+# client logs each hosted call's session id and stream retries at INFO.
+_NOISY_LOGGERS: Final = (
+    "botocore", "boto3", "urllib3", "textual", "httpx", "httpcore",
+    "mcp.client.streamable_http",
+)
 
 
 def configure_rotating_log(

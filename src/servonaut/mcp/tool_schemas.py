@@ -777,8 +777,8 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "mcp_tool_call": {
         "description": (
             "Invoke a tool on the hosted MCP server at mcp.servonaut.dev. "
-            "Runs one JSON-RPC 2.0 tools/call with (name, arguments) over the "
-            "hosted server's event stream and returns {status, response}, "
+            "Runs one JSON-RPC 2.0 tools/call with (name, arguments) in a "
+            "session on the hosted server and returns {status, response}, "
             "where response holds the server's JSON-RPC result or error."
         ),
         "schema": {

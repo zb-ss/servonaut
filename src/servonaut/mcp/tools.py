@@ -2084,9 +2084,10 @@ class ServonautTools:
                             arguments: Optional[Dict[str, Any]] = None) -> str:
         """Invoke a tool on the hosted MCP server at mcp.servonaut.dev.
 
-        Opens the hosted server's event stream at ``$SERVONAUT_MCP_URL/mcp/sse``
-        with the CLI's OAuth bearer, runs ``initialize`` and one ``tools/call``
-        over it and closes the stream again (see
+        Opens one session on the hosted server at ``$SERVONAUT_MCP_URL`` with
+        the CLI's OAuth bearer (Streamable HTTP at ``/mcp``, or the event
+        stream at ``/mcp/sse`` on a server without it), runs ``initialize``
+        and one ``tools/call`` and closes the session again (see
         :mod:`servonaut.mcp.hosted_call`). Returns
         ``{"status": 200, "response": {"result": ...}}``, with the server's
         JSON-RPC ``error`` in place of ``result`` when it refused the call, so
@@ -2131,7 +2132,7 @@ class ServonautTools:
             return refuse(_error(exc.code, str(exc)))
         duration_ms = int((time.monotonic() - started) * 1000)
 
-        # "status" is the event stream's HTTP status: always 200 once the
+        # "status" is the HTTP status of the answer: always 200 once the
         # server answered, and kept for agents that read it.
         encoded = json.dumps({"status": 200, "response": outcome})
         size = len(encoded.encode("utf-8"))
@@ -2156,8 +2157,8 @@ class ServonautTools:
                                 arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Run one hosted tool call, refreshing a refused session token once.
 
-        The server refuses an expired token on the event-stream GET, before
-        any JSON-RPC is exchanged, so a retry cannot repeat a tool call.
+        The server checks the token before it runs anything, so a refused
+        token means no tool ran and the retry cannot repeat a tool call.
         """
         from servonaut.mcp.hosted_call import HostedCallError
 
@@ -2176,16 +2177,18 @@ class ServonautTools:
 
     async def _call_hosted_tool_in_free_slot(self, base: str, access_token: str, name: str,
                                              arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Run one hosted tool call, waiting for the slot of this process's last stream.
+        """Run one hosted tool call, waiting for the slot of this process's last session.
 
-        The hosted server frees a closed stream's connection slot only when it
-        notices the client has gone, about two seconds later, so a call made
-        right after the previous one is refused for the connection limit
-        although nothing is open any more. That refusal is retried until
-        ``mcp.hosted_connect_retry_seconds`` have passed since the stream
-        closed. Any other refusal (another client holds the slots, or the
-        plan has none) is reported at once. Like an expired token, the refusal
-        comes on the event-stream GET, so a retry cannot repeat a tool call.
+        The hosted server frees a closed event stream's connection slot only
+        when it notices the client has gone, about two seconds later, so a
+        call made right after the previous one can be refused for the
+        connection limit although nothing is open any more. (A Streamable
+        HTTP session ends with a DELETE, which frees its slot at once.) That
+        refusal is retried until ``mcp.hosted_connect_retry_seconds`` have
+        passed since the session closed. Any other refusal (another client
+        holds the slots, or the plan has none) is reported at once. Like an
+        expired token, the refusal comes on the session's first request,
+        before any tool call is sent, so a retry cannot repeat a tool call.
         """
         from servonaut.mcp.hosted_call import HostedCallError, call_hosted_tool
 
@@ -2208,7 +2211,7 @@ class ServonautTools:
                     base, access_token, name, arguments, timeout=timeout,
                 )
             except HostedCallError as exc:
-                if exc.status is None:  # not refused: a stream may have held a slot
+                if exc.status is None:  # not refused: a session may have held a slot
                     self._hosted_stream_closed_at = time.monotonic()
                 closed_at = self._hosted_stream_closed_at
                 if (exc.code != "connection_limit" or closed_at is None
