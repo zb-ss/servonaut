@@ -44,6 +44,10 @@ from servonaut.services.ai_sse import (
     coerce_retry_after,
 )
 from servonaut.services.ai_balance import safe_terminal_text
+from servonaut.services.ai_split_turns import (
+    CONTINUATION_LOST_CODE,
+    CONTINUATION_LOST_MESSAGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +305,20 @@ def _map_service_unavailable(err: Union[APIError, SSEStreamError]) -> ErrorActio
     )
 
 
+def _map_continuation_lost(err: Union[APIError, SSEStreamError]) -> ErrorActionPayload:
+    """A turn paused for its tools could not be continued.
+
+    The service has stopped waiting (the window closed, or the turn was
+    already continued). The fixed message never echoes the server's text.
+    """
+    return ErrorActionPayload(
+        action=UserFacingAction.TOAST_WARNING,
+        user_message=CONTINUATION_LOST_MESSAGE,
+        code=CONTINUATION_LOST_CODE,
+        details=_details_of(err),
+    )
+
+
 def _map_upstream_unavailable(err: Union[APIError, SSEStreamError, SSEStreamDead]) -> ErrorActionPayload:
     """503 — vendor chain exhausted; T10 watcher counts these for second-in-60s prompt."""
     return ErrorActionPayload(
@@ -362,6 +380,7 @@ _CODE_DISPATCH = {
     "service_unavailable": _map_service_unavailable,
     "feature_disabled": _map_service_unavailable,  # legacy code alias
     "upstream_unavailable": _map_upstream_unavailable,
+    CONTINUATION_LOST_CODE: _map_continuation_lost,
     "context_too_large": _map_context_too_large,
     "content_blocked": _map_content_blocked,
     "validation_failed": _map_validation_failed,

@@ -53,6 +53,7 @@ from servonaut.models.relay_messages import (
     CommandType,
 )
 from servonaut.mcp.audit import AuditOutcome, record_outcomes
+from servonaut.services.ai_split_turns import prompt_deadline
 from servonaut.services.team_rules import TEAM_RULE_REASON, is_team_refusal
 
 if TYPE_CHECKING:
@@ -554,6 +555,10 @@ class ToolCall:
     # keeps audit rows faithful to what the server claimed. ``None`` means
     # the caller did not distinguish, so ``guard_level`` is the label.
     server_guard_level: Optional[str] = None
+    # time.monotonic() deadline for continuing a turn the service paused
+    # for this call (split turns); ``None`` when the turn is not paused or
+    # its window is unknown. The confirmation prompt is sized from it.
+    respond_by: Optional[float] = None
 
 
 @dataclass
@@ -808,7 +813,16 @@ class AIToolBridge(_FloorDangerousMixin):
         tells the model the tool did not run, so a late answer can never
         execute a tool the service has already given up on.
         """
-        deadline = self._confirm_deadline()
+        deadline = self._confirm_deadline(call)
+        if deadline is not None and deadline <= 0:
+            return self._error_with_audit(
+                call,
+                reason="confirm_window_closed",
+                error_message=(
+                    f"No time was left to confirm {call.tool} before the AI "
+                    "service stopped waiting for it, so the tool was not run."
+                ),
+            )
         try:
             allowed = await asyncio.wait_for(self._confirm(call), timeout=deadline)
         except asyncio.TimeoutError as exc:
@@ -845,8 +859,17 @@ class AIToolBridge(_FloorDangerousMixin):
             error_message=f"Confirmation prompt failed: {exc}",
         )
 
-    def _confirm_deadline(self) -> Optional[float]:
-        """Seconds allowed for a confirmation answer, or ``None`` for no limit."""
+    def _confirm_deadline(self, call: ToolCall) -> Optional[float]:
+        """Seconds allowed for a confirmation answer, or ``None`` for no limit.
+
+        In a turn the service paused for this call, the service's window
+        decides, minus the time to run the tool and continue the turn.
+        Otherwise the service is holding the turn open, and the configured
+        limit keeps the prompt inside its wait.
+        """
+        paused = prompt_deadline(call.respond_by, run_seconds=self._run_seconds(call))
+        if paused is not None:
+            return paused
         if self._confirm_timeout is None:
             return None
         try:
@@ -862,6 +885,14 @@ class AIToolBridge(_FloorDangerousMixin):
             )
             return _DEFAULT_CONFIRM_TIMEOUT_SECONDS
         return float(value)
+
+    def _run_seconds(self, call: ToolCall) -> int:
+        """The time limit a call runs under: its ``ttl_seconds``, or the default."""
+        raw = call.args.get("ttl_seconds")
+        try:
+            return int(raw) if raw else self._default_ttl_seconds
+        except (TypeError, ValueError):
+            return self._default_ttl_seconds
 
     def _resolve_guard_level(self, call: ToolCall) -> None:
         """Set ``call.guard_level`` to the level the call runs at.
@@ -1316,7 +1347,7 @@ class AIToolBridge(_FloorDangerousMixin):
         resolver = getattr(self, "instance_id_resolver", None)
         if callable(resolver) and target:
             target = resolver(str(target))
-        ttl = int(call.args.get("ttl_seconds") or self._default_ttl_seconds)
+        ttl = self._run_seconds(call)
 
         # Build the relay payload. Args we forward verbatim by tool:
         #   tail_log       → log_path, lines

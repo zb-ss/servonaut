@@ -19,6 +19,7 @@ defaulting to standard, and confirm_callback exception handling.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
@@ -530,7 +531,7 @@ def test_deadline_is_read_on_every_call():
 @pytest.mark.parametrize("bad", ["soon", 0, -3, float("nan"), True])
 def test_invalid_deadline_falls_back_to_the_default(bad):
     bridge, _tools, _audit = _deadline_bridge(AsyncMock(), lambda: bad)
-    assert bridge._confirm_deadline() == 50.0
+    assert bridge._confirm_deadline(_call()) == 50.0
 
 
 def test_default_deadline_matches_the_config_default():
@@ -541,6 +542,51 @@ def test_default_deadline_matches_the_config_default():
         AIProviderConfig().tool_confirm_timeout_seconds
         == ai_tool_bridge._DEFAULT_CONFIRM_TIMEOUT_SECONDS
     )
+
+
+def _paused_call(window: float, **kwargs: Any) -> ToolCall:
+    call = _call(tool="db_processlist", **kwargs)
+    call.respond_by = time.monotonic() + window
+    return call
+
+
+def test_paused_turn_sizes_the_prompt_from_its_window():
+    # The service holds nothing while the turn is paused, so the prompt may
+    # stay open far beyond the configured limit: the window, minus up to a
+    # minute to run the tool and a few seconds to continue.
+    bridge, _tools, _audit = _deadline_bridge(AsyncMock(), lambda: 50.0)
+
+    assert bridge._confirm_deadline(_paused_call(300)) == pytest.approx(235, abs=1)
+    short_run = _paused_call(300, args={"instance_id": "i-abc", "ttl_seconds": 10})
+    assert bridge._confirm_deadline(short_run) == pytest.approx(285, abs=1)
+
+
+def test_call_outside_a_paused_turn_keeps_the_configured_limit():
+    bridge, _tools, _audit = _deadline_bridge(AsyncMock(), lambda: 50.0)
+
+    assert bridge._confirm_deadline(_call()) == 50.0
+
+
+def test_paused_turn_without_time_to_answer_is_refused_unprompted():
+    confirm = AsyncMock(return_value=True)
+    bridge, tools, audit = _deadline_bridge(confirm, lambda: 50.0)
+
+    result = run(bridge.handle_tool_call(_paused_call(30, args={"instance_id": "i-abc"})))
+
+    assert result.status == "error"
+    assert "No time was left to confirm db_processlist" in result.result
+    confirm.assert_not_awaited()
+    tools.db_processlist.assert_not_awaited()
+    assert audit.log.call_args.args[4] == "confirm_window_closed"
+
+
+def test_paused_turn_answer_runs_the_tool():
+    bridge, tools, _audit = _deadline_bridge(AsyncMock(return_value=True), lambda: 50.0)
+
+    result = run(bridge.handle_tool_call(_paused_call(300, args={"instance_id": "i-abc"})))
+
+    assert result.status == "ok"
+    tools.db_processlist.assert_awaited_once()
 
 
 def test_callback_timeout_without_a_deadline_is_a_confirm_error():

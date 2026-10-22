@@ -13,7 +13,12 @@ what clients sent and holds the scripted answers:
 * ``POST /api/ai/chat/tool-result``: a tool result for a chat turn,
   validated like the service (422 on a malformed body); read back with
   :meth:`AiState.tool_results`. A chat stream that sent a ``tool_call``
-  waits for it;
+  waits for it, unless the turn pauses;
+* ``POST /api/ai/chat/continue``: the rest of a paused turn. A continuation
+  the client never got, or already used, is 404 ``continuation_not_found``;
+  one whose awaited results have not all arrived is 409
+  ``tool_results_pending`` (retry after 1 s); otherwise the next scripted
+  turn answers it;
 * ``POST /api/ai/topup/checkout``: the checkout URL for a top-up pack
   (a Stripe URL unless :meth:`AiState.configure` sets another); read back
   with :meth:`AiState.topups`;
@@ -45,6 +50,7 @@ from e2e.harness.fake_cloud.routes_auth import (
 from e2e.harness.fake_cloud.state import ScenarioStore
 
 CHAT_PATH = "/api/ai/chat"
+CONTINUE_PATH = "/api/ai/chat/continue"
 TOOL_RESULT_PATH = "/api/ai/chat/tool-result"
 TOPUP_PATH = "/api/ai/topup/checkout"
 TOPUP_PACKS_PATH = "/api/ai/topup/packs"
@@ -74,6 +80,7 @@ class AiState:
             self._exports: dict[str, str] = {}
             self._turns: deque[ChatTurn] = deque()
             self._chats: list[dict[str, Any]] = []
+            self._continuations: dict[str, dict[str, Any]] = {}
             self._conversation_numbers = itertools.count(1)
             self._topup_url = STRIPE_CHECKOUT_URL
             self._topups: list[dict[str, Any]] = []
@@ -110,7 +117,8 @@ class AiState:
             self._turns.extend(turns)
 
     def chats(self) -> list[dict[str, Any]]:
-        """One row per chat request: body, conversation id, frames, pings, how it ended."""
+        """One row per chat or continue request: its path, body, conversation id,
+        frames, pings and how it ended."""
         with self._lock:
             return copy.deepcopy(self._chats)
 
@@ -156,14 +164,46 @@ class AiState:
         with self._lock:
             return self._streams
 
-    def open_chat(self, body: dict[str, Any]) -> tuple[Optional[ChatTurn], dict[str, Any]]:
-        """Take the next scripted turn and start the record of this chat."""
+    def suspend(self, payload: dict[str, Any], conversation_id: str) -> None:
+        """Keep a paused turn until the client continues it."""
+        with self._lock:
+            self._continuations[str(payload.get("continuation_id"))] = {
+                "conversation_id": conversation_id,
+                "awaited": list(payload.get("tool_call_ids") or []),
+            }
+
+    def continuation(self, continuation_id: str) -> Optional[dict[str, Any]]:
+        """A paused turn (its conversation, awaited calls and whether all their
+        results arrived), or ``None`` when there is no such paused turn."""
+        with self._lock:
+            found = self._continuations.get(continuation_id)
+            if found is None:
+                return None
+            posted = {r["tool_call_id"] for r in self._tool_results}
+            return {**copy.deepcopy(found), "ready": set(found["awaited"]) <= posted}
+
+    def take_continuation(self, continuation_id: str) -> None:
+        """Use up a paused turn: it can be continued once."""
+        with self._lock:
+            self._continuations.pop(continuation_id, None)
+
+    def open_chat(
+        self,
+        body: dict[str, Any],
+        *,
+        path: str = CHAT_PATH,
+        conversation_id: Optional[str] = None,
+    ) -> tuple[Optional[ChatTurn], dict[str, Any]]:
+        """Take the next scripted turn and start the record of this request."""
         with self._lock:
             turn = self._turns.popleft() if self._turns else None
-            conversation_id = body.get("conversation_id") or (
+            conversation_id = conversation_id or body.get("conversation_id") or (
                 f"conv-e2e-{next(self._conversation_numbers)}"
             )
             record = {
+                "path": path,
+                # A paused turn exists only because its chat asked to split.
+                "split_turns": path == CONTINUE_PATH or body.get("split_turns") is True,
                 "body": copy.deepcopy(body),
                 "conversation_id": conversation_id,
                 "frames": 0,
@@ -234,15 +274,43 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
 
         return wrapper
 
-    async def chat(request: web.Request) -> web.StreamResponse:
-        turn, record = state.open_chat(await json_body(request))
+    async def answer(
+        request: web.Request, turn: Optional[ChatTurn], record: dict[str, Any]
+    ) -> web.StreamResponse:
         if turn is None:
             state.update_chat(record, ended="unscripted")
             return _error(500, "internal_error", "no scripted chat turn")
         if turn.status != 200:
             state.update_chat(record, ended=f"refused:{turn.status}")
-            return web.json_response(turn.error_body or {}, status=turn.status)
+            headers = {} if turn.retry_after is None else {"Retry-After": str(turn.retry_after)}
+            return web.json_response(turn.error_body or {}, status=turn.status, headers=headers)
         return await replay(request, state, turn, record)
+
+    async def chat(request: web.Request) -> web.StreamResponse:
+        turn, record = state.open_chat(await json_body(request))
+        return await answer(request, turn, record)
+
+    async def continue_chat(request: web.Request) -> web.StreamResponse:
+        continuation_id = str((await json_body(request)).get("continuation_id") or "")
+        paused = state.continuation(continuation_id)
+        if paused is None:
+            return _error(404, "continuation_not_found", "no such paused turn")
+        if not paused["ready"]:
+            return web.json_response(
+                {"error": {"code": "tool_results_pending", "message": "results pending",
+                           "details": {"retry_after": 1}}},
+                status=409,
+                headers={"Retry-After": "1"},
+            )
+        turn, record = state.open_chat(
+            {"continuation_id": continuation_id},
+            path=CONTINUE_PATH,
+            conversation_id=paused["conversation_id"],
+        )
+        if turn is not None and turn.status == 200:
+            # Refusals leave the paused turn for a retry, as the service does.
+            state.take_continuation(continuation_id)
+        return await answer(request, turn, record)
 
     async def tool_result(request: web.Request) -> web.Response:
         body = await json_body(request)
@@ -295,6 +363,7 @@ def add_routes(app: web.Application, store: ScenarioStore, state: AiState) -> No
 
     one = f"{CONVERSATIONS_PATH}/{{conversation_id}}"
     app.router.add_post(CHAT_PATH, guarded(chat))
+    app.router.add_post(CONTINUE_PATH, guarded(continue_chat))
     app.router.add_post(TOOL_RESULT_PATH, guarded(tool_result))
     app.router.add_post(TOPUP_PATH, guarded(topup))
     app.router.add_get(TOPUP_PACKS_PATH, guarded(topup_packs))

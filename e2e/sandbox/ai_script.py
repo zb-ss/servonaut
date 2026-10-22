@@ -19,8 +19,19 @@ browser)::
     }
 
 Every chat request consumes the next turn; a turn's reply is streamed in
-short pieces. Times are relative to the start, so nothing shows a far-off
-date. Everything in the file is for walks and recordings: keep it synthetic.
+short pieces. A turn may also ask the app to run one tool and then say
+``after``::
+
+    {"reply": "On it.", "after": " Saved.",
+     "tool_call": {"tool": "remember_server_finding", "guard_level": "standard",
+                   "args": {"instance_id": "web-1", "title": "Disk", "body": "91%"},
+                   "result": "Finding saved."}}
+
+The service pauses that turn while the tool runs (as a service that splits
+turns does) unless the turn says ``"pause": false``, which keeps the stream
+open until the tool's result arrives. Times are relative to the start, so
+nothing shows a far-off date. Everything in the file is for walks and
+recordings: keep it synthetic.
 """
 
 from __future__ import annotations
@@ -47,6 +58,11 @@ def load(path: Path) -> dict[str, Any]:
         spec = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ScriptError(f"cannot read the AI script {path}: {exc}") from exc
+    return load_spec(spec)
+
+
+def load_spec(spec: Any) -> dict[str, Any]:
+    """*spec* (a parsed script), checked; raises :class:`ScriptError`."""
     if not isinstance(spec, dict):
         raise ScriptError("the AI script must be a JSON object")
     if not isinstance(spec.get("model", ""), str):
@@ -61,6 +77,8 @@ def load(path: Path) -> dict[str, Any]:
         isinstance(t, dict) and isinstance(t.get("reply"), str) for t in turns
     ):
         raise ScriptError('turns must be a list of {"reply": "..."} objects')
+    for turn in turns:
+        _check_tool_turn(turn)
     conversations = spec.get("conversations", [])
     if not isinstance(conversations, list) or not all(
         isinstance(c, dict) and isinstance(c.get("id"), str) and isinstance(c.get("title"), str)
@@ -68,6 +86,22 @@ def load(path: Path) -> dict[str, Any]:
     ):
         raise ScriptError('conversations must be a list of objects with an "id" and a "title"')
     return spec
+
+
+def _check_tool_turn(turn: dict[str, Any]) -> None:
+    """Refuse a malformed ``tool_call`` turn; a plain reply passes."""
+    call = turn.get("tool_call")
+    if call is None:
+        return
+    if not isinstance(call, dict) or not isinstance(call.get("tool"), str) or not call["tool"]:
+        raise ScriptError('a turn\'s tool_call must be an object with a "tool" name')
+    if not isinstance(call.get("args", {}), dict):
+        raise ScriptError("tool_call args must be an object")
+    for key in ("guard_level", "result"):
+        if not isinstance(call.get(key, ""), str):
+            raise ScriptError(f"tool_call {key} must be a string")
+    if not isinstance(turn.get("after", ""), str) or not isinstance(turn.get("pause", True), bool):
+        raise ScriptError("a turn's after must be a string and pause true or false")
 
 
 def _pieces(reply: str) -> list[str]:
@@ -102,22 +136,43 @@ def _conversation(entry: dict[str, Any], now: datetime) -> tuple[dict[str, Any],
     return row, export
 
 
+def _chat_turns(
+    turn: dict[str, Any], number: int, model: str, usage_quota: dict[str, Any]
+) -> list[Any]:
+    """What the service streams for one scripted turn: one stream, or two when
+    it pauses for a tool (the second answers the app's continue request)."""
+    from e2e.harness.fake_cloud.chat_script import (
+        ChatTurn, token, tool_call, tool_result, turn_suspended, usage,
+    )
+
+    reply = [token(piece) for piece in _pieces(turn["reply"])]
+    done = usage(model=model, **usage_quota)
+    call = turn.get("tool_call")
+    if call is None:
+        return [ChatTurn.of(*reply, done, gap=0.03, says_it_pauses=True)]
+    call_id = f"tc-qa-{number}"
+    asked = tool_call(call_id, call["tool"], dict(call.get("args", {})),
+                      guard_level=call.get("guard_level", "standard"))
+    answered = tool_result(call_id, call.get("result", "Done."))
+    after = [token(piece) for piece in _pieces(turn.get("after", ""))]
+    if not turn.get("pause", True):
+        return [ChatTurn.of(*reply, asked, answered, *after, done, gap=0.03)]
+    return [
+        ChatTurn.of(*reply, asked, turn_suspended(f"cont-qa-{number}", [call_id]),
+                    gap=0.03, says_it_pauses=True),
+        ChatTurn.of(answered, *after, done, gap=0.03, says_it_pauses=True),
+    ]
+
+
 def apply(fake_cloud: Any, spec: dict[str, Any], *, now: Optional[datetime] = None) -> None:
     """Queue the turns, set the quota and store the conversations on *fake_cloud*."""
-    from e2e.harness.fake_cloud.chat_script import ChatTurn, token, usage
-
     now = now or datetime.now(timezone.utc)
     quota = _quota(spec, fake_cloud.entitlements().get("quota"), now)
     fake_cloud.configure(quota=quota)
     usage_quota = {k: v for k, v in quota.items() if k in _QUOTA_KEYS | {"resets_at"}}
-    fake_cloud.ai.script(*(
-        ChatTurn.of(
-            *[token(piece) for piece in _pieces(turn["reply"])],
-            usage(model=spec.get("model") or "hosted-model", **usage_quota),
-            gap=0.03,
-        )
-        for turn in spec.get("turns", [])
-    ))
+    model = spec.get("model") or "hosted-model"
+    for number, turn in enumerate(spec.get("turns", []), start=1):
+        fake_cloud.ai.script(*_chat_turns(turn, number, model, usage_quota))
     rows, exports = [], {}
     for entry in spec.get("conversations", []):
         row, export = _conversation(entry, now)
