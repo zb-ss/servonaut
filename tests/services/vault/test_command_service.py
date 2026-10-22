@@ -2622,13 +2622,163 @@ async def test_a_relay_target_names_the_team_and_the_callers_role_in_it() -> Non
     service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
     service.teams = MagicMock()
     service.teams.list_teams = AsyncMock(return_value=[
-        {"slug": "ops", "name": "Ops", "role": "viewer"},
+        {"id": 7, "slug": "ops", "name": "Ops", "role": "viewer"},
     ])
     service.teams.list_shared_servers = AsyncMock(return_value=[{"id": "srv-1", "name": "web-1"}])
 
     target = await service.resolve_relay_target("web-1")
 
     assert target == {
-        "id": "srv-1", "name": "web-1", "is_shared": True,
-        "team_slug": "ops", "team_name": "Ops", "team_role": "viewer",
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "ops",
+        "team_id": "7", "team_name": "Ops", "team_role": "viewer",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_relay_target_can_be_named_through_its_team() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[
+        {"id": 7, "slug": "ops", "name": "Ops", "role": "member"},
+        {"id": 8, "slug": "dev", "name": "Dev", "role": "member"},
+    ])
+    service.teams.list_shared_servers = AsyncMock(return_value=[{"id": "srv-1", "name": "web-1"}])
+
+    # The reference list_instances gives it: only that team's copy matches.
+    target = await service.resolve_relay_target("ops/web-1")
+
+    assert (target["id"], target["team_slug"]) == ("srv-1", "ops")
+    assert await service.resolve_relay_target("qa/web-1") is None
+
+
+# ---------------------------------------------------------------------------
+# Whose vault key an own server connects with (team agent rules)
+# ---------------------------------------------------------------------------
+
+
+def _team_key_service(tmp_path, binding, vault=None) -> VaultCommandService:
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    service._personal_binding = AsyncMock(return_value=(binding, "instance:aws:i-1"))  # type: ignore[method-assign]
+    service.vaults.get_vault = AsyncMock(return_value=vault or {})  # type: ignore[method-assign]
+    return service
+
+
+_OWN_SERVER = {"provider": "aws", "id": "i-1", "public_ip": "192.0.2.10"}
+_NATIVE = {"source": "servonaut_vault", "vault_id": "22222222-2222-4222-8222-222222222222"}
+
+
+@pytest.mark.asyncio
+async def test_an_own_server_bound_to_a_team_vault_key_names_that_team(tmp_path) -> None:
+    service = _team_key_service(tmp_path, _NATIVE, {"kind": "team", "team": {"slug": "ops-team"}})
+
+    assert await service.credential_team(_OWN_SERVER) == "ops-team"
+    service.vaults.get_vault.assert_awaited_once_with(_NATIVE["vault_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vault", [{"kind": "team"}, {}, {"kind": "shared"}])
+async def test_a_vault_that_is_not_personal_and_names_no_team_is_still_a_teams(tmp_path, vault) -> None:
+    service = _team_key_service(tmp_path, _NATIVE, vault)
+
+    assert await service.credential_team(_OWN_SERVER) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", [None, {"source": "bitwarden_pm"}])
+async def test_an_own_server_without_a_native_binding_has_no_team_key(tmp_path, binding) -> None:
+    service = _team_key_service(tmp_path, binding)
+
+    assert await service.credential_team(_OWN_SERVER) is None
+    service.vaults.get_vault.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_personal_vault_key_is_no_teams(tmp_path) -> None:
+    service = _team_key_service(tmp_path, _NATIVE, {"kind": "personal"})
+
+    assert await service.credential_team(_OWN_SERVER) is None
+
+
+@pytest.mark.asyncio
+async def test_a_shared_server_is_left_to_its_teams_rules(tmp_path) -> None:
+    service = _team_key_service(tmp_path, _NATIVE, {"kind": "team", "team": {"slug": "ops-team"}})
+
+    assert await service.credential_team({**_OWN_SERVER, "is_shared": True}) is None
+    service._personal_binding.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_locked_vault_connects_with_no_vault_key(tmp_path) -> None:
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    service._personal_binding = AsyncMock()  # type: ignore[method-assign]
+
+    assert await service.credential_team(_OWN_SERVER) is None
+    service._personal_binding.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_binding_without_a_vault_cannot_be_taken_for_a_personal_key(tmp_path) -> None:
+    service = _team_key_service(tmp_path, {"source": "servonaut_vault"})
+
+    with pytest.raises(VaultStateError, match="malformed"):
+        await service.credential_team(_OWN_SERVER)
+
+
+def test_the_vault_says_whether_it_is_unlocked(tmp_path) -> None:
+    store = IdentityStore(
+        tmp_path / "vault_keys.json",
+        environment_key="MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    )
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    assert service.is_unlocked is False
+
+    store.create(identity_id="11111111-1111-4111-8111-111111111111", user_id=1)
+    assert service.is_unlocked is True
+
+
+def _personal_bind_service(put_personal_binding) -> VaultCommandService:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.vaults.get_vault = AsyncMock(return_value={"scope": "user:1"})  # type: ignore[method-assign]
+    service.items.get_item = AsyncMock(return_value={"item_id": "i"})  # type: ignore[method-assign]
+    service.items.read_item = MagicMock(return_value={"public_fingerprint": "SHA256:abc"})  # type: ignore[method-assign]
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))  # type: ignore[method-assign]
+    service.bindings._validate_host_keys = MagicMock()  # type: ignore[method-assign]
+    service.bindings.build_binding = MagicMock(side_effect=lambda **kwargs: kwargs)  # type: ignore[method-assign]
+    service.bindings.put_personal_binding = put_personal_binding  # type: ignore[method-assign]
+    return service
+
+
+async def _bind_web_1(service: VaultCommandService):
+    return await service.bind_personal(
+        vault_id="11111111-1111-4111-8111-111111111111", item_id="22222222-2222-4222-8222-222222222222",
+        provider="aws", instance_id="i-1", hostname="192.0.2.10", port=22, login="deploy",
+        host_keys=["ssh-ed25519 AAAA"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_binding_an_own_server_changes_the_binding_generation(tmp_path) -> None:
+    service = _personal_bind_service(AsyncMock(return_value={"ok": True}))
+    before = service.binding_generation
+
+    assert await _bind_web_1(service) == {"ok": True}
+    assert service.binding_generation != before
+
+
+@pytest.mark.asyncio
+async def test_a_binding_that_fails_leaves_the_generation(tmp_path) -> None:
+    service = _personal_bind_service(AsyncMock(side_effect=APIError(code="x", message="x", status=500)))
+    before = service.binding_generation
+
+    with pytest.raises(APIError):
+        await _bind_web_1(service)
+    assert service.binding_generation == before

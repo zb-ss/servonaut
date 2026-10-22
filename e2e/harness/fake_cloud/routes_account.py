@@ -12,7 +12,8 @@ served exactly as given, to the scenario's account only. *Managed teams*
 members: each member sees the team through their own role, and owners and
 admins invite (``POST …/members``), resend (``…/members/{id}/resend``),
 change roles (``PUT …/members/{id}``) and remove members (``DELETE``), as
-the CLI's ``TeamService`` calls them. Shared servers (``POST`` and ``DELETE
+the CLI's ``TeamService`` calls them (``join_team`` puts a user in one
+directly, for a journey's set-up). Shared servers (``POST`` and ``DELETE
 …/servers``), their SSH-verify results (``…/servers/{id}/ssh-verify-*``) and
 shared configs (``…/configs``) work for both kinds.
 """
@@ -168,6 +169,16 @@ class AccountData:
             slug = f"{base}-{number}"
         return slug
 
+    def join_team(self, slug: str, *, user_id: int, role: str, email: str,
+                  name: Optional[str] = None) -> None:
+        """*user_id* is an active member of managed team *slug* with *role* already.
+
+        A journey's set-up, for any user (the scenario's account too): no
+        invitation, no seat check.
+        """
+        with self._lock:
+            self._managed[slug].add_member(user_id, email, name or email.split("@")[0], role)
+
     def team_members(self, slug: str) -> Optional[list[dict[str, Any]]]:
         """The active members of managed team *slug*; None for a scenario row (or no team)."""
         with self._lock:
@@ -217,6 +228,20 @@ class AccountData:
             if row is None or not scenario_account:
                 return None
             return copy.deepcopy({**row, "members": row.get("members", [])})
+
+    def team_id_of(self, slug: str, user_id: int, *, scenario_account: bool) -> Optional[str]:
+        """The id of team *slug* when *user_id* can see it, else None.
+
+        A scenario row without an id gets one derived from its slug.
+        """
+        with self._lock:
+            team = self._managed.get(slug)
+            if team is not None:
+                return str(team.id) if team.role_of(user_id) else None
+            row = next((t for t in self._teams if t.get("slug") == slug), None)
+            if row is None or not scenario_account:
+                return None
+            return str(row.get("id") or f"team-{slug}")
 
     def caller_role(self, slug: str, user_id: int, *, scenario_account: bool) -> Optional[str]:
         """*user_id*'s role on team *slug*, or None when they cannot see the team."""

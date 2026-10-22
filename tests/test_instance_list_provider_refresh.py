@@ -101,6 +101,34 @@ def test_the_refresh_key_lists_the_team_shared_servers_again():
     assert "shared_refresh" in started
 
 
+def test_listed_shared_servers_fetch_the_same_teams_agent_rules():
+    from servonaut.services.shared_servers import SharedServers
+
+    app = _signed_in(_app(aws_fresh=True))
+    teams = [{"id": "team-1", "slug": "ops-team", "name": "Ops", "role": "member"}]
+    found = SharedServers(rows=[], teams=teams)
+    screen, _ = _screen(app)
+    worker = SimpleNamespace(name="shared_refresh", is_finished=True, error=None, result=found)
+    with _with_app(app), patch(
+        "servonaut.screens.instance_list.replace_instances", return_value=[],
+    ):
+        screen.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.SUCCESS))
+
+    app.refresh_team_policies.assert_called_once_with(teams)
+
+
+def test_shared_servers_that_could_not_be_listed_fetch_no_rules():
+    app = _signed_in(_app(aws_fresh=True))
+    screen, _ = _screen(app)
+    worker = SimpleNamespace(
+        name="shared_refresh", is_finished=True, error=RuntimeError("offline"), result=None,
+    )
+    with _with_app(app):
+        screen.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.ERROR))
+
+    app.refresh_team_policies.assert_not_called()
+
+
 def test_signed_out_the_shared_rows_leave_the_list_without_a_request():
     app = _app(aws_fresh=True, hetzner_fresh=True)
     app.instances = [dict(AWS_ROW), {"id": "srv-1", "name": "server-1", "is_shared": True}]

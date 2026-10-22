@@ -10,6 +10,7 @@ pynacl>=1.5
 httpx>=0.25.0
 httpx-sse>=0.4
 keyring>=24
+regex>=2025.9.18
 
 # Supported non-desktop integrations bundled in every desktop shell target.
 mcp>=1.30.0,<2

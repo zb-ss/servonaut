@@ -353,7 +353,8 @@ class InstanceListScreen(Screen):
 
         Signed out, nothing is asked and any shared rows still listed leave
         the list. They are never cached on disk: a member removed from a
-        team stops seeing its servers at the next start.
+        team stops seeing its servers at the next start. Once listed, the
+        same teams' agent rules are fetched too.
         """
         from servonaut.services.shared_servers import load_shared_servers
 
@@ -387,6 +388,10 @@ class InstanceListScreen(Screen):
         found = worker.result
         # The team key tier of SSH connect reads the user's teams from here.
         self.app.teams = found.teams
+        # What agents may do on these servers: the same teams' signed rules.
+        refresh_rules = getattr(self.app, "refresh_team_policies", None)
+        if callable(refresh_rules):
+            refresh_rules(found.teams)
         self._instances = replace_instances(self.app, "shared", found.rows)
         self._update_table()
         self._update_status_bar()

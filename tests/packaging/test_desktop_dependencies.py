@@ -53,6 +53,7 @@ _DIRECT_REQUIREMENTS = {
     "httpx>=0.25.0",
     "httpx-sse>=0.4",
     "keyring>=24",
+    "regex>=2025.9.18",
     "mcp>=1.30.0,<2",
     "ovh",
     "hcloud>=2.0",
@@ -181,6 +182,7 @@ def test_desktop_target_locks_are_exact_hashes_and_pinned() -> None:
             "mcp",
             "ovh",
             "pynacl",
+            "regex",
             "tabulate",
         } <= versions.keys()
 

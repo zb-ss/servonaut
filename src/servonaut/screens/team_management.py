@@ -19,6 +19,11 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
 from servonaut.services.api_client import APIError
+from servonaut.services.team_rules_view import (
+    TITLE as AGENT_RULES_TITLE,
+    agent_rules_lines,
+    agent_rules_view,
+)
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -37,6 +42,11 @@ _ROLE_OPTIONS: List[Tuple[str, str]] = [
 _MANAGE_MEMBERS_ROLES = frozenset({"owner", "admin"})
 # Only the owner can promote/demote admins (MANAGE_ADMINS).
 _MANAGE_ADMINS_ROLES = frozenset({"owner"})
+# Shown only while a team is open.
+_DETAIL_SECTIONS = (
+    "team_header", "members_section", "configs_section", "servers_section",
+    "agent_rules_section",
+)
 
 
 class TeamManagementScreen(Screen):
@@ -71,6 +81,8 @@ class TeamManagementScreen(Screen):
         self._team_configs: list[dict] = []
         # Holds the parsed remote payload between "Pull Latest" and Apply confirm.
         self._pending_pull_payload: Optional[dict] = None
+        # Team-list rows by slug: a team's agent rules are fetched by its id.
+        self._teams_by_slug: dict[str, dict] = {}
         # Custom-server names the open push form offers (ticked or not).
         self._push_server_names: list[str] = []
 
@@ -265,6 +277,17 @@ class TeamManagementScreen(Screen):
                     classes="settings_section",
                 ),
 
+                # --- Agent rules section (curved card, read-only) ---
+                Container(
+                    Static(
+                        f"[bold]{AGENT_RULES_TITLE}[/bold]",
+                        id="section_agent_rules", classes="section_header",
+                    ),
+                    Static("", id="agent_rules_body"),
+                    id="agent_rules_section",
+                    classes="settings_section",
+                ),
+
                 Button("Back", variant="default", id="btn_back"),
 
                 id="team_management_container",
@@ -327,11 +350,11 @@ class TeamManagementScreen(Screen):
     def _hide_detail_section(self) -> None:
         # Detail-only sections are wrapped in .settings_section cards;
         # collapse the whole card so the empty curved border doesn't render.
-        for widget_id in ("team_header", "members_section", "configs_section", "servers_section"):
+        for widget_id in _DETAIL_SECTIONS:
             self.query_one(f"#{widget_id}").display = False
 
     def _show_detail_section(self) -> None:
-        for widget_id in ("team_header", "members_section", "configs_section", "servers_section"):
+        for widget_id in _DETAIL_SECTIONS:
             self.query_one(f"#{widget_id}").display = True
 
     def _hide_create_form(self) -> None:
@@ -609,9 +632,63 @@ class TeamManagementScreen(Screen):
                 f"[bold]Team: {display_team_name}[/bold]\n{seat_line}"
             )
             self._refresh_member_buttons()
+            await self._show_agent_rules(slug, team, servers)
         except Exception as exc:
             logger.error("Failed to load team detail: %s", exc)
             self.notify(f"Failed to load team: {exc}", severity="error", markup=False)
+
+    async def _show_agent_rules(self, slug: str, team: dict, servers: list[dict]) -> None:
+        """Show what agents may do on the team's servers: what this device has, then fresh.
+
+        Without the app's refresher (no team service) only the rules this
+        device has are shown.
+        """
+        from servonaut.services.shared_servers import team_id_text
+        from servonaut.services.team_policy import team_policy_store
+
+        refresher = getattr(self.app, "team_policy", None)
+        store = refresher.store if refresher is not None else team_policy_store()
+        if self.app.demo_mode and self.app.redaction_service:
+            # Server names are identifiers, as in the servers table.
+            redact = self.app.redaction_service.redact_name
+            servers = [dict(server, name=redact(str(server.get("name") or ""))) for server in servers]
+
+        row = dict(self._teams_by_slug.get(slug) or {})
+        row.setdefault("slug", slug)
+        if not row.get("id") and team.get("id"):
+            row["id"] = team.get("id")
+        # By id: another team may have used this slug before a rename.
+        team_id = team_id_text(row) or None
+
+        def show() -> None:
+            self._render_agent_rules(agent_rules_view(
+                slug, store.status(slug, team_id), servers, self._current_team_role,
+            ))
+
+        show()
+        if refresher is None:
+            return
+        # Never raises: a failed fetch shows as the readonly fallback.
+        await refresher.refresh([row])
+        show()
+
+    def _render_agent_rules(self, view: dict) -> None:
+        """Show *view* (``team_rules_view.agent_rules_view``) in the agent rules card."""
+        lines = agent_rules_lines(view)
+        if self.app.demo_mode and self.app.redaction_service:
+            lines = [self.app.redaction_service.scrub_stream(line) for line in lines]
+        body = [escape(line) for line in lines]
+        if not view["in_force"]:
+            # The fallback (and why) is the line that matters.
+            body[0] = f"[$text-warning]{body[0]}[/$text-warning]"
+        elif view["unusable_pattern"]:
+            body = [
+                f"[$text-warning]{line}[/$text-warning]" if raw.startswith("No command can run")
+                else line
+                for raw, line in zip(lines, body)
+            ]
+        body[-1] = f"[dim]{body[-1]}[/dim]"
+        self.query_one("#agent_rules_body", Static).update("\n".join(body))
 
     def _list_shared_servers(self, slug: str, team_name: str, servers: list[dict]) -> None:
         """Make the team's shared servers in the server list the ones listed here.
@@ -846,12 +923,14 @@ class TeamManagementScreen(Screen):
             return x
 
         self._team_roles.clear()
+        self._teams_by_slug.clear()
         owned_count = 0
         for team in teams:
             slug = team.get("slug", "")
             role = (team.get("role") or "").lower()
             if slug:
                 self._team_roles[slug] = role
+                self._teams_by_slug[slug] = dict(team)
             if role == "owner":
                 owned_count += 1
             table.add_row(

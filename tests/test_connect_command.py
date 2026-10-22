@@ -292,7 +292,7 @@ class TestOAuthSessionFallback:
              patch("servonaut.services.auth_service.AuthService", return_value=auth), \
              patch("servonaut.services.relay_manager._extract_user_id", return_value="42"), \
              patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
-             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock(team_policy=None)), \
              patch("servonaut.services.relay_listener.RelayListener",
                    return_value=listener) as listener_cls, \
              patch.dict(os.environ, {}, clear=False):
@@ -328,7 +328,7 @@ class TestOAuthSessionFallback:
              patch("servonaut.services.auth_service.AuthService", return_value=auth), \
              patch("servonaut.services.relay_manager._extract_user_id", return_value="42"), \
              patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
-             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock(team_policy=None)), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SERVONAUT_RELAY_TOKEN", None)
             os.environ.pop("SERVONAUT_USER_ID", None)
@@ -369,7 +369,7 @@ class TestOAuthSessionFallback:
         with patch("servonaut.config.manager.ConfigManager", return_value=config_manager), \
              patch("servonaut.services.auth_service.AuthService", return_value=auth), \
              patch("servonaut.services.relay_lock.RelayLock", return_value=lock), \
-             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock()), \
+             patch("servonaut.mcp.server.build_headless_tools", return_value=MagicMock(team_policy=None)), \
              patch("servonaut.services.relay_listener.RelayListener",
                    return_value=listener) as listener_cls, \
              patch.dict(os.environ, env, clear=False):

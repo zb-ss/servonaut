@@ -232,6 +232,7 @@ def test_profiles_are_complete_exact_hash_locks_with_required_tooling() -> None:
             "keyring",
             "ovh",
             "pynacl",
+            "regex",
             "tabulate",
             "textual",
         } <= versions.keys()

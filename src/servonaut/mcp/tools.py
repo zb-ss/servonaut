@@ -39,8 +39,12 @@ from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
 from servonaut.services.team_rules import (
+    CREDENTIAL_CHECK_FAILED,
+    CREDENTIAL_CHECK_FAILED_REASON,
     TEAM_RULE_REASON,
+    CredentialRulesMemo,
     TeamGuard,
+    credential_rules_row,
     guard_for_target_from,
 )
 from servonaut.utils.instance_resolver import (
@@ -236,7 +240,8 @@ class ServonautTools:
                  team_service=None,
                  account_registry=None,
                  vault_runtime=None,
-                 apply_team_rules: bool = True) -> None:
+                 apply_team_rules: bool = True,
+                 team_policy=None) -> None:
         self._config_manager = config_manager
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -281,6 +286,12 @@ class ServonautTools:
         # (services/team_rules.py). False only for a surface where a person
         # typed the request, which team rules do not govern.
         self._apply_team_rules = apply_team_rules
+        # Fetches the teams' signed agent rules (a TeamPolicyRefresher)
+        # whenever the shared servers are read; None: nothing fetches them
+        # here and teams without saved rules stay at the readonly level.
+        self._team_policy = team_policy
+        # Whose vault key an own server connects with (see _credential_rules_row).
+        self._credential_memo = CredentialRulesMemo()
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -321,6 +332,11 @@ class ServonautTools:
         # token -> {signature, expires_at}. The op cannot execute until a second
         # call echoes a token whose signature matches the exact call.
         self._aws_confirm_staging: Dict[str, Dict[str, Any]] = {}
+
+    @property
+    def team_policy(self):
+        """The TeamPolicyRefresher this surface fetches team agent rules with, or None."""
+        return self._team_policy
 
     @property
     def config_manager(self):
@@ -429,6 +445,7 @@ class ServonautTools:
         """Install the optional native Vault SSH boundary."""
         self._vault_runtime = service
         self._bw_ref_memo.clear()
+        self._credential_memo.clear()
 
     # ------------------------------------------------------------------
     # Provider accounts
@@ -601,14 +618,54 @@ class ServonautTools:
         is audited: ``instance_not_found``, ``ambiguous_instance`` for a
         name several servers share (the message lists their references),
         ``<provider>_unavailable`` for an ``<account>/...`` reference to an
-        account that cannot connect (the message says why), or
-        ``team_rule`` when the server is a team's shared server whose rule
+        account that cannot connect (the message says why),
+        ``credential_check_failed`` when the vault key of a server of the
+        user's own could not be checked, or ``team_rule`` when a team's rule
         does not let an agent run *tool_name* (for ``run_command``, the
-        command in ``args``) there. *requested_as* names the request in a
-        team refusal when the command is one the tool built (see
-        :meth:`TeamGuard.refusal`). *for_agent* False is for a surface where
-        a person made the request: team rules do not apply to it.
+        command in ``args``) there: on the team's shared server, or on an own
+        server that connects with a key from the team's vault.
+        *requested_as* names the request in a team refusal when the command
+        is one the tool built (see :meth:`TeamGuard.refusal`). *for_agent*
+        False is for a surface where a person made the request: team rules
+        do not apply to it.
         """
+        instance, _team_guard, error = await self._lookup_target(
+            tool_name, args, instance_id, audit_result=audit_result,
+            for_agent=for_agent, requested_as=requested_as,
+        )
+        return instance, error
+
+    async def _lookup_target(
+        self, tool_name: str, args: Dict[str, Any], instance_id: str,
+        *, audit_result: str = '', for_agent: bool = True, requested_as: str = '',
+    ):
+        """:meth:`_lookup_instance`, plus the team guard the call passed.
+
+        Returns ``(instance, team_guard, None)`` (``team_guard`` None when
+        the local rules apply), or ``(None, None, message)``.
+        """
+        instance, error = await self._find_target(
+            tool_name, args, instance_id, audit_result=audit_result,
+        )
+        if error is not None:
+            return None, None, error
+        if not for_agent:
+            return instance, None, None
+        team_guard, error = await self._agent_team_guard(tool_name, args, instance)
+        if error is not None:
+            return None, None, error
+        if team_guard is not None:
+            command = args.get('command', '') if tool_name == 'run_command' else None
+            refusal = team_guard.refusal(tool_name, command, requested_as=requested_as)
+            if refusal is not None:
+                self._audit.log(tool_name, args, '', False, TEAM_RULE_REASON)
+                return None, None, refusal
+        return instance, team_guard, None
+
+    async def _find_target(
+        self, tool_name: str, args: Dict[str, Any], instance_id: str, *, audit_result: str = '',
+    ):
+        """``(instance, None)`` for *instance_id*, or ``(None, message)`` once audited."""
         try:
             instance = await self._find_instance(instance_id)
         except AmbiguousInstanceError as exc:
@@ -656,20 +713,62 @@ class ServonautTools:
                 tool_name, args, audit_result, False, 'instance_not_found',
             )
             return None, f"Instance not found: {instance_id}"
-        team_guard = self._team_guard(instance) if for_agent else None
-        if team_guard is not None:
-            command = args.get('command', '') if tool_name == 'run_command' else None
-            refusal = team_guard.refusal(tool_name, command, requested_as=requested_as)
-            if refusal is not None:
-                self._audit.log(tool_name, args, '', False, TEAM_RULE_REASON)
-                return None, refusal
         return instance, None
 
     def _team_guard(self, instance: Dict) -> Optional[TeamGuard]:
         """The guard agents run under on *instance*: None unless a team shares it."""
         if not self._apply_team_rules:
             return None
-        return guard_for_target_from(instance, self._guard)
+        mcp = getattr(self._config_manager.get(), 'mcp', None)
+        return guard_for_target_from(
+            instance, self._guard,
+            pattern_timeout_ms=getattr(mcp, 'team_pattern_timeout_ms', None),
+        )
+
+    async def _agent_team_guard(
+        self, tool_name: str, args: Dict[str, Any], instance: Dict,
+    ):
+        """``(guard, None)``: the team guard an agent runs under on *instance*.
+
+        The guard is None where the local rules apply. A server of the
+        user's own that connects with a key from a team's vault runs under
+        that team's rules. ``(None, message)`` once audited when that key
+        could not be checked: a team's key is never taken for a personal one.
+        """
+        if not self._apply_team_rules:
+            return None, None
+        try:
+            rules_row = await self._credential_rules_row(instance)
+        except Exception as exc:  # noqa: BLE001 — refuse rather than guess the key
+            logger.warning(
+                "Could not check the vault key of %s (%s)",
+                instance.get('id') or instance.get('name'), type(exc).__name__,
+            )
+            self._audit.log(tool_name, args, '', False, CREDENTIAL_CHECK_FAILED_REASON)
+            return None, CREDENTIAL_CHECK_FAILED
+        return self._team_guard(rules_row if rules_row is not None else instance), None
+
+    async def _credential_rules_row(self, instance: Dict) -> Optional[Dict]:
+        """The team row whose rules apply to *instance*, an own server reached
+        with a team's vault key; None for any other server.
+
+        The answer is remembered a while (see ``CredentialRulesMemo``).
+
+        Raises:
+            Exception: the key or the team could not be checked.
+        """
+        team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
+
+        async def team_row(slug: str) -> Dict:
+            shared = await self._shared_server_rows()
+            if slug not in self._shared_teams_read:
+                # The team's servers were not read (a failed listing): read
+                # them again, so a failure refuses rather than lose the
+                # override the team may give this server.
+                shared = None
+            return await credential_rules_row(instance, slug, team_service, shared)
+
+        return await self._credential_memo.rules_row(instance, self._vault_runtime, team_row)
 
     async def _provider_target(
         self, provider: str, reference: str, account: str,
@@ -784,7 +883,7 @@ class ServonautTools:
         if state:
             instances = [i for i in instances if i.get('state') == state]
 
-        result = self._format_instances(instances)
+        result = self._format_instances(instances) + self._agent_levels(instances)
         inventories = self._provider_inventories()
         for provider, label in (("aws", "AWS"), ("ovh", "OVH"), ("hetzner", "Hetzner")):
             if only_provider is not None and provider != only_provider:
@@ -843,14 +942,13 @@ class ServonautTools:
             self._audit.log('run_command', args, '', False, cmd_reason)
             return f"Blocked: {cmd_reason}"
 
-        instance, error = await self._lookup_instance(
+        instance, team_guard, error = await self._lookup_target(
             'run_command', args, instance_id, requested_as=requested_as,
         )
         if error is not None:
             return error
         # Rendered by the guard that accepted it: on a team's shared server
         # that can be the team's standard level under a local dangerous one.
-        team_guard = self._team_guard(instance)
         guard = team_guard.guard if team_guard is not None else self._guard
         command = guard.command_for_execution(command)
 
@@ -4546,22 +4644,40 @@ class ServonautTools:
 
         One read serves every call for a minute. A failed read lists none
         (and is remembered for the same minute): the user's own servers
-        never wait on the team service.
+        never wait on the team service. Each read also fetches the same
+        teams' agent rules, so the rules on these rows are as fresh as they.
         """
         now = time.monotonic()
         if self._shared_memo is not None and self._shared_memo[0] > now:
             return [dict(row) for row in self._shared_memo[1]]
         team_service = self._team_service or getattr(self._vault_runtime, 'teams', None)
         rows: List[Dict] = []
+        read: frozenset = frozenset()
         if team_service is not None:
             from servonaut.services.shared_servers import load_shared_servers
 
             try:
-                rows = (await load_shared_servers(team_service)).rows
+                teams = await team_service.list_teams()
+                found, _statuses = await asyncio.gather(
+                    load_shared_servers(team_service, teams),
+                    self._refresh_team_rules(teams),
+                )
+                rows, read = found.rows, frozenset(found.read)
             except Exception as exc:  # noqa: BLE001 — signed out, offline, no team plan
                 logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
-        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows)
+        self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows, read)
         return [dict(row) for row in rows]
+
+    @property
+    def _shared_teams_read(self) -> frozenset:
+        """The teams whose servers the last :meth:`_shared_server_rows` read in full."""
+        return self._shared_memo[2] if self._shared_memo is not None else frozenset()
+
+    async def _refresh_team_rules(self, teams: Any) -> List[Any]:
+        """Fetch the agent rules of *teams*; nothing without a refresher."""
+        if self._team_policy is None:
+            return []
+        return await self._team_policy.refresh(teams)
 
     async def _find_shared(self, reference: str) -> Optional[Dict]:
         """The team shared server *reference* names (id, name or ``<team>/<name>``).
@@ -4593,6 +4709,20 @@ class ServonautTools:
                 cannot connect.
         """
         return await self._directory.find(instance_id)
+
+    def _agent_levels(self, instances: List[Dict]) -> str:
+        """The level agents run at on each listed team shared server, and why."""
+        lines = []
+        for row in instances:
+            team_guard = self._team_guard(row)
+            if team_guard is not None:
+                lines.append(f"  {qualified_reference(row)}: {team_guard.describe_level()}")
+        if not lines:
+            return ""
+        return (
+            "\n\nAgents on team shared servers (the team's rule for your role; "
+            "your MCP settings can only make it stricter):\n" + "\n".join(lines)
+        )
 
     def _format_instances(self, instances: List[Dict]) -> str:
         lines = [f"{'Name':<30} {'ID':<20} {'State':<10} {'Public IP':<16} {'Region':<14}"]

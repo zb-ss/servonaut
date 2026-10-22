@@ -33,6 +33,8 @@ dependencies = [
     "httpx>=0.25.0",
     "httpx-sse>=0.4",
     "keyring>=24",
+    # Searches team agent rules' blocked patterns with a time limit.
+    "regex>=2025.9.18",
 ]
 
 [project.optional-dependencies]

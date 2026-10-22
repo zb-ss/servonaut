@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -667,6 +667,46 @@ def test_build_headless_tools_reuses_the_relay_vault_runtime(monkeypatch, tmp_pa
     runtime.unlock_existing_identity.assert_called_once()
     factory.assert_not_called()
     assert tools.account_registry.accounts("hetzner")
+
+
+def test_build_headless_tools_fetches_team_rules_with_the_vault_runtime_s_teams(
+    monkeypatch, tmp_path,
+):
+    from servonaut.mcp.server import build_headless_tools
+    from servonaut.services.team_policy import team_policy_store
+    from servonaut.services.team_policy_refresh import TeamPolicyRefresher
+    from servonaut.services.vault.identity_store import IdentityStoreError
+
+    registry_config = build_registry(monkeypatch, hetzner={"hetzner": []})[0].config
+    manager = MagicMock()
+    manager.get.return_value = registry_config
+    registry_config.mcp.audit_path = str(tmp_path / "audit.jsonl")
+    runtime = MagicMock()
+    runtime.unlock_existing_identity.side_effect = IdentityStoreError("locked")
+    runtime.teams.list_teams = AsyncMock(return_value=[])
+
+    tools = build_headless_tools(manager, vault_runtime=runtime)
+
+    assert isinstance(tools.team_policy, TeamPolicyRefresher)
+    assert tools.team_policy.store is team_policy_store()
+    asyncio.run(tools.team_policy.refresh())
+    runtime.teams.list_teams.assert_awaited_once()
+
+
+def test_build_headless_tools_signed_out_fetches_no_team_rules(monkeypatch, tmp_path):
+    from servonaut.mcp.server import build_headless_tools
+
+    registry_config = build_registry(monkeypatch, hetzner={"hetzner": []})[0].config
+    manager = MagicMock()
+    manager.get.return_value = registry_config
+    registry_config.mcp.audit_path = str(tmp_path / "audit.jsonl")
+    monkeypatch.setattr(
+        "servonaut.services.auth_service.AuthService.is_authenticated", False, raising=False,
+    )
+
+    tools = build_headless_tools(manager)
+
+    assert asyncio.run(tools.team_policy.refresh()) == []
 
 
 # ---------------------------------------------------------------------------

@@ -782,6 +782,9 @@ ACCEPTABLE_UNSTYLED: frozenset[str] = frozenset(
         "servers_section",
         "team_mgmt_header",
         "teams_section",
+        "agent_rules_section",  # Reason: card; styled by its .settings_section class
+        "section_agent_rules",  # Reason: Static header; styled by .section_header
+        "agent_rules_body",     # Reason: Static; inherits global Static
         # ---- BW SSH / SSH-ref integration (PR #27) ----
         # Bitwarden vault + SSH ref editor + verify modal. All inherit
         # parent screen / modal styling.

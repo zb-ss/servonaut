@@ -170,6 +170,17 @@ class ManagedTeam:
         self.members.append(owner)
         return owner
 
+    def add_member(self, user_id: int, email: str, name: str, role: str) -> Member:
+        """*user_id* is an active member with *role* already (a journey's set-up)."""
+        role = self._assignable(role)
+        if self.member_of(user_id) is not None:
+            raise ValueError(f"user {user_id} is already a member of {self.slug}")
+        now = _iso(_now())
+        member = Member(self._next_id(), email, role, now, user_id=user_id, name=name,
+                        user_email=email, accepted_at=now)
+        self.members.append(member)
+        return member
+
     def _next_id(self) -> int:
         member_id, self.next_member_id = self.next_member_id, self.next_member_id + 1
         return member_id

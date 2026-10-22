@@ -497,6 +497,62 @@ Once connected, the exit code is the remote command's (or the session's);
 
 ---
 
+## `servonaut team`
+
+### `servonaut team rules`
+
+*Teams plan.* Show what a team lets AI agents do on its shared servers, as it
+applies on this machine now. Read-only: owners and admins change the rules on
+the website. See [Team agent rules](team-agent-rules.md).
+
+```
+servonaut team rules TEAM [--json]
+```
+
+| Argument / flag | Description |
+|-----------------|-------------|
+| `TEAM` | The team's slug or name (any case) |
+| `--json` | Print the rules as JSON |
+
+The command fetches the team's signed rules, checks them as every agent
+surface does, and prints each role's level and yours, the servers with levels
+of their own, the allowed commands and the team's blocked patterns, the
+rules' version, when they were last fetched and until when they are valid:
+
+```
+$ servonaut team rules ops
+What agents may do here (team ops)
+Agents on this team's shared servers run at these levels. Your own MCP settings can only make these stricter.
+Owner: standard · Admin: standard · Member: standard · Viewer: readonly
+Your role: member (standard)
+Per server:
+  web-1: Member readonly
+Allowed commands at the standard level: Servonaut's built-in list
+Blocked patterns the team adds to Servonaut's own: \.env\b
+Version 3 · last refreshed 2026-10-19 09:30 UTC · valid until 2026-10-20 09:30 UTC
+```
+
+When the rules cannot be used, it prints the read-only fallback instead, and
+why (see [When the rules fall back to read-only](team-agent-rules.md#when-the-rules-fall-back-to-read-only)).
+
+`--json` prints the same as one object: `team`, `team_id`, `in_force`
+(false when the rules fell back to read-only), `problem` and
+`fallback_reason` (why), `version`, `expires_at`, `last_refreshed`,
+`your_role`, `your_level`, `role_levels`, `servers` (each with `id`, `name`
+and its `role_levels`), `command_allowlist` (`null` for Servonaut's built-in
+list), `command_blocklist` (the patterns the team adds) and
+`unusable_pattern` (a team pattern Servonaut cannot use, which stops every
+command on the team's servers). Times are UTC, as `2026-10-20T09:30:00Z`.
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | The rules were shown, including the read-only fallback |
+| `1` | Not signed in, your teams could not be read, or you are not in that team |
+
+---
+
 ## `servonaut vault`
 
 Manage an encrypted personal or team vault. Vault keys and SSH private keys

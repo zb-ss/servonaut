@@ -477,6 +477,25 @@ class APIClient(APIClientInterface):
         )
         return response.json()
 
+    async def get_with_headers(
+        self,
+        path: str,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        params: Optional[Dict[str, Any]] = None,
+        retry_on_401: bool = True,
+    ) -> Tuple[Any, Dict[str, str]]:
+        """:meth:`get`, plus the response headers (names in lower case).
+
+        For a caller that needs the server's view of a response, e.g. its
+        ``Date`` to judge an expiry by the server's clock.
+        """
+        response = await self._request(
+            "GET", path, timeout=timeout, params=params, retry_on_401=retry_on_401
+        )
+        headers = {name.lower(): value for name, value in response.headers.items()}
+        return response.json(), headers
+
     async def post(self, path: str, *, json: Optional[Any] = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, retry_on_401: bool = True, **kwargs: Any) -> Dict[str, Any]:
         response = await self._request(
             "POST", path, timeout=timeout, json=json, retry_on_401=retry_on_401

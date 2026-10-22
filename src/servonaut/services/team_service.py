@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, TYPE_CHECKING
+import re
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .interfaces import TeamServiceInterface
 from servonaut.services.bw_ssh_config_service import (
@@ -14,6 +15,9 @@ if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
 
 logger = logging.getLogger(__name__)
+
+# The server's team slug shape; a slug is checked before it goes into a URL.
+_TEAM_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # RBAC permissions matrix
 ROLE_PERMISSIONS = {
@@ -190,6 +194,20 @@ class TeamService(TeamServiceInterface):
         """Get team MCP policy."""
         result = await self._api.get(f"/api/v1/teams/{slug}/policy")
         return result
+
+    async def get_team_policy_with_date(self, slug: str) -> Tuple[Any, Optional[str]]:
+        """The team's policy and the response's ``Date`` header (None if absent).
+
+        The policy carries the team's signed agent rules; the date lets the
+        caller judge their expiry by the server's clock (see ``team_policy``).
+
+        Raises:
+            ValueError: *slug* is not a team slug; nothing is sent.
+        """
+        if not isinstance(slug, str) or not _TEAM_SLUG_RE.fullmatch(slug):
+            raise ValueError(f"not a team slug: {slug!r}")
+        body, headers = await self._api.get_with_headers(f"/api/v1/teams/{slug}/policy")
+        return body, headers.get("date")
 
     # ------------------------------------------------------------------
     # Team-side SSH config (vault wiring, admin/owner only for writes)
