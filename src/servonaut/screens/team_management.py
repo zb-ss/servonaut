@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import List, Optional, Tuple
 
 from rich.markup import escape
@@ -11,10 +12,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Input, Select, Static
+from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionList, Static
+from textual.widgets.selection_list import Selection
 
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
 from servonaut.services.api_client import APIError
 from servonaut.services.team_rules_view import (
     TITLE as AGENT_RULES_TITLE,
@@ -80,6 +83,8 @@ class TeamManagementScreen(Screen):
         self._pending_pull_payload: Optional[dict] = None
         # Team-list rows by slug: a team's agent rules are fetched by its id.
         self._teams_by_slug: dict[str, dict] = {}
+        # Custom-server names the open push form offers (ticked or not).
+        self._push_server_names: list[str] = []
 
     # ------------------------------------------------------------------
     # Compose
@@ -191,6 +196,15 @@ class TeamManagementScreen(Screen):
                     ),
                     Container(
                         Static("[bold]Push Current Config[/bold]", classes="section_header"),
+                        Static("", id="push_config_servers_label"),
+                        SelectionList(id="push_config_servers"),
+                        Horizontal(
+                            Button("Select All", variant="default", id="btn_push_servers_all"),
+                            Button("Select None", variant="default", id="btn_push_servers_none"),
+                            classes="form_actions_row",
+                            id="push_config_server_actions",
+                        ),
+                        Static("", id="push_config_profiles"),
                         Static("", id="push_config_preview"),
                         Input(
                             placeholder="Description (optional — e.g. 'Adds staging bastion')",
@@ -976,18 +990,104 @@ class TeamManagementScreen(Screen):
         self.query_one("#pull_config_form").display = False
 
     def _show_push_config_form(self) -> None:
-        from servonaut.services.team_config_subset import build_shareable_subset
+        """Open the push form with every custom server listed and none ticked.
+
+        Only the custom servers the user ticks are pushed. Connection
+        profiles, connection rules and scan rules go out whole, so the
+        profiles are listed by name and bastion host for review.
+        """
         config_manager = getattr(self.app, "config_manager", None)
         config = config_manager.get() if config_manager is not None else None
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
-        _payload, summary = build_shareable_subset(config)
+        servers = list(config.custom_servers)
+        self._push_server_names = [server.name for server in servers]
+        self._render_push_config_servers(servers, selected=set())
+        self._render_push_config_preview(config)
+        self.query_one("#input_push_description", Input).value = ""
+        form = self.query_one("#push_config_form")
+        form.display = True
+        if servers:
+            self.query_one("#push_config_servers", SelectionList).focus()
+        else:
+            self.query_one("#input_push_description", Input).focus()
+        # The form opens at the foot of the page: bring all of it into view once
+        # it is laid out, so the summary and Push are not below the fold.
+        self.call_after_refresh(form.scroll_visible, top=True, animate=False)
+
+    def _render_push_config_servers(self, servers: list, *, selected: set) -> None:
+        """List the custom servers by name and host, ticking the ones named in *selected*."""
+        demo = self.app.demo_mode and self.app.redaction_service
+
+        def _name(x: str) -> str:
+            return self.app.redaction_service.redact_name(x) if demo else x
+
+        def _host(x: str) -> str:
+            return self.app.redaction_service.scrub_stream(x) if demo else x
+
+        names = [_name(server.name) for server in servers]
+        # Names padded to the longest one, so the hosts line up in a column.
+        width = max((len(name) for name in names), default=0)
+        listing = self.query_one("#push_config_servers", SelectionList)
+        listing.clear_options()
+        listing.add_options([
+            Selection(
+                f"{escape(name.ljust(width))}  [dim]{escape(_host(server.host))}[/dim]",
+                server.name,
+                server.name in selected,
+            )
+            for name, server in zip(names, servers)
+        ])
+        if servers:
+            listing.highlighted = 0  # so Space ticks the first row straight away
+        listing.display = bool(servers)
+        self.query_one("#push_config_server_actions").display = bool(servers)
+        self.query_one("#push_config_servers_label", Static).update(
+            "[bold]Custom servers[/bold] [dim]— only the ticked ones are shared[/dim]"
+            if servers
+            else "[dim]No custom servers in your config.[/dim]"
+        )
+
+    def _push_selected_servers(self) -> list[str]:
+        """Names of the custom servers ticked in the push form."""
+        return list(self.query_one("#push_config_servers", SelectionList).selected)
+
+    def _render_push_config_preview(self, config) -> None:
+        """Show what Push sends with the current ticks: profiles, counts, stripped paths."""
+        from servonaut.services.team_config_subset import build_shareable_subset
+
+        payload, summary = build_shareable_subset(
+            config, custom_servers=self._push_selected_servers()
+        )
+        demo = self.app.demo_mode and self.app.redaction_service
+
+        def _name(x: str) -> str:
+            return self.app.redaction_service.redact_name(x) if demo else x
+
+        def _host(x: str) -> str:
+            return self.app.redaction_service.scrub_stream(x) if demo else x
+
+        profiles = payload["connection_profiles"]
+        if profiles:
+            names = [_name(profile["name"]) for profile in profiles]
+            width = max(len(name) for name in names)
+            lines = ["[bold]Connection profiles[/bold] [dim]— all of them are shared[/dim]"]
+            lines += [
+                f"  • {escape(name.ljust(width))}  "
+                f"[dim]{escape(_host(self._profile_route(profile)))}[/dim]"
+                for name, profile in zip(names, profiles)
+            ]
+        else:
+            lines = ["[dim]No connection profiles in your config.[/dim]"]
+        self.query_one("#push_config_profiles", Static).update("\n".join(lines))
+
         preview = (
-            f"Will share: [bold]{summary['connection_profiles']}[/bold] connection profiles, "
+            f"Will share: [bold]{summary['custom_servers']}[/bold] of "
+            f"{len(self._push_server_names)} custom servers, "
+            f"[bold]{summary['connection_profiles']}[/bold] connection profiles, "
             f"[bold]{summary['connection_rules']}[/bold] connection rules, "
-            f"[bold]{summary['scan_rules']}[/bold] scan rules, "
-            f"[bold]{summary['custom_servers']}[/bold] custom servers."
+            f"[bold]{summary['scan_rules']}[/bold] scan rules."
         )
         if summary["stripped_paths"]:
             preview += (
@@ -995,10 +1095,26 @@ class TeamManagementScreen(Screen):
                 "stripped — teammates must re-bind them locally.[/$text-warning]"
             )
         self.query_one("#push_config_preview", Static).update(preview)
-        self.query_one("#input_push_description", Input).value = ""
-        form = self.query_one("#push_config_form")
-        form.display = True
-        self.query_one("#input_push_description", Input).focus()
+
+    @staticmethod
+    def _profile_route(profile: dict) -> str:
+        """How a connection profile reaches its servers, as the push sends it."""
+        bastion = profile.get("bastion_host") or ""
+        if bastion:
+            user = profile.get("bastion_user") or ""
+            return f"bastion {user}@{bastion}" if user else f"bastion {bastion}"
+        if profile.get("proxy_command"):
+            return f"proxy command {profile['proxy_command']}"
+        return "no bastion"
+
+    def on_selection_list_selected_changed(self, event: SelectionList.SelectedChanged) -> None:
+        """Keep the push preview in step with the ticked custom servers."""
+        if event.selection_list.id != "push_config_servers":
+            return
+        config_manager = getattr(self.app, "config_manager", None)
+        config = config_manager.get() if config_manager is not None else None
+        if config is not None:
+            self._render_push_config_preview(config)
 
     def _show_pull_config_form(self, remote_payload: dict) -> None:
         from servonaut.services.team_config_subset import diff_against_local
@@ -1111,6 +1227,12 @@ class TeamManagementScreen(Screen):
 
         elif button_id == "btn_confirm_push_config":
             self._submit_push_config()
+
+        elif button_id == "btn_push_servers_all":
+            self.query_one("#push_config_servers", SelectionList).select_all()
+
+        elif button_id == "btn_push_servers_none":
+            self.query_one("#push_config_servers", SelectionList).deselect_all()
 
         elif button_id == "btn_cancel_push_config":
             self._hide_push_config_form()
@@ -1371,7 +1493,9 @@ class TeamManagementScreen(Screen):
             self.notify("Local config not available.", severity="error")
             return
         from servonaut.services.team_config_subset import build_shareable_subset
-        payload, _summary = build_shareable_subset(config)
+        payload, _summary = build_shareable_subset(
+            config, custom_servers=self._push_selected_servers()
+        )
         description = self.query_one("#input_push_description", Input).value.strip() or None
         self.run_worker(
             self._do_push_config(self._current_team_slug, payload, description),
@@ -1451,7 +1575,7 @@ class TeamManagementScreen(Screen):
         payload = self._pending_pull_payload
         try:
             apply_team_config(config, payload)
-            config_manager.save()
+            config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
             self.notify(f"Apply failed: {exc}", severity="error", markup=False)
@@ -1465,11 +1589,12 @@ class TeamManagementScreen(Screen):
         )
 
     def _action_share_all_servers(self) -> None:
-        """Bulk-share every eligible instance, skipping ones already on the team.
+        """Offer every eligible instance not yet on the team, then share the ones confirmed.
 
         Eligible = has a routable hostname (public or private IP). Dedupe is
         applied client-side via instance_id first (most reliable), then by
-        hostname (handles non-cloud custom servers without an id).
+        hostname (handles non-cloud custom servers without an id). Nothing is
+        sent until the user confirms the list in ShareServersConfirmModal.
         """
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
@@ -1495,7 +1620,7 @@ class TeamManagementScreen(Screen):
         skipped_existing = 0
         skipped_no_ip = 0
         for instance in instances:
-            hostname = instance.get("public_ip") or instance.get("private_ip")
+            hostname = server_address(instance)
             if not hostname:
                 skipped_no_ip += 1
                 continue
@@ -1515,8 +1640,33 @@ class TeamManagementScreen(Screen):
             return
 
         slug = self._current_team_slug
+        self.app.push_screen(
+            ShareServersConfirmModal(
+                self._current_team_name or slug,
+                to_share,
+                skipped_existing=skipped_existing,
+                skipped_no_address=skipped_no_ip,
+            ),
+            callback=partial(
+                self._share_all_confirmed, slug, len(to_share), skipped_existing, skipped_no_ip
+            ),
+        )
+
+    def _share_all_confirmed(
+        self,
+        slug: str,
+        offered: int,
+        skipped_existing: int,
+        skipped_no_ip: int,
+        chosen: Optional[list[dict]],
+    ) -> None:
+        """Share the servers ticked in Share All's confirmation; nothing when it was cancelled."""
+        if not chosen:
+            return
         self.run_worker(
-            self._do_share_all(slug, to_share, skipped_existing, skipped_no_ip),
+            self._do_share_all(
+                slug, chosen, skipped_existing, skipped_no_ip, left_out=offered - len(chosen)
+            ),
             exclusive=True,
             name="share_all_servers",
         )
@@ -1527,6 +1677,8 @@ class TeamManagementScreen(Screen):
         instances: list[dict],
         skipped_existing: int,
         skipped_no_ip: int,
+        *,
+        left_out: int = 0,
     ) -> None:
         team_svc = getattr(self.app, "team_service", None)
         if team_svc is None:
@@ -1536,7 +1688,7 @@ class TeamManagementScreen(Screen):
         for instance in instances:
             payload: dict = {
                 "name": instance.get("name") or instance.get("id", ""),
-                "hostname": instance.get("public_ip") or instance.get("private_ip"),
+                "hostname": server_address(instance),
             }
             if instance.get("id"):
                 payload["instance_id"] = instance["id"]
@@ -1558,6 +1710,8 @@ class TeamManagementScreen(Screen):
                 failed.append(f"{payload['name']} ({exc})")
 
         parts = [f"Shared {succeeded}"]
+        if left_out:
+            parts.append(f"left out {left_out}")
         if skipped_existing:
             parts.append(f"skipped {skipped_existing} already shared")
         if skipped_no_ip:

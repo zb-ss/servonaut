@@ -4,9 +4,10 @@
 the way the service streams a chat turn: the ``conversation`` frame first,
 then the turn's events, spaced by its ``gap``. After a ``tool_call`` frame it
 waits for the client's answer on the tool-result route (sending ``ping``
-frames meanwhile when the turn asks for them); ``stall_after`` goes silent
-and ``hold_open`` stays open after the last frame, both until the client
-leaves. How the stream ended is written to the chat record
+frames meanwhile when the turn asks for them), unless the turn pauses:
+then its ``turn_suspended`` frame is registered as a continuation and the
+stream closes after it. ``stall_after`` goes silent and ``hold_open`` stays
+open after the last frame, both until the client leaves. How the stream ended is written to the chat record
 (:meth:`AiState.chats`), and a reset of the AI state ends every stream.
 """
 
@@ -49,7 +50,8 @@ async def replay(
     events = list(turn.events)
     stall_after = turn.stall_after
     if turn.announce:
-        events.insert(0, conversation(record["conversation_id"]))
+        says_it_pauses = turn.says_it_pauses and record["split_turns"]
+        events.insert(0, conversation(record["conversation_id"], split_turns=says_it_pauses))
         stall_after = None if stall_after is None else stall_after + 1
     ended = "completed"
     try:
@@ -65,7 +67,9 @@ async def replay(
                 break
             await response.write(event.frame())
             state.update_chat(record, frames=sent + 1)
-            if event.name == "tool_call":
+            if event.name == "turn_suspended":
+                state.suspend(event.payload(), record["conversation_id"])
+            if event.name == "tool_call" and not turn.pauses:
                 waited = await _wait_for_tool_result(state, event, gone, keepalive)
                 if waited is not None:
                     ended = waited

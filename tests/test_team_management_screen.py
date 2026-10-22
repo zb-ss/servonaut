@@ -784,6 +784,30 @@ def _capture_notifications(screen) -> list[tuple[str, str]]:
     return notifications
 
 
+async def _until(pilot, predicate, what: str, tries: int = 200) -> None:
+    """Pause until *predicate* holds; fail naming *what* if it never does."""
+    for _ in range(tries):
+        if predicate():
+            return
+        await pilot.pause()
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+async def _confirm_share_all(app, pilot) -> None:
+    """Confirm Share All's server list as it opened (every server ticked)."""
+    from servonaut.screens.team_share_confirm import ShareServersConfirmModal
+
+    def listed() -> bool:
+        modal = app.screen
+        if not isinstance(modal, ShareServersConfirmModal):
+            return False
+        rows = modal.query("#share_confirm_list")
+        return bool(rows) and rows.first().option_count > 0
+
+    await _until(pilot, listed, "the Share All confirmation and its rows")
+    app.screen.query_one("#share_confirm_share", Button).press()
+
+
 class TestTeamManagementMemberWriteErrors:
     @pytest.mark.asyncio
     async def test_invite_402_owner_caller_sees_billing_cta(self):
@@ -1303,10 +1327,9 @@ class TestTeamManagementShareServer:
             screen._current_team_role = "owner"
             screen._shared_servers = []  # nothing shared yet
             screen._action_share_all_servers()
-            for _ in range(10):
-                await pilot.pause()
+            await _confirm_share_all(app, pilot)
             # 3 eligible (skipped stopped). Each gets its own POST.
-            assert team_svc.push_server.call_count == 3
+            await _until(pilot, lambda: team_svc.push_server.call_count == 3, "three shares")
             sent_names = [c.args[1]["name"] for c in team_svc.push_server.call_args_list]
             assert sent_names == ["aws-1", "aws-2", "prod-db"]
             # Custom server's username + non-default port came through.
@@ -1333,9 +1356,8 @@ class TestTeamManagementShareServer:
                 {"name": "aws-1", "hostname": "1.1.1.1", "instance_id": "i-1"},
             ]
             screen._action_share_all_servers()
-            for _ in range(10):
-                await pilot.pause()
-            assert team_svc.push_server.call_count == 1
+            await _confirm_share_all(app, pilot)
+            await _until(pilot, lambda: team_svc.push_server.call_count == 1, "one share")
             assert team_svc.push_server.call_args.args[1]["name"] == "aws-2"
 
     @pytest.mark.asyncio
@@ -1407,8 +1429,8 @@ class TestTeamManagementShareServer:
             screen._shared_servers = []
             notes = _capture_notifications(screen)
             screen._action_share_all_servers()
-            for _ in range(15):
-                await pilot.pause()
+            await _confirm_share_all(app, pilot)
+            await _until(pilot, lambda: any("Share All:" in msg for _, msg in notes), "the summary")
             assert team_svc.push_server.call_count == 3
             summary_notes = [msg for sev, msg in notes if sev == "warning" and "Shared 2" in msg]
             assert summary_notes, notes

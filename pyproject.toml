@@ -60,7 +60,7 @@ desktop-test = ["aiohttp==3.14.3", "textual-serve==1.1.3"]
 # pins (the desktop journeys host the real frontend), and playwright drives
 # it in headless Chromium; its browser is installed separately with
 # `python -m playwright install chromium`. mcp keeps the
-# upper bound of the `mcp` extra below.
+# bounds of the `mcp` extra below.
 e2e = [
     "moto[ec2,iam,logs,s3,sts,wafv2]>=5.2.3,<6",
     "flask>=3.1,<4",
@@ -68,7 +68,7 @@ e2e = [
     "aiohttp==3.14.3",
     "textual-serve==1.1.3",
     "playwright==1.62.0",
-    "mcp>=1.0.0,<2",
+    "mcp>=1.30.0,<2",
     "pytest-xdist>=3.8,<4",
     # Loopback SSH servers for the remote journeys (pinned: the harness
     # subclasses its server and SFTP classes).
@@ -102,7 +102,10 @@ e2e = [
 # dispatch return in CallToolResult / ListToolsResult. Imports, Tool
 # construction, stdio and run() are unaffected — see
 # tests/test_mcp_sdk_contract.py, which pins that surface.
-mcp = ["mcp>=1.0.0,<2"]
+#
+# The floor is the first release whose event-stream client closes all of
+# its channels when the hosted server refuses the stream.
+mcp = ["mcp>=1.30.0,<2"]
 ovh = ["ovh"]
 hetzner = ["hcloud>=2.0"]
 # Local speech-to-text for voice input. sounddevice needs the PortAudio
@@ -125,8 +128,8 @@ ai = []
 sync = []
 keyring = []
 all = [
-    # Upper bound mirrors the `mcp` extra above — see the note there.
-    "mcp>=1.0.0,<2",
+    # Bounds mirror the `mcp` extra above — see the note there.
+    "mcp>=1.30.0,<2",
     "ovh",
     "hcloud>=2.0",
     "keyring>=24",

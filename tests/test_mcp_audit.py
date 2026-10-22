@@ -129,3 +129,55 @@ class TestReadRecent:
         assert "allowed" in e
         assert "reason" in e
         assert "result_length" in e
+
+
+class TestRecordOutcomes:
+    def test_collects_every_row_written_in_the_block(self, audit):
+        from servonaut.mcp.audit import AuditOutcome, record_outcomes
+
+        with record_outcomes() as outcomes:
+            audit.log("run_command", {}, "", False, "command_timeout")
+            audit.log("get_logs", {}, "out", True)
+
+        assert outcomes == [
+            AuditOutcome("run_command", False, "command_timeout"),
+            AuditOutcome("get_logs", True, ""),
+        ]
+
+    def test_rows_outside_a_block_are_not_collected(self, audit):
+        from servonaut.mcp.audit import record_outcomes
+
+        with record_outcomes() as outcomes:
+            pass
+        audit.log("list_instances", {}, "", True)
+
+        assert outcomes == []
+
+    def test_still_collects_when_the_file_cannot_be_written(self, audit, audit_file):
+        from servonaut.mcp.audit import record_outcomes
+
+        Path(audit_file).mkdir()  # a directory where the log file should be
+        with record_outcomes() as outcomes:
+            audit.log("get_logs", {}, "", False, "validation: lines")
+
+        assert [o.allowed for o in outcomes] == [False]
+
+    def test_concurrent_calls_keep_their_own_rows(self, audit):
+        import asyncio
+
+        from servonaut.mcp.audit import record_outcomes
+
+        async def call(tool, allowed):
+            with record_outcomes() as outcomes:
+                await asyncio.sleep(0)
+                audit.log(tool, {}, "", allowed)
+                await asyncio.sleep(0)
+            return outcomes
+
+        async def both():
+            return await asyncio.gather(call("a", True), call("b", False))
+
+        first, second = asyncio.run(both())
+
+        assert [(o.tool, o.allowed) for o in first] == [("a", True)]
+        assert [(o.tool, o.allowed) for o in second] == [("b", False)]

@@ -11,7 +11,7 @@ keyring>=24
 regex>=2025.9.18
 
 # Supported non-desktop integrations bundled in every standalone CLI target.
-mcp>=1.0.0,<2
+mcp>=1.30.0,<2
 ovh
 hcloud>=2.0
 

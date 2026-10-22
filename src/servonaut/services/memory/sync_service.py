@@ -1769,7 +1769,7 @@ class MemorySyncService:
                         cfg.memory.per_server_overrides[env.instance_id] = {
                             "memory_disabled": True
                         }
-                        self._config_manager.save()
+                        self._config_manager.save(cfg)
                 except Exception as exc:  # noqa: BLE001 — must not crash the sync run
                     logger.warning("Could not persist memory_disabled opt-out: %s", exc)
 
