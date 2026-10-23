@@ -337,6 +337,7 @@ class FakeCloud(LoopbackServer):
         routes_auth.add_routes(app, self._store, lambda: self.url)
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field,
+                                  credential_binding=self.vault.server_binding_field,
                                   base_url=lambda: self.url)
         routes_agent_rules.add_routes(
             app, self._store, self.agent_rules, team_id_of=self._team_id_of,
