@@ -25,17 +25,28 @@ CLOUDTRAIL_ENDPOINT_ENV = "AWS_ENDPOINT_URL_CLOUDTRAIL"
 def fake_cloud_env(server: Any) -> dict[str, str]:
     """The Servonaut API, the hosted MCP endpoint and the package index on FakeCloud.
 
-    The update check reads the package index URL from a module constant too;
-    children get it redirected through :data:`REDIRECTS_ENV`.
+    The update check reads the package index URL from a module constant too,
+    and the keys that verify team agent rules are a module constant: children
+    get both redirected through :data:`REDIRECTS_ENV`.
     """
-    from servonaut.services import update_service
+    from servonaut.services import team_policy_keys, update_service
 
     return {
         "SERVONAUT_API_URL": server.url,
         "SERVONAUT_MCP_URL": server.url,
         "SERVONAUT_PYPI_URL": server.pypi_json_url,
-        REDIRECTS_ENV: json.dumps({update_service.__name__: {"PYPI_URL": server.pypi_json_url}}),
+        REDIRECTS_ENV: json.dumps({
+            update_service.__name__: {"PYPI_URL": server.pypi_json_url},
+            team_policy_keys.__name__: {"TEAM_POLICY_KEYS": team_policy_trust(server)},
+        }),
     }
+
+
+def team_policy_trust(server: Any) -> dict[str, dict[str, str]]:
+    """The key table that trusts FakeCloud's agent-rules key for FakeCloud's origin only."""
+    from servonaut.services import team_policy_keys
+
+    return server.agent_rules.trusted_keys(team_policy_keys.api_origin(server.url))
 
 
 def moto_env(server: Any) -> dict[str, str]:

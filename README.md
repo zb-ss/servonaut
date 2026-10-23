@@ -194,6 +194,7 @@ All screenshots and the launch video were recorded with `--demo` active, which r
 
 - **MCP server** — ~80 tools for Claude Code, Cursor, Windsurf, etc.: instance ops, AWS / Hetzner / OVH lifecycle, S3, log analysis & IP banning, Docker inspection, system-health probes, SSH-key CRUD, memory queries, and an authenticated REST proxy — behind a three-tier guard (`readonly` / `standard` / `dangerous`) with a JSONL audit trail. → [details below](#mcp-server-for-ai-agents)
 - **MCP relay** — `servonaut connect` (or TUI autostart) holds a Mercure SSE connection open so agents and team-mates can dispatch tool calls to this machine. Tokens never leave the CLI.
+- **Team agent rules** *(Teams plan)* — team owners and admins decide what members' AI agents may do on the team's shared servers: a level per role and per server, allowed commands and blocked patterns. The rules are signed by servonaut.dev and checked by every member's Servonaut, for the AI chat with any provider, relayed Servonaut AI tool calls and every MCP agent; rules that cannot be checked leave the team's servers read-only. → [docs](docs/team-agent-rules.md)
 - **Servonaut Cloud account** — optional `servonaut login` unlocks config sync across machines and the MCP relay.
 - **Config sync** — client-side-encrypted snapshots of your `config.json` synced via servonaut.dev, paired with a passphrase you control.
 
@@ -677,6 +678,7 @@ All runtime files are under `~/.servonaut/`:
 | `mcp_audit.jsonl` | MCP server audit trail |
 | `aws_audit.jsonl`, `hetzner_audit.jsonl`, `ovh_audit.json` | Audit trails of server lifecycle actions (create, start, stop, delete, …) per provider |
 | `audit_queue.json` | Team audit events waiting to be sent to servonaut.dev |
+| `team_policy.json` | The last verified agent rules of each of your teams, mode `0600`, checked again whenever they are read (see [Team agent rules](docs/team-agent-rules.md)) |
 | `memory/` | Server-memory store: `<provider>/<instance_id>/<module>.json` per probed server, plus `index.json` |
 | `memory/sync_queue.jsonl` | Pre-encryption envelopes waiting to be pushed to servonaut.dev. Replayed on next bootstrap; deleted after a successful drain. Only present while Memory Sync has unsent work. |
 | `memory/keys.json` | Memory Sync keypair; the private key is stored encrypted with your passphrase |

@@ -31,10 +31,12 @@ from aiohttp import web
 from e2e.harness.fake_cloud import (
     control,
     routes_account,
+    routes_agent_rules,
     routes_ai,
     routes_auth,
     routes_configs,
     routes_findings,
+    routes_hosted_mcp,
     routes_memory,
     routes_misc,
     routes_pypi,
@@ -45,15 +47,17 @@ from e2e.harness.fake_cloud import (
 from e2e.harness.fake_cloud.log import RequestLog, redact
 from e2e.harness.fake_cloud.relay import RelayHub
 from e2e.harness.fake_cloud.routes_account import AccountData
+from e2e.harness.fake_cloud.routes_agent_rules import AgentRulesCloud
 from e2e.harness.fake_cloud.routes_ai import AiState
 from e2e.harness.fake_cloud.routes_configs import ConfigSnapshots
 from e2e.harness.fake_cloud.routes_findings import FindingsCloud
+from e2e.harness.fake_cloud.routes_hosted_mcp import HostedMcpState
 from e2e.harness.fake_cloud.routes_memory import MemoryCloud
 from e2e.harness.fake_cloud.routes_secrets import SecretsData
 from e2e.harness.fake_cloud.routes_vault import VaultCloud
 from e2e.harness.fake_cloud.state import ScenarioStore
 from e2e.harness.fake_cloud.tls import TlsMaterial
-from e2e.harness.fake_cloud.users import REQUEST_ACCOUNT, Account
+from e2e.harness.fake_cloud.users import REQUEST_ACCOUNT, Account, current_account
 from e2e.harness.fake_cloud.wire import Value, WireCapture, WireRequest, find_on_wire
 from e2e.harness.loopback import LoopbackServer
 
@@ -78,7 +82,10 @@ class FakeCloud(LoopbackServer):
         # stream that outlived its journey) is not logged into the next one.
         self._epoch = 0
         self.account = AccountData()
+        # The teams' agent rules: saved (PUT …/mcp-policy) and signed (GET …/policy).
+        self.agent_rules = AgentRulesCloud()
         self.ai = AiState()
+        self.hosted_mcp = HostedMcpState()
         self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
@@ -120,7 +127,9 @@ class FakeCloud(LoopbackServer):
         self._wire.clear()
         self.relay.reset()
         self.account.reset()
+        self.agent_rules.reset()
         self.ai.reset()
+        self.hosted_mcp.reset()
         self.memory.reset()
         self.configs.reset()
         self.secrets.reset()
@@ -260,6 +269,7 @@ class FakeCloud(LoopbackServer):
         self.release()  # so would a request still waiting for release()
         self.relay.drop_streams()  # open subscriptions would hold up shutdown
         self.ai.drop_streams()  # so would an open chat stream
+        self.hosted_mcp.drop_streams()  # or hosted MCP stream
 
     def switch_off_ssh_ca(self) -> None:
         """Answer like a service with SSH certificates switched off.
@@ -302,6 +312,21 @@ class FakeCloud(LoopbackServer):
         with self._held_lock:
             return path in self._held_paths
 
+    def _team_id_of(self, slug: str) -> Optional[str]:
+        """The id of team *slug* when the requesting user is a member."""
+        return self.account.team_id_of(
+            slug, self._store.snapshot().user_id, scenario_account=current_account() is None,
+        )
+
+    def _team_role_of(self, slug: str) -> Optional[str]:
+        """The requesting user's role in team *slug*; None when not a member."""
+        return self.account.caller_role(
+            slug, self._store.snapshot().user_id, scenario_account=current_account() is None,
+        )
+
+    def _shared_server_ids(self, slug: str) -> list[str]:
+        return [str(row.get("id")) for row in self.account.shared_servers(slug) if row.get("id")]
+
     def ssl_context(self) -> ssl.SSLContext:
         return self._tls.server_context()
 
@@ -313,7 +338,12 @@ class FakeCloud(LoopbackServer):
         routes_relay.add_routes(app, self._store, self.relay)
         routes_account.add_routes(app, self._store, self.account, ssh_ca=self.vault.server_ca_field,
                                   base_url=lambda: self.url)
+        routes_agent_rules.add_routes(
+            app, self._store, self.agent_rules, team_id_of=self._team_id_of,
+            role_of=self._team_role_of, server_ids=self._shared_server_ids,
+        )
         routes_ai.add_routes(app, self._store, self.ai)
+        routes_hosted_mcp.add_routes(app, self._store, self.hosted_mcp)
         routes_memory.add_routes(app, self._store, self.memory)
         routes_configs.add_routes(app, self._store, self.configs)
         routes_secrets.add_routes(app, self._store, self.secrets)

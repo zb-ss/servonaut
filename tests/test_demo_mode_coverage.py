@@ -2141,7 +2141,10 @@ class TestTeamManagementDemoMode:
         screen._current_team_name = ""
         screen._current_team_role = None
         screen._team_roles = {}
+        screen._teams_by_slug = {}
         mock_app = _make_mock_app(demo=True)
+        # No refresher: the agent rules card shows what this device has.
+        mock_app.team_policy = None
 
         mock_team_svc = MagicMock()
 

@@ -905,9 +905,9 @@ def test_release_candidate_emits_a_qualification_template_after_verify() -> None
     prepare, upload = verify[prepare_at:upload_at], verify[upload_at:]
     assert "python -m scripts.distribution.qualification template" in prepare
     assert "--evidence candidate-evidence.json" in prepare
-    assert (
-        "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
-        in upload
+    # Pinned to a full commit SHA; the version itself is Dependabot's to bump.
+    assert re.search(
+        r"uses: actions/upload-artifact@[0-9a-f]{40} # v[0-9]+\.[0-9]+\.[0-9]+\n", upload
     )
     assert "name: qualification-record-template\n" in upload
     assert "path: qualification/qualification-record.json\n" in upload

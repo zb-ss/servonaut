@@ -133,6 +133,9 @@ class ServonautApp(App):
     entitlement_guard = None
     config_sync_service = None
     team_service = None
+    # Fetches the teams' signed agent rules (TeamPolicyRefresher); built in
+    # _init_services.
+    team_policy = None
     vault_command_service = None
     # Shared by every in-app SSH path (see _wire_vault_ssh); None until the vault is set up.
     vault_lease_cache = None
@@ -679,6 +682,14 @@ class ServonautApp(App):
         except Exception as e:
             logger.debug("Azure service init skipped: %s", e)
 
+        # The teams' agent rules: the ones saved on this device apply at once;
+        # fetched with the teams' shared servers (instance list), then again
+        # each time they are due.
+        from servonaut.services.team_policy import team_policy_store
+        from servonaut.services.team_policy_refresh import TeamPolicyRefresher
+        self.team_policy = TeamPolicyRefresher(team_policy_store(), self._signed_in_team_service)
+        self.team_policy.load()
+
         # Build a single ServonautTools instance that both the local MCP
         # server (if running) and the built-in chat adapter dispatch through.
         # This guarantees the chat sees OVH + custom servers the same way
@@ -709,6 +720,7 @@ class ServonautApp(App):
             hetzner_object_storage_service=self.hetzner_object_storage_service,
             ovh_object_storage_service=self.ovh_object_storage_service,
             account_registry=self.accounts,
+            team_policy=self.team_policy,
         )
         # Bind every default-account service (OVH IPs, DNS, billing,
         # snapshots, …) the constructor is not handed, so the chat tools
@@ -1037,6 +1049,8 @@ class ServonautApp(App):
         watchdog = getattr(self, "_ui_stall_watchdog", None)
         if watchdog is not None:
             watchdog.stop()
+        if self.team_policy is not None:
+            self.team_policy.close()
         if self.vault_command_service is not None:
             self.vault_command_service.close()
         if self.relay_manager is not None:
@@ -1339,6 +1353,10 @@ class ServonautApp(App):
                     self.connection_service,
                     self.scp_service,
                     accounts=self.accounts,
+                    # Finds the teams' shared servers (and their vault keys)
+                    # for Servonaut AI's tool calls, as the relay does.
+                    vault_runtime=self.vault_command_service,
+                    team_policy=self.team_policy,
                 )
                 self.ai_relay_executors = relay
                 cfg = self.config_manager.get()
@@ -1922,6 +1940,28 @@ class ServonautApp(App):
                 self.workers.cancel_group(self, "memory_auto_scan")
             except Exception:  # noqa: BLE001
                 pass
+
+    def _signed_in_team_service(self):
+        """The team service while signed in, else None (no team rules are fetched)."""
+        auth = self.auth_service
+        if self.team_service is None or auth is None or not auth.is_authenticated:
+            return None
+        return self.team_service
+
+    def refresh_team_policies(self, teams=None) -> None:
+        """Fetch the agent rules of *teams* (team-list rows; None: every team) in the background.
+
+        The refresher then fetches them again each time they are due.
+        """
+        if self.team_policy is None:
+            return
+        self.run_worker(
+            self.team_policy.refresh(teams),
+            name="team_policy_refresh",
+            group="team_policy",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     def _start_fleet_auto_scan_loop(self) -> None:
         """Spawn the background fleet auto-scan loop as a worker.

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from e2e.harness import fleet
-from e2e.harness.session_seed import seed_session
+from e2e.harness.session_seed import grant_dangerous_ai_tools, seed_session
 from e2e.harness.fake_ai import KEYS
 
 # The relay is covered by its own journeys; these keep it switched off.
@@ -43,15 +43,22 @@ def web_1_server() -> Any:
     )
 
 
-def byo_provider_config(provider: str, base_url: str, *, with_key: bool = True) -> Any:
+def byo_provider_config(
+    provider: str, base_url: str, *, with_key: bool = True, preferred: bool = False,
+) -> Any:
     """An ``AIProviderConfig`` for *provider* served from *base_url*.
 
     The provider's own fabricated key goes in its own field. Ollama gets one
-    only when *with_key* (Ollama Cloud); a local Ollama has none.
+    only when *with_key* (Ollama Cloud); a local Ollama has none. With
+    *preferred* the user already chose it over Servonaut AI, so a subscriber
+    is not asked which provider to use.
     """
     from servonaut.config.schema import AIProviderConfig
 
-    config = AIProviderConfig(provider=provider, base_url=base_url, model="")
+    config = AIProviderConfig(
+        provider=provider, base_url=base_url, model="",
+        provider_preference=provider if preferred else None,
+    )
     if provider != "ollama" or with_key:
         setattr(config, f"{provider}_api_key", KEYS[provider])
     return config
@@ -65,11 +72,15 @@ def seed_byo(
     *,
     signed_in: bool,
     with_key: bool = True,
+    preferred: bool = False,
     **config: Any,
 ) -> None:
-    """A home with *provider* configured, optionally signed in to the service."""
+    """A home with *provider* configured, optionally signed in to the service.
+
+    *preferred*: see :func:`byo_provider_config`.
+    """
     fake_cloud.configure(**_NO_RELAY)
-    ai_provider = byo_provider_config(provider, base_url, with_key=with_key)
+    ai_provider = byo_provider_config(provider, base_url, with_key=with_key, preferred=preferred)
     seed.config(ai_provider=ai_provider, **{**_MEMORY_ANSWERED, **config})
     seed.cache(fleet.cache_rows(), fresh=True)
     if signed_in:
@@ -82,19 +93,14 @@ def seed_hosted(
     """A home signed in with the hosted-AI entitlement and no other provider.
 
     *dangerous_tools* adds the team-admin entitlement that unlocks the
-    dangerous AI tools to the saved session, in ``custom_limits`` where the
-    service reports it. FakeCloud's entitlements leave the flag out, and a
-    refresh keeps a flag the answer does not mention.
+    dangerous AI tools to the saved session (``grant_dangerous_ai_tools``).
     """
     fake_cloud.configure(**_NO_RELAY)
     seed.config(**{**_MEMORY_ANSWERED, **config})
     seed.cache(fleet.cache_rows(), fresh=True)
     path = seed_session(seed.home, fake_cloud)
     if dangerous_tools:
-        token = json.loads(path.read_text(encoding="utf-8"))
-        token["entitlements"]["custom_limits"] = {"allow_dangerous_ai_tools": True}
-        token["allow_dangerous_ai_tools"] = True
-        path.write_text(json.dumps(token, indent=2), encoding="utf-8")
+        grant_dangerous_ai_tools(path)
     return path
 
 

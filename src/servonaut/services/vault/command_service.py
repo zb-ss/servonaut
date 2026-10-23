@@ -51,6 +51,7 @@ from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
+from servonaut.services.shared_servers import team_id_text
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
 from .rotation import RotationService
@@ -238,6 +239,8 @@ class VaultCommandService:
         self.connection_service = connection_service
         self.ssh_ref_resolver = ssh_ref_resolver
         self._leases: list[VaultSshLease] = []
+        # Bumped by every own-server binding made here (see binding_generation).
+        self._binding_generation = 0
         self._pending_identity_reset: PendingIdentityReset | None = None
         self._device_pending_events: list[dict[str, Any]] = []
         self._device_pending_callback: Callable[[Mapping[str, Any]], Any] | None = None
@@ -280,6 +283,20 @@ class VaultCommandService:
         """Pick up a Settings change to file key storage without a restart."""
         if self._owns_store:
             self.store.allow_file_key_store = bool(self.config.vault.allow_file_key_store)
+
+    @property
+    def is_unlocked(self) -> bool:
+        """Whether the vault identity is unlocked, so native vault keys can be used."""
+        return self.store.identity is not None
+
+    @property
+    def binding_generation(self) -> int:
+        """Changes whenever this process binds one of the user's own servers to a key.
+
+        A caller that remembers whose key an own server uses (see
+        :meth:`credential_team`) checks again once it changed.
+        """
+        return self._binding_generation
 
     def unlock_existing_identity(self) -> bool:
         """Unlock persisted custody only after the caller opts into vault use.
@@ -1559,7 +1576,7 @@ class VaultCommandService:
             public_fingerprint=fingerprint, host_keys=host_keys, binding_revision=revision,
         )
         try:
-            return await self.bindings.put_personal_binding(
+            result = await self.bindings.put_personal_binding(
                 normalized_provider, normalized_instance_id, binding,
             )
         except APIError as exc:
@@ -1568,6 +1585,8 @@ class VaultCommandService:
                     "this Servonaut service does not accept vault keys for custom servers yet"
                 ) from exc
             raise
+        self._binding_generation += 1
+        return result
 
     async def bind_imported_bitwarden_ref(
         self,
@@ -2012,6 +2031,39 @@ class VaultCommandService:
         binding, _ = await self._personal_binding(*instance_target(instance))
         return binding
 
+    async def credential_team(self, instance: Mapping[str, Any]) -> str | None:
+        """The slug of the team whose vault holds the key an own server connects with.
+
+        A server of the user's own can be bound to a key in a team vault the
+        user administers; :meth:`resolve_ssh` then connects with that team's
+        key. None for any other server: a shared one (its team's rules apply
+        already), one without a native binding, or one bound to a personal
+        vault key. '' for a team vault that does not name its team. Decides
+        as :meth:`resolve_ssh` does: a locked vault resolves no native key.
+
+        Raises:
+            Exception: the binding or its vault could not be read; the
+                caller must not take the key for a personal one.
+        """
+        if instance.get("is_shared") is True or self.store.identity is None:
+            return None
+        try:
+            target = instance_target(instance)
+        except ValueError:
+            return None
+        binding, _ = await self._personal_binding(*target)
+        if not isinstance(binding, Mapping) or binding.get("source") != "servonaut_vault":
+            return None
+        vault_id = binding.get("vault_id")
+        if not isinstance(vault_id, str) or not vault_id:
+            raise VaultStateError("native credential binding is malformed")
+        vault = await self.vaults.get_vault(vault_id)
+        if vault.get("kind") == "personal":
+            return None
+        team = vault.get("team") if isinstance(vault.get("team"), Mapping) else {}
+        slug = team.get("slug")
+        return slug if isinstance(slug, str) else ""
+
     async def _credential_binding(
         self, instance: Mapping[str, Any],
     ) -> tuple[Mapping[str, Any] | None, str]:
@@ -2054,6 +2106,8 @@ class VaultCommandService:
         Relay code calls this only when its ordinary provider directory did
         not find a target.  The result carries the canonical team and server
         identifiers required by certificate/native-binding resolution.
+        *identifier* is the server's id, its name, or ``<team>/<name>`` (the
+        reference ``list_instances`` gives it).
         """
         if not isinstance(identifier, str) or not identifier:
             return None
@@ -2067,10 +2121,11 @@ class VaultCommandService:
             for server in await self.teams.list_shared_servers(slug):
                 if not isinstance(server, Mapping):
                     continue
-                if identifier not in {str(server.get("id", "")), str(server.get("name", ""))}:
+                name = str(server.get("name", ""))
+                if identifier not in {str(server.get("id", "")), name, f"{slug}/{name}"}:
                     continue
                 matches.append({
-                    **server, "is_shared": True, "team_slug": slug,
+                    **server, "is_shared": True, "team_slug": slug, "team_id": team_id_text(team),
                     # What the caller's agents may do there follows the
                     # caller's role in the team (see team_rules).
                     "team_name": team.get("name") if isinstance(team.get("name"), str) else "",

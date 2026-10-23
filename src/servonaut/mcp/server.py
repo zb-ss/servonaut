@@ -221,6 +221,18 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
     except Exception as e:
         logger.warning("Could not resolve secret provider for MCP: %s", e)
 
+    # The teams' agent rules: the ones saved on this device apply at once;
+    # the tools fetch them with the teams' shared servers, the caller at
+    # start (see run_server and the relay listener), and each fetch
+    # schedules the next for when they are due.
+    from servonaut.services.team_policy import team_policy_store
+    from servonaut.services.team_policy_refresh import TeamPolicyRefresher
+    team_policy = TeamPolicyRefresher(
+        team_policy_store(),
+        lambda: vault_runtime.teams if vault_runtime is not None else None,
+    )
+    team_policy.load()
+
     # IP enrichment (rDNS / ASN / abuse) for enrich_ips.
     ip_enrichment_service = None
     try:
@@ -254,6 +266,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         ip_enrichment_service=ip_enrichment_service,
         account_registry=accounts,
         vault_runtime=vault_runtime,
+        team_policy=team_policy,
     )
     return tools
 
@@ -424,8 +437,12 @@ async def run_server() -> None:
 
     server = create_mcp_server()
 
+    from servonaut.services.team_policy_refresh import kept_fresh
+
     try:
-        async with stdio_server() as (read_stream, write_stream):
+        async with kept_fresh(server.servonaut_tools.team_policy), stdio_server() as (
+            read_stream, write_stream,
+        ):
             await server.run(read_stream, write_stream, server.create_initialization_options())
     finally:
         runtime = getattr(server.servonaut_tools, "_vault_runtime", None)

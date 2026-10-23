@@ -28,16 +28,17 @@ Every call is logged to `~/.servonaut/mcp_audit.jsonl` with a timestamp, argumen
 
 ### Team shared servers
 
-On a server one of your teams shares with you, the team decides what your AI agents may do. This covers the MCP server and the tools of the AI chat, including the hosted AI's tool calls relayed to this machine. Your own settings can make it stricter, never looser:
+On a server one of your teams shares with you, the team's owners and admins decide what your AI agents may do (see [Team agent rules](team-agent-rules.md) for what they can set). This covers the MCP server and the tools of the AI chat, including the hosted AI's tool calls relayed to this machine. Your own settings can make it stricter, never looser:
 
-- Your agents run at the stricter of your `guard_level` and the level your role in the team gets: owners, admins and members get `standard`, viewers get `readonly`. If Servonaut cannot tell your role, it uses `readonly`.
-- At `standard`, only the built-in command allowlist applies, with the same option rules as on your own servers (no `find -delete`, no `ip ... add`, and so on). Commands you added to your own allowlist do not work on a team's servers, and commands you removed from it stay refused.
-- The built-in blocklist always applies, and so do the patterns you added to your own blocklist.
-- `transfer_file` and the other `dangerous` tools are not available on a team's servers.
+- Your agents run at the stricter of your `guard_level` and the level the team gives your role, on that server if the team set a level for it. Unless the team changed them, owners, admins and members get `standard` and viewers get `readonly`. If Servonaut cannot tell your role, it uses `readonly`.
+- At `standard`, a command must be on the team's allowlist (the built-in one unless the team names its own) and on your own `command_allowlist`, with the same option rules as on your own servers (no `find -delete`, no `ip ... add`, and so on).
+- The built-in blocklist always applies, and so do the patterns the team and you added.
+- `transfer_file` and the other `dangerous` tools are available on a team's server only where the team gives your role `dangerous` and your own `guard_level` is `dangerous` too.
+- When Servonaut has no team rules it can use (not fetched yet, expired while servonaut.dev could not be reached, or not verifiable), the team's servers run at `readonly` for every role, owners included.
 
-A refusal names the team, the level and what was refused, for example: *Blocked: on team Ops's shared servers your agents run at the standard level (set by the team), and 'systemctl restart nginx' is not an allowed command there.* When the command is on the allowlist but one of its options is not allowed, the refusal says which rule it broke. The audit log records every refusal with the reason `team_rule`.
+A refusal names the team, the level, who set it and what was refused, for example: *Blocked: on team Ops's shared servers your agents run at the standard level (set by the team), and 'systemctl restart nginx' is not an allowed command there.* When the command is on the allowlist but one of its options is not allowed, the refusal says which rule it broke. When the level fell back to `readonly`, the refusal says why, for example: *Blocked: on team Ops's shared servers your agents run at the readonly level (because the team's agent rules expired and could not be refreshed; check that you are online and signed in), and running commands is not available there.* The audit log records every refusal with the reason `team_rule`.
 
-Your own servers keep your own settings. A server that is both in your own inventory and shared by a team keeps your own settings when your agent names it by your own name or id; named through the team (`ops/<name>`, or the team's id for it), the team's rule applies. What you do yourself does not fall under team rules: commands you type in the TUI, with `servonaut ssh` or in the web console, and remediation fixes you approve.
+Your own servers keep your own settings. A server that is both in your own inventory and shared by a team keeps your own settings when your agent names it by your own name or id; named through the team (`ops/<name>`, or the team's id for it), the team's rule applies. An own server that connects with a key from a team's vault is under that team's rules too. What you do yourself does not fall under team rules: commands you type in the TUI, with `servonaut ssh` or in the web console, and remediation fixes you approve.
 
 ## Several accounts per provider
 
@@ -73,6 +74,8 @@ When a provider has more than one account configured (see
 ### `list_instances(region?, state?, account?)`
 
 List every managed instance (AWS EC2, OVH, Hetzner, custom servers) of every account.  Optional filters on `region`, `state` or `account`.
+
+Signed in as a member of a team, the list also holds the servers the team shares with you, named `<team>/<name>`, and ends with a section *Agents on team shared servers*: the level your agents run at on each of them and who set it, for example `ops/web-1: standard (set by the team)`, `standard (set by your MCP settings)` when your own settings are stricter, or `readonly (because …)` when the team's rules fell back to read-only.
 
 ### `check_status(instance_id)`
 
@@ -195,7 +198,15 @@ Operational: report / heal the Mercure relay connection.  Not chat-exposed.
 
 ### `mcp_tool_call(name, arguments?)`
 
-Invoke a tool on the hosted MCP server at `mcp.servonaut.dev`.  Wraps name + arguments in a JSON-RPC 2.0 `tools/call` envelope.
+Invoke a tool on the hosted MCP server at `mcp.servonaut.dev` (or `SERVONAUT_MCP_URL`).  Each call opens one session on the server with your CLI login, runs one JSON-RPC 2.0 `tools/call` and closes the session again. It uses the server's Streamable HTTP endpoint (`/mcp`); a server without that endpoint gets the event stream at `/mcp/sse` instead.  The answer is `{"status": 200, "response": {"result": …}}`, with the server's JSON-RPC `error` in place of `result` when it refused the call.  An expired session is refreshed once.
+
+Over the event stream, the server can keep a closed stream's connection slot for a moment, so a call made right after another one waits for it instead of failing with `connection_limit`.  Settings, in the `mcp` section of `config.json`:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `hosted_call_timeout_seconds` | `30` | How long one call (connect, initialize, call) may take |
+| `hosted_connect_retry_seconds` | `5` | How long after the previous call's session closed a refused connection is retried; `0` turns the wait off |
+| `hosted_connect_retry_interval_seconds` | `0.5` | The pause between those retries |
 
 ---
 

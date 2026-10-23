@@ -46,6 +46,16 @@ def team_label(team: Mapping[str, Any]) -> str:
     return ""
 
 
+def team_id_text(team: Mapping[str, Any]) -> str:
+    """The id of *team* (a team-list row) as text; '' when it has none."""
+    value = team.get("id")
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    return value if isinstance(value, str) else ""
+
+
 def _port(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
         return _DEFAULT_SSH_PORT
@@ -88,6 +98,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
             "key_name": "",
             "is_shared": True,
             "team_slug": slug,
+            # The team's agent rules are found by its id: a slug can pass to
+            # another team after a rename. '' when the team list did not say.
+            "team_id": team_id_text(team),
             "team_name": label,
             # "" when the team list did not say: agents then get the
             # strictest level there.
@@ -101,13 +114,15 @@ def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
     """A shared server record that names its team (``team_slug``) as a row.
 
     The vault's shared-target lookup returns the team's record with
-    ``is_shared``, ``team_slug``, ``team_name`` and ``team_role`` added;
+    ``is_shared``, ``team_slug``, ``team_id``, ``team_name`` and
+    ``team_role`` added;
     this fills the plain fields the connection paths read (the host above
     all). A row is returned as is.
     """
     if target.get("is_shared") is True and target.get("state") == SHARED_STATE:
         return dict(target)
     team = {
+        "id": target.get("team_id"),
         "slug": target.get("team_slug") or "",
         "name": target.get("team_name") or "",
         "role": target.get("team_role") or "",
@@ -131,6 +146,19 @@ def _own_port(row: Mapping[str, Any]) -> int:
     return _port(row.get("port"))
 
 
+def _public_address(row: Mapping[str, Any]) -> Tuple[str, int]:
+    return str(row.get("public_ip") or "").strip().lower(), _own_port(row)
+
+
+def is_same_server(shared: Mapping[str, Any], own: Mapping[str, Any]) -> bool:
+    """Whether the *shared* row is the user's own row *own* (see :func:`fold_shared`)."""
+    recorded = str(shared.get("instance_id") or "")
+    if recorded and recorded == str(own.get("id") or ""):
+        return True
+    address = _public_address(own)
+    return bool(address[0]) and _public_address(shared) == address
+
+
 def fold_shared(
     rows: Sequence[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[int, List[str]]]:
@@ -151,9 +179,9 @@ def fold_shared(
         row_id = str(row.get("id") or "")
         if row_id:
             by_id.setdefault(row_id, row)
-        address = str(row.get("public_ip") or "").strip().lower()
-        if address:
-            by_address.setdefault((address, _own_port(row)), row)
+        address = _public_address(row)
+        if address[0]:
+            by_address.setdefault(address, row)
 
     shared_by: Dict[int, List[str]] = {}
     listed: List[Dict[str, Any]] = []
@@ -162,8 +190,7 @@ def fold_shared(
             listed.append(row)
             continue
         recorded = str(row.get("instance_id") or "")
-        address = (str(row.get("public_ip") or "").strip().lower(), _own_port(row))
-        owner = (by_id.get(recorded) if recorded else None) or by_address.get(address)
+        owner = (by_id.get(recorded) if recorded else None) or by_address.get(_public_address(row))
         if owner is None:
             listed.append(row)
             continue
@@ -187,6 +214,8 @@ class SharedServers:
     teams: List[Dict[str, Any]] = field(default_factory=list)
     # One line per team whose servers could not be read.
     problems: List[str] = field(default_factory=list)
+    # The slugs of the teams whose servers were read (their rows are all here).
+    read: List[str] = field(default_factory=list)
 
 
 async def load_shared_servers(
@@ -218,4 +247,5 @@ async def load_shared_servers(
         found.rows.extend(
             shared_row(server, team) for server in servers or [] if isinstance(server, Mapping)
         )
+        found.read.append(slug)
     return found

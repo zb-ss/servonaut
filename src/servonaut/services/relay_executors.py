@@ -10,7 +10,16 @@ from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
-from servonaut.services.team_rules import TEAM_RULE_REASON, TeamGuard, guard_for_target
+from servonaut.services.shared_servers import is_shared_row
+from servonaut.services.team_rules import (
+    CREDENTIAL_CHECK_FAILED,
+    CREDENTIAL_CHECK_FAILED_REASON,
+    TEAM_RULE_REASON,
+    CredentialRulesMemo,
+    TeamGuard,
+    credential_rules_row,
+    guard_for_target,
+)
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.utils.ssh_utils import run_ssh_subprocess, ssh_diagnostics, ssh_returncode
 from servonaut.services.ssh_host_keys import (
@@ -52,7 +61,7 @@ class RelayExecutors:
     def __init__(self, config_manager, aws_service, custom_server_service,
                  ssh_service, connection_service, scp_service,
                  accounts=None, vault_runtime: Any | None = None,
-                 audit: Any | None = None) -> None:
+                 audit: Any | None = None, team_policy: Any | None = None) -> None:
         self._config_manager = config_manager
         # Where team-rule refusals are recorded (an AuditTrail). None: the
         # MCP audit trail of the current config, opened on first refusal.
@@ -72,6 +81,12 @@ class RelayExecutors:
         # private-agent lifetime.  It is optional for older sessions, but a
         # native target must fail closed when it cannot resolve a lease.
         self._vault_runtime = vault_runtime
+        # Whose vault key an own server connects with (see _agent_team_guard).
+        self._credential_memo = CredentialRulesMemo()
+        # Fetches a team's agent rules before an agent acts on its server
+        # when they are not in force for want of a fetch (a
+        # TeamPolicyRefresher); None: only the rules already fetched apply.
+        self._team_policy = team_policy
         # Load additional blocklist patterns from config
         mcp_config = config_manager.get().mcp
         self._extra_blocklist: List[re.Pattern] = [
@@ -81,6 +96,11 @@ class RelayExecutors:
     def set_vault_runtime(self, service: Any | None) -> None:
         """Install the composed native-vault runtime after relay construction."""
         self._vault_runtime = service
+        self._credential_memo.clear()
+
+    def set_team_policy(self, refresher: Any | None) -> None:
+        """Install the process's TeamPolicyRefresher after relay construction."""
+        self._team_policy = refresher
 
     async def execute(self, request: CommandRequest) -> CommandResponse:
         """Dispatch a CommandRequest to the appropriate executor."""
@@ -313,12 +333,16 @@ class RelayExecutors:
 
     async def _target(self, request: CommandRequest):
         """``(instance, None)``, or ``(None, error response)`` for the target."""
+        account_error: Optional[UnknownAccountError] = None
         try:
             instance = await self._find_instance(request.target_server_id)
-        except (AmbiguousInstanceError, UnknownAccountError) as exc:
+        except AmbiguousInstanceError as exc:
             return None, CommandResponse(
                 request_id=request.id, status="error", error_message=str(exc),
             )
+        except UnknownAccountError as exc:
+            # "<team>/<name>" names a team's shared server, not an account.
+            account_error, instance = exc, None
         if not instance and self._vault_runtime is not None:
             resolver = getattr(self._vault_runtime, "resolve_relay_target", None)
             if resolver is not None:
@@ -337,7 +361,10 @@ class RelayExecutors:
             return None, CommandResponse(
                 request_id=request.id,
                 status="error",
-                error_message=f"Instance not found: {request.target_server_id}",
+                error_message=(
+                    str(account_error) if account_error is not None
+                    else f"Instance not found: {request.target_server_id}"
+                ),
             )
         return dict(instance), None
 
@@ -452,7 +479,46 @@ class RelayExecutors:
         mcp = self._config_manager.get().mcp
         return guard_for_target(
             instance, mcp.guard_level, mcp.command_allowlist, mcp.command_blocklist,
+            pattern_timeout_ms=getattr(mcp, 'team_pattern_timeout_ms', None),
         )
+
+    async def _agent_team_guard(
+        self, request: CommandRequest, instance: Mapping[str, Any],
+        tool_name: str, command: Optional[str] = None,
+    ) -> tuple[Optional[TeamGuard], Optional[CommandResponse]]:
+        """:meth:`_team_guard`, with the team's rules fetched when they must be.
+
+        A server of the user's own that connects with a key from a team's
+        vault runs under that team's rules (see ``team_rules``); whose key it
+        is is remembered a while. Returns ``(guard, None)``, or ``(None,
+        rejection)`` once audited when that key could not be checked: the
+        request is refused rather than take a team's key for a personal one.
+        """
+        if not request.from_agent:
+            return None, None
+        runtime = self._vault_runtime
+
+        async def team_row(slug: str) -> Mapping[str, Any]:
+            return await credential_rules_row(instance, slug, runtime.teams)
+
+        try:
+            row = await self._credential_memo.rules_row(instance, runtime, team_row)
+        except Exception as exc:  # noqa: BLE001 - refuse rather than guess the key
+            target = instance.get('id') or request.target_server_id
+            logger.warning(
+                "Relay %s on %s refused: its vault key could not be checked (%s)",
+                tool_name, target, type(exc).__name__,
+            )
+            self._audit_refusal(
+                request, tool_name, target, command, CREDENTIAL_CHECK_FAILED_REASON,
+            )
+            return None, CommandResponse(
+                request_id=request.id, status="rejected", error_message=CREDENTIAL_CHECK_FAILED,
+            )
+        row = row if row is not None else instance
+        if is_shared_row(row) and self._team_policy is not None:
+            await self._team_policy.ensure_loaded(row.get('team_slug'), row.get('team_id'))
+        return self._team_guard(request, row), None
 
     def _team_refusal(
         self, request: CommandRequest, instance: Mapping[str, Any],
@@ -470,16 +536,16 @@ class RelayExecutors:
             "Relay %s on shared server %s refused (%s): %s",
             tool_name, target, TEAM_RULE_REASON, refusal,
         )
-        self._audit_team_refusal(request, tool_name, target, command)
+        self._audit_refusal(request, tool_name, target, command, TEAM_RULE_REASON)
         return CommandResponse(
             request_id=request.id, status="rejected", error_message=refusal,
         )
 
-    def _audit_team_refusal(
+    def _audit_refusal(
         self, request: CommandRequest, tool_name: str, target: Any,
-        command: Optional[str],
+        command: Optional[str], reason: str,
     ) -> None:
-        """Record a team-rule refusal; a failing audit write never unblocks it."""
+        """Record an agent's refused request; a failing audit write never unblocks it."""
         args: Dict[str, Any] = {
             'instance_id': str(target or ''), 'request_type': request.type.value,
         }
@@ -493,11 +559,11 @@ class RelayExecutors:
 
                 self._audit = AuditTrail(self._config_manager.get().mcp.audit_path)
             self._audit.log(
-                tool_name, args, '', False, TEAM_RULE_REASON,
+                tool_name, args, '', False, reason,
                 source='relay', request_id=request.id,
             )
         except Exception as exc:  # noqa: BLE001 - the refusal stands either way
-            logger.warning("Could not audit a team-rule refusal: %s", exc)
+            logger.warning("Could not audit a refused agent request: %s", exc)
 
     def _check_blocklist(self, command: str) -> Optional[str]:
         """Check command against blocklist. Returns rejection reason or None."""
@@ -532,7 +598,11 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
-        team_guard = self._team_guard(request, instance)
+        team_guard, rejection = await self._agent_team_guard(
+            request, instance, 'run_command', command,
+        )
+        if rejection is not None:
+            return rejection
         if team_guard is not None:
             rejection = self._team_refusal(
                 request, instance, team_guard, 'run_command', command,
@@ -682,7 +752,9 @@ class RelayExecutors:
         instance, failure = await self._target(request)
         if failure is not None:
             return failure
-        team_guard = self._team_guard(request, instance)
+        team_guard, rejection = await self._agent_team_guard(request, instance, 'transfer_file')
+        if rejection is not None:
+            return rejection
         if team_guard is not None:
             rejection = self._team_refusal(request, instance, team_guard, 'transfer_file')
             if rejection is not None:

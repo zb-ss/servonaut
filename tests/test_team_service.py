@@ -88,6 +88,28 @@ class TestTeamService:
         configs = run(team_service.list_team_configs("team-a"))
         assert len(configs) == 1
 
+    def test_the_team_policy_comes_with_the_response_date(self, team_service, mock_api):
+        mock_api.get_with_headers = AsyncMock(return_value=(
+            {"data": {"agent_rules_signed": None}},
+            {"date": "Sun, 18 Oct 2026 21:00:00 GMT", "content-type": "application/json"},
+        ))
+        body, date = run(team_service.get_team_policy_with_date("ops-team"))
+
+        assert body == {"data": {"agent_rules_signed": None}}
+        assert date == "Sun, 18 Oct 2026 21:00:00 GMT"
+        mock_api.get_with_headers.assert_awaited_once_with("/api/v1/teams/ops-team/policy")
+
+    def test_a_policy_response_without_a_date_says_none(self, team_service, mock_api):
+        mock_api.get_with_headers = AsyncMock(return_value=({"data": {}}, {}))
+        assert run(team_service.get_team_policy_with_date("ops-team")) == ({"data": {}}, None)
+
+    @pytest.mark.parametrize("slug", ["", "../admin", "ops team", "ops/servers", None])
+    def test_a_policy_fetch_refuses_what_is_not_a_slug(self, team_service, mock_api, slug):
+        mock_api.get_with_headers = AsyncMock()
+        with pytest.raises(ValueError):
+            run(team_service.get_team_policy_with_date(slug))
+        mock_api.get_with_headers.assert_not_awaited()
+
     def test_get_latest_team_config_unwraps_data(self, team_service, mock_api):
         mock_api.get.return_value = {"data": {"id": "c1", "version": 3, "config_data": {"connection_profiles": []}}}
         latest = run(team_service.get_latest_team_config("team-a"))

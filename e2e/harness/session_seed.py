@@ -3,7 +3,8 @@
 :func:`seed_session` writes ``auth.json`` through the real ``AuthToken``
 dataclass, holding the token pair FakeCloud currently accepts and the
 entitlements it serves, so a journey can start signed in without running the
-device flow. :func:`seed_relay_config` points a home's relay at FakeCloud.
+device flow; :func:`grant_dangerous_ai_tools` unlocks the dangerous AI tools
+in it. :func:`seed_relay_config` points a home's relay at FakeCloud.
 """
 
 from __future__ import annotations
@@ -41,6 +42,19 @@ def seed_session(home: Path, fake_cloud: Any, *, expires_in: float = 3600.0) -> 
     path.write_text(json.dumps(asdict(token), indent=2), encoding="utf-8")
     path.chmod(0o600)
     return path
+
+
+def grant_dangerous_ai_tools(path: Path) -> None:
+    """Give the session saved at *path* (``auth.json``) the dangerous AI tools.
+
+    The team-admin entitlement goes in ``custom_limits``, where the service
+    reports it. FakeCloud's entitlements leave the flag out, and a refresh
+    keeps a flag the answer does not mention.
+    """
+    token = json.loads(path.read_text(encoding="utf-8"))
+    token["entitlements"]["custom_limits"] = {"allow_dangerous_ai_tools": True}
+    token["allow_dangerous_ai_tools"] = True
+    path.write_text(json.dumps(token, indent=2), encoding="utf-8")
 
 
 def read_session(home: Path) -> Optional[dict[str, Any]]:

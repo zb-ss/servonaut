@@ -14,14 +14,15 @@ before sending:
   warning so the operator knows what's missing on the other side.
 
 The shareable subset is intentionally narrow — connection profiles, scan
-rules, custom servers (sanitised), and connection rules. IP-ban configs are
+rules, the custom servers the operator picks (sanitised), and connection
+rules. IP-ban configs are
 EXCLUDED because they reference AWS-account-specific resource IDs (IP-set
 UUIDs, security-group IDs) that won't exist in another teammate's account.
 """
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Collection, Tuple
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AppConfig
@@ -32,12 +33,19 @@ if TYPE_CHECKING:
 SHAREABLE_SUBSET_VERSION = 1
 
 
-def build_shareable_subset(config: "AppConfig") -> Tuple[dict, dict]:
+def build_shareable_subset(
+    config: "AppConfig", *, custom_servers: Collection[str]
+) -> Tuple[dict, dict]:
     """Return ``(payload, summary)`` from a local :class:`AppConfig`.
+
+    Only the custom servers named in ``custom_servers`` go into the payload.
+    The caller always says which ones, so no caller shares every server by
+    accident; names not in the config are ignored. Connection profiles,
+    connection rules and scan rules are sent whole.
 
     The payload is what gets POSTed to ``/api/v1/teams/{slug}/configs``.
     The summary is a dict the UI can render before push so the operator can
-    review what will be shared:
+    review what will be shared (counts cover only what is sent):
 
     .. code-block:: python
 
@@ -50,23 +58,26 @@ def build_shareable_subset(config: "AppConfig") -> Tuple[dict, dict]:
         }
     """
     profiles = [_sanitise_profile(asdict(p)) for p in config.connection_profiles]
-    custom_servers = [_sanitise_custom_server(asdict(s)) for s in config.custom_servers]
+    chosen = set(custom_servers)
+    servers = [
+        _sanitise_custom_server(asdict(s)) for s in config.custom_servers if s.name in chosen
+    ]
 
     stripped = sum(p.pop("_stripped", 0) for p in profiles)
-    stripped += sum(s.pop("_stripped", 0) for s in custom_servers)
+    stripped += sum(s.pop("_stripped", 0) for s in servers)
 
     payload = {
         "subset_version": SHAREABLE_SUBSET_VERSION,
         "connection_profiles": profiles,
         "connection_rules": [asdict(r) for r in config.connection_rules],
         "scan_rules": [asdict(r) for r in config.scan_rules],
-        "custom_servers": custom_servers,
+        "custom_servers": servers,
     }
     summary = {
         "connection_profiles": len(profiles),
         "connection_rules": len(payload["connection_rules"]),
         "scan_rules": len(payload["scan_rules"]),
-        "custom_servers": len(custom_servers),
+        "custom_servers": len(servers),
         "stripped_paths": stripped,
     }
     return payload, summary

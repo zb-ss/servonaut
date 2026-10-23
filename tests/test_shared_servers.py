@@ -20,6 +20,7 @@ from servonaut.services.shared_servers import (
     as_shared_row,
     fold_shared,
     fold_shared_rows,
+    is_same_server,
     load_shared_servers,
     shared_row,
 )
@@ -160,6 +161,24 @@ class TestFoldShared:
         assert fold_shared_rows([own, shared]) == [own, shared]
 
 
+class TestIsSameServer:
+    """The one-row test agrees with the listing (fold_shared)."""
+
+    @pytest.mark.parametrize("own, server, same", [
+        (_own(), _server(instance_id="i-0abc"), True),
+        (_own(public_ip="web.example.com", port=2222, is_custom=True), _server(), True),
+        (_own(public_ip="WEB.example.com ", port=2222), _server(), True),
+        (_own(public_ip="web.example.com", is_custom=True), _server(), False),
+        (_own(public_ip="", private_ip="10.0.0.5"), _server(hostname="10.0.0.5", port=22), False),
+        (_own(public_ip=""), _server(hostname="", port=22), False),
+        (_own(), _server(), False),
+    ])
+    def test_matches_what_the_listing_folds(self, own, server, same):
+        shared = shared_row(server, TEAM)
+        assert is_same_server(shared, own) is same
+        assert (fold_shared_rows([own, shared]) == [own]) is same
+
+
 class _Teams:
     def __init__(self, teams, servers, failing=()):
         self.teams = teams
@@ -199,6 +218,8 @@ class TestLoadSharedServers:
         found = asyncio.run(load_shared_servers(service))
         assert [row["name"] for row in found.rows] == ["build-1"]
         assert found.problems == ["team Ops: 503 Service Unavailable"]
+        # Only dev's rows are complete: ops's servers are unknown, not none.
+        assert found.read == ["dev"]
 
     def test_each_row_carries_the_role_from_its_team(self):
         service = _Teams(
@@ -429,3 +450,16 @@ def test_the_teams_key_login_stays_with_the_teams_key():
     assert shared_login(shared_row(_server(), TEAM), None, "ec2-user") == "deploy"
     rule = SimpleNamespace(username="admin")
     assert shared_login(shared_row(_server(), TEAM), rule, "ec2-user") == "admin"
+
+
+class TestTeamIdOnRows:
+    """A shared row names its team by id too: a slug can pass to another team."""
+
+    @pytest.mark.parametrize("team_id, text", [("team-1", "team-1"), (7, "7"), (None, ""), (True, "")])
+    def test_the_team_list_s_id_is_carried_as_text(self, team_id, text):
+        row = shared_row(_server(), {**TEAM, "id": team_id})
+        assert row["team_id"] == text
+
+    def test_a_vault_target_keeps_its_team_id(self):
+        target = {**_server(), "is_shared": True, "team_slug": "ops", "team_id": "team-1"}
+        assert as_shared_row(target)["team_id"] == "team-1"

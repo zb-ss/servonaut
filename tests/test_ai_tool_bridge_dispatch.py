@@ -289,3 +289,204 @@ class TestUnsupportedArgumentTolerance:
         )))
         assert result.status == "ok"
         tools.list_instances.assert_called_once_with(anything="goes")
+
+
+# ---------------------------------------------------------------------------
+# Failures a local tool reports in its output
+# ---------------------------------------------------------------------------
+
+class TestLocalToolFailureStatus:
+    """Local tools report failure as text ("Error: …" or a JSON ``error``
+    envelope). The result must say so (status "error"), so the server can
+    flag the call as failed, while the model still gets the text as is."""
+
+    def _run(self, output, args=None):
+        bridge, _ = _make_bridge_with_tools({"disk_usage": output})
+        return run(bridge.handle_tool_call(ToolCall(
+            tool_call_id="tc-fail", tool="disk_usage", args=args or {},
+            guard_level="dangerous", conversation_id="conv-1",
+        ))), bridge
+
+    def test_error_text_is_an_error_result(self):
+        result, bridge = self._run("Error: df_not_available")
+
+        assert (result.status, result.error) == ("error", "df_not_available")
+        assert result.result == "Error: df_not_available"
+        assert result.skipped is False
+        reasons = [c.args[4] for c in bridge._audit.log.call_args_list]
+        assert reasons[-1] == "error_local"
+
+    def test_json_error_envelope_is_an_error_result(self):
+        output = '{"error": {"code": "not_logged_in", "message": "Run `servonaut login` first."}}'
+        result, _ = self._run(output)
+
+        assert result.status == "error"
+        assert result.error == "Run `servonaut login` first."
+        assert result.result == output
+
+    @pytest.mark.parametrize("output", [
+        "No errors found in the last hour.",
+        '{"error": null, "candidates": []}',
+        '{"rows": [{"name": "web-1", "error": "timeout"}]}',
+        "{not json",
+    ])
+    def test_successful_output_stays_ok(self, output):
+        result, _ = self._run(output)
+
+        assert (result.status, result.error) == ("ok", None)
+
+    def test_failure_is_detected_before_the_dropped_argument_note(self):
+        bridge, tools = _make_bridge_with_tools({})
+
+        async def disk_usage(instance_id: str) -> str:
+            return "Error: df_not_available"
+        tools.disk_usage = disk_usage
+
+        result = run(bridge.handle_tool_call(ToolCall(
+            tool_call_id="tc-fail", tool="disk_usage",
+            args={"instance_id": "web-1", "bogus_knob": 1},
+            guard_level="dangerous", conversation_id="conv-1",
+        )))
+
+        assert result.status == "error"
+        assert "bogus_knob" in result.result and result.result.endswith("df_not_available")
+
+
+class TestLocalToolOutcomeFromAudit:
+    """The audit row a local tool writes decides its result's status: tools
+    write ``allowed=False`` on every refusal and failure, however the text
+    is worded, and their text can be raw server output."""
+
+    def _call(self, tool, args=None):
+        return ToolCall(
+            tool_call_id="tc-1", tool=tool, args=args or {},
+            guard_level="dangerous", conversation_id="conv-1",
+        )
+
+    def _bridge_with_real_tools(self, tmp_path, **kwargs):
+        from servonaut.mcp.audit import AuditTrail
+        from tests.test_mcp_tools import make_tools
+
+        tools = make_tools(**kwargs)
+        tools._audit = AuditTrail(str(tmp_path / "mcp_audit.jsonl"))
+        bridge, _ = _make_bridge_with_tools({})
+        bridge._servonaut_tools = tools
+        return bridge
+
+    def _bridge_with_handler(self, tmp_path, name, rows, output):
+        """A bridge whose *name* handler writes *rows* to a real audit trail."""
+        from servonaut.mcp.audit import AuditTrail
+
+        trail = AuditTrail(str(tmp_path / "mcp_audit.jsonl"))
+        bridge, tools = _make_bridge_with_tools({})
+
+        async def handler(instance_id: str = "", log_path: str = "", lines: int = 100) -> str:
+            for tool, allowed, reason in rows:
+                trail.log(tool, {}, "", allowed, reason)
+            return output
+        setattr(tools, name, handler)
+        return bridge
+
+    def test_unknown_instance_is_an_error(self, tmp_path):
+        bridge = self._bridge_with_real_tools(tmp_path)
+
+        result = run(bridge.handle_tool_call(
+            self._call("describe_instance", {"instance_id": "web-9"}),
+        ))
+
+        assert (result.status, result.error) == ("error", "Instance not found: web-9")
+        assert result.result == "Instance not found: web-9"
+        reasons = [c.args[4] for c in bridge._audit.log.call_args_list]
+        assert reasons[-1] == "error_local"
+
+    def test_guard_refusal_is_denied(self, tmp_path):
+        from servonaut.mcp.guards import GuardLevel
+
+        bridge = self._bridge_with_real_tools(tmp_path, guard_level=GuardLevel.READONLY)
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "i-abc123"}),
+        ))
+
+        assert result.status == "denied"
+        assert result.error is None
+        assert result.result.startswith("Blocked: ")
+        last = bridge._audit.log.call_args_list[-1]
+        assert (last.args[3], last.args[4]) == (False, "denied_local")
+
+    def test_bad_line_count_is_an_error(self, tmp_path):
+        bridge = self._bridge_with_real_tools(tmp_path)
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "i-abc123", "lines": 0}),
+        ))
+
+        assert result.status == "error"
+        assert result.error == "validation: lines must be an integer (1-10000)"
+
+    def test_log_text_that_starts_with_error_stays_ok(self, tmp_path):
+        log_tail = "Error: upstream timed out (110)\nGET /health 200"
+        bridge = self._bridge_with_handler(
+            tmp_path, "get_logs", [("run_command", True, "")], log_tail,
+        )
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "i-abc123"}),
+        ))
+
+        assert (result.status, result.error) == ("ok", None)
+        assert result.result == log_tail
+
+    def test_failure_without_an_error_prefix_is_an_error(self, tmp_path):
+        output = "command timed out after 30s (host reachable)\nmore detail"
+        bridge = self._bridge_with_handler(
+            tmp_path, "get_logs", [("run_command", False, "command_timeout")], output,
+        )
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "i-abc123"}),
+        ))
+
+        assert result.status == "error"
+        assert result.error == "command timed out after 30s (host reachable)"
+        assert result.result == output
+
+    def test_the_last_row_decides(self, tmp_path):
+        bridge = self._bridge_with_handler(
+            tmp_path, "get_logs",
+            [("run_command", False, "ssh_error: one host"), ("get_logs", True, "")],
+            "2 of 3 hosts answered",
+        )
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "i-abc123"}),
+        ))
+
+        assert result.status == "ok"
+
+    def test_team_refusal_keeps_the_team_rule_reason(self, tmp_path):
+        from servonaut.services.team_rules import REFUSAL_PREFIX, TEAM_RULE_REASON
+
+        refusal = REFUSAL_PREFIX + "ops's shared servers your agents run at the readonly level."
+        bridge = self._bridge_with_handler(
+            tmp_path, "get_logs", [("get_logs", False, TEAM_RULE_REASON)], refusal,
+        )
+
+        result = run(bridge.handle_tool_call(
+            self._call("get_logs", {"instance_id": "ops/web-1"}),
+        ))
+
+        assert result.status == "denied"
+        assert bridge._audit.log.call_args_list[-1].args[4] == TEAM_RULE_REASON
+
+    @pytest.mark.parametrize("output", [
+        "Blocked: Tool 'get_logs' not available in readonly mode",
+        '{"error": {"code": "guard_denied", "message": "Blocked: readonly"}}',
+    ])
+    def test_refusal_text_is_denied_when_no_row_was_written(self, output):
+        bridge, _ = _make_bridge_with_tools({"disk_usage": output})
+
+        result = run(bridge.handle_tool_call(self._call("disk_usage")))
+
+        assert (result.status, result.error) == ("denied", None)
+        assert result.result == output

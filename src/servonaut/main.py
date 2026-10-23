@@ -479,6 +479,15 @@ def _relay_url_preflight(relay_cfg) -> str:
     return api_base
 
 
+async def _run_relay(listener, vault_runtime, team_policy) -> None:
+    """Run *listener* with its vault runtime, keeping the teams' agent rules fresh."""
+    from servonaut.services.team_policy_refresh import kept_fresh
+    from servonaut.services.vault.background import run_relay_with_vault
+
+    async with kept_fresh(team_policy):
+        await run_relay_with_vault(listener, vault_runtime)
+
+
 def _relay_run_foreground() -> None:
     """Run the relay listener in the foreground.
 
@@ -635,6 +644,8 @@ def _relay_run_foreground() -> None:
     ai_tool_executor = None
     probe_bridge = None
     vault_runtime = None
+    # Fetches the teams' agent rules for this relay (set once signed in).
+    team_policy = None
     ai_tool_note = "disabled (run `servonaut login` to enable)"
     if auth_service is not None:
         try:
@@ -668,6 +679,8 @@ def _relay_run_foreground() -> None:
             headless_tools = build_headless_tools(
                 config_manager, accounts=accounts, vault_runtime=vault_runtime,
             )
+            team_policy = headless_tools.team_policy
+            executors.set_team_policy(team_policy)
             ip_ban_service = IPBanService(config_manager, accounts=accounts)
 
             bridge = AIToolBridge(
@@ -746,8 +759,7 @@ def _relay_run_foreground() -> None:
     log_relay_event("starting", mode="bg", client_id=listener.client_id)
 
     try:
-        from servonaut.services.vault.background import run_relay_with_vault
-        asyncio.run(run_relay_with_vault(listener, vault_runtime))
+        asyncio.run(_run_relay(listener, vault_runtime, team_policy))
     finally:
         log_relay_event(
             "stopped", mode="bg",
@@ -1477,6 +1489,10 @@ def _main() -> None:
     from servonaut.cli.servers import add_servers_parser, handle_servers_command
     add_servers_parser(subparsers)
 
+    # ---- team subcommand (agent rules, read-only) ----
+    from servonaut.cli.team import add_team_parser, handle_team_command
+    add_team_parser(subparsers)
+
     # ---- db subcommand (DB credential setup for db_processlist/db_top_queries) ----
     from servonaut.cli.db import add_db_parser
     add_db_parser(subparsers)
@@ -1524,6 +1540,10 @@ def _main() -> None:
     if getattr(args, 'subcommand', None) == 'servers':
         _setup_logging(debug=args.debug)
         sys.exit(handle_servers_command(args))
+
+    if getattr(args, 'subcommand', None) == 'team':
+        _setup_logging(debug=args.debug)
+        sys.exit(handle_team_command(args))
 
     if getattr(args, 'subcommand', None) == 'db':
         _setup_logging(debug=args.debug)

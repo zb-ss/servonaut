@@ -24,7 +24,7 @@ from e2e.harness import fleet
 
 pytestmark = [pytest.mark.e2e_pr, pytest.mark.asyncio]
 
-TEAM = {"slug": "ops", "name": "Ops", "role": "member", "member_count": 2}
+TEAM = {"id": "team-ops", "slug": "ops", "name": "Ops", "role": "member", "member_count": 2}
 SERVER_1 = {
     "id": "srv-1", "name": "server-1", "hostname": "server-1.example.com", "port": 22,
     "login_user": "deploy", "username": "deploy", "status": "active",

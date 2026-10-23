@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 from servonaut.config.schema import MCPConfig
-from servonaut.mcp.guards import CommandGuard, GuardLevel
+from servonaut.mcp.guards import CommandGuard, GuardLevel, standard_command_names
 
 
 def make_guard(level, **kwargs):
@@ -504,3 +504,16 @@ class TestEdgeCases:
         # ls is NOT in custom allowlist
         allowed, _ = guard.check_command("ls -la")
         assert not allowed
+
+
+class TestStandardCommandNames:
+    @pytest.mark.parametrize("command, names", [
+        ("uptime", ["uptime"]),
+        ("ps aux | grep 'nginx'", ["ps", "grep"]),
+        ("sudo systemctl status nginx | tail -n 5", ["systemctl", "tail"]),
+        ("'sys''temctl' status", ["systemctl"]),
+        ("cat 'unbalanced", []),
+        ("", []),
+    ])
+    def test_the_name_each_segment_runs(self, command, names):
+        assert standard_command_names(command) == names

@@ -1,21 +1,38 @@
 """Team rules: what agents may do on a team's shared servers."""
 from __future__ import annotations
 
+import asyncio
+import time
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from servonaut.config.schema import MCPConfig
 from servonaut.mcp.guards import CommandGuard
+from servonaut.services import team_rules
 from servonaut.services.team_rules import (
     DEFAULT_TEAM_RULES,
+    CredentialRulesMemo,
     TeamRules,
+    credential_rules_row,
+    credential_team_of,
     guard_for_target,
     guard_for_target_from,
     is_team_refusal,
     stricter,
 )
 
+from tests._team_policy_fixtures import agent_rules_with, trust_signed_team_rules
+
 BUILTIN_ALLOWLIST = MCPConfig().command_allowlist
 BUILTIN_BLOCKLIST = MCPConfig().command_blocklist
+
+
+@pytest.fixture(autouse=True)
+def _signed_team_rules():
+    """Team ops has verified signed rules: the format 1 defaults."""
+    trust_signed_team_rules("ops")
 
 
 def _shared(role="member", **changes):
@@ -104,6 +121,36 @@ class TestGuardForTarget:
         guard = _guard(_shared(), allowlist=allowlist)
         assert guard.refusal("run_command", "uptime") is not None
 
+    def test_a_command_only_the_local_allowlist_leaves_out_names_that_list(self):
+        rules = TeamRules(command_allowlist=(*BUILTIN_ALLOWLIST, "systemctl"))
+        refusal = _guard(_shared(), rules=rules).refusal("run_command", "systemctl status nginx")
+
+        # Not "set by the team ... not an allowed command": the team allows it.
+        assert refusal == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'systemctl' is allowed by the team but not "
+            "by the command_allowlist in your MCP settings; add it there to use it "
+            "on this team's servers."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_a_built_in_command_removed_locally_names_the_local_list(self):
+        allowlist = [command for command in BUILTIN_ALLOWLIST if command not in ("cat", "grep")]
+        refusal = _guard(_shared(), allowlist=allowlist).refusal(
+            "run_command", "cat /etc/hostname | grep web",
+        )
+        assert refusal.endswith(
+            "and 'cat', 'grep' are allowed by the team but not by the command_allowlist "
+            "in your MCP settings; add them there to use them on this team's servers."
+        )
+
+    def test_a_command_the_team_does_not_allow_either_is_the_team_s_refusal(self):
+        allowlist = [command for command in BUILTIN_ALLOWLIST if command != "cat"]
+        refusal = _guard(_shared(), allowlist=allowlist).refusal(
+            "run_command", "cat x | systemctl status",
+        )
+        assert refusal.endswith("and 'cat x | systemctl status' is not an allowed command there.")
+
     def test_a_local_blocklist_addition_applies(self):
         guard = _guard(_shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bcat\b"])
         assert guard.refusal("run_command", "cat /etc/hostname") is not None
@@ -134,7 +181,19 @@ class TestGuardForTarget:
         assert refusal.startswith("Blocked: on team ops's shared servers")
 
     def test_a_team_without_a_name_or_slug_reads_naturally(self):
+        # Without a slug no signed rules can be found: the readonly fallback.
         refusal = _guard(_shared(team_name="", team_slug="")).refusal("transfer_file")
+        assert refusal == (
+            "Blocked: on this team's shared servers your agents run at the readonly "
+            "level (because the team's agent rules have not been loaded yet), and "
+            "file transfers are not available there."
+        )
+        assert is_team_refusal(refusal)
+
+    def test_a_team_without_a_name_reads_naturally_with_explicit_rules(self):
+        refusal = _guard(_shared(team_name="", team_slug=""), rules=DEFAULT_TEAM_RULES).refusal(
+            "transfer_file",
+        )
         assert refusal == (
             "Blocked: on this team's shared servers your agents run at the standard "
             "level (set by the team), and file transfers are not available there."
@@ -190,6 +249,17 @@ class TestGuardForTarget:
         )
         assert is_team_refusal(refusal)
 
+    def test_an_own_server_reached_with_a_team_s_key_says_so(self):
+        row = {**_shared(), "via_team_key": True}
+        refusal = _guard(row).refusal("transfer_file")
+
+        assert refusal == (
+            "Blocked: on this server, which connects with a key from team Ops's "
+            "vault, your agents run at the standard level (set by the team), and "
+            "file transfers are not available there."
+        )
+        assert is_team_refusal(refusal)
+
     def test_other_blocked_messages_are_not_team_refusals(self):
         assert not is_team_refusal("Blocked: Command matches blocklist pattern: x")
         assert not is_team_refusal("Blocked: on hold")
@@ -204,6 +274,32 @@ class TestGuardForTarget:
     def test_the_standard_guard_renders_the_checked_words(self):
         guard = _guard(_shared())
         assert guard.guard.command_for_execution("ps aux | grep 'nginx'") == "ps aux | grep nginx"
+
+
+class TestTheCommandAsItRuns:
+    """At the standard level the command runs rebuilt from its words, quotes removed."""
+
+    def test_quoting_part_of_a_word_does_not_hide_it_from_a_team_pattern(self):
+        rules = TeamRules(command_blocklist=(*BUILTIN_BLOCKLIST, "/etc/shadow"))
+        guard = _guard(_shared(), rules=rules)
+
+        assert guard.guard.command_for_execution("cat /etc/sh'adow'") == "cat /etc/shadow"
+        assert guard.refusal("run_command", "cat /etc/sh'adow'") == (
+            "Blocked: on team Ops's shared servers your agents run at the standard "
+            "level (set by the team), and 'cat /etc/sh'adow'' is refused there: it "
+            "matches the blocked pattern /etc/shadow."
+        )
+
+    def test_quoting_does_not_hide_it_from_a_local_pattern_either(self):
+        guard = _guard(_shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bshadow\b"])
+
+        assert guard.refusal("run_command", 'cat /etc/sha""dow').endswith(
+            "is refused there: it matches the blocked pattern \\bshadow\\b."
+        )
+
+    def test_a_quoted_command_that_matches_nothing_still_runs(self):
+        rules = TeamRules(command_blocklist=(*BUILTIN_BLOCKLIST, "/etc/shadow"))
+        assert _guard(_shared(), rules=rules).refusal("run_command", "grep 'a b' /etc/hosts") is None
 
 
 class TestFromLocalGuard:
@@ -222,7 +318,387 @@ class TestFromLocalGuard:
         local = CommandGuard(MCPConfig(guard_level="dangerous"))
         assert guard_for_target_from({"id": "i-1"}, local) is None
 
+    def test_the_pattern_time_limit_is_passed_on(self):
+        local = CommandGuard(MCPConfig(guard_level="dangerous"))
+        team = guard_for_target_from(_shared(), local, pattern_timeout_ms=7)
+        assert team.pattern_budget == pytest.approx(0.007)
+
+
+def _dangerous_rules(*patterns):
+    """Members at dangerous, so only the blocked patterns decide."""
+    return TeamRules(
+        role_levels={"member": "dangerous"},
+        command_blocklist=(*BUILTIN_BLOCKLIST, *patterns),
+    )
+
+
+def _timed_guard(*patterns, timeout_ms=50):
+    return guard_for_target(
+        _shared(), "dangerous", BUILTIN_ALLOWLIST, BUILTIN_BLOCKLIST,
+        _dangerous_rules(*patterns), pattern_timeout_ms=timeout_ms,
+    )
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+class _SlowPattern:
+    """A compiled pattern that takes *cost* seconds on any command, by *clock*.
+
+    It stops at its timeout, as ``regex`` does, unless *overruns*: ``regex``
+    looks at the clock only now and then, so a search can end a little late.
+    """
+
+    def __init__(self, name, cost, clock, overruns=False):
+        self.pattern = name
+        self._cost = cost
+        self._clock = clock
+        self._overruns = overruns
+        self.timeouts = []
+
+    def search(self, command, timeout=None):
+        self.timeouts.append(timeout)
+        if timeout < self._cost and not self._overruns:
+            self._clock.now += timeout
+            raise TimeoutError("regex timed out")
+        self._clock.now += self._cost
+        return None
+
+
+class TestTeamPatternTimeLimit:
+    """A team's blocked patterns cannot hang the tools that check them."""
+
+    def test_a_catastrophic_pattern_is_refused_within_the_time_limit(self):
+        guard = _timed_guard(r"^(a|aa)+$")
+        command = "a" * 60 + "b"
+        started = time.monotonic()
+        refusal = guard.refusal("run_command", command)
+        elapsed = time.monotonic() - started
+
+        # Without a limit this one search outlasts the suite's 60 s timeout.
+        assert elapsed < 1.0
+        assert refusal == (
+            "Blocked: on team Ops's shared servers your agents run at the dangerous "
+            f"level (set by the team), and '{command}' is refused there: the team's "
+            "blocked pattern '^(a|aa)+$' takes too long to check (a team owner or "
+            "admin can change it)."
+        )
+
+    def test_one_time_limit_covers_all_of_the_team_s_patterns(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(team_rules, "time", clock)
+        first, second, third = (_SlowPattern(name, 0.03, clock) for name in ("p1", "p2", "p3"))
+        guard = replace(_timed_guard(), team_patterns=(first, second, third))
+
+        refusal = guard.refusal("run_command", "uptime")
+
+        assert first.timeouts == [pytest.approx(0.05)]
+        # The second gets what the first left, not a budget of its own.
+        assert second.timeouts == [pytest.approx(0.02)]
+        assert third.timeouts == []
+        assert "the team's blocked pattern 'p2' takes too long to check" in refusal
+
+    def test_a_used_up_budget_refuses_without_searching_again(self, monkeypatch):
+        clock = _Clock()
+        monkeypatch.setattr(team_rules, "time", clock)
+        first = _SlowPattern("p1", 0.06, clock, overruns=True)
+        second = _SlowPattern("p2", 0.0, clock)
+        guard = replace(_timed_guard(), team_patterns=(first, second))
+
+        refusal = guard.refusal("run_command", "uptime")
+
+        assert second.timeouts == []
+        assert "the team's blocked pattern 'p2' takes too long to check" in refusal
+
+    def test_patterns_that_do_not_match_let_the_command_run(self):
+        guard = _timed_guard(r"^(a|aa)+$", r"\.env\b")
+        assert guard.refusal("run_command", "uptime") is None
+        assert guard.refusal("run_command", "aaaa").endswith(
+            "it matches the blocked pattern ^(a|aa)+$."
+        )
+
+    def test_pcre_forms_python_s_re_cannot_read_are_used(self):
+        rules = _dangerous_rules(r"\h--force\b", r"\p{Lu}{3}_TOKEN")
+        assert rules.unusable_pattern() == ""
+        guard = _guard(_shared(), rules=rules)
+        assert guard.refusal("run_command", "git push\t--force").endswith(
+            "it matches the blocked pattern \\h--force\\b."
+        )
+        assert guard.refusal("run_command", "echo $API_TOKEN") is not None
+        assert guard.refusal("run_command", "git push origin main") is None
+
+    @pytest.mark.parametrize("pattern", ["x(", "[z-a]", "a{99999999999}", "(" * 5000 + ")" * 5000])
+    def test_a_pattern_regex_cannot_compile_still_refuses_every_command(self, pattern):
+        guard = _guard(_shared(), rules=_dangerous_rules(pattern))
+        assert "Servonaut cannot use the team's blocked pattern" in guard.refusal(
+            "run_command", "uptime",
+        )
+        assert guard.guard.check_command("uptime")[0] is False
+
+    @pytest.mark.parametrize("timeout_ms", [None, 0, -5, "100", float("nan"), True])
+    def test_a_time_limit_that_is_not_a_positive_number_is_the_default(self, timeout_ms):
+        guard = _timed_guard(timeout_ms=timeout_ms)
+        assert guard.pattern_budget == MCPConfig().team_pattern_timeout_ms / 1000
+
+    def test_servonaut_s_own_and_local_patterns_stay_on_the_guard(self):
+        guard = _guard(
+            _shared(), blocklist=[*BUILTIN_BLOCKLIST, r"\bcurl\b"],
+            rules=_dangerous_rules(r"\.env\b"),
+        )
+        assert guard.guard.blocklist == [*BUILTIN_BLOCKLIST, r"\bcurl\b"]
+        assert [pattern.pattern for pattern in guard.team_patterns] == [r"\.env\b"]
+
 
 def test_only_team_refusals_are_recognised():
     assert not is_team_refusal("Blocked: Command 'x' not in allowlist for standard mode")
     assert not is_team_refusal(None)
+
+
+class TestDescribeLevel:
+    def test_names_the_level_and_who_set_it(self):
+        assert _guard(_shared()).describe_level() == "standard (set by the team)"
+        assert _guard(_shared(), level="readonly").describe_level() == (
+            "readonly (set by your MCP settings)"
+        )
+
+    def test_a_fallback_says_why(self):
+        rules = TeamRules.readonly("the team's agent rules expired")
+        assert _guard(_shared(), rules=rules).describe_level() == (
+            "readonly (because the team's agent rules expired)"
+        )
+
+    def test_a_pattern_servonaut_cannot_use_is_named(self):
+        rules = TeamRules(command_blocklist=("(unclosed",))
+        assert _guard(_shared(), rules=rules).describe_level().endswith(
+            "no command can run there because Servonaut cannot use the team's "
+            "blocked pattern '(unclosed'"
+        )
+
+
+def _own_row(**changes):
+    row = {"id": "i-1", "name": "app-1", "public_ip": "web.example.com", "port": 22}
+    row.update(changes)
+    return row
+
+
+def _teams(*rows, servers=()):
+    service = MagicMock()
+    service.list_teams = AsyncMock(return_value=list(rows))
+    service.list_shared_servers = AsyncMock(return_value=list(servers))
+    return service
+
+
+class TestCredentialRules:
+    """An own server reached with a team's vault key runs under that team's rules."""
+
+    def test_the_team_s_shared_row_for_the_same_server_is_used(self):
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[{"id": "srv-1", "name": "web-1", "hostname": "web.example.com"}],
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["is_shared"] is True
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("srv-1", "ops", "member")
+
+    def test_the_strictest_of_two_shared_copies_is_used(self):
+        trust_signed_team_rules("ops", agent_rules_with(
+            servers={"srv-2": {"role_levels": {"member": "readonly"}}},
+        ), version=2)
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[
+                {"id": "srv-1", "name": "web-1", "hostname": "web.example.com"},
+                {"id": "srv-2", "name": "web-1b", "instance_id": "i-1"},
+            ],
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["id"] == "srv-2"
+
+    def test_another_team_s_copy_of_the_server_is_not_used(self):
+        from servonaut.services.shared_servers import shared_row
+
+        service = _teams({"slug": "ops", "name": "Ops", "role": "member"})
+        other = shared_row(
+            {"id": "srv-9", "instance_id": "i-1"}, {"slug": "dev", "name": "Dev", "role": "owner"},
+        )
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service, [other]))
+
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("", "ops", "member")
+
+    def test_a_server_the_team_does_not_share_gets_the_team_wide_level(self):
+        service = _teams({"slug": "ops", "name": "Ops", "role": "admin"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert (row["id"], row["team_slug"], row["team_role"]) == ("", "ops", "admin")
+        assert _guard(row).level == "standard"
+
+    def test_rows_already_read_are_used_instead_of_reading_the_team_s_servers(self):
+        from servonaut.services.shared_servers import shared_row
+
+        service = _teams({"slug": "ops", "name": "Ops", "role": "member"})
+        shared = shared_row({"id": "srv-1", "instance_id": "i-1"}, {"slug": "ops", "role": "member"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service, [shared]))
+
+        assert row["id"] == "srv-1"
+        service.list_shared_servers.assert_not_awaited()
+
+    def test_a_team_the_user_is_not_in_gives_no_role(self):
+        service = _teams({"slug": "dev", "name": "Dev", "role": "owner"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+        assert row["team_role"] == ""
+        assert _guard(row).level == "readonly"
+        service.list_shared_servers.assert_not_awaited()
+
+    def test_every_row_says_the_server_is_reached_with_the_team_s_key(self):
+        service = _teams(
+            {"slug": "ops", "name": "Ops", "role": "member"},
+            servers=[{"id": "srv-1", "name": "web-1", "hostname": "web.example.com"}],
+        )
+        shared = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+        team_wide = asyncio.run(credential_rules_row(_own_row(public_ip="other.example.com"), "ops", service))
+
+        assert shared["via_team_key"] is True and shared["id"] == "srv-1"
+        assert team_wide["via_team_key"] is True and team_wide["id"] == ""
+
+    def test_a_team_the_user_is_not_in_falls_back_with_a_reason(self):
+        service = _teams({"slug": "dev", "name": "Dev", "role": "owner"})
+        row = asyncio.run(credential_rules_row(_own_row(), "ops", service))
+        unnamed = asyncio.run(credential_rules_row(_own_row(), "", service))
+
+        assert team_rules.rules_for(row).fallback_reason == (
+            "the vault key it connects with belongs to a team you are not a member of"
+        )
+        assert team_rules.rules_for(unnamed).fallback_reason == (
+            "the team vault of the key it connects with names no team"
+        )
+
+    def test_an_unreadable_team_list_is_raised_for_the_caller_to_refuse(self):
+        service = _teams()
+        service.list_teams = AsyncMock(side_effect=RuntimeError("offline"))
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(credential_rules_row(_own_row(), "ops", service))
+
+
+class TestCredentialTeamOf:
+    def test_a_shared_server_or_no_vault_runtime_has_none(self):
+        runtime = MagicMock(credential_team=AsyncMock(return_value="ops"))
+        assert asyncio.run(credential_team_of(_shared(), runtime)) is None
+        assert asyncio.run(credential_team_of(_own_row(), None)) is None
+        runtime.credential_team.assert_not_awaited()
+
+    def test_the_vault_runtime_names_the_team(self):
+        runtime = MagicMock(credential_team=AsyncMock(return_value="ops"))
+        assert asyncio.run(credential_team_of(_own_row(), runtime)) == "ops"
+
+    def test_a_runtime_without_the_check_has_none(self):
+        assert asyncio.run(credential_team_of(_own_row(), object())) is None
+
+
+class _MemoClock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def _runtime(*answers, unlocked=True):
+    runtime = MagicMock(spec=["credential_team", "is_unlocked", "binding_generation"])
+    runtime.credential_team = AsyncMock(side_effect=list(answers))
+    runtime.is_unlocked = unlocked
+    runtime.binding_generation = 0
+    return runtime
+
+
+class TestCredentialRulesMemo:
+    """Whose vault key an own server uses is remembered, except when that could mislead."""
+
+    @staticmethod
+    def _team_row(calls):
+        async def team_row(slug):
+            calls.append(slug)
+            return {"id": "", "is_shared": True, "team_slug": slug, "team_role": "member"}
+        return team_row
+
+    def test_an_answer_serves_later_calls_until_it_expires(self):
+        clock = _MemoClock()
+        memo = CredentialRulesMemo(ttl_seconds=60, clock=clock)
+        runtime, calls = _runtime("ops", "ops"), []
+
+        first = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+        again = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+        clock.now += 61
+        later = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row(calls)))
+
+        assert first == again == later
+        assert first["team_slug"] == "ops"
+        assert runtime.credential_team.await_count == 2
+        assert calls == ["ops", "ops"]
+
+    def test_a_check_that_fails_is_not_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(RuntimeError("vault offline"), "ops")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_a_team_row_that_cannot_be_built_is_not_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops", "ops")
+
+        async def failing(slug):
+            raise RuntimeError("503")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(memo.rules_row(_own_row(), runtime, failing))
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is not None
+
+    def test_no_team_key_is_not_remembered_while_the_vault_is_locked(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(None, "ops", unlocked=False)
+
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+        runtime.is_unlocked = True
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_a_new_binding_checks_the_server_again(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime(None, "ops")
+
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+        runtime.binding_generation = 1
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_slug"] == "ops"
+
+    def test_clearing_forgets_every_answer(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops", None)
+
+        asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        memo.clear()
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([]))) is None
+
+    def test_shared_servers_and_no_runtime_are_left_to_the_local_rules(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops")
+
+        assert asyncio.run(memo.rules_row(_shared(), runtime, self._team_row([]))) is None
+        assert asyncio.run(memo.rules_row(_own_row(), None, self._team_row([]))) is None
+        runtime.credential_team.assert_not_awaited()
+
+    def test_a_returned_row_cannot_change_what_is_remembered(self):
+        memo = CredentialRulesMemo()
+        runtime = _runtime("ops")
+
+        row = asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))
+        row["team_role"] = "owner"
+        assert asyncio.run(memo.rules_row(_own_row(), runtime, self._team_row([])))["team_role"] == "member"

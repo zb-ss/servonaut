@@ -8,6 +8,7 @@ config is now resolved through ``config_manager.get()``.
 
 from unittest.mock import MagicMock, PropertyMock, patch
 
+from servonaut.config.schema import AppConfig
 from servonaut.screens.team_management import TeamManagementScreen
 
 
@@ -25,21 +26,23 @@ def test_push_config_form_resolves_config_via_config_manager():
     screen = TeamManagementScreen.__new__(TeamManagementScreen)
     screen.query_one = MagicMock()
     screen.notify = MagicMock()
+    screen.call_after_refresh = MagicMock()  # the form scrolls into view once laid out
 
-    sentinel_config = object()
+    sentinel_config = AppConfig()
     mock_app = MagicMock()
+    mock_app.demo_mode = False
     mock_app.config_manager.get.return_value = sentinel_config
 
     with patch.object(TeamManagementScreen, "app", new_callable=PropertyMock, return_value=mock_app), \
          patch("servonaut.services.team_config_subset.build_shareable_subset",
-               return_value=({}, _summary())) as bss:
+               return_value=({"connection_profiles": []}, _summary())) as bss:
         screen._show_push_config_form()
 
     # The form got PAST the None-guard (no error notify) and used the config
     # returned by config_manager.get() — proving the dead self.app.config read
     # is gone.
     mock_app.config_manager.get.assert_called_once()
-    bss.assert_called_once_with(sentinel_config)
+    bss.assert_called_once_with(sentinel_config, custom_servers=[])
     # No "Local config not available." error was raised.
     for call in screen.notify.call_args_list:
         assert "not available" not in str(call)

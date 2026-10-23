@@ -711,6 +711,9 @@ class RelayManager:
         vault_runtime = getattr(app, "vault_command_service", None)
         if vault_runtime is not None:
             executors.set_vault_runtime(vault_runtime)
+        # The app fetches and refreshes the teams' agent rules for the whole
+        # process; the relay only asks it to before an agent's request.
+        executors.set_team_policy(getattr(app, "team_policy", None))
         probe_bridge = self._build_probe_bridge(executors)
         return RelayListener(
             executors=executors,

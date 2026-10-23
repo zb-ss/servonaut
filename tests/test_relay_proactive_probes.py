@@ -365,3 +365,44 @@ class TestProbeArgDrift:
         assert probe_error_from_tool_text(
             "Error: No db_profile configured for web-1. To set one up …",
         ).startswith("db_not_configured:")
+
+
+class TestProbeFailedResultSlugs:
+    """The bridge answers a failed or refused local tool with status
+    "error" or "denied"; the probe keeps the specific slug its text names,
+    and answers with a status the probe contract has."""
+
+    def _respond(self, result):
+        bridge = MagicMock()
+        bridge.handle_tool_call = AsyncMock(return_value=result)
+        listener = make_listener(probe_bridge=bridge)
+        run(listener._handle_event(probe_event(tool="docker_ps")))
+        return listener._post_result.await_args.args[0]
+
+    @pytest.mark.parametrize("status, text, error, slug", [
+        ("denied", "Blocked: Tool 'docker_ps' not available in readonly mode", None,
+         "not_permitted: Tool 'docker_ps' not available in readonly mode"),
+        ("error", "Instance not found: ghost", "Instance not found: ghost",
+         "instance_not_found: Instance not found: ghost"),
+        ("error", "Error: docker_not_available", "docker_not_available",
+         "docker_not_available"),
+        ("error", "Error: No db_profile configured for web-1.",
+         "No db_profile configured for web-1.",
+         "db_not_configured: No db_profile configured for web-1."),
+        ("error", "command timed out after 30s", "command timed out after 30s",
+         "probe_failed: command timed out after 30s"),
+    ])
+    def test_failed_result_keeps_its_specific_slug(self, status, text, error, slug):
+        response = self._respond(_tool_result(status=status, result=text, error=error))
+
+        assert response.status == "error"
+        assert response.error_message == slug
+        assert response.output == ""
+
+    def test_timeout_stays_a_timeout(self):
+        response = self._respond(_tool_result(
+            status="timeout", result="", error="Local tool timed out after 30s",
+        ))
+
+        assert response.status == "timeout"
+        assert response.error_message.startswith("probe_failed:")

@@ -46,3 +46,37 @@ class TestAPIClientErrors:
         assert isinstance(err, ForbiddenEntitlementError)
         assert err.status == 403
         assert "Access denied" in err.message
+
+
+class TestGetWithHeaders:
+    def test_the_body_comes_with_the_headers_in_lower_case(self, api_client):
+        import asyncio
+
+        import httpx
+
+        def handler(request):
+            assert request.url.path == "/api/v1/teams/ops-team/policy"
+            assert request.headers["Authorization"] == "Bearer test-token"
+            return httpx.Response(
+                200, json={"data": {"allowed_tools": []}},
+                headers={"Date": "Sun, 18 Oct 2026 21:00:00 GMT", "X-Extra": "1"},
+            )
+
+        api_client.transport = httpx.MockTransport(handler)
+        body, headers = asyncio.run(api_client.get_with_headers("/api/v1/teams/ops-team/policy"))
+
+        assert body == {"data": {"allowed_tools": []}}
+        assert headers["date"] == "Sun, 18 Oct 2026 21:00:00 GMT"
+        assert headers["x-extra"] == "1"
+
+    def test_an_error_response_raises_like_get(self, api_client):
+        import asyncio
+
+        import httpx
+
+        api_client.transport = httpx.MockTransport(lambda request: httpx.Response(
+            403, json={"error": {"code": "forbidden", "message": "Not a member"}},
+        ))
+        with pytest.raises(APIError) as caught:
+            asyncio.run(api_client.get_with_headers("/api/v1/teams/ops-team/policy"))
+        assert caught.value.status == 403

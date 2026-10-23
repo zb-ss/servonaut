@@ -218,6 +218,24 @@ def render_standard_command(command: str) -> str:
     )
 
 
+def standard_command_names(command: str) -> List[str]:
+    """The name each pipeline segment of *command* runs (after one ``sudo``).
+
+    The names the standard tier checks against the allowlist; empty when
+    the command cannot be split into words.
+    """
+    try:
+        segments = _pipeline_segments(_tokenize(command))
+    except ValueError:
+        return []
+    names = []
+    for segment in segments:
+        words = segment[1:] if segment and segment[0] == "sudo" else segment
+        if words:
+            names.append(words[0])
+    return names
+
+
 def check_standard_command(command: str, allowlist: Sequence[str]) -> Tuple[bool, str]:
     """Allow read-only allowlisted commands, optionally piped, and nothing else."""
     if any(sequence in command for sequence in _FORBIDDEN_SEQUENCES):
