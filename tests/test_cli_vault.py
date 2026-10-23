@@ -496,6 +496,102 @@ def test_incomplete_ssh_rotation_warns_and_exits_non_zero(capsys) -> None:
     assert "The exposure stays open" in error
 
 
+def _rotate_ssh(result: dict, capsys) -> tuple[int, str, str]:
+    class Service:
+        close = MagicMock()
+        rotate_ssh_key = AsyncMock(return_value=result)
+
+    vault.set_vault_service_factory(Service)
+    try:
+        args = _parser().parse_args([
+            "vault", "exposures", "--vault", VAULT_ID, "--rotate-ssh", "item-1",
+            "--team", "team-a", "--server", "server-1", "--server", "server-2", "--yes",
+        ])
+        code = vault.handle_vault_command(args)
+    finally:
+        vault.set_vault_service_factory(None)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_rotation_stopped_before_saving_says_nothing_changed_on_the_servers(capsys) -> None:
+    code, _out, err = _rotate_ssh({
+        "rotated": False, "item_written": False, "public_fingerprint": "SHA256:new",
+        "error": "the vault key must be rotated first",
+        "hosts": [{"server_id": "server-1", "status": "new_key_removed"},
+                  {"server_id": "server-2", "status": "new_key_removed"}],
+    }, capsys)
+
+    assert code == 1
+    assert "did not finish (the vault key must be rotated first)." in err
+    assert "Nothing changed on the servers: the old key is still in place" in err
+    assert "The exposure stays open; run the rotation again once the cause is fixed." in err
+    assert "remove the old key" not in err
+
+
+def test_rotation_stopped_before_saving_names_the_hosts_that_kept_the_new_key(capsys) -> None:
+    code, _out, err = _rotate_ssh({
+        "rotated": False, "item_written": False, "public_fingerprint": "SHA256:new",
+        "error": "HTTP 409, vault_rotation_required",
+        "hosts": [{"server_id": "server-1", "status": "new_key_removed"},
+                  {"server_id": "server-2", "status": "new_key_left", "error": "RuntimeError"}],
+    }, capsys)
+
+    assert code == 1
+    assert "the unused new key (SHA256:new) could not be removed from: server-2;" in err
+    assert "delete its line from authorized_keys there" in err
+    assert "server-1" not in err.split("could not be removed from:")[1]
+    assert "remove the old key" not in err
+
+
+def test_rotation_stopped_after_saving_keeps_the_old_key_advice_with_the_reason(capsys) -> None:
+    code, _out, err = _rotate_ssh({
+        "rotated": False, "item_written": True, "error": "HTTP 500, server_error",
+        "hosts": [{"server_id": "server-1", "status": "old_key_removed"},
+                  {"server_id": "server-2", "status": "failed", "error": "EnrollmentError"}],
+    }, capsys)
+
+    assert code == 1
+    assert "did not finish (HTTP 500, server_error). The exposed key may still log in to: server-2." in err
+    assert "remove the old key from those servers, then run the rotation again." in err
+
+
+def test_rotation_that_rotated_the_vault_key_first_says_so(capsys) -> None:
+    code, out, _err = _rotate_ssh({
+        "rotated": True, "vault_key_rotated": True, "item_written": True,
+        "hosts": [{"server_id": "server-1", "status": "old_key_removed"}],
+        "exposures": {"resolved": [], "needs_owner": False, "failed": []},
+    }, capsys)
+
+    assert code == 0
+    assert "The vault key was rotated first, as the service required (usually after a member leaves)." in out
+
+
+def test_rotation_refused_before_any_host_shows_the_fixed_reason(capsys) -> None:
+    from servonaut.services.vault.errors import VAULT_ROTATION_NOT_PERMITTED, VaultUserError
+
+    message = VAULT_ROTATION_NOT_PERMITTED.format(vault_id=VAULT_ID)
+
+    class Service:
+        close = MagicMock()
+        rotate_ssh_key = AsyncMock(side_effect=VaultUserError(message))
+
+    vault.set_vault_service_factory(Service)
+    try:
+        args = _parser().parse_args([
+            "vault", "exposures", "--vault", VAULT_ID, "--rotate-ssh", "item-1",
+            "--team", "team-a", "--server", "server-1", "--yes",
+        ])
+        code = vault.handle_vault_command(args)
+    finally:
+        vault.set_vault_service_factory(None)
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert f"Vault operation failed ({message})." in err
+    assert f"`servonaut vault rotate --vault {VAULT_ID}`" in err and "no server was changed" in err
+
+
 def test_break_glass_import_requires_a_source_network_and_vice_versa(capsys) -> None:
     class Service:
         close = MagicMock()

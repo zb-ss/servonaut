@@ -4,7 +4,8 @@ The data is neutral and scenario-driven through :class:`AccountData`
 (``FakeCloud.account``). Every route needs a current access token, so a
 client with an expired token has to refresh before it sees anything.
 A shared-server row carries the team SSH CA's view of that server
-(``ssh_ca``), which the Vault fake supplies.
+(``ssh_ca``) and, once a vault key is bound to it, the signed binding
+(``credential_binding``); the Vault fake supplies both.
 
 There are two kinds of team. *Scenario rows* (``configure(teams=...)``) are
 served exactly as given, to the scenario's account only. *Managed teams*
@@ -418,12 +419,14 @@ def add_routes(
     data: AccountData,
     ssh_ca: Optional[Callable[[str, str], Optional[dict[str, Any]]]] = None,
     base_url: Callable[[], str] = lambda: "",
+    credential_binding: Optional[Callable[[str, str], Optional[dict[str, Any]]]] = None,
 ) -> None:
     """Register the account data routes on *app*.
 
     *ssh_ca* answers a shared server's ``ssh_ca`` field from the team's SSH
-    CA state; without it every row says ``null`` (no CA). *base_url* is
-    where invitation accept URLs point.
+    CA state; without it every row says ``null`` (no CA). *credential_binding*
+    answers a bound server's ``credential_binding`` field (``None`` leaves the
+    field out). *base_url* is where invitation accept URLs point.
     """
 
     def guarded(handler: Any) -> Any:
@@ -556,6 +559,9 @@ def add_routes(
         servers = data.shared_servers(slug)
         for row in servers:
             row["ssh_ca"] = ssh_ca(slug, str(row.get("id"))) if ssh_ca is not None else None
+            binding = credential_binding(slug, str(row.get("id"))) if credential_binding is not None else None
+            if binding is not None:
+                row["credential_binding"] = binding
         return web.json_response({"data": servers})
 
     async def verify_list(request: web.Request) -> web.Response:

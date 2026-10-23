@@ -15,7 +15,11 @@ a real ``sshd``:
 * an owner's bootstrap key logs in as the image's admin user (who has
   passwordless sudo): the existing credential the first enrolment needs.
   :func:`install_owner_credential` puts it in a home, with the host key the
-  owner already trusts.
+  owner already trusts;
+* a plain key also logs in when the login's ``~/.ssh/authorized_keys`` lists
+  it, read at every authentication (``AuthorizedKeysFile``), and ``getent
+  passwd`` names the login users' homes, so a vault key bound to the server
+  works and can be rotated there.
 
 Every login decision reads the files the CLI wrote on the host, so a journey
 proves what was installed, not what the CLI reported. :attr:`CaSshdHost.logins`
@@ -59,6 +63,14 @@ HOST_KEY_FILE = "/etc/ssh/ssh_host_ed25519_key.pub"
 SSHD_VERSION = "OpenSSH_9.6p1 Ubuntu-3ubuntu13.5, OpenSSL 3.0.13 30 Jan 2024"
 # Tools the enrolment template runs that the suite's remote roots leave out.
 EXTRA_TOOLS = ("install", "mktemp", "chmod", "mv", "rm")
+# The login accounts ``getent passwd`` answers for: (name, uid, home).
+ACCOUNTS = (("root", 0, "/root"), (ADMIN_USER, 1000, f"/home/{ADMIN_USER}"), (LOGIN, 1001, f"/home/{LOGIN}"))
+GETENT = (
+    "#!/bin/sh\n# server-1's login accounts, as /etc/passwd lists them.\n"
+    '[ "$1" = passwd ] || exit 2\ncase "$2" in\n'
+    + "".join(f'  {name}) echo "{name}:x:{uid}:{uid}::{home}:/bin/bash" ;;\n' for name, uid, home in ACCOUNTS)
+    + "  *) exit 2 ;;\nesac\n"
+)
 # Passwordless sudo for the login users, as many cloud images grant it.
 SUDO = """#!/bin/sh
 # server-1 grants its login users passwordless sudo.
@@ -340,12 +352,37 @@ class CaSshdHost(RemoteHost):
     # -- authentication ---------------------------------------------------
 
     def accepts_key(self, username: str, key: asyncssh.SSHKey) -> bool:
-        accepted = username == ADMIN_USER and key.public_data == self.bootstrap_key.public_data
-        login = SshdLogin(username, "key", accepted, "authorized key" if accepted else "unknown key")
+        if username == ADMIN_USER and key.public_data == self.bootstrap_key.public_data:
+            accepted, reason = True, "authorized key"
+        elif key.public_data in self.authorized_keys(username):
+            accepted, reason = True, "authorized_keys"
+        else:
+            accepted, reason = False, "unknown key"
+        login = SshdLogin(username, "key", accepted, reason)
         self.logins.append(login)
         self.log.add(host=self.name, event="auth", user=username, key=key.get_fingerprint(),
                      accepted=accepted, reason=login.reason)
         return accepted
+
+    def authorized_keys(self, username: str) -> set[bytes]:
+        """The key blobs *username*'s ``~/.ssh/authorized_keys`` lists right now."""
+        home = "/root" if username == "root" else f"/home/{username}"
+        try:
+            text = self.remote.read_bytes(f"{home}/.ssh/authorized_keys").decode("utf-8")
+        except (OSError, UnicodeError, ValueError):
+            return set()
+        blobs: set[bytes] = set()
+        for line in key_lines(text):
+            # A line may start with options; the key is the field after its type.
+            fields = line.split()
+            for index, field in enumerate(fields[:-1]):
+                if field.startswith(("ssh-", "ecdsa-", "sk-")):
+                    try:
+                        blobs.add(base64.b64decode(fields[index + 1], validate=True))
+                    except ValueError:
+                        pass
+                    break
+        return blobs
 
     def certificate_key(self, username: str, key_data: bytes) -> Optional[asyncssh.SSHKey]:
         """sshd's user-certificate decision, from the files on disk right now.
@@ -484,6 +521,7 @@ def start_ca_host(*, log: CommandLog, remote_dir: Path, hidden: Iterable[str]) -
         assert source is not None, f"{tool} is missing from {SYSTEM_TOOL_DIRS}"
         remote.write(f"/bin/{tool}", f'#!/bin/sh\nexec {shlex.quote(str(source.resolve()))} "$@"\n', mode=0o755)
     remote.write("/bin/sudo", SUDO, mode=0o755)
+    remote.write("/bin/getent", GETENT, mode=0o755)
     host_key = asyncssh.generate_private_key("ssh-ed25519")
     remote.write(HOST_KEY_FILE, host_key.export_public_key("openssh").decode("ascii"))
     remote.path("/etc/ssh/sshd_config.d").mkdir(parents=True, exist_ok=True)

@@ -655,6 +655,94 @@ async def test_vault_screen_rotates_on_the_picked_servers() -> None:
     assert sorted(rotation["servers"]) == ["srv-ops-1", "srv-ops-2"]
 
 
+class _RotationOutcomeService(_ScreenService):
+    """Answers a rotation with a fixed outcome."""
+
+    def __init__(self, outcome: dict) -> None:
+        super().__init__()
+        self.outcome = outcome
+
+    async def rotate_ssh_key(self, **kwargs):
+        self.rotations.append(kwargs)
+        return self.outcome
+
+
+class _NotedVaultHost(_VaultHost):
+    def __init__(self, service) -> None:
+        super().__init__(service)
+        self.notes: list[tuple[str, dict]] = []
+
+    def notify(self, message: str, **kwargs) -> None:
+        self.notes.append((message, kwargs))
+
+
+async def _rotation_status(outcome: dict) -> tuple[str, list[tuple[str, dict]]]:
+    """The status line and notifications after a rotation that ended with *outcome*."""
+    app = _NotedVaultHost(_RotationOutcomeService(outcome))
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _ready_vault_screen(app)
+        screen._selected_vault_id = "vault-1"
+        await screen._rotate_exposure({"item_id": "item-1"}, {"team": "ops", "servers": "srv-ops-1,srv-ops-2"})
+        await pilot.pause()
+        return str(screen.query_one("#vault_status", Static).render()), list(app.notes)
+
+
+@pytest.mark.asyncio
+async def test_rotation_stopped_before_saving_shows_the_reason_and_that_no_server_changed() -> None:
+    status, notes = await _rotation_status({
+        "rotated": False, "item_written": False, "vault_key_rotated": True, "public_fingerprint": "SHA256:new",
+        "error": "the vault key must be rotated first [bold]now[/bold]",
+        "hosts": [{"server_id": "srv-ops-1", "status": "new_key_removed"},
+                  {"server_id": "srv-ops-2", "status": "new_key_removed"}],
+    })
+
+    assert status.startswith("The vault key was rotated first")
+    assert "did not finish (the vault key must be rotated first [bold]now[/bold])." in status
+    assert "Nothing changed on the servers" in status and "rotate again once the cause is fixed" in status
+    assert "remove the old key" not in status
+    [(message, options)] = notes
+    assert message == status and options["markup"] is False and options["severity"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_rotation_stopped_before_saving_names_the_server_that_kept_the_new_key() -> None:
+    status, _notes = await _rotation_status({
+        "rotated": False, "item_written": False, "public_fingerprint": "SHA256:new", "error": "RuntimeError",
+        "hosts": [{"server_id": "srv-ops-1", "status": "new_key_removed"},
+                  {"server_id": "srv-ops-2", "status": "new_key_left", "error": "EnrollmentError"}],
+    })
+
+    assert "the unused new key (SHA256:new) could not be removed from: srv-ops-2;" in status
+    assert "delete its line from authorized_keys there" in status
+
+
+@pytest.mark.asyncio
+async def test_rotation_stopped_after_saving_keeps_the_old_key_advice() -> None:
+    status, _notes = await _rotation_status({
+        "rotated": False, "item_written": True, "error": "HTTP 500, server_error",
+        "hosts": [{"server_id": "srv-ops-1", "status": "old_key_removed"},
+                  {"server_id": "srv-ops-2", "status": "failed", "error": "EnrollmentError"}],
+    })
+
+    assert "did not finish (HTTP 500, server_error). The exposed key may still log in to: srv-ops-2." in status
+    assert "remove the old key from those servers, then rotate again." in status
+
+
+@pytest.mark.asyncio
+async def test_rotation_after_rotating_the_vault_key_says_so() -> None:
+    status, notes = await _rotation_status({
+        "rotated": True, "item_written": True, "vault_key_rotated": True,
+        "hosts": [{"server_id": "srv-ops-1", "status": "old_key_removed"}],
+        "exposures": {"resolved": ["e-1"], "needs_owner": False, "failed": []},
+    })
+
+    assert status == (
+        "The vault key was rotated first, as the service required (usually after a member leaves). "
+        "SSH key rotation completed on all selected hosts. 1 exposure resolved as rotated."
+    )
+    assert notes == []
+
+
 @pytest.mark.asyncio
 async def test_vault_screen_binds_an_imported_key_to_the_picked_server() -> None:
     service = _ScreenService()

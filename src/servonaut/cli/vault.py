@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.api_client import APIError
-from servonaut.services.vault.display import grant_summary, terminal_safe
+from servonaut.services.vault.display import (
+    VAULT_KEY_ROTATED_FIRST,
+    grant_summary,
+    ssh_rotation_failure,
+    terminal_safe,
+)
 from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
 
 _EXIT_OK = 0
@@ -43,19 +48,8 @@ def set_vault_service_factory(factory: Optional[VaultServiceFactory]) -> None:
 
 
 def _warn_incomplete_rotation(rotation: Any) -> None:
-    """Say plainly which hosts may still accept the exposed key."""
-    hosts = rotation.get("hosts", []) if isinstance(rotation, Mapping) else []
-    unfinished = [
-        str(host.get("server_id")) for host in hosts
-        if isinstance(host, Mapping) and host.get("status") != "old_key_removed"
-    ]
-    print(
-        "Warning: the SSH key rotation did not finish. The exposed key may still log in to: "
-        + (", ".join(unfinished) or "the selected servers")
-        + ". The exposure stays open; remove the old key from those servers, "
-        "then run the rotation again.",
-        file=sys.stderr,
-    )
+    """Say why the rotation stopped and what is left on which hosts."""
+    print(f"Warning: {ssh_rotation_failure(rotation, retry='run the rotation again')}", file=sys.stderr)
 
 
 def _report_exposure_resolution(rotation: Mapping[str, Any], vault_id: str) -> bool:
@@ -817,7 +811,9 @@ async def _handle(args: argparse.Namespace) -> int:
                 if not args.team or not args.server:
                     print("Error: --team and at least one --server are required with --rotate-ssh.", file=sys.stderr)
                     return _EXIT_USAGE
-                if not _confirm(args, "Rotate the exposed SSH key on every selected server"):
+                if not _confirm(
+                    args, "Rotate the exposed SSH key on every selected server (and the vault key first, if it is due)",
+                ):
                     return _EXIT_ABORTED
                 rotation = await _invoke(
                     services,
@@ -828,6 +824,8 @@ async def _handle(args: argparse.Namespace) -> int:
                     servers=args.server,
                 )
                 _print(rotation, json_output=output)
+                if not output and isinstance(rotation, Mapping) and rotation.get("vault_key_rotated") is True:
+                    print(VAULT_KEY_ROTATED_FIRST)
                 if not (isinstance(rotation, Mapping) and rotation.get("rotated") is True):
                     _warn_incomplete_rotation(rotation)
                     return _EXIT_ERROR

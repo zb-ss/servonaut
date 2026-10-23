@@ -40,6 +40,8 @@ from .errors import (
     RECOVERY_KEY_NOT_THIS_IDENTITY,
     RECOVERY_KEY_TYPO,
     SERVER_MOVED_SINCE_BINDING,
+    VAULT_ROTATION_FAILED,
+    VAULT_ROTATION_NOT_PERMITTED,
     VaultUserError,
     vault_failure_reason,
 )
@@ -191,6 +193,21 @@ def _check_recovery_key(value: str) -> None:
         if not value.strip().upper().startswith("SVRK1-"):
             raise VaultUserError(RECOVERY_KEY_NOT_A_KEY) from exc
         raise VaultUserError(RECOVERY_KEY_TYPO) from exc
+
+
+def _host_outcome(outcomes: list[dict[str, Any]], server_id: str) -> dict[str, Any]:
+    """The per-host row of an SSH key rotation (every prepared host has one)."""
+    return next(outcome for outcome in outcomes if outcome["server_id"] == server_id)
+
+
+async def _remove_key_best_effort(executor: Any, login: str, public_key: str) -> str | None:
+    """Remove *public_key* from one host's login; why it stayed, or ``None`` once removed."""
+    try:
+        await executor.remove_authorized_key(login, public_key)
+    except Exception as exc:  # reported per host, so it never hides the failure being undone
+        logger.info("An unused SSH key could not be removed from a host after a failed rotation")
+        return vault_failure_reason(exc)
+    return None
 
 
 class VaultCommandService:
@@ -1083,12 +1100,17 @@ class VaultCommandService:
     ) -> dict[str, Any]:
         """Rotate one bound SSH item across hosts, then close its exposures.
 
-        Every target first receives and proves the new key while its old key
-        remains usable. The encrypted item and every signed binding are
-        persisted before any exact old key line is removed. Any failure keeps
-        at least one working key on every prepared host and leaves the
-        server-side exposure open for a user to review; only when every host
-        has dropped the old key are the item's open exposures resolved.
+        A vault key the service wants rotated (usually after a member left)
+        is rotated first, since the service takes no item writes until then;
+        when that is not possible nothing else happens. Every target then
+        receives and proves the new key while its old key remains usable.
+        The encrypted item and every signed binding are persisted before any
+        exact old key line is removed. A failure before the item is saved
+        takes the new key off every prepared host again, so each keeps only
+        its old key; a later failure keeps at least one working key on every
+        prepared host. Either way the server-side exposure stays open for a
+        user to review; only when every host has dropped the old key are the
+        item's open exposures resolved.
         """
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
@@ -1098,6 +1120,11 @@ class VaultCommandService:
         item = await self.items.get_item(vault_id, item_id)
         if item.get("type") not in {"ssh_key", "break_glass"}:
             raise VaultStateError("only an SSH vault item can be rotated on hosts")
+        vault_key_rotated = await self._rotate_due_vault_key(vault_id, vault)
+        if vault_key_rotated:
+            # The rotation re-wrapped every item key under the new version.
+            vault = await self.vaults.get_vault(vault_id)
+            item = await self.items.get_item(vault_id, item_id)
         payload = self.items.read_item(vault, item)
         old_public_key = payload.get("public_key")
         if not isinstance(old_public_key, str):
@@ -1106,52 +1133,20 @@ class VaultCommandService:
         if payload.get("public_fingerprint") != old_fingerprint:
             raise VaultStateError("SSH vault item public fingerprint is invalid")
         new_private = bytearray(self._new_ed25519_private_key())
+        prepared: list[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]] = []
         try:
             new_public_key = self._public_key_from_private(bytes(new_private), None)
             new_fingerprint = crypto.ssh_public_fingerprint(new_public_key)
             targets = await self._rotation_targets(
                 team, servers, vault, vault_id, item_id, old_fingerprint,
             )
-            outcomes: list[dict[str, Any]] = []
-            prepared: list[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]] = []
+            result: dict[str, Any] = {
+                "rotated": False, "public_fingerprint": new_fingerprint, "hosts": [],
+                "vault_key_rotated": vault_key_rotated, "item_written": False,
+            }
+            outcomes: list[dict[str, Any]] = result["hosts"]
             try:
-                for shared, binding in targets:
-                    server_id = str(shared["id"])
-                    lease = executor = None
-                    appended = False
-                    login = str(binding["login_user"])
-                    try:
-                        lease = await self.resolve_ssh({**shared, "is_shared": True, "team_slug": team})
-                        if lease is None:
-                            raise VaultStateError("bound server has no verified SSH route")
-                        executor = self._remote_executor(shared, lease)
-                        await executor.append_authorized_key(login, new_public_key)
-                        appended = True
-                        if await executor.verify_new_key(login, bytes(new_private)) is not True:
-                            raise VaultStateError("new SSH key login proof failed")
-                        prepared.append((shared, binding, executor, lease))
-                        outcomes.append({"server_id": server_id, "status": "verified"})
-                    except Exception as exc:
-                        outcomes.append({"server_id": server_id, "status": "failed", "error": str(exc)})
-                        # This host is not in ``prepared``: undo its half-done step here.
-                        if appended and executor is not None:
-                            try:
-                                await executor.remove_authorized_key(login, new_public_key)
-                            except Exception:
-                                pass
-                        if lease is not None:
-                            lease.close()
-                        raise
-            except Exception as exc:
-                for _shared, binding, executor, lease in reversed(prepared):
-                    try:
-                        await executor.remove_authorized_key(str(binding["login_user"]), new_public_key)
-                    except Exception:
-                        pass
-                    lease.close()
-                return {"rotated": False, "public_fingerprint": new_fingerprint,
-                        "hosts": outcomes, "error": str(exc)}
-            try:
+                await self._prepare_rotation_hosts(team, targets, new_public_key, new_private, prepared, outcomes)
                 new_payload = dict(payload)
                 new_payload.update({
                     "private_key_openssh": bytes(new_private).decode("utf-8"),
@@ -1163,55 +1158,141 @@ class VaultCommandService:
                     expected_revision=_positive_int(item.get("revision"), "item.revision"),
                     retry_stale_once=False,
                 )
-                bindings: list[dict[str, Any]] = []
-                for shared, binding, _executor, _lease in prepared:
-                    hostname = shared.get("hostname") or shared.get("host") or shared.get("public_ip")
-                    port = shared.get("port", 22)
-                    if not isinstance(hostname, str) or not hostname or isinstance(port, bool) or not isinstance(port, int):
-                        raise VaultStateError("bound server has no valid SSH destination")
-                    replacement = self.bindings.build_binding(
-                        scope=str(vault["scope"]), target=f"shared_server:{shared['id']}",
-                        hostname=hostname, port=port, login_user=str(binding["login_user"]),
-                        vault_id=vault_id, vault_item_id=item_id, public_fingerprint=new_fingerprint,
-                        host_keys=tuple(binding["host_keys"]),
-                        binding_revision=_positive_int(binding.get("binding_revision"), "binding.binding_revision") + 1,
-                    )
-                    bindings.append(await self.bindings.put_team_binding(team, str(shared["id"]), replacement))
-                    for outcome in outcomes:
-                        if outcome["server_id"] == str(shared["id"]):
-                            outcome["status"] = "rebound"
-                            break
-                # Removing the old keys is the irreversible final phase. At
-                # this point both credentials are persisted and every host is
-                # already proven with the new one, so a partial remote failure
-                # leaves the new credential usable and the exposure open.
-                for shared, binding, executor, _lease in prepared:
-                    try:
-                        await executor.remove_authorized_key(str(binding["login_user"]), old_public_key)
-                    except Exception as exc:
-                        for outcome in outcomes:
-                            if outcome["server_id"] == str(shared["id"]):
-                                outcome.update({"status": "failed", "error": str(exc)})
-                                break
-                        raise
-                    for outcome in outcomes:
-                        if outcome["server_id"] == str(shared["id"]):
-                            outcome["status"] = "old_key_removed"
-                            break
-                exposures = await self._resolve_rotated_exposures(
-                    vault_id, item_id, [shared for shared, _binding, _executor, _lease in prepared],
+                result["item_written"] = True
+                bindings = await self._rebind_rotated_hosts(
+                    team, vault, vault_id, item_id, new_fingerprint, prepared, outcomes,
                 )
-                return {"rotated": True, "public_fingerprint": new_fingerprint,
-                        "hosts": outcomes, "item": written, "bindings": bindings, "exposures": exposures}
+                await self._remove_old_keys(old_public_key, prepared, outcomes)
             except Exception as exc:
-                return {"rotated": False, "public_fingerprint": new_fingerprint,
-                        "hosts": outcomes, "error": str(exc)}
-            finally:
-                for _shared, _binding, _executor, lease in prepared:
-                    lease.close()
+                if not result["item_written"]:
+                    # Nothing was saved, so the vault still holds the old key
+                    # every host kept: the new one would only be a dead line.
+                    await self._withdraw_new_key(new_public_key, prepared, outcomes)
+                return {**result, "error": vault_failure_reason(exc)}
+            exposures = await self._resolve_rotated_exposures(
+                vault_id, item_id, [shared for shared, _binding, _executor, _lease in prepared],
+            )
+            return {**result, "rotated": True, "item": written, "bindings": bindings, "exposures": exposures}
         finally:
+            for _shared, _binding, _executor, lease in prepared:
+                lease.close()
             for index in range(len(new_private)):
                 new_private[index] = 0
+
+    async def _rotate_due_vault_key(self, vault_id: str, vault: Mapping[str, Any]) -> bool:
+        """Rotate the vault key first when the service says it is due; ``True`` when rotated.
+
+        Refuses, before any server is touched, when this user may not rotate
+        it or the rotation fails.
+        """
+        rotation = vault.get("rotation")
+        if not (isinstance(rotation, Mapping) and rotation.get("required") is True):
+            return False
+        if vault.get("my_role") not in {"owner", "admin"}:
+            raise VaultUserError(VAULT_ROTATION_NOT_PERMITTED.format(vault_id=vault_id))
+        try:
+            await self.rotation.rotate(vault_id)
+        except Exception as exc:
+            if isinstance(exc, APIError) and exc.status == 403:
+                raise VaultUserError(VAULT_ROTATION_NOT_PERMITTED.format(vault_id=vault_id)) from exc
+            raise VaultUserError(VAULT_ROTATION_FAILED.format(reason=vault_failure_reason(exc))) from exc
+        return True
+
+    async def _prepare_rotation_hosts(
+        self, team: str, targets: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+        new_public_key: str, new_private: bytearray,
+        prepared: list[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]],
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Add and prove the new key on every target, beside its old key.
+
+        A host joins *prepared* once the new key has logged in. A host that
+        fails has its own half-done step undone here before the error
+        propagates; the hosts already prepared are the caller's to undo.
+        """
+        for shared, binding in targets:
+            server_id = str(shared["id"])
+            login = str(binding["login_user"])
+            lease = executor = None
+            appended = False
+            try:
+                lease = await self.resolve_ssh({**shared, "is_shared": True, "team_slug": team})
+                if lease is None:
+                    raise VaultUserError("this server has no verified SSH route")
+                executor = self._remote_executor(shared, lease)
+                await executor.append_authorized_key(login, new_public_key)
+                appended = True
+                if await executor.verify_new_key(login, bytes(new_private)) is not True:
+                    raise VaultUserError("the new key could not log in to this server")
+            except Exception as exc:
+                outcome = {"server_id": server_id, "status": "failed", "error": vault_failure_reason(exc)}
+                outcomes.append(outcome)
+                if appended and executor is not None:
+                    left = await _remove_key_best_effort(executor, login, new_public_key)
+                    if left is not None:
+                        outcome.update({"status": "new_key_left", "error": left})
+                if lease is not None:
+                    lease.close()
+                raise
+            prepared.append((shared, binding, executor, lease))
+            outcomes.append({"server_id": server_id, "status": "verified"})
+
+    @staticmethod
+    async def _withdraw_new_key(
+        new_public_key: str,
+        prepared: Sequence[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]],
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Take the unused new key off every prepared host, saying where it stays."""
+        for shared, binding, executor, _lease in reversed(prepared):
+            left = await _remove_key_best_effort(executor, str(binding["login_user"]), new_public_key)
+            _host_outcome(outcomes, str(shared["id"])).update(
+                {"status": "new_key_removed"} if left is None else {"status": "new_key_left", "error": left}
+            )
+
+    async def _rebind_rotated_hosts(
+        self, team: str, vault: Mapping[str, Any], vault_id: str, item_id: str, new_fingerprint: str,
+        prepared: Sequence[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]],
+        outcomes: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Point every prepared host's signed binding at the new key."""
+        bindings: list[dict[str, Any]] = []
+        for shared, binding, _executor, _lease in prepared:
+            hostname = shared.get("hostname") or shared.get("host") or shared.get("public_ip")
+            port = shared.get("port", 22)
+            if not isinstance(hostname, str) or not hostname or isinstance(port, bool) or not isinstance(port, int):
+                raise VaultStateError("bound server has no valid SSH destination")
+            replacement = self.bindings.build_binding(
+                scope=str(vault["scope"]), target=f"shared_server:{shared['id']}",
+                hostname=hostname, port=port, login_user=str(binding["login_user"]),
+                vault_id=vault_id, vault_item_id=item_id, public_fingerprint=new_fingerprint,
+                host_keys=tuple(binding["host_keys"]),
+                binding_revision=_positive_int(binding.get("binding_revision"), "binding.binding_revision") + 1,
+            )
+            bindings.append(await self.bindings.put_team_binding(team, str(shared["id"]), replacement))
+            _host_outcome(outcomes, str(shared["id"]))["status"] = "rebound"
+        return bindings
+
+    @staticmethod
+    async def _remove_old_keys(
+        old_public_key: str,
+        prepared: Sequence[tuple[Mapping[str, Any], Mapping[str, Any], Any, VaultSshLease]],
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        """Remove the old key from every prepared host: the irreversible final phase.
+
+        Both credentials are persisted and every host is already proven with
+        the new one, so a partial remote failure leaves the new credential
+        usable and the exposure open.
+        """
+        for shared, binding, executor, _lease in prepared:
+            outcome = _host_outcome(outcomes, str(shared["id"]))
+            try:
+                await executor.remove_authorized_key(str(binding["login_user"]), old_public_key)
+            except Exception as exc:
+                outcome.update({"status": "failed", "error": vault_failure_reason(exc)})
+                raise
+            outcome["status"] = "old_key_removed"
 
     async def _resolve_rotated_exposures(
         self, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
