@@ -91,6 +91,14 @@ DEFAULT_CA_POLICY = {
     "interactive_ttl_seconds": 28_800, "automation_ttl_seconds": 600,
     "max_ttl_seconds": 57_600, "require_member_mfa": False,
 }
+# How the service refuses switching certificates on and starting a rollover:
+# "frozen" while it has paused that for teams it has not cleared, "busy" while
+# another switch-on anywhere on the service holds its activation lock. See
+# :meth:`VaultCloud.refuse_ca_activation`.
+CA_ACTIVATION_REFUSALS = {
+    "frozen": (409, "ssh_ca_enable_frozen", "Switching on SSH certificates is paused. Contact support."),
+    "busy": (503, "ssh_ca_busy", "Another SSH CA activation is in progress. Try again shortly."),
+}
 
 
 def _now() -> str:
@@ -254,6 +262,20 @@ class VaultCloud:
             # "email" (pending until the e-mailed link is opened) or "mfa"
             # (pending until the confirmation request, made with a fresh second factor).
             self.identity_confirmation = "auto"
+            # A key of CA_ACTIVATION_REFUSALS, or None to switch certificates on as asked.
+            self.ca_activation_refusal: Optional[str] = None
+
+    def refuse_ca_activation(self, kind: Optional[str]) -> None:
+        """Control: refuse every CA switch-on and rollover start with *kind*.
+
+        ``"frozen"`` answers 409 ``ssh_ca_enable_frozen`` and ``"busy"`` 503
+        ``ssh_ca_busy`` (see :data:`CA_ACTIVATION_REFUSALS`); ``None`` lets
+        them through again.
+        """
+        if kind is not None and kind not in CA_ACTIVATION_REFUSALS:
+            raise ValueError(f"unknown CA activation refusal: {kind!r}")
+        with self._lock:
+            self.ca_activation_refusal = kind
 
     def open_exposure(self, vault_id: str, item_id: str, *, public_fingerprint: str, subject: str = "member") -> str:
         """Control: record that a removed member had fetched this item's key."""
@@ -942,6 +964,8 @@ class VaultCloud:
         with self._lock:
             if self._ca_state(slug) is not None:
                 return _refusal(409, "ca_already_enabled", "The SSH CA is already enabled")
+            if self.ca_activation_refusal is not None:
+                return _refusal(*CA_ACTIVATION_REFUSALS[self.ca_activation_refusal])
             user_key, host_key = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
             supplied = body.get("policy") if isinstance(body.get("policy"), dict) else {}
             self._ca_keys[slug] = {"user": {1: user_key}, "host": host_key}
@@ -1191,6 +1215,8 @@ class VaultCloud:
             state = self._ca_state(slug)
             if state is None:
                 return _refusal(403, "ca_disabled", "The team SSH certificate authority is disabled")
+            if self.ca_activation_refusal is not None:
+                return _refusal(*CA_ACTIVATION_REFUSALS[self.ca_activation_refusal])
             if self._generation(state, "next") is not None:
                 return _refusal(409, "rollover_in_progress", "A user CA rollover is already in progress")
             caller = self._user_id() if user_id is None else user_id
