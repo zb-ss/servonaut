@@ -209,3 +209,17 @@ def test_a_busy_certificate_service_says_to_try_again_and_names_the_service_not_
         "nothing is wrong with your setup, so try again in a minute"
     )
     assert "team" not in reason
+
+
+def test_a_due_vault_key_rotation_says_who_rotates_it_and_how() -> None:
+    exc = APIError(
+        code="vault_rotation_required", message="server text", status=409, details={"current_version": 3},
+    )
+
+    reason = vault_failure_reason(exc)
+
+    assert reason == (
+        "the vault key must be rotated first, usually because a member left; a team owner or admin "
+        "rotates it with Rotate vault key or `servonaut vault rotate --vault <vault>`, then try again"
+    )
+    assert "server text" not in reason
