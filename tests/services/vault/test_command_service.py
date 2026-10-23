@@ -715,6 +715,11 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
     assert failed["rotated"] is False
     assert "append" in calls and "verify" in calls and "write" in calls
     assert "remove-old" not in calls
+    # Nothing was saved: the new key comes off the host again and the old one stays.
+    assert calls.index("write") < calls.index("remove-new")
+    assert failed["item_written"] is False
+    assert failed["hosts"] == [{"server_id": "server-1", "status": "new_key_removed"}]
+    assert failed["error"] == "RuntimeError"  # the class only, never the exception's text
 
     calls.clear()
     items.fail_write = False
@@ -729,6 +734,9 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
     assert failed_binding["rotated"] is False
     assert "write" in calls and "rebind" in calls
     assert "remove-old" not in calls
+    # The item already holds the new key, so the hosts keep it.
+    assert "remove-new" not in calls
+    assert failed_binding["item_written"] is True
     assert items.last_payload is not None
     assert items.last_payload["public_fingerprint"] == "SHA256:new"
 
@@ -748,6 +756,314 @@ async def test_ssh_rotation_proves_all_hosts_before_removing_old_key() -> None:
     assert calls == ["append", "verify", "remove-new", "close"]
     # No failed rotation resolves anything.
     assert resolved == []
+
+
+_ROTATION_VAULT = "11111111-1111-1111-1111-111111111111"
+_ROTATION_ITEM = "22222222-2222-2222-2222-222222222222"
+_OLD_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEJpbmRpbmdUZXN0S2V5MTIzNDU2Nzg5MDE="
+_NEW_SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE5ld0tleTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI="
+
+
+class _RotationWorld:
+    """In-memory vault, team and hosts behind ``rotate_ssh_key``.
+
+    ``calls`` records every step in order; ``authorized`` is each host's
+    authorized_keys for the bound login.
+    """
+
+    def __init__(self, servers: tuple[str, ...]) -> None:
+        self.calls: list[str] = []
+        self.authorized = {server: {_OLD_SSH_KEY} for server in servers}
+        self.vault: dict[str, object] = {
+            "vault_id": _ROTATION_VAULT, "scope": "team:example", "current_version": 1, "my_role": "owner",
+            "rotation": {"required": False},
+        }
+        self.key_version = 1
+        self.read_with: tuple[object, object] | None = None
+        self.write_error: Exception | None = None
+        self.put_error: Exception | None = None
+        self.rotate_error: Exception | None = None
+        self.proof_fails: set[str] = set()
+        self.new_key_stays: set[str] = set()
+
+    # The service's collaborators -------------------------------------------
+
+    async def get_vault(self, _vault_id: str) -> dict[str, object]:
+        self.calls.append("get-vault")
+        return dict(self.vault)
+
+    async def get_item(self, _vault_id: str, _item_id: str) -> dict[str, object]:
+        self.calls.append("get-item")
+        return {"type": "ssh_key", "revision": 1, "key_version": self.key_version}
+
+    def read_item(self, vault: dict[str, object], item: dict[str, object]) -> dict[str, object]:
+        self.read_with = (vault["current_version"], item["key_version"])
+        return {"name": "deploy", "notes": "", "public_key": _OLD_SSH_KEY,
+                "public_fingerprint": "SHA256:old", "private_key_openssh": "old"}
+
+    async def write_item(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+        self.calls.append("write")
+        if self.write_error is not None:
+            raise self.write_error
+        return {"revision": 2}
+
+    async def rotate(self, _vault_id: str) -> dict[str, object]:
+        self.calls.append("rotate-vault")
+        if self.rotate_error is not None:
+            raise self.rotate_error
+        # The service re-wraps every item key under the new version.
+        self.vault.update(current_version=2, rotation={"required": False})
+        self.key_version = 2
+        return {"accepted": []}
+
+    async def put_team_binding(self, _team: str, server_id: str, _binding: object) -> dict[str, object]:
+        self.calls.append(f"rebind:{server_id}")
+        if self.put_error is not None:
+            raise self.put_error
+        return {"ok": True}
+
+    def executor(self, shared: dict[str, object], _lease: object) -> object:
+        world, server = self, str(shared["id"])
+
+        class Executor:
+            async def append_authorized_key(self, _login: str, key: str) -> None:
+                world.calls.append(f"append:{server}")
+                world.authorized[server].add(key)
+
+            async def verify_new_key(self, _login: str, _key: bytes) -> bool:
+                world.calls.append(f"verify:{server}")
+                return server not in world.proof_fails
+
+            async def remove_authorized_key(self, _login: str, key: str) -> None:
+                kind = "old" if key == _OLD_SSH_KEY else "new"
+                world.calls.append(f"remove-{kind}:{server}")
+                if kind == "new" and server in world.new_key_stays:
+                    raise RuntimeError("secret local detail")
+                world.authorized[server].discard(key)
+
+        return Executor()
+
+    def service(self, monkeypatch: pytest.MonkeyPatch) -> VaultCommandService:
+        import servonaut.services.vault.command_service as module
+
+        world = self
+        binding = {"vault_id": _ROTATION_VAULT, "vault_item_id": _ROTATION_ITEM, "public_fingerprint": "SHA256:old",
+                   "login_user": "deploy", "host_keys": [_OLD_SSH_KEY], "binding_revision": 1}
+
+        class Lease:
+            def __init__(self, server: str) -> None:
+                self.server = server
+
+            def close(self) -> None:
+                world.calls.append(f"close:{self.server}")
+
+        async def shared(_team: str, server: str) -> dict[str, object]:
+            return {"id": server, "hostname": f"{server}.example.test", "port": 22, "credential_binding": binding}
+
+        async def resolve(instance: dict[str, object]) -> Lease:
+            world.calls.append(f"connect:{instance['id']}")
+            return Lease(str(instance["id"]))
+
+        service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+        service.vaults = SimpleNamespace(get_vault=self.get_vault)  # type: ignore[assignment]
+        service.items = SimpleNamespace(  # type: ignore[assignment]
+            get_item=self.get_item, read_item=self.read_item, write_item=self.write_item,
+        )
+        service.bindings = SimpleNamespace(  # type: ignore[assignment]
+            verify_binding=lambda binding, *_args, **_kwargs: binding,
+            build_binding=lambda **kwargs: dict(kwargs),
+            put_team_binding=self.put_team_binding,
+        )
+        service.rotation = SimpleNamespace(rotate=self.rotate, resolve_exposure=AsyncMock())  # type: ignore[assignment]
+        service.list_exposures = AsyncMock(return_value={"data": []})  # type: ignore[method-assign]
+        service._shared_server = shared  # type: ignore[method-assign]
+        service.resolve_ssh = resolve  # type: ignore[method-assign]
+        service._remote_executor = self.executor  # type: ignore[method-assign]
+        service._new_ed25519_private_key = lambda: b"fixture new private key"  # type: ignore[method-assign]
+        service._public_key_from_private = lambda *_args: _NEW_SSH_KEY  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            module.crypto, "ssh_public_fingerprint",
+            lambda key: "SHA256:old" if key == _OLD_SSH_KEY else "SHA256:new",
+        )
+        return service
+
+
+async def _rotate_on(service: VaultCommandService, *servers: str) -> dict[str, object]:
+    return await service.rotate_ssh_key(
+        vault_id=_ROTATION_VAULT, item_id=_ROTATION_ITEM, team="example", servers=list(servers),
+    )
+
+
+def _first_host_step(calls: list[str]) -> int:
+    return min(index for index, call in enumerate(calls) if call.startswith(("connect:", "append:")))
+
+
+@pytest.mark.asyncio
+async def test_ssh_rotation_rotates_a_due_vault_key_before_touching_any_host(monkeypatch) -> None:
+    world = _RotationWorld(("server-1", "server-2"))
+    world.vault["rotation"] = {"required": True, "reasons": ["member_removed"]}
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1", "server-2")
+
+    assert result["rotated"] is True and result["vault_key_rotated"] is True, result
+    rotated_at = world.calls.index("rotate-vault")
+    assert rotated_at < _first_host_step(world.calls)
+    # The vault and item are read again after the rotation and the payload is
+    # decrypted from them, under the new key version.
+    assert world.calls[rotated_at + 1:rotated_at + 3] == ["get-vault", "get-item"]
+    assert world.read_with == (2, 2)
+    assert world.authorized == {"server-1": {_NEW_SSH_KEY}, "server-2": {_NEW_SSH_KEY}}
+
+
+@pytest.mark.asyncio
+async def test_ssh_rotation_without_a_due_vault_key_leaves_the_vault_key_alone(monkeypatch) -> None:
+    world = _RotationWorld(("server-1",))
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1")
+
+    assert result["rotated"] is True and result["vault_key_rotated"] is False
+    assert "rotate-vault" not in world.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "refusal"), [
+    ("member", None),
+    ("admin", APIError(code="forbidden", message="server text", status=403)),
+])
+async def test_ssh_rotation_stops_before_any_host_when_the_vault_key_may_not_be_rotated(
+    monkeypatch, role, refusal,
+) -> None:
+    world = _RotationWorld(("server-1",))
+    world.vault.update(rotation={"required": True}, my_role=role)
+    world.rotate_error = refusal
+    service = world.service(monkeypatch)
+
+    with pytest.raises(VaultUserError) as raised:
+        await _rotate_on(service, "server-1")
+
+    message = vault_failure_reason(raised.value)
+    assert "only a team owner or admin can do that" in message
+    assert f"`servonaut vault rotate --vault {_ROTATION_VAULT}`" in message
+    assert "no server was changed" in message and "server text" not in message
+    assert not any(call.startswith(("connect:", "append:")) for call in world.calls)
+    assert ("rotate-vault" in world.calls) is (refusal is not None)
+    assert "write" not in world.calls
+    assert world.authorized == {"server-1": {_OLD_SSH_KEY}}
+
+
+@pytest.mark.asyncio
+async def test_ssh_rotation_stops_before_any_host_when_the_vault_key_rotation_fails(monkeypatch) -> None:
+    world = _RotationWorld(("server-1",))
+    world.vault["rotation"] = {"required": True}
+    world.rotate_error = APIError(code="server_error", message="server text", status=500)
+    service = world.service(monkeypatch)
+
+    with pytest.raises(VaultUserError) as raised:
+        await _rotate_on(service, "server-1")
+
+    assert str(raised.value) == (
+        "the vault key must be rotated before this SSH key can be replaced, and rotating it failed "
+        "(HTTP 500, server_error); no server was changed"
+    )
+    assert not any(call.startswith(("connect:", "append:")) for call in world.calls)
+
+
+@pytest.mark.asyncio
+async def test_item_write_refused_for_a_due_rotation_takes_the_new_key_off_every_host(monkeypatch) -> None:
+    from servonaut.services.vault.errors import _ACTIONABLE_CODES
+
+    world = _RotationWorld(("server-1", "server-2"))
+    world.write_error = APIError(
+        code="vault_rotation_required", message="server text", status=409, details={"current_version": 3},
+    )
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1", "server-2")
+
+    assert result["rotated"] is False and result["item_written"] is False
+    assert result["error"] == _ACTIONABLE_CODES["vault_rotation_required"]
+    assert "server text" not in str(result)
+    assert result["hosts"] == [
+        {"server_id": "server-1", "status": "new_key_removed"},
+        {"server_id": "server-2", "status": "new_key_removed"},
+    ]
+    # Every host keeps exactly its old key; nothing was rebound or removed from it.
+    assert world.authorized == {"server-1": {_OLD_SSH_KEY}, "server-2": {_OLD_SSH_KEY}}
+    write = world.calls.index("write")
+    assert sorted(world.calls[write + 1:write + 3]) == ["remove-new:server-1", "remove-new:server-2"]
+    assert not any(call.startswith(("remove-old:", "rebind:")) for call in world.calls)
+    assert {"close:server-1", "close:server-2"} <= set(world.calls)
+    service.rotation.resolve_exposure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_item_write_reports_a_host_that_kept_the_new_key(monkeypatch) -> None:
+    world = _RotationWorld(("server-1", "server-2"))
+    world.write_error = APIError(code="vault_rotation_required", message="server text", status=409)
+    world.new_key_stays = {"server-2"}
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1", "server-2")
+
+    assert result["rotated"] is False and result["item_written"] is False
+    assert result["hosts"] == [
+        {"server_id": "server-1", "status": "new_key_removed"},
+        {"server_id": "server-2", "status": "new_key_left", "error": "RuntimeError"},
+    ]
+    assert "secret local detail" not in str(result)
+    # The old key was never touched, so no host is locked out.
+    assert all(_OLD_SSH_KEY in keys for keys in world.authorized.values())
+    assert world.authorized["server-2"] == {_OLD_SSH_KEY, _NEW_SSH_KEY}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_host_proof_takes_the_new_key_off_the_hosts_already_prepared(monkeypatch) -> None:
+    world = _RotationWorld(("server-1", "server-2"))
+    world.proof_fails = {"server-2"}
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1", "server-2")
+
+    assert result["rotated"] is False and result["item_written"] is False
+    assert result["error"] == "the new key could not log in to this server"
+    assert result["hosts"] == [
+        {"server_id": "server-1", "status": "new_key_removed"},
+        {"server_id": "server-2", "status": "failed", "error": "the new key could not log in to this server"},
+    ]
+    assert world.authorized == {"server-1": {_OLD_SSH_KEY}, "server-2": {_OLD_SSH_KEY}}
+    assert "write" not in world.calls
+
+
+@pytest.mark.asyncio
+async def test_a_failed_host_that_keeps_the_new_key_says_so(monkeypatch) -> None:
+    world = _RotationWorld(("server-1",))
+    world.proof_fails = {"server-1"}
+    world.new_key_stays = {"server-1"}
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1")
+
+    assert result["error"] == "the new key could not log in to this server"
+    assert result["hosts"] == [{"server_id": "server-1", "status": "new_key_left", "error": "RuntimeError"}]
+
+
+@pytest.mark.asyncio
+async def test_binding_failure_after_the_item_write_keeps_the_new_keys(monkeypatch) -> None:
+    world = _RotationWorld(("server-1", "server-2"))
+    world.put_error = APIError(code="server_error", message="server text", status=500)
+    service = world.service(monkeypatch)
+
+    result = await _rotate_on(service, "server-1", "server-2")
+
+    assert result["rotated"] is False and result["item_written"] is True
+    assert result["error"] == "HTTP 500, server_error"
+    # The vault item holds the new key now: every host keeps both keys.
+    assert world.authorized == {
+        "server-1": {_OLD_SSH_KEY, _NEW_SSH_KEY}, "server-2": {_OLD_SSH_KEY, _NEW_SSH_KEY},
+    }
+    assert not any(call.startswith(("remove-new:", "remove-old:")) for call in world.calls)
 
 
 def test_native_known_hosts_requires_private_real_directory_and_formats_port(tmp_path) -> None:
