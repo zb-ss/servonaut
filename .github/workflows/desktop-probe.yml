@@ -49,6 +49,9 @@ jobs:
           - os: windows-2025
             renderer: edgechromium
             python: local/desktop-probe-venv/Scripts/python.exe
+            # Now and then the native window takes longer than the default
+            # 40-second budget to open and close on this runner.
+            time_scale: '2'
           - os: macos-15-intel
             renderer: cocoa
             python: local/desktop-probe-venv/bin/python
