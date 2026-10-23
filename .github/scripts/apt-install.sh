@@ -22,15 +22,28 @@ download() {
     && sudo timeout --kill-after=10 "$limit" apt-get install -y -q --download-only "$@"
 }
 
+# Regional and cloud mirrors are subdomains of archive.ubuntu.com.
+mirror_host='https?://[a-z0-9.-]+\.archive\.ubuntu\.com/'
+
 use_fallback_mirror() {
-  local sources=()
+  local sources=() lists=() list
   shopt -s nullglob
   sources=("$apt_dir"/sources.list "$apt_dir"/sources.list.d/*.list "$apt_dir"/sources.list.d/*.sources)
   shopt -u nullglob
-  echo "::warning::The Ubuntu mirror did not deliver within ${attempt_seconds}s; switching to ${fallback_mirror}"
-  if [ "${#sources[@]}" -gt 0 ]; then
-    sudo sed -i -E "s#https?://[a-z0-9.-]*archive\.ubuntu\.com/ubuntu/?#${fallback_mirror}#g" "${sources[@]}"
-  fi
+  echo "::warning::The Ubuntu mirror did not deliver within ${attempt_seconds}s; switching to the main Ubuntu archive"
+  [ "${#sources[@]}" -gt 0 ] || return 0
+  sudo sed -i -E "s#${mirror_host}ubuntu/?#${fallback_mirror}#g" "${sources[@]}"
+  # GitHub's runners name a mirror list instead (mirror+file:/etc/apt/apt-mirrors.txt),
+  # with their cloud mirror first. Drop that entry and keep the main archive.
+  mapfile -t lists < <(grep -ohE 'mirror\+file:[^[:space:]]+' "${sources[@]}" | sed 's/^mirror+file://' | sort -u || true)
+  for list in "${lists[@]}"; do
+    [ -f "$list" ] || continue
+    sudo sed -i -E "\\#^${mirror_host}#d" "$list"
+    if ! grep -qE '^https?://archive\.ubuntu\.com/' "$list"; then
+      { echo "$fallback_mirror"; cat "$list"; } | sudo tee "$list.fallback" > /dev/null
+      sudo mv "$list.fallback" "$list"
+    fi
+  done
 }
 
 if ! download "$attempt_seconds" "$@"; then

@@ -42,9 +42,17 @@ _STUBS = {
 _AZURE_LIST = "deb http://azure.archive.ubuntu.com/ubuntu jammy main universe\n"
 _AZURE_SOURCES = "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n"
 _OTHER_LIST = "deb https://packages.microsoft.com/ubuntu/22.04/prod jammy main\n"
+# GitHub's Ubuntu runners point apt at a mirror list, their cloud mirror first.
+_RUNNER_MIRRORS = (
+    "http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+    "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+    "https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+)
 
 
-def _run(tmp_path: Path, *packages: str, slow_attempts: int = 0):
+def _run(
+    tmp_path: Path, *packages: str, slow_attempts: int = 0, mirror_list: str | None = None
+):
     stubs = tmp_path / "bin"
     stubs.mkdir()
     for name, body in _STUBS.items():
@@ -55,6 +63,12 @@ def _run(tmp_path: Path, *packages: str, slow_attempts: int = 0):
     (apt_dir / "sources.list.d").mkdir(parents=True)
     (apt_dir / "sources.list").write_text(_AZURE_LIST, encoding="utf-8")
     (apt_dir / "sources.list.d" / "ubuntu.sources").write_text(_AZURE_SOURCES, encoding="utf-8")
+    if mirror_list is not None:
+        (apt_dir / "apt-mirrors.txt").write_text(mirror_list, encoding="utf-8")
+        (apt_dir / "sources.list.d" / "runner.sources").write_text(
+            f"Types: deb\nURIs: mirror+file:{apt_dir / 'apt-mirrors.txt'}\nSuites: noble\n",
+            encoding="utf-8",
+        )
     (apt_dir / "sources.list.d" / "microsoft-prod.list").write_text(_OTHER_LIST, encoding="utf-8")
     log = tmp_path / "calls.log"
     log.touch()
@@ -113,6 +127,40 @@ def test_a_slow_mirror_is_replaced_by_the_main_archive(tmp_path: Path) -> None:
     assert "URIs: http://archive.ubuntu.com/ubuntu/\n" in ubuntu_sources
     assert other_list == _OTHER_LIST
     assert "::warning::The Ubuntu mirror did not deliver within 120s" in result.stdout
+
+
+def test_a_slow_runner_mirror_list_falls_back_to_the_main_archive(tmp_path: Path) -> None:
+    result, _, apt_dir = _run(tmp_path, "xvfb", slow_attempts=1, mirror_list=_RUNNER_MIRRORS)
+
+    assert result.returncode == 0, result.stderr
+    assert (apt_dir / "apt-mirrors.txt").read_text(encoding="utf-8") == (
+        "https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+        "https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+    )
+    assert "mirror+file:" in (apt_dir / "sources.list.d" / "runner.sources").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_mirror_list_without_the_main_archive_gains_it(tmp_path: Path) -> None:
+    result, _, apt_dir = _run(
+        tmp_path,
+        "xvfb",
+        slow_attempts=1,
+        mirror_list="http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (apt_dir / "apt-mirrors.txt").read_text(encoding="utf-8") == (
+        "http://archive.ubuntu.com/ubuntu/\n"
+    )
+
+
+def test_a_healthy_mirror_leaves_the_mirror_list_alone(tmp_path: Path) -> None:
+    result, _, apt_dir = _run(tmp_path, "xvfb", mirror_list=_RUNNER_MIRRORS)
+
+    assert result.returncode == 0, result.stderr
+    assert (apt_dir / "apt-mirrors.txt").read_text(encoding="utf-8") == _RUNNER_MIRRORS
 
 
 def test_a_last_attempt_has_no_time_limit(tmp_path: Path) -> None:
