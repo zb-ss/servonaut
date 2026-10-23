@@ -52,6 +52,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="start signed in to the local Servonaut API")
     up.add_argument("--ssh-ca-off", action="store_true",
                     help="answer like a service with SSH certificates switched off")
+    up.add_argument("--ssh-ca-refuse", choices=("frozen", "busy"), default=None,
+                    help="refuse every SSH certificates switch-on: frozen = switching on is paused "
+                         "(409), busy = another switch-on holds the service (503)")
     up.add_argument("--teams", action="store_true",
                     help="on the Teams plan, owning a team whose shared server (server-1) runs "
                          "an sshd that honours SSH certificates, to walk Team Vault and SSH "
@@ -138,8 +141,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from e2e.sandbox import owner
 
         return owner.up(root=args.root, scenario=args.scenario, signed_in=args.signed_in,
-                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, api_delay=args.api_delay,
-                        teams=args.teams, account_email=args.account_email,
+                        keep=args.keep, ssh_ca_off=args.ssh_ca_off, ssh_ca_refuse=args.ssh_ca_refuse,
+                        api_delay=args.api_delay, teams=args.teams, account_email=args.account_email,
                         verification_uri=args.verification_uri, user_code=args.user_code,
                         hostname=args.hostname, ai_script=args.ai_script)
 

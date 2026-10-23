@@ -187,3 +187,25 @@ def test_a_service_that_cannot_sign_certificates_does_not_blame_the_user() -> No
         "the Servonaut service cannot issue SSH certificates right now; "
         "nothing is wrong with your setup, so try again later"
     )
+
+
+def test_paused_certificate_switch_on_points_to_support_without_blaming_the_user() -> None:
+    exc = APIError(code="ssh_ca_enable_frozen", message="server text", status=409)
+
+    assert vault_failure_reason(exc) == (
+        "switching on SSH certificates is paused on the Servonaut service for now; "
+        "nothing is wrong with your setup, so contact support at https://servonaut.dev/contact "
+        "to ask for them for your team"
+    )
+
+
+def test_a_busy_certificate_service_says_to_try_again_and_names_the_service_not_the_team() -> None:
+    exc = APIError(code="ssh_ca_busy", message="server text", status=503)
+
+    reason = vault_failure_reason(exc)
+
+    assert reason == (
+        "the Servonaut service is busy switching on SSH certificates; "
+        "nothing is wrong with your setup, so try again in a minute"
+    )
+    assert "team" not in reason

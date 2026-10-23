@@ -55,6 +55,9 @@ _INACTIVE_DEVICE_REASONS = {
     "expired": "the approval window expired; run `servonaut vault devices add` to try again",
 }
 
+# Where people reach Servonaut support.
+_CONTACT_URL = "https://servonaut.dev/contact"
+
 # Refusals the user can act on; keyed by the server's machine-readable code.
 _ACTIONABLE_CODES = {
     "identity_unconfirmed": (
@@ -69,6 +72,18 @@ _ACTIONABLE_CODES = {
     "ssh_ca_unavailable": (
         "the Servonaut service cannot issue SSH certificates right now; "
         "nothing is wrong with your setup, so try again later"
+    ),
+    # Switching certificates on (or back on) is paused for teams the service
+    # has not cleared yet; the pause covers the whole service.
+    "ssh_ca_enable_frozen": (
+        "switching on SSH certificates is paused on the Servonaut service for now; "
+        f"nothing is wrong with your setup, so contact support at {_CONTACT_URL} to ask for them for your team"
+    ),
+    # Another switch-on is in progress somewhere on the service, not necessarily
+    # for this team.
+    "ssh_ca_busy": (
+        "the Servonaut service is busy switching on SSH certificates; "
+        "nothing is wrong with your setup, so try again in a minute"
     ),
     "no_identity": (
         "this device does not hold your current vault identity; add it from an active device "
