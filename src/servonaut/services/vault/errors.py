@@ -89,7 +89,25 @@ _ACTIONABLE_CODES = {
         "this device does not hold your current vault identity; add it from an active device "
         "(`servonaut vault devices add`) or recover it (`servonaut vault recover`)"
     ),
+    # The service takes no item writes while the vault key is due for rotation
+    # (``details.current_version`` is the version to rotate from).
+    "vault_rotation_required": (
+        "the vault key must be rotated first, usually because a member left; a team owner or admin "
+        "rotates it with Rotate vault key or `servonaut vault rotate --vault <vault>`, then try again"
+    ),
 }
+
+# An SSH key rotation first rotates a vault key that is due; these say why it
+# stopped there, before any server was touched.
+VAULT_ROTATION_NOT_PERMITTED = (
+    "the vault key must be rotated before this SSH key can be replaced, usually because a member left, "
+    "and only a team owner or admin can do that; ask one to run `servonaut vault rotate --vault {vault_id}` "
+    "or use Rotate vault key, then try again; no server was changed"
+)
+VAULT_ROTATION_FAILED = (
+    "the vault key must be rotated before this SSH key can be replaced, and rotating it failed "
+    "({reason}); no server was changed"
+)
 
 # A service can run with SSH certificates switched off; that is the service's
 # choice rather than a failure, so it reads as information, not an error.

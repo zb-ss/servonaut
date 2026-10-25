@@ -64,3 +64,46 @@ def grant_summary(results: Any) -> str:
     if skipped:
         sentences.append(f"{_count(skipped, 'grant was', 'grants were')} not applied.")
     return " ".join(sentences)
+
+
+# Said before an SSH key rotation's outcome when it rotated the vault key first.
+VAULT_KEY_ROTATED_FIRST = (
+    "The vault key was rotated first, as the service required (usually after a member leaves)."
+)
+
+
+def ssh_rotation_failure(result: Any, *, retry: str) -> str:
+    """Why an SSH key rotation stopped and what to do next, for people.
+
+    *result* is ``rotate_ssh_key``'s outcome when ``rotated`` is false;
+    *retry* says how to start the rotation again on the calling surface.
+    Until the vault item is saved, every new key is taken off the hosts again
+    and each keeps its old key; after that, the old key may still be on some.
+    """
+    outcome = result if isinstance(result, Mapping) else {}
+    hosts = [host for host in outcome.get("hosts") or [] if isinstance(host, Mapping)]
+    reason = outcome.get("error")
+    stopped = (
+        f"SSH key rotation did not finish ({terminal_safe(reason)})." if reason
+        else "SSH key rotation did not finish."
+    )
+    if outcome.get("item_written") is False:
+        left = [terminal_safe(host.get("server_id")) for host in hosts if host.get("status") == "new_key_left"]
+        if not left:
+            return (
+                f"{stopped} Nothing changed on the servers: the old key is still in place and no new key "
+                f"was left behind. The exposure stays open; {retry} once the cause is fixed."
+            )
+        new_key = terminal_safe(outcome.get("public_fingerprint") or "")
+        return (
+            f"{stopped} The old key is still in place on every server, but the unused new key"
+            f"{f' ({new_key})' if new_key else ''} could not be removed from: {', '.join(left)}; "
+            f"delete its line from authorized_keys there. The exposure stays open; {retry} once the cause is fixed."
+        )
+    unfinished = [
+        terminal_safe(host.get("server_id")) for host in hosts if host.get("status") != "old_key_removed"
+    ]
+    return (
+        f"{stopped} The exposed key may still log in to: {', '.join(unfinished) or 'the selected servers'}. "
+        f"The exposure stays open; remove the old key from those servers, then {retry}."
+    )

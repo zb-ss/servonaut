@@ -30,7 +30,7 @@ from textual.worker import Worker
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.services.vault import onboarding
-from servonaut.services.vault.display import grant_summary
+from servonaut.services.vault.display import VAULT_KEY_ROTATED_FIRST, grant_summary, ssh_rotation_failure
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -1533,7 +1533,8 @@ class VaultScreen(Screen):
                 ConfirmActionScreen(
                     "Rotate exposed SSH key",
                     "A replacement key will be installed and proven on each selected host before the old key is removed.",
-                    ["A host failure leaves the exposure open.", "Review the per-host result before resolving the exposure."],
+                    ["A vault key that is due for rotation is rotated first.", "A host failure leaves the exposure open.",
+                     "Review the per-host result before resolving the exposure."],
                     "ROTATE",
                     "Rotate key",
                     severity="warning",
@@ -1557,21 +1558,17 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"SSH-key rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        hosts = result.get("hosts", []) if isinstance(result, Mapping) else []
-        self._rotation_hosts = [dict(host) for host in hosts if isinstance(host, Mapping)]
+        outcome = result if isinstance(result, Mapping) else {}
+        self._rotation_hosts = [dict(host) for host in outcome.get("hosts") or [] if isinstance(host, Mapping)]
         self._table_mode = "rotation"
         self._render_rotation()
-        rotated = result.get("rotated") if isinstance(result, Mapping) else False
-        if rotated:
-            self._status(_rotation_summary(result.get("exposures")))
+        first = f"{VAULT_KEY_ROTATED_FIRST} " if outcome.get("vault_key_rotated") is True else ""
+        if outcome.get("rotated"):
+            self._status(first + _rotation_summary(outcome.get("exposures")))
             return
-        message = (
-            "SSH key rotation did not finish. The exposed key may still log in to the hosts "
-            "not marked old_key_removed, so the exposure stays open: remove the old key "
-            "there, then rotate again."
-        )
+        message = first + ssh_rotation_failure(outcome, retry="rotate again")
         self._status(message)
-        self.app.notify(message, severity="error", markup=False)
+        self.app.notify(self.scrub_for_display(message), severity="error", markup=False)
 
     def action_devices(self) -> None:
         if not self._allows_identity_action("ready"):

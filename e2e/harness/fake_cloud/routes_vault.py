@@ -264,6 +264,8 @@ class VaultCloud:
             self.identity_confirmation = "auto"
             # A key of CA_ACTIVATION_REFUSALS, or None to switch certificates on as asked.
             self.ca_activation_refusal: Optional[str] = None
+            # Vaults whose key becomes due for rotation when their next item write arrives.
+            self._rotation_due_on_item_write: set[str] = set()
 
     def refuse_ca_activation(self, kind: Optional[str]) -> None:
         """Control: refuse every CA switch-on and rollover start with *kind*.
@@ -276,6 +278,29 @@ class VaultCloud:
             raise ValueError(f"unknown CA activation refusal: {kind!r}")
         with self._lock:
             self.ca_activation_refusal = kind
+
+    def require_rotation(self, vault_id: str, *, on_next_item_write: bool = False) -> None:
+        """Control: make the vault's key due for rotation, as removing a member does.
+
+        While it is due the service refuses item writes with 409
+        ``vault_rotation_required`` until an owner or admin rotates the key.
+        With *on_next_item_write* the key becomes due only when the vault's
+        next item write arrives (a member removed while a client works), so
+        that write is the one refused.
+        """
+        with self._lock:
+            if vault_id not in self._vaults:
+                raise ValueError(f"unknown vault: {vault_id}")
+            if on_next_item_write:
+                self._rotation_due_on_item_write.add(vault_id)
+            else:
+                self._mark_rotation_due(self._vaults[vault_id])
+
+    @staticmethod
+    def _mark_rotation_due(vault: dict[str, Any]) -> None:
+        last = vault["rotation"].get("last_rotated_at")
+        vault["rotation"] = {"required": True, "required_since": _now(), "reasons": ["member_removed"],
+                             "last_rotated_at": last}
 
     def open_exposure(self, vault_id: str, item_id: str, *, public_fingerprint: str, subject: str = "member") -> str:
         """Control: record that a removed member had fetched this item's key."""
@@ -795,6 +820,12 @@ class VaultCloud:
             nonce, ciphertext = _decode(body.get("nonce"), ITEM_NONCE_BYTES), _decode(body.get("ciphertext"))
             if nonce is None or not ciphertext or len(ciphertext) < 16:
                 return 422, {"error": {"code": "validation_failed", "message": "Item must contain authenticated ciphertext"}}
+            if vault_id in self._rotation_due_on_item_write:
+                self._rotation_due_on_item_write.discard(vault_id)
+                self._mark_rotation_due(vault)
+            if vault["rotation"].get("required"):
+                return _refusal(409, "vault_rotation_required", "Rotate the vault key before changing items",
+                                current_version=vault["current_version"])
             expected = body.get("expected_revision")
             old = self._items.setdefault(vault_id, {}).get(item_id)
             if old is not None and expected != old["revision"]:
@@ -875,6 +906,9 @@ class VaultCloud:
             message = _lp("svn-tv-version-v1", vault_id, vault["scope"], old_version + 1, public_key, previous, identity["identity_id"])
             if not _verify(_decode(identity["sig_public_key"], KEY_BYTES), message, signature):
                 return 422, {"error": {"code": "invalid_signature", "message": "Rotation version signature did not verify"}}
+            rewraps = self._item_rewraps(vault_id, body.get("item_rewraps"), old_version + 1, identity)
+            if isinstance(rewraps, tuple):
+                return rewraps
             vault["versions"].append({"version": old_version + 1, "public_key": _b64(public_key), "prev_hash": _b64(previous),
                                       "record_hash": _b64(_digest("svn-tv-version-hash-v1", message, signature)),
                                       "creator_identity_id": identity["identity_id"], "signature": _b64(signature), "created_at": _now(), "retired_at": None})
@@ -884,8 +918,45 @@ class VaultCloud:
                 vault["versions"].pop()
                 vault["current_version"] = old_version
                 return grant_status, grant_result
+            for item_id, wrapped, wrap_signature in rewraps:
+                self._items[vault_id][item_id].update({
+                    "key_version": old_version + 1, "wrapped_item_key": _b64(wrapped),
+                    "wrap_signature": _b64(wrap_signature), "wrapper_identity_id": identity["identity_id"],
+                    "updated_at": _now(),
+                })
             vault["rotation"] = {"required": False, "required_since": None, "reasons": [], "last_rotated_at": _now()}
             return 200, {"vault": self._vault_payload(vault, user_id), "accepted": grant_result["accepted"]}
+
+    def _item_rewraps(
+        self, vault_id: str, records: object, version: int, identity: dict[str, Any],
+    ) -> "list[tuple[str, bytes, bytes]] | tuple[int, dict[str, Any]]":
+        """A rotation's re-wrapped item keys, checked as the service checks them.
+
+        Every live item is re-wrapped exactly once, at its current revision,
+        for the new version and signed by the rotating identity; otherwise
+        the rotation is refused (the client re-reads and retries an
+        ``item_set_changed``).
+        """
+        live = {item_id: item for item_id, item in self._items.get(vault_id, {}).items() if not item.get("deleted_at")}
+        if not isinstance(records, list):
+            return _refusal(422, "validation_failed", "item_rewraps must be a list", field="item_rewraps")
+        signer = _decode(identity["sig_public_key"], KEY_BYTES)
+        rewraps: list[tuple[str, bytes, bytes]] = []
+        for record in records:
+            item = live.get(record.get("item_id")) if isinstance(record, dict) else None
+            if item is None or record.get("revision") != item["revision"]:
+                return _refusal(409, "item_set_changed", "The vault's items changed")
+            wrapped = _decode(record.get("wrapped_item_key"))
+            signature = _decode(record.get("wrap_signature"), SIG_BYTES)
+            message = _lp("svn-vault-item-wrap-v1", vault_id, item["item_id"], item["revision"], version,
+                          hashlib.sha256(wrapped or b"").digest(), _decode(item["ciphertext_sha256"]) or b"",
+                          identity["identity_id"])
+            if wrapped is None or signature is None or not _verify(signer, message, signature):
+                return _refusal(422, "invalid_signature", "Item re-wrap signature did not verify")
+            rewraps.append((item["item_id"], wrapped, signature))
+        if sorted(item_id for item_id, _wrapped, _signature in rewraps) != sorted(live):
+            return _refusal(409, "item_set_changed", "The vault's items changed")
+        return rewraps
 
     def delete_item(self, vault_id: str, item_id: str, body: dict[str, Any], user_id: int) -> tuple[int, dict[str, Any]]:
         with self._lock:
@@ -1191,6 +1262,14 @@ class VaultCloud:
                 row["needs_refresh"] = self._needs_refresh(state, host)
                 rows.append(row)
             return {"data": rows}
+
+    def server_binding_field(self, slug: str, server_id: str) -> Optional[dict[str, Any]]:
+        """A shared server's ``credential_binding`` field: its signed vault binding, or ``None``."""
+        if slug != TEAM_SLUG:
+            return None
+        with self._lock:
+            binding = self._bindings.get(("team", server_id))
+            return copy.deepcopy(binding) if binding is not None else None
 
     def server_ca_field(self, slug: str, server_id: str) -> Optional[dict[str, Any]]:
         """A shared server's ``ssh_ca`` field; ``None`` while the CA is off."""
