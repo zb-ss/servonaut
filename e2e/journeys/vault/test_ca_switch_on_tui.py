@@ -89,3 +89,41 @@ async def test_the_ssh_certificates_screen_switches_certificates_on_after_confir
         await wait_for_async(
             lambda: not screen.query_one("#ca_audit", Button).disabled, desc="the CA actions to be offered",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refusal", "reason"), [
+    ("frozen", "switching on SSH certificates is paused on the Servonaut service for now; nothing is wrong with "
+               "your setup, so contact support at https://servonaut.dev/contact to ask for them for your team"),
+    ("busy", "the Servonaut service is busy switching on SSH certificates; nothing is wrong with your setup, "
+             "so try again in a minute"),
+])
+async def test_a_refused_switch_on_says_why_and_leaves_certificates_off(
+    fake_cloud: Any, account_home: Any, monkeypatch: pytest.MonkeyPatch, refusal: str, reason: str,
+) -> None:
+    fake_cloud.account.configure(teams=[_VAULT_TEAM])
+    fake_cloud.vault.refuse_ca_activation(refusal)
+    sandbox = account_home(f"ca-switch-on-{refusal}")
+    service = _native_service(fake_cloud, sandbox.home, monkeypatch)
+    app = _CaHost(service)
+
+    async with app.run_test(size=(160, 50)):
+        screen = await wait_for_async(
+            lambda: app.screen if isinstance(app.screen, CaScreen) else None, desc="the SSH Certificates screen",
+        )
+        enable = screen.query_one("#ca_enable", Button)
+        await wait_for_async(lambda: enable.display and not enable.disabled, desc="the switch-on button")
+
+        enable.press()
+        (await _modal(app, open_=True)).query_one("#ca_enable_confirm", Button).press()
+        await _modal(app, open_=False)
+
+        toasts = await wait_for_async(
+            lambda: [(n.severity, str(n.message)) for n in app._notifications] or None,  # noqa: SLF001 - own host
+            desc="the refusal toast",
+        )
+        assert toasts == [("error", f"Switching on SSH certificates failed ({reason}).")]
+        assert fake_cloud.vault.ca_payload(TEAM_SLUG)["enabled"] is False
+        assert "not switched on for this team" in _status(screen)
+        # Nothing changed, so switching on stays on offer for a later try.
+        await wait_for_async(lambda: enable.display and not enable.disabled, desc="the switch-on button again")

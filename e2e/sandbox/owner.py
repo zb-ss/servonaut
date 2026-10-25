@@ -355,7 +355,8 @@ class Owner:
 
     def __init__(self, root: Path, scenario: str, pointer: Path, claim_record: dict,
                  lock: state.OwnerLock, stop_request: StopRequest, *,
-                 signed_in: bool, keep: bool, ssh_ca_off: bool = False, api_delay: float = 0.0,
+                 signed_in: bool, keep: bool, ssh_ca_off: bool = False,
+                 ssh_ca_refuse: Optional[str] = None, api_delay: float = 0.0,
                  teams: bool = False, account_email: str = "",
                  verification_uri: Optional[str] = None, user_code: Optional[str] = None,
                  hostname: Optional[str] = None, ai_script: Optional[dict] = None) -> None:
@@ -368,6 +369,7 @@ class Owner:
         self.signed_in = signed_in
         self.keep = keep
         self.ssh_ca_off = ssh_ca_off
+        self.ssh_ca_refuse = ssh_ca_refuse
         self.api_delay = api_delay
         self.teams = teams
         self.account_email = account_email
@@ -467,6 +469,8 @@ class Owner:
         self.fake_cloud = self._start(FakeCloud(material, default_pypi_version=get_version()).start())
         if self.ssh_ca_off:
             self.fake_cloud.switch_off_ssh_ca()
+        if self.ssh_ca_refuse:
+            self.fake_cloud.vault.refuse_ca_activation(self.ssh_ca_refuse)
         if self.api_delay:
             self.fake_cloud.slow_down(self.api_delay)
         if self.account_email or self.verification_uri:
@@ -568,6 +572,7 @@ class Owner:
             "scenario": self.scenario,
             "signed_in": self.signed_in,
             "ssh_ca_off": self.ssh_ca_off,
+            "ssh_ca_refuse": self.ssh_ca_refuse,
             "api_delay": self.api_delay,
             "keep": self.keep,
             "started_at": self.claim_record["started_at"],
@@ -1041,7 +1046,7 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
 
 def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
-    ssh_ca_off: bool = False, api_delay: float = 0.0, teams: bool = False,
+    ssh_ca_off: bool = False, ssh_ca_refuse: Optional[str] = None, api_delay: float = 0.0, teams: bool = False,
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
     ai_script: Optional[Path] = None, user_code: Optional[str] = None,
 ) -> int:
@@ -1081,8 +1086,8 @@ def up(
                 _say(f"not starting: {exc}")
                 return 2
             owner = Owner(root, scenario, pointer, record, lock, stop_request,
-                          signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off, api_delay=api_delay,
-                          teams=teams, account_email=account_email,
+                          signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off,
+                          ssh_ca_refuse=ssh_ca_refuse, api_delay=api_delay, teams=teams, account_email=account_email,
                           verification_uri=verification_uri, user_code=user_code,
                           hostname=hostname, ai_script=script)
         stop_request.raise_if_requested()
