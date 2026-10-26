@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Optional
+
+from servonaut.services.shared_servers import row_team_label, team_key_fallback, team_key_target
 
 logger = logging.getLogger(__name__)
 
@@ -210,16 +212,45 @@ async def resolve_with_vault(
     vault_runtime: Any,
     connection_service: Any,
     cache: Optional[VaultLeaseCache] = None,
+    team_rows: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """*conn* unchanged, or with the server's vault credential applied.
 
+    A server of the user's own without a vault credential or a local key
+    for its key pair connects with a team's vault key or SSH certificate
+    when a team in *team_rows* shares the same server (see
+    ``shared_servers.team_key_fallback``), or when *instance* was marked
+    with such a team row (``shared_servers.with_team_key``). It then goes
+    where the team's key points, by the team row's connection rule, and
+    ``key_team`` names the team. When the team's key cannot be used here
+    (no vault identity yet, a grant still pending), the user's own SSH
+    setup applies as before: an agent or ssh's default keys may hold the
+    server's key.
+
     Raises:
-        VaultCredentialError: see :func:`vault_lease`.
+        VaultCredentialError: see :func:`vault_lease` (the server's own
+            vault credential).
     """
     lease = await vault_lease(instance, vault_runtime, cache=cache)
+    if lease is not None:
+        return apply_vault_lease(conn, lease, instance=instance, connection_service=connection_service)
+    team = team_key_target(instance) or team_key_fallback(instance, team_rows, conn.get("key_path"))
+    if team is None:
+        return dict(conn)
+    try:
+        lease = await vault_lease(team, vault_runtime, cache=cache)
+    except VaultCredentialError as exc:
+        logger.info("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
+        return dict(conn)
     if lease is None:
         return dict(conn)
-    return apply_vault_lease(conn, lease, instance=instance, connection_service=connection_service)
+    # The team's route: its connection rule, not the one for the user's own row.
+    applied = apply_vault_lease(
+        {**conn, "profile": None, "proxy_args": []}, lease,
+        instance=team, connection_service=connection_service,
+    )
+    applied["key_team"] = row_team_label(team)
+    return applied
 
 
 def ssh_identity_kwargs(conn: Mapping[str, Any]) -> dict[str, Any]:

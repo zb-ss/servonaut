@@ -14,7 +14,9 @@ the hermetic FakeCloud:
    stay closed until a grant exists;
 4. the owner's ``vault grants process`` seals the vault key for the member,
    who can then read the item's metadata and log in to ``server-1`` with a
-   certificate the team CA issued for their own device;
+   certificate the team CA issued for their own device. ``server-1`` is also
+   ``edge-1`` of the member's own AWS fleet, whose key pair has no key on
+   their computer: by that name too it connects with the team's certificate;
 5. removed from the team, the member no longer sees its vault.
 
 FakeCloud answers each person for the token they hold (``FakeCloud.add_user``).
@@ -106,7 +108,11 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     fake_cloud.configure(plan="teams", mcp_connections=0)
     fake_cloud.account.configure(teams=[])
     fake_cloud.account.create_team(name="Example team", slug=TEAM_SLUG, team_id=TEAM_ID, owner_user_id=OWNER_ID)
-    fake_cloud.account.place_shared_server(TEAM_SLUG, SERVER_ID, hostname=LOOPBACK, port=server_1.port)
+    # The team shares the machine the member also lists as edge-1 of their own AWS account.
+    fake_cloud.account.place_shared_server(
+        TEAM_SLUG, SERVER_ID, hostname=LOOPBACK, port=server_1.port,
+        instance_id=fleet.EDGE_1.instance_id,
+    )
     fake_cloud.add_user(MEMBER_ID, email=MEMBER_EMAIL, name="Member")
     _configure_test_custody(journey)
 
@@ -177,6 +183,16 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
         f"/api/v1/teams/{TEAM_SLUG}/servers/{SERVER_ID}/ssh-verify-report") if entry.get("user_id") == MEMBER_ID]
     assert (report["status"], report["body"]["status"], report["body"]["resolution_tier"]) == (200, "verified", "ca")
 
+    # The member's own edge-1 is the same machine, and its key pair (ops-key)
+    # has no key on this computer: it connects with the team's certificate.
+    by_own_name = cli(member, "ssh", fleet.EDGE_1.name, stdin="hostname\n")
+    assert by_own_name.returncode == 0, by_own_name.describe()
+    assert by_own_name.stdout.splitlines()[0] == HOST_NAME
+    assert "No key of your own for 'edge-1' here: connecting with team " \
+        "Example team's key" in by_own_name.stderr, by_own_name.describe()
+    assert "SSH resolution tier: ca" in by_own_name.stderr, by_own_name.describe()
+    assert server_1.certificate_logins()[-1].accepted
+
     # 5. Removed from the team, the member no longer sees its vault.
     member_row = next(m for m in fake_cloud.account.members(TEAM_SLUG) if m["user"] and m["user"]["id"] == MEMBER_ID)
     await owner_teams.remove_member(TEAM_SLUG, str(member_row["id"]))
@@ -186,7 +202,7 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     member_requests = [entry for entry in fake_cloud.requests() if entry.get("user_id") == MEMBER_ID]
     assert member_requests and all(entry["bearer_ok"] for entry in member_requests)
     fake_cloud.assert_no_unexpected_errors(
-        *expected("no secret store on file", "no key reference"),
+        *expected("no secret store on file", "no key reference", "no vault binding"),
         # The member's item read before any grant existed.
         ("GET", rf"/api/v1/vaults/{vault_id}/items", 403),
     )

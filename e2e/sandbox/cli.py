@@ -61,6 +61,10 @@ def _parser() -> argparse.ArgumentParser:
                          "certificates end to end; with a second person, a member to be "
                          "(member@example.com, own home, signed out: run --as member, "
                          "accept-invite); needs a short --root, such as /tmp/svt")
+    up.add_argument("--team-server-as", default=None, metavar="NAME",
+                    help="with --teams: the team's shared server is also NAME of the account's "
+                         "AWS fleet (edge-1, for example), and the member gets the account's AWS "
+                         "credentials but no key files, like a teammate given AWS keys")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
@@ -144,7 +148,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         keep=args.keep, ssh_ca_off=args.ssh_ca_off, ssh_ca_refuse=args.ssh_ca_refuse,
                         api_delay=args.api_delay, teams=args.teams, account_email=args.account_email,
                         verification_uri=args.verification_uri, user_code=args.user_code,
-                        hostname=args.hostname, ai_script=args.ai_script)
+                        hostname=args.hostname, ai_script=args.ai_script,
+                        team_server_as=args.team_server_as)
 
     from e2e.sandbox import client
 

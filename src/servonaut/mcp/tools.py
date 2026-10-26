@@ -37,7 +37,10 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
-from servonaut.services.shared_servers import as_shared_row, fold_shared_rows
+from servonaut.services.shared_servers import (
+    as_shared_row, fold_shared_rows, lacks_own_key, team_key_fallback, team_key_target,
+    with_team_key,
+)
 from servonaut.services.team_rules import (
     CREDENTIAL_CHECK_FAILED,
     CREDENTIAL_CHECK_FAILED_REASON,
@@ -99,6 +102,14 @@ _BW_REF_MEMO_TTL_SECONDS = 60.0
 # How long one read of the teams' shared servers serves list_instances and
 # lookups: a tool loop must not cost a team-list request per call.
 _SHARED_SERVERS_MEMO_TTL_SECONDS = 60.0
+
+
+def _own_row_key(instance: Dict) -> tuple:
+    """A memo key for one of the user's own servers."""
+    return (
+        str(instance.get('provider') or 'aws').lower(), str(instance.get('account') or ''),
+        str(instance.get('id') or ''), str(instance.get('name') or ''),
+    )
 
 # --- aws_call passthrough -------------------------------------------------
 # boto3 operation names are snake_case (describe_security_group_rules, get_ip_set,
@@ -292,6 +303,11 @@ class ServonautTools:
         self._team_policy = team_policy
         # Whose vault key an own server connects with (see _credential_rules_row).
         self._credential_memo = CredentialRulesMemo()
+        # Own server -> (expiry, binding generation, team row or None): which
+        # team's key it falls back to (see _with_team_key).
+        self._team_key_memo: Dict[tuple, tuple] = {}
+        # (own server, team slug) -> (expiry, rules row): that team's rules there.
+        self._team_key_rules_memo: Dict[tuple, tuple] = {}
         # (provider, instance_id) -> (monotonic_expiry, ref-or-None). See
         # _BW_REF_MEMO_TTL_SECONDS — holds opaque ref pointers, never keys.
         self._bw_ref_memo: Dict[tuple, tuple] = {}
@@ -446,6 +462,9 @@ class ServonautTools:
         self._vault_runtime = service
         self._bw_ref_memo.clear()
         self._credential_memo.clear()
+        self._team_key_memo.clear()
+        self._team_key_rules_memo.clear()
+        self._shared_memo = None
 
     # ------------------------------------------------------------------
     # Provider accounts
@@ -649,6 +668,7 @@ class ServonautTools:
         )
         if error is not None:
             return None, None, error
+        instance = await self._with_team_key(instance)
         if not for_agent:
             return instance, None, None
         team_guard, error = await self._agent_team_guard(tool_name, args, instance)
@@ -752,7 +772,9 @@ class ServonautTools:
         """The team row whose rules apply to *instance*, an own server reached
         with a team's vault key; None for any other server.
 
-        The answer is remembered a while (see ``CredentialRulesMemo``).
+        The answer is remembered a while (see ``CredentialRulesMemo``). An
+        own server without such a key that is marked to connect with a team's
+        key instead (see :meth:`_with_team_key`) runs under that team's rules.
 
         Raises:
             Exception: the key or the team could not be checked.
@@ -768,7 +790,19 @@ class ServonautTools:
                 shared = None
             return await credential_rules_row(instance, slug, team_service, shared)
 
-        return await self._credential_memo.rules_row(instance, self._vault_runtime, team_row)
+        row = await self._credential_memo.rules_row(instance, self._vault_runtime, team_row)
+        fallback = team_key_target(instance)
+        if row is not None or fallback is None:
+            return row
+        slug = str(fallback.get('team_slug') or '')
+        key = (*_own_row_key(instance), slug)
+        now = time.monotonic()
+        hit = self._team_key_rules_memo.get(key)
+        if hit is not None and hit[0] > now:
+            return dict(hit[1])
+        rules_row = dict(await team_row(slug))
+        self._team_key_rules_memo[key] = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rules_row)
+        return dict(rules_row)
 
     async def _provider_target(
         self, provider: str, reference: str, account: str,
@@ -1009,7 +1043,12 @@ class ServonautTools:
             )
             return msg
 
-        if key_source and key_source.startswith('vault_'):
+        # A team's key on the user's own AWS server: SSM with the user's own
+        # AWS credentials stays the fallback, as without the team's key.
+        if (
+            key_source and key_source.startswith('vault_')
+            and not (is_aws and team_key_target(instance) is not None)
+        ):
             msg = (
                 "Error: Native Vault SSH connection failed (host not reachable "
                 "/ sshd refused). Verify the shared-server endpoint and host "
@@ -4444,7 +4483,79 @@ class ServonautTools:
             self._config_manager.get().default_username,
         )
 
+    async def _with_team_key(self, instance: Dict) -> Dict:
+        """*instance*, marked to connect with a team's key when it falls back to one.
+
+        A server of the user's own whose key pair they have no key for here
+        connects with the vault key or SSH certificate of a team that shares
+        it (see ``shared_servers.team_key_fallback``). Marked here, before
+        any rule is checked, the team's rules apply to it and its connection
+        uses that key (:meth:`_resolve_connection_with_vault`).
+        """
+        # No I/O for a team's row, a custom server or a server without a key
+        # pair; without a vault runtime no team key can be used here.
+        if self._vault_runtime is None or not lacks_own_key(instance, None):
+            return instance
+        if self._resolve_connection(instance).get('key_path'):
+            return instance
+        key = _own_row_key(instance)
+        generation = getattr(self._vault_runtime, 'binding_generation', None)
+        now = time.monotonic()
+        hit = self._team_key_memo.get(key)
+        if hit is not None and hit[0] > now and hit[1] == generation:
+            team = hit[2]
+        else:
+            team = team_key_fallback(instance, await self._shared_server_rows(), None)
+            if team is not None and await self._has_own_credential(instance):
+                team = None
+            if getattr(self._vault_runtime, 'is_unlocked', False) is True:
+                # Locked, the user's own vault key cannot be checked yet.
+                self._team_key_memo[key] = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, generation, team)
+        return with_team_key(instance, team) if team is not None else instance
+
+    async def _has_own_credential(self, instance: Dict) -> bool:
+        """Whether the user's own chain finds a key for *instance*: a vault key
+        of their own or a Bitwarden reference (a local key file is checked first).
+
+        Whatever it opened (an agent, a temporary key file) is closed again. A
+        credential of the user's own that fails its checks counts as one: its
+        connection then fails as before, never with a team's key.
+        """
+        try:
+            conn, cleanup = await self._resolve_credential_chain(instance)
+        except Exception:  # noqa: BLE001 — a configured own credential fails closed later
+            return True
+        if cleanup is not None:
+            await cleanup()
+            return True
+        return bool(conn.get('key_path'))
+
     async def _resolve_connection_with_vault(self, instance: Dict):
+        """:meth:`_resolve_credential_chain`, with a team's key for a marked own server.
+
+        A server of the user's own marked by :meth:`_with_team_key` connects
+        with that team's key when its own chain finds none (no vault lease,
+        Bitwarden key or local key file); the connection then goes where the
+        team's key points. A team's key that cannot be used here leaves the
+        user's own SSH setup, as before (an agent may hold the server's key);
+        the team's rules still apply to it, the stricter reading.
+        """
+        conn, cleanup = await self._resolve_credential_chain(instance)
+        team = team_key_target(instance)
+        if team is None or cleanup is not None or conn.get('key_path'):
+            return conn, cleanup
+        try:
+            team_conn, team_cleanup = await self._resolve_credential_chain(team)
+        except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
+            logger.info(
+                "Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__,
+            )
+            return conn, cleanup
+        if team_cleanup is None and not team_conn.get('key_path'):
+            return conn, cleanup
+        return team_conn, team_cleanup
+
+    async def _resolve_credential_chain(self, instance: Dict):
         """Resolve connection params through the canonical SSH-ref chain.
 
         Wraps :meth:`_resolve_connection` (unchanged) with the same

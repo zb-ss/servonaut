@@ -41,6 +41,7 @@ from servonaut.screens._demo_resolve import (
     display_username,
     hide_login,
     refuse_unresolved,
+    team_rows,
 )
 from servonaut.screens._provider_accounts import ServerAccountMixin
 from servonaut.utils.instance_resolver import display_name
@@ -1501,6 +1502,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             BwItemNotFoundError,
             BwItemShapeError,
         )
+        from servonaut.services.ssh_ref_resolver import resolve_target, team_key_hint
         from servonaut.utils.ephemeral_key import persistent_bw_ssh_key
 
         # Demo mode redacts the row we display; connect to the real record.
@@ -1508,9 +1510,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         name = instance.get("name") or instance.get("id", "instance")
 
         resolver = await self._ssh_ref_resolver()
+        own_row = instance.get("is_shared") is not True
 
         try:
-            resolved = await resolver.resolve(instance)
+            # Without a key of the user's own, a team's key for the same
+            # server is used (the connection then targets the team's row).
+            instance, resolved = await resolve_target(resolver, instance, team_rows(self.app))
         except Exception as exc:  # Configured native credentials fail closed.
             logger.warning("Native Vault SSH resolution failed: %s", type(exc).__name__)
             from servonaut.services.vault.errors import vault_failure_reason
@@ -1523,8 +1528,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             return
 
         if resolved is None:
+            hint = team_key_hint(
+                instance, team_rows(self.app), getattr(self.app, "vault_command_service", None),
+            )
             self.app.notify(
-                "No SSH key configured for this instance.",
+                hint or "No SSH key configured for this instance.",
                 severity="warning",
                 markup=False,
             )
@@ -1534,6 +1542,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Build the SSH command depending on the resolution source
         # ------------------------------------------------------------------
         source = resolved.source
+        via_team = ""
+        if own_row and instance.get("is_shared") is True:
+            team = instance.get("team_name") or instance.get("team_slug") or ""
+            via_team = f" with team {rich_escape(str(team))}'s key"
 
         if source in ("ca", "vault"):
             ssh_cmd = self._native_ssh_command(instance, resolved)
@@ -1543,7 +1555,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 # The terminal is detached. The runtime owns this lease and
                 # keeps its private agent alive until process shutdown/TTL.
                 self.app.notify(
-                    f"Connected (resolution tier: {source}): {rich_escape(name)}", markup=True
+                    f"Connected{via_team} (resolution tier: {source}): {rich_escape(name)}",
+                    markup=True,
                 )
             else:
                 self.app.notify("Could not launch the terminal.", severity="error", markup=False)

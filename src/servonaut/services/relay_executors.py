@@ -4,13 +4,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, TYPE_CHECKING
 
 from servonaut.models.relay_messages import CommandRequest, CommandResponse, CommandType
 from servonaut.services.accounts.headless import InstanceDirectory
 from servonaut.services.accounts.registry import UnknownAccountError
-from servonaut.services.shared_servers import is_shared_row
+from servonaut.services.shared_servers import (
+    is_shared_row,
+    lacks_own_key,
+    load_shared_servers,
+    team_key_fallback,
+    team_key_target,
+    with_team_key,
+)
 from servonaut.services.team_rules import (
     CREDENTIAL_CHECK_FAILED,
     CREDENTIAL_CHECK_FAILED_REASON,
@@ -38,6 +46,17 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT_LINES = 500
 _MAX_TTL_SECONDS = 300  # Cap command timeout at 5 minutes
 _TRANSFERS_DIR = Path.home() / '.servonaut' / 'transfers'
+# How long one read of the teams' shared servers serves the team-key
+# fallback (see RelayExecutors._with_team_key).
+_SHARED_ROWS_TTL_SECONDS = 60.0
+
+
+def _own_row_key(instance: Mapping[str, Any]) -> tuple:
+    """A memo key for one of the user's own servers."""
+    return (
+        str(instance.get('provider') or 'aws').lower(), str(instance.get('account') or ''),
+        str(instance.get('id') or ''), str(instance.get('name') or ''),
+    )
 
 # Always-blocked patterns (same as MCP guard — never allow, even from backend)
 _COMMAND_BLOCKLIST = [
@@ -83,6 +102,12 @@ class RelayExecutors:
         self._vault_runtime = vault_runtime
         # Whose vault key an own server connects with (see _agent_team_guard).
         self._credential_memo = CredentialRulesMemo()
+        # (expiry, rows): the teams' shared servers, for the team-key fallback.
+        self._shared_rows_memo: Optional[tuple[float, List[Dict[str, Any]]]] = None
+        # Own server -> (expiry, binding generation, team row or None), and
+        # (own server, team slug) -> (expiry, rules row): see _with_team_key.
+        self._team_key_memo: Dict[tuple, tuple] = {}
+        self._team_key_rules_memo: Dict[tuple, tuple] = {}
         # Fetches a team's agent rules before an agent acts on its server
         # when they are not in force for want of a fetch (a
         # TeamPolicyRefresher); None: only the rules already fetched apply.
@@ -97,6 +122,9 @@ class RelayExecutors:
         """Install the composed native-vault runtime after relay construction."""
         self._vault_runtime = service
         self._credential_memo.clear()
+        self._shared_rows_memo = None
+        self._team_key_memo.clear()
+        self._team_key_rules_memo.clear()
 
     def set_team_policy(self, refresher: Any | None) -> None:
         """Install the process's TeamPolicyRefresher after relay construction."""
@@ -366,7 +394,71 @@ class RelayExecutors:
                     else f"Instance not found: {request.target_server_id}"
                 ),
             )
-        return dict(instance), None
+        return await self._with_team_key(dict(instance)), None
+
+    async def _with_team_key(self, instance: Dict[str, Any]) -> Dict[str, Any]:
+        """*instance*, marked to connect with a team's key when it falls back to one.
+
+        A server of the user's own whose key pair they have no key for here
+        connects with the vault key or SSH certificate of a team that shares
+        it (see ``shared_servers.team_key_fallback``). Marked here, before
+        any rule is checked, the team's rules apply to it and its connection
+        uses that key (:meth:`_vault_lease`).
+        """
+        # No I/O for a team's row, a custom server or a server without a key
+        # pair; without a vault runtime no team key can be used here.
+        if self._vault_runtime is None or not lacks_own_key(instance, None):
+            return instance
+        if self._resolve_connection(instance).get('key_path'):
+            return instance
+        key = _own_row_key(instance)
+        generation = getattr(self._vault_runtime, 'binding_generation', None)
+        now = time.monotonic()
+        hit = self._team_key_memo.get(key)
+        if hit is not None and hit[0] > now and hit[1] == generation:
+            team = hit[2]
+        else:
+            team = team_key_fallback(instance, await self._shared_rows(), None)
+            if team is not None and await self._has_own_vault_key(instance):
+                team = None
+            if getattr(self._vault_runtime, 'is_unlocked', False) is True:
+                # Locked, the user's own vault key cannot be checked yet.
+                self._team_key_memo[key] = (now + _SHARED_ROWS_TTL_SECONDS, generation, team)
+        return with_team_key(instance, team) if team is not None else instance
+
+    async def _has_own_vault_key(self, instance: Mapping[str, Any]) -> bool:
+        """Whether the user's own vault key opens *instance* (the lease is closed again).
+
+        One that fails its checks counts as theirs: its connection then fails
+        as before, never with a team's key.
+        """
+        try:
+            lease = await self._vault_lease(instance)
+        except Exception:  # noqa: BLE001 — a configured own credential fails closed later
+            return True
+        if lease is None:
+            return False
+        self._close_lease(lease)
+        return True
+
+    async def _shared_rows(self) -> List[Dict[str, Any]]:
+        """The servers the user's teams share; none when they cannot be read.
+
+        One read serves the next minute's requests. A failed read lists none:
+        the server then keeps the user's own SSH setup.
+        """
+        now = time.monotonic()
+        if self._shared_rows_memo is not None and self._shared_rows_memo[0] > now:
+            return [dict(row) for row in self._shared_rows_memo[1]]
+        rows: List[Dict[str, Any]] = []
+        teams = getattr(self._vault_runtime, 'teams', None)
+        if teams is not None:
+            try:
+                rows = (await load_shared_servers(teams)).rows
+            except Exception as exc:  # noqa: BLE001 - signed out, offline, no team plan
+                logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
+        self._shared_rows_memo = (now + _SHARED_ROWS_TTL_SECONDS, rows)
+        return [dict(row) for row in rows]
 
     async def _vault_lease(self, instance: Mapping[str, Any]) -> Any | None:
         """Resolve a connection-only native credential lease when applicable.
@@ -394,6 +486,28 @@ class RelayExecutors:
         if lease is None and requires_lease:
             raise RuntimeError("native vault SSH binding did not return an SSH lease")
         return lease
+
+    async def _lease_and_target(self, instance: Mapping[str, Any]) -> tuple[Any | None, Dict[str, Any]]:
+        """``(lease, row)``: the server's vault lease and the row to connect as.
+
+        A server of the user's own marked with a team's key (see
+        :meth:`_with_team_key`) connects as that team's row, with its lease,
+        when it has no vault key of its own. A team's key that cannot be used
+        here leaves the user's own SSH setup, as before: an agent or ssh's
+        default keys may hold the server's key.
+        """
+        lease = await self._vault_lease(instance)
+        team = team_key_target(instance)
+        if lease is not None or team is None:
+            return lease, dict(instance)
+        try:
+            team_lease = await self._vault_lease(team)
+        except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
+            logger.info("Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__)
+            return None, dict(instance)
+        if team_lease is None:
+            return None, dict(instance)
+        return team_lease, team
 
     @staticmethod
     def _lease_options(lease: Any | None) -> list[str]:
@@ -503,6 +617,10 @@ class RelayExecutors:
 
         try:
             row = await self._credential_memo.rules_row(instance, runtime, team_row)
+            fallback = team_key_target(instance)
+            if row is None and fallback is not None:
+                # No key of the user's own: it connects with this team's key.
+                row = await self._team_key_rules(instance, str(fallback.get('team_slug') or ''), team_row)
         except Exception as exc:  # noqa: BLE001 - refuse rather than guess the key
             target = instance.get('id') or request.target_server_id
             logger.warning(
@@ -519,6 +637,17 @@ class RelayExecutors:
         if is_shared_row(row) and self._team_policy is not None:
             await self._team_policy.ensure_loaded(row.get('team_slug'), row.get('team_id'))
         return self._team_guard(request, row), None
+
+    async def _team_key_rules(self, instance, slug: str, team_row) -> Dict[str, Any]:
+        """Team *slug*'s rules row for the own server *instance*, remembered a minute."""
+        key = (*_own_row_key(instance), slug)
+        now = time.monotonic()
+        hit = self._team_key_rules_memo.get(key)
+        if hit is not None and hit[0] > now:
+            return dict(hit[1])
+        rules_row = dict(await team_row(slug))
+        self._team_key_rules_memo[key] = (now + _SHARED_ROWS_TTL_SECONDS, rules_row)
+        return dict(rules_row)
 
     def _team_refusal(
         self, request: CommandRequest, instance: Mapping[str, Any],
@@ -612,13 +741,13 @@ class RelayExecutors:
             # Run exactly the words the team's guard checked.
             command = team_guard.guard.command_for_execution(command)
 
-        lease = await self._vault_lease(instance)
+        lease, target = await self._lease_and_target(instance)
         try:
             # Validate all native lease metadata before command construction.
             # SSH consumes it through explicit arguments; SCP also receives
             # the same values through its explicit builder arguments.
             self._lease_options(lease)
-            conn = self._resolve_connection(instance)
+            conn = self._resolve_connection(target)
             host, port = self._lease_destination(lease, conn)
             ssh_cmd = self._ssh_service.build_ssh_command(
                 host=host,
@@ -653,7 +782,7 @@ class RelayExecutors:
 
         host_key_problem = detect_host_key_problem(
             ssh_diagnostics(ssh_output), ssh_returncode(ssh_output),
-            self._host_key_target(instance, conn), self._host_key_policy(),
+            self._host_key_target(target, conn), self._host_key_policy(),
             stdout=stdout,
         )
         if host_key_problem is not None:
@@ -760,9 +889,9 @@ class RelayExecutors:
             if rejection is not None:
                 return rejection
 
-        lease = await self._vault_lease(instance)
+        lease, target = await self._lease_and_target(instance)
         try:
-            conn = self._resolve_connection(instance)
+            conn = self._resolve_connection(target)
             host, port = self._lease_destination(lease, conn)
             username = self._lease_login(lease, conn['username'])
             key_path = None if lease is not None else conn['key_path']
@@ -811,7 +940,7 @@ class RelayExecutors:
             # scp has no private log: its stderr is checked, and legacy scp
             # (before OpenSSH 9, or -O) exits 1 rather than 255.
             host_key_problem = detect_host_key_problem(
-                stderr, returncode, self._host_key_target(instance, conn),
+                stderr, returncode, self._host_key_target(target, conn),
                 self._host_key_policy(), stdout=stdout,
                 exit_codes=SCP_REFUSAL_EXIT_CODES,
             )
