@@ -240,13 +240,20 @@ async def resolve_with_vault(
     try:
         lease = await vault_lease(team, vault_runtime, cache=cache)
     except VaultCredentialError as exc:
-        logger.info("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
+        logger.warning("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
         return dict(conn)
     if lease is None:
         return dict(conn)
-    # The team's route: its connection rule, not the one for the user's own row.
+    # The team's route: its connection rule and options, not the user's own row's.
+    profile, extra_options = None, []
+    if connection_service is not None:
+        try:
+            profile = connection_service.resolve_profile(team)
+            extra_options = list(connection_service.get_extra_options(team, profile) or [])
+        except Exception:  # noqa: BLE001 - a row without rules keeps none
+            profile, extra_options = None, []
     applied = apply_vault_lease(
-        {**conn, "profile": None, "proxy_args": []}, lease,
+        {**conn, "profile": profile, "proxy_args": [], "extra_options": extra_options}, lease,
         instance=team, connection_service=connection_service,
     )
     applied["key_team"] = row_team_label(team)

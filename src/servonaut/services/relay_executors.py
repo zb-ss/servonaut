@@ -427,19 +427,23 @@ class RelayExecutors:
         return with_team_key(instance, team) if team is not None else instance
 
     async def _has_own_vault_key(self, instance: Mapping[str, Any]) -> bool:
-        """Whether the user's own vault key opens *instance* (the lease is closed again).
+        """Whether a vault key of the user's own is bound to *instance*.
 
-        One that fails its checks counts as theirs: its connection then fails
-        as before, never with a team's key.
+        Only the binding is read, never key material. A check that fails
+        counts as one: the server's connection then goes as before.
         """
-        try:
-            lease = await self._vault_lease(instance)
-        except Exception:  # noqa: BLE001 — a configured own credential fails closed later
-            return True
-        if lease is None:
+        runtime = self._vault_runtime
+        check = getattr(runtime, 'personal_binding', None)
+        # Locked, a vault key of the user's own cannot be used here either.
+        if not callable(check) or getattr(runtime, 'is_unlocked', False) is not True:
             return False
-        self._close_lease(lease)
-        return True
+        try:
+            binding = await check(dict(instance))
+        except ValueError:  # a server the vault cannot address has no binding
+            return False
+        except Exception:  # noqa: BLE001 — unknown: keep the user's own way
+            return True
+        return isinstance(binding, Mapping) and binding.get('source') == 'servonaut_vault'
 
     async def _shared_rows(self) -> List[Dict[str, Any]]:
         """The servers the user's teams share; none when they cannot be read.
@@ -503,7 +507,7 @@ class RelayExecutors:
         try:
             team_lease = await self._vault_lease(team)
         except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
-            logger.info("Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__)
+            logger.warning("Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__)
             return None, dict(instance)
         if team_lease is None:
             return None, dict(instance)

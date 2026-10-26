@@ -2089,6 +2089,9 @@ def _fallback_runtime(lease=None, error=None, own_lease=None):
     runtime.resolve_relay_target = AsyncMock(return_value=None)
     runtime.resolve_ssh = AsyncMock(side_effect=resolve_ssh)
     runtime.credential_team = AsyncMock(return_value=None)
+    runtime.personal_binding = AsyncMock(
+        return_value={"source": "servonaut_vault", "vault_id": "own-vault"} if own_lease else None,
+    )
     runtime.is_unlocked = True
     return runtime
 
@@ -2182,13 +2185,35 @@ class TestTeamKeyFallback:
         assert (kwargs["identity_agent"], kwargs["username"]) == ("/run/own.sock", "admin")
 
     def test_a_personal_bitwarden_key_is_the_user_s_own(self):
+        from servonaut.services.ssh_ref_resolver import ResolvedSshRef
+
         tools = self._tools(_fallback_runtime(_team_lease()))
-        cleanup = AsyncMock()
-        tools._resolve_credential_chain = AsyncMock(return_value=({"key_path": "/tmp/bw-key"}, cleanup))
+        tools._ssh_ref = AsyncMock(return_value=ResolvedSshRef(source="personal", item_id="item-1"))
+        tools._with_bw_key = AsyncMock()
         instance = run(tools._with_team_key(dict(SAMPLE_INSTANCES[0])))
 
         assert "team_key_row" not in instance
-        cleanup.assert_awaited_once()  # the temporary key file is gone again
+        tools._with_bw_key.assert_not_awaited()  # the reference is enough: no key material
+
+    def test_a_locked_vault_reads_no_key_material(self):
+        runtime = _fallback_runtime(_team_lease())
+        runtime.is_unlocked = False
+        tools = self._tools(runtime)
+        for _ in range(3):
+            instance = run(tools._with_team_key(dict(SAMPLE_INSTANCES[0])))
+
+        assert instance["team_key_row"]["team_slug"] == "ops"
+        runtime.personal_binding.assert_not_awaited()
+        runtime.resolve_ssh.assert_not_awaited()
+
+    def test_without_a_vault_runtime_nothing_falls_back(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        tools = self._tools(None)
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        # The local dangerous level: no team key, so no team rules either.
+        assert "[transport_used: ssh]" in result
 
     def test_a_mark_in_the_team_s_own_data_is_ignored(self):
         trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))

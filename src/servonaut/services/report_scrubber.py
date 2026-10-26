@@ -418,6 +418,10 @@ class _IdentifierCollector:
         self.add_id(instance.get("id"))
         self.add_name(instance.get("name"))
         self.add_account(instance.get("account"))
+        # A team's shared server: its team's name and slug, as demo mode
+        # labels the team (a team's name often names a client).
+        self.add_account(instance.get("team_name"))
+        self.add_account(instance.get("team_slug"))
         self.add(instance.get("account_id"), self._redaction.redact_account_id)
         for field in ("public_ip", "private_ip", "host"):
             self.add_host(instance.get(field))
