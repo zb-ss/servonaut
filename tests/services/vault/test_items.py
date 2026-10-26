@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -116,7 +117,7 @@ class _PersonalState:
         pass
 
 
-def _sparse_personal_item(*, author_id: str | None = None, wrapper_id: str | None = None, bad_signatures: bool = False):
+def _sparse_personal_item(*, author_id: str | None = None, wrapper_id: str | None = None, bad_signatures: bool = False, name: str = "token"):
     signing_seed, encryption_secret, vault_secret = b"a" * 32, b"b" * 32, b"v" * 32
     identity_id = "11111111-1111-4111-8111-111111111111"
     vault_id = "22222222-2222-4222-8222-222222222222"
@@ -149,10 +150,10 @@ def _sparse_personal_item(*, author_id: str | None = None, wrapper_id: str | Non
         "my_grant": {"version": 1, "sealed_private_key": base64.b64encode(sealed).decode(),
                      "granter_identity_id": identity_id, "signature": base64.b64encode(grant_signature).decode()},
     }
-    payload = {"name": "token", "notes": "", "value": "opaque"}
+    payload = {"name": name, "notes": "", "value": "opaque"}
     item_key = b"k" * 32
     nonce, ciphertext = crypto.encrypt_item(
-        item_key, b'{"name":"token","notes":"","value":"opaque"}',
+        item_key, json.dumps(payload).encode("utf-8"),
         crypto.item_aad(vault_id, item_id, "secret", 1),
     )
     wrapped_key = crypto.seal(item_key, version_public)
@@ -207,3 +208,8 @@ def test_sparse_personal_item_requires_matching_local_owner() -> None:
 
     with pytest.raises(VaultStateError, match="ownership does not match"):
         service.read_item(vault, item)
+
+
+def test_existing_item_names_are_not_cleaned_or_rejected_on_read() -> None:
+    service, vault, item, payload = _sparse_personal_item(name=" \u202eold\n ")
+    assert service.read_item(vault, item) == payload

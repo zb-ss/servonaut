@@ -141,3 +141,38 @@ def test_fake_ca_issues_a_real_certificate_for_a_registered_device_key(fake_clou
     ).audit())
     assert report.entries_checked == 1
     assert report.valid
+
+
+@pytest.mark.parametrize("revision", [None, 3, 4, 6, True])
+def test_fake_delete_refuses_a_tombstone_with_the_wrong_revision(fake_cloud, revision):
+    cloud = fake_cloud.vault
+    cloud._items["vault"] = {"key": {"item_id": "key", "revision": 4, "deleted_at": None}}
+    status, body = cloud.delete_item("vault", "key", {"revision": revision}, 1)
+    assert status == 409 and body["error"]["code"] == "revision_conflict"
+    assert cloud._items["vault"]["key"]["deleted_at"] is None
+    assert cloud._items["vault"]["key"]["revision"] == 4
+
+
+def test_fake_delete_accepts_the_next_revision_and_refuses_a_second_delete(fake_cloud):
+    cloud = fake_cloud.vault
+    cloud._items["vault"] = {"key": {"item_id": "key", "revision": 4, "deleted_at": None}}
+    status, body = cloud.delete_item("vault", "key", {"revision": 5}, 1)
+    assert status == 200 and body["revision"] == 5 and body["deleted_at"]
+    status, body = cloud.delete_item("vault", "key", {"revision": 6}, 1)
+    assert status == 409 and body["error"]["code"] == "item_deleted"
+
+
+def test_fake_item_metadata_lists_only_the_items_team_server_bindings(fake_cloud):
+    cloud = fake_cloud.vault
+    cloud._vaults["vault"] = {"team": {"slug": "example-team"}}
+    item = {"vault_id": "vault", "item_id": "key", "revision": 1}
+    cloud._bindings[("aws", "i-1")] = {"vault_id": "vault", "vault_item_id": "key"}
+    assert cloud.item_payload(item)["bound_server_ids"] == []
+    server = cloud._shared_servers("example-team")[0]
+    server_id = str(server["id"])
+    cloud._bindings[("team", server_id)] = {"vault_id": "vault", "vault_item_id": "key"}
+    bound = cloud.item_payload(item)["bound_server_ids"]
+    assert bound == [{"server_id": server_id, "name": server["name"]}]
+    cloud._bindings[("team", server_id)]["vault_item_id"] = "other"
+    assert cloud.item_payload(item)["bound_server_ids"] == []
+    assert "bound_server_ids" not in item

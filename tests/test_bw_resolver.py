@@ -214,3 +214,15 @@ class TestSessionInjection:
         ):
             key = BwResolver(session_getter=_boom).resolve_ssh_key(VALID_ITEM_ID)
         assert key == SAMPLE_KEY
+
+
+@pytest.mark.parametrize("name, expected", [("web-1", "web-1"), (None, None), (23, None)])
+def test_resolves_name_and_key_together_in_one_read(name, expected):
+    payload = json.dumps({"name": name, "sshKey": {"privateKey": SAMPLE_KEY}})
+    with patch("shutil.which", return_value="/usr/bin/bw"), \
+         patch("subprocess.run", return_value=_completed(stdout=payload)) as run:
+        item = BwResolver().resolve_ssh_item(VALID_ITEM_ID)
+    assert item.private_key == SAMPLE_KEY
+    assert item.name == expected
+    run.assert_called_once()
+    assert run.call_args.args[0] == ["bw", "get", "item", VALID_ITEM_ID]
