@@ -688,7 +688,14 @@ class Owner:
         """
         from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_SLUG
 
-        entry = next(e for e in entries if e.provider == "aws" and e.shown == self.team_server_as)
+        # The default account's server: in the multi-account scenario its name
+        # is shown qualified (``<account>/edge-1``).
+        name = self.team_server_as
+        entry = next((e for e in entries if e.provider == "aws" and e.shown == name), None) or next(
+            (e for e in entries if e.provider == "aws" and e.shown.endswith(f"/{name}")), None,
+        )
+        if entry is None:
+            raise RuntimeError(f"--team-server-as: no AWS server {name!r} in the seeded fleet")
         self.fake_cloud.account.place_shared_server(TEAM_SLUG, SERVER_ID, instance_id=entry.instance_id)
 
     def _seed_team_owner(self) -> list[str]:

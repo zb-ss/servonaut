@@ -511,6 +511,7 @@ def team_key_hint(
     label = str(team.get("team_name") or team.get("team_slug") or "").strip()
     who = f"Team {label}" if label else "A team"
     return (
-        f"{who} shares this server with its own key, which needs a Servonaut Vault "
-        "identity on this computer: run `servonaut vault setup`, then connect again."
+        f"{who} shares this server with its own key, which needs this computer's "
+        "Servonaut Vault identity: set it up with `servonaut vault setup` (or unlock it), "
+        "then connect again."
     )

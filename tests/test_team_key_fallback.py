@@ -308,12 +308,13 @@ class TestTeamKeyHint:
     def test_an_own_server_falling_back_says_to_set_up_the_vault(self):
         hint = team_key_hint(OWN, [_team_row()], None)
         assert hint == (
-            "Team Ops shares this server with its own key, which needs a Servonaut Vault "
-            "identity on this computer: run `servonaut vault setup`, then connect again."
+            "Team Ops shares this server with its own key, which needs this computer's "
+            "Servonaut Vault identity: set it up with `servonaut vault setup` (or unlock it), "
+            "then connect again."
         )
 
     def test_the_team_s_own_row_says_so_too(self):
-        assert "run `servonaut vault setup`" in team_key_hint(_team_row(), [], SimpleNamespace(is_unlocked=False))
+        assert "`servonaut vault setup`" in team_key_hint(_team_row(), [], SimpleNamespace(is_unlocked=False))
 
     def test_an_unlocked_identity_needs_no_setup(self):
         assert team_key_hint(OWN, [_team_row()], SimpleNamespace(is_unlocked=True)) is None
@@ -450,3 +451,52 @@ def test_log_access_uses_the_team_s_key(lease):
 
     assert conn["identity_agent"] == lease.identity_agent
 
+
+def test_demo_mode_scrubs_the_team_s_name_from_messages():
+    from servonaut.services.redaction_service import RedactionService
+    from servonaut.services.report_scrubber import _IdentifierCollector
+
+    redaction = RedactionService()
+    collector = _IdentifierCollector(redaction)
+    collector.add_instance(_team_row())
+
+    # The same stand-in the Teams screen and the server list show.
+    assert collector.found["Ops"] == redaction.redact_account_label("Ops")
+    assert collector.found["ops"] == redaction.redact_account_label("ops")
+
+
+
+def test_run_command_uses_the_team_s_key(lease):
+    from servonaut.screens.command_overlay import CommandOverlay
+
+    overlay = CommandOverlay(dict(OWN))
+    app = _app(_runtime(team_lease=lease), [dict(OWN), _team_row()])
+    overlay._connection = dict(OWN)
+    overlay._host, overlay._username, overlay._key_path = "9.9.9.9", "ec2-user", None
+    overlay._proxy_args, overlay._port, overlay._extra_options, overlay._profile = [], None, [], None
+    started = []
+
+    with _with_app(overlay, app), \
+            patch.object(overlay, "run_worker", side_effect=lambda work, **_kw: started.append(work)):
+        asyncio.run(overlay._resolve_and_run("bash -ic uptime", MagicMock()))
+
+    kwargs = app.ssh_service.build_ssh_command.call_args.kwargs
+    assert kwargs["identity_agent"] == lease.identity_agent
+    assert kwargs["username"] == "deploy"
+
+
+def test_browsing_files_uses_the_team_s_key(lease):
+    from servonaut.widgets.remote_tree import RemoteTree
+
+    app = _app(_runtime(team_lease=lease), [dict(OWN), _team_row()])
+    tree = RemoteTree(dict(OWN), app.ssh_service, app.connection_service, "ec2-user", ["/"])
+    tree._key_path = None
+
+    with _with_app(tree, app), \
+            patch("servonaut.widgets.remote_tree.run_ssh",
+                  return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+        asyncio.run(tree._apply_vault())
+        tree._run_ls("ls -la /")
+
+    kwargs = app.ssh_service.build_ssh_command.call_args.kwargs
+    assert kwargs["identity_agent"] == lease.identity_agent

@@ -4514,21 +4514,27 @@ class ServonautTools:
         return with_team_key(instance, team) if team is not None else instance
 
     async def _has_own_credential(self, instance: Dict) -> bool:
-        """Whether the user's own chain finds a key for *instance*: a vault key
-        of their own or a Bitwarden reference (a local key file is checked first).
+        """Whether the user has a key of their own for *instance* besides a key
+        file (checked first): a Bitwarden reference, or a vault key bound to it.
 
-        Whatever it opened (an agent, a temporary key file) is closed again. A
-        credential of the user's own that fails its checks counts as one: its
-        connection then fails as before, never with a team's key.
+        Only references are read, never key material. A check that fails
+        counts as a key of the user's own: its connection then goes as before.
         """
+        ref = await self._ssh_ref(instance)
+        if ref is not None and ref.source == 'personal' and ref.item_id:
+            return True
+        runtime = self._vault_runtime
+        check = getattr(runtime, 'personal_binding', None)
+        # Locked, a vault key of the user's own cannot be used here either.
+        if not callable(check) or getattr(runtime, 'is_unlocked', False) is not True:
+            return False
         try:
-            conn, cleanup = await self._resolve_credential_chain(instance)
-        except Exception:  # noqa: BLE001 — a configured own credential fails closed later
+            binding = await check(instance)
+        except ValueError:  # a server the vault cannot address has no binding
+            return False
+        except Exception:  # noqa: BLE001 — unknown: keep the user's own way
             return True
-        if cleanup is not None:
-            await cleanup()
-            return True
-        return bool(conn.get('key_path'))
+        return isinstance(binding, Mapping) and binding.get('source') == 'servonaut_vault'
 
     async def _resolve_connection_with_vault(self, instance: Dict):
         """:meth:`_resolve_credential_chain`, with a team's key for a marked own server.
@@ -4547,7 +4553,7 @@ class ServonautTools:
         try:
             team_conn, team_cleanup = await self._resolve_credential_chain(team)
         except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
-            logger.info(
+            logger.warning(
                 "Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__,
             )
             return conn, cleanup
@@ -4658,9 +4664,25 @@ class ServonautTools:
         elif requires_native:
             raise RuntimeError("Native Vault SSH credential has no active runtime")
 
+        ref = await self._ssh_ref(instance)
+        if ref is None or ref.source not in {'personal', 'team'}:
+            return conn, None
+        item_id = ref.item_id
+        if not item_id:
+            # Partial roll-up row (ref exists but item_id unknown on this
+            # device) — nothing resolvable, keep the local key.
+            return conn, None
+        return await self._with_bw_key(conn, ref, instance)
+
+    async def _ssh_ref(self, instance: Dict):
+        """The memoized SSH-ref lookup for *instance* (references only, no key material).
+
+        None when nothing is stored or the lookup failed; a failure is
+        remembered like a miss, so a degraded API costs one timeout per TTL.
+        """
         instance_id = instance.get('id', '')
         if not instance_id:
-            return conn, None
+            return None
         provider = str(instance.get('provider', 'aws') or 'aws').lower()
         team_slug = instance.get('team_slug') if instance.get('is_shared') is True else None
         memo_key = ('ssh-ref', provider, str(instance_id), team_slug)
@@ -4705,17 +4727,15 @@ class ServonautTools:
                 self._bw_ref_memo[memo_key] = (
                     now + _BW_REF_MEMO_TTL_SECONDS, None,
                 )
-                return conn, None
+                return None
             self._bw_ref_memo[memo_key] = (now + _BW_REF_MEMO_TTL_SECONDS, ref)
+        return ref
 
-        if ref is None or ref.source not in {'personal', 'team'}:
-            return conn, None
+    async def _with_bw_key(self, conn: Dict, ref: Any, instance: Dict):
+        """``(conn, cleanup)``: *conn* with *ref*'s Bitwarden key in a temporary file."""
+        provider = str(instance.get('provider', 'aws') or 'aws').lower()
+        instance_id = instance.get('id', '')
         item_id = ref.item_id
-        if not item_id:
-            # Partial roll-up row (ref exists but item_id unknown on this
-            # device) — nothing resolvable, keep the local key.
-            return conn, None
-
         try:
             from servonaut.services.bw_resolver import BwResolver
             from servonaut.utils.ephemeral_key import (

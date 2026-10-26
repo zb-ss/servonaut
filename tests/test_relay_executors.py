@@ -1490,6 +1490,12 @@ class _FallbackRuntime(_VaultRuntime):
             return self.team_lease
         return self.own_lease
 
+    async def personal_binding(self, instance):
+        # A vault key of the user's own is bound when they hold its lease.
+        if self.own_lease is None:
+            return None
+        return {"source": "servonaut_vault", "vault_id": "own-vault"}
+
     async def credential_team(self, instance):
         return None
 
