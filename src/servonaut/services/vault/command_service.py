@@ -27,6 +27,7 @@ from servonaut.services.api_client import APIClient
 from servonaut.services.api_client import APIError
 from servonaut.services.auth_service import AuthService
 from servonaut.services.team_service import TeamService
+from servonaut.utils.validation import ValidationError
 
 from . import crypto
 from .auto_bind import is_personal_server
@@ -1132,6 +1133,11 @@ class VaultCommandService:
 
         async def check(server: Mapping[str, Any]) -> tuple[str, str]:
             name = terminal_safe(server.get("name") or server.get("id") or "Unnamed server")
+            try:
+                instance_target(server)
+            except ValidationError:
+                # Unsupported route IDs cannot be bound; omit them from checked reads.
+                return "skipped", name
             async with gate:
                 try:
                     binding = await self.personal_binding(server)
@@ -1146,7 +1152,7 @@ class VaultCommandService:
                              for row in item.get("bound_server_ids", [])],
             "own_servers": [name for state, name in results if state == "own_servers"],
             "unchecked": [name for state, name in results if state == "unchecked"],
-            "checked": sum(state != "unchecked" for state, _ in results),
+            "checked": sum(state in {"own_servers", "unused"} for state, _ in results),
         }
 
     async def delete_ssh_key(
@@ -1650,7 +1656,12 @@ class VaultCommandService:
             private_key = Path(path).read_bytes()
         private_bytes = bytearray(private_key.encode("utf-8") if isinstance(private_key, str) else private_key)
         try:
-            public_key = self._public_key_from_private(bytes(private_bytes), passphrase)
+            try:
+                public_key = self._public_key_from_private(bytes(private_bytes), passphrase)
+            except ValueError as exc:
+                raise VaultUserError(
+                    "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key"
+                ) from exc
             fingerprint = crypto.ssh_public_fingerprint(public_key)
             item_id = str(uuid.uuid4())
             payload = {

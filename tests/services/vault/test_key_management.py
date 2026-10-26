@@ -263,3 +263,72 @@ async def test_rename_refuses_invalid_revisions_before_decrypting(service, revis
         await service.rename_ssh_key(vault_id="vault", item_id="key", name="new")
     service.items.read_item.assert_not_called()
     service.items.write_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["ssh", "bitwarden"])
+async def test_unreadable_import_has_actionable_error_and_wipes_private_buffer(service, monkeypatch, source) -> None:
+    import servonaut.services.vault.command_service as module
+
+    buffers: list[bytearray] = []
+    def tracked_buffer(value):
+        buffer = bytearray(value)
+        buffers.append(buffer)
+        return buffer
+    monkeypatch.setattr(module, "bytearray", tracked_buffer, raising=False)
+    with pytest.raises(VaultUserError) as caught:
+        await service.import_keys(source=source, vault_id="vault", private_key=b"unreadable key material")
+    assert str(caught.value) == (
+        "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key"
+    )
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert buffers and buffers[0] == bytearray(len(b"unreadable key material"))
+    service.items.write_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_import_does_not_reclassify_unrelated_errors(service, monkeypatch) -> None:
+    service._public_key_from_private = MagicMock(side_effect=RuntimeError("loader unavailable"))
+    with pytest.raises(RuntimeError, match="loader unavailable"):
+        await service.import_keys(source="bitwarden", vault_id="vault", private_key=b"fixture")
+    service._public_key_from_private.side_effect = None
+    service._public_key_from_private.return_value = "ssh-ed25519 public"
+    monkeypatch.setattr("servonaut.services.vault.command_service.crypto.ssh_public_fingerprint", lambda _: "SHA256:key")
+    service.items.write_item.side_effect = ValueError("write refused")
+    with pytest.raises(ValueError, match="write refused"):
+        await service.import_keys(source="bitwarden", vault_id="vault", private_key=b"fixture")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instance_id", [
+    "ns0000001.example.test", "vps-000001.vps.example.test",
+    "project-1/00000000-0000-4000-8000-000000000001",  # synthetic fixture  leak-guard:allow
+])
+async def test_unsupported_ovh_targets_do_not_block_deleting_an_unused_key(service, instance_id) -> None:
+    service._personal_binding = AsyncMock(return_value=(None, "unused"))
+    service.personal_binding = AsyncMock(wraps=VaultCommandService.personal_binding.__get__(service))
+    servers = [{"id": instance_id, "provider": "ovh", "name": "storage-1"}]
+    usage = await service.ssh_key_usage(vault_id="vault", item_id="key", servers=servers)
+    assert usage["team_servers"] == usage["own_servers"] == usage["unchecked"] == []
+    assert usage["checked"] == 0
+    assert await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers) == {
+        "item_id": "key", "deleted": True,
+    }
+    service.personal_binding.assert_not_awaited()
+    service._personal_binding.assert_not_awaited()
+    service.items.delete_item.assert_awaited_once_with("vault", "key", 3)
+
+
+@pytest.mark.asyncio
+async def test_real_aws_binding_read_failure_still_blocks_delete_beside_unsupported_ovh_rows(service) -> None:
+    service._personal_binding = AsyncMock(side_effect=APIError(code="unavailable", message="opaque", status=503))
+    service.personal_binding = VaultCommandService.personal_binding.__get__(service)
+    servers = [
+        {"id": "ns0000001.example.test", "provider": "ovh", "name": "storage-1"},
+        {"id": "i-0001", "provider": "aws", "name": "web-1"},
+    ]
+    with pytest.raises(VaultKeyInUse) as caught:
+        await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers)
+    assert caught.value.unchecked == ["web-1"]
+    service._personal_binding.assert_awaited_once_with("aws", "i-0001")
+    service.items.delete_item.assert_not_awaited()

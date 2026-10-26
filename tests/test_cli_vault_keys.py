@@ -148,3 +148,19 @@ def test_items_with_an_unavailable_name_shows_null(service, capsys) -> None:
     service.ssh_key_choices.return_value = []
     assert _run("items", "--vault", VAULT_ID, "--names", "--json") == 0
     assert json.loads(capsys.readouterr().out)["data"][0]["name"] is None
+
+
+def test_bitwarden_import_reports_unreadable_material_without_raw_exception(service, monkeypatch, capsys) -> None:
+    from servonaut.services.vault.command_service import VaultCommandService
+
+    core = VaultCommandService.__new__(VaultCommandService)
+    core.items = SimpleNamespace(write_item=AsyncMock())
+    service.import_keys = core.import_keys
+    monkeypatch.setattr("servonaut.services.bw_resolver.BwResolver.resolve_ssh_item",
+                        MagicMock(return_value=("unreadable key material", "web-1")))
+    assert _run("import", "bitwarden", "--vault", VAULT_ID, "--item", "bw-item") == 1
+    output = capsys.readouterr()
+    assert "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key" in output.err
+    assert "ValueError" not in output.err
+    assert "unreadable key material" not in output.out + output.err
+    core.items.write_item.assert_not_awaited()

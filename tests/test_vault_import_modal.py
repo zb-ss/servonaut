@@ -366,3 +366,30 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
             assert button.region.y >= 0 and button.region.bottom <= app.size.height
         await pilot.click("#vault_import_cancel")
         await wait_until(lambda: not isinstance(app.screen, VaultImportModal))
+
+
+def test_bitwarden_unreadable_material_keeps_fixed_tui_notice_and_wipes_buffer(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from servonaut.services.vault.command_service import VaultCommandService
+
+    core = VaultCommandService.__new__(VaultCommandService)
+    core.items = SimpleNamespace(write_item=AsyncMock())
+    service = MagicMock()
+    service.import_keys = AsyncMock(side_effect=core.import_keys)
+    resolver = MagicMock()
+    resolver.resolve_ssh_key.return_value = "unreadable key material"
+    modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
+    modal._source = "bitwarden"
+    modal._bw_items = [BwItemSummary(id="item-1", name="web-1", type=5, has_ssh_key=True)]
+    modal._list = MagicMock(return_value=_List([0]))
+    harness = _Harness(modal)
+    try:
+        asyncio.run(modal._import_selected())
+    finally:
+        harness.close()
+    harness.app.notify.assert_called_once_with(
+        "Could not import the selected Bitwarden SSH key.", severity="error", markup=False,
+    )
+    assert modal.dismiss.call_args.args[0]["failed"] == 1
+    assert service.import_keys.await_args.kwargs["private_key"] == bytearray(len("unreadable key material"))
+    core.items.write_item.assert_not_awaited()
