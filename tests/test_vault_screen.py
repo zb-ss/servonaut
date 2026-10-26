@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from html import unescape
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -283,6 +284,26 @@ async def test_setup_result_is_purposeful_metadata_not_raw_identity_payload() ->
         assert "not-for-status" not in status
         assert not screen.query_one("#vault_items", Button).disabled
 
+
+@pytest.mark.asyncio
+async def test_a_failed_setup_is_logged_with_its_cause(caplog) -> None:
+    """The toast names only the error type; the log keeps the cause."""
+    class Service(_VaultStatusService):
+        async def setup(self, **_kwargs):
+            raise ValueError("invalid device platform")
+
+    app = _VaultHost(Service(remote_identity=None))
+    async with app.run_test(size=(160, 50)):
+        screen = app.screen
+        assert isinstance(screen, VaultScreen)
+        await wait_until(lambda: "No vault identity exists yet" in _status_text(screen))
+        with caplog.at_level(logging.WARNING, logger="servonaut.screens.vault"):
+            await screen._setup(lambda _key: True)
+
+    [record] = [record for record in caplog.records if record.name == "servonaut.screens.vault"]
+    assert record.getMessage() == "Vault setup failed"
+    assert record.exc_info is not None
+    assert str(record.exc_info[1]) == "invalid device platform"
 
 @pytest.mark.asyncio
 async def test_demo_toggle_redraws_cached_vault_metadata_without_fetching_again() -> None:
