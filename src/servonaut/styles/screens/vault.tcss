@@ -333,13 +333,14 @@ CaEnrollmentConfirmModal {
 #auto_bind_actions {
     height: auto;
     layout: grid;
-    grid-size: 4;
-    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-size: 5;
+    grid-columns: 1fr 1fr 1fr 1fr 1fr;
     grid-gutter: 0 1;
     margin-top: 1;
 }
 
 #auto_bind_actions #auto_bind_apply,
+#auto_bind_actions #auto_bind_fetch_keys,
 #auto_bind_actions #auto_bind_all,
 #auto_bind_actions #auto_bind_none,
 #auto_bind_actions #auto_bind_back {
@@ -355,6 +356,77 @@ VaultAutoBindScreen.-narrow #auto_bind_content {
 VaultAutoBindScreen.-narrow #auto_bind_actions {
     grid-size: 2;
     grid-columns: 1fr 1fr;
+}
+
+/* Modals for Auto-bind bulk host key fetching and review */
+AutoBindFetchConfirmModal {
+    align: center middle;
+}
+
+#auto_bind_confirm_container {
+    width: 60;
+    max-width: 90%;
+    height: auto;
+    border: round $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+#auto_bind_confirm_message {
+    margin-bottom: 1;
+}
+
+#auto_bind_confirm_actions {
+    height: auto;
+    align: right middle;
+}
+
+#auto_bind_confirm_no {
+    margin-right: 1;
+}
+
+VaultAutoBindReviewModal {
+    align: center middle;
+}
+
+#auto_bind_review_container {
+    width: 80;
+    max-width: 95%;
+    height: 85%;
+    max-height: 28;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#auto_bind_review_title {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#auto_bind_review_scroll {
+    height: 1fr;
+    border: solid $panel;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.auto_bind_review_item {
+    margin-bottom: 1;
+}
+
+#vault_bind_use_trusted {
+    margin-bottom: 1;
+}
+
+#auto_bind_review_actions {
+    height: auto;
+    align: right middle;
+}
+
+#auto_bind_review_cancel {
+    margin-right: 1;
 }
 
 /* A short terminal keeps the table, the reason and the buttons: the intro goes. */

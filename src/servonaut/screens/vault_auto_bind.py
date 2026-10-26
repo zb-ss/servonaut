@@ -9,23 +9,31 @@ checked the host-key fingerprints and pressed Bind.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Static
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.services.vault import crypto
 from servonaut.services.vault.auto_bind import (
+    FETCH_FAILED,
+    FETCHED,
+    HOST_KEY_MISMATCH,
+    NO_HOST_KEYS,
+    READY,
     AutoBindRow,
     apply_auto_bind,
+    fetch_host_keys_for_rows,
     plan_auto_bind,
 )
+from servonaut.services.vault.ec2_host_keys import key_family_from_public_key
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -34,7 +42,7 @@ from servonaut.widgets.sidebar import Sidebar
 logger = logging.getLogger(__name__)
 
 # Held back while the review loads or the keys are being bound.
-_ACTIONS = ("#auto_bind_apply", "#auto_bind_all", "#auto_bind_none", "#auto_bind_trust")
+_ACTIONS = ("#auto_bind_apply", "#auto_bind_fetch_keys", "#auto_bind_all", "#auto_bind_none", "#auto_bind_trust")
 
 INTRO = (
     "Each of your servers gets the key from your personal vault that is named like its "
@@ -44,12 +52,108 @@ INTRO = (
 )
 
 
+class AutoBindFetchConfirmModal(ModalScreen[bool]):
+    """Confirm connecting once to record host keys."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="auto_bind_confirm_container"):
+            yield Static(escape(self._message), id="auto_bind_confirm_message")
+            with Horizontal(id="auto_bind_confirm_actions"):
+                yield Button("Cancel", id="auto_bind_confirm_no")
+                yield Button("Connect", variant="primary", id="auto_bind_confirm_yes")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "auto_bind_confirm_yes":
+            self.dismiss(True)
+        elif event.button.id == "auto_bind_confirm_no":
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+class VaultAutoBindReviewModal(ModalScreen[bool]):
+    """Review host keys and fingerprints before binding."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        rows: Sequence[AutoBindRow],
+        *,
+        server_name_fn: Callable[[AutoBindRow], str],
+        scrub_fn: Callable[[object], str],
+    ) -> None:
+        super().__init__()
+        self._review_rows = list(rows)
+        self._server_name = server_name_fn
+        self._scrub = scrub_fn
+        self._all_verified = bool(self._review_rows) and all(row.verified for row in self._review_rows)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="auto_bind_review_container"):
+            yield Static("Review host keys before binding", id="auto_bind_review_title")
+            with VerticalScroll(id="auto_bind_review_scroll"):
+                for row in self._review_rows:
+                    with Vertical(classes="auto_bind_review_item"):
+                        s_name = self._scrub(self._server_name(row))
+                        addr = f"{row.host}:{row.port}" if row.host and row.port != 22 else (row.host or "")
+                        login_addr = f"{row.login}@{addr}" if row.login else addr
+                        yield Static(f"[bold]{escape(s_name)}[/bold] ({escape(self._scrub(login_addr))})")
+                        if row.host_keys:
+                            for key in row.host_keys:
+                                family = key_family_from_public_key(key)
+                                try:
+                                    fp = crypto.ssh_public_fingerprint(key)
+                                except Exception:
+                                    fp = "unknown fingerprint"
+                                yield Static(f"  {escape(family)} · {escape(self._scrub(fp))}")
+                        source = row.verification_source or ("verified by AWS console output" if row.verified else "trusted by this computer")
+                        yield Static(f"  [dim]Source: {escape(self._scrub(source))}[/dim]")
+
+            yield Checkbox(
+                "I checked these fingerprints: pin them",
+                value=self._all_verified,
+                id="vault_bind_use_trusted",
+                disabled=False,
+            )
+            with Horizontal(id="auto_bind_review_actions"):
+                yield Button("Cancel", id="auto_bind_review_cancel")
+                yield Button(
+                    "Bind",
+                    variant="primary",
+                    id="vault_bind_confirm",
+                    disabled=not self._all_verified,
+                )
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id == "vault_bind_use_trusted":
+            btn = self.query_one("#vault_bind_confirm", Button)
+            btn.disabled = not (event.value or self._all_verified)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "vault_bind_confirm":
+            self.dismiss(True)
+        elif event.button.id == "auto_bind_review_cancel":
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
 class VaultAutoBindScreen(Screen):
     """Review and bind vault SSH keys to the servers named like them."""
 
     BINDINGS = [
         Binding("escape", "back", "Back", show=True),
         Binding("space", "toggle_row", "Select", show=True),
+        Binding("f", "fetch_host_keys", "Fetch host keys", show=True),
         Binding("r", "reload", "Check again", show=True),
     ]
 
@@ -78,6 +182,7 @@ class VaultAutoBindScreen(Screen):
                 yield Checkbox("I checked these host-key fingerprints: pin them", id="auto_bind_trust")
                 with Horizontal(id="auto_bind_actions"):
                     yield Button("Bind selected", variant="primary", id="auto_bind_apply")
+                    yield Button("Fetch host keys", id="auto_bind_fetch_keys")
                     yield Button("Select all", id="auto_bind_all")
                     yield Button("Select none", id="auto_bind_none")
                     yield Button("Back", id="auto_bind_back")
@@ -88,6 +193,7 @@ class VaultAutoBindScreen(Screen):
         table = self.query_one("#auto_bind_table", DataTable)
         table.add_columns("Bind", "Server", "Status", "Vault key", "Matched by", "Login", "Address")
         self._sync_apply()
+        self._sync_fetch()
         self.action_reload()
 
     def on_resize(self) -> None:
@@ -152,6 +258,46 @@ class VaultAutoBindScreen(Screen):
             table.move_cursor(row=min(max(cursor, 0), len(self._rows) - 1))
         self._show_detail()
         self._sync_apply()
+        self._sync_fetch()
+
+    def _can_fetch_host_keys(self) -> tuple[bool, str]:
+        if self._busy.is_busy:
+            return False, ""
+        has_no_host_keys = any(row.status == NO_HOST_KEYS for row in self._rows)
+        if not has_no_host_keys:
+            return False, "None of the servers need a host key fetched."
+        service = self._service()
+        if service is None:
+            return False, "Vault services are unavailable."
+        records = getattr(service, "records_new_host_keys", None)
+        can_record = bool(records()) if callable(records) else False
+        if not can_record:
+            mode = "yes"
+            conn_svc = getattr(service, "connection_service", None)
+            if conn_svc is not None and hasattr(conn_svc, "host_key_policy"):
+                try:
+                    mode = conn_svc.host_key_policy().mode
+                except Exception:
+                    pass
+            reason = (
+                f"Connecting does not record new host keys with ssh.host_key_checking = {mode}: "
+                "fetch them one by one with Use Vault Key, or paste verified keys."
+            )
+            return False, reason
+        return True, ""
+
+    def _sync_fetch(self) -> None:
+        try:
+            btn = self.query_one("#auto_bind_fetch_keys", Button)
+        except Exception:
+            return
+        if self._busy.holds("#auto_bind_fetch_keys"):
+            return
+        can_fetch, reason = self._can_fetch_host_keys()
+        btn.disabled = not can_fetch
+        btn.tooltip = (
+            reason if not can_fetch and reason else "Connect once to record host keys for servers missing them (f)"
+        )
 
     def _show_detail(self) -> None:
         detail = self.query_one("#auto_bind_detail", Static)
@@ -163,7 +309,15 @@ class VaultAutoBindScreen(Screen):
         text = f"{self._server_name(row)}: {row.status_text}"
         if row.host_keys:
             prints = "\n".join(f"  {crypto.ssh_public_fingerprint(key)}" for key in row.host_keys)
-            text += f"\nHost keys this computer trusts for {row.host}:\n{prints}"
+            if row.status == READY and not row.verification_source:
+                text += f"\nHost keys this computer trusts for {row.host}:\n{prints}"
+            else:
+                source_label = f" ({row.verification_source})" if row.verification_source else ""
+                text += f"\nHost keys for {row.host}{source_label}:\n{prints}"
+        elif row.status == NO_HOST_KEYS:
+            can_fetch, reason = self._can_fetch_host_keys()
+            if not can_fetch and reason and "No servers" not in reason:
+                text += f"\n{reason}"
         detail.update(self.scrub_for_display(text))
 
     def _sync_apply(self) -> None:
@@ -239,6 +393,7 @@ class VaultAutoBindScreen(Screen):
         self._rows = rows
         self._selected = {index for index, row in enumerate(rows) if row.ready}
         self._render_rows()
+        self._sync_fetch()
         ready = len(self._selected)
         if not rows:
             self._status("You have no servers of your own to bind a key to.")
@@ -251,7 +406,7 @@ class VaultAutoBindScreen(Screen):
             self._status(f"None of your {len(rows)} servers can get a vault key automatically: see each status.")
 
     # ------------------------------------------------------------------
-    # Choosing and binding
+    # Choosing, fetching, and binding
     # ------------------------------------------------------------------
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -272,10 +427,66 @@ class VaultAutoBindScreen(Screen):
         self._selected.symmetric_difference_update({index})
         self._render_rows()
 
+    def action_fetch_host_keys(self) -> None:
+        can_fetch, reason = self._can_fetch_host_keys()
+        if not can_fetch or self._busy.is_busy:
+            if reason and any(row.status == NO_HOST_KEYS for row in self._rows):
+                self._status(reason)
+            return
+        target_rows = [row for row in self._rows if row.status == NO_HOST_KEYS]
+        if not target_rows:
+            return
+        n = len(target_rows)
+        msg = (
+            f"Connect once to each of {n} servers to record its host key? Nothing is bound yet."
+            if n > 1
+            else "Connect once to this server to record its host key? Nothing is bound yet."
+        )
+
+        def on_confirmed(confirmed: bool) -> None:
+            if confirmed:
+                self.run_worker(
+                    self._run_fetch_host_keys(target_rows),
+                    group="vault_auto_bind_host_keys",
+                    exclusive=True,
+                )
+
+        self.app.push_screen(AutoBindFetchConfirmModal(msg), on_confirmed)
+
+    async def _run_fetch_host_keys(self, target_rows: list[AutoBindRow]) -> None:
+        service = self._service()
+        if service is None or not target_rows:
+            return
+        total = len(target_rows)
+        with self._busy.running(f"Fetching host keys (1 of {total})…", hold=_ACTIONS) as job:
+            def progress(index: int, row: AutoBindRow) -> None:
+                self._busy.say(job, f"Fetching host keys ({index + 1} of {total})…")
+
+            await fetch_host_keys_for_rows(
+                service,
+                target_rows,
+                on_progress=progress,
+                accounts=getattr(self.app, "accounts", None),
+            )
+
+        newly_ready = {i for i, row in enumerate(self._rows) if row.status == FETCHED and row.result is None}
+        self._selected.update(newly_ready)
+        self._render_rows()
+        self._sync_fetch()
+
+        fetched_count = sum(row.status == FETCHED for row in target_rows)
+        failed_count = sum(row.status in {FETCH_FAILED, HOST_KEY_MISMATCH} for row in target_rows)
+        message = f"Fetched host keys for {fetched_count} of {total} servers."
+        if failed_count:
+            message += f" {failed_count} failed or mismatched: see status."
+        self._status(message)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button = event.button.id
         if button == "auto_bind_back":
             self.action_back()
+        elif button == "auto_bind_fetch_keys":
+            self.action_fetch_host_keys()
         elif button == "auto_bind_all":
             self._selected = {i for i, row in enumerate(self._rows) if row.ready and row.result is None}
             self._render_rows()
@@ -288,14 +499,35 @@ class VaultAutoBindScreen(Screen):
     def _start_binding(self) -> None:
         if self._busy.is_busy or not self._selected:
             return
+        chosen = [self._rows[index] for index in sorted(self._selected) if self._rows[index].ready]
+        if not chosen:
+            return
+
+        needs_review = any(row.status == FETCHED or row.verified for row in chosen)
+        if needs_review:
+            def on_reviewed(confirmed: bool) -> None:
+                if confirmed:
+                    self.run_worker(self._bind(chosen), group="vault_auto_bind", exclusive=True)
+
+            self.app.push_screen(
+                VaultAutoBindReviewModal(
+                    chosen,
+                    server_name_fn=self._server_name,
+                    scrub_fn=self.scrub_for_display,
+                ),
+                on_reviewed,
+            )
+            return
+
         if not self.query_one("#auto_bind_trust", Checkbox).value:
             self._status("Check the host-key fingerprints of the selected servers, then tick the box to pin them.")
             return
-        self.run_worker(self._bind(), group="vault_auto_bind", exclusive=True)
+        self.run_worker(self._bind(chosen), group="vault_auto_bind", exclusive=True)
 
-    async def _bind(self) -> None:
+    async def _bind(self, chosen: Sequence[AutoBindRow] | None = None) -> None:
         service = self._service()
-        chosen = [self._rows[index] for index in sorted(self._selected)]
+        if chosen is None:
+            chosen = [self._rows[index] for index in sorted(self._selected) if self._rows[index].ready]
         if service is None or self._vault_id is None or not chosen:
             return
         with self._busy.running(f"Binding vault keys to {len(chosen)} servers…", hold=_ACTIONS) as job:

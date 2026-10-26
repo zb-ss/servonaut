@@ -8,7 +8,17 @@ from textual.app import App
 from textual.widgets import Button, Checkbox, DataTable, Static
 
 from servonaut.screens import vault_auto_bind
-from servonaut.screens.vault_auto_bind import VaultAutoBindScreen
+from servonaut.screens.vault_auto_bind import (
+    AutoBindFetchConfirmModal,
+    VaultAutoBindReviewModal,
+    VaultAutoBindScreen,
+)
+from servonaut.services.vault.auto_bind import (
+    FETCHED,
+    HOST_KEY_MISMATCH,
+    AutoBindRow,
+    KeyMatch,
+)
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.styles import CSS_FILES
 from tests._async_bounds import wait_until
@@ -25,7 +35,7 @@ SERVERS = [
 
 
 class _Service:
-    def __init__(self, *, keys=None, vaults=None, fail_bind=()) -> None:
+    def __init__(self, *, keys=None, vaults=None, fail_bind=(), records_new=True) -> None:
         self.keys = keys if keys is not None else [
             {"item_id": "k1", "label": "web-1 · SHA256:a", "name": "web-1.pem", "fingerprint": "SHA256:a"},
             {"item_id": "k2", "label": "web-2 · SHA256:b", "name": "web-2", "fingerprint": "SHA256:b"},
@@ -35,8 +45,17 @@ class _Service:
             {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
         ]
         self.fail_bind = set(fail_bind)
+        self.records_new = records_new
         self.binds: list[dict[str, Any]] = []
         self.key_calls: list[dict[str, Any]] = []
+        self.visits: list[str] = []
+
+    def records_new_host_keys(self) -> bool:
+        return self.records_new
+
+    async def visit_for_host_key(self, instance, login=None):
+        self.visits.append(instance["id"])
+        return None
 
     async def vault_choices(self, *, team=None):
         return self.vaults
@@ -194,6 +213,213 @@ async def test_the_review_fits_a_narrow_terminal() -> None:
         await wait_until(lambda: _rows(app))
         await pilot.pause()
         screen = app.screen.region
-        for selector in ("#auto_bind_table", "#auto_bind_trust", "#auto_bind_apply", "#auto_bind_back"):
+        for selector in (
+            "#auto_bind_table",
+            "#auto_bind_trust",
+            "#auto_bind_apply",
+            "#auto_bind_back",
+            "#auto_bind_fetch_keys",
+        ):
+            region = app.screen.query_one(selector).region
+            assert region.width > 0 and region.height > 0 and screen.contains_region(region), (selector, region)
+
+
+@pytest.mark.asyncio
+async def test_fetch_button_enabled_and_disabled_reasons() -> None:
+    # 1. Enabled when servers lack host keys
+    app1 = _Host(_Service())
+    async with app1.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app1))
+        btn1 = app1.screen.query_one("#auto_bind_fetch_keys", Button)
+        assert not btn1.disabled
+
+    # 2. Disabled when records_new_host_keys is False
+    app2 = _Host(_Service(records_new=False))
+    async with app2.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app2))
+        btn2 = app2.screen.query_one("#auto_bind_fetch_keys", Button)
+        assert btn2.disabled
+        assert "ssh.host_key_checking = yes" in (btn2.tooltip or "")
+
+    # 3. Disabled when no servers need host keys fetched
+    app3 = _Host(_Service(), instances=[SERVERS[0]])
+    async with app3.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app3))
+        btn3 = app3.screen.query_one("#auto_bind_fetch_keys", Button)
+        assert btn3.disabled
+        assert "None of the servers need a host key fetched" in (btn3.tooltip or "")
+
+
+@pytest.mark.asyncio
+async def test_fetch_action_opens_confirm_modal_and_fetches(monkeypatch) -> None:
+    async def fake_fetch(service, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = FETCHED
+            r.host_keys = [HOST_KEY]
+            r.verified = False
+            r.verification_source = "trusted by this computer"
+
+    monkeypatch.setattr(vault_auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+
+    app = _Host(_Service())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        web2_idx = next(i for i, r in enumerate(app.screen._rows) if r.instance["name"] == "web-2")
+        # web-2 is initially NO_HOST_KEYS and not selected
+        assert not any("fetched" in cell for row in _rows(app) for cell in row)
+        assert web2_idx not in app.screen._selected
+
+        # Press 'f' to fetch host keys
+        await pilot.press("f")
+        await wait_until(lambda: isinstance(app.screen, AutoBindFetchConfirmModal))
+
+        # Confirm connection
+        await pilot.click("#auto_bind_confirm_yes")
+        await wait_until(lambda: "Fetched host keys for 1 of 1 servers" in _status(app))
+
+        # web-2 is now fetched and selected
+        rows = _rows(app)
+        statuses = {row[1]: row[2] for row in rows}
+        assert statuses["web-2"] == "fetched: check fingerprint"
+        assert web2_idx in app.screen._selected
+
+
+@pytest.mark.asyncio
+async def test_host_key_mismatch_row_is_never_selectable(monkeypatch) -> None:
+    async def fake_fetch(service, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = HOST_KEY_MISMATCH
+            r.mismatch_detail = "different key than AWS recorded"
+
+    monkeypatch.setattr(vault_auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+
+    app = _Host(_Service())
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        web2_idx = next(i for i, r in enumerate(app.screen._rows) if r.instance["name"] == "web-2")
+        await pilot.press("f")
+        await wait_until(lambda: isinstance(app.screen, AutoBindFetchConfirmModal))
+        await pilot.click("#auto_bind_confirm_yes")
+        await wait_until(lambda: "1 failed or mismatched" in _status(app))
+
+        # Select all should NOT select the mismatch row
+        await pilot.click("#auto_bind_all")
+        assert web2_idx not in app.screen._selected
+
+        # Direct selection attempt should also be rejected
+        app.screen.query_one("#auto_bind_table", DataTable).move_cursor(row=web2_idx)
+        app.screen.action_toggle_row()
+        assert web2_idx not in app.screen._selected
+
+
+@pytest.mark.asyncio
+async def test_review_modal_blocks_bind_until_tick_unless_verified() -> None:
+    # 1. Unverified row blocks confirm until tick
+    unverified_row = AutoBindRow(
+        instance={"id": "i-web2", "name": "web-2"},
+        status=FETCHED,
+        match=KeyMatch(item_id="k2", name="web-2", matched_by="server name"),
+        host="198.51.100.2",
+        port=22,
+        login="ubuntu",
+        host_keys=[HOST_KEY],
+        verified=False,
+    )
+
+    class _ModalHost(App):
+        CSS_PATH = CSS_FILES
+
+        def __init__(self, rows):
+            self.rows = rows
+            super().__init__()
+
+        def on_mount(self):
+            self.push_screen(
+                VaultAutoBindReviewModal(
+                    self.rows,
+                    server_name_fn=lambda r: r.instance.get("name", ""),
+                    scrub_fn=lambda s: str(s),
+                )
+            )
+
+    app1 = _ModalHost([unverified_row])
+    async with app1.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app1.screen, VaultAutoBindReviewModal))
+        confirm_btn = app1.screen.query_one("#vault_bind_confirm", Button)
+        checkbox = app1.screen.query_one("#vault_bind_use_trusted", Checkbox)
+
+        assert confirm_btn.disabled
+        assert not checkbox.value
+
+        # Tick checkbox -> confirm is enabled
+        checkbox.value = True
+        await pilot.pause()
+        assert not confirm_btn.disabled
+
+        # Untick checkbox -> confirm is disabled again
+        checkbox.value = False
+        await pilot.pause()
+        assert confirm_btn.disabled
+
+    # 2. Verified row enables confirm immediately
+    verified_row = AutoBindRow(
+        instance={"id": "i-web1", "name": "web-1"},
+        status=FETCHED,
+        match=KeyMatch(item_id="k1", name="web-1", matched_by="server name"),
+        host="198.51.100.1",
+        port=22,
+        login="ubuntu",
+        host_keys=[HOST_KEY],
+        verified=True,
+        verification_source="verified by AWS console output",
+    )
+
+    app2 = _ModalHost([verified_row])
+    async with app2.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app2.screen, VaultAutoBindReviewModal))
+        confirm_btn = app2.screen.query_one("#vault_bind_confirm", Button)
+        checkbox = app2.screen.query_one("#vault_bind_use_trusted", Checkbox)
+
+        assert not confirm_btn.disabled
+        assert checkbox.value
+
+
+@pytest.mark.asyncio
+async def test_review_modal_fits_narrow_terminal() -> None:
+    row = AutoBindRow(
+        instance={"id": "i-web1", "name": "web-1"},
+        status=FETCHED,
+        match=KeyMatch(item_id="k1", name="web-1", matched_by="server name"),
+        host="198.51.100.1",
+        port=22,
+        login="ubuntu",
+        host_keys=[HOST_KEY],
+        verified=False,
+    )
+
+    class _ModalHost(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self):
+            self.push_screen(
+                VaultAutoBindReviewModal(
+                    [row],
+                    server_name_fn=lambda r: r.instance.get("name", ""),
+                    scrub_fn=lambda s: str(s),
+                )
+            )
+
+    app = _ModalHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, VaultAutoBindReviewModal))
+        await pilot.pause()
+        screen = app.screen.region
+        for selector in (
+            "#auto_bind_review_container",
+            "#auto_bind_review_scroll",
+            "#vault_bind_use_trusted",
+            "#auto_bind_review_cancel",
+            "#vault_bind_confirm",
+        ):
             region = app.screen.query_one(selector).region
             assert region.width > 0 and region.height > 0 and screen.contains_region(region), (selector, region)
