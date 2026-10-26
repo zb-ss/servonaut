@@ -28,6 +28,7 @@ from servonaut.services.vault.display import (
     terminal_safe,
 )
 from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
+from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
 _EXIT_ERROR = 1
@@ -116,12 +117,12 @@ def add_vault_parser(subparsers: Any) -> None:
     commands.add_parser("status", help="Show identity, device and vault status.")
     setup = commands.add_parser("setup", help="Create or restore a vault identity.")
     setup.add_argument("--device-name", default=None)
-    setup.add_argument("--platform", default=None)
+    setup.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     setup.add_argument("--yes", action="store_true", help="Confirm recovery-key display requirements.")
 
     recover = commands.add_parser("recover", help="Restore a device with the recovery key.")
     recover.add_argument("--device-name", default=None)
-    recover.add_argument("--platform", default=None)
+    recover.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     identity = commands.add_parser("identity", help="Manage identity confirmation.")
     identity_sub = identity.add_subparsers(dest="vault_identity_command", required=True)
     identity_sub.add_parser("confirm", help="Refresh identity confirmation after login with MFA.")
@@ -138,7 +139,7 @@ def add_vault_parser(subparsers: Any) -> None:
     device_sub.add_parser("list", help="List current and recently finished devices.")
     add = device_sub.add_parser("add", help="Register this device and wait for approval on another device.")
     add.add_argument("--device-name", default=None)
-    add.add_argument("--platform", default=None)
+    add.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     approve = device_sub.add_parser("approve", help="Approve a pending device after comparing its SAS.")
     approve.add_argument("device_id")
     revoke = device_sub.add_parser("revoke", help="Revoke a device.")
