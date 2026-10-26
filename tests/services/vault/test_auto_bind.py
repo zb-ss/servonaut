@@ -5,11 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from servonaut.services.vault.auto_bind import (
     ALREADY_BOUND,
     AMBIGUOUS,
     CHECK_FAILED,
+    FETCH_FAILED,
+    FETCHED,
+    HOST_KEY_MISMATCH,
     MATCHED_BY_KEY_FILE,
     MATCHED_BY_KEY_PAIR,
     MATCHED_BY_SERVER_NAME,
@@ -18,10 +23,21 @@ from servonaut.services.vault.auto_bind import (
     NO_KEY,
     NO_LOGIN,
     READY,
+    _HOST_KEY_VISITS,
     apply_auto_bind,
+    fetch_host_keys_for_rows,
     match_ssh_key,
     normalize_key_name,
     plan_auto_bind,
+)
+from servonaut.services.vault.crypto import ssh_public_fingerprint
+from servonaut.services.vault.ec2_host_keys import (
+    BEGIN_FINGERPRINTS,
+    BEGIN_KEYS,
+    END_FINGERPRINTS,
+    END_KEYS,
+    MAX_CONSOLE_OUTPUT_CHARS,
+    parse_ec2_console_output,
 )
 from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.personal_targets import instance_provider, instance_target
@@ -177,3 +193,267 @@ async def test_binding_goes_on_after_a_failure_and_never_replaces_a_key() -> Non
     # A custom server is bound by its name under the provider "custom".
     assert calls["x"]["provider"] == "custom"
     assert SimpleNamespace(**calls["x"]).host_keys == [HOST_KEY]
+
+
+def _make_key() -> str:
+    priv = ed25519.Ed25519PrivateKey.generate()
+    return priv.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+
+
+def test_parse_ec2_console_output_keys_block() -> None:
+    key1 = _make_key()
+    console = f"boot log\n{BEGIN_KEYS}\n{key1}\n{END_KEYS}\nkernel ready"
+    res = parse_ec2_console_output(console)
+
+    assert res.verified is True
+    assert res.keys == [key1]
+    assert res.has_keys_block is True
+    assert res.source == "verified by AWS console output"
+    assert res.error is None
+
+
+def test_parse_ec2_console_output_fingerprints_only() -> None:
+    key1 = _make_key()
+    fp1 = ssh_public_fingerprint(key1)
+    console = f"boot log\n{BEGIN_FINGERPRINTS}\n256 {fp1} root@ip-10-0-0-1 (ED25519)\n{END_FINGERPRINTS}\nready"
+    res = parse_ec2_console_output(console)
+
+    assert res.verified is False
+    assert res.has_keys_block is False
+    assert res.has_fingerprints_block is True
+    assert res.fingerprints.get("ED25519") == fp1
+    assert res.source == "AWS console output"
+
+
+def test_parse_ec2_console_output_agreeing_keys_and_fingerprints() -> None:
+    key1 = _make_key()
+    fp1 = ssh_public_fingerprint(key1)
+    console = (
+        f"{BEGIN_FINGERPRINTS}\n256 {fp1} root@ip-10-0-0-1 (ED25519)\n{END_FINGERPRINTS}\n"
+        f"{BEGIN_KEYS}\n{key1}\n{END_KEYS}"
+    )
+    res = parse_ec2_console_output(console)
+
+    assert res.verified is True
+    assert res.keys == [key1]
+    assert res.has_keys_block is True
+    assert res.has_fingerprints_block is True
+
+
+def test_parse_ec2_console_output_disagreeing_keys_and_fingerprints() -> None:
+    key1 = _make_key()
+    other_fp = "SHA256:dGhpcy1pcy1hLWZha2UtZmluZ2VycHJpbnQtdmFsdWU"
+    console = (
+        f"{BEGIN_FINGERPRINTS}\n256 {other_fp} root@ip-10-0-0-1 (ED25519)\n{END_FINGERPRINTS}\n"
+        f"{BEGIN_KEYS}\n{key1}\n{END_KEYS}"
+    )
+    res = parse_ec2_console_output(console)
+
+    assert res.verified is False
+    assert "disagree" in (res.error or "")
+
+
+def test_parse_ec2_console_output_multiple_blocks_agreement_and_disagreement() -> None:
+    key1 = _make_key()
+    key2 = _make_key()
+
+    # Agreeing multiple blocks: uses last/first
+    agreeing = f"{BEGIN_KEYS}\n{key1}\n{END_KEYS}\n{BEGIN_KEYS}\n{key1}\n{END_KEYS}"
+    res_agree = parse_ec2_console_output(agreeing)
+    assert res_agree.verified is True
+    assert res_agree.keys == [key1]
+
+    # Disagreeing multiple blocks: unverified
+    disagreeing = f"{BEGIN_KEYS}\n{key1}\n{END_KEYS}\n{BEGIN_KEYS}\n{key2}\n{END_KEYS}"
+    res_disagree = parse_ec2_console_output(disagreeing)
+    assert res_disagree.verified is False
+    assert "disagree" in (res_disagree.error or "")
+
+
+def test_parse_ec2_console_output_edge_cases() -> None:
+    # Empty output
+    empty_res = parse_ec2_console_output("")
+    assert empty_res.verified is False
+    assert "empty" in (empty_res.error or "")
+
+    # Oversized output
+    oversized = "a" * (MAX_CONSOLE_OUTPUT_CHARS + 10)
+    over_res = parse_ec2_console_output(oversized)
+    assert over_res.verified is False
+    assert "size limit" in (over_res.error or "")
+
+    # Rotated output (no markers)
+    rotated = "Linux ip-10-0-0-1 login prompt\nUbuntu 24.04 LTS"
+    rot_res = parse_ec2_console_output(rotated)
+    assert rot_res.verified is False
+    assert "no longer holds" in (rot_res.error or "")
+
+    # MD5-only fingerprints (no SHA256)
+    md5_console = (
+        f"{BEGIN_FINGERPRINTS}\n"
+        "2048 01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef root@ip (RSA)\n"
+        f"{END_FINGERPRINTS}"
+    )
+    md5_res = parse_ec2_console_output(md5_console)
+    assert md5_res.verified is False
+    assert "no longer holds" in (md5_res.error or "")
+
+    # Junk inside KEYS block
+    junk_console = f"{BEGIN_KEYS}\nnot a valid key line\n{END_KEYS}"
+    junk_res = parse_ec2_console_output(junk_console)
+    assert junk_res.verified is False
+    assert "no longer holds" in (junk_res.error or "")
+
+
+class _VisitService(_Service):
+    def __init__(self, *, visits=None, fail_visit=(), **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.visits: list[str] = []
+        self.fail_visit = set(fail_visit)
+        self.active_concurrency = 0
+        self.max_concurrency = 0
+
+    async def visit_for_host_key(self, instance, login=None):
+        import asyncio
+
+        self.active_concurrency += 1
+        self.max_concurrency = max(self.max_concurrency, self.active_concurrency)
+        try:
+            await asyncio.sleep(0.01)
+            inst_id = instance.get("id") or ""
+            self.visits.append(inst_id)
+            if inst_id in self.fail_visit:
+                return "connection timeout"
+            return None
+        finally:
+            self.active_concurrency -= 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_aws_keys_block_skips_ssh_visit() -> None:
+    key1 = _make_key()
+    server = _server("i-aws-1", "web-1")
+    keys = [_key("k1", "web-1")]
+    service = _VisitService()
+
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+    assert rows[0].status == NO_HOST_KEYS
+
+    console = f"{BEGIN_KEYS}\n{key1}\n{END_KEYS}"
+    await fetch_host_keys_for_rows(
+        service, rows, console_output_reader=lambda inst: console,
+    )
+
+    row = rows[0]
+    assert row.status == FETCHED
+    assert row.ready is True
+    assert row.verified is True
+    assert row.verification_source == "verified by AWS console output"
+    assert row.host_keys == [key1]
+    # No visit was made!
+    assert service.visits == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_aws_fingerprints_match_and_mismatch() -> None:
+    key_match = _make_key()
+    fp_match = ssh_public_fingerprint(key_match)
+
+    key_differ = _make_key()
+    # Different key than console recorded
+    key_differ_actual = _make_key()
+
+    server_ok = _server("i-ok", "web-1")
+    server_bad = _server("i-bad", "web-2")
+    keys = [_key("k1", "web-1"), _key("k2", "web-2")]
+    service = _VisitService()
+
+    rows = await plan_auto_bind(service, [server_ok, server_bad], keys, host_keys_for=lambda *_: [])
+
+    consoles = {
+        "i-ok": f"{BEGIN_FINGERPRINTS}\n256 {fp_match} root@ip (ED25519)\n{END_FINGERPRINTS}",
+        "i-bad": f"{BEGIN_FINGERPRINTS}\n256 {ssh_public_fingerprint(key_differ)} root@ip (ED25519)\n{END_FINGERPRINTS}",
+    }
+    trusted = {
+        "i-ok": [key_match],
+        "i-bad": [key_differ_actual],
+    }
+
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        console_output_reader=lambda inst: consoles[inst["id"]],
+        host_keys_for=lambda inst, *_: trusted[inst["id"]],
+    )
+
+    by_id = {row.instance["id"]: row for row in rows}
+
+    ok_row = by_id["i-ok"]
+    assert ok_row.status == FETCHED
+    assert ok_row.ready is True
+    assert ok_row.verified is True
+    assert ok_row.verification_source == "verified by AWS console output"
+
+    bad_row = by_id["i-bad"]
+    assert bad_row.status == HOST_KEY_MISMATCH
+    assert bad_row.status_label == "host key differs from AWS"
+    assert bad_row.ready is False
+    assert bad_row.verified is False
+    assert "The server answered with a different host key than AWS" in bad_row.status_text
+    assert "ssh-keygen -R" in bad_row.status_text
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_bounded_concurrency_and_per_row_failure() -> None:
+    servers = [_server(f"i-{n}", f"web-{n}") for n in range(10)]
+    keys = [_key(f"k{n}", f"web-{n}") for n in range(10)]
+    service = _VisitService(fail_visit={"i-3"})
+    trusted_key = _make_key()
+
+    rows = await plan_auto_bind(service, servers, keys, host_keys_for=lambda *_: [])
+    assert all(r.status == NO_HOST_KEYS for r in rows)
+
+    # Empty console output -> forces SSH visit for all
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        console_output_reader=lambda inst: "",
+        host_keys_for=lambda *_: [trusted_key],
+        max_concurrency=4,
+    )
+
+    assert service.max_concurrency <= 4
+    by_id = {row.instance["id"]: row for row in rows}
+
+    failing = by_id["i-3"]
+    assert failing.status == FETCH_FAILED
+    assert failing.ready is False
+    assert "connection timeout" in failing.status_text
+
+    success = [r for r in rows if r.instance["id"] != "i-3"]
+    assert len(success) == 9
+    assert all(r.status == FETCHED and r.ready is True for r in success)
+    assert all(r.verified is False for r in success)
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_non_aws_server() -> None:
+    server = {"id": "ovh-1", "name": "web-1", "provider": "ovh", "public_ip": "198.51.100.10"}
+    keys = [_key("k1", "web-1")]
+    service = _VisitService()
+    trusted_key = _make_key()
+
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+    assert rows[0].status == NO_HOST_KEYS
+
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        host_keys_for=lambda *_: [trusted_key],
+    )
+
+    row = rows[0]
+    assert row.status == FETCHED
+    assert row.ready is True
+    assert row.verified is False
+    assert "compare with the server's console or your provider" in (row.verification_source or "")
