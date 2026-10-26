@@ -56,6 +56,7 @@ class FleetEntry:
     instance_id: str
     state: str  # as the provider's API reports it
     ssh: bool  # a real SSH session works (loopback SSH server)
+    key_name: Optional[str] = None
 
 
 @dataclass
@@ -73,6 +74,7 @@ def _entry(
     *,
     qualified: bool,
     ssh: bool = False,
+    key_name: Optional[str] = None,
 ) -> FleetEntry:
     """A fleet entry, named with the product's own display rules."""
     row = {
@@ -94,6 +96,7 @@ def _entry(
         instance_id=instance_id,
         state=state,
         ssh=ssh,
+        key_name=key_name,
     )
 
 
@@ -175,7 +178,7 @@ class ScenarioSeeder:
         label = "aws"
         entries = [
             _entry("aws", label, h.name, ids[h.name], h.state, qualified=multi,
-                   ssh=h.name == remote_fleet.APP_1.name)
+                   ssh=h.name == remote_fleet.APP_1.name, key_name=h.key_name)
             for h in primary_hosts
         ]
         if not multi:
@@ -196,7 +199,8 @@ class ScenarioSeeder:
         self.cloudtrail.seed(_trail("RebootInstances", "CreateBucket"), region=REGION,
                              account=aws.SECOND_ACCOUNT)
         entries += [
-            _entry("aws", second, h.name, second_ids[h.name], h.state, qualified=True)
+            _entry("aws", second, h.name, second_ids[h.name], h.state, qualified=True,
+                   key_name=h.key_name)
             for h in fleet.AWS_SECOND_FLEET
         ]
         return entries
