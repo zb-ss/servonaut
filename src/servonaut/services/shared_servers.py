@@ -15,6 +15,8 @@ there (see ``team_rules``).
 A shared server that is also one of the user's own servers is listed once:
 the user's own row, marked as shared (see :func:`fold_shared`). The user's
 own access wins because it is theirs; the mark says the team has it too.
+Without a key of their own for it, the team's access is used instead (see
+:func:`team_key_fallback`).
 """
 from __future__ import annotations
 
@@ -70,6 +72,9 @@ def shared_row(server: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, 
     filled in from it.
     """
     row: Dict[str, Any] = copy.deepcopy(dict(server))
+    # Only this client marks a row with a team's key (see with_team_key):
+    # a record from the team list never carries one.
+    row.pop(TEAM_KEY_ROW, None)
     host = str(
         server.get("hostname") or server.get("public_ip") or server.get("host") or ""
     ).strip()
@@ -120,7 +125,9 @@ def as_shared_row(target: Mapping[str, Any]) -> Dict[str, Any]:
     all). A row is returned as is.
     """
     if target.get("is_shared") is True and target.get("state") == SHARED_STATE:
-        return dict(target)
+        row = dict(target)
+        row.pop(TEAM_KEY_ROW, None)
+        return row
     team = {
         "id": target.get("team_id"),
         "slug": target.get("team_slug") or "",
@@ -204,6 +211,86 @@ def fold_shared(
 def fold_shared_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """:func:`fold_shared`'s rows only."""
     return fold_shared(rows)[0]
+
+
+# Binding source of a team vault key (the same value ``ssh_credentials`` reads).
+_VAULT_SOURCE = "servonaut_vault"
+# The team row a user's own server is marked with when it connects with that
+# team's key (see :func:`with_team_key`). A marked row only lives for one
+# lookup: it is never cached or listed.
+TEAM_KEY_ROW = "team_key_row"
+
+
+def has_team_access(row: Mapping[str, Any]) -> bool:
+    """Whether the team's row *row* brings the team's own SSH access: a team
+    vault key (its signed ``credential_binding``) or an SSH certificate for
+    an enrolled host."""
+    binding = row.get("credential_binding")
+    if isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE:
+        return True
+    ca = row.get("ssh_ca")
+    return isinstance(ca, Mapping) and ca.get("enrolled") is True
+
+
+def lacks_own_key(own: Mapping[str, Any], key_path: Any) -> bool:
+    """Whether the user's own server *own* names a cloud key pair
+    (``key_name``) they have no key for here (*key_path*, the local key its
+    connection resolved, is empty).
+
+    Such a server may connect with a team's key (:func:`team_key_fallback`).
+    A server without a key pair keeps the user's own SSH setup (an agent or
+    the default keys, which ssh tries by itself), and so does every server
+    the user has a key for. A custom server's ``key_name`` is its key file,
+    not a key pair: custom servers keep their own setup too.
+    """
+    return not (
+        is_shared_row(own) or own.get("is_custom") is True or key_path
+        or not str(own.get("key_name") or "").strip()
+    )
+
+
+def team_key_fallback(
+    own: Mapping[str, Any], rows: Iterable[Mapping[str, Any]], key_path: Any,
+) -> Optional[Dict[str, Any]]:
+    """The team row whose key the user's own server *own* connects with, or None.
+
+    A server the user lists as their own (from their own cloud account) and
+    a team also shares is listed once, as their own (see :func:`fold_shared`).
+    When the user has no key of their own for it (:func:`lacks_own_key`), it
+    connects with the team's vault key or SSH certificate instead: the first
+    row in *rows* that shares the same server with that access.
+    """
+    if not lacks_own_key(own, key_path):
+        return None
+    for row in rows:
+        if (
+            isinstance(row, Mapping) and is_shared_row(row)
+            and has_team_access(row) and is_same_server(row, own)
+        ):
+            return dict(row)
+    return None
+
+
+def with_team_key(own: Mapping[str, Any], team: Mapping[str, Any]) -> Dict[str, Any]:
+    """*own* marked to connect with *team*'s key (see :func:`team_key_target`)."""
+    return {**own, TEAM_KEY_ROW: dict(team)}
+
+
+def team_key_target(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The team row :func:`with_team_key` marked *row* with, else None.
+
+    Only a server of the user's own is ever marked: on a team's row the key
+    is ignored, so data from elsewhere cannot point it at another team.
+    """
+    if is_shared_row(row):
+        return None
+    team = row.get(TEAM_KEY_ROW)
+    return dict(team) if isinstance(team, Mapping) and is_shared_row(team) else None
+
+
+def row_team_label(row: Mapping[str, Any]) -> str:
+    """The name to show for the team of the shared *row*: its name, else its slug."""
+    return str(row.get("team_name") or row.get("team_slug") or "").strip()
 
 
 @dataclass

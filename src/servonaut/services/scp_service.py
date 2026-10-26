@@ -229,9 +229,15 @@ class SCPService(SCPServiceInterface):
         if port is not None and port != 22:
             cmd.extend(['-P', str(port)])
 
-        # Apply per-host extras (e.g. legacy algorithm negotiation)
+        # Apply per-host extras (e.g. legacy algorithm negotiation). As in
+        # SSHService.build_ssh_command: a Vault lease pins the host its key
+        # names, so a cloud server's HostKeyAlias would look up a name the
+        # lease's file does not hold.
         if extra_options:
             for opt in extra_options:
+                option_name = opt.split("=", 1)[0].strip().casefold() if opt else ""
+                if known_hosts_file and option_name == "hostkeyalias":
+                    continue
                 if opt:
                     cmd.extend(['-o', opt])
 

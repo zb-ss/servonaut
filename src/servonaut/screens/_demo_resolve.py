@@ -27,6 +27,20 @@ def connection_instance(app: Any, instance: Optional[Dict[str, Any]]) -> Optiona
     return resolved if isinstance(resolved, dict) else instance
 
 
+def team_rows(app: Any) -> List[Dict[str, Any]]:
+    """The team shared servers of the fleet, as their real records.
+
+    What a connection to one of the user's own servers may fall back to
+    (see ``shared_servers.team_key_fallback``). Demo mode redacts
+    ``app.instances``, so the pre-redaction copy is read then.
+    """
+    from servonaut.services.shared_servers import is_shared_row
+
+    demo = bool(getattr(app, "demo_mode", False)) and getattr(app, "redaction_service", None) is not None
+    rows = getattr(app, "_instances_pristine", None) if demo else getattr(app, "instances", None)
+    return [dict(row) for row in rows or [] if isinstance(row, dict) and is_shared_row(row)]
+
+
 UNRESOLVED_MESSAGE = (
     "The real server behind this row is not known in demo mode, so nothing "
     "was sent. Press ctrl+shift+d to turn demo mode off and try again."

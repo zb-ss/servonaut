@@ -151,6 +151,27 @@ def teams_root_problem(root: Path) -> Optional[str]:
     )
 
 
+def _fleet_host(name: str) -> Any:
+    """The AWS fleet server called *name*, or None."""
+    from e2e.harness import fleet
+
+    return next((host for host in fleet.AWS_FLEET if host.name == name), None)
+
+
+def team_server_as_problem(name: Optional[str], teams: bool) -> Optional[str]:
+    """Why ``--team-server-as`` *name* cannot be used, or None."""
+    if not name:
+        return None
+    if not teams:
+        return "--team-server-as needs --teams (it names what the team's shared server also is)"
+    if _fleet_host(name) is None:
+        from e2e.harness import fleet
+
+        names = ", ".join(host.name for host in fleet.AWS_FLEET)
+        return f"--team-server-as {name!r} names no AWS server of the sandbox fleet ({names})"
+    return None
+
+
 READY_PREFIX = "SANDBOX READY"
 # How often the owner looks for desktop requests and writes the request logs.
 _POLL_SECONDS = 0.5
@@ -359,7 +380,8 @@ class Owner:
                  ssh_ca_refuse: Optional[str] = None, api_delay: float = 0.0,
                  teams: bool = False, account_email: str = "",
                  verification_uri: Optional[str] = None, user_code: Optional[str] = None,
-                 hostname: Optional[str] = None, ai_script: Optional[dict] = None) -> None:
+                 hostname: Optional[str] = None, ai_script: Optional[dict] = None,
+                 team_server_as: Optional[str] = None) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -372,6 +394,8 @@ class Owner:
         self.ssh_ca_refuse = ssh_ca_refuse
         self.api_delay = api_delay
         self.teams = teams
+        # --team-server-as: the AWS fleet server the team's shared server also is.
+        self.team_server_as = team_server_as
         self.account_email = account_email
         self.verification_uri = verification_uri
         self.user_code = user_code
@@ -521,6 +545,8 @@ class Owner:
         ).seed(self.scenario)
         if self.teams:
             seeded.notes.extend(self._seed_team_owner())
+            if self.team_server_as:
+                self._share_as_own(seeded.fleet)
         if self.signed_in:
             session_seed.seed_session(self.user.home, self.fake_cloud)
         self.child_env = self._child_env(self.user)
@@ -653,6 +679,18 @@ class Owner:
             TEAM_SLUG, SERVER_ID, hostname=LOOPBACK, port=self.ca_host.port,
         )
 
+    def _share_as_own(self, entries: list) -> None:
+        """Record the team's shared server as the fleet's ``--team-server-as`` server.
+
+        The team records the instance it shares, so the account lists that
+        machine once, as its own server marked as shared. The instance id is
+        the one the AWS fake gave the server when the fleet was seeded.
+        """
+        from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_SLUG
+
+        entry = next(e for e in entries if e.provider == "aws" and e.shown == self.team_server_as)
+        self.fake_cloud.account.place_shared_server(TEAM_SLUG, SERVER_ID, instance_id=entry.instance_id)
+
     def _seed_team_owner(self) -> list[str]:
         """Give the home the owner's existing access to the shared server; return the notes.
 
@@ -682,19 +720,32 @@ class Owner:
         from e2e.harness.seed import HomeSeeder
 
         self.member = Sandbox(self.root / MEMBER).create()
-        # A teammate with no cloud accounts of their own: AWS stays off.
+        aws_keys = bool(self.team_server_as)
+        # A teammate with no cloud accounts of their own: AWS stays off. With
+        # --team-server-as they were given the account's AWS keys, but none of
+        # its SSH key files.
         HomeSeeder(self.member.home, api_url=self.fake_cloud.url).config(
-            aws=HomeSeeder.aws_config(enabled=False),
+            aws=HomeSeeder.aws_config(enabled=aws_keys),
         )
         self.member_env = self._child_env(self.member)
-        # Nor AWS credentials: the product lists AWS servers whenever it finds
-        # credentials, and a new teammate's list starts empty.
-        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
-            self.member_env.pop(name, None)
-        self.member_env["AWS_SHARED_CREDENTIALS_FILE"] = str(self.member.home / ".aws" / "credentials")
-        self.member_env["AWS_CONFIG_FILE"] = str(self.member.home / ".aws" / "config")
+        if not aws_keys:
+            # Nor AWS credentials: the product lists AWS servers whenever it
+            # finds credentials, and a new teammate's list starts empty.
+            for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+                self.member_env.pop(name, None)
+            self.member_env["AWS_SHARED_CREDENTIALS_FILE"] = str(self.member.home / ".aws" / "credentials")
+            self.member_env["AWS_CONFIG_FILE"] = str(self.member.home / ".aws" / "config")
         run_member = "python -m e2e.sandbox run --as member --"
-        return [
+        notes = []
+        if aws_keys:
+            notes.append(
+                f"Team server as own: {HOST_NAME} is also {self.team_server_as} of the AWS fleet. "
+                f"The member lists the fleet with the account's AWS keys and has no SSH key "
+                f"files: `{run_member} ssh {self.team_server_as}` connects with the team's key "
+                f"once the owner has enrolled {HOST_NAME}. The owner's own ~/.ssh/ops-key.pem "
+                f"opens it too; remove it to see the owner fall back the same way."
+            )
+        return notes + [
             f"Team member: {MEMBER_EMAIL} has a home of their own ({self.member.home}), is signed "
             f"out and is not in {TEAM_SLUG} yet. Run their commands with `{run_member} <args>`.",
             f"Member walk: invite {MEMBER_EMAIL} on the Teams screen; accept the invitation with "
@@ -733,6 +784,7 @@ class Owner:
             "shared_server": {
                 "name": HOST_NAME,
                 "id": SERVER_ID,
+                "same_as": self.team_server_as,
                 "address": f"127.0.0.1:{self.ca_host.port}",
                 "login": LOGIN,
                 "admin_login": ADMIN_USER,
@@ -1049,6 +1101,7 @@ def up(
     ssh_ca_off: bool = False, ssh_ca_refuse: Optional[str] = None, api_delay: float = 0.0, teams: bool = False,
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
     ai_script: Optional[Path] = None, user_code: Optional[str] = None,
+    team_server_as: Optional[str] = None,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -1061,7 +1114,10 @@ def up(
     repo_root = bootstrap.REPO_ROOT
     # Resolved: children carry this exact path, and `down` finds them by it.
     root = (root or state.default_root(repo_root)).resolve()
-    problem = root_problem(root, repo_root) or (teams_root_problem(root) if teams else None)
+    problem = (
+        root_problem(root, repo_root) or (teams_root_problem(root) if teams else None)
+        or team_server_as_problem(team_server_as, teams)
+    )
     if problem:
         _say(f"not starting: {problem}")
         return 2
@@ -1089,7 +1145,7 @@ def up(
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off,
                           ssh_ca_refuse=ssh_ca_refuse, api_delay=api_delay, teams=teams, account_email=account_email,
                           verification_uri=verification_uri, user_code=user_code,
-                          hostname=hostname, ai_script=script)
+                          hostname=hostname, ai_script=script, team_server_as=team_server_as)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

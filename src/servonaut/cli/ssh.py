@@ -30,7 +30,7 @@ from servonaut.services.connection_service import (
     profile_route,
     rule_username,
 )
-from servonaut.utils.instance_resolver import describe_candidate, match_instances
+from servonaut.utils.instance_resolver import describe_candidate, match_instances, qualified_reference
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +337,7 @@ async def _handle_ssh_async(args: Any) -> int:
         check_configured_reference,
         with_ovh_login,
     )
-    from servonaut.services.ssh_ref_resolver import SshRefResolver
+    from servonaut.services.ssh_ref_resolver import SshRefResolver, resolve_target, team_key_hint
     from servonaut.services.bw_resolver import (
         BwResolver,
         BwCliMissingError,
@@ -419,17 +419,21 @@ async def _handle_ssh_async(args: Any) -> int:
 
         teams_supplier = _teams_supplier_fn
 
+    vault_runtime = _vault_runtime_for_cli()
     resolver = SshRefResolver(
         bw_ssh_config_service=bw_ssh_config_service or _NullBwService(),
         team_service=team_service or _NullTeamService(),
         ssh_service=ssh_service,
         teams_supplier=teams_supplier,
-        vault_runtime=_vault_runtime_for_cli(),
+        vault_runtime=vault_runtime,
     )
 
     # --- Resolve ---
+    # Without a key of the user's own, a team's key for the same server is
+    # used; the connection then targets the team's row (its host and login).
+    own_row = instance.get("is_shared") is not True
     try:
-        resolved = await resolver.resolve(instance)
+        instance, resolved = await resolve_target(resolver, instance, instances)
     except Exception as exc:  # A configured native binding must fail closed.
         logger.warning("Native Vault SSH resolution failed: %s", type(exc).__name__)
         from servonaut.services.vault.errors import vault_failure_reason
@@ -441,6 +445,10 @@ async def _handle_ssh_async(args: Any) -> int:
         return _EXIT_GENERIC_ERROR
 
     if resolved is None:
+        hint = team_key_hint(instance, instances, vault_runtime)
+        if hint is not None:
+            print(f"No SSH key for {args.instance!r} here. {hint}", file=sys.stderr)
+            return _EXIT_NO_CREDENTIAL
         print(
             f"No SSH key configured for {iid!r}. "
             f"Assign a Bitwarden SSH key {_ASSIGN_KEY_HINT}, "
@@ -449,6 +457,13 @@ async def _handle_ssh_async(args: Any) -> int:
         )
         return _EXIT_NO_CREDENTIAL
 
+    if own_row and instance.get("is_shared") is True:
+        print(
+            f"No key of your own for {args.instance!r} here: connecting with team "
+            f"{instance.get('team_name') or instance.get('team_slug')}'s key "
+            f"({qualified_reference(instance)}).",
+            file=sys.stderr,
+        )
     print(f"SSH resolution tier: {resolved.source}", file=sys.stderr)
     if resolved.source == "local":
         print(

@@ -1458,3 +1458,157 @@ class TestTeamKeyOnAnOwnServerOnRelay:
             )))
 
         assert response.status == "success"
+
+
+class _FallbackRuntime(_VaultRuntime):
+    """No key of the user's own for i-abc123; *lease* (or *error*) for the team's copy of it."""
+
+    is_unlocked = True
+
+    def __init__(self, lease=None, error=None, binding=True, own_lease=None) -> None:
+        super().__init__(lease=None)
+        self.own_lease = own_lease
+        self.team_lease = lease
+        self.team_error = error
+        shared = {
+            "id": "srv-1", "name": "web-server", "hostname": "54.1.2.3", "port": 22,
+            "instance_id": "i-abc123",
+        }
+        if binding:
+            shared["credential_binding"] = {"source": "servonaut_vault", "vault_id": "vault-1"}
+        self.teams = MagicMock()
+        self.teams.list_teams = AsyncMock(
+            return_value=[{"id": "team-id-ops", "slug": "ops", "name": "Ops", "role": "member"}],
+        )
+        self.teams.list_shared_servers = AsyncMock(return_value=[shared])
+
+    async def resolve_ssh(self, instance):
+        self.resolved.append(instance)
+        if instance.get("is_shared") is True:
+            if self.team_error is not None:
+                raise self.team_error
+            return self.team_lease
+        return self.own_lease
+
+    async def credential_team(self, instance):
+        return None
+
+
+class TestTeamKeyFallbackOnRelay:
+    """An own server whose key pair has no key here connects with the team's key."""
+
+    def _executor(self, runtime, own_key=None):
+        executor = make_executors()
+        executor._ssh_service.get_key_path.return_value = own_key
+        executor.set_vault_runtime(runtime)
+        executor._config_manager.get.return_value = AppConfig(mcp=MCPConfig(guard_level="dangerous"))
+        executor._audit = MagicMock()
+        return executor
+
+    @staticmethod
+    def _ssh_ok():
+        return patch(
+            "servonaut.services.relay_executors.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"ok", b"")),
+        )
+
+    def test_a_command_runs_with_the_team_s_key(self):
+        trust_signed_team_rules("ops")
+        lease = _VaultLease()
+        executor = self._executor(_FallbackRuntime(lease))
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "success"
+        kwargs = executor._ssh_service.build_ssh_command.call_args.kwargs
+        assert kwargs["identity_agent"] == lease.identity_agent
+        assert kwargs["username"] == "vault-login"
+        assert kwargs["key_path"] is None
+
+    def test_the_team_s_rules_apply(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "readonly", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": [],
+        })
+        executor = self._executor(_FallbackRuntime(_VaultLease()))
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "rejected"
+        assert response.error_message.startswith(
+            "Blocked: on this server, which connects with a key from team Ops's vault,"
+        )
+        executor._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_a_key_of_the_user_s_own_needs_no_team(self):
+        runtime = _FallbackRuntime(_VaultLease())
+        executor = self._executor(runtime, own_key="~/.ssh/prod-key.pem")
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123",
+                payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        assert executor._ssh_service.build_ssh_command.call_args.kwargs["key_path"] == "~/.ssh/prod-key.pem"
+        runtime.teams.list_shared_servers.assert_not_awaited()
+
+    def test_a_share_without_the_team_s_key_changes_nothing(self):
+        executor = self._executor(_FallbackRuntime(_VaultLease(), binding=False))
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123",
+                payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        assert executor._ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] is None
+
+    def test_a_team_key_that_cannot_be_used_keeps_the_user_s_own_setup(self):
+        trust_signed_team_rules("ops")
+        executor = self._executor(_FallbackRuntime(error=RuntimeError("vault locked")))
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123", payload={"command": "uptime"},
+            )))
+
+        assert response.status == "success"
+        assert executor._ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] is None
+
+    def test_a_personal_vault_key_keeps_the_local_rules(self):
+        trust_signed_team_rules("ops", {
+            "role_levels": {"owner": "standard", "admin": "standard",
+                            "member": "readonly", "viewer": "readonly"},
+            "servers": {}, "command_allowlist": None, "command_blocklist": [],
+        })
+        own = _VaultLease()
+        own.identity_agent = "/tmp/own-agent.sock"
+        executor = self._executor(_FallbackRuntime(_VaultLease(), own_lease=own))
+        with self._ssh_ok():
+            response = run(executor.execute(make_request(
+                from_agent=True, target="i-abc123",
+                payload={"command": "systemctl restart nginx"},
+            )))
+
+        assert response.status == "success"
+        assert executor._ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] == "/tmp/own-agent.sock"
+        assert own.closed >= 1  # the check's lease was closed again
+
+    def test_the_team_s_rules_are_not_fetched_for_every_request(self):
+        trust_signed_team_rules("ops")
+        runtime = _FallbackRuntime(_VaultLease())
+        executor = self._executor(runtime)
+        with self._ssh_ok():
+            for request_id in ("req-1", "req-2", "req-3"):
+                run(executor.execute(make_request(
+                    from_agent=True, req_id=request_id, target="i-abc123",
+                    payload={"command": "uptime"},
+                )))
+
+        assert runtime.teams.list_teams.await_count <= 2
+        assert runtime.teams.list_shared_servers.await_count <= 2

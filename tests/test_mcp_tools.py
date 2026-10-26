@@ -2055,3 +2055,179 @@ class TestTeamKeyOnAnOwnServer:
 
         assert "[transport_used: ssh]" in before
         assert "run at the readonly level (set by the team)" in after
+
+
+# ---------------------------------------------------------------------------
+# An own server without its key pair, reached with a team's key instead
+# ---------------------------------------------------------------------------
+
+_TEAM_BINDING = {"source": "servonaut_vault", "vault_id": "vault-1", "item_id": "item-1"}
+
+
+def _team_lease():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        source="vault", identity_agent="/run/agent.sock", identity_file="/run/key.pub",
+        certificate_path=None, known_hosts_path="/run/known_hosts", login_user="deploy",
+        target_host="team-web.example.com", target_port=22,
+    )
+
+
+def _fallback_runtime(lease=None, error=None, own_lease=None):
+    """A vault runtime with *own_lease* (none by default) for the user's own
+    server and *lease* (or *error*) for the team's."""
+
+    async def resolve_ssh(instance):
+        if instance.get('is_shared') is True:
+            if error is not None:
+                raise error
+            return lease
+        return own_lease
+
+    runtime = MagicMock()
+    runtime.resolve_relay_target = AsyncMock(return_value=None)
+    runtime.resolve_ssh = AsyncMock(side_effect=resolve_ssh)
+    runtime.credential_team = AsyncMock(return_value=None)
+    runtime.is_unlocked = True
+    return runtime
+
+
+class TestTeamKeyFallback:
+    """i-abc123 names the key pair prod-key, which has no key file here."""
+
+    def _tools(self, runtime, binding=_TEAM_BINDING, level=GuardLevel.DANGEROUS):
+        shared = _shared_server(instance_id="i-abc123", credential_binding=binding)
+        tools = make_tools(
+            guard_level=level, vault_runtime=runtime, team_service=_team_service(servers=[shared]),
+        )
+        tools._ssh_service.get_key_path.return_value = None
+        tools._ssh_service.discover_key.return_value = None
+        return tools
+
+    def test_a_command_runs_with_the_team_s_key(self):
+        trust_signed_team_rules("ops")
+        lease = _team_lease()
+        tools = self._tools(_fallback_runtime(lease))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert "[transport_used: ssh]" in result
+        kwargs = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert kwargs["identity_agent"] == lease.identity_agent
+        assert kwargs["known_hosts_file"] == lease.known_hosts_path
+        assert (kwargs["host"], kwargs["username"]) == ("team-web.example.com", "deploy")
+
+    def test_the_team_s_rules_apply(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        tools = self._tools(_fallback_runtime(_team_lease()))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        # Without the fallback the local dangerous level would have run it (with no key).
+        assert result == (
+            "Blocked: on this server, which connects with a key from team Ops's vault, "
+            "your agents run at the readonly level (set by the team), and running "
+            "commands is not available there."
+        )
+        tools._ssh_service.build_ssh_command.assert_not_called()
+
+    def test_a_key_of_the_user_s_own_keeps_the_local_rules(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        runtime = _fallback_runtime(_team_lease())
+        tools = self._tools(runtime)
+        tools._ssh_service.discover_key.return_value = "/home/user/.ssh/prod-key.pem"
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result
+        kwargs = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert kwargs["key_path"] == "/home/user/.ssh/prod-key.pem"
+        assert kwargs["identity_agent"] is None
+        asked = [call.args[0] for call in runtime.resolve_ssh.await_args_list]
+        assert not any(row.get('is_shared') is True for row in asked)
+
+    def test_a_share_without_the_team_s_key_changes_nothing(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        tools = self._tools(_fallback_runtime(_team_lease()), binding=None)
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        assert "[transport_used: ssh]" in result
+        assert tools._ssh_service.build_ssh_command.call_args.kwargs["identity_agent"] is None
+
+    def test_a_team_key_that_cannot_be_used_keeps_the_user_s_own_setup(self):
+        # No vault identity yet, a grant still pending: an agent may still hold
+        # the server's key, as before. The team's rules still apply there.
+        trust_signed_team_rules("ops")
+        tools = self._tools(_fallback_runtime(error=RuntimeError("vault locked")))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        assert "[transport_used: ssh]" in result
+        kwargs = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert kwargs["identity_agent"] is None and kwargs["host"] != "team-web.example.com"
+
+    def test_a_personal_vault_key_keeps_the_local_rules(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        own = _team_lease()
+        own.identity_agent, own.target_host, own.login_user = "/run/own.sock", "54.123.45.67", "admin"
+        tools = self._tools(_fallback_runtime(_team_lease(), own_lease=own))
+        with _ssh_ok():
+            result = run(tools.run_command("i-abc123", NOT_ALLOWLISTED))
+
+        # Not "Blocked: on this server, which connects with a key from team Ops's vault".
+        assert "[transport_used: ssh]" in result
+        kwargs = tools._ssh_service.build_ssh_command.call_args.kwargs
+        assert (kwargs["identity_agent"], kwargs["username"]) == ("/run/own.sock", "admin")
+
+    def test_a_personal_bitwarden_key_is_the_user_s_own(self):
+        tools = self._tools(_fallback_runtime(_team_lease()))
+        cleanup = AsyncMock()
+        tools._resolve_credential_chain = AsyncMock(return_value=({"key_path": "/tmp/bw-key"}, cleanup))
+        instance = run(tools._with_team_key(dict(SAMPLE_INSTANCES[0])))
+
+        assert "team_key_row" not in instance
+        cleanup.assert_awaited_once()  # the temporary key file is gone again
+
+    def test_a_mark_in_the_team_s_own_data_is_ignored(self):
+        trust_signed_team_rules("ops", agent_rules_with(role_levels={"member": "readonly"}))
+        trust_signed_team_rules("dev")
+        injected = {"is_shared": True, "team_slug": "dev", "team_role": "owner", "id": "srv-9"}
+        shared = _shared_server(team_key_row=injected)
+        tools = make_tools(guard_level=GuardLevel.DANGEROUS, vault_runtime=_fallback_runtime(),
+                           team_service=_team_service(servers=[shared]))
+        result = run(tools.run_command("ops/team-web-1", "uptime"))
+
+        assert result.startswith("Blocked: on team Ops's shared server")
+
+    def test_the_team_s_rules_are_not_fetched_for_every_call(self):
+        trust_signed_team_rules("ops")
+        tools = self._tools(_fallback_runtime(_team_lease()))
+        with _ssh_ok():
+            for _ in range(3):
+                run(tools.run_command("i-abc123", "uptime"))
+
+        # Once for the shared servers, once for the rules row: not once per call.
+        assert tools._team_service.list_teams.await_count <= 2
+
+    def test_ssm_stays_the_fallback_for_an_own_aws_server(self):
+        trust_signed_team_rules("ops")
+        tools = self._tools(_fallback_runtime(_team_lease()))
+        tools._run_command_via_ssm = AsyncMock(return_value="SSM fallback")
+        with patch(
+            "servonaut.mcp.tools.run_ssh_subprocess",
+            new=AsyncMock(return_value=(b"", b"Connection refused")),
+        ):
+            result = run(tools.run_command("i-abc123", "uptime"))
+
+        # As without the team's key: the user's own AWS credentials reach it.
+        assert result == "SSM fallback"
+
+    def test_aws_tools_still_see_the_user_s_own_server(self):
+        trust_signed_team_rules("ops")
+        tools = self._tools(_fallback_runtime(_team_lease()))
+        instance, error = run(tools._lookup_instance("get_server_info", {}, "i-abc123"))
+
+        assert error is None
+        assert instance["id"] == "i-abc123" and instance.get("is_shared") is not True

@@ -24,7 +24,7 @@ from servonaut.utils.ssh_utils import run_ssh_subprocess
 from servonaut.widgets.progress_indicator import ProgressIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, team_rows
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +511,7 @@ class AIAnalysisScreen(Screen):
                 connection_instance(self.app, self._instance),
                 self.app.ssh_service,
                 self.app.connection_service,
+                team_rows=team_rows(self.app),
             )
 
             # Use get_read_command for compressed/rotated, tail for active

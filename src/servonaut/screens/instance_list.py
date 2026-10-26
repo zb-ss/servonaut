@@ -25,6 +25,7 @@ from servonaut.screens._demo_resolve import (
     real_instance_id,
     refuse_unresolved,
     replace_instances,
+    team_rows,
 )
 from servonaut.services.memory.provider import instance_provider
 from servonaut.utils.instance_resolver import display_name, is_aws_row
@@ -1046,6 +1047,7 @@ class InstanceListScreen(Screen):
                 vault_runtime=getattr(self.app, "vault_command_service", None),
                 connection_service=self.app.connection_service,
                 cache=getattr(self.app, "vault_lease_cache", None),
+                team_rows=team_rows(self.app),
             )
         except VaultCredentialError as exc:
             self.app.notify(str(exc), severity="error", markup=False)
@@ -1064,7 +1066,10 @@ class InstanceListScreen(Screen):
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
                 name = display.get('name') or display.get('id', 'instance')
                 via = f" via {profile.bastion_host}" if profile and profile.bastion_host else ""
-                self.app.notify(f"SSH session launched for {name}{via}")
+                if conn.get("key_team"):
+                    # No key of the user's own here: a team's key for the same server.
+                    via = f" with team {conn['key_team']}'s key"
+                self.app.notify(f"SSH session launched for {name}{via}", markup=False)
                 self._maybe_show_memory_prompt(display)
                 try:
                     self._maybe_pull_annotations(instance)
