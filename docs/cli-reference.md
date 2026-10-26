@@ -647,9 +647,12 @@ terminal controls removed; long import names are shortened to fit.
 skips the question). It refuses while the key is bound to a team server or one
 of this computer's servers, while a server's binding cannot be checked, or while
 the key has open exposures: give those servers another key, or resolve or rotate
-the exposures, first. Deletion removes the key
-from the vault only: servers that accept it keep accepting it until it is
-removed from their `authorized_keys`.
+the exposures, first. Deletion removes the key from the vault only: servers that
+accept it keep accepting it until it is removed from their `authorized_keys`.
+
+In the app, **Items** on the Vault screen lists each SSH key's name, and
+**Rename key** and **Delete key** act on the selected key the same way; Delete
+key asks you to type DELETE.
 
 `items --names` decrypts SSH key names locally and adds them to the listing.
 `items` and `show` print metadata by default. `show --reveal` requires an
