@@ -186,6 +186,13 @@ why:
   well, and its refusals say so ("on this server, which connects with a key
   from team Ops's vault, ..."). If that team is not one of yours, agents run
   at `readonly` there until the server uses another key.
+  When your own entry names a cloud key pair (an AWS key pair, for example)
+  that you have no key file for on this machine, and no key of your own in
+  Servonaut's vault or Bitwarden, it connects with the key of a team that
+  shares the same server instead: the team's vault key or SSH certificate.
+  The team's rules then apply to it in the same way. Until this machine can
+  use the team's key (no Servonaut Vault identity yet, or access not granted
+  yet), your own SSH setup is tried as before.
 - **A modified Servonaut.** The rules are applied by the Servonaut on the
   member's machine. For Servonaut AI, servonaut.dev also checks each role's
   level before it sends a tool call to a member's machine, which holds even

@@ -144,6 +144,7 @@ class RemoteTree(Tree):
         """
         if self._identity is not None:
             return
+        from servonaut.screens._demo_resolve import team_rows
         from servonaut.services.ssh_credentials import (
             VaultCredentialError, resolve_with_vault, ssh_identity_kwargs,
         )
@@ -160,6 +161,7 @@ class RemoteTree(Tree):
                 vault_runtime=getattr(app, "vault_command_service", None),
                 connection_service=self._connection_service,
                 cache=getattr(app, "vault_lease_cache", None),
+                team_rows=team_rows(app),
             )
         except VaultCredentialError as exc:
             raise RuntimeError(str(exc)) from exc

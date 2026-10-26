@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, List, Literal, Optional
+
+from servonaut.services.shared_servers import has_team_access, is_shared_row, team_key_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -458,3 +460,58 @@ class SshRefResolver:
             team_slug=None,
             server_id=None,
         )
+
+
+async def resolve_target(
+    resolver: Any, instance: dict, team_rows: Iterable[Mapping[str, Any]] = (),
+) -> tuple[dict, Optional[ResolvedSshRef]]:
+    """``(row, ref)``: *resolver*'s :meth:`SshRefResolver.resolve` for
+    *instance*, with a team's key as a fallback.
+
+    When nothing resolves for a server of the user's own whose key pair
+    they have no key for here, and a team in *team_rows* shares the same
+    server with its vault key or SSH certificate, *row* is that team's row
+    and *ref* its credential (see ``shared_servers.team_key_fallback``): the
+    connection then goes where the team's key points, with its login.
+    Otherwise *row* is *instance*.
+
+    Raises:
+        Exception: as :meth:`SshRefResolver.resolve`; a team's configured
+            vault key that cannot be used fails closed here too.
+    """
+    resolved = await resolver.resolve(instance)
+    if resolved is not None:
+        return instance, resolved
+    team = team_key_fallback(instance, team_rows, None)
+    if team is None:
+        return instance, None
+    resolved = await resolver.resolve(team)
+    if resolved is None:
+        return instance, None
+    return team, resolved
+
+
+def team_key_hint(
+    instance: Mapping[str, Any], team_rows: Iterable[Mapping[str, Any]], vault_runtime: Any,
+) -> Optional[str]:
+    """What to do when no key resolved for *instance* but a team's key could have.
+
+    A team's vault key or SSH certificate (on the team's row, or the one a
+    server of the user's own falls back to) needs a Servonaut Vault identity
+    on this computer. Without an unlocked one, the advice to place a key in
+    ``~/.ssh`` is the wrong one. None when no team key applies or the vault
+    identity is ready (then the team gives this user no access here).
+    """
+    if is_shared_row(instance):
+        team = dict(instance) if has_team_access(instance) else None
+    else:
+        team = team_key_fallback(instance, team_rows, None)
+    if team is None or getattr(vault_runtime, "is_unlocked", False) is True:
+        return None
+    label = str(team.get("team_name") or team.get("team_slug") or "").strip()
+    who = f"Team {label}" if label else "A team"
+    return (
+        f"{who} shares this server with its own key, which needs this computer's "
+        "Servonaut Vault identity: set it up with `servonaut vault setup` (or unlock it), "
+        "then connect again."
+    )

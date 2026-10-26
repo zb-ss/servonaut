@@ -151,6 +151,8 @@ EXPECTED: dict[str, tuple[tuple[str, str, int], ...]] = {
     ),
     # No SSH key reference stored for an instance.
     "no key reference": (("GET", r"/api/v1/me/instances/[^/]+/[^/]+/ssh-ref", 404),),
+    # No Servonaut Vault key bound to one of the user's own servers.
+    "no vault binding": (("GET", r"/api/v1/me/instances/[^/]+/[^/]+/credential-binding", 404),),
 }
 
 

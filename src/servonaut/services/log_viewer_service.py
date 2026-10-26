@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
 from servonaut.services.memory.provider import instance_provider
@@ -91,8 +91,12 @@ class LogViewerService(LogViewerServiceInterface):
 
     async def resolve_connection(
         self, instance: dict, ssh_service: Any, connection_service: Any,
+        *, team_rows: Iterable[Mapping[str, Any]] = (),
     ) -> Dict[str, Any]:
         """The connection for *instance*, with its vault credential applied.
+
+        *team_rows* are the team shared servers a server of the user's own
+        may connect through (see ``ssh_credentials.resolve_with_vault``).
 
         Raises:
             VaultCredentialError: the server's vault credential cannot be used.
@@ -103,6 +107,7 @@ class LogViewerService(LogViewerServiceInterface):
             self._resolve_connection(instance, ssh_service, connection_service),
             instance, vault_runtime=self._vault_runtime,
             connection_service=connection_service, cache=self._vault_leases,
+            team_rows=team_rows,
         )
 
     def _resolve_connection(

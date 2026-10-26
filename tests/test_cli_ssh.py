@@ -375,6 +375,78 @@ class TestHandleSshCommand:
         assert result == _EXIT_SUCCESS
         assert row["id"] == "srv-1"
 
+    def test_an_own_server_without_its_key_pair_connects_with_the_team_s_key(self, capsys):
+        """No key here for the AWS key pair: the vault key of the team sharing it."""
+        args = _make_args(instance="web-1")
+        own = {**_make_instance("i-abc", "web-1", public_ip="9.9.9.9"), "key_name": "prod-key"}
+        headless, ssh_svc, _ = _patch_headless(instances=[own])
+        team_service = MagicMock()
+        team_service.list_teams = AsyncMock(return_value=[{"slug": "ops", "name": "Ops"}])
+        shared = {
+            "id": "srv-1", "name": "web-1", "hostname": "9.9.9.9", "instance_id": "i-abc",
+            "credential_binding": {"source": "servonaut_vault", "vault_id": "vault-1"},
+        }
+        team_service.list_shared_servers = AsyncMock(return_value=[shared])
+        headless = (*headless[:4], team_service, *headless[5:])
+        lease = MagicMock(target_host="9.9.9.9", target_port=22)
+        team_ref = ResolvedSshRef(
+            source="vault", lease=lease, login_user="deploy", identity_agent="/agent.sock",
+            identity_file="/key.pub", known_hosts_path="/known_hosts",
+        )
+
+        async def resolve(row):
+            return team_ref if row.get("is_shared") is True else None
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[own]),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+        ):
+            MockResolver.return_value = MagicMock(resolve=AsyncMock(side_effect=resolve))
+
+            from servonaut.cli.ssh import handle_ssh_command
+
+            assert handle_ssh_command(args) == _EXIT_SUCCESS
+
+        kwargs = ssh_svc.build_ssh_command.call_args.kwargs
+        assert (kwargs["host"], kwargs["username"]) == ("9.9.9.9", "deploy")
+        assert kwargs["identity_agent"] == "/agent.sock"
+        assert "connecting with team Ops's key (ops/web-1)" in capsys.readouterr().err
+
+    def test_without_a_vault_identity_the_team_s_key_says_how_to_get_one(self, capsys):
+        args = _make_args(instance="web-1")
+        own = {**_make_instance("i-abc", "web-1", public_ip="9.9.9.9"), "key_name": "prod-key"}
+        headless, ssh_svc, _ = _patch_headless(instances=[own])
+        team_service = MagicMock()
+        team_service.list_teams = AsyncMock(return_value=[{"slug": "ops", "name": "Ops"}])
+        team_service.list_shared_servers = AsyncMock(return_value=[{
+            "id": "srv-1", "name": "web-1", "hostname": "9.9.9.9", "instance_id": "i-abc",
+            "ssh_ca": {"enrolled": True},
+        }])
+        headless = (*headless[:4], team_service, *headless[5:])
+
+        from servonaut.cli import ssh as ssh_mod
+
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[own]),
+            patch.object(ssh_mod, "_vault_runtime_for_cli", return_value=None),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+        ):
+            MockResolver.return_value = MagicMock(resolve=AsyncMock(return_value=None))
+
+            from servonaut.cli.ssh import handle_ssh_command
+
+            assert handle_ssh_command(args) == _EXIT_NO_CREDENTIAL
+
+        err = capsys.readouterr().err
+        assert "No SSH key for 'web-1' here. Team Ops shares this server with its own key" in err
+        assert "servonaut vault setup" in err and "Bitwarden" not in err
+        ssh_svc.build_ssh_command.assert_not_called()
+
     def test_vault_login_to_a_shared_server_goes_to_the_pinned_destination(self):
         """A shared row from the API carries ``hostname``, not an IP field."""
         args = _make_args(instance="qa-host")

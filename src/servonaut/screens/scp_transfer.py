@@ -13,7 +13,7 @@ from textual.worker import Worker
 
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, team_rows
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
@@ -183,6 +183,7 @@ class SCPTransferScreen(Screen):
             vault_runtime=getattr(self.app, "vault_command_service", None),
             connection_service=self.app.connection_service,
             cache=getattr(self.app, "vault_lease_cache", None),
+            team_rows=team_rows(self.app),
         )
         if resolved.get("identity_agent") is None:
             return self._command_for(options, local_path, remote_path)

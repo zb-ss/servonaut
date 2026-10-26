@@ -92,6 +92,24 @@ class TestBuildUploadCommand(TestSCPService):
         assert '-J' not in cmd
         assert 'ProxyCommand=ssh -W %h:%p bastion' in cmd
 
+    def test_a_vault_lease_drops_the_cloud_host_key_alias(self):
+        # The lease pins the host its key names; an alias would look up a
+        # name its known_hosts file does not hold (as build_ssh_command does).
+        extra = ['HostKeyAlias=aws:eu-west-2:i-0123456789abcdef0', 'ServerAliveInterval=5']
+        leased = self.scp_service.build_upload_command(
+            local_path='/tmp/a', remote_path='/srv/a', host='9.9.9.9', username='deploy',
+            extra_options=extra, identity_agent='/tmp/agent.sock', identity_file='/tmp/key.pub',
+            known_hosts_file='/tmp/vault-known-hosts',
+        )
+        plain = self.scp_service.build_upload_command(
+            local_path='/tmp/a', remote_path='/srv/a', host='9.9.9.9', username='deploy',
+            extra_options=extra,
+        )
+
+        assert not any(arg.startswith('HostKeyAlias=') for arg in leased)
+        assert 'ServerAliveInterval=5' in leased
+        assert 'HostKeyAlias=aws:eu-west-2:i-0123456789abcdef0' in plain
+
     def test_native_vault_transfer_uses_only_verified_host_key_policy(self):
         command = self.scp_service.build_upload_command(
             local_path='/tmp/file.txt',

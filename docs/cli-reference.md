@@ -418,9 +418,17 @@ on this device only** on the Account screen.
 
 ## `servonaut ssh`
 
-Connect to a managed instance (AWS or custom server) by name or id. The SSH
-key is resolved from your Bitwarden reference when one is registered, else
-from `~/.ssh` — see [Bitwarden SSH keys](bitwarden-ssh.md).
+Connect to a managed instance by name or id: one of your own servers (any
+provider, or a custom server) or a server a team shares (`<team>/<name>`).
+The SSH key comes from an SSH certificate or a Servonaut Vault key when the
+server has one, else from your Bitwarden reference when one is registered,
+else from `~/.ssh` — see [Bitwarden SSH keys](bitwarden-ssh.md).
+
+A server of your own whose cloud key pair you have no key for on this
+machine connects with the vault key or SSH certificate of a team that
+shares the same server, when there is one; a line on stderr names the team.
+Without a Servonaut Vault identity on this machine, the command says to run
+`servonaut vault setup` first.
 
 ```
 servonaut ssh [--user USER] [--port PORT] <instance> [-- <command>...]
