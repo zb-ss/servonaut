@@ -216,6 +216,10 @@ def add_vault_parser(subparsers: Any) -> None:
         "--yes", action="store_true",
         help="Pin the host keys this computer already trusts and bind without asking.",
     )
+    auto_bind.add_argument(
+        "--fetch-host-keys", action="store_true",
+        help="Connect once to record host keys for servers missing them (still connects once per server with --dry-run).",
+    )
     rotate = commands.add_parser("rotate", help="Rotate a vault encryption version.")
     rotate.add_argument("--vault", required=True, help=_VAULT_HELP)
     rotate.add_argument("--yes", action="store_true")
@@ -569,12 +573,16 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "host": row.host,
         "port": row.port,
         "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
+        "verified": getattr(row, "verified", False),
+        "verification_source": getattr(row, "verification_source", None),
         "status": row.status,
         "result": row.result,
     }
 
 
 def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
+    from servonaut.services.vault.auto_bind import FETCHED
+
     for row in rows:
         record = _auto_bind_record(row)
         name = terminal_safe(str(record["server"] or "server"))
@@ -588,12 +596,25 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
         print(" ".join(parts) + f" - {status}")
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
-                print(f"    host key {fingerprint}")
+                if getattr(row, "verified", False):
+                    source = getattr(row, "verification_source", None) or "verified by AWS console output"
+                    print(f"    host key {fingerprint} ({source})")
+                elif row.status == FETCHED:
+                    source = getattr(row, "verification_source", None) or "not verified: compare with the server's console or your provider"
+                    print(f"    host key {fingerprint} ({source})")
+                else:
+                    print(f"    host key {fingerprint}")
 
 
 async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> int:
     """Plan, confirm and apply ``vault auto-bind``."""
-    from servonaut.services.vault.auto_bind import apply_auto_bind, plan_auto_bind
+    from servonaut.services.vault.auto_bind import (
+        FETCHED,
+        NO_HOST_KEYS,
+        apply_auto_bind,
+        fetch_host_keys_for_rows,
+        plan_auto_bind,
+    )
 
     vault_id = args.vault
     if not vault_id:
@@ -607,6 +628,16 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
         vault_id = str(personal[0]["vault_id"])
     keys = await _invoke(services, "ssh_key_choices", vault_id=vault_id, name_limit=None)
     rows = await plan_auto_bind(services, _auto_bind_servers(), keys)
+
+    if getattr(args, "fetch_host_keys", False):
+        to_fetch = [row for row in rows if row.status == NO_HOST_KEYS]
+        if to_fetch:
+            await fetch_host_keys_for_rows(
+                services,
+                to_fetch,
+                accounts=getattr(services, "accounts", None),
+            )
+
     ready = [row for row in rows if row.ready]
     if output and (args.dry_run or not ready):
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
@@ -617,15 +648,41 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
         if not output:
             print(f"{len(ready)} of {len(rows)} servers can get a vault key.", file=sys.stderr)
         return _EXIT_OK
-    if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(ready)} servers"):
+
+    is_yes = getattr(args, "yes", False)
+    if getattr(args, "fetch_host_keys", False) and not is_yes and not sys.stdin.isatty():
+        print(
+            "Refusing to bind fetched host keys without confirmation. Run interactively or pass --yes to bind only verified keys.",
+            file=sys.stderr,
+        )
+        return _EXIT_ERROR
+
+    unverified_fetched = [row for row in ready if row.status == FETCHED and not row.verified]
+    if is_yes and unverified_fetched:
+        to_bind = [row for row in ready if row not in unverified_fetched]
+        if not output:
+            n = len(unverified_fetched)
+            word = "servers" if n > 1 else "server"
+            print(f"Skipped {n} unverified {word}: run without --yes to check their fingerprints.", file=sys.stderr)
+    else:
+        to_bind = ready
+
+    if not to_bind:
+        if output:
+            _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
+        else:
+            print(f"0 of {len(rows)} servers can get a vault key.", file=sys.stderr)
+        return _EXIT_OK
+
+    if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(to_bind)} servers"):
         return _EXIT_ABORTED
-    await apply_auto_bind(services, ready, vault_id=vault_id)
-    failed = [row for row in ready if row.result != "bound"]
+    await apply_auto_bind(services, to_bind, vault_id=vault_id)
+    failed = [row for row in to_bind if row.result != "bound"]
     if output:
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
     else:
-        _print_auto_bind(ready, results=True)
-        print(f"Bound vault keys to {len(ready) - len(failed)} of {len(ready)} servers.", file=sys.stderr)
+        _print_auto_bind(to_bind, results=True)
+        print(f"Bound vault keys to {len(to_bind) - len(failed)} of {len(to_bind)} servers.", file=sys.stderr)
     return _EXIT_ERROR if failed else _EXIT_OK
 
 

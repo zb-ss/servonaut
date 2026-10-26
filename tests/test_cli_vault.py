@@ -950,7 +950,17 @@ class _AutoBindService:
 
     async def ssh_key_choices(self, *, vault_id, name_limit):
         assert (vault_id, name_limit) == (VAULT_ID, None)
-        return [{"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"}]
+        return getattr(
+            self,
+            "keys",
+            [{"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"}],
+        )
+
+    def records_new_host_keys(self) -> bool:
+        return True
+
+    async def visit_for_host_key(self, instance, login=None):
+        return None
 
     def ssh_destination(self, instance):
         return instance.get("public_ip"), 22
@@ -1011,6 +1021,149 @@ def test_auto_bind_yes_binds_the_ready_servers_and_reports_json(monkeypatch, cap
     report = json.loads(capsys.readouterr().out)
     results = {server["server"]: (server["status"], server["result"]) for server in report["servers"]}
     assert results == {"web-1": ("ready", "bound"), "db-1": ("no_key", None)}
+
+
+def test_auto_bind_fetch_host_keys_refuses_without_yes_when_not_interactive(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
+    code, service = _auto_bind(monkeypatch, ["--fetch-host-keys"])
+    assert code != 0 and service.binds == []
+    assert "Refusing to bind fetched host keys without confirmation. Run interactively or pass --yes to bind only verified keys." in capsys.readouterr().err
+
+
+def test_auto_bind_fetch_host_keys_dry_run_fetches_and_binds_nothing(monkeypatch, capsys) -> None:
+    from servonaut.services.vault import auto_bind
+
+    servers = [
+        {"id": "i-web1", "name": "web-1", "public_ip": "198.51.100.1"},
+        {"id": "i-web2", "name": "web-2", "public_ip": "198.51.100.2"},
+    ]
+    keys = [
+        {"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"},
+        {"item_id": "k2", "label": "web-2", "name": "web-2.pem", "fingerprint": "SHA256:b"},
+    ]
+    service = _AutoBindService()
+    service.keys = keys
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: servers)
+    # web-1 trusted, web-2 has no trusted key
+    monkeypatch.setattr(
+        auto_bind, "trusted_host_keys",
+        lambda inst, h, p: [service.HOST_KEY] if inst["id"] == "i-web1" else [],
+    )
+
+    async def fake_fetch(svc, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = auto_bind.FETCHED
+            r.host_keys = [service.HOST_KEY]
+            r.verified = False
+
+    monkeypatch.setattr(auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--dry-run", "--fetch-host-keys"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    out = capsys.readouterr()
+    assert code == 0 and service.binds == []
+    assert "web-1: web-1.pem" in out.out
+    assert "web-2: web-2.pem" in out.out
+    assert "not verified: compare with the server's console or your provider" in out.out
+    assert "2 of 2 servers can get a vault key." in out.err
+
+
+def test_auto_bind_fetch_host_keys_yes_binds_only_verified_rows(monkeypatch, capsys) -> None:
+    from servonaut.services.vault import auto_bind
+
+    servers = [
+        {"id": "i-web1", "name": "web-1", "public_ip": "198.51.100.1"},
+        {"id": "i-web2", "name": "web-2", "public_ip": "198.51.100.2"},
+        {"id": "i-web3", "name": "web-3", "public_ip": "198.51.100.3"},
+    ]
+    keys = [
+        {"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"},
+        {"item_id": "k2", "label": "web-2", "name": "web-2.pem", "fingerprint": "SHA256:b"},
+        {"item_id": "k3", "label": "web-3", "name": "web-3.pem", "fingerprint": "SHA256:c"},
+    ]
+    service = _AutoBindService()
+    service.keys = keys
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: servers)
+    # web-1 trusted from before
+    monkeypatch.setattr(
+        auto_bind, "trusted_host_keys",
+        lambda inst, h, p: [service.HOST_KEY] if inst["id"] == "i-web1" else [],
+    )
+
+    # web-2 verified by AWS, web-3 unverified
+    async def fake_fetch(svc, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = auto_bind.FETCHED
+            r.host_keys = [service.HOST_KEY]
+            if r.instance["id"] == "i-web2":
+                r.verified = True
+                r.verification_source = "verified by AWS console output"
+            else:
+                r.verified = False
+
+    monkeypatch.setattr(auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--yes", "--fetch-host-keys"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    out = capsys.readouterr()
+    assert code == 0
+    # web-1 (trusted) and web-2 (verified) bound; web-3 (unverified) skipped
+    bound_ids = [b["instance_id"] for b in service.binds]
+    assert bound_ids == ["i-web1", "i-web2"]
+    assert "Skipped 1 unverified server: run without --yes to check their fingerprints." in out.err
+
+
+def test_auto_bind_fetch_host_keys_interactive_confirm_binds_all_when_confirmed(monkeypatch, capsys) -> None:
+    from servonaut.services.vault import auto_bind
+
+    servers = [
+        {"id": "i-web1", "name": "web-1", "public_ip": "198.51.100.1"},
+        {"id": "i-web2", "name": "web-2", "public_ip": "198.51.100.2"},
+    ]
+    keys = [
+        {"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"},
+        {"item_id": "k2", "label": "web-2", "name": "web-2.pem", "fingerprint": "SHA256:b"},
+    ]
+    service = _AutoBindService()
+    service.keys = keys
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: servers)
+    monkeypatch.setattr(
+        auto_bind, "trusted_host_keys",
+        lambda inst, h, p: [service.HOST_KEY] if inst["id"] == "i-web1" else [],
+    )
+
+    async def fake_fetch(svc, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = auto_bind.FETCHED
+            r.host_keys = [service.HOST_KEY]
+            r.verified = False
+
+    monkeypatch.setattr(auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+    # TTY with "y" response
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: True, readline=lambda: "y\n"))
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--fetch-host-keys"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    out = capsys.readouterr()
+    assert code == 0
+    bound_ids = [b["instance_id"] for b in service.binds]
+    assert bound_ids == ["i-web1", "i-web2"]
+    assert "Bound vault keys to 2 of 2 servers." in out.err
 
 
 def _vault_record(name, kind, vault_id, team=None, items=0):
