@@ -46,7 +46,7 @@ from .errors import (
     vault_failure_reason,
 )
 from .grant_processor import GrantProcessor
-from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError
+from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError, device_platform
 from .identity_store import IdentityStore
 from .items import VaultItemService
 from .local_state import LocalStateError, VaultLocalState
@@ -592,7 +592,7 @@ class VaultCommandService:
         try:
             enrolled = await self.identity.enroll(
                 recovery_key=recovery, device_name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(), client="cli",
+                platform=platform or device_platform(), client="cli",
             )
         except APIError as exc:
             if exc.code != "identity_exists":
@@ -651,7 +651,7 @@ class VaultCommandService:
             registered = await self.identity.register_pending_device(
                 user_id=user_id,
                 name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(),
+                platform=platform or device_platform(),
                 client="cli",
             )
             remote_identity = registered.get("identity")
@@ -689,7 +689,7 @@ class VaultCommandService:
             registered = await self.identity.register_pending_device(
                 user_id=user_id,
                 name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(),
+                platform=platform or device_platform(),
                 client="cli",
             )
             identity = registered.get("identity") if isinstance(registered, Mapping) else None
@@ -798,7 +798,7 @@ class VaultCommandService:
                 recovery_key=recovery_key,
                 reason=reason,
                 device_name=self.default_device_name(),
-                platform=platform_module.system().lower(),
+                platform=device_platform(),
                 client="cli",
             )
             expires_at = result.get("expires_at") if isinstance(result, Mapping) else None

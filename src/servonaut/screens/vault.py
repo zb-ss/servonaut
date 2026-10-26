@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import math
 import secrets
 from pathlib import Path
@@ -36,6 +37,13 @@ from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.secret_input import SecretInput
+
+logger = logging.getLogger(__name__)
+
+
+def _log_identity_failure(action: str, exc: BaseException) -> None:
+    """Log an identity step that failed: the toast names only the error type."""
+    logger.warning("Vault %s failed", action, exc_info=exc)
 
 
 async def _invoke(service: Any, method: str, /, **kwargs: Any) -> Any:
@@ -1305,6 +1313,7 @@ class VaultScreen(Screen):
             async with self._busy('Creating your vault identity…', holds_screen=True):
                 await _invoke(service, "setup", device_name=None, platform=None, recovery_confirmation=confirmation)
         except Exception as exc:
+            _log_identity_failure("setup", exc)
             self.app.notify(f"Vault setup failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         self._set_identity_state("ready")
@@ -1622,6 +1631,7 @@ class VaultScreen(Screen):
             await _cancel_pending_device(service)
             raise
         except Exception as exc:
+            _log_identity_failure("device registration", exc)
             await _cancel_pending_device(service)
             reason = vault_failure_reason(exc)
             self._status(f"This computer was not added ({reason}). Choose Add device to try again, or Recover.")
@@ -1732,6 +1742,7 @@ class VaultScreen(Screen):
             async with self._busy("Restoring your vault identity on this computer…", holds_screen=True):
                 await _invoke(service, "recover", recovery_key=recovery_key, device_name=None, platform=None)
         except Exception as exc:
+            _log_identity_failure("recovery", exc)
             self.app.notify(f"Vault recovery failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         self.app.notify("Your vault identity is restored on this computer.", markup=False)
@@ -1774,6 +1785,7 @@ class VaultScreen(Screen):
             async with self._busy('Requesting a new vault identity…', holds_screen=True):
                 result = await _invoke(service, "reset_identity", reason="rotate", recovery_confirmation=confirmation)
         except Exception as exc:
+            _log_identity_failure("identity reset", exc)
             self.app.notify(f"Identity reset failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         self._status("Identity reset requested. Confirm it through the e-mail, then this screen will verify and save the replacement identity.")

@@ -6,6 +6,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from servonaut.cli import vault
 from servonaut.services.api_client import APIError
 
@@ -39,6 +41,15 @@ def test_vault_parser_accepts_pending_device_add() -> None:
 
     assert args.vault_devices_command == "add"
     assert args.device_name == "laptop"
+
+
+def test_vault_parser_takes_only_platform_names_the_service_accepts(capsys) -> None:
+    for command in (["setup"], ["recover"], ["devices", "add"]):
+        assert _parser().parse_args(["vault", *command, "--platform", "macos"]).platform == "macos"
+        # What platform.system() says on a Mac: refused here, not by the service later.
+        with pytest.raises(SystemExit):
+            _parser().parse_args(["vault", *command, "--platform", "darwin"])
+    assert "invalid choice: 'darwin'" in capsys.readouterr().err
 
 
 def test_vault_status_dispatches_through_injected_service(capsys) -> None:
