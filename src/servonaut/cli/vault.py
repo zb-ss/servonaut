@@ -575,6 +575,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
         "verified": getattr(row, "verified", False),
         "verification_source": getattr(row, "verification_source", None),
+        "fetch_error": getattr(row, "fetch_error", None),
         "status": row.status,
         "result": row.result,
     }
