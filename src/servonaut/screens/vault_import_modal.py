@@ -332,6 +332,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         try:
             result = await self._service.import_keys(
                 source="bitwarden", vault_id=self._vault_id, private_key=private, source_ref=item.id,
+                name=item.name,
             )
         except Exception:
             summary["failed"] += 1

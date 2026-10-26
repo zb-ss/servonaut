@@ -1,6 +1,6 @@
 """Native encrypted-vault TUI surface.
 
-This screen deliberately renders only metadata until a user confirms a reveal.
+Names are decrypted locally for selection; secret values require a confirmed reveal.
 The application injects ``vault_command_service`` during paid-service setup;
 the screen never constructs cryptographic or HTTP services itself.
 """
@@ -30,15 +30,18 @@ from textual.widgets.selection_list import Selection
 from textual.worker import Worker
 
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.vault import onboarding
-from servonaut.services.vault.display import VAULT_KEY_ROTATED_FIRST, grant_summary, ssh_rotation_failure
-from servonaut.services.vault.errors import vault_failure_reason
+from servonaut.services.vault.display import VAULT_KEY_ROTATED_FIRST, grant_summary, ssh_rotation_failure, terminal_safe
+from servonaut.services.vault.errors import VaultKeyInUse, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.widgets.secret_input import SecretInput
 
 logger = logging.getLogger(__name__)
+
+_ITEM_NAME_DISPLAY_MAX = 60
 
 
 def _log_identity_failure(action: str, exc: BaseException) -> None:
@@ -877,6 +880,7 @@ class VaultScreen(Screen):
         "vault_confirm_identity", "vault_create", "vault_items", "vault_reveal", "vault_exposures", "vault_resolve_exposure",
         "vault_rotate_exposure", "vault_devices", "vault_approve", "vault_recovery_rotate",
         "vault_reset", "vault_import", "vault_auto_bind", "vault_roster", "vault_grants", "vault_rotate",
+        "vault_rename_key", "vault_delete_key",
     )
 
     def __init__(self) -> None:
@@ -884,6 +888,7 @@ class VaultScreen(Screen):
         self._setup_running = False
         self._vaults: list[dict[str, Any]] = []
         self._items: list[dict[str, Any]] = []
+        self._key_names: dict[str, Optional[str]] = {}
         self._devices: list[dict[str, Any]] = []
         self._exposures: list[dict[str, Any]] = []
         self._selected_vault_id: Optional[str] = None
@@ -923,6 +928,8 @@ class VaultScreen(Screen):
                         yield Button("Create vault", id="vault_create")
                         yield Button("Items", id="vault_items")
                         yield Button("Reveal", id="vault_reveal")
+                        yield Button("Rename key", id="vault_rename_key")
+                        yield Button("Delete key", id="vault_delete_key")
                         yield Button("Exposures", id="vault_exposures")
                         yield Button("Resolve exposure", id="vault_resolve_exposure")
                         yield Button("Rotate exposed SSH key", id="vault_rotate_exposure")
@@ -1058,11 +1065,27 @@ class VaultScreen(Screen):
                 escape(self.scrub_for_display(row.get("vault_id") or "")),
             )
 
+    def _item_name_cell(self, row: Mapping[str, Any]) -> str:
+        if row.get("type") != "ssh_key":
+            return ""
+        name = self._key_names.get(str(row.get("item_id") or ""))
+        text = "(name unknown)" if name is None else name
+        text = self.scrub_for_display(terminal_safe(text))
+        if len(text) > _ITEM_NAME_DISPLAY_MAX:
+            text = text[:_ITEM_NAME_DISPLAY_MAX] + "…"
+        return escape(text)
+
     def _render_items(self) -> None:
         table = self.query_one("#vault_table", DataTable)
-        table.clear(columns=True); table.add_columns("Type", "Revision", "Fingerprint", "Item ID")
+        table.clear(columns=True); table.add_columns("Name", "Type", "Revision", "Fingerprint", "Item ID")
         for row in self._items:
-            table.add_row(escape(self.scrub_for_display(row.get("type") or "unsupported")), str(row.get("revision") or ""), escape(self.scrub_for_display(row.get("public_fingerprint") or "")), escape(self.scrub_for_display(row.get("item_id") or "")))
+            table.add_row(
+                self._item_name_cell(row),
+                escape(self.scrub_for_display(row.get("type") or "unsupported")),
+                str(row.get("revision") or ""),
+                escape(self.scrub_for_display(row.get("public_fingerprint") or "")),
+                escape(self.scrub_for_display(row.get("item_id") or "")),
+            )
 
     def _render_exposures(self) -> None:
         table = self.query_one("#vault_table", DataTable)
@@ -1272,6 +1295,8 @@ class VaultScreen(Screen):
             "vault_auto_bind": self.action_auto_bind,
             "vault_roster": self.action_roster,
             "vault_grants": self.action_grants,
+            "vault_rename_key": self.action_rename_key,
+            "vault_delete_key": self.action_delete_key,
             "vault_rotate": self.action_rotate,
         }
         handler = actions.get(event.button.id or "")
@@ -1412,14 +1437,31 @@ class VaultScreen(Screen):
         try:
             async with self._busy("Loading the vault's items…"):
                 response = await _invoke(service, "list_items", vault_id=self._selected_vault_id)
+                names, name_failure = await self._read_key_names(service)
         except Exception as exc:
             self.app.notify(f"Could not load item metadata ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
         rows = response.get("data", []) if isinstance(response, Mapping) else response
         self._items = [dict(row) for row in rows or []]
+        self._key_names = names
         self._table_mode = "items"
         self._render_items()
-        self._status("Item metadata loaded. Press V to reveal a selected item.")
+        if name_failure is not None:
+            self._status(f"Item metadata loaded, but SSH key names could not be read ({name_failure}). Rename and delete remain available.")
+        else:
+            self._status("Items loaded. Use Rename key or Delete key on an SSH key; press V to reveal.")
+
+    async def _read_key_names(self, service: Any) -> tuple[dict[str, Optional[str]], Optional[str]]:
+        try:
+            choices = await _invoke(service, "ssh_key_choices", vault_id=self._selected_vault_id, name_limit=None)
+        except Exception as exc:
+            return {}, vault_failure_reason(exc)
+        names: dict[str, Optional[str]] = {}
+        for row in choices or []:
+            if isinstance(row, Mapping) and isinstance(row.get("item_id"), str):
+                name = row.get("name")
+                names[row["item_id"]] = name if isinstance(name, str) and name.strip() else None
+        return names, None
 
     def _selected_item(self) -> Optional[dict[str, Any]]:
         table = self.query_one("#vault_table", DataTable)
@@ -1470,6 +1512,103 @@ class VaultScreen(Screen):
             ),
             callback,
         )
+
+    def _selected_ssh_key(self) -> Optional[dict[str, Any]]:
+        if not self._allows_identity_action("ready"):
+            return None
+        if self._table_mode != "items":
+            self.app.notify("Load a vault's items first.", severity="warning", markup=False)
+            return None
+        item = self._selected_item()
+        if item is None or not self._selected_vault_id:
+            self.app.notify("Load a vault's items and select an SSH key first.", severity="warning", markup=False)
+            return None
+        if item.get("type") != "ssh_key" or not item.get("item_id"):
+            self.app.notify("Select an SSH key item first.", severity="warning", markup=False)
+            return None
+        return item
+
+    def action_rename_key(self) -> None:
+        item = self._selected_ssh_key()
+        if item is None:
+            return
+        item_id = str(item["item_id"])
+        self.run_worker(self._rename_vault_key(item_id, self._key_names.get(item_id)), group="vault", exclusive=True)
+
+    async def _rename_vault_key(self, item_id: str, current_name: Optional[str]) -> None:
+        new_name = await self.app.push_screen_wait(VaultRenameKeyModal(current_name))
+        if not isinstance(new_name, str):
+            return
+        service = self._service()
+        if service is None:
+            return
+        try:
+            async with self._busy("Renaming the vault key…"):
+                result = await _invoke(service, "rename_ssh_key", vault_id=self._selected_vault_id, item_id=item_id, name=new_name)
+        except Exception as exc:
+            self.app.notify(f"Could not rename the vault key ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        name = result["name"] if isinstance(result, Mapping) else new_name
+        self.app.notify(f"Renamed to {self.scrub_for_display(terminal_safe(name))}.", markup=False)
+        await self._load_items()
+
+    def action_delete_key(self) -> None:
+        item = self._selected_ssh_key()
+        if item is not None:
+            self.run_worker(self._delete_vault_key(item, str(item["item_id"])), group="vault", exclusive=True)
+
+    def _notify_key_in_use(self, refusal: VaultKeyInUse) -> None:
+        lines = [vault_failure_reason(refusal)]
+        for label, names in (("Team servers", refusal.team_servers), ("Your servers", refusal.own_servers),
+                             ("Could not check", refusal.unchecked)):
+            if names:
+                lines.append(f"{label}: " + ", ".join(self.scrub_for_display(terminal_safe(name)) for name in names))
+        self.app.notify("\n".join(lines), severity="warning", markup=False)
+
+    def _delete_key_confirmation(self, item: Mapping[str, Any], usage: Mapping[str, Any]) -> ConfirmActionScreen:
+        name = usage.get("name") or self._key_names.get(str(item["item_id"])) or "(name unknown)"
+        fingerprint = usage.get("fingerprint") or item.get("public_fingerprint") or ""
+        name = escape(self.scrub_for_display(terminal_safe(name)))
+        fingerprint = escape(self.scrub_for_display(terminal_safe(fingerprint)))
+        return ConfirmActionScreen(
+            "Delete vault key", f"Delete the vault key {name}?",
+            [
+                f"remove the key {name} ({fingerprint}) from this vault",
+                "not remove it from servers: those that accept it keep accepting it until it is removed from their authorized_keys",
+            ],
+            "DELETE", "Delete", severity="danger",
+        )
+
+    async def _delete_vault_key(self, item: dict[str, Any], item_id: str) -> None:
+        service = self._service()
+        if service is None:
+            return
+        servers = list(getattr(self.app, "instances", None) or [])
+        try:
+            async with self._busy("Checking where this key is used…"):
+                usage = await _invoke(service, "ssh_key_usage", vault_id=self._selected_vault_id, item_id=item_id, servers=servers)
+        except Exception as exc:
+            self.app.notify(f"Could not check key usage ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        refusal = VaultKeyInUse.from_usage(usage)
+        if refusal.team_servers or refusal.own_servers or refusal.unchecked:
+            self._notify_key_in_use(refusal)
+            return
+        if await self.app.push_screen_wait(self._delete_key_confirmation(item, usage)):
+            await self._remove_vault_key(service, item_id, servers)
+
+    async def _remove_vault_key(self, service: Any, item_id: str, servers: list[dict[str, Any]]) -> None:
+        try:
+            async with self._busy("Deleting the vault key…"):
+                await _invoke(service, "delete_ssh_key", vault_id=self._selected_vault_id, item_id=item_id, servers=servers)
+        except VaultKeyInUse as exc:
+            self._notify_key_in_use(exc)
+            return
+        except Exception as exc:
+            self.app.notify(f"Could not delete the vault key ({vault_failure_reason(exc)}).", severity="error", markup=False)
+            return
+        self.app.notify("Vault key deleted.", markup=False)
+        await self._load_items()
 
     def action_exposures(self) -> None:
         if not self._allows_identity_action("ready"):
