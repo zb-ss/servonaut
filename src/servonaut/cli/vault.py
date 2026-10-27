@@ -708,8 +708,9 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
             v_team = target.get("team") if isinstance(target, Mapping) and isinstance(target.get("team"), Mapping) else {}
             v_slug = v_team.get("slug") or (target.get("team_slug") if isinstance(target, Mapping) else None)
             if not target or target.get("kind") != "team" or v_slug != team:
+                raw_vault = getattr(args, "_raw_vault", None) or getattr(args, "vault", None)
                 print(
-                    f'"{terminal_safe(args.vault)}" is not {terminal_safe(team)}\'s team vault: '
+                    f'"{terminal_safe(raw_vault)}" is not {terminal_safe(team)}\'s team vault: '
                     "leave out --vault to use the team's vault.",
                     file=sys.stderr,
                 )
@@ -821,6 +822,7 @@ async def _handle(args: argparse.Namespace) -> int:
     try:
         services = _services()
         if getattr(args, "vault", None):
+            args._raw_vault = args.vault
             args.vault = await _vault_id(services, args.vault)
         if command == "status":
             status = await _invoke(services, "status")

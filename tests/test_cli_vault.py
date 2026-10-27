@@ -1706,6 +1706,7 @@ def test_auto_bind_team_with_personal_vault_refused(monkeypatch, capsys) -> None
     from unittest.mock import AsyncMock, MagicMock
 
     service = _AutoBindService()
+    service.resolve_vault_id = AsyncMock(return_value=VAULT_ID)
     service.list_vaults = AsyncMock(return_value=[
         {"vault_id": VAULT_ID, "kind": "personal", "label": "Personal"},
         {"vault_id": "tv-ops", "kind": "team", "team": {"slug": "ops"}},
