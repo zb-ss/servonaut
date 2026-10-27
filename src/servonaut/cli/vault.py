@@ -723,6 +723,10 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
                 team_name = terminal_safe(str((team_rec.get("name") if team_rec else None) or team))
                 print(f"You have no team vault for {team_name} yet: run `servonaut vault create --team {terminal_safe(team)}`.", file=sys.stderr)
                 return _EXIT_ERROR
+            if team_vault.get("my_grant") is None:
+                team_name = terminal_safe(str((team_rec.get("name") if team_rec else None) or team))
+                print(f"Your access to the team vault for {team_name} is still waiting for approval.", file=sys.stderr)
+                return _EXIT_ERROR
             vault_id = str(team_vault["vault_id"])
         else:
             personal = [

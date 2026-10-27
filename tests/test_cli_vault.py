@@ -1377,7 +1377,7 @@ def test_auto_bind_team_resolves_team_vault_and_binds_shared_servers(monkeypatch
 
     service = _AutoBindService()
     service.list_vaults = AsyncMock(return_value=[
-        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}, "my_grant": {"sealed_key": "s1"}},
     ])
     service.teams = MagicMock()
     service.teams.list_teams = AsyncMock(return_value=[{"slug": "devs", "role": "admin", "name": "Devs"}])
@@ -1433,6 +1433,29 @@ def test_auto_bind_team_no_vault_returns_error(monkeypatch, capsys) -> None:
     assert "You have no team vault for devs yet: run `servonaut vault create --team devs`." in capsys.readouterr().err
 
 
+def test_auto_bind_team_vault_waiting_for_grant_approval_returns_error(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}, "my_grant": None},
+    ])
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[{"slug": "devs", "role": "admin", "name": "Devs"}])
+    service.teams.list_shared_servers = AsyncMock(return_value=[])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--yes"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 1
+    assert "Your access to the team vault for Devs is still waiting for approval." in capsys.readouterr().err
+
+
 def test_auto_bind_team_dry_run_and_json(monkeypatch, capsys) -> None:
     from unittest.mock import AsyncMock, MagicMock
     from servonaut.services.vault import auto_bind
@@ -1449,7 +1472,7 @@ def test_auto_bind_team_dry_run_and_json(monkeypatch, capsys) -> None:
 
     service = _AutoBindService()
     service.list_vaults = AsyncMock(return_value=[
-        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}, "my_grant": {"sealed_key": "s1"}},
     ])
     service.teams = MagicMock()
     service.teams.list_teams = AsyncMock(return_value=[{"slug": "devs", "role": "admin", "name": "Devs"}])
@@ -1494,7 +1517,7 @@ def test_auto_bind_team_loads_shared_servers_via_team_service(monkeypatch, capsy
 
     service = _AutoBindService()
     service.list_vaults = AsyncMock(return_value=[
-        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}, "my_grant": {"sealed_key": "s1"}},
     ])
     service.ssh_key_choices = AsyncMock(return_value=keys)
     service.teams = MagicMock()
