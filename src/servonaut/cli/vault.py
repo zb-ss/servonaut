@@ -597,21 +597,23 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
         record = _auto_bind_record(row)
         name = terminal_safe(str(record["server"] or "server"))
         status = row.status_text if results or not row.ready else "ready"
+        fetch_err = getattr(row, "fetch_error", None)
+        mismatch_det = getattr(row, "mismatch_detail", None)
         if row.match is None or row.match.ambiguous:
             print(f"{name}: {status}")
-            if getattr(row, "fetch_error", None):
-                print(f"    fetch error: {terminal_safe(str(row.fetch_error))}")
-            if getattr(row, "mismatch_detail", None):
-                print(f"    mismatch: {terminal_safe(str(row.mismatch_detail))}")
+            if fetch_err and str(fetch_err) not in status:
+                print(f"    fetch error: {terminal_safe(str(fetch_err))}")
+            if mismatch_det and str(mismatch_det) not in status:
+                print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
             continue
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
             parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
         print(" ".join(parts) + f" - {status}")
-        if getattr(row, "fetch_error", None):
-            print(f"    fetch error: {terminal_safe(str(row.fetch_error))}")
-        if getattr(row, "mismatch_detail", None):
-            print(f"    mismatch: {terminal_safe(str(row.mismatch_detail))}")
+        if fetch_err and str(fetch_err) not in status:
+            print(f"    fetch error: {terminal_safe(str(fetch_err))}")
+        if mismatch_det and str(mismatch_det) not in status:
+            print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
                 if getattr(row, "verified", False):

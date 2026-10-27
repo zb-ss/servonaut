@@ -1251,6 +1251,34 @@ def test_auto_bind_prints_fetch_error_and_mismatch_detail(capsys) -> None:
     assert "mismatch: differs from AWS console fingerprints" in out
 
 
+def test_auto_bind_fetch_error_not_duplicated_when_in_status_text(capsys) -> None:
+    from servonaut.cli import vault
+    from servonaut.services.vault.auto_bind import FETCH_FAILED, HOST_KEY_MISMATCH, AutoBindRow, KeyMatch
+
+    row_err = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=FETCH_FAILED,
+        match=KeyMatch(item_id="k1", name="k1.pem", matched_by="server name"),
+        login="ubuntu",
+        host="198.51.100.1",
+        fetch_error="ssh: connect to host 198.51.100.1 port 22: Connection refused",
+    )
+    row_mismatch = AutoBindRow(
+        instance={"id": "i-2", "name": "web-2"},
+        status=HOST_KEY_MISMATCH,
+        match=KeyMatch(item_id="k2", name="k2.pem", matched_by="server name"),
+        login="ubuntu",
+        host="198.51.100.2",
+        mismatch_detail="The server answered with a different host key than AWS recorded at first boot: do not bind, check the server.",
+    )
+    vault._print_auto_bind([row_err, row_mismatch], results=False)
+    out = capsys.readouterr().out
+    assert "Could not fetch host key: ssh: connect to host 198.51.100.1 port 22: Connection refused" in out
+    assert "fetch error:" not in out
+    assert "The server answered with a different host key than AWS recorded at first boot: do not bind, check the server." in out
+    assert "mismatch:" not in out
+
+
 def test_auto_bind_fetch_host_keys_builds_account_registry_and_calls_client_factory(monkeypatch, capsys) -> None:
     from unittest.mock import MagicMock
     from cryptography.hazmat.primitives.asymmetric import ed25519
