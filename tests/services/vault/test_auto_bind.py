@@ -792,5 +792,21 @@ async def test_fetch_host_keys_mismatch_removes_from_known_hosts_end_to_end(tmp_
     assert trusted_host_keys(server, "198.51.100.7", None) == []
 
 
+def test_auto_bind_row_no_host_keys_status_text_surface_override() -> None:
+    from servonaut.services.vault.auto_bind import AutoBindRow, NO_HOST_KEYS, KeyMatch
+
+    row = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=NO_HOST_KEYS,
+        match=KeyMatch(item_id="k1", name="k1.pem", matched_by="server name"),
+        login="ubuntu",
+        host="198.51.100.1",
+    )
+    assert row.status_text_for("cli") == "No trusted host key yet: run with --fetch-host-keys to fetch and review it"
+    assert row.status_text_for("tui") == "No trusted host key yet: press f (Fetch host keys) to fetch and review it"
+    assert row.status_text == "No trusted host key yet: run with --fetch-host-keys to fetch and review it"
+
+
+
 
 

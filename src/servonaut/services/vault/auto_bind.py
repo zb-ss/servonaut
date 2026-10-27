@@ -67,7 +67,7 @@ STATUS_TEXT = {
     FETCHED: "Fetched host key: check fingerprint before binding",
     ALREADY_BOUND: "Already has a vault key: change it with Use Vault Key",
     AMBIGUOUS: "Several different keys have this name: choose one with Use Vault Key",
-    NO_HOST_KEYS: "No trusted host key yet: connect once with SSH and check its fingerprint",
+    NO_HOST_KEYS: "No trusted host key yet: run with --fetch-host-keys to fetch and review it",
     FETCH_FAILED: "Could not fetch host key",
     HOST_KEY_MISMATCH: "Host key differs from AWS first-boot key: do not bind",
     NO_ADDRESS: "No address to connect to",
@@ -190,8 +190,7 @@ class AutoBindRow:
             return "has a team key"
         return STATUS_LABEL.get(self.status, self.status)
 
-    @property
-    def status_text(self) -> str:
+    def status_text_for(self, surface: str = "cli") -> str:
         if self.result == "bound":
             return "Bound"
         if self.result is not None:
@@ -204,7 +203,15 @@ class AutoBindRow:
             return "Already has a team key: team keys are never replaced automatically."
         if self.status == NO_LOGIN and self.team:
             return "No login user: set the login on the shared server (Teams → Shared Servers)."
+        if self.status == NO_HOST_KEYS:
+            if surface == "tui":
+                return "No trusted host key yet: press f (Fetch host keys) to fetch and review it"
+            return "No trusted host key yet: run with --fetch-host-keys to fetch and review it"
         return STATUS_TEXT.get(self.status, self.status)
+
+    @property
+    def status_text(self) -> str:
+        return self.status_text_for("cli")
 
 
 def is_personal_server(instance: Mapping[str, Any]) -> bool:

@@ -153,7 +153,7 @@ async def test_the_review_lists_each_server_with_its_key_or_why_not() -> None:
         assert "web-1: Ready to bind" in detail and "SHA256:" in detail
         # Another row's full reason shows when it is highlighted.
         app.screen.query_one("#auto_bind_table", DataTable).move_cursor(row=2)
-        await wait_until(lambda: "connect once with SSH" in str(app.screen.query_one("#auto_bind_detail", Static).render()))
+        await wait_until(lambda: "press f (Fetch host keys)" in str(app.screen.query_one("#auto_bind_detail", Static).render()))
 
 
 @pytest.mark.asyncio
