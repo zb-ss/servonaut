@@ -218,15 +218,28 @@ async def test_import_from_bitwarden_retains_names_and_matches_auto_bind(
         await wait_for_async(lambda: not confirm.disabled, desc="import confirm button")
         confirm.press()
 
-        # The import modal closes. If an optional team-migration modal is offered, dismiss it.
-        def _dismiss_migration_if_open() -> bool:
-            if isinstance(app.screen, VaultImportedReferenceModal):
-                if cancel_btn := app.screen.query("#vault_import_bind_cancel"):
-                    cancel_btn.first(Button).press()
-                    return False
-            return not isinstance(app.screen, VaultImportModal) and app.screen is screen and not screen._busy_work
+        # The import modal closes, followed by either the migration modal or direct return to VaultScreen.
+        await wait_for_async(
+            lambda: not isinstance(app.screen, VaultImportModal),
+            desc="vault import modal closed",
+        )
 
-        await wait_for_async(_dismiss_migration_if_open, desc="return to VaultScreen after import")
+        def _screen_after_import() -> Any:
+            if isinstance(app.screen, VaultImportedReferenceModal) and app.screen.query("#vault_import_bind_cancel"):
+                return app.screen
+            if app.screen is screen and not screen._busy_work and all(w.is_finished for w in screen.workers):
+                return screen
+            return None
+
+        post_import_screen = await wait_for_async(
+            _screen_after_import, desc="VaultScreen or VaultImportedReferenceModal after import"
+        )
+        if isinstance(post_import_screen, VaultImportedReferenceModal):
+            post_import_screen.query_one("#vault_import_bind_cancel", Button).press()
+            await wait_for_async(
+                lambda: app.screen is screen and not screen._busy_work and all(w.is_finished for w in screen.workers),
+                desc="return to VaultScreen after dismissing migration modal",
+            )
 
         # Switch to items view.
         items_btn = screen.query_one("#vault_items", Button)
