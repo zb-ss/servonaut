@@ -218,7 +218,8 @@ def status(*, as_json: bool) -> int:
     lines = [
         f"QA sandbox: running, owner pid {current['owner_pid']}, scenario {current['scenario']}"
         f"{', signed in' if current.get('signed_in') else ''}"
-        f"{', teams' if current.get('teams') else ''}, since {current['started_at']}",
+        f"{', teams' if current.get('teams') else ''}"
+        f"{', bitwarden' if current.get('bitwarden') else ''}, since {current['started_at']}",
         f"checkout:   {current['repo_root']}",
         f"root:       {current['root']}",
         f"home:       {current['sandbox']['home']}",
@@ -233,6 +234,18 @@ def status(*, as_json: bool) -> int:
         format_fleet(current["fleet"]),
         "",
         *(f"- {note}" for note in current.get("notes", [])),
+    ]
+    bitwarden = current.get("bitwarden")
+    if bitwarden and bitwarden.get("items"):
+        lines += [
+            "",
+            "bitwarden:",
+            *(
+                f"  {item['name'].encode('unicode_escape').decode('ascii')} (id: {item['id']})"
+                for item in bitwarden["items"]
+            ),
+        ]
+    lines += [
         "",
         "fakes:",
         *(f"  {name:<14} {url}" for name, url in current["urls"].items()),

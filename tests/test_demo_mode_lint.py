@@ -59,6 +59,9 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/vault_rename_key_modal.py", "_submit", "update",
+                   "Only fixed required-name and length-validation messages; "
+                   "no key name, secret or server data is interpolated."),
     # Demo-toggle redraw helpers (refresh_after_demo_toggle hooks).
     AllowlistEntry("screens/key_management.py", "refresh_after_demo_toggle", "update",
                    "Clears the ssh-add listing with an empty string constant."),
@@ -875,6 +878,12 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes hard-coded status/count strings or error messages "
                    "already scrubbed via _demo_safe() (scrub_stream) in _load; "
                    "the folder name is local user config, escaped for markup."),
+
+    # vault_auto_bind.py — the intro above the review table.
+    AllowlistEntry("screens/vault_auto_bind.py", "_load", "update",
+                   "Static intro text; in team mode it names the team only "
+                   "through scrub_for_display (display_text, which runs "
+                   "redact_display_text), so the team name is scrubbed."),
 
     # aws_create.py — EC2 launch wizard outside demo recording scope.
     # Region names, AMI IDs/names, instance type names, and VPC resource IDs

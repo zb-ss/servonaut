@@ -221,6 +221,7 @@ Your AWS credentials need `ec2:DescribeInstances` and `ec2:DescribeRegions` perm
 | IP ban (Security Groups) | `ec2:AuthorizeSecurityGroupIngress`, `ec2:RevokeSecurityGroupIngress`, `ec2:DescribeSecurityGroups` |
 | IP ban (NACLs) | `ec2:CreateNetworkAclEntry`, `ec2:DeleteNetworkAclEntry`, `ec2:DescribeNetworkAcls` |
 | CloudWatch Logs | `logs:DescribeLogGroups`, `logs:FilterLogEvents` |
+| Verify host keys in Auto-bind | `ec2:GetConsoleOutput` |
 | OVHcloud (optional) | OVH API credentials — 3-key (application key / secret / consumer key) or OAuth2. Set up via `servonaut --setup-ovh` or in Settings. |
 
 ## Getting Started

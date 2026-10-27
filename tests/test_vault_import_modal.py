@@ -44,7 +44,7 @@ def test_modal_is_optional_metadata_result() -> None:
 
 def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(tmp_path: Path) -> None:
     service = MagicMock()
-    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-1"})
+    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-1", "name": "Stored local key", "public_fingerprint": "SHA256:local"})
     modal = VaultImportModal(service, "vault-1", tmp_path)
     modal._source = "ssh"
     modal._local_keys = [
@@ -74,6 +74,8 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
                     "vault_item_id": "vault-item-1",
                     "source": "ssh",
                     "source_ref": "id_ed25519",
+                    "name": "Stored local key",
+                    "fingerprint": "SHA256:local",
                 }
             ],
         }
@@ -82,7 +84,7 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
 
 def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path) -> None:
     service = MagicMock()
-    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-2"})
+    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-2", "name": "Stored Bitwarden key", "public_fingerprint": "SHA256:bitwarden"})
     resolver = MagicMock()
     resolver.resolve_ssh_key.return_value = "fixture-private"
     modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
@@ -108,7 +110,8 @@ def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path
     assert call["source_ref"] == "item-uuid-1"
     assert "delete" not in " ".join(name for name in dir(resolver) if "delete" in name)
     assert harness.modal.dismiss.call_args.args[0]["references"] == [
-        {"vault_item_id": "vault-item-2", "source": "bitwarden", "source_ref": "item-uuid-1"}
+        {"vault_item_id": "vault-item-2", "source": "bitwarden", "source_ref": "item-uuid-1",
+         "name": "Stored Bitwarden key", "fingerprint": "SHA256:bitwarden"}
     ]
 
 
@@ -366,3 +369,126 @@ async def test_narrow_import_picker_pins_actions_and_allows_pointer_cancel(tmp_p
             assert button.region.y >= 0 and button.region.bottom <= app.size.height
         await pilot.click("#vault_import_cancel")
         await wait_until(lambda: not isinstance(app.screen, VaultImportModal))
+
+
+def test_bitwarden_unreadable_material_keeps_fixed_tui_notice_and_wipes_buffer(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from servonaut.services.vault.command_service import VaultCommandService
+
+    core = VaultCommandService.__new__(VaultCommandService)
+    core.items = SimpleNamespace(write_item=AsyncMock())
+    service = MagicMock()
+    service.import_keys = AsyncMock(side_effect=core.import_keys)
+    resolver = MagicMock()
+    resolver.resolve_ssh_key.return_value = "unreadable key material"
+    modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
+    modal._source = "bitwarden"
+    modal._bw_items = [BwItemSummary(id="item-1", name="web-1", type=5, has_ssh_key=True)]
+    modal._list = MagicMock(return_value=_List([0]))
+    harness = _Harness(modal)
+    try:
+        asyncio.run(modal._import_selected())
+    finally:
+        harness.close()
+    harness.app.notify.assert_called_once_with(
+        "Could not import the selected Bitwarden SSH key.", severity="error", markup=False,
+    )
+    assert modal.dismiss.call_args.args[0]["failed"] == 1
+    assert service.import_keys.await_args.kwargs["private_key"] == bytearray(len("unreadable key material"))
+    core.items.write_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name, fingerprint", [
+    ("[1st key", "SHA256:fixture"), ("\x1b[31mred-key", "key [3"),
+    ("x\\[y", "trailing\\"),
+])
+async def test_bitwarden_labels_render_hostile_brackets_literally(tmp_path: Path, name: str, fingerprint: str) -> None:
+    from textual.app import App
+    from textual.widgets import SelectionList
+    from servonaut.services.vault.display import terminal_safe
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._bw_items = [BwItemSummary(id="item-1", name=name, type=5, has_ssh_key=True, fingerprint=fingerprint)]
+        modal._show_bitwarden_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 1)
+        plain = listing.get_option_at_index(0).prompt.plain
+        assert terminal_safe(name) in plain and terminal_safe(fingerprint) in plain
+        assert "\x1b" not in plain
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_local_filename_and_target_render_unclosed_brackets_and_trailing_backslash(tmp_path: Path) -> None:
+    from textual.app import App
+    from textual.widgets import SelectionList
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._local_keys = [ScannedKey(path=tmp_path / "key", filename="key [3", encrypted=False,
+                                        resolved_target="target [old\\")]
+        modal._show_local_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 1)
+        plain = listing.get_option_at_index(0).prompt.plain
+        assert plain == "key [3  → target [old\\ "
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["id [old", "x\\[y", "trailing\\"])
+async def test_encrypted_key_passphrase_modal_renders_filename_literally(name: str) -> None:
+    from textual.app import App
+    from textual.content import Content
+    from textual.markup import to_content
+    from textual.widgets import Static
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(BwPassphraseModal(name))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#bw_passphrase_prompt")))
+        content = app.screen.query_one("#bw_passphrase_prompt", Static).content
+        plain = content.plain if isinstance(content, Content) else to_content(str(content)).plain
+        assert plain == f"Enter the passphrase for {name} to decrypt it for import. Skip to leave this key out."
+        await pilot.press("escape")
+
+
+@pytest.mark.parametrize("name", [None, 7, "", "Stored [1st key"])
+def test_import_reference_only_copies_nonempty_string_name(name: object) -> None:
+    summary = {"imported": 0, "failed": 0, "imported_ids": [], "references": []}
+    VaultImportModal._record_import(summary, {"item_id": "key-1", "name": name}, "ssh", "source-1")
+    expected = {"vault_item_id": "key-1", "source": "ssh", "source_ref": "source-1"}
+    if isinstance(name, str) and name:
+        expected["name"] = name
+    assert summary["references"] == [expected]
+
+
+@pytest.mark.parametrize("fingerprint", [None, 7, "", "SHA256:fixture"])
+def test_import_reference_only_includes_string_fingerprint(fingerprint: object) -> None:
+    summary = {"imported": 0, "failed": 0, "imported_ids": [], "references": []}
+    VaultImportModal._record_import(
+        summary, {"item_id": "key-1", "name": "id_key", "public_fingerprint": fingerprint}, "ssh", "id_key",
+    )
+    reference = summary["references"][0]
+    assert reference["name"] == "id_key"
+    if isinstance(fingerprint, str):
+        assert reference["fingerprint"] == fingerprint
+    else:
+        assert "fingerprint" not in reference

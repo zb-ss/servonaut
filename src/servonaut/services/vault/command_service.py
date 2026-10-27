@@ -27,8 +27,10 @@ from servonaut.services.api_client import APIClient
 from servonaut.services.api_client import APIError
 from servonaut.services.auth_service import AuthService
 from servonaut.services.team_service import TeamService
+from servonaut.utils.validation import ValidationError
 
 from . import crypto
+from .auto_bind import is_personal_server
 from .bindings import BindingDestinationChangedError, VaultBindingService
 from .ca_client import CertificateAuthorityClient
 from .ca_pins import CaPins
@@ -42,13 +44,14 @@ from .errors import (
     SERVER_MOVED_SINCE_BINDING,
     VAULT_ROTATION_FAILED,
     VAULT_ROTATION_NOT_PERMITTED,
+    VaultKeyInUse,
     VaultUserError,
     vault_failure_reason,
 )
 from .grant_processor import GrantProcessor
-from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError
+from .identity_client import IdentityClient, NoLocalIdentityError, RecoveryKeyMismatchError, device_platform
 from .identity_store import IdentityStore
-from .items import VaultItemService
+from .items import VaultItemService, clean_item_name
 from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
@@ -74,9 +77,11 @@ logger = logging.getLogger(__name__)
 
 # SSH keys whose names a picker decrypts; beyond this they show by fingerprint.
 _NAMED_KEY_CHOICES = 50
-# Items a picker fetches at once, and the longest key name it shows.
+# Items a picker fetches at once, and the longest name in its labels.
 _KEY_NAME_FETCHES = 6
-_KEY_NAME_MAX = 80
+_KEY_LABEL_NAME_MAX = 80
+# Personal server bindings checked at once before removing a key.
+_KEY_USAGE_FETCHES = 6
 # A picker's mark for a key whose item failed verification.
 _UNVERIFIED_KEY = object()
 
@@ -592,7 +597,7 @@ class VaultCommandService:
         try:
             enrolled = await self.identity.enroll(
                 recovery_key=recovery, device_name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(), client="cli",
+                platform=platform or device_platform(), client="cli",
             )
         except APIError as exc:
             if exc.code != "identity_exists":
@@ -651,7 +656,7 @@ class VaultCommandService:
             registered = await self.identity.register_pending_device(
                 user_id=user_id,
                 name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(),
+                platform=platform or device_platform(),
                 client="cli",
             )
             remote_identity = registered.get("identity")
@@ -689,7 +694,7 @@ class VaultCommandService:
             registered = await self.identity.register_pending_device(
                 user_id=user_id,
                 name=device_name or self.default_device_name(),
-                platform=platform or platform_module.system().lower(),
+                platform=platform or device_platform(),
                 client="cli",
             )
             identity = registered.get("identity") if isinstance(registered, Mapping) else None
@@ -798,7 +803,7 @@ class VaultCommandService:
                 recovery_key=recovery_key,
                 reason=reason,
                 device_name=self.default_device_name(),
-                platform=platform_module.system().lower(),
+                platform=device_platform(),
                 client="cli",
             )
             expires_at = result.get("expires_at") if isinstance(result, Mapping) else None
@@ -1007,7 +1012,8 @@ class VaultCommandService:
             elif name:
                 # A name identifies the key, so its fingerprint is shortened to keep one line.
                 short = fingerprint if len(fingerprint) <= 24 else fingerprint[:19] + "…"
-                label = f"{name} · {short}"
+                display_name = name if len(name) <= _KEY_LABEL_NAME_MAX else name[:_KEY_LABEL_NAME_MAX] + "…"
+                label = f"{display_name} · {short}"
             else:
                 label = fingerprint or row["item_id"]
             choices.append({
@@ -1030,7 +1036,7 @@ class VaultCommandService:
         name = payload.get("name") if isinstance(payload, Mapping) else None
         if isinstance(payload, dict):
             payload.clear()  # drop the decrypted key material as soon as the name is out
-        return name[:_KEY_NAME_MAX] if isinstance(name, str) and name else None
+        return terminal_safe(name) if isinstance(name, str) and name else None
 
     async def team_choices(self) -> list[dict[str, str]]:
         """Teams this user belongs to, as ``{"slug", "label"}`` for a picker."""
@@ -1064,6 +1070,105 @@ class VaultCommandService:
         if item.get("type") == "secret":
             self._cache_verified_secret_item(vault_id, item_id, plaintext)
         return {"metadata": item, "plaintext": plaintext}
+
+    async def _ssh_key_record(self, vault_id: str, item_id: str) -> dict[str, Any]:
+        item = await self.items.get_item(vault_id, item_id)
+        if item.get("type") != "ssh_key":
+            raise VaultUserError("only SSH key items can be renamed or deleted")
+        if item.get("deleted") or item.get("deleted_at"):
+            raise VaultUserError("this vault key has already been deleted")
+        return item
+
+    async def rename_ssh_key(self, *, vault_id: str, item_id: str, name: str) -> dict[str, Any]:
+        """Rename a verified SSH key without overwriting a concurrent change."""
+        try:
+            cleaned = clean_item_name(name)
+        except ValueError as exc:
+            raise VaultUserError("a vault key name must contain 1 to 200 characters") from exc
+        item = await self._ssh_key_record(vault_id, item_id)
+        revision = _positive_int(item.get("revision"), "item.revision")
+        vault = await self.vaults.get_vault(vault_id)
+        payload = self.items.read_item(vault, item)
+        try:
+            if payload.get("name") != cleaned:
+                payload["name"] = cleaned
+                updated = await self.items.write_item(
+                    vault_id, item_id, "ssh_key", payload,
+                    expected_revision=revision, retry_stale_once=False,
+                )
+                revision = updated["revision"]
+            return {"item_id": item_id, "name": cleaned, "revision": revision}
+        finally:
+            payload.clear()
+
+    async def ssh_key_usage(
+        self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Team bindings and this computer's own servers using a vault SSH key."""
+        item = await self._ssh_key_record(vault_id, item_id)
+        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
+        return {
+            **usage, "name": await self._ssh_key_display_name(vault_id, item),
+            "fingerprint": terminal_safe(item.get("public_fingerprint") or ""),
+        }
+
+    async def _ssh_key_display_name(self, vault_id: str, item: Mapping[str, Any]) -> str | None:
+        try:
+            vault = await self.vaults.get_vault(vault_id)
+            payload = self.items.read_item(vault, item)
+        except Exception:  # unavailable or unverified names are shown by fingerprint
+            return None
+        try:
+            name = payload.get("name")
+            return terminal_safe(name) if isinstance(name, str) else None
+        finally:
+            payload.clear()
+
+    async def _ssh_key_usage(
+        self, vault_id: str, item_id: str, item: Mapping[str, Any],
+        servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        own = [server for server in servers if is_personal_server(server)]
+        gate = asyncio.Semaphore(_KEY_USAGE_FETCHES)
+
+        async def check(server: Mapping[str, Any]) -> tuple[str, str]:
+            name = terminal_safe(server.get("name") or server.get("id") or "Unnamed server")
+            try:
+                instance_target(server)
+            except ValidationError:
+                # Unsupported route IDs cannot be bound; omit them from checked reads.
+                return "skipped", name
+            async with gate:
+                try:
+                    binding = await self.personal_binding(server)
+                except Exception:  # an unavailable binding must prevent deletion
+                    return "unchecked", name
+            used = binding and binding.get("vault_item_id") == item_id and binding.get("vault_id") == vault_id
+            return ("own_servers" if used else "unused"), name
+
+        results = await asyncio.gather(*(check(server) for server in own))
+        return {
+            "team_servers": [terminal_safe(row.get("name") or row.get("server_id") or "Unnamed server")
+                             for row in item.get("bound_server_ids", [])],
+            "own_servers": [name for state, name in results if state == "own_servers"],
+            "unchecked": [name for state, name in results if state == "unchecked"],
+            "checked": sum(state in {"own_servers", "unused"} for state, _ in results),
+        }
+
+    async def delete_ssh_key(
+        self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Delete only an unused, unexposed SSH key at its current revision."""
+        item = await self._ssh_key_record(vault_id, item_id)
+        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
+        if usage["team_servers"] or usage["own_servers"] or usage["unchecked"]:
+            raise VaultKeyInUse.from_usage(usage)
+        exposures = await self.list_exposures(vault_id=vault_id)
+        if any(row.get("item_id") == item_id and row.get("status", "open") == "open"
+               and row.get("resolved_at") is None for row in exposures["data"]):
+            raise VaultUserError("resolve or rotate its open exposures first")
+        await self.items.delete_item(vault_id, item_id, item["revision"])
+        return {"item_id": item_id, "deleted": True}
 
     async def process_grants(
         self, *, vault_id: str | None = None, interactive: bool = False,
@@ -1521,6 +1626,7 @@ class VaultCommandService:
         private_key: str | bytes | None = None,
         passphrase: bytes | None = None,
         source_ref: str | None = None,
+        name: str | None = None,
         break_glass_from_cidrs: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Validate SSH material locally then encrypt it as a fresh vault item.
@@ -1535,6 +1641,11 @@ class VaultCommandService:
         """
         if source not in {"ssh", "bitwarden"}:
             raise ValueError("unsupported SSH import source")
+        default_name = Path(path).name if source == "ssh" and path else "Imported SSH key"
+        item_name = clean_item_name(
+            name if name is not None and terminal_safe(name).strip() else default_name,
+            truncate=True,
+        )
         break_glass = (
             None if break_glass_from_cidrs is None
             else {"logins": ["root"], "from_cidrs": _normalized_cidrs(break_glass_from_cidrs)}
@@ -1545,11 +1656,16 @@ class VaultCommandService:
             private_key = Path(path).read_bytes()
         private_bytes = bytearray(private_key.encode("utf-8") if isinstance(private_key, str) else private_key)
         try:
-            public_key = self._public_key_from_private(bytes(private_bytes), passphrase)
+            try:
+                public_key = self._public_key_from_private(bytes(private_bytes), passphrase)
+            except ValueError as exc:
+                raise VaultUserError(
+                    "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key, unlocked or with its passphrase"
+                ) from exc
             fingerprint = crypto.ssh_public_fingerprint(public_key)
             item_id = str(uuid.uuid4())
             payload = {
-                "name": Path(path).name if path else "Imported SSH key",
+                "name": item_name,
                 "notes": "",
                 "private_key_openssh": bytes(private_bytes).decode("utf-8"),
                 "public_key": public_key,
@@ -1563,7 +1679,7 @@ class VaultCommandService:
                 payload.update(break_glass)
                 item_type = "break_glass"
             result = await self.items.write_item(vault_id, item_id, item_type, payload, expected_revision=0)
-            return {"item_id": item_id, "type": item_type, "public_fingerprint": fingerprint, "item": result}
+            return {"item_id": item_id, "name": item_name, "type": item_type, "public_fingerprint": fingerprint, "item": result}
         finally:
             for index in range(len(private_bytes)):
                 private_bytes[index] = 0
@@ -1572,17 +1688,22 @@ class VaultCommandService:
         self,
         *, vault_id: str, server: str, item_id: str, team: str | None,
         login: str | None, pin_host_key: bool, host_keys: Sequence[str] = (),
+        replace_existing: bool = True,
     ) -> dict[str, Any]:
         """Write a signed binding only after an explicit host-pin decision.
 
         The first binding pins *host_keys* when given, otherwise the keys this
         machine already trusts for the server (from an earlier SSH login).
+        With ``replace_existing=False`` a shared server that already has a
+        credential_binding is refused instead of updated.
         """
         if not team:
             raise ValueError("a team is required to bind a shared server")
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
         shared = await self._shared_server(team, server)
+        if not replace_existing and shared.get("credential_binding"):
+            raise VaultUserError("already has a team key: left alone")
         hostname = shared.get("hostname") or shared.get("host") or shared.get("public_ip")
         port = shared.get("port", 22)
         if not isinstance(hostname, str) or not hostname or isinstance(port, bool) or not isinstance(port, int):
@@ -2095,16 +2216,26 @@ class VaultCommandService:
 
         return records_new_host_keys(self.connection_service)
 
-    async def visit_for_host_key(self, instance: Mapping[str, Any], *, login: str | None = None) -> str | None:
+    async def visit_for_host_key(
+        self,
+        instance: Mapping[str, Any],
+        *,
+        login: str | None = None,
+        known_hosts_path: Path | str | None = None,
+    ) -> str | None:
         """Connect to *instance* once so its host key is recorded; why not, if it failed."""
         if self.connection_service is None or self.ssh_service is None:
             return "Servonaut cannot open SSH connections here."
         from servonaut.services.host_key_recording import visit_for_host_key, visit_timeout
 
+        kwargs: dict[str, Any] = {}
+        if known_hosts_path is not None:
+            kwargs["known_hosts_path"] = known_hosts_path
         return await visit_for_host_key(
             instance, self.connection_service, self.ssh_service,
             login or self.ssh_login(instance) or getattr(self.config, "default_username", None) or "",
             timeout=visit_timeout(getattr(self.config, "ssh", None)),
+            **kwargs,
         )
 
     async def personal_binding(self, instance: Mapping[str, Any]) -> Mapping[str, Any] | None:

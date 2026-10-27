@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import platform
+import sys
 
 import datetime as datetime_module
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from servonaut.services.api_client import APIError
 from servonaut.services.vault import crypto
 from servonaut.services.vault.command_service import VaultCommandService, VaultSshLease
 from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
+from servonaut.services.vault.identity_client import DEVICE_PLATFORMS, device_platform
 from servonaut.services.vault.identity_store import IdentityStore
 from servonaut.services.vault.local_state import LocalStateError, VaultLocalState
 from servonaut.services.vault.team_vault_client import VaultStateError
@@ -2844,6 +2847,36 @@ async def test_bind_personal_can_refuse_to_replace_an_existing_key() -> None:
     service.bindings.put_personal_binding.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_bind_team_can_refuse_to_replace_an_existing_key() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_shared_servers = AsyncMock(return_value=[{
+        "id": "s-1",
+        "name": "shared-1",
+        "hostname": "198.51.100.7",
+        "port": 22,
+        "login_user": "ubuntu",
+        "credential_binding": {"source": "servonaut_vault", "valid": True},
+    }])
+    service.bindings = MagicMock()
+    service.bindings.put_team_binding = AsyncMock()
+
+    with pytest.raises(VaultUserError, match="already has a team key: left alone"):
+        await service.bind(
+            vault_id="11111111-1111-4111-8111-111111111111",
+            item_id="22222222-2222-4222-8222-222222222222",
+            server="s-1",
+            team="ops",
+            login="ubuntu",
+            pin_host_key=False,
+            host_keys=["ssh-ed25519 AAAA"],
+            replace_existing=False,
+        )
+    service.bindings.put_team_binding.assert_not_awaited()
+
+
+
 def test_ssh_destination_is_where_the_connection_rule_sends_ssh() -> None:
     rules = MagicMock()
     rules.resolve_profile.side_effect = lambda row: SimpleNamespace(bastion_host="b") if row["id"] == "i-behind" else None
@@ -3098,3 +3131,119 @@ async def test_a_binding_that_fails_leaves_the_generation(tmp_path) -> None:
     with pytest.raises(APIError):
         await _bind_web_1(service)
     assert service.binding_generation == before
+
+
+# --- Device platform: a Mac is "macos" to the vault service, never "darwin" ---
+
+_ENV_KEY = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
+
+@pytest.fixture
+def on_a_mac(monkeypatch):
+    """Report this computer as a Mac, both ways Python can be asked."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+
+
+class _SignedApi(_Api):
+    """Records the signed requests the real identity client sends."""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        super().__init__({})
+        self.response = response
+        self.signed: list[tuple[str, str, object]] = []
+
+    async def request_signed(self, method: str, path: str, **kwargs: object) -> dict[str, object]:
+        self.signed.append((method, path, kwargs.get("json")))
+        return self.response
+
+
+@pytest.mark.parametrize(
+    ("sys_platform", "expected"),
+    [("linux", "linux"), ("darwin", "macos"), ("win32", "windows"), ("freebsd14", "other")],
+)
+def test_device_platform_is_a_name_the_vault_service_accepts(monkeypatch, sys_platform, expected) -> None:
+    monkeypatch.setattr(sys, "platform", sys_platform)
+
+    assert device_platform() == expected
+    assert expected in DEVICE_PLATFORMS
+
+
+@pytest.mark.asyncio
+async def test_setup_on_a_mac_enrols_the_device_as_macos(tmp_path, on_a_mac) -> None:
+    api = _SignedApi({"confirmation": {"state": "pending"}})
+    store = IdentityStore(tmp_path / "vault" / "vault_keys.json", environment_key=_ENV_KEY)
+    service = VaultCommandService(api, SimpleNamespace(user_id=1), _config(), store=store)
+    service.identity.status = AsyncMock(return_value={"identity": None})  # type: ignore[method-assign]
+
+    await service.setup(device_name="mac", platform=None, recovery_confirmation=lambda _key: True)
+
+    [(method, path, body)] = api.signed
+    assert (method, path) == ("POST", "/api/v1/vault/identity")
+    assert body["device"]["platform"] == "macos"  # type: ignore[index]
+    assert store.identity is not None
+
+
+@pytest.mark.asyncio
+async def test_add_device_on_a_mac_registers_the_device_as_macos(tmp_path, on_a_mac) -> None:
+    expiry = (datetime_module.datetime.now(datetime_module.timezone.utc) + datetime_module.timedelta(minutes=5)).isoformat()
+    api = _SignedApi({
+        "identity": {"identity_id": "11111111-1111-4111-8111-111111111111"},
+        "approval": {"state": "pending", "expires_at": expiry},
+    })
+    store = IdentityStore(tmp_path / "vault" / "vault_keys.json", environment_key=_ENV_KEY)
+    service = VaultCommandService(api, SimpleNamespace(user_id=1), _config(), store=store)
+
+    await service.add_device(device_name="mac", platform=None)
+
+    [(method, path, body)] = api.signed
+    assert (method, path) == ("POST", "/api/v1/vault/devices")
+    assert body["platform"] == "macos"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_recover_on_a_mac_registers_the_device_as_macos(tmp_path, on_a_mac) -> None:
+    store = IdentityStore(tmp_path / "vault" / "vault_keys.json", environment_key=_ENV_KEY)
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    identity = MagicMock()
+    identity.register_pending_device = AsyncMock(return_value={"identity": {"identity_id": "i"}})
+    identity.fetch_recovery_wrap = AsyncMock(return_value={})
+    identity.activate_with_recovery = AsyncMock(return_value={"device": {}})
+    service.identity = identity
+
+    await service.recover(
+        recovery_key=crypto.format_recovery_key(bytes(32)), device_name="mac", platform=None,
+    )
+
+    assert identity.register_pending_device.await_args.kwargs["platform"] == "macos"
+
+
+@pytest.mark.asyncio
+async def test_identity_reset_on_a_mac_names_the_device_macos(tmp_path, on_a_mac) -> None:
+    expiry = (datetime_module.datetime.now(datetime_module.timezone.utc) + datetime_module.timedelta(minutes=30)).isoformat()
+    store = IdentityStore(tmp_path / "vault" / "vault_keys.json", environment_key=_ENV_KEY)
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config(), store=store)
+    identity = MagicMock()
+    identity.request_reset = AsyncMock(return_value={"expires_at": expiry})
+    service.identity = identity
+
+    await service.reset_identity(reason="rotate", recovery_confirmation=lambda _key: True)
+
+    assert identity.request_reset.await_args.kwargs["platform"] == "macos"
+
+
+@pytest.mark.asyncio
+async def test_key_choices_keep_full_names_for_rename_and_matching_but_shorten_labels() -> None:
+    name = "x" * 120
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": [
+        {"item_id": "key", "type": "ssh_key", "revision": 1, "public_fingerprint": "SHA256:key"},
+    ]})
+    service.vaults.get_vault = AsyncMock(return_value={})
+    service.items.get_item = AsyncMock(return_value={"item_id": "key"})
+    service.items.read_item = MagicMock(side_effect=lambda *_args: {"name": "\u202e" + name + "\n"})
+
+    (choice,) = await service.ssh_key_choices(vault_id="vault")
+
+    assert choice["name"] == name
+    assert choice["label"] == "x" * 80 + "… · SHA256:key"

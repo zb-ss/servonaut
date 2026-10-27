@@ -47,15 +47,26 @@ def _available_port() -> int:
         return int(listener.getsockname()[1])
 
 
+# A loaded CI runner can take seconds to start sshd; a healthy start returns
+# as soon as the port accepts, so the bound only matters when it hangs.
+_SSHD_START_SECONDS = 20.0
+
+
 def _wait_for_sshd(port: int, process: subprocess.Popen[bytes]) -> None:
-    for _ in range(100):
+    deadline = time.monotonic() + _SSHD_START_SECONDS
+    while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(process.stderr.read().decode("utf-8", errors="replace"))
         with socket.socket() as client:
             if client.connect_ex(("127.0.0.1", port)) == 0:
                 return
         time.sleep(0.02)
-    raise RuntimeError("temporary sshd did not listen")
+    process.terminate()
+    _, stderr = process.communicate(timeout=10)
+    raise RuntimeError(
+        f"temporary sshd did not listen within {_SSHD_START_SECONDS:g}s: "
+        + stderr.decode("utf-8", errors="replace")
+    )
 
 
 @pytest.mark.skipif(not os.path.exists("/bin/ssh-agent"), reason="OpenSSH is unavailable")

@@ -233,7 +233,7 @@ class IdentityClient:
             json={
                 "device_id": pending.device.device_id,
                 "name": name,
-                "platform": platform,
+                "platform": _platform_value(platform),
                 "client": client,
                 "device_sig_public_key": _b64(pending.device.signing_public_key),
                 "device_enc_public_key": _b64(pending.device.encryption_public_key),
@@ -640,7 +640,16 @@ def _decode_b64(value: str) -> bytes:
     return raw
 
 
-def _platform() -> str:
+# The device platforms the vault service accepts.
+DEVICE_PLATFORMS = ("linux", "macos", "windows", "other")
+
+
+def device_platform() -> str:
+    """This computer's platform as the vault service names it.
+
+    Not ``platform.system().lower()``: that is ``darwin`` on a Mac, which the
+    service does not accept.
+    """
     import sys
     if sys.platform.startswith("linux"):
         return "linux"
@@ -652,7 +661,7 @@ def _platform() -> str:
 
 
 def _platform_value(value: str) -> str:
-    if value not in {"linux", "macos", "windows", "other"}:
+    if value not in DEVICE_PLATFORMS:
         raise ValueError("invalid device platform")
     return value
 

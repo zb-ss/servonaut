@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import logging
 import math
 import secrets
 import sys
@@ -27,7 +28,8 @@ from servonaut.services.vault.display import (
     ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import VaultKeyInUse, VaultUserError, vault_failure_reason
+from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
 _EXIT_ERROR = 1
@@ -36,6 +38,8 @@ _EXIT_ABORTED = 5
 _VAULT_HELP = "Vault id, or the vault's name as `servonaut vault list` shows it."
 # Wrong passphrases accepted before an import gives up.
 _PASSPHRASE_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 VaultServiceFactory = Callable[[], Any]
 _service_factory: Optional[VaultServiceFactory] = None
@@ -116,12 +120,12 @@ def add_vault_parser(subparsers: Any) -> None:
     commands.add_parser("status", help="Show identity, device and vault status.")
     setup = commands.add_parser("setup", help="Create or restore a vault identity.")
     setup.add_argument("--device-name", default=None)
-    setup.add_argument("--platform", default=None)
+    setup.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     setup.add_argument("--yes", action="store_true", help="Confirm recovery-key display requirements.")
 
     recover = commands.add_parser("recover", help="Restore a device with the recovery key.")
     recover.add_argument("--device-name", default=None)
-    recover.add_argument("--platform", default=None)
+    recover.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     identity = commands.add_parser("identity", help="Manage identity confirmation.")
     identity_sub = identity.add_subparsers(dest="vault_identity_command", required=True)
     identity_sub.add_parser("confirm", help="Refresh identity confirmation after login with MFA.")
@@ -138,7 +142,7 @@ def add_vault_parser(subparsers: Any) -> None:
     device_sub.add_parser("list", help="List current and recently finished devices.")
     add = device_sub.add_parser("add", help="Register this device and wait for approval on another device.")
     add.add_argument("--device-name", default=None)
-    add.add_argument("--platform", default=None)
+    add.add_argument("--platform", default=None, choices=DEVICE_PLATFORMS)
     approve = device_sub.add_parser("approve", help="Approve a pending device after comparing its SAS.")
     approve.add_argument("device_id")
     revoke = device_sub.add_parser("revoke", help="Revoke a device.")
@@ -154,16 +158,27 @@ def add_vault_parser(subparsers: Any) -> None:
     items = commands.add_parser("items", help="List item metadata only.")
     items.add_argument("--vault", required=True, help=_VAULT_HELP)
     items.add_argument("--include-deleted", action="store_true")
+    items.add_argument("--names", action="store_true", help="Decrypt SSH key names locally and include them.")
     show = commands.add_parser("show", help="Show item metadata; --reveal requires confirmation.")
     show.add_argument("item_id")
     show.add_argument("--vault", required=True, help=_VAULT_HELP)
     show.add_argument("--reveal", action="store_true")
     show.add_argument("--yes", action="store_true")
 
+    rename = commands.add_parser("rename", help="Rename a vault SSH key.")
+    rename.add_argument("item_id")
+    rename.add_argument("--vault", required=True, help=_VAULT_HELP)
+    rename.add_argument("--name", required=True, help="New SSH key name (1 to 200 characters).")
+    delete = commands.add_parser("delete", help="Remove an unused SSH key from the vault only.")
+    delete.add_argument("item_id")
+    delete.add_argument("--vault", required=True, help=_VAULT_HELP)
+    delete.add_argument("--yes", action="store_true")
+
     imports = commands.add_parser("import", help="Import SSH material into the encrypted vault.")
     import_sub = imports.add_subparsers(dest="vault_import_command", required=True)
     import_ssh = import_sub.add_parser("ssh", help="Import a local SSH private key file.")
     import_ssh.add_argument("--vault", required=True, help=_VAULT_HELP)
+    import_ssh.add_argument("--name", default=None, help="Key name; defaults to the file name.")
     import_ssh.add_argument(
         "--path", required=True,
         help="Private key file, e.g. ~/.ssh/id_ed25519; asks for its passphrase when it has one.",
@@ -178,6 +193,7 @@ def add_vault_parser(subparsers: Any) -> None:
     )
     import_bw = import_sub.add_parser("bitwarden", help="Import SSH keys from Bitwarden without deleting them.")
     import_bw.add_argument("--vault", required=True, help=_VAULT_HELP)
+    import_bw.add_argument("--name", default=None, help="Key name; defaults to the Bitwarden item name.")
     import_bw.add_argument("--item", required=True, help="Existing Bitwarden SSH item UUID.")
     bind = commands.add_parser("bind", help="Bind a vault SSH item to a server.")
     bind.add_argument("server")
@@ -210,10 +226,15 @@ def add_vault_parser(subparsers: Any) -> None:
         help="Bind personal-vault SSH keys to the servers named like them (key pair name, then server name).",
     )
     auto_bind.add_argument("--vault", default=None, help=f"{_VAULT_HELP} Default: your personal vault.")
+    auto_bind.add_argument("--team", default=None, help="Bind a team vault's keys to that team's shared servers.")
     auto_bind.add_argument("--dry-run", action="store_true", help="Show what would be bound and change nothing.")
     auto_bind.add_argument(
         "--yes", action="store_true",
         help="Pin the host keys this computer already trusts and bind without asking.",
+    )
+    auto_bind.add_argument(
+        "--fetch-host-keys", action="store_true",
+        help="Connect once to record host keys for servers missing them (still connects once per server with --dry-run).",
     )
     rotate = commands.add_parser("rotate", help="Rotate a vault encryption version.")
     rotate.add_argument("--vault", required=True, help=_VAULT_HELP)
@@ -557,7 +578,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
     from servonaut.services.vault import crypto
 
     instance = row.instance
-    return {
+    rec = {
         "server": instance.get("name") or instance.get("id"),
         "instance_id": instance.get("id"),
         "provider": "custom" if instance.get("is_custom") else str(instance.get("provider") or "aws").lower(),
@@ -568,44 +589,194 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "host": row.host,
         "port": row.port,
         "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
+        "verified": getattr(row, "verified", False),
+        "verification_source": getattr(row, "verification_source", None),
+        "fetch_error": getattr(row, "fetch_error", None),
+        "mismatch_detail": getattr(row, "mismatch_detail", None),
+        "team": getattr(row, "team", None),
         "status": row.status,
         "result": row.result,
     }
+    if getattr(row, "skipped", None) is not None:
+        rec["skipped"] = row.skipped
+    return rec
 
 
 def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
+    from servonaut.services.vault.auto_bind import FETCHED
+
     for row in rows:
         record = _auto_bind_record(row)
         name = terminal_safe(str(record["server"] or "server"))
         status = row.status_text if results or not row.ready else "ready"
+        fetch_err = getattr(row, "fetch_error", None)
+        mismatch_det = getattr(row, "mismatch_detail", None)
         if row.match is None or row.match.ambiguous:
             print(f"{name}: {status}")
+            if fetch_err and str(fetch_err) not in status:
+                print(f"    fetch error: {terminal_safe(str(fetch_err))}")
+            if mismatch_det and str(mismatch_det) not in status:
+                print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
             continue
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
             parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
         print(" ".join(parts) + f" - {status}")
+        if fetch_err and str(fetch_err) not in status:
+            print(f"    fetch error: {terminal_safe(str(fetch_err))}")
+        if mismatch_det and str(mismatch_det) not in status:
+            print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
-                print(f"    host key {fingerprint}")
+                if getattr(row, "verified", False):
+                    source = getattr(row, "verification_source", None) or "verified by AWS console output"
+                    print(f"    host key {fingerprint} ({source})")
+                elif row.status == FETCHED:
+                    source = getattr(row, "verification_source", None) or "not verified: compare with the server's console or your provider"
+                    print(f"    host key {fingerprint} ({source})")
+                else:
+                    print(f"    host key {fingerprint}")
+
+
+async def _load_team_shared_servers(
+    services: Any, team: str
+) -> tuple[int, list[dict[str, Any]], Optional[dict[str, Any]]]:
+    team_svc = getattr(services, "teams", None) or getattr(services, "team_service", None)
+    if team_svc is None:
+        try:
+            from servonaut.cli.team import _default_team_service
+            team_svc = _default_team_service()
+        except Exception:
+            team_svc = None
+    if team_svc is None:
+        print("Team services are unavailable: sign in first.", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+    try:
+        teams = await team_svc.list_teams()
+    except Exception as exc:
+        print(f"Could not load your teams ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+
+    from servonaut.cli.team import _find_team
+    team_rec = _find_team(teams, team)
+    if team_rec is None:
+        print(f"You are not in a team called {terminal_safe(team)}.", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+
+    role = str(team_rec.get("role") or "").lower()
+    if role not in {"owner", "admin"}:
+        name = terminal_safe(str(team_rec.get("name") or team))
+        print(f"Only team owners and admins can bind vault keys for {name}.", file=sys.stderr)
+        return _EXIT_ERROR, [], team_rec
+
+    try:
+        from servonaut.services.shared_servers import load_shared_servers
+        res = await load_shared_servers(team_svc, teams=[team_rec])
+        if res.problems:
+            print(f"Could not load shared servers for {terminal_safe(team)}: {terminal_safe(res.problems[0])}.", file=sys.stderr)
+            return _EXIT_ERROR, [], team_rec
+        return _EXIT_OK, list(res.rows), team_rec
+    except Exception as exc:
+        print(f"Could not load shared servers for team {terminal_safe(team)} ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR, [], team_rec
 
 
 async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> int:
     """Plan, confirm and apply ``vault auto-bind``."""
-    from servonaut.services.vault.auto_bind import apply_auto_bind, plan_auto_bind
+    from servonaut.services.vault.auto_bind import (
+        FETCHED,
+        NO_HOST_KEYS,
+        apply_auto_bind,
+        fetch_host_keys_for_rows,
+        plan_auto_bind,
+    )
 
     vault_id = args.vault
-    if not vault_id:
-        personal = [
-            choice for choice in await _invoke(services, "vault_choices")
-            if isinstance(choice, Mapping) and choice.get("kind") == "personal"
-        ]
-        if not personal:
-            print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
-            return _EXIT_ERROR
-        vault_id = str(personal[0]["vault_id"])
+    team = getattr(args, "team", None)
+    team_rec = None
+    servers = list(_auto_bind_servers())
+    if team:
+        exit_code, shared, team_rec = await _load_team_shared_servers(services, team)
+        if exit_code != _EXIT_OK:
+            return exit_code
+        from servonaut.services.shared_servers import is_shared_row
+        own_servers = [s for s in servers if not is_shared_row(s)]
+        servers = own_servers + list(shared)
+
+    try:
+        vaults = await _invoke(services, "list_vaults")
+    except Exception as exc:
+        print(f"Could not load vaults ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR
+
+    if vault_id:
+        vault_id = await _vault_id(services, vault_id)
+        if team:
+            target = None
+            for v in vaults:
+                if isinstance(v, Mapping) and str(v.get("vault_id")) == vault_id:
+                    target = v
+                    break
+            v_team = target.get("team") if isinstance(target, Mapping) and isinstance(target.get("team"), Mapping) else {}
+            v_slug = v_team.get("slug") or (target.get("team_slug") if isinstance(target, Mapping) else None)
+            if not target or target.get("kind") != "team" or v_slug != team:
+                raw_vault = getattr(args, "_raw_vault", None) or getattr(args, "vault", None)
+                print(
+                    f'"{terminal_safe(raw_vault)}" is not {terminal_safe(team)}\'s team vault: '
+                    "leave out --vault to use the team's vault.",
+                    file=sys.stderr,
+                )
+                return _EXIT_ERROR
+    else:
+        if team:
+            team_vault = None
+            for v in vaults:
+                if isinstance(v, Mapping) and v.get("kind") == "team":
+                    team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
+                    slug = team_info.get("slug") or v.get("team_slug")
+                    if slug == team:
+                        team_vault = v
+                        break
+            if not team_vault:
+                team_name = terminal_safe(str((team_rec.get("name") if team_rec else None) or team))
+                print(f"You have no team vault for {team_name} yet: run `servonaut vault create --team {terminal_safe(team)}`.", file=sys.stderr)
+                return _EXIT_ERROR
+            if team_vault.get("my_grant") is None:
+                team_name = terminal_safe(str((team_rec.get("name") if team_rec else None) or team))
+                print(f"Your access to the team vault for {team_name} is still waiting for approval.", file=sys.stderr)
+                return _EXIT_ERROR
+            vault_id = str(team_vault["vault_id"])
+        else:
+            personal = [
+                choice for choice in vaults
+                if isinstance(choice, Mapping) and choice.get("kind") == "personal"
+            ]
+            if not personal:
+                print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
+                return _EXIT_ERROR
+            vault_id = str(personal[0]["vault_id"])
+
     keys = await _invoke(services, "ssh_key_choices", vault_id=vault_id, name_limit=None)
-    rows = await plan_auto_bind(services, _auto_bind_servers(), keys)
+    rows = await plan_auto_bind(services, servers, keys, team=team)
+
+    if getattr(args, "fetch_host_keys", False):
+        to_fetch = [row for row in rows if row.status == NO_HOST_KEYS]
+        if to_fetch:
+            accounts = getattr(services, "accounts", None)
+            if accounts is None:
+                try:
+                    from servonaut.config.manager import ConfigManager
+                    from servonaut.services.accounts.headless import build_account_registry
+                    accounts = build_account_registry(ConfigManager())
+                except Exception as exc:
+                    logger.debug("Failed to build account registry: %s", exc, exc_info=True)
+                    accounts = None
+            await fetch_host_keys_for_rows(
+                services,
+                to_fetch,
+                accounts=accounts,
+            )
+
     ready = [row for row in rows if row.ready]
     if output and (args.dry_run or not ready):
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
@@ -616,16 +787,76 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
         if not output:
             print(f"{len(ready)} of {len(rows)} servers can get a vault key.", file=sys.stderr)
         return _EXIT_OK
-    if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(ready)} servers"):
+
+    is_yes = getattr(args, "yes", False)
+    if getattr(args, "fetch_host_keys", False) and not is_yes and not sys.stdin.isatty():
+        print(
+            "Refusing to bind fetched host keys without confirmation. Run interactively or pass --yes to bind only verified keys.",
+            file=sys.stderr,
+        )
+        return _EXIT_ERROR
+
+    unverified_fetched = [row for row in ready if row.status == FETCHED and not row.verified]
+    if is_yes and unverified_fetched:
+        for row in unverified_fetched:
+            row.skipped = "not verified"
+        to_bind = [row for row in ready if row not in unverified_fetched]
+        if not output:
+            n = len(unverified_fetched)
+            word = "servers" if n > 1 else "server"
+            print(f"Skipped {n} unverified {word}: run without --yes to check their fingerprints.", file=sys.stderr)
+    else:
+        to_bind = ready
+
+    if not to_bind:
+        if output:
+            _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
+        else:
+            print(f"0 of {len(rows)} servers can get a vault key.", file=sys.stderr)
+        return _EXIT_OK
+
+    if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(to_bind)} servers"):
         return _EXIT_ABORTED
-    await apply_auto_bind(services, ready, vault_id=vault_id)
-    failed = [row for row in ready if row.result != "bound"]
+    await apply_auto_bind(services, to_bind, vault_id=vault_id, team=team, reviewed_fetched=True)
+    failed = [row for row in to_bind if row.result != "bound"]
     if output:
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
     else:
-        _print_auto_bind(ready, results=True)
-        print(f"Bound vault keys to {len(ready) - len(failed)} of {len(ready)} servers.", file=sys.stderr)
+        _print_auto_bind(to_bind, results=True)
+        print(f"Bound vault keys to {len(to_bind) - len(failed)} of {len(to_bind)} servers.", file=sys.stderr)
     return _EXIT_ERROR if failed else _EXIT_OK
+
+
+def _named_row(row: Mapping[str, Any], names: Mapping[str, Any]) -> dict[str, Any]:
+    if row.get("type") != "ssh_key":
+        return dict(row)
+    name = names.get(row.get("item_id"))
+    return {**row, "name": terminal_safe(name) if name is not None else None}
+
+
+async def _items_with_names(services: Any, args: argparse.Namespace) -> dict[str, Any]:
+    listed = await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted)
+    if not args.names:
+        return listed
+    choices = await _invoke(services, "ssh_key_choices", vault_id=args.vault, name_limit=None)
+    names = {row["item_id"]: row.get("name") for row in choices}
+    return {**listed, "data": [_named_row(row, names) for row in listed["data"]]}
+
+
+async def _delete_ssh_key(services: Any, args: argparse.Namespace, output: bool) -> int:
+    servers = _auto_bind_servers()
+    usage = await _invoke(services, "ssh_key_usage", vault_id=args.vault, item_id=args.item_id, servers=servers)
+    print(f"Vault key: {terminal_safe(usage.get('name') or 'Unnamed SSH key')} "
+          f"({terminal_safe(usage.get('fingerprint') or args.item_id)})", file=sys.stderr)
+    if usage["team_servers"] or usage["own_servers"] or usage["unchecked"]:
+        raise VaultKeyInUse.from_usage(usage)
+    print("This removes the key from the vault only. Servers that accept it keep accepting it "
+          "until it is removed from their authorized_keys.", file=sys.stderr)
+    if not _confirm(args, "Delete this key from the vault"):
+        return _EXIT_ABORTED
+    _print(await _invoke(services, "delete_ssh_key", vault_id=args.vault, item_id=args.item_id, servers=servers),
+           json_output=output)
+    return _EXIT_OK
 
 
 async def _handle(args: argparse.Namespace) -> int:
@@ -635,6 +866,7 @@ async def _handle(args: argparse.Namespace) -> int:
     try:
         services = _services()
         if getattr(args, "vault", None):
+            args._raw_vault = args.vault
             args.vault = await _vault_id(services, args.vault)
         if command == "status":
             status = await _invoke(services, "status")
@@ -743,17 +975,34 @@ async def _handle(args: argparse.Namespace) -> int:
             else:
                 _print_vaults(vaults)
         elif command == "items":
-            _print(await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted), json_output=output)
+            _print(await _items_with_names(services, args), json_output=output)
         elif command == "show":
             if args.reveal and not _confirm(args, "Reveal this secret in your terminal"):
                 return _EXIT_ABORTED
             item = await _invoke(services, "show_item", vault_id=args.vault, item_id=args.item_id, reveal=args.reveal)
             _print(item, json_output=output, revealed=args.reveal)
+        elif command == "rename":
+            renamed = await _invoke(services, "rename_ssh_key", vault_id=args.vault, item_id=args.item_id, name=args.name)
+            if output:
+                _print(renamed, json_output=True)
+            else:
+                print(f"Renamed the key to {terminal_safe(renamed['name'])}.")
+        elif command == "delete":
+            return await _delete_ssh_key(services, args, output)
         elif command == "import":
             if args.vault_import_command == "bitwarden":
                 from servonaut.services.bw_resolver import BwResolver
-                private_key = await asyncio.to_thread(BwResolver(session_getter=None).resolve_ssh_key, args.item)
-                _print(await _invoke(services, "import_keys", source="bitwarden", vault_id=args.vault, private_key=private_key, source_ref=args.item), json_output=output)
+                key_text, item_name = await asyncio.to_thread(BwResolver(session_getter=None).resolve_ssh_item, args.item)
+                private_key = bytearray(key_text.encode("utf-8"))
+                del key_text
+                try:
+                    _print(await _invoke(
+                        services, "import_keys", source="bitwarden", vault_id=args.vault,
+                        private_key=private_key, source_ref=args.item,
+                        name=args.name if args.name is not None else item_name,
+                    ), json_output=output)
+                finally:
+                    _wipe(private_key)
             else:
                 if args.from_cidr and not args.break_glass:
                     print("Error: --from-cidr is only used with --break-glass.", file=sys.stderr)
@@ -769,7 +1018,7 @@ async def _handle(args: argparse.Namespace) -> int:
                 try:
                     _print(await _invoke(
                         services, "import_keys", source="ssh", vault_id=args.vault, path=str(key_path),
-                        private_key=private_key,
+                        private_key=private_key, name=args.name,
                         break_glass_from_cidrs=args.from_cidr if args.break_glass else None,
                     ), json_output=output)
                 finally:
@@ -868,6 +1117,13 @@ async def _handle(args: argparse.Namespace) -> int:
                 _print(await _invoke(services, "recover_escrow", vault_id=args.vault, escrow_key=escrow_key), json_output=output)
         else:
             raise ValueError(f"Unknown vault command: {command}")
+    except VaultKeyInUse as exc:
+        for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
+                             ("Could not check", exc.unchecked)):
+            if names:
+                print(f"{label}: {', '.join(terminal_safe(name) for name in names)}", file=sys.stderr)
+        print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR
     except APIError as exc:
         print(f"Vault request failed ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR
