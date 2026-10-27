@@ -545,3 +545,26 @@ async def test_team_review_modal_shows_team_note() -> None:
         await wait_until(lambda: isinstance(app.screen, VaultAutoBindReviewModal))
         note = app.screen.query_one("#auto_bind_review_team_note", Static)
         assert "Everyone in devs will connect with these keys." in str(note.render())
+
+
+@pytest.mark.asyncio
+async def test_fetch_progress_reports_1_of_2_then_2_of_2_never_3_of_2() -> None:
+    from servonaut.services.vault.auto_bind import NO_HOST_KEYS, AutoBindRow
+    calls = []
+    service = _Service()
+    rows = [
+        AutoBindRow(instance=SERVERS[0], status=NO_HOST_KEYS, host="198.51.100.1", port=22, login="ubuntu"),
+        AutoBindRow(instance=SERVERS[1], status=NO_HOST_KEYS, host="198.51.100.2", port=22, login="ubuntu"),
+    ]
+    app = _Host(service, instances=SERVERS[:2])
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        orig_say = screen._busy.say
+        def spy_say(job, msg):
+            calls.append(msg)
+            return orig_say(job, msg)
+        screen._busy.say = spy_say
+        await screen._run_fetch_host_keys(rows)
+        assert any("1 of 2" in c for c in calls)
+        assert any("2 of 2" in c for c in calls)
+        assert not any("3 of 2" in c for c in calls)

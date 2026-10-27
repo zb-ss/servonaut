@@ -19,8 +19,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
 from servonaut.services.shared_servers import is_same_server, is_shared_row
 from servonaut.services.ssh_host_keys import trusted_host_keys
 
@@ -34,6 +32,8 @@ from .ec2_host_keys import (
 )
 from .errors import vault_failure_reason
 from .personal_targets import instance_provider
+
+logger = logging.getLogger(__name__)
 
 # Extensions a private key file commonly carries; the key's name is the rest.
 _KEY_FILE_SUFFIXES = (".pem", ".key", ".ppk", ".openssh", ".priv")
