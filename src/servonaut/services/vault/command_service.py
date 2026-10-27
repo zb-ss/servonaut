@@ -2100,16 +2100,26 @@ class VaultCommandService:
 
         return records_new_host_keys(self.connection_service)
 
-    async def visit_for_host_key(self, instance: Mapping[str, Any], *, login: str | None = None) -> str | None:
+    async def visit_for_host_key(
+        self,
+        instance: Mapping[str, Any],
+        *,
+        login: str | None = None,
+        known_hosts_path: Path | str | None = None,
+    ) -> str | None:
         """Connect to *instance* once so its host key is recorded; why not, if it failed."""
         if self.connection_service is None or self.ssh_service is None:
             return "Servonaut cannot open SSH connections here."
         from servonaut.services.host_key_recording import visit_for_host_key, visit_timeout
 
+        kwargs: dict[str, Any] = {}
+        if known_hosts_path is not None:
+            kwargs["known_hosts_path"] = known_hosts_path
         return await visit_for_host_key(
             instance, self.connection_service, self.ssh_service,
             login or self.ssh_login(instance) or getattr(self.config, "default_username", None) or "",
             timeout=visit_timeout(getattr(self.config, "ssh", None)),
+            **kwargs,
         )
 
     async def personal_binding(self, instance: Mapping[str, Any]) -> Mapping[str, Any] | None:

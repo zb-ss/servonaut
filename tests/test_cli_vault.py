@@ -969,7 +969,11 @@ class _AutoBindService:
     def records_new_host_keys(self) -> bool:
         return True
 
-    async def visit_for_host_key(self, instance, login=None):
+    async def visit_for_host_key(self, instance, login=None, known_hosts_path=None):
+        if known_hosts_path:
+            host = instance.get("public_ip") or instance.get("name") or instance.get("id")
+            with open(known_hosts_path, "a") as f:
+                f.write(f"{host} {self.HOST_KEY}\n")
         return None
 
     def ssh_destination(self, instance):
@@ -1363,6 +1367,7 @@ def test_auto_bind_fetch_host_keys_when_registry_fails_reports_not_verified_and_
         return [] if calls <= 1 else [service.HOST_KEY]
 
     monkeypatch.setattr(auto_bind, "trusted_host_keys", fake_trusted)
+    monkeypatch.setattr(auto_bind, "read_host_keys_from_file", lambda *args, **kwargs: [service.HOST_KEY])
 
     def bad_registry(cfg):
         raise RuntimeError("cannot initialize account store")
@@ -1433,6 +1438,7 @@ def test_auto_bind_team_resolves_team_vault_and_binds_shared_servers(monkeypatch
         login="ubuntu",
         pin_host_key=False,
         host_keys=[service.HOST_KEY],
+        replace_existing=False,
     )
     out = capsys.readouterr()
     assert "Bound vault keys to 1 of 1 servers." in out.err

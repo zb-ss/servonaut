@@ -624,9 +624,9 @@ class VaultAutoBindScreen(Screen):
             return
         n = len(target_rows)
         msg = (
-            f"Connect once to each of {n} servers to record its host key? Nothing is bound yet."
+            f"Connect once to each of {n} servers to read its host key? Nothing is trusted or bound until you review the keys."
             if n > 1
-            else "Connect once to this server to record its host key? Nothing is bound yet."
+            else "Connect once to this server to read its host key? Nothing is trusted or bound until you review the keys."
         )
 
         def on_confirmed(confirmed: bool) -> None:

@@ -15,19 +15,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.shared_servers import is_same_server, is_shared_row
-from servonaut.services.ssh_host_keys import trusted_host_keys
+from servonaut.services.ssh_host_keys import ensure_known_hosts_file, read_host_keys_from_file, trusted_host_keys
 
 from .ec2_host_keys import (
     EC2ConsoleHostKeys,
     fetch_ec2_console_output_sync,
-    host_key_removal_command,
     parse_ec2_console_output,
-    remove_recorded_host_key,
     verify_fetched_host_keys,
 )
 from .errors import vault_failure_reason
@@ -447,7 +447,6 @@ async def fetch_host_keys_for_rows(
     if not target_rows:
         return
 
-    read_host_keys = host_keys_for or trusted_host_keys
     gate = asyncio.Semaphore(max_concurrency)
     completed_count = 0
     completed_lock = asyncio.Lock()
@@ -460,135 +459,146 @@ async def fetch_host_keys_for_rows(
             accounts=accounts or getattr(service, "accounts", None),
         )
 
-    async def fetch_one(row: AutoBindRow) -> None:
-        nonlocal completed_count
-        async with gate:
-            await _fetch_row(row)
-            async with completed_lock:
-                completed_count += 1
-                current_completed = completed_count
-            if on_progress is not None:
-                on_progress(current_completed, row)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_file = Path(temp_dir) / "known_hosts"
+        ensure_known_hosts_file(temp_file)
 
-    async def _fetch_row(row: AutoBindRow) -> None:
-        inst = row.own_instance or row.instance
-        is_aws = (not inst.get("is_custom") and instance_provider(inst).lower() == "aws")
-        console_res: Optional[EC2ConsoleHostKeys] = None
+        async def fetch_one(row: AutoBindRow) -> None:
+            nonlocal completed_count
+            async with gate:
+                await _fetch_row(row, temp_file)
+                async with completed_lock:
+                    completed_count += 1
+                    current_completed = completed_count
+                if on_progress is not None:
+                    on_progress(current_completed, row)
 
-        if is_aws:
-            try:
-                raw_console = await asyncio.to_thread(_read_console, inst)
-                console_res = parse_ec2_console_output(raw_console)
-            except Exception as exc:
-                logger.debug("ec2:GetConsoleOutput failed for %s: %s", inst.get("id"), exc, exc_info=True)
-                code = ""
-                if hasattr(exc, "response") and isinstance(getattr(exc, "response"), Mapping):
-                    code = str(exc.response.get("Error", {}).get("Code", ""))
-                if not code:
-                    msg = str(exc).lower()
-                    if "accessdenied" in msg or "unauthorizedoperation" in msg:
-                        code = "AccessDenied"
-                    elif "throttl" in msg or "requestlimitexceeded" in msg:
-                        code = "Throttling"
-                if code in {"AccessDenied", "UnauthorizedOperation"}:
-                    console_res = EC2ConsoleHostKeys(
-                        source="not verified: no permission to read the console output (ec2:GetConsoleOutput)",
-                        error="no permission to read the console output (ec2:GetConsoleOutput)",
-                    )
-                elif code in {"Throttling", "RequestLimitExceeded"}:
-                    console_res = EC2ConsoleHostKeys(
-                        source="not verified: AWS throttled the console read; fetch again later",
-                        error="AWS throttled the console read; fetch again later",
-                    )
-                else:
-                    console_res = EC2ConsoleHostKeys(
-                        source="not verified: could not read the console output",
-                        error="could not read the console output",
-                    )
+        async def _fetch_row(row: AutoBindRow, temp_kh: Path) -> None:
+            inst = row.own_instance or row.instance
+            is_aws = (not inst.get("is_custom") and instance_provider(inst).lower() == "aws")
+            console_res: Optional[EC2ConsoleHostKeys] = None
 
-            # 1. KEYS block is present and well-formed: use directly without connecting
-            if console_res.has_keys_block and console_res.keys:
-                row.host_keys = list(console_res.keys)
-                row.status = FETCHED
-                row.verified = True
-                row.verification_source = "verified by AWS console output"
-                return
-
-        # Visit the server once so its host key is recorded
-        failure: Optional[str] = None
-        try:
-            failure = await service.visit_for_host_key(row.instance, login=row.login)
-        except Exception as exc:
-            failure = str(exc)
-
-        if failure:
-            row.status = FETCH_FAILED
-            row.fetch_error = failure.strip().rstrip(".")
-            return
-
-        port = row.port if row.port != 22 else None
-        try:
-            keys = await asyncio.to_thread(read_host_keys, row.instance, str(row.host), port)
-            if not keys and row.own_instance:
-                keys = await asyncio.to_thread(read_host_keys, row.own_instance, str(row.host), port)
-        except Exception as exc:
-            keys = []
-
-        if not keys:
-            row.status = FETCH_FAILED
-            row.fetch_error = "the connection worked, but no host key was recorded for it"
-            return
-
-        row.host_keys = keys
-
-        if is_aws and console_res is not None:
-            if console_res.has_fingerprints_block:
-                verified, reason = verify_fetched_host_keys(keys, console_res)
-                if reason == "mismatch":
-                    row.status = HOST_KEY_MISMATCH
-                    row.verified = False
-                    removed = await asyncio.to_thread(remove_recorded_host_key, row.instance, str(row.host), row.port)
-                    if row.own_instance:
-                        await asyncio.to_thread(remove_recorded_host_key, row.own_instance, str(row.host), row.port)
-                    row.host_keys = []
-                    removal = host_key_removal_command(inst, str(row.host), row.port)
-                    if removed:
-                        row.mismatch_detail = (
-                            "The server answered with a different host key than AWS recorded at first boot: "
-                            "untrusted key removed from Servonaut known_hosts; do not bind."
+            if is_aws:
+                try:
+                    raw_console = await asyncio.to_thread(_read_console, inst)
+                    console_res = parse_ec2_console_output(raw_console)
+                except Exception as exc:
+                    logger.debug("ec2:GetConsoleOutput failed for %s: %s", inst.get("id"), exc, exc_info=True)
+                    code = ""
+                    if hasattr(exc, "response") and isinstance(getattr(exc, "response"), Mapping):
+                        code = str(exc.response.get("Error", {}).get("Code", ""))
+                    if not code:
+                        msg = str(exc).lower()
+                        if "accessdenied" in msg or "unauthorizedoperation" in msg:
+                            code = "AccessDenied"
+                        elif "throttl" in msg or "requestlimitexceeded" in msg:
+                            code = "Throttling"
+                    if code in {"AccessDenied", "UnauthorizedOperation"}:
+                        console_res = EC2ConsoleHostKeys(
+                            source="not verified: no permission to read the console output (ec2:GetConsoleOutput)",
+                            error="no permission to read the console output (ec2:GetConsoleOutput)",
+                        )
+                    elif code in {"Throttling", "RequestLimitExceeded"}:
+                        console_res = EC2ConsoleHostKeys(
+                            source="not verified: AWS throttled the console read; fetch again later",
+                            error="AWS throttled the console read; fetch again later",
                         )
                     else:
-                        row.mismatch_detail = (
-                            "The server answered with a different host key than AWS recorded at first boot: "
-                            f"do not bind, check the server. Remove the recorded key with: {removal}"
+                        console_res = EC2ConsoleHostKeys(
+                            source="not verified: could not read the console output",
+                            error="could not read the console output",
                         )
-                    return
-                if verified:
+
+                # 1. KEYS block is present and well-formed: use directly without connecting
+                if console_res.has_keys_block and console_res.keys:
+                    row.host_keys = list(console_res.keys)
                     row.status = FETCHED
                     row.verified = True
                     row.verification_source = "verified by AWS console output"
                     return
-                # Fingerprints present but didn't match key types
-                row.status = FETCHED
-                row.verified = False
-                row.verification_source = reason
+
+            # Visit the server once so its host key is recorded into temporary storage
+            failure: Optional[str] = None
+            try:
+                try:
+                    failure = await service.visit_for_host_key(
+                        row.instance,
+                        login=row.login,
+                        known_hosts_path=temp_kh,
+                    )
+                except TypeError:
+                    failure = await service.visit_for_host_key(row.instance, login=row.login)
+            except Exception as exc:
+                failure = str(exc)
+
+            if failure:
+                row.status = FETCH_FAILED
+                row.fetch_error = failure.strip().rstrip(".")
                 return
 
-            # Neither block was usable on AWS
+            port = row.port if row.port != 22 else None
+            try:
+                if host_keys_for is not None:
+                    keys = await asyncio.to_thread(host_keys_for, row.instance, str(row.host), port)
+                    if not keys and row.own_instance:
+                        keys = await asyncio.to_thread(host_keys_for, row.own_instance, str(row.host), port)
+                else:
+                    keys = await asyncio.to_thread(
+                        read_host_keys_from_file,
+                        temp_kh,
+                        row.instance,
+                        str(row.host),
+                        port,
+                        own_instance=row.own_instance,
+                    )
+            except Exception as exc:
+                keys = []
+
+            if not keys:
+                row.status = FETCH_FAILED
+                row.fetch_error = "the connection worked, but no host key was recorded for it"
+                return
+
+            row.host_keys = keys
+
+            if is_aws and console_res is not None:
+                if console_res.has_fingerprints_block:
+                    verified, reason = verify_fetched_host_keys(keys, console_res)
+                    if reason == "mismatch":
+                        row.status = HOST_KEY_MISMATCH
+                        row.verified = False
+                        row.host_keys = []
+                        row.mismatch_detail = (
+                            "The server answered with a different host key than AWS recorded at first boot: "
+                            "do not bind, check the server."
+                        )
+                        return
+                    if verified:
+                        row.status = FETCHED
+                        row.verified = True
+                        row.verification_source = "verified by AWS console output"
+                        return
+                    # Fingerprints present but didn't match key types
+                    row.status = FETCHED
+                    row.verified = False
+                    row.verification_source = reason
+                    return
+
+                # Neither block was usable on AWS
+                row.status = FETCHED
+                row.verified = False
+                reason_text = console_res.error or console_res.source or "the console output no longer holds the first-boot host keys"
+                if not reason_text.startswith("not verified:"):
+                    reason_text = f"not verified: {reason_text}"
+                row.verification_source = reason_text
+                return
+
+            # Non-AWS instance
             row.status = FETCHED
             row.verified = False
-            reason_text = console_res.error or console_res.source or "the console output no longer holds the first-boot host keys"
-            if not reason_text.startswith("not verified:"):
-                reason_text = f"not verified: {reason_text}"
-            row.verification_source = reason_text
-            return
+            row.verification_source = "not verified: compare with the server's console or your provider"
 
-        # Non-AWS instance
-        row.status = FETCHED
-        row.verified = False
-        row.verification_source = "not verified: compare with the server's console or your provider"
-
-    await asyncio.gather(*(fetch_one(row) for row in target_rows))
+        await asyncio.gather(*(fetch_one(row) for row in target_rows))
 
 
 __all__ = [

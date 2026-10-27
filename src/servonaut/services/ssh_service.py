@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from servonaut.services.interfaces import SSHServiceInterface, SecretProviderInterface
-from servonaut.services.ssh_host_keys import HostKeyPolicy, identity_file_args, pinned_host_key_options
+from servonaut.services.ssh_host_keys import HostKeyPolicy, ensure_known_hosts_file, identity_file_args, pinned_host_key_options
 from servonaut.config.manager import ConfigManager
 
 logger = logging.getLogger(__name__)
@@ -536,6 +536,7 @@ class SSHService(SSHServiceInterface):
         identity_file: Optional[str] = None,
         certificate_file: Optional[str] = None,
         known_hosts_file: Optional[str] = None,
+        record_to_known_hosts: Optional[Path | str] = None,
     ) -> List[str]:
         """Build SSH command as List[str]. NEVER use shell=True.
 
@@ -580,6 +581,15 @@ class SSHService(SSHServiceInterface):
         # first would silently defeat the verified binding pins below.
         if known_hosts_file:
             cmd = ['ssh', *pinned_host_key_options(known_hosts_file)]
+        elif record_to_known_hosts:
+            rec_path = Path(record_to_known_hosts)
+            ensure_known_hosts_file(rec_path)
+            policy = HostKeyPolicy(
+                mode="accept-new",
+                known_hosts_file=rec_path,
+                user_known_hosts_file=Path("/dev/null"),
+            )
+            cmd = ['ssh', *policy.ssh_options()]
         else:
             cmd = ['ssh', *HostKeyPolicy.from_ssh_config(ssh_cfg).ssh_options()]
 

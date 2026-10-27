@@ -76,8 +76,11 @@ def test_auto_bind_fetches_host_keys_reviews_and_connects(
     assert servers_dry["web-1"]["host_key_fingerprints"]
     assert 200 not in fake_cloud.statuses(route)
 
-    known_hosts = sandbox.home / ".servonaut" / "known_hosts"
-    known_hosts.unlink(missing_ok=True)
+    # A subsequent dry-run still reports no_host_keys because fetched keys
+    # remain in temporary storage and never pollute known_hosts
+    again_dry = _json(cli(sandbox, "vault", "auto-bind", "--dry-run", "--json"))
+    servers_again_dry = {s["server"]: s for s in again_dry["servers"]}
+    assert servers_again_dry["web-1"]["status"] == "no_host_keys"
 
     # 3. Non-interactive without --yes is refused
     refused = cli(sandbox, "vault", "auto-bind", "--fetch-host-keys")
@@ -85,15 +88,17 @@ def test_auto_bind_fetches_host_keys_reviews_and_connects(
     assert "Refusing to bind fetched host keys without confirmation" in refused.stderr
     assert 200 not in fake_cloud.statuses(route)
 
-    known_hosts.unlink(missing_ok=True)
-
     # 4. With --yes, unverified fetched keys are skipped
     skipped_res = _json(cli(sandbox, "vault", "auto-bind", "--fetch-host-keys", "--yes", "--json"))
     servers_skipped = {s["server"]: s for s in skipped_res["servers"]}
     assert servers_skipped["web-1"]["result"] is None
     assert 200 not in fake_cloud.statuses(route)
 
-    known_hosts.unlink(missing_ok=True)
+    # Running --fetch-host-keys --yes a second time still never binds the unverified key
+    skipped_res_again = _json(cli(sandbox, "vault", "auto-bind", "--fetch-host-keys", "--yes", "--json"))
+    servers_skipped_again = {s["server"]: s for s in skipped_res_again["servers"]}
+    assert servers_skipped_again["web-1"]["result"] is None
+    assert 200 not in fake_cloud.statuses(route)
 
     # 5. Interactive confirmation (typing "y") confirms and binds
     bound = run_in_terminal(

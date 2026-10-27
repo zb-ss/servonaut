@@ -307,14 +307,15 @@ def test_parse_ec2_console_output_edge_cases() -> None:
 
 
 class _VisitService(_Service):
-    def __init__(self, *, visits=None, fail_visit=(), **kwargs) -> None:
+    def __init__(self, *, visits=None, fail_visit=(), mock_keys=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.visits: list[str] = []
         self.fail_visit = set(fail_visit)
         self.active_concurrency = 0
         self.max_concurrency = 0
+        self.mock_keys = dict(mock_keys or {})
 
-    async def visit_for_host_key(self, instance, login=None):
+    async def visit_for_host_key(self, instance, login=None, known_hosts_path=None):
         import asyncio
 
         self.active_concurrency += 1
@@ -325,6 +326,11 @@ class _VisitService(_Service):
             self.visits.append(inst_id)
             if inst_id in self.fail_visit:
                 return "connection timeout"
+            if known_hosts_path and inst_id in self.mock_keys:
+                host = instance.get("public_ip") or instance.get("name") or inst_id
+                key = self.mock_keys[inst_id]
+                with open(known_hosts_path, "a") as f:
+                    f.write(f"{host} {key}\n")
             return None
         finally:
             self.active_concurrency -= 1
@@ -400,9 +406,10 @@ async def test_fetch_host_keys_aws_fingerprints_match_and_mismatch() -> None:
     assert bad_row.status_label == "host key differs from AWS"
     assert bad_row.ready is False
     assert bad_row.verified is False
-    assert "The server answered with a different host key than AWS" in bad_row.status_text
-    assert "untrusted key removed from Servonaut known_hosts; do not bind." in bad_row.status_text
-    assert "ssh-keygen -R" not in bad_row.status_text
+    assert bad_row.status_text == (
+        "The server answered with a different host key than AWS recorded at first boot: "
+        "do not bind, check the server."
+    )
 
 
 @pytest.mark.asyncio
@@ -653,9 +660,7 @@ async def test_team_auto_bind_applies_via_service_bind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_host_keys_aws_fingerprints_mismatch_removal_failed(monkeypatch) -> None:
-    from servonaut.services.vault import auto_bind
-
+async def test_fetch_host_keys_aws_fingerprints_mismatch_message() -> None:
     key_differ = _make_key()
     key_differ_actual = _make_key()
     server_bad = _server("i-bad", "web-2")
@@ -664,8 +669,6 @@ async def test_fetch_host_keys_aws_fingerprints_mismatch_removal_failed(monkeypa
 
     rows = await plan_auto_bind(service, [server_bad], keys, host_keys_for=lambda *_: [])
     console = f"{BEGIN_FINGERPRINTS}\n256 {ssh_public_fingerprint(key_differ)} root@ip (ED25519)\n{END_FINGERPRINTS}"
-
-    monkeypatch.setattr(auto_bind, "remove_recorded_host_key", lambda *args, **kwargs: False)
 
     await fetch_host_keys_for_rows(
         service,
@@ -676,7 +679,10 @@ async def test_fetch_host_keys_aws_fingerprints_mismatch_removal_failed(monkeypa
 
     bad_row = rows[0]
     assert bad_row.status == HOST_KEY_MISMATCH
-    assert "The server answered with a different host key than AWS recorded at first boot: do not bind, check the server. Remove the recorded key with: ssh-keygen -R" in bad_row.status_text
+    assert bad_row.status_text == (
+        "The server answered with a different host key than AWS recorded at first boot: "
+        "do not bind, check the server."
+    )
 
 
 @pytest.mark.asyncio
@@ -753,11 +759,12 @@ def test_verify_fetched_host_keys_unlisted_key_family() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_host_keys_mismatch_removes_from_known_hosts_end_to_end(tmp_path, monkeypatch) -> None:
+async def test_fetch_host_keys_mismatch_does_not_pollute_known_hosts(tmp_path, monkeypatch) -> None:
     from servonaut.services.ssh_host_keys import trusted_host_keys
 
     fake_kh = tmp_path / "known_hosts"
-    fake_kh.write_text("198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyFixtureHostKeyFixtureHostK\n")
+    initial_content = "198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyFixtureHostKeyFixtureHostK\n"
+    fake_kh.write_text(initial_content)
     fake_kh.chmod(0o600)
     empty_user_kh = tmp_path / "user_known_hosts"
 
@@ -768,7 +775,8 @@ async def test_fetch_host_keys_mismatch_removes_from_known_hosts_end_to_end(tmp_
     server = _server("i-bad", "web-2")
     server["public_ip"] = "198.51.100.7"
     keys = [_key("k2", "web-2")]
-    service = _VisitService()
+    key_visited = _make_key()
+    service = _VisitService(mock_keys={"i-bad": key_visited})
 
     assert len(trusted_host_keys(server, "198.51.100.7", None)) == 1
 
@@ -789,8 +797,40 @@ async def test_fetch_host_keys_mismatch_removes_from_known_hosts_end_to_end(tmp_
     bad_row = rows[0]
     assert bad_row.status == HOST_KEY_MISMATCH
     assert bad_row.host_keys == []
-    # Known hosts must have had the offending entry removed
-    assert trusted_host_keys(server, "198.51.100.7", None) == []
+    assert bad_row.status_text == (
+        "The server answered with a different host key than AWS recorded at first boot: "
+        "do not bind, check the server."
+    )
+    # Servonaut's known_hosts must be completely untouched and byte-identical!
+    assert fake_kh.read_text() == initial_content
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_does_not_modify_permanent_known_hosts(tmp_path, monkeypatch) -> None:
+    fake_kh = tmp_path / "known_hosts"
+    fake_kh.write_text("")
+    fake_kh.chmod(0o600)
+    empty_user_kh = tmp_path / "user_known_hosts"
+
+    monkeypatch.setattr("servonaut.services.vault.ec2_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.user_known_hosts_path", lambda: empty_user_kh)
+
+    server = {"id": "ovh-1", "name": "web-1", "provider": "ovh", "public_ip": "198.51.100.10"}
+    keys = [_key("k1", "web-1")]
+    visited_key = _make_key()
+    service = _VisitService(mock_keys={"ovh-1": visited_key})
+
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+    assert rows[0].status == NO_HOST_KEYS
+
+    await fetch_host_keys_for_rows(service, rows)
+
+    row = rows[0]
+    assert row.status == FETCHED
+    assert row.host_keys == [visited_key]
+    # Servonaut's permanent known_hosts must remain empty and unmodified!
+    assert fake_kh.read_bytes() == b""
 
 
 def test_auto_bind_row_no_host_keys_status_text_surface_override() -> None:
