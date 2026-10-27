@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from textual.app import App
-from textual.widgets import Button, Checkbox, DataTable, Static
+from textual.widgets import Button, Checkbox, DataTable, Select, Static
 
 from servonaut.screens import vault_auto_bind
 from servonaut.screens.vault_auto_bind import (
@@ -103,8 +103,14 @@ def _trusted(monkeypatch):
 
 
 def _with_host_keys(plan, trusted):
-    async def planned(service, instances, keys):
-        return await plan(service, instances, keys, host_keys_for=lambda instance, host, port: trusted.get(instance["id"], []))
+    async def planned(service, instances, keys, **kwargs):
+        return await plan(
+            service,
+            instances,
+            keys,
+            host_keys_for=lambda instance, host, port: trusted.get(instance["id"], []),
+            **kwargs,
+        )
     return planned
 
 
@@ -423,3 +429,119 @@ async def test_review_modal_fits_narrow_terminal() -> None:
         ):
             region = app.screen.query_one(selector).region
             assert region.width > 0 and region.height > 0 and screen.contains_region(region), (selector, region)
+
+
+@pytest.mark.asyncio
+async def test_team_vault_picker_filters_administered_vaults() -> None:
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "devs", "role": "admin"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+        {
+            "vault_id": "tv-2",
+            "kind": "team",
+            "team": {"slug": "ops", "role": "owner"},
+            "my_grant": {"sealed_key": "s2"},
+        },
+        {
+            "vault_id": "tv-3",
+            "kind": "team",
+            "team": {"slug": "marketing", "role": "member"},
+            "my_grant": {"sealed_key": "s3"},
+        },
+        {
+            "vault_id": "tv-4",
+            "kind": "team",
+            "team": {"slug": "sales", "role": "admin"},
+            "my_grant": None,
+        },
+    ]
+    service = _Service(vaults=vaults)
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        option_values = [opt[1] for opt in select._options]
+        assert "personal" in option_values
+        assert "team:devs" in option_values
+        assert "team:ops" in option_values
+        assert "team:marketing" not in option_values
+        assert "team:sales" not in option_values
+        assert select.value == "personal"
+
+
+@pytest.mark.asyncio
+async def test_switching_vault_picker_loads_team_shared_servers() -> None:
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "devs", "role": "admin"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.1"},
+        {"id": "s-shared", "name": "dev-box", "hostname": "198.51.100.2", "is_shared": True, "team_slug": "devs", "login": "ubuntu"},
+    ]
+    keys_personal = [{"item_id": "k1", "label": "web-own", "name": "web-own.pem", "fingerprint": "SHA256:1"}]
+    keys_team = [{"item_id": "k2", "label": "dev-box", "name": "dev-box.pem", "fingerprint": "SHA256:2"}]
+
+    class _TeamService(_Service):
+        async def ssh_key_choices(self, *, vault_id, name_limit=None):
+            if vault_id == "tv-1":
+                return keys_team
+            return keys_personal
+
+    service = _TeamService(vaults=vaults)
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=(160, 50)) as pilot:
+        # Initially personal vault loads own servers
+        await wait_until(lambda: any("web-own" in r for r in _rows(app)))
+        assert not any("dev-box" in r for r in _rows(app))
+
+        # Switch to team vault
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:devs"
+
+        # Now team shared servers load
+        await wait_until(lambda: any("dev-box" in r for r in _rows(app)))
+        assert not any("web-own" in r for r in _rows(app))
+
+
+@pytest.mark.asyncio
+async def test_team_review_modal_shows_team_note() -> None:
+    row = AutoBindRow(
+        instance={"id": "s-1", "name": "dev-box"},
+        status=FETCHED,
+        match=KeyMatch(item_id="k1", name="dev-box", matched_by="server name"),
+        host="198.51.100.1",
+        port=22,
+        login="ubuntu",
+        host_keys=[HOST_KEY],
+        verified=True,
+    )
+
+    class _ModalHost(App):
+        CSS_PATH = CSS_FILES
+
+        def on_mount(self):
+            self.push_screen(
+                VaultAutoBindReviewModal(
+                    [row],
+                    server_name_fn=lambda r: r.instance.get("name", ""),
+                    scrub_fn=lambda s: str(s),
+                    team="devs",
+                )
+            )
+
+    app = _ModalHost()
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: isinstance(app.screen, VaultAutoBindReviewModal))
+        note = app.screen.query_one("#auto_bind_review_team_note", Static)
+        assert "Everyone in devs will connect with these keys." in str(note.render())

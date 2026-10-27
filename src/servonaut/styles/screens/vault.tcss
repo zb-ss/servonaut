@@ -301,6 +301,12 @@ CaEnrollmentConfirmModal {
     margin-bottom: 1;
 }
 
+#auto_bind_vault_select {
+    width: 1fr;
+    max-width: 70;
+    margin-bottom: 1;
+}
+
 #auto_bind_intro {
     color: $text-muted;
     margin-bottom: 1;
@@ -405,6 +411,11 @@ VaultAutoBindReviewModal {
     margin-bottom: 1;
 }
 
+#auto_bind_review_team_note {
+    color: $accent;
+    margin-bottom: 1;
+}
+
 #auto_bind_review_scroll {
     height: 1fr;
     border: solid $panel;
@@ -434,8 +445,34 @@ VaultAutoBindScreen.-short #auto_bind_intro {
     display: none;
 }
 
+VaultAutoBindScreen.-short #auto_bind_title {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_vault_select {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_status {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_table {
+    min-height: 3;
+}
+
 VaultAutoBindScreen.-short #auto_bind_detail {
-    max-height: 4;
+    max-height: 2;
+    margin-top: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_trust {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_actions {
+    margin-top: 0;
 }
 
 /* Use Vault Key: the search boxes above its two lists. */

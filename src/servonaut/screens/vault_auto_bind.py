@@ -17,7 +17,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Checkbox, DataTable, Footer, Static
+from textual.widgets import Button, Checkbox, DataTable, Footer, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._demo_resolve import connection_instance
@@ -89,16 +89,23 @@ class VaultAutoBindReviewModal(ModalScreen[bool]):
         *,
         server_name_fn: Callable[[AutoBindRow], str],
         scrub_fn: Callable[[object], str],
+        team: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._review_rows = list(rows)
         self._server_name = server_name_fn
         self._scrub = scrub_fn
+        self._team = team
         self._all_verified = bool(self._review_rows) and all(row.verified for row in self._review_rows)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="auto_bind_review_container"):
             yield Static("Review host keys before binding", id="auto_bind_review_title")
+            if self._team:
+                yield Static(
+                    f"Everyone in {escape(self._team)} will connect with these keys.",
+                    id="auto_bind_review_team_note",
+                )
             with VerticalScroll(id="auto_bind_review_scroll"):
                 for row in self._review_rows:
                     with Vertical(classes="auto_bind_review_item"):
@@ -162,6 +169,8 @@ class VaultAutoBindScreen(Screen):
         self._rows: list[AutoBindRow] = []
         self._selected: set[int] = set()
         self._vault_id: Optional[str] = None
+        self._team: Optional[str] = None
+        self._selected_target: str = "personal"
         # Real record (by identity) -> the row as the instance list shows it,
         # so demo mode shows its stand-in names while the real ones are bound.
         self._shown_as: dict[int, Mapping[str, Any]] = {}
@@ -174,6 +183,13 @@ class VaultAutoBindScreen(Screen):
             yield Sidebar()
             with Vertical(id="auto_bind_content"):
                 yield Static("[bold]Auto-bind vault keys[/bold]", id="auto_bind_title")
+                yield Select[str](
+                    [("Personal vault: binds for you", "personal")],
+                    value="personal",
+                    prompt="Select vault…",
+                    id="auto_bind_vault_select",
+                    allow_blank=False,
+                )
                 yield Static(INTRO, id="auto_bind_intro", markup=False)
                 yield BusyIndicator(id="auto_bind_busy")
                 yield Static("", id="auto_bind_status", markup=False)
@@ -195,6 +211,13 @@ class VaultAutoBindScreen(Screen):
         self._sync_apply()
         self._sync_fetch()
         self.action_reload()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "auto_bind_vault_select":
+            val = str(event.value) if event.value is not Select.NULL else "personal"
+            if val != self._selected_target:
+                self._selected_target = val
+                self.action_reload()
 
     def on_resize(self) -> None:
         self._sync_compact_layout()
@@ -362,7 +385,10 @@ class VaultAutoBindScreen(Screen):
             return
         with self._busy.running("Finding your personal vault…", hold=_ACTIONS) as job:
             try:
-                vaults = await service.vault_choices()
+                if hasattr(service, "list_vaults"):
+                    vaults = await service.list_vaults()
+                else:
+                    vaults = await service.vault_choices()
             except Exception as exc:
                 self._status(f"Could not load your vaults ({vault_failure_reason(exc)}).")
                 return
@@ -372,20 +398,80 @@ class VaultAutoBindScreen(Screen):
                     "You have no personal vault yet: create one on the Vault screen and import your SSH keys into it."
                 )
                 return
-            self._vault_id = str(personal[0]["vault_id"])
+            personal_vault_id = str(personal[0]["vault_id"])
+
+            options: list[tuple[str, str]] = [("Personal vault: binds for you", "personal")]
+            team_vault_map: dict[str, tuple[str, str]] = {}
+            for v in vaults:
+                if v.get("kind") == "team" and v.get("my_grant") is not None:
+                    team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
+                    slug = team_info.get("slug") or v.get("team_slug")
+                    role = str(team_info.get("role") or v.get("role") or "").lower()
+                    if not role:
+                        role = next(
+                            (
+                                str(i.get("team_role") or "").lower()
+                                for i in (getattr(self.app, "instances", None) or [])
+                                if i.get("team_slug") == slug
+                            ),
+                            "",
+                        )
+                    if slug and role in {"owner", "admin"}:
+                        key = f"team:{slug}"
+                        options.append((f"Team vault for {slug}: binds for everyone in {slug}", key))
+                        team_vault_map[key] = (str(v["vault_id"]), slug)
+
+            try:
+                select = self.query_one("#auto_bind_vault_select", Select)
+                select.set_options(options)
+                if self._selected_target not in {opt[1] for opt in options}:
+                    self._selected_target = "personal"
+                select.value = self._selected_target
+            except Exception:
+                pass
+
+            if self._selected_target == "personal":
+                self._vault_id = personal_vault_id
+                self._team = None
+            else:
+                self._vault_id, self._team = team_vault_map[self._selected_target]
+
+            try:
+                intro = self.query_one("#auto_bind_intro", Static)
+                if self._team:
+                    intro.update(
+                        f"Each shared server of {self._team} gets the key from the team vault that is named like its "
+                        "key pair (an AWS server's key pair name) or like the server. The host keys pinned are "
+                        "the ones this computer already trusts from earlier SSH connections. A server that "
+                        "already has a team key is left alone."
+                    )
+                else:
+                    intro.update(INTRO)
+            except Exception:
+                pass
+
             # Every key's name is decrypted locally to compare it.
-            self._busy.say(job, "Reading the names of your vault's SSH keys… this can take a few seconds")
+            if self._team:
+                self._busy.say(job, f"Reading the names of team vault SSH keys for {self._team}…")
+            else:
+                self._busy.say(job, "Reading the names of your vault's SSH keys… this can take a few seconds")
             try:
                 keys = await service.ssh_key_choices(vault_id=self._vault_id, name_limit=None)
             except Exception as exc:
                 self._status(f"Could not read your vault's SSH keys ({vault_failure_reason(exc)}).")
                 return
             if not keys:
-                self._status("Your personal vault has no SSH key yet: import your keys with Import SSH on the Vault screen.")
+                if self._team:
+                    self._status(f"Team vault for {self._team} has no SSH key yet: import keys with Import SSH on the Vault screen.")
+                else:
+                    self._status("Your personal vault has no SSH key yet: import your keys with Import SSH on the Vault screen.")
                 return
             self._busy.say(job, "Checking each server's vault key, login and trusted host keys…")
             try:
-                rows = await plan_auto_bind(service, self._servers(), keys)
+                if self._team:
+                    rows = await plan_auto_bind(service, self._servers(), keys, team=self._team)
+                else:
+                    rows = await plan_auto_bind(service, self._servers(), keys)
             except Exception as exc:
                 logger.warning("Auto-bind review failed: %s", type(exc).__name__)
                 self._status(f"Could not check your servers ({vault_failure_reason(exc)}).")
@@ -396,7 +482,10 @@ class VaultAutoBindScreen(Screen):
         self._sync_fetch()
         ready = len(self._selected)
         if not rows:
-            self._status("You have no servers of your own to bind a key to.")
+            if self._team:
+                self._status(f"Team {self._team} has no shared servers to bind a key to.")
+            else:
+                self._status("You have no servers of your own to bind a key to.")
         elif ready:
             self._status(
                 f"{ready} of {len(rows)} servers can get a vault key. Check their host-key fingerprints "
@@ -514,6 +603,7 @@ class VaultAutoBindScreen(Screen):
                     chosen,
                     server_name_fn=self._server_name,
                     scrub_fn=self.scrub_for_display,
+                    team=self._team,
                 ),
                 on_reviewed,
             )
@@ -530,7 +620,8 @@ class VaultAutoBindScreen(Screen):
             chosen = [self._rows[index] for index in sorted(self._selected) if self._rows[index].ready]
         if service is None or self._vault_id is None or not chosen:
             return
-        with self._busy.running(f"Binding vault keys to {len(chosen)} servers…", hold=_ACTIONS) as job:
+        desc = f"to {self._team} shared servers" if self._team else ""
+        with self._busy.running(f"Binding vault keys {desc} ({len(chosen)} servers)…", hold=_ACTIONS) as job:
             def progress(index: int, row: AutoBindRow) -> None:
                 self._busy.say(job, f"Binding {index + 1} of {len(chosen)}: {self._server_name(row)}…")
 
@@ -538,6 +629,7 @@ class VaultAutoBindScreen(Screen):
                 service,
                 chosen,
                 vault_id=self._vault_id,
+                team=self._team,
                 reviewed_fetched=reviewed_fetched,
                 on_progress=progress,
             )
