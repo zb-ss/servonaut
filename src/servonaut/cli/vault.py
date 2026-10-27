@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import getpass
 import json
+import logging
 import math
 import secrets
 import sys
@@ -37,6 +38,8 @@ _EXIT_ABORTED = 5
 _VAULT_HELP = "Vault id, or the vault's name as `servonaut vault list` shows it."
 # Wrong passphrases accepted before an import gives up.
 _PASSPHRASE_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 VaultServiceFactory = Callable[[], Any]
 _service_factory: Optional[VaultServiceFactory] = None
@@ -651,7 +654,8 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
                     from servonaut.config.manager import ConfigManager
                     from servonaut.services.accounts.headless import build_account_registry
                     accounts = build_account_registry(ConfigManager())
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Failed to build account registry: %s", exc, exc_info=True)
                     accounts = None
             await fetch_host_keys_for_rows(
                 services,

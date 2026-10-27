@@ -1241,6 +1241,116 @@ def test_auto_bind_prints_fetch_error_and_mismatch_detail(capsys) -> None:
     assert "mismatch: differs from AWS console fingerprints" in out
 
 
+def test_auto_bind_fetch_host_keys_builds_account_registry_and_calls_client_factory(monkeypatch, capsys) -> None:
+    from unittest.mock import MagicMock
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from servonaut.services.vault import auto_bind
+    from servonaut.services.vault.ec2_host_keys import BEGIN_KEYS, END_KEYS
+
+    server = {
+        "id": "i-web1",
+        "name": "web-1",
+        "public_ip": "198.51.100.1",
+        "provider": "aws",
+        "account": "prod-acc",
+        "region": "us-east-1",
+    }
+    priv = ed25519.Ed25519PrivateKey.generate()
+    key_openssh = priv.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    keys = [{"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"}]
+
+    service = _AutoBindService()
+    service.keys = keys
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [server])
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda inst, h, p: [])
+
+    mock_client = MagicMock()
+    # botocore returns the base64-decoded console output text directly in Output
+    mock_client.get_console_output.return_value = {
+        "Output": f"console boot\n{BEGIN_KEYS}\n{key_openssh}\n{END_KEYS}\n"
+    }
+    mock_factory = MagicMock()
+    mock_factory.client.return_value = mock_client
+    mock_accounts = MagicMock()
+    mock_accounts.aws_client_factory.return_value = mock_factory
+
+    monkeypatch.setattr(
+        "servonaut.services.accounts.headless.build_account_registry",
+        lambda cfg: mock_accounts,
+    )
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--dry-run", "--fetch-host-keys"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 0
+    mock_accounts.aws_client_factory.assert_called_once_with("prod-acc")
+    mock_factory.client.assert_called_once_with("ec2", "us-east-1")
+    mock_client.get_console_output.assert_called_once_with(InstanceId="i-web1")
+    out = capsys.readouterr().out
+    assert "verified by AWS console output" in out
+
+
+def test_auto_bind_fetch_host_keys_when_registry_fails_reports_not_verified_and_never_calls_boto3(monkeypatch, caplog, capsys) -> None:
+    import logging
+    from unittest.mock import MagicMock
+    from servonaut.services.vault import auto_bind
+
+    server = {
+        "id": "i-web1",
+        "name": "web-1",
+        "public_ip": "198.51.100.1",
+        "provider": "aws",
+        "account": "prod-acc",
+        "region": "us-east-1",
+    }
+    keys = [{"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"}]
+
+    service = _AutoBindService()
+    service.keys = keys
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [server])
+
+    calls = 0
+
+    def fake_trusted(inst, h, p):
+        nonlocal calls
+        calls += 1
+        return [] if calls <= 1 else [service.HOST_KEY]
+
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", fake_trusted)
+
+    def bad_registry(cfg):
+        raise RuntimeError("cannot initialize account store")
+
+    monkeypatch.setattr("servonaut.services.accounts.headless.build_account_registry", bad_registry)
+
+    mock_boto = MagicMock()
+    monkeypatch.setattr("boto3.client", mock_boto, raising=False)
+    monkeypatch.setattr("boto3.Session", mock_boto, raising=False)
+
+    vault.set_vault_service_factory(lambda: service)
+    with caplog.at_level(logging.DEBUG):
+        try:
+            code = vault.handle_vault_command(
+                _parser().parse_args(["vault", "auto-bind", "--dry-run", "--fetch-host-keys"])
+            )
+        finally:
+            vault.set_vault_service_factory(None)
+
+    assert code == 0
+    assert mock_boto.call_count == 0
+    assert any("Failed to build account registry" in record.message for record in caplog.records)
+    out = capsys.readouterr().out
+    assert "not verified" in out
+
+
 
 def _vault_record(name, kind, vault_id, team=None, items=0):
     """A vault as the service lists it, with the signed material a person never needs to read."""

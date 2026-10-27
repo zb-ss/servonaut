@@ -14,9 +14,12 @@ has a vault key is left alone.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from servonaut.services.shared_servers import is_same_server, is_shared_row
 from servonaut.services.ssh_host_keys import trusted_host_keys
@@ -542,7 +545,7 @@ async def fetch_host_keys_for_rows(
                     if removed:
                         row.mismatch_detail = (
                             "The server answered with a different host key than AWS recorded at first boot: "
-                            f"untrusted key removed from Servonaut known_hosts ({removal}); do not bind."
+                            "untrusted key removed from Servonaut known_hosts; do not bind."
                         )
                     else:
                         row.mismatch_detail = (

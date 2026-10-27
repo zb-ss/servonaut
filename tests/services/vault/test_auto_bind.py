@@ -401,7 +401,8 @@ async def test_fetch_host_keys_aws_fingerprints_match_and_mismatch() -> None:
     assert bad_row.ready is False
     assert bad_row.verified is False
     assert "The server answered with a different host key than AWS" in bad_row.status_text
-    assert "ssh-keygen -R" in bad_row.status_text
+    assert "untrusted key removed from Servonaut known_hosts; do not bind." in bad_row.status_text
+    assert "ssh-keygen -R" not in bad_row.status_text
 
 
 @pytest.mark.asyncio
@@ -648,6 +649,148 @@ async def test_team_auto_bind_applies_via_service_bind() -> None:
         pin_host_key=False,
         host_keys=[HOST_KEY],
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_aws_fingerprints_mismatch_removal_failed(monkeypatch) -> None:
+    from servonaut.services.vault import auto_bind
+
+    key_differ = _make_key()
+    key_differ_actual = _make_key()
+    server_bad = _server("i-bad", "web-2")
+    keys = [_key("k2", "web-2")]
+    service = _VisitService()
+
+    rows = await plan_auto_bind(service, [server_bad], keys, host_keys_for=lambda *_: [])
+    console = f"{BEGIN_FINGERPRINTS}\n256 {ssh_public_fingerprint(key_differ)} root@ip (ED25519)\n{END_FINGERPRINTS}"
+
+    monkeypatch.setattr(auto_bind, "remove_recorded_host_key", lambda *args, **kwargs: False)
+
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        console_output_reader=lambda inst: console,
+        host_keys_for=lambda inst, *_: [key_differ_actual],
+    )
+
+    bad_row = rows[0]
+    assert bad_row.status == HOST_KEY_MISMATCH
+    assert "The server answered with a different host key than AWS recorded at first boot: do not bind, check the server. Remove the recorded key with: ssh-keygen -R" in bad_row.status_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc", "expected_source"),
+    [
+        (
+            Exception("ClientError: An error occurred (AccessDenied) when calling ec2:GetConsoleOutput for arn:aws:iam::123456789012:role/admin"),
+            "not verified: no permission to read the console output (ec2:GetConsoleOutput)",
+        ),
+        (
+            Exception("UnauthorizedOperation: You are not authorized to perform this operation on account 123456789012"),
+            "not verified: no permission to read the console output (ec2:GetConsoleOutput)",
+        ),
+        (
+            Exception("RequestLimitExceeded: Request limit exceeded for instance i-bad in region us-east-1"),
+            "not verified: AWS throttled the console read; fetch again later",
+        ),
+        (
+            Exception("ThrottlingException: Rate exceeded for account 999999999999"),
+            "not verified: AWS throttled the console read; fetch again later",
+        ),
+        (
+            Exception("InternalError: Failed to fetch console output for arn:aws:ec2:us-east-1:123456789012:instance/i-bad"),
+            "not verified: could not read the console output",
+        ),
+    ],
+)
+async def test_fetch_host_keys_aws_console_error_mapping(exc: Exception, expected_source: str) -> None:
+    server = _server("i-1", "web-1")
+    keys = [_key("k1", "web-1")]
+    service = _VisitService()
+
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+
+    def faulty_reader(inst):
+        raise exc
+
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        console_output_reader=faulty_reader,
+        host_keys_for=lambda inst, *_: [_make_key()],
+    )
+
+    row = rows[0]
+    assert row.status == FETCHED
+    assert row.verified is False
+    assert row.verification_source == expected_source
+    assert "123456789012" not in (row.verification_source or "")
+    assert "arn:aws" not in (row.verification_source or "")
+    assert "123456789012" not in (row.fetch_error or "")
+    assert "arn:aws" not in (row.fetch_error or "")
+
+
+def test_verify_fetched_host_keys_unlisted_key_family() -> None:
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from servonaut.services.vault.ec2_host_keys import EC2ConsoleHostKeys, verify_fetched_host_keys
+
+    ed_key = _make_key()
+    fp_ed = ssh_public_fingerprint(ed_key)
+    console_res = EC2ConsoleHostKeys(
+        source="AWS console output (first-boot fingerprints)",
+        fingerprints={"ED25519": fp_ed},
+        has_fingerprints_block=True,
+    )
+
+    priv_ec = ec.generate_private_key(ec.SECP256R1())
+    ecdsa_key = priv_ec.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+
+    verified, reason = verify_fetched_host_keys([ecdsa_key], console_res)
+    assert verified is False
+    assert reason == "not verified: console output does not list a fingerprint for ECDSA"
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_keys_mismatch_removes_from_known_hosts_end_to_end(tmp_path, monkeypatch) -> None:
+    from servonaut.services.ssh_host_keys import trusted_host_keys
+
+    fake_kh = tmp_path / "known_hosts"
+    fake_kh.write_text("198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyFixtureHostKeyFixtureHostK\n")
+    fake_kh.chmod(0o600)
+    empty_user_kh = tmp_path / "user_known_hosts"
+
+    monkeypatch.setattr("servonaut.services.vault.ec2_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.user_known_hosts_path", lambda: empty_user_kh)
+
+    server = _server("i-bad", "web-2")
+    server["public_ip"] = "198.51.100.7"
+    keys = [_key("k2", "web-2")]
+    service = _VisitService()
+
+    assert len(trusted_host_keys(server, "198.51.100.7", None)) == 1
+
+    # Plan with no host keys so status is NO_HOST_KEYS
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+    assert rows[0].status == NO_HOST_KEYS
+
+    # Console recorded a completely different fingerprint
+    key_console = _make_key()
+    console = f"{BEGIN_FINGERPRINTS}\n256 {ssh_public_fingerprint(key_console)} root@ip (ED25519)\n{END_FINGERPRINTS}"
+
+    await fetch_host_keys_for_rows(
+        service,
+        rows,
+        console_output_reader=lambda inst: console,
+    )
+
+    bad_row = rows[0]
+    assert bad_row.status == HOST_KEY_MISMATCH
+    assert bad_row.host_keys == []
+    # Known hosts must have had the offending entry removed
+    assert trusted_host_keys(server, "198.51.100.7", None) == []
+
 
 
 

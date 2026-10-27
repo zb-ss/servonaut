@@ -460,7 +460,7 @@ class VaultAutoBindScreen(Screen):
         total = len(target_rows)
         with self._busy.running(f"Fetching host keys (1 of {total})…", hold=_ACTIONS) as job:
             def progress(index: int, row: AutoBindRow) -> None:
-                self._busy.say(job, f"Fetching host keys ({index + 1} of {total})…")
+                self._busy.say(job, f"Fetching host keys ({index} of {total})…")
 
             await fetch_host_keys_for_rows(
                 service,
