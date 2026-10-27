@@ -587,7 +587,7 @@ async def test_demo_mode_scrubs_team_name_everywhere() -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         await wait_until(lambda: _rows(app))
         select = app.screen.query_one("#auto_bind_vault_select", Select)
-        for opt in select._options:
+        for opt in app.screen._vault_options:
             label_str = str(opt[0])
             assert "Top Secret Engineering" not in label_str
 
@@ -707,3 +707,107 @@ async def test_team_slug_does_not_mangle_key_name_containing_slug() -> None:
         app.redaction_service = RedactionService()
         shown = screen.scrub_for_display("ops-deploy.pem")
         assert shown == "ops-deploy.pem"
+
+
+@pytest.mark.asyncio
+async def test_toggle_demo_mode_on_after_loading_team_mode() -> None:
+    from servonaut.services.redaction_service import RedactionService
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "secret-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.2"},
+        {
+            "id": "s-1",
+            "name": "shared-1",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "secret-team",
+            "team_role": "admin",
+            "team_name": "Top Secret Engineering",
+            "login": "ubuntu",
+        },
+    ]
+    keys = [
+        {"item_id": "k0", "label": "web-own", "name": "web-own.pem", "fingerprint": "SHA256:0"},
+        {"item_id": "k1", "label": "shared-1", "name": "shared-1.pem", "fingerprint": "SHA256:1"},
+    ]
+    service = _Service(vaults=vaults, keys=keys)
+    app = _Host(service, instances=instances)
+    app.demo_mode = False
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:secret-team"
+        await pilot.pause()
+        await wait_until(lambda: app.screen._team == "secret-team" and not app.screen._busy.is_busy)
+
+        # Before demo mode: real name is present
+        assert any("Top Secret Engineering" in opt[0] for opt in app.screen._vault_options)
+        intro = str(app.screen.query_one("#auto_bind_intro", Static).render())
+        assert "Top Secret Engineering" in intro
+
+        # Toggle demo mode on
+        app.demo_mode = True
+        app.redaction_service = RedactionService()
+        app.screen.refresh_after_demo_toggle()
+        await pilot.pause()
+
+        # After toggle: real name is gone from options, intro, and status
+        assert not any("Top Secret Engineering" in opt[0] for opt in app.screen._vault_options)
+        intro_scrubbed = str(app.screen.query_one("#auto_bind_intro", Static).render())
+        assert "Top Secret Engineering" not in intro_scrubbed
+        status = str(app.screen.query_one("#auto_bind_status", Static).render())
+        assert "Top Secret Engineering" not in status
+
+        # Selection is preserved
+        assert select.value == "team:secret-team"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_picker_label_one_line_high_for_20_char_team(size: tuple[int, int]) -> None:
+    from textual.widgets._select import SelectCurrent
+
+    team_name_20 = "12345678901234567890"  # 20 chars
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "twenty-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.2"},
+        {
+            "id": "s-1",
+            "name": "twenty-box",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "twenty-team",
+            "team_role": "admin",
+            "team_name": team_name_20,
+            "login": "ubuntu",
+        },
+    ]
+    service = _Service(vaults=vaults)
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=size) as pilot:
+        await wait_until(lambda: _rows(app))
+        opt_labels = [opt[0] for opt in app.screen._vault_options]
+        expected_label = f"Team vault: {team_name_20} (binds for everyone in it)"
+        assert expected_label in opt_labels
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:twenty-team"
+        await pilot.pause()
+        current = select.query_one(SelectCurrent)
+        assert current.size.height == 1

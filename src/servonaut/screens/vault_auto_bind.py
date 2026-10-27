@@ -16,6 +16,7 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Select, Static
 
@@ -175,6 +176,10 @@ class VaultAutoBindScreen(Screen):
         self._team: Optional[str] = None
         self._team_name: Optional[str] = None
         self._selected_target: str = "personal"
+        self._has_personal_vault: bool = True
+        self._team_vault_options_raw: list[tuple[str, str, str]] = []
+        self._team_vault_map: dict[str, tuple[str, str, str]] = {}
+        self._vault_options: list[tuple[str, str]] = [("Personal vault: binds for you", "personal")]
         # Real record (by identity) -> the row as the instance list shows it,
         # so demo mode shows its stand-in names while the real ones are bound.
         self._shown_as: dict[int, Mapping[str, Any]] = {}
@@ -244,16 +249,57 @@ class VaultAutoBindScreen(Screen):
             return text
         return display_text(self.app, text)
 
+    def _build_picker_options(self) -> list[tuple[Text, str]]:
+        options: list[tuple[Text, str]] = []
+        if self._has_personal_vault:
+            options.append((Text("Personal vault: binds for you"), "personal"))
+        for key, slug, raw_name in self._team_vault_options_raw:
+            clean_name = self.scrub_for_display(raw_name)
+            options.append((
+                Text(f"Team vault: {clean_name} (binds for everyone in it)"),
+                key,
+            ))
+        return options
+
+    def _sync_intro(self) -> None:
+        try:
+            intro = self.query_one("#auto_bind_intro", Static)
+        except NoMatches:
+            return
+        if self._team:
+            clean_team = self.scrub_for_display(self._team_name or self._team)
+            intro.update(
+                f"Each shared server of {clean_team} gets the key from the team vault that is named like its "
+                "key pair (an AWS server's key pair name) or like the server. The host keys pinned are "
+                "the ones this computer already trusts from earlier SSH connections. A server that "
+                "already has a team key is left alone."
+            )
+        else:
+            intro.update(INTRO)
+
     def refresh_after_demo_toggle(self) -> None:
         self._render_rows()
         self._status(self._status_raw)
+        self._sync_intro()
         self._busy.redraw()
+        try:
+            select = self.query_one("#auto_bind_vault_select", Select)
+        except NoMatches:
+            return
+        options = self._build_picker_options()
+        new_tuples = [(str(opt[0]), opt[1]) for opt in options]
+        if self._vault_options != new_tuples:
+            current_val = select.value
+            select.set_options(options)
+            self._vault_options = new_tuples
+            if current_val in {opt[1] for opt in options}:
+                select.value = current_val
 
     def _status(self, message: str) -> None:
         self._status_raw = message
         try:
             self.query_one("#auto_bind_status", Static).update(self.scrub_for_display(message))
-        except Exception:
+        except NoMatches:
             pass
 
     def _server_name(self, row: AutoBindRow) -> str:
@@ -263,7 +309,7 @@ class VaultAutoBindScreen(Screen):
     def _render_rows(self) -> None:
         try:
             table = self.query_one("#auto_bind_table", DataTable)
-        except Exception:
+        except NoMatches:
             return
         cursor = table.cursor_row
         table.clear()
@@ -412,11 +458,8 @@ class VaultAutoBindScreen(Screen):
                 if slug:
                     shared_by_slug.setdefault(str(slug), []).append(row)
 
-            options: list[tuple[Text, str]] = []
-            if personal_vault_id:
-                options.append((Text("Personal vault: binds for you"), "personal"))
-
             team_vault_map: dict[str, tuple[str, str, str]] = {}
+            team_vault_options_raw: list[tuple[str, str, str]] = []
             for v in vaults:
                 if v.get("kind") == "team" and v.get("my_grant") is not None:
                     team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
@@ -429,14 +472,15 @@ class VaultAutoBindScreen(Screen):
                     role = str(team_shared[0].get("team_role") or "").lower()
                     if role in {"owner", "admin"}:
                         raw_name = str(team_shared[0].get("team_name") or team_info.get("name") or slug)
-                        clean_name = self.scrub_for_display(raw_name)
                         key = f"team:{slug}"
-                        options.append((
-                            Text(f"Team vault for {clean_name}: binds for everyone in {clean_name}"),
-                            key,
-                        ))
+                        team_vault_options_raw.append((key, slug, raw_name))
                         team_vault_map[key] = (str(v["vault_id"]), slug, raw_name)
 
+            self._has_personal_vault = bool(personal_vault_id)
+            self._team_vault_options_raw = team_vault_options_raw
+            self._team_vault_map = team_vault_map
+
+            options = self._build_picker_options()
             if not options:
                 self._status(
                     "You have no personal vault yet: create one on the Vault screen and import your SSH keys into it."
@@ -444,10 +488,10 @@ class VaultAutoBindScreen(Screen):
                 return
 
             select = self.query_one("#auto_bind_vault_select", Select)
-            current_options = [(str(opt[0]), opt[1]) for opt in select._options]
             new_options = [(str(opt[0]), opt[1]) for opt in options]
-            if current_options != new_options:
+            if self._vault_options != new_options:
                 select.set_options(options)
+                self._vault_options = new_options
             if self._selected_target not in {opt[1] for opt in options}:
                 self._selected_target = options[0][1]
             if select.value != self._selected_target:
@@ -463,19 +507,9 @@ class VaultAutoBindScreen(Screen):
                 self._team = None
                 self._team_name = None
             else:
-                self._vault_id, self._team, self._team_name = team_vault_map[self._selected_target]
+                self._vault_id, self._team, self._team_name = self._team_vault_map[self._selected_target]
 
-            intro = self.query_one("#auto_bind_intro", Static)
-            if self._team:
-                clean_team = self.scrub_for_display(self._team_name or self._team)
-                intro.update(
-                    f"Each shared server of {clean_team} gets the key from the team vault that is named like its "
-                    "key pair (an AWS server's key pair name) or like the server. The host keys pinned are "
-                    "the ones this computer already trusts from earlier SSH connections. A server that "
-                    "already has a team key is left alone."
-                )
-            else:
-                intro.update(INTRO)
+            self._sync_intro()
 
             # Every key's name is decrypted locally to compare it.
             if self._team:
