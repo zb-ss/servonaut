@@ -168,6 +168,9 @@ async def test_every_surface_from_up_to_down(qa_sandbox, desktop):
     status = await qa_sandbox.command("status")
     assert status.returncode == 0, status.stderr
     assert "QA sandbox: running" in status.stdout and "custom/web-1" in status.stdout
+    assert current.get("bitwarden") is None
+    assert "BW_SESSION" not in current["env"]
+    assert "bitwarden" not in status.stdout
 
     # One sandbox per person: a second one is refused while the first runs.
     second = await qa_sandbox.command("up", "--root", str(qa_sandbox.root.with_name("other")))
@@ -423,6 +426,87 @@ async def test_teams_option_seeds_an_owned_team_and_its_shared_server(qa_sandbox
         (entry["user"], entry["accepted"], entry["reason"]) == (ADMIN_USER, True, "authorized key")
         for entry in logins
     ), logins
+
+    await qa_sandbox.down()
+    qa_sandbox.assert_gone(before)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(JOURNEY_TIMEOUT)
+async def test_bitwarden_option_seeds_fleet_keys_and_forwards_session(qa_sandbox):
+    before = _files(qa_sandbox.person.base)
+    current = await qa_sandbox.up("--signed-in", "--bitwarden")
+    assert current["bitwarden"] is not None
+    items = current["bitwarden"]["items"]
+    by_name = {item["name"]: item["id"] for item in items}
+    assert "ops-key" in by_name
+    long_name = "staging-bastion-us-east-1-extended-production-service-management-gateway-access-key"
+    assert long_name in by_name
+    assert "\x1b[31mred-key" in by_name
+
+    # BW_SESSION forwarded in the child environment
+    assert current["env"].get("BW_SESSION")
+
+    # Key material for ops-key matches what the sandbox wrote for the servers
+    home_key = (Path(current["sandbox"]["home"]) / ".ssh" / "ops-key.pem").read_text(encoding="utf-8")
+    bw_state = json.loads((Path(current["root"]) / "shims" / "bitwarden.json").read_text(encoding="utf-8"))
+    ops_item = next(it for it in bw_state["bw"]["items"] if it["name"] == "ops-key")
+    assert ops_item["sshKey"]["privateKey"] == home_key
+
+    # status lists the Bitwarden items (name and id; never key material)
+    status = await qa_sandbox.command("status")
+    assert status.returncode == 0, status.stderr
+    assert ", bitwarden," in status.stdout.splitlines()[0]
+    assert "ops-key" in status.stdout
+    assert by_name["ops-key"] in status.stdout
+    assert "PRIVATE KEY" not in status.stdout
+    assert "\x1b" not in status.stdout
+    assert "\\x1b[31mred-key" in status.stdout
+
+    # run -- vault import bitwarden ... sees BW_SESSION and imports the key
+    code, text = await asyncio.to_thread(_on_terminal, qa_sandbox, ("run", "--", "vault", "setup"), _recovery_groups)
+    assert code == 0, text
+    created = await qa_sandbox.command("run", "--", "vault", "create", "--name", "Personal", "--json")
+    assert created.returncode == 0, created.stdout + created.stderr
+    vault_id = json.loads(created.stdout)["vault_id"]
+
+    res = await qa_sandbox.command(
+        "run", "--", "vault", "import", "bitwarden",
+        "--vault", vault_id,
+        "--item", by_name["ops-key"],
+        "--json",
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    imported_item = json.loads(res.stdout)
+    assert imported_item.get("type") == "ssh_key"
+    assert imported_item.get("item_id")
+
+    # The long-name item is also importable with real key material
+    res_long = await qa_sandbox.command(
+        "run", "--", "vault", "import", "bitwarden",
+        "--vault", vault_id,
+        "--item", by_name[long_name],
+        "--json",
+    )
+    assert res_long.returncode == 0, res_long.stdout + res_long.stderr
+    imported_long = json.loads(res_long.stdout)
+    assert imported_long.get("type") == "ssh_key"
+    assert imported_long.get("item_id")
+
+    # The imported keys retain their Bitwarden item names in the vault
+    listed = await qa_sandbox.command("run", "--", "vault", "items", "--vault", vault_id, "--names", "--json")
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    vault_data = json.loads(listed.stdout).get("data", [])
+    names = {it.get("name") for it in vault_data}
+    assert "ops-key" in names
+    assert long_name in names
+
+    # Call log in shims recorded the bw call with BW_SESSION present
+    call_log = (Path(current["root"]) / "shims" / "argv.jsonl").read_text(encoding="utf-8")
+    calls = [json.loads(line) for line in call_log.splitlines() if line.strip()]
+    bw_calls = [c for c in calls if c.get("tool") == "bw"]
+    assert bw_calls
+    assert bw_calls[0].get("env", {}).get("BW_SESSION") is True
 
     await qa_sandbox.down()
     qa_sandbox.assert_gone(before)

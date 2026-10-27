@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+
+from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.widgets.secret_input import SecretInput
 
 
@@ -45,7 +46,7 @@ class BwPassphraseModal(ModalScreen[Optional[str]]):
                 id="bw_passphrase_title",
             ),
             Static(
-                f"Enter the passphrase for [bold]{escape(self._filename)}[/bold] "
+                f"Enter the passphrase for [bold]{markup_literal(terminal_safe(self._filename))} [/bold]"
                 "to decrypt it for import. Skip to leave this key out.",
                 id="bw_passphrase_prompt",
             ),

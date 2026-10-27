@@ -569,6 +569,11 @@ signed in to the local API.
   -- vault setup`, the owner's `run -- vault grants process`, then the
   member's `vault list` and, once the owner enrolled `server-1` in the
   team's SSH CA, `run --as member -- ssh server-1`.
+- `--bitwarden` provides a fake Bitwarden Password Manager (`bw` CLI on `PATH`
+  and `BW_SESSION` in the child environment) seeded with native SSH-key items
+  for each distinct key pair of the fleet (such as `ops-key`, matching the key
+  material of `~/.ssh/ops-key.pem`), plus extra items to test name cleaning and
+  long names. `status` lists the seeded Bitwarden items.
 - CLI: `python -m e2e.sandbox run -- ssh web-1 -- uptime` runs the
   checkout's `servonaut` in the sandbox and exits with its status.
 - MCP: `python -m e2e.sandbox mcp-call list_instances '{"account": "prod"}'`

@@ -1,0 +1,30 @@
+"""Vault key names and confirmation dialogs at both supported terminal sizes."""
+from __future__ import annotations
+
+import pytest
+
+from textual.widgets import Button, Input
+
+from tests._async_bounds import wait_until
+from tests.test_vault_key_names_tui import _Host, _Service, _confirm_open, _loaded, _rename_open
+
+
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)], ids=["160x50", "100x30"])
+@pytest.mark.parametrize("state", ["items", "rename", "delete"])
+def test_vault_key_management(screen_snapshot, size, state) -> None:
+    service = _Service(names=[{"item_id": "k1", "name": "Deploy key for web-1"}])
+    app = _Host(service)
+
+    async def scene(pilot) -> None:
+        screen = await _loaded(app, pilot)
+        if state == "rename":
+            screen.action_rename_key()
+            await wait_until(lambda: _rename_open(app))
+            app.screen.query_one("#vault_rename_key_input", Input).value = ""
+            app.screen.query_one("#vault_rename_key_save", Button).press()
+            await wait_until(lambda: "Name is required." in str(app.screen.query_one("#vault_rename_key_feedback").render()))
+        elif state == "delete":
+            screen.action_delete_key()
+            await wait_until(lambda: _confirm_open(app))
+
+    screen_snapshot(app, size, scene)

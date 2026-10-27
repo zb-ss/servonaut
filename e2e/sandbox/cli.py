@@ -65,6 +65,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="with --teams: the team's shared server is also NAME of the account's "
                          "AWS fleet (edge-1, for example), and the member gets the account's AWS "
                          "credentials but no key files, like a teammate given AWS keys")
+    up.add_argument("--bitwarden", action="store_true",
+                    help="provide a fake Bitwarden Password Manager (bw CLI on PATH, "
+                         "BW_SESSION in the child environment) seeded with native SSH-key items "
+                         "for each distinct key pair of the fleet")
     up.add_argument("--api-delay", type=_api_delay, default=0.0, metavar="SECONDS",
                     help="answer every Servonaut API request after SECONDS (up to 30), "
                          "to see what the app shows while it waits")
@@ -149,7 +153,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         api_delay=args.api_delay, teams=args.teams, account_email=args.account_email,
                         verification_uri=args.verification_uri, user_code=args.user_code,
                         hostname=args.hostname, ai_script=args.ai_script,
-                        team_server_as=args.team_server_as)
+                        team_server_as=args.team_server_as, bitwarden=args.bitwarden)
 
     from e2e.sandbox import client
 
