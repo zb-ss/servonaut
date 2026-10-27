@@ -21,7 +21,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, DataTable, Footer, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
-from servonaut.screens._demo_resolve import connection_instance, display_text, team_rows
+from servonaut.screens._demo_resolve import connection_instance, display_text, replace_instances, team_rows
 from servonaut.services.vault import crypto
 from servonaut.services.vault.auto_bind import (
     FETCH_FAILED,
@@ -536,7 +536,26 @@ class VaultAutoBindScreen(Screen):
             self._busy.say(job, "Checking each server's vault key, login and trusted host keys…")
             try:
                 if self._team:
-                    rows = await plan_auto_bind(service, self._servers(), keys, team=self._team)
+                    team_svc = getattr(self.app, "team_service", None) or getattr(service, "teams", None)
+                    team_servers = None
+                    if team_svc is not None:
+                        try:
+                            from servonaut.services.shared_servers import load_shared_servers
+                            team_rec = {"slug": self._team, "name": self._team_name or self._team, "role": "admin"}
+                            res = await load_shared_servers(team_svc, teams=[team_rec])
+                            if not res.problems:
+                                team_servers = list(res.rows)
+                        except Exception as exc:
+                            logger.warning("Could not load fresh shared servers for team %s: %s", self._team, exc)
+                    if team_servers is None:
+                        team_servers = self._servers()
+                    else:
+                        for s in team_servers:
+                            for shown in getattr(self.app, "instances", None) or []:
+                                if shown.get("is_shared") and (shown.get("team_slug"), str(shown.get("id"))) == (s.get("team_slug"), str(s.get("id"))):
+                                    self._shown_as[id(s)] = shown
+                                    break
+                    rows = await plan_auto_bind(service, team_servers, keys, team=self._team)
                 else:
                     rows = await plan_auto_bind(service, self._servers(), keys)
             except Exception as exc:
@@ -716,6 +735,10 @@ class VaultAutoBindScreen(Screen):
                 reviewed_fetched=reviewed_fetched,
                 on_progress=progress,
             )
+        if self._team:
+            for row in chosen:
+                if row.result == "bound" and row.binding_result:
+                    self._remember_team_binding(row.instance, row.binding_result)
         self._selected.clear()
         self.query_one("#auto_bind_trust", Checkbox).value = False
         self._render_rows()
@@ -726,6 +749,32 @@ class VaultAutoBindScreen(Screen):
             message += f" {failed} failed: see their status."
         self._status(message)
         self.app.notify(message, severity="warning" if failed else "information", markup=False)
+
+    def _remember_team_binding(self, target: Mapping[str, Any], result: object) -> None:
+        """Keep the team's shared rows in app.instances current after binding."""
+        if not isinstance(result, Mapping):
+            return
+        binding = result.get("credential_binding", result)
+        if (
+            not isinstance(binding, Mapping) or binding.get("source") != "servonaut_vault"
+            or binding.get("valid") is not True or not binding.get("signature")
+        ):
+            return
+        binding = dict(binding)
+        rows = team_rows(self.app)
+        team_slug = target.get("team_slug") or self._team
+        target_id = (team_slug, str(target.get("id") or ""))
+        for row in rows:
+            if (row.get("team_slug"), str(row.get("id") or "")) != target_id:
+                continue
+            row["credential_binding"] = binding
+            if binding.get("login_user"):
+                row["login_user"] = binding["login_user"]
+        replace_instances(self.app, "shared", rows)
+        if isinstance(target, dict):
+            target["credential_binding"] = binding
+            if binding.get("login_user"):
+                target["login_user"] = binding["login_user"]
 
     def action_back(self) -> None:
         # Leaving while binding stops the servers not reached yet; those bound stay bound.

@@ -2847,6 +2847,36 @@ async def test_bind_personal_can_refuse_to_replace_an_existing_key() -> None:
     service.bindings.put_personal_binding.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_bind_team_can_refuse_to_replace_an_existing_key() -> None:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.teams = MagicMock()
+    service.teams.list_shared_servers = AsyncMock(return_value=[{
+        "id": "s-1",
+        "name": "shared-1",
+        "hostname": "198.51.100.7",
+        "port": 22,
+        "login_user": "ubuntu",
+        "credential_binding": {"source": "servonaut_vault", "valid": True},
+    }])
+    service.bindings = MagicMock()
+    service.bindings.put_team_binding = AsyncMock()
+
+    with pytest.raises(VaultUserError, match="already has a team key: left alone"):
+        await service.bind(
+            vault_id="11111111-1111-4111-8111-111111111111",
+            item_id="22222222-2222-4222-8222-222222222222",
+            server="s-1",
+            team="ops",
+            login="ubuntu",
+            pin_host_key=False,
+            host_keys=["ssh-ed25519 AAAA"],
+            replace_existing=False,
+        )
+    service.bindings.put_team_binding.assert_not_awaited()
+
+
+
 def test_ssh_destination_is_where_the_connection_rule_sends_ssh() -> None:
     rules = MagicMock()
     rules.resolve_profile.side_effect = lambda row: SimpleNamespace(bastion_host="b") if row["id"] == "i-behind" else None

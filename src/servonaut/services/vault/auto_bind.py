@@ -175,6 +175,7 @@ class AutoBindRow:
     # After binding: None (not tried), "bound", or the failure reason.
     result: Optional[str] = None
     skipped: Optional[str] = None
+    binding_result: Optional[Mapping[str, Any]] = None
 
     @property
     def ready(self) -> bool:
@@ -377,7 +378,7 @@ async def apply_auto_bind(
         team_slug = row.team or team
         if team_slug:
             try:
-                await service.bind(
+                res = await service.bind(
                     vault_id=vault_id,
                     server=str(row.instance.get("id")),
                     item_id=row.match.item_id,
@@ -385,11 +386,13 @@ async def apply_auto_bind(
                     login=row.login,
                     pin_host_key=False,
                     host_keys=list(row.host_keys),
+                    replace_existing=False,
                 )
             except Exception as exc:
                 row.result = vault_failure_reason(exc)
             else:
                 row.result = "bound"
+                row.binding_result = res if isinstance(res, Mapping) else None
         else:
             custom = row.instance.get("is_custom") is True
             try:

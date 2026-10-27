@@ -1572,17 +1572,22 @@ class VaultCommandService:
         self,
         *, vault_id: str, server: str, item_id: str, team: str | None,
         login: str | None, pin_host_key: bool, host_keys: Sequence[str] = (),
+        replace_existing: bool = True,
     ) -> dict[str, Any]:
         """Write a signed binding only after an explicit host-pin decision.
 
         The first binding pins *host_keys* when given, otherwise the keys this
         machine already trusts for the server (from an earlier SSH login).
+        With ``replace_existing=False`` a shared server that already has a
+        credential_binding is refused instead of updated.
         """
         if not team:
             raise ValueError("a team is required to bind a shared server")
         _uuid(vault_id, "vault_id")
         _uuid(item_id, "item_id")
         shared = await self._shared_server(team, server)
+        if not replace_existing and shared.get("credential_binding"):
+            raise VaultUserError("already has a team key: left alone")
         hostname = shared.get("hostname") or shared.get("host") or shared.get("public_ip")
         port = shared.get("port", 22)
         if not isinstance(hostname, str) or not hostname or isinstance(port, bool) or not isinstance(port, int):

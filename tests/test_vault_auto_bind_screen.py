@@ -82,6 +82,23 @@ class _Service:
         self.binds.append(kwargs)
         return {"source": "servonaut_vault"}
 
+    async def bind(self, **kwargs):
+        server = kwargs.get("server") or kwargs.get("instance_id")
+        if server in self.fail_bind:
+            raise VaultUserError("already has a team key: left alone")
+        self.binds.append(kwargs)
+        return {
+            "source": "servonaut_vault",
+            "valid": True,
+            "signature": "sig",
+            "credential_binding": {
+                "source": "servonaut_vault",
+                "valid": True,
+                "signature": "sig",
+                "vault_item_id": kwargs.get("item_id"),
+            },
+        }
+
 
 class _Host(App):
     CSS_PATH = CSS_FILES
@@ -115,11 +132,20 @@ def _trusted(monkeypatch):
 
 def _with_host_keys(plan, trusted):
     async def planned(service, instances, keys, **kwargs):
+        inner_host_keys_for = kwargs.pop("host_keys_for", None)
+
+        def lookup(instance, host, port):
+            if instance.get("id") in trusted:
+                return trusted[instance["id"]]
+            if inner_host_keys_for is not None:
+                return inner_host_keys_for(instance, host, port)
+            return []
+
         return await plan(
             service,
             instances,
             keys,
-            host_keys_for=lambda instance, host, port: trusted.get(instance["id"], []),
+            host_keys_for=lookup,
             **kwargs,
         )
     return planned
@@ -232,7 +258,6 @@ async def test_the_review_fits_a_narrow_terminal() -> None:
         screen = app.screen.region
         for selector in (
             "#auto_bind_vault_select",
-            "#auto_bind_intro",
             "#auto_bind_table",
             "#auto_bind_trust",
             "#auto_bind_apply",
@@ -903,5 +928,66 @@ async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
         assert actions.visible
         for btn in actions.query(Button):
             assert btn.visible and btn.size.height >= 1
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_bind_and_reload_shows_has_team_key(monkeypatch) -> None:
+    monkeypatch.setattr(
+        vault_auto_bind, "plan_auto_bind",
+        _with_host_keys(vault_auto_bind.plan_auto_bind, {"s-1": [HOST_KEY]}),
+    )
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "ops-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {
+            "id": "s-1",
+            "name": "shared-1",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "ops-team",
+            "team_role": "admin",
+            "login_user": "ubuntu",
+        },
+    ]
+    keys = [{"item_id": "k1", "label": "shared-1", "name": "shared-1.pem", "fingerprint": "SHA256:1"}]
+    service = _Service(vaults=vaults, keys=keys)
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=(160, 50)) as pilot:
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:ops-team"
+        await wait_until(lambda: app.screen._team == "ops-team" and not app.screen._busy.is_busy)
+
+        # Before binding: server is ready and selected
+        rows = _rows(app)
+        assert any(row[1] == "shared-1" and row[2] == "ready" for row in rows)
+        apply_btn = app.screen.query_one("#auto_bind_apply", Button)
+        assert not apply_btn.disabled
+
+        # Pin and bind
+        app.screen.query_one("#auto_bind_trust", Checkbox).value = True
+        apply_btn.press()
+        await wait_until(lambda: len(service.binds) == 1)
+        await wait_until(lambda: not app.screen._busy.is_busy)
+
+        # In-memory shared row was updated with returned binding
+        assert app.instances[0].get("credential_binding") is not None
+
+        # Reload the review
+        app.screen.action_reload()
+        await wait_until(lambda: any(row[1] == "shared-1" and row[2] == "has a team key" for row in _rows(app)))
+
+        # After reload: shows "has a team key" and is not selectable
+        rows_after = _rows(app)
+        assert any(row[1] == "shared-1" and row[2] == "has a team key" for row in rows_after)
+        apply_btn_after = app.screen.query_one("#auto_bind_apply", Button)
+        assert apply_btn_after.disabled
+
 
 

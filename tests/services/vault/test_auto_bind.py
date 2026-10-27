@@ -648,6 +648,7 @@ async def test_team_auto_bind_applies_via_service_bind() -> None:
         login="admin",
         pin_host_key=False,
         host_keys=[HOST_KEY],
+        replace_existing=False,
     )
 
 
@@ -805,6 +806,33 @@ def test_auto_bind_row_no_host_keys_status_text_surface_override() -> None:
     assert row.status_text_for("cli") == "No trusted host key yet: run with --fetch-host-keys to fetch and review it"
     assert row.status_text_for("tui") == "No trusted host key yet: press f (Fetch host keys) to fetch and review it"
     assert row.status_text == "No trusted host key yet: run with --fetch-host-keys to fetch and review it"
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_refuses_when_server_bound_concurrently() -> None:
+    server = {
+        "id": "s-1",
+        "name": "shared-1",
+        "hostname": "198.51.100.7",
+        "port": 22,
+        "login_user": "ubuntu",
+        "is_shared": True,
+        "team_slug": "ops",
+        "team_role": "admin",
+    }
+    keys = [_key("k1", "shared-1")]
+    service = _Service()
+    service.bind = AsyncMock(side_effect=VaultUserError("already has a team key: left alone"))
+
+    rows = await plan_auto_bind(service, [server], keys, team="ops", host_keys_for=lambda *_: [HOST_KEY])
+    assert len(rows) == 1 and rows[0].ready
+
+    await apply_auto_bind(service, rows, vault_id="v", team="ops")
+
+    assert rows[0].result == "already has a team key: left alone"
+    service.bind.assert_awaited_once()
+    assert service.bind.await_args.kwargs["replace_existing"] is False
+
 
 
 
