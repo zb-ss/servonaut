@@ -214,6 +214,7 @@ def add_vault_parser(subparsers: Any) -> None:
         help="Bind personal-vault SSH keys to the servers named like them (key pair name, then server name).",
     )
     auto_bind.add_argument("--vault", default=None, help=f"{_VAULT_HELP} Default: your personal vault.")
+    auto_bind.add_argument("--team", default=None, help="Bind a team vault's keys to that team's shared servers.")
     auto_bind.add_argument("--dry-run", action="store_true", help="Show what would be bound and change nothing.")
     auto_bind.add_argument(
         "--yes", action="store_true",
@@ -580,6 +581,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "verification_source": getattr(row, "verification_source", None),
         "fetch_error": getattr(row, "fetch_error", None),
         "mismatch_detail": getattr(row, "mismatch_detail", None),
+        "team": getattr(row, "team", None),
         "status": row.status,
         "result": row.result,
     }
@@ -622,6 +624,25 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                     print(f"    host key {fingerprint}")
 
 
+async def _load_team_shared_servers(services: Any, team: str) -> list[dict[str, Any]]:
+    team_svc = getattr(services, "teams", None) or getattr(services, "team_service", None)
+    if team_svc is None:
+        try:
+            from servonaut.cli.team import _default_team_service
+            team_svc = _default_team_service()
+        except Exception:
+            team_svc = None
+    if team_svc is None:
+        return []
+    try:
+        from servonaut.services.shared_servers import load_shared_servers
+        res = await load_shared_servers(team_svc, teams=[{"slug": team}])
+        return list(res.rows)
+    except Exception as exc:
+        logger.warning("Could not load shared servers for team %s: %s", team, exc)
+        return []
+
+
 async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> int:
     """Plan, confirm and apply ``vault auto-bind``."""
     from servonaut.services.vault.auto_bind import (
@@ -633,17 +654,47 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
     )
 
     vault_id = args.vault
+    team = getattr(args, "team", None)
     if not vault_id:
-        personal = [
-            choice for choice in await _invoke(services, "vault_choices")
-            if isinstance(choice, Mapping) and choice.get("kind") == "personal"
-        ]
-        if not personal:
-            print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
-            return _EXIT_ERROR
-        vault_id = str(personal[0]["vault_id"])
+        if team:
+            try:
+                if hasattr(services, "list_vaults"):
+                    vaults = await _invoke(services, "list_vaults")
+                else:
+                    vaults = await _invoke(services, "vault_choices")
+            except Exception as exc:
+                print(f"Could not load vaults ({vault_failure_reason(exc)}).", file=sys.stderr)
+                return _EXIT_ERROR
+            team_vault = None
+            for v in vaults:
+                if isinstance(v, Mapping) and v.get("kind") == "team":
+                    team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
+                    slug = team_info.get("slug") or v.get("team_slug")
+                    if slug == team:
+                        team_vault = v
+                        break
+            if not team_vault:
+                print(f"You have no team vault for {team} yet: run `servonaut vault create --team {team}`.", file=sys.stderr)
+                return _EXIT_ERROR
+            vault_id = str(team_vault["vault_id"])
+        else:
+            personal = [
+                choice for choice in await _invoke(services, "vault_choices")
+                if isinstance(choice, Mapping) and choice.get("kind") == "personal"
+            ]
+            if not personal:
+                print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
+                return _EXIT_ERROR
+            vault_id = str(personal[0]["vault_id"])
     keys = await _invoke(services, "ssh_key_choices", vault_id=vault_id, name_limit=None)
-    rows = await plan_auto_bind(services, _auto_bind_servers(), keys)
+    servers = list(_auto_bind_servers())
+    if team:
+        shared = await _load_team_shared_servers(services, team)
+        existing_ids = {s.get("id") for s in servers if isinstance(s, Mapping)}
+        for s in shared:
+            if s.get("id") not in existing_ids:
+                servers.append(s)
+    rows = await plan_auto_bind(services, servers, keys, team=team)
 
     if getattr(args, "fetch_host_keys", False):
         to_fetch = [row for row in rows if row.status == NO_HOST_KEYS]
@@ -703,7 +754,7 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
 
     if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(to_bind)} servers"):
         return _EXIT_ABORTED
-    await apply_auto_bind(services, to_bind, vault_id=vault_id, reviewed_fetched=True)
+    await apply_auto_bind(services, to_bind, vault_id=vault_id, team=team, reviewed_fetched=True)
     failed = [row for row in to_bind if row.result != "bound"]
     if output:
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)

@@ -1351,6 +1351,154 @@ def test_auto_bind_fetch_host_keys_when_registry_fails_reports_not_verified_and_
     assert "not verified" in out
 
 
+def test_auto_bind_team_resolves_team_vault_and_binds_shared_servers(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock
+    from servonaut.services.vault import auto_bind
+
+    shared_server = {
+        "id": "srv-1",
+        "name": "dev-box",
+        "hostname": "198.51.100.2",
+        "is_shared": True,
+        "team_slug": "devs",
+        "login_user": "ubuntu",
+    }
+    keys = [{"item_id": "k-dev", "label": "dev-box", "name": "dev-box.pem", "fingerprint": "SHA256:dev"}]
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+    ])
+    service.ssh_key_choices = AsyncMock(return_value=keys)
+    service.bind = AsyncMock(return_value={"source": "servonaut_vault"})
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [shared_server])
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda inst, h, p: [service.HOST_KEY])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--yes"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 0
+    service.bind.assert_awaited_once_with(
+        vault_id="tv-devs",
+        server="srv-1",
+        item_id="k-dev",
+        team="devs",
+        login="ubuntu",
+        pin_host_key=False,
+        host_keys=[service.HOST_KEY],
+    )
+    out = capsys.readouterr()
+    assert "Bound vault keys to 1 of 1 servers." in out.err
+
+
+def test_auto_bind_team_no_vault_returns_error(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": VAULT_ID, "kind": "personal", "label": "Personal"},
+    ])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--yes"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 1
+    assert "You have no team vault for devs yet: run `servonaut vault create --team devs`." in capsys.readouterr().err
+
+
+def test_auto_bind_team_dry_run_and_json(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock
+    from servonaut.services.vault import auto_bind
+
+    shared_server = {
+        "id": "srv-1",
+        "name": "dev-box",
+        "hostname": "198.51.100.2",
+        "is_shared": True,
+        "team_slug": "devs",
+        "login_user": "ubuntu",
+    }
+    keys = [{"item_id": "k-dev", "label": "dev-box", "name": "dev-box.pem", "fingerprint": "SHA256:dev"}]
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+    ])
+    service.ssh_key_choices = AsyncMock(return_value=keys)
+    service.bind = AsyncMock(return_value={"source": "servonaut_vault"})
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [shared_server])
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda inst, h, p: [service.HOST_KEY])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--dry-run", "--json"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 0
+    assert service.bind.call_count == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["vault_id"] == "tv-devs"
+    assert len(report["servers"]) == 1
+    assert report["servers"][0]["server"] == "dev-box"
+    assert report["servers"][0]["team"] == "devs"
+    assert report["servers"][0]["status"] == "ready"
+
+
+def test_auto_bind_team_loads_shared_servers_via_team_service(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from servonaut.services.vault import auto_bind
+
+    shared_server = {
+        "id": "srv-remote",
+        "name": "api-box",
+        "hostname": "198.51.100.5",
+        "is_shared": True,
+        "team_slug": "devs",
+        "login": "ubuntu",
+    }
+    keys = [{"item_id": "k-api", "label": "api-box", "name": "api-box.pem", "fingerprint": "SHA256:api"}]
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}},
+    ])
+    service.ssh_key_choices = AsyncMock(return_value=keys)
+    service.teams = MagicMock()
+    service.teams.list_shared_servers = AsyncMock(return_value=[shared_server])
+
+    own_server = {"id": "i-local", "name": "web-local", "public_ip": "198.51.100.1"}
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [own_server])
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda inst, h, p: [service.HOST_KEY])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--dry-run", "--json"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert len(report["servers"]) == 1
+    assert report["servers"][0]["server"] == "api-box"
+
+
 
 def _vault_record(name, kind, vault_id, team=None, items=0):
     """A vault as the service lists it, with the signed material a person never needs to read."""
