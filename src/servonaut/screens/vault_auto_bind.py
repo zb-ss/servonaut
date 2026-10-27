@@ -249,7 +249,10 @@ class VaultAutoBindScreen(Screen):
 
     def _status(self, message: str) -> None:
         self._status_raw = message
-        self.query_one("#auto_bind_status", Static).update(self.scrub_for_display(message))
+        try:
+            self.query_one("#auto_bind_status", Static).update(self.scrub_for_display(message))
+        except Exception:
+            pass
 
     def _server_name(self, row: AutoBindRow) -> str:
         shown = self._shown_as.get(id(row.instance), row.instance)

@@ -543,6 +543,7 @@ async def test_switching_vault_picker_loads_team_shared_servers() -> None:
         # Switch to team vault
         select = app.screen.query_one("#auto_bind_vault_select", Select)
         select.value = "team:devs"
+        await pilot.pause()
 
         # Now team shared servers load
         await wait_until(lambda: any("dev-box" in r for r in _rows(app)))
