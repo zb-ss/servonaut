@@ -624,7 +624,9 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                     print(f"    host key {fingerprint}")
 
 
-async def _load_team_shared_servers(services: Any, team: str) -> list[dict[str, Any]]:
+async def _load_team_shared_servers(
+    services: Any, team: str
+) -> tuple[int, list[dict[str, Any]], Optional[dict[str, Any]]]:
     team_svc = getattr(services, "teams", None) or getattr(services, "team_service", None)
     if team_svc is None:
         try:
@@ -633,14 +635,36 @@ async def _load_team_shared_servers(services: Any, team: str) -> list[dict[str, 
         except Exception:
             team_svc = None
     if team_svc is None:
-        return []
+        print("Team services are unavailable: sign in first.", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+    try:
+        teams = await team_svc.list_teams()
+    except Exception as exc:
+        print(f"Could not load your teams ({exc}).", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+
+    from servonaut.cli.team import _find_team
+    team_rec = _find_team(teams, team)
+    if team_rec is None:
+        print(f"You are not in a team called {terminal_safe(team)}.", file=sys.stderr)
+        return _EXIT_ERROR, [], None
+
+    role = str(team_rec.get("role") or "").lower()
+    if role not in {"owner", "admin"}:
+        name = terminal_safe(str(team_rec.get("name") or team))
+        print(f"Only team owners and admins can bind vault keys for {name}.", file=sys.stderr)
+        return _EXIT_ERROR, [], team_rec
+
     try:
         from servonaut.services.shared_servers import load_shared_servers
-        res = await load_shared_servers(team_svc, teams=[{"slug": team}])
-        return list(res.rows)
+        res = await load_shared_servers(team_svc, teams=[team_rec])
+        if res.problems:
+            print(f"Could not load shared servers for {terminal_safe(team)}: {res.problems[0]}.", file=sys.stderr)
+            return _EXIT_ERROR, [], team_rec
+        return _EXIT_OK, list(res.rows), team_rec
     except Exception as exc:
-        logger.warning("Could not load shared servers for team %s: %s", team, exc)
-        return []
+        print(f"Could not load shared servers for team {terminal_safe(team)} ({exc}).", file=sys.stderr)
+        return _EXIT_ERROR, [], team_rec
 
 
 async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> int:
@@ -655,16 +679,38 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
 
     vault_id = args.vault
     team = getattr(args, "team", None)
-    if not vault_id:
+    team_rec = None
+    servers = list(_auto_bind_servers())
+    if team:
+        exit_code, shared, team_rec = await _load_team_shared_servers(services, team)
+        if exit_code != _EXIT_OK:
+            return exit_code
+        existing_ids = {s.get("id") for s in servers if isinstance(s, Mapping)}
+        for s in shared:
+            if s.get("id") not in existing_ids:
+                servers.append(s)
+
+    try:
+        vaults = await _invoke(services, "list_vaults")
+    except Exception as exc:
+        print(f"Could not load vaults ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR
+
+    if vault_id:
+        vault_id = await _vault_id(services, vault_id)
         if team:
-            try:
-                if hasattr(services, "list_vaults"):
-                    vaults = await _invoke(services, "list_vaults")
-                else:
-                    vaults = await _invoke(services, "vault_choices")
-            except Exception as exc:
-                print(f"Could not load vaults ({vault_failure_reason(exc)}).", file=sys.stderr)
+            target = None
+            for v in vaults:
+                if isinstance(v, Mapping) and str(v.get("vault_id")) == vault_id:
+                    target = v
+                    break
+            v_team = target.get("team") if isinstance(target, Mapping) and isinstance(target.get("team"), Mapping) else {}
+            v_slug = v_team.get("slug") or (target.get("team_slug") if isinstance(target, Mapping) else None)
+            if not target or target.get("kind") != "team" or v_slug != team:
+                print(f"Vault {terminal_safe(args.vault)} does not belong to team {terminal_safe(team)}.", file=sys.stderr)
                 return _EXIT_ERROR
+    else:
+        if team:
             team_vault = None
             for v in vaults:
                 if isinstance(v, Mapping) and v.get("kind") == "team":
@@ -674,26 +720,21 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
                         team_vault = v
                         break
             if not team_vault:
-                print(f"You have no team vault for {team} yet: run `servonaut vault create --team {team}`.", file=sys.stderr)
+                team_name = terminal_safe(str((team_rec.get("name") if team_rec else None) or team))
+                print(f"You have no team vault for {team_name} yet: run `servonaut vault create --team {terminal_safe(team)}`.", file=sys.stderr)
                 return _EXIT_ERROR
             vault_id = str(team_vault["vault_id"])
         else:
             personal = [
-                choice for choice in await _invoke(services, "vault_choices")
+                choice for choice in vaults
                 if isinstance(choice, Mapping) and choice.get("kind") == "personal"
             ]
             if not personal:
                 print("You have no personal vault yet: run `servonaut vault create` and import your SSH keys.", file=sys.stderr)
                 return _EXIT_ERROR
             vault_id = str(personal[0]["vault_id"])
+
     keys = await _invoke(services, "ssh_key_choices", vault_id=vault_id, name_limit=None)
-    servers = list(_auto_bind_servers())
-    if team:
-        shared = await _load_team_shared_servers(services, team)
-        existing_ids = {s.get("id") for s in servers if isinstance(s, Mapping)}
-        for s in shared:
-            if s.get("id") not in existing_ids:
-                servers.append(s)
     rows = await plan_auto_bind(services, servers, keys, team=team)
 
     if getattr(args, "fetch_host_keys", False):
