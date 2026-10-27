@@ -16,6 +16,16 @@ def terminal_safe(value: object) -> str:
     )
 
 
+def markup_literal(value: object) -> str:
+    """Escape every opening bracket for literal text in Textual 8 markup.
+
+    Rich's escape leaves unmatched brackets unescaped, which can swallow a
+    later trusted tag in Textual's parser. Backslashes stay literal: never
+    end untrusted text directly before a closing tag; insert a separator.
+    """
+    return str(value).replace("[", "\\[")
+
+
 def flatten_rows(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
     """Dotted ``key: value`` rows of nested mappings and lists, nested data included."""
     if isinstance(value, Mapping):

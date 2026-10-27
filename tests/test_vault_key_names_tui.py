@@ -502,3 +502,24 @@ async def test_grouped_refusal_names_are_scrubbed_in_demo_mode() -> None:
         notice, options = app.notes[-1]
         assert "Team servers: server-1" in notice and "web-1" not in notice
         assert options["markup"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["key [old", "\x1b[31mred-key", "x\\[y", "trailing\\"])
+async def test_delete_confirmation_shows_hostile_key_name_without_markup_crash(name: str) -> None:
+    from textual.markup import to_content
+    from servonaut.services.vault.display import terminal_safe
+
+    usage = {"team_servers": [], "own_servers": [], "unchecked": [], "checked": 0,
+             "name": name, "fingerprint": "SHA256:fixture"}
+    app = _Host(_Service(names=[{"item_id": "k1", "name": name}], usage=usage))
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _loaded(app, pilot)
+        screen.action_delete_key()
+        await wait_until(lambda: _confirm_open(app))
+        modal = app.screen
+        assert to_content(modal._description).plain == f"Delete the vault key {terminal_safe(name)}?"
+        bullet = "[$text-error]  • " + modal._consequences[0] + "[/$text-error]"
+        assert to_content(bullet).plain == f"  • remove the key {terminal_safe(name)} (SHA256:fixture) from this vault"
+        await pilot.press("escape")
+        await wait_until(lambda: app.screen is screen)

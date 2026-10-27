@@ -393,3 +393,75 @@ def test_bitwarden_unreadable_material_keeps_fixed_tui_notice_and_wipes_buffer(t
     assert modal.dismiss.call_args.args[0]["failed"] == 1
     assert service.import_keys.await_args.kwargs["private_key"] == bytearray(len("unreadable key material"))
     core.items.write_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name, fingerprint", [
+    ("[1st key", "SHA256:fixture"), ("\x1b[31mred-key", "key [3"),
+    ("x\\[y", "trailing\\"),
+])
+async def test_bitwarden_labels_render_hostile_brackets_literally(tmp_path: Path, name: str, fingerprint: str) -> None:
+    from textual.app import App
+    from textual.widgets import SelectionList
+    from servonaut.services.vault.display import terminal_safe
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._bw_items = [BwItemSummary(id="item-1", name=name, type=5, has_ssh_key=True, fingerprint=fingerprint)]
+        modal._show_bitwarden_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 1)
+        plain = listing.get_option_at_index(0).prompt.plain
+        assert terminal_safe(name) in plain and terminal_safe(fingerprint) in plain
+        assert "\x1b" not in plain
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_local_filename_and_target_render_unclosed_brackets_and_trailing_backslash(tmp_path: Path) -> None:
+    from textual.app import App
+    from textual.widgets import SelectionList
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(VaultImportModal(MagicMock(), "vault-1", tmp_path))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_list")))
+        modal = app.screen
+        modal._local_keys = [ScannedKey(path=tmp_path / "key", filename="key [3", encrypted=False,
+                                        resolved_target="target [old\\")]
+        modal._show_local_options()
+        listing = modal.query_one("#vault_import_list", SelectionList)
+        await wait_until(lambda: listing.option_count == 1)
+        plain = listing.get_option_at_index(0).prompt.plain
+        assert plain == "key [3  → target [old\\ "
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["id [old", "x\\[y", "trailing\\"])
+async def test_encrypted_key_passphrase_modal_renders_filename_literally(name: str) -> None:
+    from textual.app import App
+    from textual.content import Content
+    from textual.markup import to_content
+    from textual.widgets import Static
+
+    class Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(BwPassphraseModal(name))
+
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#bw_passphrase_prompt")))
+        content = app.screen.query_one("#bw_passphrase_prompt", Static).content
+        plain = content.plain if isinstance(content, Content) else to_content(str(content)).plain
+        assert plain == f"Enter the passphrase for {name} to decrypt it for import. Skip to leave this key out."
+        await pilot.press("escape")

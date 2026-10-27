@@ -15,7 +15,6 @@ from pathlib import Path
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any, Optional
 
-from rich.markup import escape
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -32,7 +31,9 @@ from textual.worker import Worker
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.vault import onboarding
-from servonaut.services.vault.display import VAULT_KEY_ROTATED_FIRST, grant_summary, ssh_rotation_failure, terminal_safe
+from servonaut.services.vault.display import (
+    VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, ssh_rotation_failure, terminal_safe,
+)
 from servonaut.services.vault.errors import VaultKeyInUse, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.safe_header import SafeHeader
@@ -95,7 +96,7 @@ class VaultRevealModal(ModalScreen[None]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Revealed vault item[/bold]"),
-            Static(escape(str(value)), id="vault_revealed_value"),
+            Static(markup_literal(str(value)), id="vault_revealed_value"),
             Button("Close", id="vault_reveal_close"),
             id="vault_reveal_modal",
         )
@@ -118,8 +119,8 @@ class VaultSecretPromptModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         yield SafeHeader()
         yield Vertical(
-            Static(escape(self._title)),
-            Static(escape(self._prompt)),
+            Static(markup_literal(self._title)),
+            Static(markup_literal(self._prompt)),
             SecretInput(id="vault_secret_input"),
             Horizontal(Button("Cancel", id="vault_secret_cancel"), Button("Continue", id="vault_secret_continue")),
             id="vault_secret_modal",
@@ -162,7 +163,7 @@ class VaultRecoveryConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         fields = [
             Static("[bold]Record this recovery key offline. It will not be shown again.[/bold]"),
-            Static(escape(_grouped_key(self._recovery_key)), id="vault_recovery_key"),
+            Static(markup_literal(_grouped_key(self._recovery_key)), id="vault_recovery_key"),
             Static("Groups are counted from the left; the first group is group 1.", id="vault_recovery_hint"),
         ]
         for index in self._checks:
@@ -191,7 +192,7 @@ class VaultSasConfirmModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Compare this safety number on both devices[/bold]"),
-            Static(escape(self._sas), id="vault_sas"),
+            Static(markup_literal(self._sas), id="vault_sas"),
             Horizontal(Button("Mismatch", id="vault_sas_no"), Button("Matches", id="vault_sas_yes")),
             id="vault_sas_modal",
         )
@@ -213,7 +214,7 @@ class VaultPendingDeviceModal(ModalScreen[bool]):
         yield SafeHeader()
         yield Vertical(
             Static("[bold]A device is waiting for vault approval[/bold]"),
-            Static(escape(f"{name} · {platform}")),
+            Static(markup_literal(f"{name} · {platform}")),
             Static("Review the device and compare its safety number before approving."),
             Horizontal(Button("Later", id="vault_pending_device_later"), Button("Review devices", id="vault_pending_device_review")),
             id="vault_pending_device_modal",
@@ -707,7 +708,7 @@ class VaultCreateModal(ModalScreen[Optional[Mapping[str, Any]]]):
                 id="vault_create_text",
             ),
             Select(
-                [(escape(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
+                [(markup_literal(str(option.get("label") or "")), index) for index, option in enumerate(self._options)],
                 value=0, allow_blank=False, id="vault_create_target",
             ),
             Horizontal(Button("Cancel", id="vault_create_cancel"), Button("Create", id="vault_create_confirm")),
@@ -973,7 +974,7 @@ class VaultScreen(Screen):
 
     def _status(self, message: str) -> None:
         self._status_raw = message
-        self.query_one("#vault_status", Static).update(escape(self.scrub_for_display(message)))
+        self.query_one("#vault_status", Static).update(markup_literal(self.scrub_for_display(message)))
 
     def refresh_after_demo_toggle(self) -> None:
         """Repaint cached metadata after demo mode changes without re-fetching."""
@@ -1059,10 +1060,10 @@ class VaultScreen(Screen):
         for row in self._vaults:
             counts = row.get("counts") if isinstance(row.get("counts"), Mapping) else {}
             table.add_row(
-                escape(self.scrub_for_display(row.get("name") or "Unnamed vault")),
-                escape(self.scrub_for_display(row.get("kind") or "")),
+                markup_literal(self.scrub_for_display(row.get("name") or "Unnamed vault")),
+                markup_literal(self.scrub_for_display(row.get("kind") or "")),
                 str(counts.get("items", 0)), str(counts.get("open_exposures", 0)),
-                escape(self.scrub_for_display(row.get("vault_id") or "")),
+                markup_literal(self.scrub_for_display(row.get("vault_id") or "")),
             )
 
     def _item_name_cell(self, row: Mapping[str, Any]) -> str:
@@ -1073,7 +1074,7 @@ class VaultScreen(Screen):
         text = self.scrub_for_display(terminal_safe(text))
         if len(text) > _ITEM_NAME_DISPLAY_MAX:
             text = text[:_ITEM_NAME_DISPLAY_MAX] + "…"
-        return escape(text)
+        return markup_literal(text)
 
     def _render_items(self) -> None:
         table = self.query_one("#vault_table", DataTable)
@@ -1081,10 +1082,10 @@ class VaultScreen(Screen):
         for row in self._items:
             table.add_row(
                 self._item_name_cell(row),
-                escape(self.scrub_for_display(row.get("type") or "unsupported")),
+                markup_literal(self.scrub_for_display(row.get("type") or "unsupported")),
                 str(row.get("revision") or ""),
-                escape(self.scrub_for_display(row.get("public_fingerprint") or "")),
-                escape(self.scrub_for_display(row.get("item_id") or "")),
+                markup_literal(self.scrub_for_display(row.get("public_fingerprint") or "")),
+                markup_literal(self.scrub_for_display(row.get("item_id") or "")),
             )
 
     def _render_exposures(self) -> None:
@@ -1092,26 +1093,26 @@ class VaultScreen(Screen):
         table.clear(columns=True); table.add_columns("Subject", "Reason", "Note", "Item ID", "Exposure ID")
         for row in self._exposures:
             note = "Key replaced in vault; old key may still be on servers" if row.get("key_replaced") is True else ""
-            table.add_row(escape(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), escape(self.scrub_for_display(row.get("reason") or "")), note, escape(self.scrub_for_display(row.get("item_id") or "")), escape(self.scrub_for_display(row.get("exposure_id") or "")))
+            table.add_row(markup_literal(self.scrub_for_display(row.get("subject") or row.get("public_fingerprint") or "")), markup_literal(self.scrub_for_display(row.get("reason") or "")), note, markup_literal(self.scrub_for_display(row.get("item_id") or "")), markup_literal(self.scrub_for_display(row.get("exposure_id") or "")))
 
     def _render_rotation(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Server", "Status", "Detail")
         for host in self._rotation_hosts:
-            table.add_row(escape(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), escape(self.scrub_for_display(host.get("status") or "unknown")), escape(self.scrub_for_display(host.get("error") or "")))
+            table.add_row(markup_literal(self.scrub_for_display(host.get("server_id") or host.get("server") or "")), markup_literal(self.scrub_for_display(host.get("status") or "unknown")), markup_literal(self.scrub_for_display(host.get("error") or "")))
 
     def _render_devices(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Name", "Platform", "Status", "Device ID")
         for row in self._devices:
-            table.add_row(escape(self.scrub_for_display(row.get("name") or "")), escape(self.scrub_for_display(row.get("platform") or "")), escape(self.scrub_for_display(row.get("status") or "")), escape(self.scrub_for_display(row.get("device_id") or "")))
+            table.add_row(markup_literal(self.scrub_for_display(row.get("name") or "")), markup_literal(self.scrub_for_display(row.get("platform") or "")), markup_literal(self.scrub_for_display(row.get("status") or "")), markup_literal(self.scrub_for_display(row.get("device_id") or "")))
 
     def _render_roster(self) -> None:
         table = self.query_one("#vault_table", DataTable)
         table.clear(columns=True); table.add_columns("Member", "Role", "Status", "Fingerprint")
         for member in self._roster:
             identity = member.get("identity") if isinstance(member.get("identity"), Mapping) else {}
-            table.add_row(escape(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), escape(self.scrub_for_display(member.get("role") or "")), escape(self.scrub_for_display(member.get("status") or "")), escape(self.scrub_for_display(identity.get("fingerprint") or "")))
+            table.add_row(markup_literal(self.scrub_for_display(member.get("display_name") or member.get("user_id") or "")), markup_literal(self.scrub_for_display(member.get("role") or "")), markup_literal(self.scrub_for_display(member.get("status") or "")), markup_literal(self.scrub_for_display(identity.get("fingerprint") or "")))
 
     def _set_identity_state(self, state: str) -> None:
         """Make only the safe next identity action available for this state."""
@@ -1568,8 +1569,8 @@ class VaultScreen(Screen):
     def _delete_key_confirmation(self, item: Mapping[str, Any], usage: Mapping[str, Any]) -> ConfirmActionScreen:
         name = usage.get("name") or self._key_names.get(str(item["item_id"])) or "(name unknown)"
         fingerprint = usage.get("fingerprint") or item.get("public_fingerprint") or ""
-        name = escape(self.scrub_for_display(terminal_safe(name)))
-        fingerprint = escape(self.scrub_for_display(terminal_safe(fingerprint)))
+        name = markup_literal(self.scrub_for_display(terminal_safe(name)))
+        fingerprint = markup_literal(self.scrub_for_display(terminal_safe(fingerprint)))
         return ConfirmActionScreen(
             "Delete vault key", f"Delete the vault key {name}?",
             [
@@ -1660,7 +1661,7 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Exposure resolution failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Exposure resolved: {escape(str(result))}")
+        self._status(f"Exposure resolved: {result}")
 
     def action_rotate_exposure(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1904,7 +1905,7 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Recovery-key rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Recovery key replaced: {escape(str(result))}")
+        self._status(f"Recovery key replaced: {result}")
 
     def action_reset(self) -> None:
         if not self._allows_identity_action("ready"):
@@ -1935,7 +1936,7 @@ class VaultScreen(Screen):
                     status = await _invoke(service, "poll_reset_identity")
                     if isinstance(status, Mapping) and status.get("state") == "confirmed":
                         self._status(
-                            f"Identity reset confirmed for device {escape(str(status.get('device_id') or ''))}."
+                            f"Identity reset confirmed for device {str(status.get('device_id') or '')}."
                         )
                         return
                     await asyncio.sleep(_approval_poll_delay(service, attempt))
@@ -2232,4 +2233,4 @@ class VaultScreen(Screen):
         except Exception as exc:
             self.app.notify(f"Vault rotation failed ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return
-        self._status(f"Vault rotation finished: {escape(str(result))}")
+        self._status(f"Vault rotation finished: {result}")
