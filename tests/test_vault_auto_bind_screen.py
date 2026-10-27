@@ -872,3 +872,36 @@ async def test_team_status_wording_when_none_can_get_key(count: int) -> None:
         else:
             assert "can get a vault key automatically" in demo_status
 
+
+@pytest.mark.asyncio
+async def test_compact_layout_at_100x30_with_twelve_rows() -> None:
+    instances = [
+        {"id": f"i-{i}", "name": f"srv-{i}", "public_ip": f"198.51.100.{i}"}
+        for i in range(12)
+    ]
+    service = _Service()
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: len(screen._rows) == 12)
+        assert screen.has_class("-short")
+        assert screen.has_class("-narrow")
+
+        intro = screen.query_one("#auto_bind_intro", Static)
+        assert intro.size.height == 0 or not intro.visible
+
+        select = screen.query_one("#auto_bind_vault_select", Select)
+        assert select.visible and select.size.height == 1
+
+        table = screen.query_one("#auto_bind_table", DataTable)
+        assert table.visible and table.size.height >= 8
+
+        status = screen.query_one("#auto_bind_status", Static)
+        assert status.visible and status.size.height >= 1
+
+        actions = screen.query_one("#auto_bind_actions")
+        assert actions.visible
+        for btn in actions.query(Button):
+            assert btn.visible and btn.size.height >= 1
+
+

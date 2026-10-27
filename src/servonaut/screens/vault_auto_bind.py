@@ -201,6 +201,7 @@ class VaultAutoBindScreen(Screen):
                     prompt="Select vault…",
                     id="auto_bind_vault_select",
                     allow_blank=False,
+                    compact=True,
                 )
                 yield Static(INTRO, id="auto_bind_intro", markup=False)
                 yield BusyIndicator(id="auto_bind_busy")
@@ -239,7 +240,7 @@ class VaultAutoBindScreen(Screen):
     def _sync_compact_layout(self) -> None:
         """Two buttons to a row once four labels no longer fit; no intro on a short terminal."""
         self.set_class(self.size.width <= 110, "-narrow")
-        self.set_class(self.size.height <= 25, "-short")
+        self.set_class(self.size.height <= 32, "-short")
 
     # ------------------------------------------------------------------
     # Display helpers
