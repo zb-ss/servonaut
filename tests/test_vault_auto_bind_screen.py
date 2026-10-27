@@ -443,6 +443,13 @@ async def test_review_modal_fits_narrow_terminal() -> None:
             region = app.screen.query_one(selector).region
             assert region.width > 0 and region.height > 0 and screen.contains_region(region), (selector, region)
 
+        source_widget = app.screen.query_one(".auto_bind_review_source", Static)
+        source_text = str(source_widget.render())
+        assert "Verification:" in source_text
+        assert "Source:" not in source_text
+        for line in source_text.splitlines():
+            assert line.startswith("  ")
+
 
 @pytest.mark.asyncio
 async def test_team_vault_picker_filters_administered_vaults() -> None:

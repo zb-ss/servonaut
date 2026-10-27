@@ -126,7 +126,10 @@ class VaultAutoBindReviewModal(ModalScreen[bool]):
                                     fp = "unknown fingerprint"
                                 yield Static(f"  {escape(family)} · {escape(self._scrub(fp))}")
                         source = row.verification_source or ("verified by AWS console output" if row.verified else "trusted by this computer")
-                        yield Static(f"  [dim]Source: {escape(self._scrub(source))}[/dim]")
+                        if not row.verified or "not verified" in source:
+                            yield Static(f"  [dim]Verification:[/dim]\n    [dim]{escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source")
+                        else:
+                            yield Static(f"  [dim]Source: {escape(self._scrub(source))}[/dim]", classes="auto_bind_review_source")
 
             yield Checkbox(
                 "I checked these fingerprints: pin them",
