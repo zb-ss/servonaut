@@ -359,9 +359,39 @@ VaultAutoBindScreen.-narrow #auto_bind_content {
     padding: 0 1;
 }
 
+VaultAutoBindScreen.-narrow #auto_bind_title {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_vault_select {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_intro {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_status {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_table {
+    min-height: 4;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_detail {
+    margin-top: 0;
+    max-height: 2;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_trust {
+    margin-top: 0;
+}
+
 VaultAutoBindScreen.-narrow #auto_bind_actions {
     grid-size: 2;
     grid-columns: 1fr 1fr;
+    margin-top: 0;
 }
 
 /* Modals for Auto-bind bulk host key fetching and review */

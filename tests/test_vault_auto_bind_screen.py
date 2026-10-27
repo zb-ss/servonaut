@@ -60,6 +60,9 @@ class _Service:
     async def vault_choices(self, *, team=None):
         return self.vaults
 
+    async def list_vaults(self):
+        return self.vaults
+
     async def ssh_key_choices(self, **kwargs):
         self.key_calls.append(kwargs)
         return self.keys
@@ -87,6 +90,7 @@ class _Host(App):
         self.vault_command_service = service
         self.vault_available = True
         self.instances = list(SERVERS if instances is None else instances)
+        self._instances_pristine = list(self.instances)
         super().__init__()
 
     def on_mount(self) -> None:
@@ -220,6 +224,8 @@ async def test_the_review_fits_a_narrow_terminal() -> None:
         await pilot.pause()
         screen = app.screen.region
         for selector in (
+            "#auto_bind_vault_select",
+            "#auto_bind_intro",
             "#auto_bind_table",
             "#auto_bind_trust",
             "#auto_bind_apply",
@@ -459,9 +465,29 @@ async def test_team_vault_picker_filters_administered_vaults() -> None:
             "team": {"slug": "sales", "role": "admin"},
             "my_grant": None,
         },
+        {
+            "vault_id": "tv-5",
+            "kind": "team",
+            "team": {"slug": "support", "role": "admin"},  # stray role: "admin" on vault
+            "my_grant": {"sealed_key": "s5"},
+        },
+        {
+            "vault_id": "tv-6",
+            "kind": "team",
+            "team": {"slug": "viewers", "role": "viewer"},
+            "my_grant": {"sealed_key": "s6"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.1"},
+        {"id": "s-devs", "name": "dev-box", "hostname": "198.51.100.2", "is_shared": True, "team_slug": "devs", "team_role": "admin"},
+        {"id": "s-ops", "name": "ops-box", "hostname": "198.51.100.3", "is_shared": True, "team_slug": "ops", "team_role": "owner"},
+        {"id": "s-mkt", "name": "mkt-box", "hostname": "198.51.100.4", "is_shared": True, "team_slug": "marketing", "team_role": "member"},
+        {"id": "s-sup", "name": "sup-box", "hostname": "198.51.100.5", "is_shared": True, "team_slug": "support", "team_role": "member"},
+        {"id": "s-view", "name": "view-box", "hostname": "198.51.100.6", "is_shared": True, "team_slug": "viewers", "team_role": "viewer"},
     ]
     service = _Service(vaults=vaults)
-    app = _Host(service)
+    app = _Host(service, instances=instances)
     async with app.run_test(size=(160, 50)) as pilot:
         await wait_until(lambda: _rows(app))
         select = app.screen.query_one("#auto_bind_vault_select", Select)
@@ -471,6 +497,8 @@ async def test_team_vault_picker_filters_administered_vaults() -> None:
         assert "team:ops" in option_values
         assert "team:marketing" not in option_values
         assert "team:sales" not in option_values
+        assert "team:support" not in option_values
+        assert "team:viewers" not in option_values
         assert select.value == "personal"
 
 
@@ -487,7 +515,7 @@ async def test_switching_vault_picker_loads_team_shared_servers() -> None:
     ]
     instances = [
         {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.1"},
-        {"id": "s-shared", "name": "dev-box", "hostname": "198.51.100.2", "is_shared": True, "team_slug": "devs", "login": "ubuntu"},
+        {"id": "s-shared", "name": "dev-box", "hostname": "198.51.100.2", "is_shared": True, "team_slug": "devs", "team_role": "admin", "login": "ubuntu"},
     ]
     keys_personal = [{"item_id": "k1", "label": "web-own", "name": "web-own.pem", "fingerprint": "SHA256:1"}]
     keys_team = [{"item_id": "k2", "label": "dev-box", "name": "dev-box.pem", "fingerprint": "SHA256:2"}]
@@ -512,6 +540,65 @@ async def test_switching_vault_picker_loads_team_shared_servers() -> None:
         # Now team shared servers load
         await wait_until(lambda: any("dev-box" in r for r in _rows(app)))
         assert not any("web-own" in r for r in _rows(app))
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_scrubs_team_name_everywhere() -> None:
+    from servonaut.services.redaction_service import RedactionService
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "secret-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.2"},
+        {
+            "id": "s-1",
+            "name": "shared-1",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "secret-team",
+            "team_role": "admin",
+            "team_name": "Top Secret Engineering",
+            "login": "ubuntu",
+        },
+    ]
+    keys = [
+        {"item_id": "k0", "label": "web-own", "name": "web-own.pem", "fingerprint": "SHA256:0"},
+        {"item_id": "k1", "label": "shared-1", "name": "shared-1.pem", "fingerprint": "SHA256:1"},
+    ]
+    service = _Service(vaults=vaults, keys=keys)
+    app = _Host(service, instances=instances)
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        for opt in select._options:
+            label_str = str(opt[0])
+            assert "Top Secret Engineering" not in label_str
+
+        select.value = "team:secret-team"
+        await wait_until(lambda: app.screen._team == "secret-team" and not app.screen._busy.is_busy)
+        intro = str(app.screen.query_one("#auto_bind_intro", Static).render())
+        assert "Top Secret Engineering" not in intro
+
+        modal = VaultAutoBindReviewModal(
+            [AutoBindRow(instance=instances[0], status=FETCHED, verified=True)],
+            server_name_fn=app.screen._server_name,
+            scrub_fn=app.screen.scrub_for_display,
+            team="secret-team",
+            team_name="Top Secret Engineering",
+        )
+        app.push_screen(modal)
+        await wait_until(lambda: bool(app.screen.query("#auto_bind_review_team_note")))
+        note = str(app.screen.query_one("#auto_bind_review_team_note", Static).render())
+        assert "Top Secret Engineering" not in note
 
 
 @pytest.mark.asyncio
