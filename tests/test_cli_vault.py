@@ -1540,6 +1540,27 @@ def test_auto_bind_team_refuses_member_role(monkeypatch, capsys) -> None:
     assert service.bind.call_count == 0
 
 
+def test_auto_bind_team_list_teams_failure_uses_failure_reason(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from servonaut.services.api_client import APIError
+
+    service = _AutoBindService()
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(side_effect=APIError(code="forbidden", message="Forbidden", status=403))
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--yes"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Could not load your teams (HTTP 403, forbidden)." in err
+
+
 def test_auto_bind_team_unknown_team_returns_error(monkeypatch, capsys) -> None:
     from unittest.mock import AsyncMock, MagicMock
 

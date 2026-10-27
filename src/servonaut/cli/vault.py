@@ -640,7 +640,7 @@ async def _load_team_shared_servers(
     try:
         teams = await team_svc.list_teams()
     except Exception as exc:
-        print(f"Could not load your teams ({exc}).", file=sys.stderr)
+        print(f"Could not load your teams ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR, [], None
 
     from servonaut.cli.team import _find_team
@@ -659,11 +659,11 @@ async def _load_team_shared_servers(
         from servonaut.services.shared_servers import load_shared_servers
         res = await load_shared_servers(team_svc, teams=[team_rec])
         if res.problems:
-            print(f"Could not load shared servers for {terminal_safe(team)}: {res.problems[0]}.", file=sys.stderr)
+            print(f"Could not load shared servers for {terminal_safe(team)}: {terminal_safe(res.problems[0])}.", file=sys.stderr)
             return _EXIT_ERROR, [], team_rec
         return _EXIT_OK, list(res.rows), team_rec
     except Exception as exc:
-        print(f"Could not load shared servers for team {terminal_safe(team)} ({exc}).", file=sys.stderr)
+        print(f"Could not load shared servers for team {terminal_safe(team)} ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR, [], team_rec
 
 
