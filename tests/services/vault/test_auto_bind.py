@@ -690,7 +690,7 @@ async def test_fetch_host_keys_aws_fingerprints_mismatch_message() -> None:
     ("exc", "expected_source"),
     [
         (
-            Exception("ClientError: An error occurred (AccessDenied) when calling ec2:GetConsoleOutput for arn:aws:iam::123456789012:role/admin"),
+            Exception("ClientError: An error occurred (AccessDenied) when calling ec2:GetConsoleOutput for arn:aws:iam::123456789012:role/admin"),  # leak-guard:allow (AWS documentation account id)
             "not verified: no permission to read the console output (ec2:GetConsoleOutput)",
         ),
         (
@@ -706,7 +706,7 @@ async def test_fetch_host_keys_aws_fingerprints_mismatch_message() -> None:
             "not verified: AWS throttled the console read; fetch again later",
         ),
         (
-            Exception("InternalError: Failed to fetch console output for arn:aws:ec2:us-east-1:123456789012:instance/i-bad"),
+            Exception("InternalError: Failed to fetch console output for arn:aws:ec2:us-east-1:123456789012:instance/i-bad"),  # leak-guard:allow (AWS documentation account id)
             "not verified: could not read the console output",
         ),
     ],
