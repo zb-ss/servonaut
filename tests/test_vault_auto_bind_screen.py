@@ -584,6 +584,7 @@ async def test_demo_mode_scrubs_team_name_everywhere() -> None:
             assert "Top Secret Engineering" not in label_str
 
         select.value = "team:secret-team"
+        await pilot.pause()
         await wait_until(lambda: app.screen._team == "secret-team" and not app.screen._busy.is_busy)
         intro = str(app.screen.query_one("#auto_bind_intro", Static).render())
         assert "Top Secret Engineering" not in intro
@@ -596,6 +597,7 @@ async def test_demo_mode_scrubs_team_name_everywhere() -> None:
             team_name="Top Secret Engineering",
         )
         app.push_screen(modal)
+        await pilot.pause()
         await wait_until(lambda: bool(app.screen.query("#auto_bind_review_team_note")))
         note = str(app.screen.query_one("#auto_bind_review_team_note", Static).render())
         assert "Top Secret Engineering" not in note
