@@ -1660,7 +1660,7 @@ class VaultCommandService:
                 public_key = self._public_key_from_private(bytes(private_bytes), passphrase)
             except ValueError as exc:
                 raise VaultUserError(
-                    "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key"
+                    "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key, unlocked or with its passphrase"
                 ) from exc
             fingerprint = crypto.ssh_public_fingerprint(public_key)
             item_id = str(uuid.uuid4())

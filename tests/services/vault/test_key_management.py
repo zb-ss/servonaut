@@ -279,7 +279,7 @@ async def test_unreadable_import_has_actionable_error_and_wipes_private_buffer(s
     with pytest.raises(VaultUserError) as caught:
         await service.import_keys(source=source, vault_id="vault", private_key=b"unreadable key material")
     assert str(caught.value) == (
-        "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key"
+        "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key, unlocked or with its passphrase"
     )
     assert isinstance(caught.value.__cause__, ValueError)
     assert buffers and buffers[0] == bytearray(len(b"unreadable key material"))
@@ -332,3 +332,17 @@ async def test_real_aws_binding_read_failure_still_blocks_delete_beside_unsuppor
     assert caught.value.unchecked == ["web-1"]
     service._personal_binding.assert_awaited_once_with("aws", "i-0001")
     service.items.delete_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_encrypted_import_without_passphrase_explains_unlocking(service) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import BestAvailableEncryption, Encoding, PrivateFormat
+
+    encrypted = Ed25519PrivateKey.generate().private_bytes(
+        Encoding.PEM, PrivateFormat.OpenSSH, BestAvailableEncryption(b"test passphrase"),
+    )
+    with pytest.raises(VaultUserError, match="OpenSSH private key, unlocked or with its passphrase") as caught:
+        await service.import_keys(source="bitwarden", vault_id="vault", private_key=encrypted)
+    assert isinstance(caught.value.__cause__, ValueError)
+    service.items.write_item.assert_not_awaited()

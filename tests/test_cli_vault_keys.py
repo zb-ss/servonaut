@@ -160,7 +160,7 @@ def test_bitwarden_import_reports_unreadable_material_without_raw_exception(serv
                         MagicMock(return_value=("unreadable key material", "web-1")))
     assert _run("import", "bitwarden", "--vault", VAULT_ID, "--item", "bw-item") == 1
     output = capsys.readouterr()
-    assert "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key" in output.err
+    assert "this is not an SSH private key Servonaut can read: it must be an OpenSSH private key, unlocked or with its passphrase" in output.err
     assert "ValueError" not in output.err
     assert "unreadable key material" not in output.out + output.err
     core.items.write_item.assert_not_awaited()
