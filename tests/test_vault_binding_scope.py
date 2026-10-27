@@ -461,3 +461,28 @@ async def test_team_binding_reply_cannot_replace_cached_credentials_with_an_unus
         assert "credential_binding" not in app.instances[0]
         assert app.notices[-1][0].startswith("Vault key bound. Team key for team-a:")
         app.vault_command_service.bind.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scope_dialog_warns_when_replacing_existing_team_key() -> None:
+    # team-a has no previous binding; team-b has an existing vault binding
+    rows = [
+        _own(),
+        _shared("team-a", "admin"),
+        _shared("team-b", "admin", credential_binding=_signed_binding("shared-team-b")),
+    ]
+    app = _Host(rows)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start(pilot)
+        assert type(app.screen).__name__ == "VaultBindingScopeModal"
+        choices = app.screen.query_one(OptionList)
+        assert choices.option_count == 3  # team-a, team-b, Just me
+
+        opt_a = choices.get_option_at_index(0)
+        assert "Team members connect to this server with this key." in opt_a.prompt.plain
+        assert "Replaces the key" not in opt_a.prompt.plain
+
+        opt_b = choices.get_option_at_index(1)
+        assert "Replaces the key everyone in team-b uses now." in opt_b.prompt.plain
+        assert "Team members connect to this server with this key." not in opt_b.prompt.plain
+

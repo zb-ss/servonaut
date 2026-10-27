@@ -135,10 +135,14 @@ class VaultBindingScopeModal(ModalScreen[Optional[str]]):
         for row in self._teams:
             name = scrub_for_display(self.app, row.get("team_name") or row["team_slug"])
             allowed = _can_bind_team(row)
-            reason = (
-                "Team members connect to this server with this key."
-                if allowed else "Only a team owner or admin can set the team's key."
-            )
+            binding = row.get("credential_binding")
+            has_vault_binding = isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE
+            if not allowed:
+                reason = "Only a team owner or admin can set the team's key."
+            elif has_vault_binding:
+                reason = f"Replaces the key everyone in {name} uses now."
+            else:
+                reason = "Team members connect to this server with this key."
             option = Option(
                 Text(f"Everyone in team {name}\n{reason}"),
                 disabled=not allowed,
