@@ -7,6 +7,7 @@ import base64
 import json
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -14,11 +15,14 @@ from nacl.signing import SigningKey
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
+    NoEncryption,
+    PrivateFormat,
     PublicFormat,
     load_ssh_public_identity,
 )
 
 from e2e.harness.fake_cloud.routes_vault import TEAM_ID
+from e2e.journeys.vault.test_native_import import _native_service
 from servonaut.services.vault.ca_audit import CaIssuanceAuditor
 from servonaut.services.vault.crypto import request_message
 from servonaut.services.vault.identity_store import LocalDevice, LocalIdentity
@@ -176,3 +180,43 @@ def test_fake_item_metadata_lists_only_the_items_team_server_bindings(fake_cloud
     cloud._bindings[("team", server_id)]["vault_item_id"] = "other"
     assert cloud.item_payload(item)["bound_server_ids"] == []
     assert "bound_server_ids" not in item
+
+
+@pytest.mark.asyncio
+async def test_vault_count_excludes_deleted_items_but_history_keeps_them(fake_cloud, account_home, monkeypatch) -> None:
+    home = account_home("vault-live-count")
+    service = _native_service(fake_cloud, home.home, monkeypatch)
+    vault = await service.create_vault(team=None, name="Personal vault", grant_policy="auto")
+    vault_id = vault["vault_id"]
+    deleted_id, live_id = str(uuid4()), str(uuid4())
+    for index, item_id in enumerate((deleted_id, live_id), 1):
+        await service.items.write_item(vault_id, item_id, "secret", {"name": f"Secret {index}"}, expected_revision=0)
+    assert (await service.list_vaults())[0]["counts"]["items"] == 2
+
+    tombstone = await service.items.delete_item(vault_id, deleted_id, 1)
+    assert tombstone["deleted_at"] and tombstone["revision"] == 2
+    live = await service.list_items(vault_id=vault_id)
+    assert [item["item_id"] for item in live["data"]] == [live_id]
+    assert (await service.list_vaults())[0]["counts"]["items"] == 1
+    history = await service.list_items(vault_id=vault_id, include_deleted=True)
+    assert {item["item_id"] for item in history["data"]} == {deleted_id, live_id}
+    assert next(item for item in history["data"] if item["item_id"] == deleted_id)["deleted_at"]
+
+
+@pytest.mark.asyncio
+async def test_vault_count_excludes_resolved_exposures_but_history_keeps_them(fake_cloud, account_home, monkeypatch) -> None:
+    home = account_home("vault-open-count")
+    service = _native_service(fake_cloud, home.home, monkeypatch)
+    vault = await service.create_vault(team=None, name="Personal vault", grant_policy="auto")
+    vault_id = vault["vault_id"]
+    private_key = Ed25519PrivateKey.generate().private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+    item = await service.import_keys(source="ssh", vault_id=vault_id, path="id_ed25519", private_key=private_key)
+    exposure_id = fake_cloud.vault.open_exposure(vault_id, item["item_id"], public_fingerprint=item["public_fingerprint"])
+    assert (await service.list_vaults())[0]["counts"]["open_exposures"] == 1
+
+    resolved = await service.resolve_exposure(vault_id=vault_id, exposure_id=exposure_id, resolution="accepted_risk")
+    assert resolved["status"] == "resolved"
+    assert (await service.list_exposures(vault_id=vault_id))["data"] == []
+    assert (await service.list_vaults())[0]["counts"]["open_exposures"] == 0
+    history = await service.rotation.list_exposures(vault_id, status="all")
+    assert [(row["exposure_id"], row["status"]) for row in history["data"]] == [(exposure_id, "resolved")]

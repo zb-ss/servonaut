@@ -756,11 +756,16 @@ class VaultCloud:
         role = self._role(vault, user_id)
         write = role in {"owner", "admin"}
         roster = self._roster(vault)
+        live_item_count = sum(not item.get("deleted_at") for item in self._items.get(vault["vault_id"], {}).values())
+        open_exposure_count = sum(
+            exposure.get("status", "open") == "open"
+            for exposure in self._exposures.get(vault["vault_id"], [])
+        )
         answer = {key: copy.deepcopy(vault[key]) for key in ("vault_id", "kind", "scope", "team", "owner_user_id", "name", "grant_policy", "current_version", "rotation", "created_at", "updated_at")}
         answer.update({"versions": copy.deepcopy(vault["versions"]), "my_grant": copy.deepcopy(vault["grants"].get(user_id)), "my_role": role,
                        "permissions": {"read_items": role in {"owner", "admin", "member"}, "write_items": write,
                                        "grant": write, "rotate": write, "manage": write, "view_exposures": write},
-                       "counts": {"items": len(self._items.get(vault["vault_id"], {})), "open_exposures": len(self._exposures.get(vault["vault_id"], [])),
+                       "counts": {"items": live_item_count, "open_exposures": open_exposure_count,
                                   "pending_recipients": sum(entry["status"] == "awaiting_grant" for entry in roster)},
                        "poll_after_seconds": 300, "access_recovery": None})
         if vault["kind"] == "team":
