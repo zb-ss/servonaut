@@ -178,10 +178,11 @@ class VaultAutoBindScreen(Screen):
         self._vault_id: Optional[str] = None
         self._team: Optional[str] = None
         self._team_name: Optional[str] = None
+        self._team_role: Optional[str] = None
         self._selected_target: str = "personal"
         self._has_personal_vault: bool = True
         self._team_vault_options_raw: list[tuple[str, str, str]] = []
-        self._team_vault_map: dict[str, tuple[str, str, str]] = {}
+        self._team_vault_map: dict[str, tuple[str, str, str, str]] = {}
         self._vault_options: list[tuple[str, str]] = [("Personal vault: binds for you", "personal")]
         # Real record (by identity) -> the row as the instance list shows it,
         # so demo mode shows its stand-in names while the real ones are bound.
@@ -462,7 +463,7 @@ class VaultAutoBindScreen(Screen):
                 if slug:
                     shared_by_slug.setdefault(str(slug), []).append(row)
 
-            team_vault_map: dict[str, tuple[str, str, str]] = {}
+            team_vault_map: dict[str, tuple[str, str, str, str]] = {}
             team_vault_options_raw: list[tuple[str, str, str]] = []
             for v in vaults:
                 if v.get("kind") == "team" and v.get("my_grant") is not None:
@@ -473,12 +474,13 @@ class VaultAutoBindScreen(Screen):
                     team_shared = shared_by_slug.get(slug, [])
                     if not team_shared:
                         continue
-                    role = str(team_shared[0].get("team_role") or "").lower()
+                    real_role = str(team_shared[0].get("team_role") or "")
+                    role = real_role.lower()
                     if role in {"owner", "admin"}:
                         raw_name = str(team_shared[0].get("team_name") or team_info.get("name") or slug)
                         key = f"team:{slug}"
                         team_vault_options_raw.append((key, slug, raw_name))
-                        team_vault_map[key] = (str(v["vault_id"]), slug, raw_name)
+                        team_vault_map[key] = (str(v["vault_id"]), slug, raw_name, real_role)
 
             self._has_personal_vault = bool(personal_vault_id)
             self._team_vault_options_raw = team_vault_options_raw
@@ -510,8 +512,9 @@ class VaultAutoBindScreen(Screen):
                 self._vault_id = personal_vault_id
                 self._team = None
                 self._team_name = None
+                self._team_role = None
             else:
-                self._vault_id, self._team, self._team_name = self._team_vault_map[self._selected_target]
+                self._vault_id, self._team, self._team_name, self._team_role = self._team_vault_map[self._selected_target]
 
             self._sync_intro()
 
@@ -541,7 +544,22 @@ class VaultAutoBindScreen(Screen):
                     if team_svc is not None:
                         try:
                             from servonaut.services.shared_servers import load_shared_servers
-                            team_rec = {"slug": self._team, "name": self._team_name or self._team, "role": "admin"}
+                            team_rec = None
+                            if hasattr(team_svc, "list_teams"):
+                                try:
+                                    known_teams = await team_svc.list_teams()
+                                    for t in known_teams or []:
+                                        if isinstance(t, Mapping) and t.get("slug") == self._team:
+                                            team_rec = dict(t)
+                                            break
+                                except Exception:
+                                    pass
+                            if team_rec is None:
+                                team_rec = {
+                                    "slug": self._team,
+                                    "name": self._team_name or self._team,
+                                    "role": self._team_role or "admin",
+                                }
                             res = await load_shared_servers(team_svc, teams=[team_rec])
                             if not res.problems:
                                 team_servers = list(res.rows)

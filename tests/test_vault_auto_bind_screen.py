@@ -993,4 +993,40 @@ async def test_team_auto_bind_bind_and_reload_shows_has_team_key(monkeypatch) ->
         assert apply_btn_after.disabled
 
 
+@pytest.mark.asyncio
+async def test_team_auto_bind_fresh_read_preserves_real_team_role() -> None:
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "leadership-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {
+            "id": "s-1",
+            "name": "leader-box",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "leadership-team",
+            "team_role": "owner",
+            "team_name": "Leadership Team",
+            "login_user": "ubuntu",
+        },
+    ]
+    keys = [{"item_id": "k1", "label": "leader-box", "name": "leader-box.pem", "fingerprint": "SHA256:1"}]
+    service = _Service(vaults=vaults, keys=keys)
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=(160, 50)) as pilot:
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:leadership-team"
+        await wait_until(lambda: app.screen._team == "leadership-team" and not app.screen._busy.is_busy)
+
+        # The planned rows carry the team's real role ("owner"), not a fabricated "admin"
+        assert len(app.screen._rows) == 1
+        assert app.screen._rows[0].instance.get("team_role") == "owner"
+
+
 
