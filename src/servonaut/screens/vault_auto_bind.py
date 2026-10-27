@@ -218,6 +218,8 @@ class VaultAutoBindScreen(Screen):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "auto_bind_vault_select":
+            if event.value != event.select.value:
+                return
             val = str(event.value) if event.value is not Select.NULL else "personal"
             if val != self._selected_target:
                 self._selected_target = val
@@ -442,10 +444,14 @@ class VaultAutoBindScreen(Screen):
                 return
 
             select = self.query_one("#auto_bind_vault_select", Select)
-            select.set_options(options)
+            current_options = [(str(opt[0]), opt[1]) for opt in select._options]
+            new_options = [(str(opt[0]), opt[1]) for opt in options]
+            if current_options != new_options:
+                select.set_options(options)
             if self._selected_target not in {opt[1] for opt in options}:
                 self._selected_target = options[0][1]
-            select.value = self._selected_target
+            if select.value != self._selected_target:
+                select.value = self._selected_target
 
             if self._selected_target == "personal":
                 if not personal_vault_id:
