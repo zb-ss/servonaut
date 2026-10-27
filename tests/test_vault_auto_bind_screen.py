@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from textual.app import App
@@ -1027,6 +1028,55 @@ async def test_team_auto_bind_fresh_read_preserves_real_team_role() -> None:
         # The planned rows carry the team's real role ("owner"), not a fabricated "admin"
         assert len(app.screen._rows) == 1
         assert app.screen._rows[0].instance.get("team_role") == "owner"
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_matches_shared_server_through_own_server_key_pair() -> None:
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "ops-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    own_instance = {
+        "id": "i-own1",
+        "name": "edge-1",
+        "key_name": "ops-key",
+        "public_ip": "198.51.100.1",
+    }
+    shared_instance = {
+        "id": "s-1",
+        "instance_id": "i-own1",
+        "name": "server-1",
+        "hostname": "198.51.100.1",
+        "is_shared": True,
+        "team_slug": "ops-team",
+        "team_role": "owner",
+        "team_name": "Ops Team",
+        "login_user": "ubuntu",
+    }
+    keys = [{"item_id": "k1", "label": "ops-key", "name": "ops-key.pem", "fingerprint": "SHA256:1"}]
+    service = _Service(vaults=vaults, keys=keys)
+    app = _Host(service, instances=[own_instance, shared_instance])
+    team_svc = AsyncMock()
+    team_svc.list_shared_servers = AsyncMock(return_value=[shared_instance])
+    app.team_service = team_svc
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:ops-team"
+        await wait_until(lambda: app.screen._team == "ops-team" and not app.screen._busy.is_busy)
+
+        assert len(app.screen._rows) == 1
+        row = app.screen._rows[0]
+        assert row.match is not None
+        assert row.match.name == "ops-key.pem"
+        assert row.match.matched_by == "key pair"
+
 
 
 

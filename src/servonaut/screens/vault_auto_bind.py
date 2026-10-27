@@ -22,6 +22,7 @@ from textual.widgets import Button, Checkbox, DataTable, Footer, Select, Static
 
 from servonaut.screens._busy_work import BusyWork
 from servonaut.screens._demo_resolve import connection_instance, display_text, replace_instances, team_rows
+from servonaut.services.shared_servers import is_shared_row
 from servonaut.services.vault import crypto
 from servonaut.services.vault.auto_bind import (
     FETCH_FAILED,
@@ -565,15 +566,18 @@ class VaultAutoBindScreen(Screen):
                                 team_servers = list(res.rows)
                         except Exception as exc:
                             logger.warning("Could not load fresh shared servers for team %s: %s", self._team, exc)
-                    if team_servers is None:
-                        team_servers = self._servers()
-                    else:
+                    all_servers = self._servers()
+                    own_servers = [s for s in all_servers if not is_shared_row(s)]
+                    if team_servers is not None:
                         for s in team_servers:
                             for shown in getattr(self.app, "instances", None) or []:
                                 if shown.get("is_shared") and (shown.get("team_slug"), str(shown.get("id"))) == (s.get("team_slug"), str(s.get("id"))):
                                     self._shown_as[id(s)] = shown
                                     break
-                    rows = await plan_auto_bind(service, team_servers, keys, team=self._team)
+                        plan_input = own_servers + team_servers
+                    else:
+                        plan_input = all_servers
+                    rows = await plan_auto_bind(service, plan_input, keys, team=self._team)
                 else:
                     rows = await plan_auto_bind(service, self._servers(), keys)
             except Exception as exc:

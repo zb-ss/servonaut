@@ -1576,6 +1576,51 @@ def test_auto_bind_team_loads_shared_servers_via_team_service(monkeypatch, capsy
     assert report["servers"][0]["server"] == "api-box"
 
 
+def test_auto_bind_team_matches_shared_server_through_own_key_pair(monkeypatch, capsys) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from servonaut.services.vault import auto_bind
+
+    shared_server = {
+        "id": "srv-1",
+        "instance_id": "i-own1",
+        "name": "server-1",
+        "hostname": "198.51.100.1",
+        "is_shared": True,
+        "team_slug": "devs",
+        "login": "ubuntu",
+    }
+    keys = [{"item_id": "k-ops", "label": "ops-key", "name": "ops-key.pem", "fingerprint": "SHA256:ops"}]
+
+    service = _AutoBindService()
+    service.list_vaults = AsyncMock(return_value=[
+        {"vault_id": "tv-devs", "kind": "team", "team": {"slug": "devs"}, "my_grant": {"sealed_key": "s1"}},
+    ])
+    service.ssh_key_choices = AsyncMock(return_value=keys)
+    service.teams = MagicMock()
+    service.teams.list_teams = AsyncMock(return_value=[{"slug": "devs", "role": "admin", "name": "Devs"}])
+    service.teams.list_shared_servers = AsyncMock(return_value=[shared_server])
+
+    own_server = {"id": "i-own1", "name": "edge-1", "key_name": "ops-key", "public_ip": "198.51.100.1"}
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [own_server])
+    monkeypatch.setattr(auto_bind, "trusted_host_keys", lambda inst, h, p: [service.HOST_KEY])
+
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--team", "devs", "--dry-run", "--json"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert len(report["servers"]) == 1
+    assert report["servers"][0]["server"] == "server-1"
+    assert report["servers"][0]["key_name"] == "ops-key.pem"
+    assert report["servers"][0]["matched_by"] == "key pair"
+
+
+
 def test_auto_bind_team_refuses_member_role(monkeypatch, capsys) -> None:
     from unittest.mock import AsyncMock, MagicMock
 

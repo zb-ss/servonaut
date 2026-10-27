@@ -687,10 +687,9 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
         exit_code, shared, team_rec = await _load_team_shared_servers(services, team)
         if exit_code != _EXIT_OK:
             return exit_code
-        existing_ids = {s.get("id") for s in servers if isinstance(s, Mapping)}
-        for s in shared:
-            if s.get("id") not in existing_ids:
-                servers.append(s)
+        from servonaut.services.shared_servers import is_shared_row
+        own_servers = [s for s in servers if not is_shared_row(s)]
+        servers = own_servers + list(shared)
 
     try:
         vaults = await _invoke(services, "list_vaults")
