@@ -1580,7 +1580,8 @@ class VaultScreen(Screen):
             self.run_worker(self._delete_vault_key(item, str(item["item_id"])), group="vault", exclusive=True)
 
     def _notify_key_in_use(self, refusal: VaultKeyInUse) -> None:
-        lines = [vault_failure_reason(refusal)]
+        reason = vault_failure_reason(refusal)
+        lines = [f"{reason[0].upper()}{reason[1:]}."]
         for label, names in (("Team servers", refusal.team_servers), ("Your servers", refusal.own_servers),
                              ("Could not check", refusal.unchecked)):
             if names:

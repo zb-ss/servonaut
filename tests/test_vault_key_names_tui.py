@@ -394,8 +394,8 @@ async def test_unchecked_only_refusal_has_retry_guidance_and_safe_grouped_names(
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _loaded(app, pilot)
         screen.action_delete_key()
-        await wait_until(lambda: any("could not check whether" in msg for msg, _ in app.notes))
-        notice, options = next((msg, opts) for msg, opts in app.notes if "could not check whether" in msg)
+        await wait_until(lambda: any("Could not check whether" in msg for msg, _ in app.notes))
+        notice, options = next((msg, opts) for msg, opts in app.notes if "Could not check whether" in msg)
         assert "Could not check: web-1[bold]" in notice
         assert "try again when they can be reached" in notice
         assert "\u202e" not in notice
@@ -523,3 +523,20 @@ async def test_delete_confirmation_shows_hostile_key_name_without_markup_crash(n
         assert to_content(bullet).plain == f"  • remove the key {terminal_safe(name)} (SHA256:fixture) from this vault"
         await pilot.press("escape")
         await wait_until(lambda: app.screen is screen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_servers, unchecked, sentence", [
+    (["web-1"], [], "This key is still used by the servers listed: give them another vault key first."),
+    ([], ["web-1"], "Could not check whether the servers listed still use this key: try again when they can be reached."),
+])
+async def test_key_in_use_notice_starts_with_a_complete_sentence(team_servers, unchecked, sentence: str) -> None:
+    app = _Host(_Service())
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _loaded(app, pilot)
+        refusal = VaultKeyInUse(team_servers=team_servers, own_servers=[], unchecked=unchecked)
+        screen._notify_key_in_use(refusal)
+        notice, options = app.notes[-1]
+        assert notice.splitlines()[0] == sentence
+        assert str(refusal)[0].islower()
+        assert options["markup"] is False
