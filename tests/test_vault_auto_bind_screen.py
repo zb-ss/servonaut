@@ -93,6 +93,13 @@ class _Host(App):
         self._instances_pristine = list(self.instances)
         super().__init__()
 
+    def redact_display_text(self, text: str) -> str:
+        if not getattr(self, "demo_mode", False) or getattr(self, "redaction_service", None) is None:
+            return text
+        from servonaut.services.report_scrubber import InventoryScrubber
+        scrubber = InventoryScrubber.for_fleet(self.redaction_service, self._instances_pristine or [])
+        return self.redaction_service.scrub_stream(scrubber.replace_known(text))
+
     def on_mount(self) -> None:
         self.push_screen(VaultAutoBindScreen())
 
@@ -657,3 +664,45 @@ async def test_fetch_progress_reports_1_of_2_then_2_of_2_never_3_of_2() -> None:
         assert any("1 of 2" in c for c in calls)
         assert any("2 of 2" in c for c in calls)
         assert not any("3 of 2" in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_team_slug_does_not_mangle_key_name_containing_slug() -> None:
+    from servonaut.services.redaction_service import RedactionService
+
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "personal"},
+        {
+            "vault_id": "tv-ops",
+            "kind": "team",
+            "team": {"slug": "ops"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {"id": "i-own", "name": "web-own", "public_ip": "198.51.100.2"},
+        {
+            "id": "s-1",
+            "name": "ops-box",
+            "hostname": "198.51.100.1",
+            "is_shared": True,
+            "team_slug": "ops",
+            "team_role": "admin",
+            "login": "ubuntu",
+        },
+    ]
+    service = _Service(vaults=vaults)
+    app = _Host(service, instances=instances)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await wait_until(lambda: _rows(app))
+        screen = app.screen
+
+        # Outside demo mode: key name is untouched
+        assert screen.scrub_for_display("ops-deploy.pem") == "ops-deploy.pem"
+
+        # In demo mode: display_text handles it without corrupting the key name with bare substring replacement
+        app.demo_mode = True
+        app.redaction_service = RedactionService()
+        shown = screen.scrub_for_display("ops-deploy.pem")
+        assert shown == "ops-deploy.pem"

@@ -236,29 +236,11 @@ class VaultAutoBindScreen(Screen):
     # ------------------------------------------------------------------
 
     def scrub_for_display(self, value: object) -> str:
-        """Demo-safe text: key names, logins, team names and addresses are hidden in demo mode."""
+        """Demo-safe text: key names, logins and addresses are hidden in demo mode."""
         text = str(value)
         if not getattr(self.app, "demo_mode", False):
             return text
-        redactor = getattr(self.app, "redaction_service", None)
-        if redactor is None:
-            return text
-        text = display_text(self.app, text)
-        shared = team_rows(self.app)
-        for row in shared:
-            for k in ("team_name", "team_slug"):
-                val = str(row.get(k) or "")
-                if val and val in text:
-                    fake = redactor.redact_account_label(val)
-                    if fake != val:
-                        text = text.replace(val, fake)
-        team_name = getattr(self, "_team_name", None)
-        if team_name and str(team_name) in text:
-            val = str(team_name)
-            fake = redactor.redact_account_label(val)
-            if fake != val:
-                text = text.replace(val, fake)
-        return str(redactor.scrub_stream(text))
+        return display_text(self.app, text)
 
     def refresh_after_demo_toggle(self) -> None:
         self._render_rows()
@@ -274,7 +256,10 @@ class VaultAutoBindScreen(Screen):
         return str(shown.get("name") or shown.get("id") or "server")
 
     def _render_rows(self) -> None:
-        table = self.query_one("#auto_bind_table", DataTable)
+        try:
+            table = self.query_one("#auto_bind_table", DataTable)
+        except Exception:
+            return
         cursor = table.cursor_row
         table.clear()
         for index, row in enumerate(self._rows):
