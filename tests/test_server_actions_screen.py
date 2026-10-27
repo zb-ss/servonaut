@@ -1275,7 +1275,7 @@ class TestUseVaultKeyForCustomServer:
         # "custom" and the server's name, whatever the label says.
         assert (kwargs["provider"], kwargs["instance_id"]) == ("custom", "Web 1")
         assert (kwargs["hostname"], kwargs["port"], kwargs["login"]) == ("192.0.2.10", 2222, "deploy")
-        assert app._notifications[-1]["message"] == "Vault key bound. SSH to this server now uses Servonaut Vault."
+        assert app._notifications[-1]["message"] == "Vault key bound. Your key: Servonaut Vault."
 
 
 # ---------------------------------------------------------------------------
