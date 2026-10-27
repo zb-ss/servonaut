@@ -2113,8 +2113,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             source = source if isinstance(source, str) and source else _VAULT_SOURCE
             label = credential_source_label(source) or "Servonaut Vault"
             if values["team"]:
-                binding = result if isinstance(result, dict) else {}
-                self._remember_team_binding(instance, {**binding, "source": source})
+                self._remember_team_binding(instance, result)
                 scope = _team_key_label(instance)
             else:
                 self._vault_binding_source = source
@@ -2155,9 +2154,19 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         return None
 
     def _remember_team_binding(
-        self, target: dict[str, Any], binding: dict[str, Any],
+        self, target: dict[str, Any], result: object,
     ) -> None:
         """Keep the team's row current without changing the own row's credential."""
+        if not isinstance(result, Mapping):
+            return
+        binding = result.get("credential_binding", result)
+        # This cache is authoritative for SSH: a write receipt must not replace it.
+        if (
+            not isinstance(binding, Mapping) or binding.get("source") != _VAULT_SOURCE
+            or binding.get("valid") is not True or not binding.get("signature")
+        ):
+            return
+        binding = dict(binding)
         rows = team_rows(self.app)
         target_id = (target.get("team_slug"), target.get("id"))
         for row in rows:

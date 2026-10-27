@@ -1,11 +1,13 @@
 """Use Vault Key distinguishes a personal key from each sharing team's key."""
 from __future__ import annotations
 
-from types import SimpleNamespace
+from base64 import b64encode
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from textual.app import App
 from textual.widgets import Button, Input, OptionList, Select, Static
 
@@ -16,6 +18,7 @@ from servonaut.screens._demo_resolve import replace_instances
 from servonaut.screens.server_actions import ServerActionsScreen, VaultBindingModal
 from servonaut.services.redaction_service import RedactionService
 from servonaut.services.shared_servers import shared_row
+from servonaut.services.vault import crypto
 from servonaut.styles import CSS_FILES
 from tests.test_vault_bind_picker import KEY_ITEM, PERSONAL_VAULT, TEAM_VAULT, _Service, _host_key, _settle
 
@@ -30,13 +33,35 @@ def _shared(slug: str = "team-a", role: str = "owner", **changes: Any) -> dict:
         {"slug": slug, "name": slug, "role": role},
     )
 
+
+def _signed_binding(server: str = "shared-team-a") -> dict[str, Any]:
+    """A synthetic API binding with a real signature over its fixture fields."""
+    binding = {
+        "source": "servonaut_vault", "valid": True,
+        "target": f"shared_server:{server}",
+        "vault_id": TEAM_VAULT, "vault_item_id": KEY_ITEM,
+        "hostname": "9.9.9.9", "port": 22, "login_user": "deploy",
+        "public_fingerprint": crypto.ssh_public_fingerprint(_host_key()),
+        "host_keys": [_host_key()], "binding_revision": 1,
+        "binder_identity_id": KEY_ITEM,
+    }
+    message = crypto.binding_message(
+        "team:1", binding["target"], binding["hostname"], binding["port"],
+        binding["login_user"], binding["vault_id"], binding["vault_item_id"],
+        binding["public_fingerprint"], binding["host_keys"],
+        binding["binding_revision"], binding["binder_identity_id"],
+    )
+    binding["signature"] = b64encode(Ed25519PrivateKey.generate().sign(message)).decode("ascii")
+    return binding
+
+
 class _BindingService(_Service):
     def __init__(self) -> None:
         super().__init__()
         self.keys[TEAM_VAULT] = self.keys[TEAM_VAULT][:1]
         self.store = SimpleNamespace(identity=object())
         self.personal_binding = AsyncMock(return_value=None)
-        self.bind = AsyncMock(return_value={"source": "servonaut_vault", "login_user": "deploy"})
+        self.bind = AsyncMock(side_effect=lambda **values: _signed_binding(values["server"]))
         self.bind_personal = AsyncMock(return_value={"source": "servonaut_vault"})
 
     def ssh_destination(self, instance: dict) -> tuple[str, int]:
@@ -383,3 +408,56 @@ async def test_filtering_or_reordering_options_cannot_change_the_chosen_scope(re
             await _choose_scope(pilot, 1)
         await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
         assert app.screen._team == (None if reorder else "team-c")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("reply_kind", [
+    "bare", "wrapped", "mapping", "receipt", "unsigned", "no_source",
+    "wrong_source", "invalid", "truthy_valid", "empty_signature", "non_mapping",
+])
+async def test_team_binding_reply_cannot_replace_cached_credentials_with_an_unusable_receipt(
+    direct: bool, reply_kind: str,
+) -> None:
+    previous, incoming = _signed_binding(), _signed_binding()
+    usable = reply_kind in ("bare", "wrapped", "mapping")
+    reply: Any = incoming
+    if reply_kind == "wrapped":
+        reply = {"credential_binding": incoming, "ok": True}
+    elif reply_kind == "mapping":
+        reply = MappingProxyType(incoming)
+    elif reply_kind == "receipt":
+        reply = {"ok": True}
+    elif reply_kind == "unsigned":
+        incoming.pop("signature")
+    elif reply_kind == "no_source":
+        incoming.pop("source")
+    elif reply_kind == "wrong_source":
+        incoming["source"] = "bitwarden"
+    elif reply_kind == "invalid":
+        incoming["valid"] = False
+    elif reply_kind == "truthy_valid":
+        incoming["valid"] = 1  # A truthy JSON number is not a validated binding.
+    elif reply_kind == "empty_signature":
+        incoming["signature"] = ""
+    elif reply_kind == "non_mapping":
+        reply = None
+    app = _Host([_own(), _shared(credential_binding=previous)], target=1 if direct else 0)
+    app.vault_command_service.bind.side_effect = None
+    app.vault_command_service.bind.return_value = reply
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start(pilot)
+        if not direct:
+            await _choose_scope(pilot, 0)
+        await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+        expected = incoming if usable else previous
+        assert app.instances[1]["credential_binding"] == expected
+        assert app._instances_pristine[1]["credential_binding"] == expected
+        if direct:
+            assert app.actions._instance["credential_binding"] == expected
+        assert "credential_binding" not in app.instances[0]
+        assert app.notices[-1][0].startswith("Vault key bound. Team key for team-a:")
+        app.vault_command_service.bind.assert_awaited_once()
