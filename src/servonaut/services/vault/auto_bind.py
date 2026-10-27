@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from servonaut.services.shared_servers import is_same_server, is_shared_row
 from servonaut.services.ssh_host_keys import trusted_host_keys
 
 from .ec2_host_keys import (
@@ -111,19 +112,30 @@ class KeyMatch:
         return self.item_id is None
 
 
-def match_ssh_key(instance: Mapping[str, Any], keys: Iterable[Mapping[str, Any]]) -> Optional[KeyMatch]:
+def match_ssh_key(
+    instance: Mapping[str, Any],
+    keys: Iterable[Mapping[str, Any]],
+    *,
+    own_instance: Optional[Mapping[str, Any]] = None,
+) -> Optional[KeyMatch]:
     """The vault key named like *instance*'s key pair, else like the server.
 
     *keys* are ``ssh_key_choices`` rows: ``item_id``, ``name`` (``None`` when
-    unknown) and ``fingerprint``.
+    unknown) and ``fingerprint``. When *own_instance* is given, its key-pair
+    name (or key file if custom) and server name are checked first.
     """
     named = [key for key in keys if isinstance(key.get("name"), str) and key["name"].strip()]
-    # A custom server's key_name is the key file it is set up with.
-    by_key = MATCHED_BY_KEY_FILE if instance.get("is_custom") is True else MATCHED_BY_KEY_PAIR
-    for matched_by, wanted in (
-        (by_key, instance.get("key_name")),
-        (MATCHED_BY_SERVER_NAME, instance.get("name")),
-    ):
+    candidates: list[tuple[str, Any]] = []
+    if own_instance is not None:
+        by_key = MATCHED_BY_KEY_FILE if own_instance.get("is_custom") is True else MATCHED_BY_KEY_PAIR
+        candidates.append((by_key, own_instance.get("key_name")))
+        candidates.append((MATCHED_BY_SERVER_NAME, own_instance.get("name")))
+    else:
+        by_key = MATCHED_BY_KEY_FILE if instance.get("is_custom") is True else MATCHED_BY_KEY_PAIR
+        candidates.append((by_key, instance.get("key_name")))
+    candidates.append((MATCHED_BY_SERVER_NAME, instance.get("name")))
+
+    for matched_by, wanted in candidates:
         if not isinstance(wanted, str) or not wanted.strip():
             continue
         target = normalize_key_name(wanted)
@@ -155,8 +167,11 @@ class AutoBindRow:
     verification_source: Optional[str] = None
     fetch_error: Optional[str] = None
     mismatch_detail: Optional[str] = None
+    team: Optional[str] = None
+    own_instance: Optional[Mapping[str, Any]] = None
     # After binding: None (not tried), "bound", or the failure reason.
     result: Optional[str] = None
+    skipped: Optional[str] = None
 
     @property
     def ready(self) -> bool:
@@ -168,6 +183,8 @@ class AutoBindRow:
             return "bound"
         if self.result is not None:
             return "binding failed"
+        if self.status == ALREADY_BOUND and self.team:
+            return "has a team key"
         return STATUS_LABEL.get(self.status, self.status)
 
     @property
@@ -180,6 +197,10 @@ class AutoBindRow:
             return f"Could not fetch host key: {self.fetch_error}"
         if self.status == HOST_KEY_MISMATCH and self.mismatch_detail:
             return self.mismatch_detail
+        if self.status == ALREADY_BOUND and self.team:
+            return "Already has a team key: team keys are never replaced automatically."
+        if self.status == NO_LOGIN and self.team:
+            return "No login user: set the login on the shared server (Teams → Shared Servers)."
         return STATUS_TEXT.get(self.status, self.status)
 
 
@@ -195,6 +216,7 @@ async def plan_auto_bind(
     instances: Sequence[Mapping[str, Any]],
     keys: Sequence[Mapping[str, Any]],
     *,
+    team: Optional[str] = None,
     host_keys_for: Callable[[Mapping[str, Any], str, Optional[int]], list[str]] | None = None,
 ) -> list[AutoBindRow]:
     """Review rows for *instances*: which key each would get, and why not when it can't.
@@ -205,27 +227,53 @@ async def plan_auto_bind(
     files) are read off the event loop.
     """
     read_host_keys = host_keys_for or trusted_host_keys
-    rows = [_row(service, instance, keys) for instance in instances if is_personal_server(instance)]
-    gate = asyncio.Semaphore(_BINDING_READS)
 
-    async def check(row: AutoBindRow) -> None:
-        if row.status != READY:
-            return
-        async with gate:
-            try:
-                binding = await service.personal_binding(row.instance)
-            except Exception:  # shown on the row; the other servers still get their answer
-                row.status = CHECK_FAILED
+    if team is None:
+        rows = [_row(service, instance, keys) for instance in instances if is_personal_server(instance)]
+        gate = asyncio.Semaphore(_BINDING_READS)
+
+        async def check(row: AutoBindRow) -> None:
+            if row.status != READY:
                 return
-        if binding is not None:
-            row.status = ALREADY_BOUND
-            return
-        port = row.port if row.port != 22 else None
-        row.host_keys = await asyncio.to_thread(read_host_keys, row.instance, str(row.host), port)
-        if not row.host_keys:
-            row.status = NO_HOST_KEYS
+            async with gate:
+                try:
+                    binding = await service.personal_binding(row.instance)
+                except Exception:  # shown on the row; the other servers still get their answer
+                    row.status = CHECK_FAILED
+                    return
+            if binding is not None:
+                row.status = ALREADY_BOUND
+                return
+            port = row.port if row.port != 22 else None
+            row.host_keys = await asyncio.to_thread(read_host_keys, row.instance, str(row.host), port)
+            if not row.host_keys:
+                row.status = NO_HOST_KEYS
 
-    await asyncio.gather(*(check(row) for row in rows))
+        await asyncio.gather(*(check(row) for row in rows))
+    else:
+        own_instances = [inst for inst in instances if not is_shared_row(inst)]
+        shared_instances = [
+            inst for inst in instances
+            if is_shared_row(inst) and inst.get("team_slug") == team
+        ]
+        rows = []
+        for shared in shared_instances:
+            matching_own = next((own for own in own_instances if is_same_server(shared, own)), None)
+            rows.append(_team_row(service, shared, keys, team=team, own_instance=matching_own))
+
+        async def check_team(row: AutoBindRow) -> None:
+            if row.status != READY:
+                return
+            port = row.port if row.port != 22 else None
+            found_keys = await asyncio.to_thread(read_host_keys, row.instance, str(row.host), port)
+            if not found_keys and row.own_instance:
+                found_keys = await asyncio.to_thread(read_host_keys, row.own_instance, str(row.host), port)
+            row.host_keys = found_keys
+            if not row.host_keys:
+                row.status = NO_HOST_KEYS
+
+        await asyncio.gather(*(check_team(row) for row in rows))
+
     order = (
         READY, FETCHED, ALREADY_BOUND, AMBIGUOUS, NO_HOST_KEYS,
         FETCH_FAILED, HOST_KEY_MISMATCH, NO_ADDRESS, NO_LOGIN, CHECK_FAILED, NO_KEY,
@@ -251,11 +299,53 @@ def _row(service: Any, instance: Mapping[str, Any], keys: Sequence[Mapping[str, 
     return row
 
 
+def _team_row(
+    service: Any,
+    shared: Mapping[str, Any],
+    keys: Sequence[Mapping[str, Any]],
+    *,
+    team: str,
+    own_instance: Optional[Mapping[str, Any]] = None,
+) -> AutoBindRow:
+    match = match_ssh_key(shared, keys, own_instance=own_instance)
+    host = str(shared.get("hostname") or shared.get("host") or shared.get("public_ip") or "").strip()
+    raw_port = shared.get("port")
+    port = raw_port if isinstance(raw_port, int) and 1 <= raw_port <= 65535 else 22
+    row = AutoBindRow(
+        instance=shared,
+        status=READY,
+        match=match,
+        host=host or None,
+        port=port,
+        team=team,
+        own_instance=own_instance,
+    )
+    login = shared.get("login_user")
+    if not login and own_instance is not None:
+        login = service.ssh_login(own_instance)
+    if isinstance(login, str) and login.strip():
+        row.login = login.strip()
+
+    if shared.get("credential_binding") is not None:
+        row.status = ALREADY_BOUND
+        return row
+    if match is None:
+        row.status = NO_KEY
+    elif match.ambiguous:
+        row.status = AMBIGUOUS
+    elif not host:
+        row.status = NO_ADDRESS
+    elif not row.login:
+        row.status = NO_LOGIN
+    return row
+
+
 async def apply_auto_bind(
     service: Any,
     rows: Sequence[AutoBindRow],
     *,
     vault_id: str,
+    team: Optional[str] = None,
     reviewed_fetched: bool = False,
     on_progress: Callable[[int, AutoBindRow], None] | None = None,
 ) -> None:
@@ -273,23 +363,41 @@ async def apply_auto_bind(
             continue
         if on_progress is not None:
             on_progress(index, row)
-        custom = row.instance.get("is_custom") is True
-        try:
-            await service.bind_personal(
-                vault_id=vault_id,
-                item_id=row.match.item_id,
-                provider=instance_provider(row.instance),
-                instance_id=str(row.instance.get("name") or "") if custom else str(row.instance.get("id") or ""),
-                hostname=str(row.host),
-                port=row.port,
-                login=str(row.login),
-                host_keys=list(row.host_keys),
-                replace_existing=False,
-            )
-        except Exception as exc:  # one server's failure does not stop the others
-            row.result = vault_failure_reason(exc)
+
+        team_slug = row.team or team
+        if team_slug:
+            try:
+                await service.bind(
+                    vault_id=vault_id,
+                    server=str(row.instance.get("id")),
+                    item_id=row.match.item_id,
+                    team=team_slug,
+                    login=row.login,
+                    pin_host_key=False,
+                    host_keys=list(row.host_keys),
+                )
+            except Exception as exc:
+                row.result = vault_failure_reason(exc)
+            else:
+                row.result = "bound"
         else:
-            row.result = "bound"
+            custom = row.instance.get("is_custom") is True
+            try:
+                await service.bind_personal(
+                    vault_id=vault_id,
+                    item_id=row.match.item_id,
+                    provider=instance_provider(row.instance),
+                    instance_id=str(row.instance.get("name") or "") if custom else str(row.instance.get("id") or ""),
+                    hostname=str(row.host),
+                    port=row.port,
+                    login=str(row.login),
+                    host_keys=list(row.host_keys),
+                    replace_existing=False,
+                )
+            except Exception as exc:  # one server's failure does not stop the others
+                row.result = vault_failure_reason(exc)
+            else:
+                row.result = "bound"
 
 
 async def fetch_host_keys_for_rows(
@@ -350,15 +458,16 @@ async def fetch_host_keys_for_rows(
                 on_progress(current_completed, row)
 
     async def _fetch_row(row: AutoBindRow) -> None:
-        is_aws = (not row.instance.get("is_custom") and instance_provider(row.instance).lower() == "aws")
+        inst = row.own_instance or row.instance
+        is_aws = (not inst.get("is_custom") and instance_provider(inst).lower() == "aws")
         console_res: Optional[EC2ConsoleHostKeys] = None
 
         if is_aws:
             try:
-                raw_console = await asyncio.to_thread(_read_console, row.instance)
+                raw_console = await asyncio.to_thread(_read_console, inst)
                 console_res = parse_ec2_console_output(raw_console)
             except Exception as exc:
-                logger.debug("ec2:GetConsoleOutput failed for %s: %s", row.instance.get("id"), exc, exc_info=True)
+                logger.debug("ec2:GetConsoleOutput failed for %s: %s", inst.get("id"), exc, exc_info=True)
                 code = ""
                 if hasattr(exc, "response") and isinstance(getattr(exc, "response"), Mapping):
                     code = str(exc.response.get("Error", {}).get("Code", ""))
@@ -407,6 +516,8 @@ async def fetch_host_keys_for_rows(
         port = row.port if row.port != 22 else None
         try:
             keys = await asyncio.to_thread(read_host_keys, row.instance, str(row.host), port)
+            if not keys and row.own_instance:
+                keys = await asyncio.to_thread(read_host_keys, row.own_instance, str(row.host), port)
         except Exception as exc:
             keys = []
 
@@ -424,8 +535,10 @@ async def fetch_host_keys_for_rows(
                     row.status = HOST_KEY_MISMATCH
                     row.verified = False
                     removed = await asyncio.to_thread(remove_recorded_host_key, row.instance, str(row.host), row.port)
+                    if row.own_instance:
+                        await asyncio.to_thread(remove_recorded_host_key, row.own_instance, str(row.host), row.port)
                     row.host_keys = []
-                    removal = host_key_removal_command(row.instance, str(row.host), row.port)
+                    removal = host_key_removal_command(inst, str(row.host), row.port)
                     if removed:
                         row.mismatch_detail = (
                             "The server answered with a different host key than AWS recorded at first boot: "

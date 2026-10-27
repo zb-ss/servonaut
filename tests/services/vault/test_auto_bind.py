@@ -544,3 +544,110 @@ def test_remove_recorded_host_key(tmp_path, monkeypatch) -> None:
     assert trusted_host_keys(inst, "198.51.100.7", None) == []
 
 
+@pytest.mark.asyncio
+async def test_team_auto_bind_matches_own_key_pair_first_then_server_name() -> None:
+    own_1 = {"id": "i-1", "name": "web-1", "key_name": "kp-shared-1", "public_ip": "198.51.100.1"}
+    shared_1 = {"id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu"}
+    own_2 = {"id": "i-2", "name": "db-1", "key_name": "other-key", "public_ip": "198.51.100.2"}
+    shared_2 = {"id": "srv-2", "name": "db-1", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.2", "instance_id": "i-2", "login_user": "ubuntu"}
+
+    service = _Service()
+    key_kp = _key("k1", "kp-shared-1")
+    key_name = _key("k2", "db-1")
+
+    rows = await plan_auto_bind(
+        service,
+        [own_1, own_2, shared_1, shared_2],
+        [key_kp, key_name],
+        team="devs",
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    by_id = {r.instance["id"]: r for r in rows}
+    assert len(by_id) == 2
+    assert by_id["srv-1"].match.item_id == "k1"
+    assert by_id["srv-1"].match.matched_by == MATCHED_BY_KEY_PAIR
+    assert by_id["srv-2"].match.item_id == "k2"
+    assert by_id["srv-2"].match.matched_by == MATCHED_BY_SERVER_NAME
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_existing_team_binding_is_never_replaced() -> None:
+    shared = {
+        "id": "srv-1",
+        "name": "web-1",
+        "is_shared": True,
+        "team_slug": "devs",
+        "hostname": "198.51.100.1",
+        "login_user": "ubuntu",
+        "credential_binding": {"source": "servonaut_vault", "vault_id": "tv1"},
+    }
+    service = _Service()
+    rows = await plan_auto_bind(
+        service,
+        [shared],
+        [_key("k1", "web-1")],
+        team="devs",
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+    row = rows[0]
+    assert row.status == ALREADY_BOUND
+    assert row.ready is False
+    assert row.status_label == "has a team key"
+    assert "Already has a team key: team keys are never replaced automatically." in row.status_text
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_login_fallbacks_and_no_login() -> None:
+    shared_a = {"id": "srv-a", "name": "web-a", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.1", "login_user": "admin"}
+    own_b = {"id": "i-b", "name": "web-b", "public_ip": "198.51.100.2"}
+    shared_b = {"id": "srv-b", "name": "web-b", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.2", "instance_id": "i-b"}
+    shared_c = {"id": "srv-c", "name": "web-c", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.3"}
+
+    service = _Service(logins={"i-b": "ubuntu"})
+    keys = [_key("ka", "web-a"), _key("kb", "web-b"), _key("kc", "web-c")]
+
+    rows = await plan_auto_bind(
+        service,
+        [shared_a, own_b, shared_b, shared_c],
+        keys,
+        team="devs",
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+    by_id = {r.instance["id"]: r for r in rows}
+    assert by_id["srv-a"].login == "admin" and by_id["srv-a"].status == READY
+    assert by_id["srv-b"].login == "ubuntu" and by_id["srv-b"].status == READY
+    assert by_id["srv-c"].status == NO_LOGIN
+    assert "set the login on the shared server (Teams → Shared Servers)" in by_id["srv-c"].status_text
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_applies_via_service_bind() -> None:
+    server = {"id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs", "hostname": "198.51.100.1"}
+    row = AutoBindRow(
+        instance=server,
+        status=READY,
+        match=match_ssh_key(server, [_key("k1", "web-1")]),
+        host="198.51.100.1",
+        port=22,
+        login="admin",
+        host_keys=[HOST_KEY],
+        team="devs",
+    )
+    service = _Service()
+    service.bind = AsyncMock(return_value={"source": "servonaut_vault"})
+
+    await apply_auto_bind(service, [row], vault_id="tv-1", team="devs")
+    assert row.result == "bound"
+    service.bind.assert_awaited_once_with(
+        vault_id="tv-1",
+        server="srv-1",
+        item_id="k1",
+        team="devs",
+        login="admin",
+        pin_host_key=False,
+        host_keys=[HOST_KEY],
+    )
+
+
+
