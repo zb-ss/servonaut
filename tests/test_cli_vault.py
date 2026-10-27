@@ -1639,13 +1639,14 @@ def test_auto_bind_team_with_personal_vault_refused(monkeypatch, capsys) -> None
     vault.set_vault_service_factory(lambda: service)
     try:
         code = vault.handle_vault_command(
-            _parser().parse_args(["vault", "auto-bind", "--team", "ops", "--vault", VAULT_ID, "--yes"])
+            _parser().parse_args(["vault", "auto-bind", "--team", "ops", "--vault", "Personal keys", "--yes"])
         )
     finally:
         vault.set_vault_service_factory(None)
 
     assert code == 1
-    assert f"Vault {VAULT_ID} does not belong to team ops." in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert '"Personal keys" is not ops\'s team vault: leave out --vault to use the team\'s vault.' in err
     assert service.bind.call_count == 0
 
 

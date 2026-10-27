@@ -707,7 +707,11 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
             v_team = target.get("team") if isinstance(target, Mapping) and isinstance(target.get("team"), Mapping) else {}
             v_slug = v_team.get("slug") or (target.get("team_slug") if isinstance(target, Mapping) else None)
             if not target or target.get("kind") != "team" or v_slug != team:
-                print(f"Vault {terminal_safe(args.vault)} does not belong to team {terminal_safe(team)}.", file=sys.stderr)
+                print(
+                    f'"{terminal_safe(args.vault)}" is not {terminal_safe(team)}\'s team vault: '
+                    "leave out --vault to use the team's vault.",
+                    file=sys.stderr,
+                )
                 return _EXIT_ERROR
     else:
         if team:
