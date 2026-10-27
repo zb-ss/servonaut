@@ -29,6 +29,9 @@ seeds one home for the scenario and records everything a driver needs in
     with ``--teams``, the people beside the owner: ``member``, with their
     e-mail address, FakeCloud user id, home and complete child environment
     (``run --as member``); otherwise empty;
+``bitwarden``
+    with ``--bitwarden``, the fake Bitwarden Password Manager items (name and
+    id only; see :meth:`Owner._bitwarden_record`); otherwise None;
 ``desktop``
     the desktop child last started on request (``python -m e2e.sandbox desktop``).
 
@@ -381,7 +384,7 @@ class Owner:
                  teams: bool = False, account_email: str = "",
                  verification_uri: Optional[str] = None, user_code: Optional[str] = None,
                  hostname: Optional[str] = None, ai_script: Optional[dict] = None,
-                 team_server_as: Optional[str] = None) -> None:
+                 team_server_as: Optional[str] = None, bitwarden: bool = False) -> None:
         self.root = root
         self.scenario = scenario
         self.pointer = pointer
@@ -396,6 +399,9 @@ class Owner:
         self.teams = teams
         # --team-server-as: the AWS fleet server the team's shared server also is.
         self.team_server_as = team_server_as
+        self.bitwarden = bitwarden
+        self.bitwarden_vault: Any = None
+        self._bitwarden_items: list[dict[str, str]] = []
         self.account_email = account_email
         self.verification_uri = verification_uri
         self.user_code = user_code
@@ -514,6 +520,10 @@ class Owner:
         self.cloudtrail = self._start(CloudTrailStub().start())
         self.providers = self._start(FakeProviders().start())
         self.shims = ShimSet(self.root / "shims")
+        if self.bitwarden:
+            from e2e.harness.bitwarden import FakeBitwarden
+
+            self.bitwarden_vault = FakeBitwarden(self.shims, tools=("bw",))
         self.world = SshWorld(
             directory=self.root / "ssh" / "client",
             remote_dir=self.root / "ssh" / "remote",
@@ -547,6 +557,8 @@ class Owner:
             seeded.notes.extend(self._seed_team_owner())
             if self.team_server_as:
                 self._share_as_own(seeded.fleet)
+        if self.bitwarden:
+            seeded.notes.extend(self._seed_bitwarden(seeded.fleet))
         if self.signed_in:
             session_seed.seed_session(self.user.home, self.fake_cloud)
         self.child_env = self._child_env(self.user)
@@ -578,9 +590,11 @@ class Owner:
             env["SERVONAUT_E2E_WRITE_ROOTS"] = os.pathsep.join(
                 filter(None, [env.get("SERVONAUT_E2E_WRITE_ROOTS", ""), str(self.agent_tmp)])
             )
-        if self.teams:
+        if self.teams or self.bitwarden:
             # A throwaway Vault custody key: the children have no OS keyring.
             env[VAULT_DEVICE_KEY_ENV] = base64.b64encode(os.urandom(32)).decode("ascii")
+        if self.bitwarden and self.bitwarden_vault is not None:
+            env["BW_SESSION"] = self.bitwarden_vault.session
         if self.hostname:
             # child_guard.ENV_HOSTNAME (that file is loaded by path, not imported).
             env["SERVONAUT_E2E_HOSTNAME"] = self.hostname
@@ -640,6 +654,7 @@ class Owner:
             "teams": self._teams_record(),
             "personas": self._personas_record(),
             "desktop": None,
+            "bitwarden": self._bitwarden_record(),
         }
         if self.ca_host is not None:
             record["urls"]["ssh_team_host"] = f"127.0.0.1:{self.ca_host.port}"
@@ -799,6 +814,55 @@ class Owner:
             },
             "member": {"email": MEMBER_EMAIL, "home": str(self.member.home) if self.member else None},
         }
+
+    # -- --bitwarden -------------------------------------------------------
+
+    def _seed_bitwarden(self, fleet_entries: Iterable[Any]) -> list[str]:
+        """Seed fake Bitwarden with native SSH-key items for the fleet, plus test items."""
+        if self.bitwarden_vault is None:
+            return []
+        import asyncssh
+
+        self._bitwarden_items = []
+        seen_keys: set[str] = set()
+        key_names: list[str] = []
+        for entry in fleet_entries:
+            key_name = getattr(entry, "key_name", None)
+            if key_name and key_name not in seen_keys:
+                seen_keys.add(key_name)
+                key_names.append(key_name)
+
+        for key_name in key_names:
+            key_file = self.user.home / ".ssh" / f"{key_name}.pem"
+            if not key_file.is_file():
+                key_file = self.user.home / ".ssh" / key_name
+            if not key_file.is_file():
+                raise FileNotFoundError(f"Fleet SSH key file missing: {key_file}")
+            private_key = key_file.read_text(encoding="utf-8")
+            imported = asyncssh.import_private_key(private_key)
+            public_key = imported.export_public_key().decode("utf-8").strip()
+            self._add_bitwarden_key(key_name, private_key, public_key)
+
+        # Names the QA pass checks on import: a long one, and one carrying a terminal escape.
+        for name in ("staging-bastion-us-east-1-extended-production-service-management-gateway-access-key",
+                     "\x1b[31mred-key"):
+            self._add_bitwarden_key(name, *_generated_ssh_key())
+
+        return [
+            f"Bitwarden: Password Manager (bw CLI) on PATH with session BW_SESSION; "
+            f"holds native SSH-key items {', '.join(key_names)}, "
+            f"a long name (>80 chars) and an escape sequence (\\x1b[31mred-key).",
+        ]
+
+    def _add_bitwarden_key(self, name: str, private_key: str, public_key: str) -> None:
+        item_id = self.bitwarden_vault.add_ssh_key_item(name, private_key, public_key)
+        self._bitwarden_items.append({"id": item_id, "name": name})
+
+    def _bitwarden_record(self) -> Optional[dict]:
+        """The ``bitwarden`` entry of ``state.json`` (None without ``--bitwarden``)."""
+        if not self.bitwarden or not self._bitwarden_items:
+            return None
+        return {"items": list(self._bitwarden_items)}
 
     def _write_state(self) -> None:
         with self._state_lock:
@@ -1103,12 +1167,23 @@ def root_problem(root: Path, repo_root: Path) -> Optional[str]:
     )
 
 
+def _generated_ssh_key() -> tuple[str, str]:
+    """A fresh Ed25519 key pair in OpenSSH form: an item holding it imports like a real key."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+
+    key = Ed25519PrivateKey.generate()
+    private_key = key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()).decode("ascii")
+    public_key = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    return private_key, public_key
+
+
 def up(
     *, root: Optional[Path], scenario: str, signed_in: bool, keep: bool,
     ssh_ca_off: bool = False, ssh_ca_refuse: Optional[str] = None, api_delay: float = 0.0, teams: bool = False,
     account_email: str = "", verification_uri: Optional[str] = None, hostname: Optional[str] = None,
     ai_script: Optional[Path] = None, user_code: Optional[str] = None,
-    team_server_as: Optional[str] = None,
+    team_server_as: Optional[str] = None, bitwarden: bool = False,
 ) -> int:
     stop_request = StopRequest()
     missing = bootstrap.missing_modules(_EXTRA_MODULES)
@@ -1152,7 +1227,8 @@ def up(
                           signed_in=signed_in, keep=keep, ssh_ca_off=ssh_ca_off,
                           ssh_ca_refuse=ssh_ca_refuse, api_delay=api_delay, teams=teams, account_email=account_email,
                           verification_uri=verification_uri, user_code=user_code,
-                          hostname=hostname, ai_script=script, team_server_as=team_server_as)
+                          hostname=hostname, ai_script=script, team_server_as=team_server_as,
+                          bitwarden=bitwarden)
         stop_request.raise_if_requested()
         _say(f"starting the {scenario} sandbox in {root}")
         started = time.monotonic()

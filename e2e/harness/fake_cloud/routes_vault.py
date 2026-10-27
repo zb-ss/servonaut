@@ -756,11 +756,16 @@ class VaultCloud:
         role = self._role(vault, user_id)
         write = role in {"owner", "admin"}
         roster = self._roster(vault)
+        live_item_count = sum(not item.get("deleted_at") for item in self._items.get(vault["vault_id"], {}).values())
+        open_exposure_count = sum(
+            exposure.get("status", "open") == "open"
+            for exposure in self._exposures.get(vault["vault_id"], [])
+        )
         answer = {key: copy.deepcopy(vault[key]) for key in ("vault_id", "kind", "scope", "team", "owner_user_id", "name", "grant_policy", "current_version", "rotation", "created_at", "updated_at")}
         answer.update({"versions": copy.deepcopy(vault["versions"]), "my_grant": copy.deepcopy(vault["grants"].get(user_id)), "my_role": role,
                        "permissions": {"read_items": role in {"owner", "admin", "member"}, "write_items": write,
                                        "grant": write, "rotate": write, "manage": write, "view_exposures": write},
-                       "counts": {"items": len(self._items.get(vault["vault_id"], {})), "open_exposures": len(self._exposures.get(vault["vault_id"], [])),
+                       "counts": {"items": live_item_count, "open_exposures": open_exposure_count,
                                   "pending_recipients": sum(entry["status"] == "awaiting_grant" for entry in roster)},
                        "poll_after_seconds": 300, "access_recovery": None})
         if vault["kind"] == "team":
@@ -958,11 +963,30 @@ class VaultCloud:
             return _refusal(409, "item_set_changed", "The vault's items changed")
         return rewraps
 
+    def item_payload(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Item metadata includes team bindings, never personal bindings."""
+        with self._lock:
+            payload = copy.deepcopy(item)
+            team = self._vaults[item["vault_id"]].get("team") or {}
+            servers = self._shared_servers(str(team.get("slug") or ""))
+            payload["bound_server_ids"] = [
+                {"server_id": str(server["id"]), "name": server.get("name")}
+                for server in servers
+                if (binding := self._bindings.get(("team", str(server["id"]))))
+                and binding.get("vault_id") == item["vault_id"]
+                and binding.get("vault_item_id") == item["item_id"]
+            ]
+            return payload
+
     def delete_item(self, vault_id: str, item_id: str, body: dict[str, Any], user_id: int) -> tuple[int, dict[str, Any]]:
         with self._lock:
             item = self._items.get(vault_id, {}).get(item_id)
             if item is None:
                 return 404, {"error": {"code": "not_found", "message": "Item not found"}}
+            if item.get("deleted_at"):
+                return _refusal(409, "item_deleted", "Item already deleted")
+            if type(body.get("revision")) is not int or body["revision"] != item["revision"] + 1:
+                return _refusal(409, "revision_conflict", "Item revision changed")
             item["deleted_at"] = _now()
             item["revision"] += 1
             return 200, {"item_id": item_id, "revision": item["revision"], "deleted_at": item["deleted_at"]}
@@ -1792,7 +1816,7 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
         if (refused := _no_grant(vault._vaults[vault_id], device.user_id)) is not None:
             return refused
         include_deleted = request.query.get("include_deleted") == "1"
-        items = [copy.deepcopy(item) for item in vault._items.get(vault_id, {}).values() if include_deleted or not item.get("deleted_at")]
+        items = [vault.item_payload(item) for item in vault._items.get(vault_id, {}).values() if include_deleted or not item.get("deleted_at")]
         return web.json_response({"data": items, "meta": {"next_cursor": None}})
 
     async def item_read(request: web.Request, device: Optional[_Device]) -> web.Response:
@@ -1803,7 +1827,7 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
         if (refused := _no_grant(vault._vaults[vault_id], device.user_id)) is not None:
             return refused
         item = vault._items.get(vault_id, {}).get(item_id)
-        return web.json_response(copy.deepcopy(item)) if item else _not_found()
+        return web.json_response(vault.item_payload(item)) if item else _not_found()
 
     async def item_put(request: web.Request, device: Optional[_Device]) -> web.Response:
         assert device is not None

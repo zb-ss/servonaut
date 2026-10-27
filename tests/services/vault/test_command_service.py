@@ -3230,3 +3230,20 @@ async def test_identity_reset_on_a_mac_names_the_device_macos(tmp_path, on_a_mac
     await service.reset_identity(reason="rotate", recovery_confirmation=lambda _key: True)
 
     assert identity.request_reset.await_args.kwargs["platform"] == "macos"
+
+
+@pytest.mark.asyncio
+async def test_key_choices_keep_full_names_for_rename_and_matching_but_shorten_labels() -> None:
+    name = "x" * 120
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.list_items = AsyncMock(return_value={"data": [
+        {"item_id": "key", "type": "ssh_key", "revision": 1, "public_fingerprint": "SHA256:key"},
+    ]})
+    service.vaults.get_vault = AsyncMock(return_value={})
+    service.items.get_item = AsyncMock(return_value={"item_id": "key"})
+    service.items.read_item = MagicMock(side_effect=lambda *_args: {"name": "\u202e" + name + "\n"})
+
+    (choice,) = await service.ssh_key_choices(vault_id="vault")
+
+    assert choice["name"] == name
+    assert choice["label"] == "x" * 80 + "… · SHA256:key"

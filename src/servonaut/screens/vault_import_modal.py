@@ -13,7 +13,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -37,6 +36,7 @@ from servonaut.services.bw_key_import import (
 )
 from servonaut.services.bw_resolver import BwResolver
 from servonaut.services.bw_session_service import BwItemSummary, BwSessionService
+from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.widgets.busy_indicator import BusyIndicator
 
 
@@ -112,6 +112,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         return self._session_service or getattr(self.app, "bw_session_service", None)
 
     def _display(self, value: str) -> str:
+        value = terminal_safe(value)
         redactor = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redactor is not None:
             return str(redactor.scrub_stream(value))
@@ -121,7 +122,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         self._status_raw = value
         if getattr(self.app, "demo_mode", False) and getattr(self.app, "redaction_service", None) is not None:
             value = str(self.app.redaction_service.scrub_stream(value))
-        self.query_one("#vault_import_status", Static).update(escape(value))
+        self.query_one("#vault_import_status", Static).update(markup_literal(terminal_safe(value)))
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw source metadata from cached summaries after a mode switch."""
@@ -196,9 +197,9 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     def _show_local_options(self) -> None:
         options: list[Selection] = []
         for index, key in enumerate(self._local_keys):
-            label = escape(self._display(key.filename))
+            label = markup_literal(self._display(key.filename))
             if key.resolved_target:
-                label += f"  [dim]→ {escape(self._display(key.resolved_target))}[/dim]"
+                label += f"  [dim]→ {markup_literal(self._display(key.resolved_target))} [/dim]"
             if key.encrypted:
                 label += "  [dim]encrypted — select to enter its passphrase[/dim]"
             if key.error:
@@ -238,8 +239,8 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
     def _show_bitwarden_options(self) -> None:
         options = [
             Selection(
-                f"{escape(self._display(item.name or 'Unnamed SSH key'))}"
-                f"  [dim]{escape(self._display(item.fingerprint or item.id))}[/dim]",
+                f"{markup_literal(self._display(item.name or 'Unnamed SSH key'))}"
+                f"  [dim]{markup_literal(self._display(item.fingerprint or item.id))} [/dim]",
                 index,
             )
             for index, item in enumerate(self._bw_items)
@@ -332,6 +333,7 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         try:
             result = await self._service.import_keys(
                 source="bitwarden", vault_id=self._vault_id, private_key=private, source_ref=item.id,
+                name=item.name,
             )
         except Exception:
             summary["failed"] += 1
@@ -350,7 +352,14 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         item_id = result["item_id"]
         summary["imported"] += 1
         summary["imported_ids"].append(item_id)
-        summary["references"].append({"vault_item_id": item_id, "source": source, "source_ref": source_ref})
+        reference = {"vault_item_id": item_id, "source": source, "source_ref": source_ref}
+        name = result.get("name")
+        if isinstance(name, str) and name:
+            reference["name"] = name
+        fingerprint = result.get("public_fingerprint")
+        if isinstance(fingerprint, str):
+            reference["fingerprint"] = fingerprint
+        summary["references"].append(reference)
 
     async def _import_selected(self) -> None:
         if self._source is None:

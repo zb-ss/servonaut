@@ -612,10 +612,12 @@ Vault and item commands are:
 ```
 servonaut vault create [--team TEAM] [--name NAME] [--grant-policy auto|approval]
 servonaut vault list
-servonaut vault items --vault VAULT_ID [--include-deleted]
+servonaut vault items --vault VAULT_ID [--include-deleted] [--names]
 servonaut vault show ITEM_ID --vault VAULT_ID [--reveal --yes]
-servonaut vault import ssh --vault VAULT_ID --path PATH [--break-glass --from-cidr CIDR [--from-cidr CIDR ...]]
-servonaut vault import bitwarden --vault VAULT_ID --item BITWARDEN_ITEM_ID
+servonaut vault import ssh --vault VAULT_ID --path PATH [--name NAME] [--break-glass --from-cidr CIDR [--from-cidr CIDR ...]]
+servonaut vault import bitwarden --vault VAULT_ID --item BITWARDEN_ITEM_ID [--name NAME]
+servonaut vault rename ITEM_ID --vault VAULT_ID --name NAME
+servonaut vault delete ITEM_ID --vault VAULT_ID [--yes]
 servonaut vault bind SERVER ITEM_ID --vault VAULT_ID --team TEAM [--login USER] (--host-key 'OPENSSH_HOST_KEY' [--host-key ...] | --pin-host-key) --yes
 servonaut vault bind-personal --vault VAULT_ID --item ITEM_ID --provider PROVIDER --instance-id INSTANCE_ID --hostname HOST --login USER --host-key 'OPENSSH_HOST_KEY' [--host-key 'OPENSSH_HOST_KEY' ...]
 servonaut vault auto-bind [--vault VAULT_ID] [--dry-run] [--yes]
@@ -637,6 +639,22 @@ stores the unlocked key, encrypted, in the vault. Outside a terminal it refuses
 such a key. To pick from the keys in `~/.ssh` instead, use **Import SSH** on
 the Vault screen.
 
+Imports keep the file name or Bitwarden item name by default; `--name` overrides
+it. `rename` changes an SSH key's name. Names contain 1–200 characters, with
+terminal controls removed; long import names are shortened to fit.
+
+`delete` shows the key's name and fingerprint and asks for confirmation (`--yes`
+skips the question). It refuses while the key is bound to a team server or one
+of this computer's servers, while a server's binding cannot be checked, or while
+the key has open exposures: give those servers another key, or resolve or rotate
+the exposures, first. Deletion removes the key from the vault only: servers that
+accept it keep accepting it until it is removed from their `authorized_keys`.
+
+In the app, **Items** on the Vault screen lists each SSH key's name, and
+**Rename key** and **Delete key** act on the selected key the same way; Delete
+key asks you to type DELETE.
+
+`items --names` decrypts SSH key names locally and adds them to the listing.
 `items` and `show` print metadata by default. `show --reveal` requires an
 explicit confirmation and only displays the value in the terminal; `--json`
 never exports revealed values. `rotate` re-keys a vault after membership or

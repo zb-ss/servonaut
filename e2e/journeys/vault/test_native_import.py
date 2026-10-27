@@ -20,6 +20,7 @@ from servonaut.services.api_client import APIClient
 from servonaut.services.auth_service import AuthService
 from servonaut.services.bw_key_import import OPENSSH_PEM_HEADER
 from servonaut.services.vault.command_service import VaultCommandService
+from servonaut.services.vault.errors import VaultUserError
 from servonaut.services.vault.identity_store import IdentityStore, LocalDevice, LocalIdentity
 
 
@@ -125,7 +126,7 @@ async def test_modal_imports_valid_local_key_and_refuses_malformed_source(
     assert app.result["imported"] == 1
     assert app.result["failed"] == 0
     assert len((await service.list_items(vault_id=vault["vault_id"]))["data"]) == 1
-    with pytest.raises(ValueError, match="SSH private key is invalid"):
+    with pytest.raises(VaultUserError, match="OpenSSH private key, unlocked or with its passphrase"):
         await service.import_keys(
             source="ssh", vault_id=vault["vault_id"], path="/invalid", private_key=b"invalid",
         )

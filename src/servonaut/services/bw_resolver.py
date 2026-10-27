@@ -20,7 +20,7 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from servonaut.services.bw_errors import (
     BwCliMissingError,
@@ -52,6 +52,13 @@ _LOCKED_STDERR_PHRASES: tuple[str, ...] = (
     "Mac failed",
 )
 _NOT_FOUND_PHRASE: str = "Not found."
+
+
+class BwSshItem(NamedTuple):
+    """The key and optional name read from one native Bitwarden SSH item."""
+
+    private_key: str
+    name: Optional[str]
 
 
 class BwResolver:
@@ -97,6 +104,12 @@ class BwResolver:
         """Resolve a BW item id to its OpenSSH private key body.
 
         Returns the raw key text (suitable for writing to a 0600 tmpfile).
+        """
+        return self.resolve_ssh_item(item_id).private_key
+
+    def resolve_ssh_item(self, item_id: str) -> BwSshItem:
+        """Read the SSH key and its item name in one Bitwarden CLI call.
+
         Raises specific BwResolverError subclasses for each failure mode.
         """
         validate_instance_id(item_id)  # rejects path traversal and non-UUID-ish ids
@@ -165,4 +178,5 @@ class BwResolver:
                 "(expected BW 2023.10+ native SSH item with .sshKey.privateKey)."
             )
 
-        return private_key
+        name = data.get("name")
+        return BwSshItem(private_key, name if isinstance(name, str) else None)

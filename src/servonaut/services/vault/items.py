@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from . import crypto
+from .display import terminal_safe
 from .roster_pins import decode_b64
 from .team_vault_client import (
     TeamVaultClient,
@@ -23,6 +24,17 @@ from .team_vault_client import (
 
 _ITEM_TYPES = {"ssh_key", "secret", "connection_extra", "break_glass", "host_pins"}
 _SSH_TYPES = {"ssh_key", "break_glass"}
+_ITEM_NAME_MAX = 200
+
+
+def clean_item_name(value: object, *, truncate: bool = False) -> str:
+    """*value* as a stored item name: no terminal controls, trimmed, 1 to 200 characters."""
+    name = terminal_safe(value).strip()
+    if truncate:
+        name = name[:_ITEM_NAME_MAX].strip()
+    if not 1 <= len(name) <= _ITEM_NAME_MAX:
+        raise ValueError("vault key name must contain 1 to 200 characters")
+    return name
 
 
 class VaultItemService:
@@ -303,7 +315,7 @@ class VaultItemService:
 
     @staticmethod
     def _validate_payload(item_type: str, payload: Mapping[str, Any], fingerprint: Any) -> None:
-        if not isinstance(payload.get("name"), str) or not 1 <= len(payload["name"]) <= 200:
+        if not isinstance(payload.get("name"), str) or not 1 <= len(payload["name"]) <= _ITEM_NAME_MAX:
             raise ValueError("vault item name must contain 1 to 200 characters")
         if not isinstance(payload.get("notes", ""), str) or len(payload.get("notes", "")) > 4000:
             raise ValueError("vault item notes must contain at most 4000 characters")

@@ -28,7 +28,7 @@ from servonaut.services.vault.display import (
     ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import VaultKeyInUse, VaultUserError, vault_failure_reason
 from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
@@ -158,16 +158,27 @@ def add_vault_parser(subparsers: Any) -> None:
     items = commands.add_parser("items", help="List item metadata only.")
     items.add_argument("--vault", required=True, help=_VAULT_HELP)
     items.add_argument("--include-deleted", action="store_true")
+    items.add_argument("--names", action="store_true", help="Decrypt SSH key names locally and include them.")
     show = commands.add_parser("show", help="Show item metadata; --reveal requires confirmation.")
     show.add_argument("item_id")
     show.add_argument("--vault", required=True, help=_VAULT_HELP)
     show.add_argument("--reveal", action="store_true")
     show.add_argument("--yes", action="store_true")
 
+    rename = commands.add_parser("rename", help="Rename a vault SSH key.")
+    rename.add_argument("item_id")
+    rename.add_argument("--vault", required=True, help=_VAULT_HELP)
+    rename.add_argument("--name", required=True, help="New SSH key name (1 to 200 characters).")
+    delete = commands.add_parser("delete", help="Remove an unused SSH key from the vault only.")
+    delete.add_argument("item_id")
+    delete.add_argument("--vault", required=True, help=_VAULT_HELP)
+    delete.add_argument("--yes", action="store_true")
+
     imports = commands.add_parser("import", help="Import SSH material into the encrypted vault.")
     import_sub = imports.add_subparsers(dest="vault_import_command", required=True)
     import_ssh = import_sub.add_parser("ssh", help="Import a local SSH private key file.")
     import_ssh.add_argument("--vault", required=True, help=_VAULT_HELP)
+    import_ssh.add_argument("--name", default=None, help="Key name; defaults to the file name.")
     import_ssh.add_argument(
         "--path", required=True,
         help="Private key file, e.g. ~/.ssh/id_ed25519; asks for its passphrase when it has one.",
@@ -182,6 +193,7 @@ def add_vault_parser(subparsers: Any) -> None:
     )
     import_bw = import_sub.add_parser("bitwarden", help="Import SSH keys from Bitwarden without deleting them.")
     import_bw.add_argument("--vault", required=True, help=_VAULT_HELP)
+    import_bw.add_argument("--name", default=None, help="Key name; defaults to the Bitwarden item name.")
     import_bw.add_argument("--item", required=True, help="Existing Bitwarden SSH item UUID.")
     bind = commands.add_parser("bind", help="Bind a vault SSH item to a server.")
     bind.add_argument("server")
@@ -815,6 +827,38 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
     return _EXIT_ERROR if failed else _EXIT_OK
 
 
+def _named_row(row: Mapping[str, Any], names: Mapping[str, Any]) -> dict[str, Any]:
+    if row.get("type") != "ssh_key":
+        return dict(row)
+    name = names.get(row.get("item_id"))
+    return {**row, "name": terminal_safe(name) if name is not None else None}
+
+
+async def _items_with_names(services: Any, args: argparse.Namespace) -> dict[str, Any]:
+    listed = await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted)
+    if not args.names:
+        return listed
+    choices = await _invoke(services, "ssh_key_choices", vault_id=args.vault, name_limit=None)
+    names = {row["item_id"]: row.get("name") for row in choices}
+    return {**listed, "data": [_named_row(row, names) for row in listed["data"]]}
+
+
+async def _delete_ssh_key(services: Any, args: argparse.Namespace, output: bool) -> int:
+    servers = _auto_bind_servers()
+    usage = await _invoke(services, "ssh_key_usage", vault_id=args.vault, item_id=args.item_id, servers=servers)
+    print(f"Vault key: {terminal_safe(usage.get('name') or 'Unnamed SSH key')} "
+          f"({terminal_safe(usage.get('fingerprint') or args.item_id)})", file=sys.stderr)
+    if usage["team_servers"] or usage["own_servers"] or usage["unchecked"]:
+        raise VaultKeyInUse.from_usage(usage)
+    print("This removes the key from the vault only. Servers that accept it keep accepting it "
+          "until it is removed from their authorized_keys.", file=sys.stderr)
+    if not _confirm(args, "Delete this key from the vault"):
+        return _EXIT_ABORTED
+    _print(await _invoke(services, "delete_ssh_key", vault_id=args.vault, item_id=args.item_id, servers=servers),
+           json_output=output)
+    return _EXIT_OK
+
+
 async def _handle(args: argparse.Namespace) -> int:
     command = args.vault_command
     output = bool(getattr(args, "json", False))
@@ -931,17 +975,34 @@ async def _handle(args: argparse.Namespace) -> int:
             else:
                 _print_vaults(vaults)
         elif command == "items":
-            _print(await _invoke(services, "list_items", vault_id=args.vault, include_deleted=args.include_deleted), json_output=output)
+            _print(await _items_with_names(services, args), json_output=output)
         elif command == "show":
             if args.reveal and not _confirm(args, "Reveal this secret in your terminal"):
                 return _EXIT_ABORTED
             item = await _invoke(services, "show_item", vault_id=args.vault, item_id=args.item_id, reveal=args.reveal)
             _print(item, json_output=output, revealed=args.reveal)
+        elif command == "rename":
+            renamed = await _invoke(services, "rename_ssh_key", vault_id=args.vault, item_id=args.item_id, name=args.name)
+            if output:
+                _print(renamed, json_output=True)
+            else:
+                print(f"Renamed the key to {terminal_safe(renamed['name'])}.")
+        elif command == "delete":
+            return await _delete_ssh_key(services, args, output)
         elif command == "import":
             if args.vault_import_command == "bitwarden":
                 from servonaut.services.bw_resolver import BwResolver
-                private_key = await asyncio.to_thread(BwResolver(session_getter=None).resolve_ssh_key, args.item)
-                _print(await _invoke(services, "import_keys", source="bitwarden", vault_id=args.vault, private_key=private_key, source_ref=args.item), json_output=output)
+                key_text, item_name = await asyncio.to_thread(BwResolver(session_getter=None).resolve_ssh_item, args.item)
+                private_key = bytearray(key_text.encode("utf-8"))
+                del key_text
+                try:
+                    _print(await _invoke(
+                        services, "import_keys", source="bitwarden", vault_id=args.vault,
+                        private_key=private_key, source_ref=args.item,
+                        name=args.name if args.name is not None else item_name,
+                    ), json_output=output)
+                finally:
+                    _wipe(private_key)
             else:
                 if args.from_cidr and not args.break_glass:
                     print("Error: --from-cidr is only used with --break-glass.", file=sys.stderr)
@@ -957,7 +1018,7 @@ async def _handle(args: argparse.Namespace) -> int:
                 try:
                     _print(await _invoke(
                         services, "import_keys", source="ssh", vault_id=args.vault, path=str(key_path),
-                        private_key=private_key,
+                        private_key=private_key, name=args.name,
                         break_glass_from_cidrs=args.from_cidr if args.break_glass else None,
                     ), json_output=output)
                 finally:
@@ -1056,6 +1117,13 @@ async def _handle(args: argparse.Namespace) -> int:
                 _print(await _invoke(services, "recover_escrow", vault_id=args.vault, escrow_key=escrow_key), json_output=output)
         else:
             raise ValueError(f"Unknown vault command: {command}")
+    except VaultKeyInUse as exc:
+        for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
+                             ("Could not check", exc.unchecked)):
+            if names:
+                print(f"{label}: {', '.join(terminal_safe(name) for name in names)}", file=sys.stderr)
+        print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        return _EXIT_ERROR
     except APIError as exc:
         print(f"Vault request failed ({vault_failure_reason(exc)}).", file=sys.stderr)
         return _EXIT_ERROR

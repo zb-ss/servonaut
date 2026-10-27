@@ -59,6 +59,9 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/vault_rename_key_modal.py", "_submit", "update",
+                   "Only fixed required-name and length-validation messages; "
+                   "no key name, secret or server data is interpolated."),
     # Demo-toggle redraw helpers (refresh_after_demo_toggle hooks).
     AllowlistEntry("screens/key_management.py", "refresh_after_demo_toggle", "update",
                    "Clears the ssh-add listing with an empty string constant."),

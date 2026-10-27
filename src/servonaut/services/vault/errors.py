@@ -9,8 +9,12 @@ happened or what to do.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 from servonaut.services.api_client import APIError
+
+from .display import terminal_safe
 
 _SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _SAFE_FIELD = re.compile(r"[a-z][a-z0-9_.-]{0,127}")
@@ -18,6 +22,30 @@ _SAFE_FIELD = re.compile(r"[a-z][a-z0-9_.-]{0,127}")
 
 class VaultUserError(RuntimeError):
     """A fixed, secret-free message that is safe to show the user as-is."""
+
+
+class VaultKeyInUse(VaultUserError):
+    """A key still bound to servers, or whose bindings could not be checked."""
+
+    def __init__(
+        self, *, team_servers: list[str], own_servers: list[str], unchecked: list[str],
+    ) -> None:
+        self.team_servers = [terminal_safe(name) for name in team_servers]
+        self.own_servers = [terminal_safe(name) for name in own_servers]
+        self.unchecked = [terminal_safe(name) for name in unchecked]
+        message = (
+            "this key is still used by the servers listed: give them another vault key first"
+            if self.team_servers or self.own_servers else
+            "could not check whether the servers listed still use this key: try again when they can be reached"
+        )
+        super().__init__(message)
+
+    @classmethod
+    def from_usage(cls, usage: Mapping[str, Any]) -> VaultKeyInUse:
+        """Build a refusal from the server-usage result shared by CLI and TUI."""
+        return cls(
+            team_servers=usage["team_servers"], own_servers=usage["own_servers"], unchecked=usage["unchecked"],
+        )
 
 
 # Why a recovery key was refused, in the user's terms.
@@ -60,6 +88,7 @@ _CONTACT_URL = "https://servonaut.dev/contact"
 
 # Refusals the user can act on; keyed by the server's machine-readable code.
 _ACTIONABLE_CODES = {
+    "revision_conflict": "this item changed since it was read; reload and try again",
     "identity_unconfirmed": (
         "your vault identity is not confirmed yet; open the confirmation e-mail, "
         "or sign in with MFA (`servonaut login`) and run `servonaut vault identity confirm`"

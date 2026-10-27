@@ -47,6 +47,8 @@
 #vault_actions #vault_create,
 #vault_actions #vault_items,
 #vault_actions #vault_reveal,
+#vault_actions #vault_rename_key,
+#vault_actions #vault_delete_key,
 #vault_actions #vault_exposures,
 #vault_actions #vault_resolve_exposure,
 #vault_actions #vault_rotate_exposure,
