@@ -15,7 +15,10 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Static, Button, Checkbox, Footer, Input, Label, Select
+from textual.widgets import (
+    Button, Checkbox, Footer, Input, Label, OptionList, Select, Static,
+)
+from textual.widgets.option_list import Option
 
 from servonaut.services.ssh_host_keys import (
     OFF_OPTIONS_KEEP_KNOWN_HOSTS,
@@ -38,9 +41,11 @@ from servonaut.screens._busy_work import BusyJob, BusyWork
 from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_KEY_PAIR, match_ssh_key
 from servonaut.screens._demo_resolve import (
     connection_instance,
+    display_text,
     display_username,
     hide_login,
     refuse_unresolved,
+    replace_instances,
     team_rows,
 )
 from servonaut.screens._provider_accounts import ServerAccountMixin
@@ -84,6 +89,97 @@ _VAULT_SOURCE = "servonaut_vault"
 def credential_source_label(source: object) -> Optional[str]:
     """The name shown for a binding's credential source, or None if unknown."""
     return _CREDENTIAL_SOURCE_LABELS.get(source) if isinstance(source, str) else None
+
+
+def scrub_for_display(app: Any, value: object) -> str:
+    """Hide names held outside the displayed fleet when demo mode is on."""
+    text = display_text(app, str(value))
+    redactor = getattr(app, "redaction_service", None)
+    if getattr(app, "demo_mode", False) and redactor is not None:
+        return str(redactor.scrub_stream(text))
+    return text
+
+
+def _can_bind_team(row: Mapping[str, Any]) -> bool:
+    """Whether this user's team role permits setting a shared key."""
+    return row.get("team_role") in ("owner", "admin")
+
+
+def _team_key_label(row: Mapping[str, Any]) -> str:
+    """The unescaped scope label; callers scrub and escape it for display."""
+    return f"Team key for {row.get('team_name') or row.get('team_slug') or 'team'}"
+
+
+class VaultBindingScopeModal(ModalScreen[Optional[str]]):
+    """Choose a sharing team, personal access (''), or cancel (None)."""
+
+    DEFAULT_CSS = """
+    VaultBindingScopeModal { align: center middle; }
+    #vault_scope_modal {
+        width: 76; max-width: 92%; height: auto; max-height: 88%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    #vault_scope_choices { max-height: 12; margin: 1 0; }
+    #vault_scope_cancel { dock: bottom; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, teams: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self._teams = teams
+        self._scopes: dict[Option, str] = {}
+
+    def _options(self) -> list[Option]:
+        options: list[Option] = []
+        self._scopes.clear()
+        for row in self._teams:
+            name = scrub_for_display(self.app, row.get("team_name") or row["team_slug"])
+            allowed = _can_bind_team(row)
+            reason = (
+                "Team members connect to this server with this key."
+                if allowed else "Only a team owner or admin can set the team's key."
+            )
+            option = Option(
+                Text(f"Everyone in team {name}\n{reason}"),
+                disabled=not allowed,
+            )
+            options.append(option)
+            if allowed:
+                self._scopes[option] = row["team_slug"]
+        personal = Option(Text("Just me\nOnly you use this key; the team is not affected."))
+        options.append(personal)
+        self._scopes[personal] = ""
+        return options
+
+    def compose(self) -> ComposeResult:
+        yield Container(
+            Static("[bold]Who is this key for?[/bold]"),
+            OptionList(*self._options(), id="vault_scope_choices"),
+            Button("Cancel", id="vault_scope_cancel"),
+            id="vault_scope_modal",
+        )
+
+    def on_mount(self) -> None:
+        # Enter alone keeps access personal; team-wide changes are deliberate.
+        self.query_one(OptionList).highlighted = len(self._teams)
+
+    def refresh_after_demo_toggle(self) -> None:
+        choices = self.query_one(OptionList)
+        highlighted = choices.highlighted
+        choices.clear_options().add_options(self._options())
+        choices.highlighted = highlighted
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        scope = self._scopes.get(event.option)
+        if scope is not None and not event.option.disabled:
+            self.dismiss(scope)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.action_cancel()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ConfirmSshVerifyModal(ModalScreen[bool]):
@@ -904,22 +1000,44 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
     def _shared_with_line(self) -> str:
         """``Also shared with: team …`` for one of the user's own servers a team shares too."""
-        from servonaut.services.shared_servers import fold_shared
-
-        if self._instance.get('is_shared') is True:
-            return ""
-        rows = getattr(self.app, "instances", None)
-        if not isinstance(rows, list):
-            return ""
-        teams = fold_shared(rows)[1].get(id(self._instance))
+        teams = [
+            str(row.get("team_name") or row["team_slug"])
+            for row in self._sharing_teams()
+        ]
         if not teams:
             return ""
-        return f"[dim]Also shared with:[/dim] {escape(', '.join(teams))}\n"
+        label = escape(scrub_for_display(self.app, ", ".join(teams)))
+        return f"[dim]Also shared with:[/dim] {label}\n"
+
+    def _sharing_teams(self) -> list[dict[str, Any]]:
+        """The real shared row for each team also sharing this own server."""
+        from servonaut.services.shared_servers import is_same_server
+
+        own = connection_instance(self.app, self._instance)
+        if own.get("is_shared") is True:
+            return []
+        teams: dict[str, dict[str, Any]] = {}
+        for row in team_rows(self.app):
+            slug = row.get("team_slug")
+            if isinstance(slug, str) and slug and is_same_server(row, own):
+                teams.setdefault(slug, row)
+        return list(teams.values())
 
     def _credential_source_line(self) -> str:
         """Describe the configured SSH credential without exposing its reference."""
         label = credential_source_label(self._binding_source()) or "Automatic resolution"
-        return f"[dim]SSH credential:[/dim] {label}\n"
+        if self._binding_source() == _VAULT_SOURCE:
+            scope = (
+                _team_key_label(self._instance)
+                if self._instance.get("is_shared") is True else "Your key"
+            )
+            label += f" · {scrub_for_display(self.app, scope)}"
+        for row in self._sharing_teams():
+            binding = row.get("credential_binding")
+            if isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE:
+                scope = scrub_for_display(self.app, _team_key_label(row))
+                label += f"; {scope} (Servonaut Vault)"
+        return f"[dim]SSH credential:[/dim] {escape(label)}\n"
 
     def _binding_source(self) -> Optional[str]:
         """The credential source this screen bound or looked up, else the row's (team servers)."""
@@ -963,9 +1081,10 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
     async def _refresh_vault_binding(self) -> None:
         """Show the personal binding's source once the vault service has answered."""
+        previous = self._vault_binding_source
         source = await self._lookup_vault_binding_source()
         # An answer that started before a bind on this screen must not undo it.
-        if source is None or source == self._vault_binding_source:
+        if self._vault_binding_source != previous or source is None or source == previous:
             return
         self._vault_binding_source = source
         if self.is_mounted:
@@ -1908,12 +2027,29 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
                 return
             instance = connection_instance(self.app, self._instance)
+            teams = self._sharing_teams()
+            selected_team = ""
+            if teams:
+                selected_team = await self.app.push_screen_wait(
+                    VaultBindingScopeModal(teams)
+                )
+                if selected_team is None:
+                    return
+                if selected_team:
+                    target = self._team_binding_target(selected_team)
+                    if target is None:
+                        return
+                    instance = target
             server = str(instance.get("id") or "")
             if not server:
                 self.app.notify("This server has no usable identifier.", severity="error", markup=False)
                 return
             values = await self.app.push_screen_wait(VaultBindingModal(service, instance))
             if not values:
+                return
+            if selected_team and self._team_binding_target(
+                selected_team, server=server,
+            ) is None:
                 return
             host_keys = [key.strip() for key in values["host_keys"].split(",") if key.strip()]
             job = self._busy.begin("Binding the vault key to this server…", hold=("#btn_use_vault_key",))
@@ -1976,16 +2112,63 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             source = result.get("source") if isinstance(result, dict) else None
             source = source if isinstance(source, str) and source else _VAULT_SOURCE
             label = credential_source_label(source) or "Servonaut Vault"
-            self._vault_binding_source = source
+            if values["team"]:
+                binding = result if isinstance(result, dict) else {}
+                self._remember_team_binding(instance, {**binding, "source": source})
+                scope = _team_key_label(instance)
+            else:
+                self._vault_binding_source = source
+                scope = "Your key"
             # The other SSH paths must not reuse a lease for the previous key.
             leases = getattr(self.app, "vault_lease_cache", None)
             if leases is not None:
                 leases.forget(instance)
+                if values["team"]:
+                    leases.forget(connection_instance(self.app, self._instance))
             if self.is_mounted:
                 self._render_server_info()
-            self.app.notify(f"Vault key bound. SSH to this server now uses {label}.", markup=False)
+            scope = scrub_for_display(self.app, scope)
+            message = f"Vault key bound. {scope}: {label}."
+            if selected_team and self._vault_binding_source:
+                message += " You keep connecting with your key."
+            self.app.notify(message, markup=False)
 
         self.run_worker(flow(), group="vault", exclusive=True)
+
+    def _team_binding_target(
+        self, slug: str, *, server: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Check the selected team is still shared and the user can set its key."""
+        target = next(
+            (row for row in self._sharing_teams() if row["team_slug"] == slug), None,
+        )
+        if (
+            target is not None and _can_bind_team(target)
+            and (server is None or target.get("id") == server)
+        ):
+            return target
+        self.app.notify(
+            "This team is no longer available for binding. "
+            "Only a team owner or admin can set its key.",
+            severity="warning", markup=False,
+        )
+        return None
+
+    def _remember_team_binding(
+        self, target: dict[str, Any], binding: dict[str, Any],
+    ) -> None:
+        """Keep the team's row current without changing the own row's credential."""
+        rows = team_rows(self.app)
+        target_id = (target.get("team_slug"), target.get("id"))
+        for row in rows:
+            if (row.get("team_slug"), row.get("id")) != target_id:
+                continue
+            row["credential_binding"] = binding
+            if binding.get("login_user"):
+                row["login_user"] = binding["login_user"]
+        replace_instances(self.app, "shared", rows)
+        if self._instance.get("is_shared") is True:
+            self._instance["credential_binding"] = binding
 
     async def _manage_ssh_ref_flow(self) -> None:
         """Fetch existing ref then open SshRefEditorModal in add or edit mode."""

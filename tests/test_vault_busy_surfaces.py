@@ -615,7 +615,7 @@ async def test_binding_shows_progress_and_cannot_be_restarted_midway(size) -> No
         await _idle(busy)
         assert not button.disabled
         await wait_until(lambda: app.focused is button)
-        assert app.notes[-1][0] == "Vault key bound. SSH to this server now uses Servonaut Vault."
+        assert app.notes[-1][0] == "Vault key bound. Team key for ops: Servonaut Vault."
         await pilot.pause()
 
 
