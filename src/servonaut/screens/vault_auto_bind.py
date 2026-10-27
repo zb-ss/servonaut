@@ -559,7 +559,17 @@ class VaultAutoBindScreen(Screen):
                 "(shown for the highlighted server), tick the box and press Bind selected."
             )
         else:
-            self._status(f"None of your {len(rows)} servers can get a vault key automatically: see each status.")
+            if self._team:
+                clean_team = self.scrub_for_display(self._team_name or self._team)
+                if len(rows) == 1:
+                    self._status(f"The 1 shared server of {clean_team} can't get a vault key automatically: see its status.")
+                else:
+                    self._status(f"None of the {len(rows)} shared servers of {clean_team} can get a vault key automatically: see each status.")
+            else:
+                if len(rows) == 1:
+                    self._status("Your 1 server can't get a vault key automatically: see its status.")
+                else:
+                    self._status(f"None of your {len(rows)} servers can get a vault key automatically: see each status.")
 
     # ------------------------------------------------------------------
     # Choosing, fetching, and binding

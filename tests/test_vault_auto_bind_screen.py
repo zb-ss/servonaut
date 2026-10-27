@@ -818,3 +818,57 @@ async def test_picker_label_one_line_high_for_20_char_team(size: tuple[int, int]
         await pilot.pause()
         current = select.query_one(SelectCurrent)
         assert current.size.height == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 3])
+async def test_team_status_wording_when_none_can_get_key(count: int) -> None:
+    vaults = [
+        {"vault_id": PERSONAL_VAULT, "label": "Personal", "kind": "user"},
+        {
+            "vault_id": "tv-1",
+            "kind": "team",
+            "team": {"slug": "ops-team"},
+            "my_grant": {"sealed_key": "s1"},
+        },
+    ]
+    instances = [
+        {
+            "id": f"s-{i}",
+            "name": f"shared-{i}",
+            "hostname": f"198.51.100.{i}",
+            "is_shared": True,
+            "team_slug": "ops-team",
+            "team_role": "admin",
+            "team_name": "Ops Core Team",
+            "login": "ubuntu",
+        }
+        for i in range(1, count + 1)
+    ]
+    # No matching keys for shared-*
+    keys_team = [{"item_id": "k-other", "label": "other", "name": "other.pem", "fingerprint": "SHA256:x"}]
+    service = _Service(vaults=vaults, keys=keys_team)
+    app = _Host(service, instances=instances)
+    async with app.run_test(size=(160, 50)) as pilot:
+        select = app.screen.query_one("#auto_bind_vault_select", Select)
+        select.value = "team:ops-team"
+        await wait_until(lambda: app.screen._team == "ops-team" and not app.screen._busy.is_busy)
+        status = _status(app)
+        if count == 1:
+            assert status == "The 1 shared server of Ops Core Team can't get a vault key automatically: see its status."
+        else:
+            assert status == f"None of the {count} shared servers of Ops Core Team can get a vault key automatically: see each status."
+
+        # Demo mode scrubs the team name
+        from servonaut.services.redaction_service import RedactionService
+
+        app.demo_mode = True
+        app.redaction_service = RedactionService()
+        app.screen.refresh_after_demo_toggle()
+        demo_status = _status(app)
+        assert "Ops Core Team" not in demo_status
+        if count == 1:
+            assert "can't get a vault key automatically" in demo_status
+        else:
+            assert "can get a vault key automatically" in demo_status
+
