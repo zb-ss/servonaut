@@ -434,6 +434,7 @@ async def test_review_modal_blocks_bind_until_tick_unless_verified() -> None:
 
 @pytest.mark.asyncio
 async def test_review_modal_fits_narrow_terminal() -> None:
+    reason = "not verified: the console output no longer holds the first-boot host keys"
     row = AutoBindRow(
         instance={"id": "i-web1", "name": "web-1"},
         status=FETCHED,
@@ -443,6 +444,7 @@ async def test_review_modal_fits_narrow_terminal() -> None:
         login="ubuntu",
         host_keys=[HOST_KEY],
         verified=False,
+        verification_source=reason,
     )
 
     class _ModalHost(App):
@@ -476,8 +478,22 @@ async def test_review_modal_fits_narrow_terminal() -> None:
         source_text = str(source_widget.render())
         assert "Verification:" in source_text
         assert "Source:" not in source_text
+        assert reason in source_text
         for line in source_text.splitlines():
             assert line.startswith("  ")
+
+        # The reason wraps inside the review scroll rather than clipping/overflowing horizontally
+        rendered_lines = [
+            "".join(segment.text for segment in source_widget.render_line(y))
+            for y in range(source_widget.region.height)
+        ]
+        full_rendered = " ".join(rendered_lines)
+        assert "the console output no longer holds the first-boot" in full_rendered
+        assert "host keys" in full_rendered
+
+        svg = app.export_screenshot()
+        assert "first-boot" in svg
+        assert "host&#160;keys" in svg or "host keys" in svg
 
 
 @pytest.mark.asyncio
