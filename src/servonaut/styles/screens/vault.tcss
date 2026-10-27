@@ -391,6 +391,10 @@ AutoBindFetchConfirmModal {
     margin-right: 1;
 }
 
+#auto_bind_confirm_yes {
+    min-width: 10;
+}
+
 VaultAutoBindReviewModal {
     align: center middle;
 }
@@ -438,6 +442,10 @@ VaultAutoBindReviewModal {
 
 #vault_auto_bind_review_cancel {
     margin-right: 1;
+}
+
+#vault_auto_bind_review_confirm {
+    min-width: 14;
 }
 
 /* A short terminal keeps the table, the reason and the buttons: the intro goes. */

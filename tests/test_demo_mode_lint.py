@@ -876,6 +876,11 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "already scrubbed via _demo_safe() (scrub_stream) in _load; "
                    "the folder name is local user config, escaped for markup."),
 
+    # vault_auto_bind.py — static explanatory text explaining auto-bind behaviour.
+    AllowlistEntry("screens/vault_auto_bind.py", "_load", "update",
+                   "Writes static explanatory guidance text describing auto-bind "
+                   "behaviour for personal or team vault targets."),
+
     # aws_create.py — EC2 launch wizard outside demo recording scope.
     # Region names, AMI IDs/names, instance type names, and VPC resource IDs
     # are AWS infrastructure taxonomy (provider-defined strings). Key pair

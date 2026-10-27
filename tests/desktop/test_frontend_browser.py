@@ -36,9 +36,9 @@ async def _launch(browser_launcher, browser_type: str):
     try:
         return await browser_launcher.launch()
     except PlaywrightError as error:
-        # The Python package can be installed without its browsers.
-        if "Executable doesn't exist" in str(error):
-            pytest.skip(f"{browser_type} is not installed for Playwright")
+        # The Python package can be installed without its browsers or missing host libraries.
+        if "Executable doesn't exist" in str(error) or "missing dependencies" in str(error):
+            pytest.skip(f"{browser_type} is not installed or has missing host dependencies for Playwright")
         raise
 
 

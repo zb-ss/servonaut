@@ -559,7 +559,7 @@ class VaultAutoBindScreen(Screen):
             )
 
         newly_ready = {i for i, row in enumerate(self._rows) if row.status == FETCHED and row.result is None}
-        self._selected.update(newly_ready)
+        self._selected |= newly_ready
         self._render_rows()
         self._sync_fetch()
 
