@@ -1166,6 +1166,82 @@ def test_auto_bind_fetch_host_keys_interactive_confirm_binds_all_when_confirmed(
     assert "Bound vault keys to 2 of 2 servers." in out.err
 
 
+def test_auto_bind_fetch_host_keys_yes_reports_skipped_in_json(monkeypatch, capsys) -> None:
+    from servonaut.services.vault import auto_bind
+
+    servers = [
+        {"id": "i-web1", "name": "web-1", "public_ip": "198.51.100.1"},
+        {"id": "i-web2", "name": "web-2", "public_ip": "198.51.100.2"},
+    ]
+    keys = [
+        {"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"},
+        {"item_id": "k2", "label": "web-2", "name": "web-2.pem", "fingerprint": "SHA256:b"},
+    ]
+    service = _AutoBindService()
+    service.keys = keys
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: servers)
+    monkeypatch.setattr(
+        auto_bind, "trusted_host_keys",
+        lambda inst, h, p: [service.HOST_KEY] if inst["id"] == "i-web1" else [],
+    )
+
+    async def fake_fetch(svc, rows, on_progress=None, accounts=None):
+        for r in rows:
+            r.status = auto_bind.FETCHED
+            r.host_keys = [service.HOST_KEY]
+            r.verified = False
+
+    monkeypatch.setattr(auto_bind, "fetch_host_keys_for_rows", fake_fetch)
+    vault.set_vault_service_factory(lambda: service)
+    try:
+        code = vault.handle_vault_command(
+            _parser().parse_args(["vault", "auto-bind", "--yes", "--fetch-host-keys", "--json"])
+        )
+    finally:
+        vault.set_vault_service_factory(None)
+
+    out = capsys.readouterr()
+    assert code == 0
+    report = json.loads(out.out)
+    by_name = {s["server"]: s for s in report["servers"]}
+    assert by_name["web-1"]["result"] == "bound"
+    assert by_name["web-2"]["skipped"] == "not verified"
+
+
+def test_auto_bind_prints_fetch_error_and_mismatch_detail(capsys) -> None:
+    row_err = SimpleNamespace(
+        instance={"id": "i-1", "name": "web-err"},
+        match=SimpleNamespace(item_id="k1", name="k1.pem", matched_by="server name", ambiguous=False),
+        login="ubuntu",
+        host="198.51.100.1",
+        port=22,
+        host_keys=[],
+        ready=False,
+        status="fetch_failed",
+        status_text="could not connect: timed out",
+        fetch_error="timed out after 10s",
+        result=None,
+    )
+    row_mismatch = SimpleNamespace(
+        instance={"id": "i-2", "name": "web-mismatch"},
+        match=SimpleNamespace(item_id="k2", name="k2.pem", matched_by="server name", ambiguous=False),
+        login="ubuntu",
+        host="198.51.100.2",
+        port=22,
+        host_keys=[],
+        ready=False,
+        status="host_key_mismatch",
+        status_text="host key mismatch",
+        mismatch_detail="differs from AWS console fingerprints",
+        result=None,
+    )
+    vault._print_auto_bind([row_err, row_mismatch], results=False)
+    out = capsys.readouterr().out
+    assert "fetch error: timed out after 10s" in out
+    assert "mismatch: differs from AWS console fingerprints" in out
+
+
+
 def _vault_record(name, kind, vault_id, team=None, items=0):
     """A vault as the service lists it, with the signed material a person never needs to read."""
     return {

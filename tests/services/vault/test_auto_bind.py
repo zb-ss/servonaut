@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from servonaut.services.vault.auto_bind import (
     ALREADY_BOUND,
     AMBIGUOUS,
+    AutoBindRow,
     CHECK_FAILED,
     FETCH_FAILED,
     FETCHED,
@@ -457,3 +458,89 @@ async def test_fetch_host_keys_non_aws_server() -> None:
     assert row.ready is True
     assert row.verified is False
     assert "compare with the server's console or your provider" in (row.verification_source or "")
+
+
+def test_parse_keys_block_normalizes_and_validates() -> None:
+    from servonaut.services.vault.bindings import VaultBindingService
+
+    key1 = _make_key()
+    key2 = _make_key()
+    raw_console = (
+        f"{BEGIN_KEYS}\n"
+        f"{key1} root@ip-10-0-0-1 (first boot comment)\n"
+        f"{key2}\n"
+        f"{END_KEYS}\n"
+    )
+    res = parse_ec2_console_output(raw_console)
+    assert res.has_keys_block is True
+    assert len(res.keys) == 2
+    for k in res.keys:
+        assert len(k.split()) == 2
+    # Verify through real VaultBindingService._validate_host_keys
+    VaultBindingService._validate_host_keys(res.keys)
+
+
+def test_parse_fingerprints_handles_trailing_plus_and_slash() -> None:
+    # 43 chars base64 sha256 ending in + and /
+    fp_plus = "SHA256:" + "A" * 42 + "+"
+    fp_slash = "SHA256:" + "B" * 42 + "/"
+    raw_console = (
+        f"{BEGIN_FINGERPRINTS}\n"
+        f"256 {fp_plus} root@host (ECDSA)\n"
+        f"256 {fp_slash}= root@host (ED25519)\n"
+        f"{END_FINGERPRINTS}\n"
+    )
+    res = parse_ec2_console_output(raw_console)
+    assert res.has_fingerprints_block is True
+    assert res.fingerprints.get("ECDSA") == fp_plus
+    assert res.fingerprints.get("ED25519") == fp_slash
+
+
+@pytest.mark.asyncio
+async def test_apply_auto_bind_skips_unreviewed_fetched_rows() -> None:
+    server = _server("i-unrev", "web-unrev")
+    key = _make_key()
+    row = AutoBindRow(
+        instance=server,
+        status=FETCHED,
+        match=match_ssh_key(server, [_key("k1", "web-unrev")]),
+        host="198.51.100.99",
+        port=22,
+        login="ubuntu",
+        host_keys=[key],
+        verified=False,
+    )
+    service = _Service()
+
+    # Without reviewed_fetched=True -> skipped
+    await apply_auto_bind(service, [row], vault_id="v1", reviewed_fetched=False)
+    assert row.result == "not reviewed"
+    assert service.bind_personal.call_count == 0
+
+    # With reviewed_fetched=True -> bound
+    await apply_auto_bind(service, [row], vault_id="v1", reviewed_fetched=True)
+    assert row.result == "bound"
+    assert service.bind_personal.call_count == 1
+
+
+def test_remove_recorded_host_key(tmp_path, monkeypatch) -> None:
+    from servonaut.services.ssh_host_keys import trusted_host_keys
+    from servonaut.services.vault.ec2_host_keys import remove_recorded_host_key
+
+    fake_kh = tmp_path / "known_hosts"
+    fake_kh.write_text("198.51.100.7 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyFixtureHostKeyFixtureHostK\n")
+    fake_kh.chmod(0o600)
+
+    empty_user_kh = tmp_path / "user_known_hosts"
+    monkeypatch.setattr("servonaut.services.vault.ec2_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.user_known_hosts_path", lambda: empty_user_kh)
+
+    inst = {"id": "i-bad", "name": "web-2"}
+    assert len(trusted_host_keys(inst, "198.51.100.7", None)) == 1
+
+    ok = remove_recorded_host_key(inst, "198.51.100.7", 22)
+    assert ok is True
+    assert trusted_host_keys(inst, "198.51.100.7", None) == []
+
+

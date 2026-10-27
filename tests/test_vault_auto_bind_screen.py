@@ -345,8 +345,8 @@ async def test_review_modal_blocks_bind_until_tick_unless_verified() -> None:
     app1 = _ModalHost([unverified_row])
     async with app1.run_test(size=(160, 50)) as pilot:
         await wait_until(lambda: isinstance(app1.screen, VaultAutoBindReviewModal))
-        confirm_btn = app1.screen.query_one("#vault_bind_confirm", Button)
-        checkbox = app1.screen.query_one("#vault_bind_use_trusted", Checkbox)
+        confirm_btn = app1.screen.query_one("#vault_auto_bind_review_confirm", Button)
+        checkbox = app1.screen.query_one("#vault_auto_bind_review_use_trusted", Checkbox)
 
         assert confirm_btn.disabled
         assert not checkbox.value
@@ -377,8 +377,8 @@ async def test_review_modal_blocks_bind_until_tick_unless_verified() -> None:
     app2 = _ModalHost([verified_row])
     async with app2.run_test(size=(160, 50)) as pilot:
         await wait_until(lambda: isinstance(app2.screen, VaultAutoBindReviewModal))
-        confirm_btn = app2.screen.query_one("#vault_bind_confirm", Button)
-        checkbox = app2.screen.query_one("#vault_bind_use_trusted", Checkbox)
+        confirm_btn = app2.screen.query_one("#vault_auto_bind_review_confirm", Button)
+        checkbox = app2.screen.query_one("#vault_auto_bind_review_use_trusted", Checkbox)
 
         assert not confirm_btn.disabled
         assert checkbox.value
@@ -417,9 +417,9 @@ async def test_review_modal_fits_narrow_terminal() -> None:
         for selector in (
             "#auto_bind_review_container",
             "#auto_bind_review_scroll",
-            "#vault_bind_use_trusted",
-            "#auto_bind_review_cancel",
-            "#vault_bind_confirm",
+            "#vault_auto_bind_review_use_trusted",
+            "#vault_auto_bind_review_cancel",
+            "#vault_auto_bind_review_confirm",
         ):
             region = app.screen.query_one(selector).region
             assert region.width > 0 and region.height > 0 and screen.contains_region(region), (selector, region)

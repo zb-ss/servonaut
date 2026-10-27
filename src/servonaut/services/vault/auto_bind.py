@@ -25,6 +25,7 @@ from .ec2_host_keys import (
     fetch_ec2_console_output_sync,
     host_key_removal_command,
     parse_ec2_console_output,
+    remove_recorded_host_key,
     verify_fetched_host_keys,
 )
 from .errors import vault_failure_reason
@@ -255,14 +256,20 @@ async def apply_auto_bind(
     rows: Sequence[AutoBindRow],
     *,
     vault_id: str,
+    reviewed_fetched: bool = False,
     on_progress: Callable[[int, AutoBindRow], None] | None = None,
 ) -> None:
     """Bind each ready row in turn, recording ``"bound"`` or the failure reason.
 
     A server that gained a vault key since the review is not replaced.
+    Unverified fetched rows require reviewed_fetched=True to bind; otherwise
+    they are skipped with result "not reviewed".
     """
     for index, row in enumerate(rows):
         if not row.ready or row.match is None or row.match.item_id is None:
+            continue
+        if row.status == FETCHED and not row.verified and not reviewed_fetched:
+            row.result = "not reviewed"
             continue
         if on_progress is not None:
             on_progress(index, row)
@@ -321,6 +328,8 @@ async def fetch_host_keys_for_rows(
 
     read_host_keys = host_keys_for or trusted_host_keys
     gate = asyncio.Semaphore(max_concurrency)
+    completed_count = 0
+    completed_lock = asyncio.Lock()
 
     def _read_console(inst: Mapping[str, Any]) -> str:
         if console_output_reader is not None:
@@ -330,10 +339,17 @@ async def fetch_host_keys_for_rows(
             accounts=accounts or getattr(service, "accounts", None),
         )
 
-    async def fetch_one(index: int, row: AutoBindRow) -> None:
-        if on_progress is not None:
-            on_progress(index, row)
+    async def fetch_one(row: AutoBindRow) -> None:
+        nonlocal completed_count
+        async with gate:
+            await _fetch_row(row)
+            async with completed_lock:
+                completed_count += 1
+                current_completed = completed_count
+            if on_progress is not None:
+                on_progress(current_completed, row)
 
+    async def _fetch_row(row: AutoBindRow) -> None:
         is_aws = (not row.instance.get("is_custom") and instance_provider(row.instance).lower() == "aws")
         console_res: Optional[EC2ConsoleHostKeys] = None
 
@@ -342,10 +358,31 @@ async def fetch_host_keys_for_rows(
                 raw_console = await asyncio.to_thread(_read_console, row.instance)
                 console_res = parse_ec2_console_output(raw_console)
             except Exception as exc:
-                console_res = EC2ConsoleHostKeys(
-                    source=f"not verified: {exc}",
-                    error=str(exc),
-                )
+                logger.debug("ec2:GetConsoleOutput failed for %s: %s", row.instance.get("id"), exc, exc_info=True)
+                code = ""
+                if hasattr(exc, "response") and isinstance(getattr(exc, "response"), Mapping):
+                    code = str(exc.response.get("Error", {}).get("Code", ""))
+                if not code:
+                    msg = str(exc).lower()
+                    if "accessdenied" in msg or "unauthorizedoperation" in msg:
+                        code = "AccessDenied"
+                    elif "throttl" in msg or "requestlimitexceeded" in msg:
+                        code = "Throttling"
+                if code in {"AccessDenied", "UnauthorizedOperation"}:
+                    console_res = EC2ConsoleHostKeys(
+                        source="not verified: no permission to read the console output (ec2:GetConsoleOutput)",
+                        error="no permission to read the console output (ec2:GetConsoleOutput)",
+                    )
+                elif code in {"Throttling", "RequestLimitExceeded"}:
+                    console_res = EC2ConsoleHostKeys(
+                        source="not verified: AWS throttled the console read; fetch again later",
+                        error="AWS throttled the console read; fetch again later",
+                    )
+                else:
+                    console_res = EC2ConsoleHostKeys(
+                        source="not verified: could not read the console output",
+                        error="could not read the console output",
+                    )
 
             # 1. KEYS block is present and well-formed: use directly without connecting
             if console_res.has_keys_block and console_res.keys:
@@ -358,8 +395,7 @@ async def fetch_host_keys_for_rows(
         # Visit the server once so its host key is recorded
         failure: Optional[str] = None
         try:
-            async with gate:
-                failure = await service.visit_for_host_key(row.instance, login=row.login)
+            failure = await service.visit_for_host_key(row.instance, login=row.login)
         except Exception as exc:
             failure = str(exc)
 
@@ -387,11 +423,19 @@ async def fetch_host_keys_for_rows(
                 if reason == "mismatch":
                     row.status = HOST_KEY_MISMATCH
                     row.verified = False
+                    removed = await asyncio.to_thread(remove_recorded_host_key, row.instance, str(row.host), row.port)
+                    row.host_keys = []
                     removal = host_key_removal_command(row.instance, str(row.host), row.port)
-                    row.mismatch_detail = (
-                        "The server answered with a different host key than AWS recorded at first boot: "
-                        f"do not bind, check the server. Remove the recorded key with: {removal}"
-                    )
+                    if removed:
+                        row.mismatch_detail = (
+                            "The server answered with a different host key than AWS recorded at first boot: "
+                            f"untrusted key removed from Servonaut known_hosts ({removal}); do not bind."
+                        )
+                    else:
+                        row.mismatch_detail = (
+                            "The server answered with a different host key than AWS recorded at first boot: "
+                            f"do not bind, check the server. Remove the recorded key with: {removal}"
+                        )
                     return
                 if verified:
                     row.status = FETCHED
@@ -418,7 +462,7 @@ async def fetch_host_keys_for_rows(
         row.verified = False
         row.verification_source = "not verified: compare with the server's console or your provider"
 
-    await asyncio.gather(*(fetch_one(idx, row) for idx, row in enumerate(target_rows)))
+    await asyncio.gather(*(fetch_one(row) for row in target_rows))
 
 
 __all__ = [

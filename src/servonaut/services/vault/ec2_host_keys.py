@@ -30,6 +30,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
+from cryptography.hazmat.primitives.serialization import load_ssh_public_key
+
 from servonaut.services.ssh_host_keys import (
     host_key_alias,
     known_hosts_name,
@@ -47,6 +49,16 @@ END_FINGERPRINTS = "-----END SSH HOST KEY FINGERPRINTS-----"
 
 # Maximum size of EC2 console output parsed (512 KB).
 MAX_CONSOLE_OUTPUT_CHARS = 512 * 1024
+
+_ALLOWED_HOST_KEY_TYPES = {
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+}
+
+_SHA256_FP_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 
 _FAMILY_MAP = {
     "ed25519": "ED25519",
@@ -112,17 +124,29 @@ def _parse_keys_block(block: str) -> Optional[list[str]]:
     """Parse and validate OpenSSH public keys in a KEYS block.
 
     Returns None if any non-empty line fails validation (junk inside markers).
+    Normalizes keys to '<type> <base64>' without comments, validates with
+    load_ssh_public_key, restricts to host-key types, and caps at 8 keys.
     """
     lines = [line.strip() for line in block.splitlines() if line.strip()]
     if not lines:
         return None
     valid_keys: list[str] = []
     for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            return None
+        key_type, key_b64 = parts[0], parts[1]
+        if key_type not in _ALLOWED_HOST_KEY_TYPES:
+            return None
+        normalized = f"{key_type} {key_b64}"
         try:
-            ssh_public_fingerprint(line)
-        except Exception:
-            return None  # Junk or invalid base64
-        valid_keys.append(line)
+            load_ssh_public_key(normalized.encode("ascii"))
+        except (ValueError, UnicodeEncodeError, TypeError):
+            return None
+        if normalized not in valid_keys:
+            valid_keys.append(normalized)
+    if not valid_keys or len(valid_keys) > 8:
+        return None
     return valid_keys
 
 
@@ -137,12 +161,16 @@ def _parse_fingerprints_block(block: str) -> Optional[dict[str, str]]:
         return None
     fingerprints: dict[str, str] = {}
     for line in lines:
-        # Match SHA256 fingerprint
-        fp_match = re.search(r"\b(SHA256:[A-Za-z0-9+/=_-]+)\b", line)
-        if not fp_match:
+        tokens = line.split()
+        fp = None
+        for tok in tokens:
+            if tok.startswith("SHA256:"):
+                clean = tok.rstrip("=")
+                if _SHA256_FP_RE.match(clean):
+                    fp = clean
+                    break
+        if not fp:
             continue
-        # OpenSSH prints sha256 base64 without padding
-        fp = fp_match.group(1).rstrip("=")
 
         # Match key type in parentheses, e.g. (ECDSA), (ED25519), (RSA)
         type_match = re.search(r"\(([A-Za-z0-9_-]+)\)", line)
@@ -271,30 +299,68 @@ def verify_fetched_host_keys(
     if not console_result.has_fingerprints_block or not console_result.fingerprints:
         return False, console_result.source or "not verified: no console fingerprints available"
 
-    matched_any = False
+    if not fetched_keys:
+        return False, "not verified: no host keys to verify"
+
     for key in fetched_keys:
         family = key_family_from_public_key(key)
         try:
             fp = ssh_public_fingerprint(key)
         except Exception:
             return False, "mismatch"
-        if family in console_result.fingerprints:
-            if console_result.fingerprints[family] != fp:
-                return False, "mismatch"
-            matched_any = True
+        if family not in console_result.fingerprints:
+            return False, f"not verified: console output does not list a fingerprint for {family}"
+        if console_result.fingerprints[family] != fp:
+            return False, "mismatch"
 
-    if matched_any:
-        return True, "verified by AWS console output"
-
-    return False, "not verified: host key type was not in console output fingerprints"
+    return True, "verified by AWS console output"
 
 
 def host_key_removal_command(instance: Mapping[str, Any], host: str, port: int = 22) -> str:
     """Generate the ssh-keygen command to remove an offending host key from Servonaut's known_hosts."""
     alias = host_key_alias(instance)
-    name = alias or known_hosts_name(host, port)
+    name = alias or known_hosts_name(host, port if port != 22 else None)
     known_hosts = servonaut_known_hosts_path()
     return f"ssh-keygen -R {name} -f {known_hosts}"
+
+
+def remove_recorded_host_key(
+    instance: Mapping[str, Any], host: str, port: int = 22,
+) -> bool:
+    """Remove a mismatched host key from Servonaut's known_hosts file.
+
+    Removes entries for all names trusted_host_keys looks up (host_key_alias,
+    and host or [host]:port).
+    Returns True if removal succeeded (or known_hosts does not exist), False on error.
+    """
+    import shutil
+    import subprocess
+
+    known_hosts = servonaut_known_hosts_path()
+    if not known_hosts.is_file():
+        return True
+
+    keygen = shutil.which("ssh-keygen")
+    if keygen is None:
+        return False
+
+    port_arg = port if port != 22 else None
+    names = [name for name in (host_key_alias(instance), known_hosts_name(host, port_arg)) if name]
+    success = True
+    for name in names:
+        try:
+            res = subprocess.run(
+                [keygen, "-R", name, "-f", str(known_hosts)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if res.returncode != 0:
+                success = False
+        except (OSError, subprocess.SubprocessError):
+            success = False
+    return success
 
 
 def fetch_ec2_console_output_sync(
@@ -317,21 +383,17 @@ def fetch_ec2_console_output_sync(
 
     client: Any = None
     if client_factory is not None:
-        client = client_factory("ec2", region_name=region or None)
+        client = client_factory("ec2", region)
     elif aws_service is not None:
         client = aws_service._client("ec2", region or None)
     elif accounts is not None:
         try:
             factory = accounts.aws_client_factory(account)
-            client = factory.client("ec2", region_name=region or None)
-        except Exception:
-            # Fall back to account service if available
-            svc = accounts.service("aws", account)
-            client = svc._client("ec2", region or None)
+            client = factory.client("ec2", region)
+        except Exception as exc:
+            raise ValueError(f"cannot read the console output for account {account!r}") from exc
     else:
-        import boto3
-
-        client = boto3.client("ec2", region_name=region or None)
+        raise ValueError("cannot read the console output for this account: no account registry")
 
     response = client.get_console_output(InstanceId=instance_id)
     return response.get("Output") or ""

@@ -416,7 +416,7 @@ VaultAutoBindReviewModal {
     margin-bottom: 1;
 }
 
-#vault_bind_use_trusted {
+#vault_auto_bind_review_use_trusted {
     margin-bottom: 1;
 }
 
@@ -425,7 +425,7 @@ VaultAutoBindReviewModal {
     align: right middle;
 }
 
-#auto_bind_review_cancel {
+#vault_auto_bind_review_cancel {
     margin-right: 1;
 }
 

@@ -120,27 +120,27 @@ class VaultAutoBindReviewModal(ModalScreen[bool]):
             yield Checkbox(
                 "I checked these fingerprints: pin them",
                 value=self._all_verified,
-                id="vault_bind_use_trusted",
+                id="vault_auto_bind_review_use_trusted",
                 disabled=False,
             )
             with Horizontal(id="auto_bind_review_actions"):
-                yield Button("Cancel", id="auto_bind_review_cancel")
+                yield Button("Cancel", id="vault_auto_bind_review_cancel")
                 yield Button(
                     "Bind",
                     variant="primary",
-                    id="vault_bind_confirm",
+                    id="vault_auto_bind_review_confirm",
                     disabled=not self._all_verified,
                 )
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if event.checkbox.id == "vault_bind_use_trusted":
-            btn = self.query_one("#vault_bind_confirm", Button)
+        if event.checkbox.id == "vault_auto_bind_review_use_trusted":
+            btn = self.query_one("#vault_auto_bind_review_confirm", Button)
             btn.disabled = not (event.value or self._all_verified)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "vault_bind_confirm":
+        if event.button.id == "vault_auto_bind_review_confirm":
             self.dismiss(True)
-        elif event.button.id == "auto_bind_review_cancel":
+        elif event.button.id == "vault_auto_bind_review_cancel":
             self.dismiss(False)
 
     def action_cancel(self) -> None:
@@ -507,7 +507,7 @@ class VaultAutoBindScreen(Screen):
         if needs_review:
             def on_reviewed(confirmed: bool) -> None:
                 if confirmed:
-                    self.run_worker(self._bind(chosen), group="vault_auto_bind", exclusive=True)
+                    self.run_worker(self._bind(chosen, reviewed_fetched=True), group="vault_auto_bind", exclusive=True)
 
             self.app.push_screen(
                 VaultAutoBindReviewModal(
@@ -522,9 +522,9 @@ class VaultAutoBindScreen(Screen):
         if not self.query_one("#auto_bind_trust", Checkbox).value:
             self._status("Check the host-key fingerprints of the selected servers, then tick the box to pin them.")
             return
-        self.run_worker(self._bind(chosen), group="vault_auto_bind", exclusive=True)
+        self.run_worker(self._bind(chosen, reviewed_fetched=False), group="vault_auto_bind", exclusive=True)
 
-    async def _bind(self, chosen: Sequence[AutoBindRow] | None = None) -> None:
+    async def _bind(self, chosen: Sequence[AutoBindRow] | None = None, *, reviewed_fetched: bool = False) -> None:
         service = self._service()
         if chosen is None:
             chosen = [self._rows[index] for index in sorted(self._selected) if self._rows[index].ready]
@@ -534,7 +534,13 @@ class VaultAutoBindScreen(Screen):
             def progress(index: int, row: AutoBindRow) -> None:
                 self._busy.say(job, f"Binding {index + 1} of {len(chosen)}: {self._server_name(row)}…")
 
-            await apply_auto_bind(service, chosen, vault_id=self._vault_id, on_progress=progress)
+            await apply_auto_bind(
+                service,
+                chosen,
+                vault_id=self._vault_id,
+                reviewed_fetched=reviewed_fetched,
+                on_progress=progress,
+            )
         self._selected.clear()
         self.query_one("#auto_bind_trust", Checkbox).value = False
         self._render_rows()

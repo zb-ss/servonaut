@@ -562,7 +562,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
     from servonaut.services.vault import crypto
 
     instance = row.instance
-    return {
+    rec = {
         "server": instance.get("name") or instance.get("id"),
         "instance_id": instance.get("id"),
         "provider": "custom" if instance.get("is_custom") else str(instance.get("provider") or "aws").lower(),
@@ -576,9 +576,13 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "verified": getattr(row, "verified", False),
         "verification_source": getattr(row, "verification_source", None),
         "fetch_error": getattr(row, "fetch_error", None),
+        "mismatch_detail": getattr(row, "mismatch_detail", None),
         "status": row.status,
         "result": row.result,
     }
+    if getattr(row, "skipped", None) is not None:
+        rec["skipped"] = row.skipped
+    return rec
 
 
 def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
@@ -590,11 +594,19 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
         status = row.status_text if results or not row.ready else "ready"
         if row.match is None or row.match.ambiguous:
             print(f"{name}: {status}")
+            if getattr(row, "fetch_error", None):
+                print(f"    fetch error: {terminal_safe(str(row.fetch_error))}")
+            if getattr(row, "mismatch_detail", None):
+                print(f"    mismatch: {terminal_safe(str(row.mismatch_detail))}")
             continue
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
             parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
         print(" ".join(parts) + f" - {status}")
+        if getattr(row, "fetch_error", None):
+            print(f"    fetch error: {terminal_safe(str(row.fetch_error))}")
+        if getattr(row, "mismatch_detail", None):
+            print(f"    mismatch: {terminal_safe(str(row.mismatch_detail))}")
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
                 if getattr(row, "verified", False):
@@ -633,10 +645,18 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
     if getattr(args, "fetch_host_keys", False):
         to_fetch = [row for row in rows if row.status == NO_HOST_KEYS]
         if to_fetch:
+            accounts = getattr(services, "accounts", None)
+            if accounts is None:
+                try:
+                    from servonaut.config.manager import ConfigManager
+                    from servonaut.services.accounts.headless import build_account_registry
+                    accounts = build_account_registry(ConfigManager())
+                except Exception:
+                    accounts = None
             await fetch_host_keys_for_rows(
                 services,
                 to_fetch,
-                accounts=getattr(services, "accounts", None),
+                accounts=accounts,
             )
 
     ready = [row for row in rows if row.ready]
@@ -660,6 +680,8 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
 
     unverified_fetched = [row for row in ready if row.status == FETCHED and not row.verified]
     if is_yes and unverified_fetched:
+        for row in unverified_fetched:
+            row.skipped = "not verified"
         to_bind = [row for row in ready if row not in unverified_fetched]
         if not output:
             n = len(unverified_fetched)
@@ -677,7 +699,7 @@ async def _auto_bind(services: Any, args: argparse.Namespace, output: bool) -> i
 
     if not _confirm(args, f"Pin the host keys shown and bind vault keys to {len(to_bind)} servers"):
         return _EXIT_ABORTED
-    await apply_auto_bind(services, to_bind, vault_id=vault_id)
+    await apply_auto_bind(services, to_bind, vault_id=vault_id, reviewed_fetched=True)
     failed = [row for row in to_bind if row.result != "bound"]
     if output:
         _print({"vault_id": vault_id, "servers": [_auto_bind_record(row) for row in rows]}, json_output=True)
