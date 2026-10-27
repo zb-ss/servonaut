@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from servonaut.services.connection_service import server_connection
 from servonaut.services.ssh_host_keys import (
     HOST_KEY_CHECKING_ACCEPT_NEW,
+    HostKeyPolicy,
     HostKeyTarget,
     detect_host_key_problem,
 )
@@ -55,6 +57,7 @@ async def visit_for_host_key(
     login: str,
     *,
     timeout: float,
+    known_hosts_path: Optional[Path | str] = None,
 ) -> Optional[str]:
     """Connect to *instance* once so OpenSSH records its host key.
 
@@ -81,6 +84,7 @@ async def visit_for_host_key(
         remote_command="true",
         # Nobody can answer a prompt here.
         extra_options=["BatchMode=yes", *(conn.get("extra_options") or [])],
+        record_to_known_hosts=known_hosts_path,
     )
     try:
         output = await run_ssh_subprocess(argv, timeout=timeout)
@@ -91,10 +95,19 @@ async def visit_for_host_key(
         return f"Could not run ssh ({exc.strerror or type(exc).__name__})."
     if output.returncode == 0:
         return None
+    policy = (
+        HostKeyPolicy(
+            mode="accept-new",
+            known_hosts_file=Path(known_hosts_path),
+            user_known_hosts_file=Path("/dev/null"),
+        )
+        if known_hosts_path
+        else connection_service.host_key_policy()
+    )
     problem = detect_host_key_problem(
         output.diagnostics, output.returncode,
         HostKeyTarget.for_connection(host, port, instance=row, profile=conn.get("profile")),
-        connection_service.host_key_policy(), stdout=output[0],
+        policy, stdout=output[0],
     )
     if problem is not None:
         return problem.message

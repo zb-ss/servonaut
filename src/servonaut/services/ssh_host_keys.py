@@ -415,6 +415,59 @@ def trusted_host_keys(instance: Any, host: str, port: Optional[int] = None) -> L
     return keys
 
 
+def read_host_keys_from_file(
+    path: Path | str,
+    instance: Any,
+    host: str,
+    port: Optional[int] = None,
+    *,
+    own_instance: Any = None,
+) -> List[str]:
+    """Return host keys in *path* trusted for a server, as ``"<type> <base64>"``.
+
+    Looks up *instance* (and *own_instance* if given) under its cloud alias
+    and ``known_hosts_name(host, port)``.
+    """
+    import shutil
+    import subprocess
+
+    keygen = shutil.which("ssh-keygen")
+    if keygen is None:
+        return []
+    path_obj = Path(path)
+    if not path_obj.is_file() or not _is_trusted_file(path_obj):
+        return []
+    names = [
+        name
+        for name in (
+            host_key_alias(instance),
+            host_key_alias(own_instance) if own_instance else None,
+            known_hosts_name(host, port),
+        )
+        if name
+    ]
+    keys: List[str] = []
+    for name in names:
+        try:
+            found = subprocess.run(
+                [keygen, "-F", name, "-f", str(path_obj)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in found.stdout.splitlines():
+            fields = line.split()
+            if not fields or line.startswith(("#", "@")) or len(fields) < 3:
+                continue
+            key = f"{fields[1]} {fields[2]}"
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
 def _instance_provider(instance: dict) -> Optional[str]:
     if instance.get("is_custom"):
         return None

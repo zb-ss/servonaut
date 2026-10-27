@@ -303,6 +303,12 @@ CaEnrollmentConfirmModal {
     margin-bottom: 1;
 }
 
+#auto_bind_vault_select {
+    width: 1fr;
+    max-width: 80;
+    margin-bottom: 1;
+}
+
 #auto_bind_intro {
     color: $text-muted;
     margin-bottom: 1;
@@ -335,13 +341,14 @@ CaEnrollmentConfirmModal {
 #auto_bind_actions {
     height: auto;
     layout: grid;
-    grid-size: 4;
-    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-size: 5;
+    grid-columns: 1fr 1fr 1fr 1fr 1fr;
     grid-gutter: 0 1;
     margin-top: 1;
 }
 
 #auto_bind_actions #auto_bind_apply,
+#auto_bind_actions #auto_bind_fetch_keys,
 #auto_bind_actions #auto_bind_all,
 #auto_bind_actions #auto_bind_none,
 #auto_bind_actions #auto_bind_back {
@@ -354,9 +361,130 @@ VaultAutoBindScreen.-narrow #auto_bind_content {
     padding: 0 1;
 }
 
+VaultAutoBindScreen.-narrow #auto_bind_title {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_vault_select {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_intro {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_status {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_table {
+    min-height: 4;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_detail {
+    margin-top: 0;
+    max-height: 2;
+}
+
+VaultAutoBindScreen.-narrow #auto_bind_trust {
+    margin-top: 0;
+}
+
 VaultAutoBindScreen.-narrow #auto_bind_actions {
     grid-size: 2;
     grid-columns: 1fr 1fr;
+    margin-top: 0;
+}
+
+/* Modals for Auto-bind bulk host key fetching and review */
+AutoBindFetchConfirmModal {
+    align: center middle;
+}
+
+#auto_bind_confirm_container {
+    width: 60;
+    max-width: 90%;
+    height: auto;
+    border: round $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+#auto_bind_confirm_message {
+    margin-bottom: 1;
+}
+
+#auto_bind_confirm_actions {
+    height: auto;
+    align: right middle;
+}
+
+#auto_bind_confirm_no {
+    margin-right: 1;
+}
+
+#auto_bind_confirm_yes {
+    min-width: 10;
+}
+
+VaultAutoBindReviewModal {
+    align: center middle;
+}
+
+#auto_bind_review_container {
+    width: 80;
+    max-width: 95%;
+    height: 85%;
+    max-height: 28;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#auto_bind_review_title {
+    color: $accent;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#auto_bind_review_team_note {
+    color: $accent;
+    margin-bottom: 1;
+}
+
+#auto_bind_review_scroll {
+    height: 1fr;
+    border: solid $panel;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.auto_bind_review_item {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.auto_bind_review_source {
+    width: 1fr;
+    height: auto;
+}
+
+#vault_auto_bind_review_use_trusted {
+    margin-bottom: 1;
+}
+
+#auto_bind_review_actions {
+    height: auto;
+    align: right middle;
+}
+
+#vault_auto_bind_review_cancel {
+    margin-right: 1;
+}
+
+#vault_auto_bind_review_confirm {
+    min-width: 14;
 }
 
 /* A short terminal keeps the table, the reason and the buttons: the intro goes. */
@@ -364,8 +492,34 @@ VaultAutoBindScreen.-short #auto_bind_intro {
     display: none;
 }
 
+VaultAutoBindScreen.-short #auto_bind_title {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_vault_select {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_status {
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_table {
+    min-height: 3;
+}
+
 VaultAutoBindScreen.-short #auto_bind_detail {
-    max-height: 4;
+    max-height: 2;
+    margin-top: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_trust {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+VaultAutoBindScreen.-short #auto_bind_actions {
+    margin-top: 0;
 }
 
 /* Use Vault Key: the search boxes above its two lists. */
