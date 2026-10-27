@@ -25,14 +25,15 @@ FakeCloud answers each person for the token they hold (``FakeCloud.add_user``).
 from __future__ import annotations
 
 import json
+import shutil
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from e2e.harness import fleet
+from e2e.harness import fleet, keygen_lookup_shim
 from e2e.harness.bootstrap import Sandbox
 from e2e.harness.ca_sshd import HOST_NAME, LOGIN, install_owner_credential, start_ca_host
 from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_ID, TEAM_SLUG
@@ -92,13 +93,15 @@ def _teams_as(token: str) -> Any:
     return TeamService(APIClient(SimpleNamespace(access_token=token, refresh_token=no_refresh)))
 
 
-def _ssh_key_file(home: Sandbox) -> str:
-    path = home.home / "shared_ed25519"
-    path.write_bytes(Ed25519PrivateKey.generate().private_bytes(
+def _ssh_key_file(home: Sandbox, name: str = "server-1.pem") -> tuple[str, str]:
+    path = home.home / name
+    key = Ed25519PrivateKey.generate()
+    path.write_bytes(key.private_bytes(
         Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()
     ))
     path.chmod(0o600)
-    return str(path)
+    public_line = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    return str(path), public_line
 
 
 @pytest.mark.asyncio
@@ -112,23 +115,30 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     fake_cloud.account.place_shared_server(
         TEAM_SLUG, SERVER_ID, hostname=LOOPBACK, port=server_1.port,
         instance_id=fleet.EDGE_1.instance_id,
+        login_user=LOGIN,
     )
     fake_cloud.add_user(MEMBER_ID, email=MEMBER_EMAIL, name="Member")
     _configure_test_custody(journey)
 
-    # 1. The owner: Vault identity, team vault with a shared key, the CA on server-1.
+    # 1. The owner: Vault identity, team vault with a shared key auto-bound to server-1.
     owner = _home(journey, fake_cloud, "o", signed_in=True)
     install_owner_credential(owner.home, server_1, SERVER_ID)
     setup, _ = _setup_with_recovery_confirmation(journey, owner, servonaut_cmd)
     assert setup.returncode == 0, setup.text
     _assert_only_getpass_tty_access(journey)
     vault_id = _json(cli(owner, "vault", "create", "--team", TEAM_SLUG, "--name", "Team vault", "--json"))["vault_id"]
+    key_path, public_line = _ssh_key_file(owner, name="server-1.pem")
     item_id = _json(cli(owner, "vault", "import", "ssh", "--vault", vault_id,
-                        "--path", _ssh_key_file(owner), "--json"))["item_id"]
-    assert _json(cli(owner, "ca", "enable", "--team", TEAM_SLUG, "--yes", "--json"))["enabled"] is True
-    enrolled = _confirmed(journey, owner, servonaut_cmd, "ca", "enroll", HOST_NAME, "--team", TEAM_SLUG,
-                          answer=LOOPBACK)
-    assert enrolled.returncode == 0 and "result.status: succeeded" in enrolled.text, enrolled.text
+                        "--path", key_path, "--json"))["item_id"]
+    bootstrap_pub = server_1.bootstrap_key.export_public_key("openssh").decode("ascii")
+    server_1.remote.write(f"/home/{LOGIN}/.ssh/authorized_keys", f"{bootstrap_pub}\n{public_line}\n", mode=0o600)
+    keygen = shutil.which("ssh-keygen", path="/usr/bin:/bin:/usr/local/bin")
+    if keygen:
+        keygen_lookup_shim.install(str(journey.shims.directory), keygen, str(journey.ctx.root))
+
+    auto_bound_cmd = cli(owner, "vault", "auto-bind", "--team", TEAM_SLUG, "--yes", "--fetch-host-keys", "--json")
+    auto_bound = _json(auto_bound_cmd)
+    assert auto_bound["servers"][0]["result"] == "bound", auto_bound
 
     # 2. The owner invites the member, who accepts and signs in as themselves.
     owner_teams = _teams_as(fake_cloud.tokens()[0])
@@ -170,6 +180,20 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     again = _json(cli(owner, "vault", "grants", "process", "--yes", "--json"))
     assert [grant for result in again for grant in result["accepted"]] == []
 
+    # Member connects with the team vault key bound by auto-bind:
+    reached_vault = cli(member, "ssh", HOST_NAME, stdin="hostname\n")
+    assert reached_vault.returncode == 0, reached_vault.describe()
+    assert reached_vault.stdout.splitlines()[0] == HOST_NAME
+    assert "SSH resolution tier: vault" in reached_vault.stderr, reached_vault.describe()
+    proofs = [login for login in server_1.logins if login.reason == "authorized_keys"]
+    assert proofs and proofs[-1].accepted, server_1.logins
+
+    # Next, the owner enables CA and enrolls server-1:
+    assert _json(cli(owner, "ca", "enable", "--team", TEAM_SLUG, "--yes", "--json"))["enabled"] is True
+    enrolled = _confirmed(journey, owner, servonaut_cmd, "ca", "enroll", HOST_NAME, "--team", TEAM_SLUG,
+                          answer=LOOPBACK)
+    assert enrolled.returncode == 0 and "result.status: succeeded" in enrolled.text, enrolled.text
+
     logins_before = len(server_1.certificate_logins())
     reached = cli(member, "ssh", HOST_NAME, stdin="hostname\n")
     assert reached.returncode == 0, reached.describe()
@@ -179,9 +203,11 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
     assert new_logins and new_logins[-1].accepted, new_logins
     issued = [row for row in fake_cloud.vault._ca[TEAM_SLUG]["issued"] if row["cert_type"] == "user"]
     assert issued[-1]["user_id"] == MEMBER_ID and issued[-1]["principals"] == [f"svn:{SERVER_ID}:{LOGIN}"]
-    [report] = [entry for entry in fake_cloud.requests(
+    reports = [entry for entry in fake_cloud.requests(
         f"/api/v1/teams/{TEAM_SLUG}/servers/{SERVER_ID}/ssh-verify-report") if entry.get("user_id") == MEMBER_ID]
-    assert (report["status"], report["body"]["status"], report["body"]["resolution_tier"]) == (200, "verified", "ca")
+    assert len(reports) == 2, reports
+    assert (reports[0]["status"], reports[0]["body"]["status"], reports[0]["body"]["resolution_tier"]) == (200, "verified", "vault")
+    assert (reports[1]["status"], reports[1]["body"]["status"], reports[1]["body"]["resolution_tier"]) == (200, "verified", "ca")
 
     # The member's own edge-1 is the same machine, and its key pair (ops-key)
     # has no key on this computer: it connects with the team's certificate.
