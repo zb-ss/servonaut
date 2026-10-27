@@ -53,8 +53,11 @@ class _Service:
     def records_new_host_keys(self) -> bool:
         return self.records_new
 
-    async def visit_for_host_key(self, instance, login=None):
+    async def visit_for_host_key(self, instance, login=None, known_hosts_path=None):
         self.visits.append(instance["id"])
+        if known_hosts_path:
+            with open(known_hosts_path, "a") as f:
+                f.write(f"{instance.get('public_ip') or instance['id']} {HOST_KEY}\n")
         return None
 
     async def vault_choices(self, *, team=None):

@@ -520,14 +520,11 @@ async def fetch_host_keys_for_rows(
             # Visit the server once so its host key is recorded into temporary storage
             failure: Optional[str] = None
             try:
-                try:
-                    failure = await service.visit_for_host_key(
-                        row.instance,
-                        login=row.login,
-                        known_hosts_path=temp_kh,
-                    )
-                except TypeError:
-                    failure = await service.visit_for_host_key(row.instance, login=row.login)
+                failure = await service.visit_for_host_key(
+                    row.instance,
+                    login=row.login,
+                    known_hosts_path=temp_kh,
+                )
             except Exception as exc:
                 failure = str(exc)
 

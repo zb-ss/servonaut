@@ -874,6 +874,44 @@ async def test_team_auto_bind_refuses_when_server_bound_concurrently() -> None:
     assert service.bind.await_args.kwargs["replace_existing"] is False
 
 
+@pytest.mark.asyncio
+async def test_fetch_host_keys_type_error_in_visit_fails_row_without_retrying_or_polluting_known_hosts(
+    tmp_path, monkeypatch
+) -> None:
+    fake_kh = tmp_path / "known_hosts"
+    initial_content = "198.51.100.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureExistingHostKeyFixtureExisting\n"
+    fake_kh.write_text(initial_content)
+    fake_kh.chmod(0o600)
+    empty_user_kh = tmp_path / "user_known_hosts"
+
+    monkeypatch.setattr("servonaut.services.vault.ec2_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.servonaut_known_hosts_path", lambda: fake_kh)
+    monkeypatch.setattr("servonaut.services.ssh_host_keys.user_known_hosts_path", lambda: empty_user_kh)
+
+    calls = 0
+
+    class _TypeErrorService(_Service):
+        async def visit_for_host_key(self, instance, login=None, known_hosts_path=None):
+            nonlocal calls
+            calls += 1
+            raise TypeError("ssh_service.build_ssh_command() got an unexpected keyword argument 'record_to_known_hosts'")
+
+    server = {"id": "ovh-1", "name": "web-1", "provider": "ovh", "public_ip": "198.51.100.10"}
+    keys = [_key("k1", "web-1")]
+    service = _TypeErrorService()
+
+    rows = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [])
+    assert rows[0].status == NO_HOST_KEYS
+
+    await fetch_host_keys_for_rows(service, rows)
+
+    row = rows[0]
+    assert calls == 1
+    assert row.status == FETCH_FAILED
+    assert "unexpected keyword argument" in (row.fetch_error or "")
+    assert fake_kh.read_text() == initial_content
+
+
 
 
 
