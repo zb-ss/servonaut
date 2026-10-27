@@ -65,9 +65,9 @@ async def test_import_uses_cleaned_explicit_name_or_source_default(service, sour
     service._public_key_from_private = MagicMock(return_value="ssh-ed25519 public")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("servonaut.services.vault.command_service.crypto.ssh_public_fingerprint", lambda _: "SHA256:key")
-        await service.import_keys(source=source, vault_id="vault", path=path, private_key=b"opaque", name=name)
+        result = await service.import_keys(source=source, vault_id="vault", path=path, private_key=b"opaque", name=name)
     payload = service.items.write_item.call_args.args[3]
-    assert payload["name"] == expected
+    assert result["name"] == payload["name"] == expected
 
 
 @pytest.mark.asyncio
@@ -346,3 +346,18 @@ async def test_encrypted_import_without_passphrase_explains_unlocking(service) -
         await service.import_keys(source="bitwarden", vault_id="vault", private_key=encrypted)
     assert isinstance(caught.value.__cause__, ValueError)
     service.items.write_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source, path, name, expected", [
+    ("ssh", "/keys/  id_ed25519\n", None, "id_ed25519"),
+    ("bitwarden", None, "  [1st key\u202e\n", "[1st key"),
+    ("bitwarden", None, "\n\u202e ", "Imported SSH key"),
+    ("bitwarden", None, "k" * 201, "k" * 200),
+])
+async def test_import_returned_name_matches_stored_name(service, source, path, name, expected) -> None:
+    service._public_key_from_private = MagicMock(return_value="ssh-ed25519 public")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("servonaut.services.vault.command_service.crypto.ssh_public_fingerprint", lambda _: "SHA256:key")
+        result = await service.import_keys(source=source, vault_id="vault", path=path, private_key=b"opaque", name=name)
+    assert result["name"] == service.items.write_item.call_args.args[3]["name"] == expected

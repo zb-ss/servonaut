@@ -584,11 +584,32 @@ class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
         super().__init__()
         self._references = references
 
-    def compose(self) -> ComposeResult:
-        options = [
-            Selection(f"Imported Bitwarden SSH key {index}", index - 1, initial_state=index == 1)
-            for index, _reference in enumerate(self._references, 1)
+    def _label(self, reference: Mapping[str, str], index: int) -> str:
+        name = reference.get("name") or f"Imported Bitwarden SSH key {index + 1}"
+        name = scrub_for_demo(self.app, terminal_safe(name))
+        if len(name) > _ITEM_NAME_DISPLAY_MAX:
+            name = name[:_ITEM_NAME_DISPLAY_MAX] + "…"
+        label = markup_literal(name)
+        fingerprint = reference.get("fingerprint")
+        if fingerprint:
+            fingerprint = scrub_for_demo(self.app, terminal_safe(fingerprint))
+            label += f"  [dim]{markup_literal(fingerprint)} [/dim]"
+        return label
+
+    def _options(self, selected: set[int]) -> list[Selection]:
+        return [
+            Selection(self._label(reference, index), index, initial_state=index in selected)
+            for index, reference in enumerate(self._references)
         ]
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw imported key labels while keeping the selection."""
+        listing = self.query_one("#vault_import_bind_list", SelectionList)
+        selected = set(listing.selected)
+        listing.clear_options()
+        listing.add_options(self._options(selected))
+
+    def compose(self) -> ComposeResult:
         yield SafeHeader()
         yield Vertical(
             Static("[bold]Bind an imported Bitwarden SSH key[/bold]"),
@@ -597,7 +618,7 @@ class VaultImportedReferenceModal(ModalScreen[Optional[dict[str, str]]]):
                 "Personal servers stay manual: open the server and choose Use vault key. "
                 "No server binding or Bitwarden reference will change until you confirm later steps."
             ),
-            SelectionList(*options, id="vault_import_bind_list"),
+            SelectionList(*self._options({0}), id="vault_import_bind_list"),
             Horizontal(
                 Button("Keep references", id="vault_import_bind_cancel"),
                 Button("Choose server", id="vault_import_bind_continue"),
@@ -2053,7 +2074,12 @@ class VaultScreen(Screen):
             item_id = reference.get("vault_item_id")
             source_ref = reference.get("source_ref")
             if isinstance(item_id, str) and item_id and isinstance(source_ref, str) and source_ref:
-                normalized.append({"vault_item_id": item_id, "source_ref": source_ref})
+                entry = {"vault_item_id": item_id, "source_ref": source_ref}
+                for field in ("name", "fingerprint"):
+                    value = reference.get(field)
+                    if isinstance(value, str) and value:
+                        entry[field] = value
+                normalized.append(entry)
         if not normalized:
             return
         selected = await self.app.push_screen_wait(VaultImportedReferenceModal(normalized))

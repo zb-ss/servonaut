@@ -42,6 +42,7 @@ def test_bitwarden_name_matches_key_pair_then_can_be_renamed_and_safely_deleted(
     bw_id = bitwarden.add_ssh_key_item(fleet.EDGE_1.key_name, private, public)
     journey.env_overrides["BW_SESSION"] = bitwarden.session
     imported = _json(cli(home, "vault", "import", "bitwarden", "--vault", vault_id, "--item", bw_id, "--json"))
+    assert imported["name"] == fleet.EDGE_1.key_name
     item_id = imported["item_id"]
     (fetch,) = bitwarden.calls("bw")
     assert fetch.argv == ["get", "item", bw_id]

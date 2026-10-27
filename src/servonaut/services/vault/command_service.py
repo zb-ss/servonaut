@@ -1679,7 +1679,7 @@ class VaultCommandService:
                 payload.update(break_glass)
                 item_type = "break_glass"
             result = await self.items.write_item(vault_id, item_id, item_type, payload, expected_revision=0)
-            return {"item_id": item_id, "type": item_type, "public_fingerprint": fingerprint, "item": result}
+            return {"item_id": item_id, "name": item_name, "type": item_type, "public_fingerprint": fingerprint, "item": result}
         finally:
             for index in range(len(private_bytes)):
                 private_bytes[index] = 0

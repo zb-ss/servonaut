@@ -44,7 +44,7 @@ def test_modal_is_optional_metadata_result() -> None:
 
 def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(tmp_path: Path) -> None:
     service = MagicMock()
-    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-1"})
+    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-1", "name": "Stored local key", "public_fingerprint": "SHA256:local"})
     modal = VaultImportModal(service, "vault-1", tmp_path)
     modal._source = "ssh"
     modal._local_keys = [
@@ -74,6 +74,8 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
                     "vault_item_id": "vault-item-1",
                     "source": "ssh",
                     "source_ref": "id_ed25519",
+                    "name": "Stored local key",
+                    "fingerprint": "SHA256:local",
                 }
             ],
         }
@@ -82,7 +84,7 @@ def test_local_import_passes_normalized_transient_key_and_returns_bind_metadata(
 
 def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path) -> None:
     service = MagicMock()
-    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-2"})
+    service.import_keys = AsyncMock(return_value={"item_id": "vault-item-2", "name": "Stored Bitwarden key", "public_fingerprint": "SHA256:bitwarden"})
     resolver = MagicMock()
     resolver.resolve_ssh_key.return_value = "fixture-private"
     modal = VaultImportModal(service, "vault-1", tmp_path, resolver=resolver)
@@ -108,7 +110,8 @@ def test_bitwarden_import_uses_item_uuid_reference_without_delete(tmp_path: Path
     assert call["source_ref"] == "item-uuid-1"
     assert "delete" not in " ".join(name for name in dir(resolver) if "delete" in name)
     assert harness.modal.dismiss.call_args.args[0]["references"] == [
-        {"vault_item_id": "vault-item-2", "source": "bitwarden", "source_ref": "item-uuid-1"}
+        {"vault_item_id": "vault-item-2", "source": "bitwarden", "source_ref": "item-uuid-1",
+         "name": "Stored Bitwarden key", "fingerprint": "SHA256:bitwarden"}
     ]
 
 
@@ -465,3 +468,27 @@ async def test_encrypted_key_passphrase_modal_renders_filename_literally(name: s
         plain = content.plain if isinstance(content, Content) else to_content(str(content)).plain
         assert plain == f"Enter the passphrase for {name} to decrypt it for import. Skip to leave this key out."
         await pilot.press("escape")
+
+
+@pytest.mark.parametrize("name", [None, 7, "", "Stored [1st key"])
+def test_import_reference_only_copies_nonempty_string_name(name: object) -> None:
+    summary = {"imported": 0, "failed": 0, "imported_ids": [], "references": []}
+    VaultImportModal._record_import(summary, {"item_id": "key-1", "name": name}, "ssh", "source-1")
+    expected = {"vault_item_id": "key-1", "source": "ssh", "source_ref": "source-1"}
+    if isinstance(name, str) and name:
+        expected["name"] = name
+    assert summary["references"] == [expected]
+
+
+@pytest.mark.parametrize("fingerprint", [None, 7, "", "SHA256:fixture"])
+def test_import_reference_only_includes_string_fingerprint(fingerprint: object) -> None:
+    summary = {"imported": 0, "failed": 0, "imported_ids": [], "references": []}
+    VaultImportModal._record_import(
+        summary, {"item_id": "key-1", "name": "id_key", "public_fingerprint": fingerprint}, "ssh", "id_key",
+    )
+    reference = summary["references"][0]
+    assert reference["name"] == "id_key"
+    if isinstance(fingerprint, str):
+        assert reference["fingerprint"] == fingerprint
+    else:
+        assert "fingerprint" not in reference

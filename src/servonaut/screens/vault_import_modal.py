@@ -352,7 +352,14 @@ class VaultImportModal(ModalScreen[ImportSummary | None]):
         item_id = result["item_id"]
         summary["imported"] += 1
         summary["imported_ids"].append(item_id)
-        summary["references"].append({"vault_item_id": item_id, "source": source, "source_ref": source_ref})
+        reference = {"vault_item_id": item_id, "source": source, "source_ref": source_ref}
+        name = result.get("name")
+        if isinstance(name, str) and name:
+            reference["name"] = name
+        fingerprint = result.get("public_fingerprint")
+        if isinstance(fingerprint, str):
+            reference["fingerprint"] = fingerprint
+        summary["references"].append(reference)
 
     async def _import_selected(self) -> None:
         if self._source is None:

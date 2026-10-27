@@ -218,28 +218,22 @@ async def test_import_from_bitwarden_retains_names_and_matches_auto_bind(
         await wait_for_async(lambda: not confirm.disabled, desc="import confirm button")
         confirm.press()
 
-        # The import modal closes, followed by either the migration modal or direct return to VaultScreen.
+        binding_modal = await wait_for_async(
+            lambda: app.screen if isinstance(app.screen, VaultImportedReferenceModal)
+            and app.screen.query("#vault_import_bind_list")
+            and app.screen.query("#vault_import_bind_cancel") else None,
+            desc="the imported key binding picker",
+        )
+        binding_list = binding_modal.query_one("#vault_import_bind_list", SelectionList)
+        assert binding_list.option_count == 2
+        labels = [binding_list.get_option_at_index(index).prompt.plain for index in range(2)]
+        assert any("ops-key" in label for label in labels)
+        assert any("web-key" in label for label in labels)
+        binding_modal.query_one("#vault_import_bind_cancel", Button).press()
         await wait_for_async(
-            lambda: not isinstance(app.screen, VaultImportModal),
-            desc="vault import modal closed",
+            lambda: app.screen is screen and not screen._busy_work and all(w.is_finished for w in screen.workers),
+            desc="return to VaultScreen after dismissing migration modal",
         )
-
-        def _screen_after_import() -> Any:
-            if isinstance(app.screen, VaultImportedReferenceModal) and app.screen.query("#vault_import_bind_cancel"):
-                return app.screen
-            if app.screen is screen and not screen._busy_work and all(w.is_finished for w in screen.workers):
-                return screen
-            return None
-
-        post_import_screen = await wait_for_async(
-            _screen_after_import, desc="VaultScreen or VaultImportedReferenceModal after import"
-        )
-        if isinstance(post_import_screen, VaultImportedReferenceModal):
-            post_import_screen.query_one("#vault_import_bind_cancel", Button).press()
-            await wait_for_async(
-                lambda: app.screen is screen and not screen._busy_work and all(w.is_finished for w in screen.workers),
-                desc="return to VaultScreen after dismissing migration modal",
-            )
 
         # Switch to items view.
         items_btn = screen.query_one("#vault_items", Button)

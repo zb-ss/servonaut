@@ -750,10 +750,14 @@ async def test_vault_screen_binds_an_imported_key_to_the_picked_server() -> None
 
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _ready_vault_screen(app)
-        reference = {"source": "bitwarden", "vault_item_id": "item-9", "source_ref": "bw-9"}
+        reference = {"source": "bitwarden", "vault_item_id": "item-9", "source_ref": "bw-9",
+                     "name": "Deployment key", "fingerprint": "SHA256:fixture"}
         offer = screen.run_worker(screen._offer_imported_bitwarden_binding("vault-1", [reference]), group="vault")
         await wait_until(lambda: isinstance(app.screen, VaultImportedReferenceModal))
-        await pilot.pause()
+        await wait_until(lambda: bool(app.screen.query("#vault_import_bind_continue")))
+        listing = app.screen.query_one("#vault_import_bind_list", SelectionList)
+        assert listing.get_option_at_index(0).prompt.plain == "Deployment key  SHA256:fixture "
+        assert app.screen._references == [{key: value for key, value in reference.items() if key != "source"}]
         app.screen.query_one("#vault_import_bind_continue", Button).press()
         modal = await _import_modal_loaded(app, pilot)
         modal.query_one("#vault_import_bind_team", Select).value = "web"
@@ -843,3 +847,55 @@ async def test_the_loading_line_stays_while_the_newest_server_load_runs() -> Non
 
         service.release["ops"].set()
         await wait_until(lambda: _loading(screen) is None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["Deployment key", "[1st key", "\x1b[31mred-key", "trailing\\", "k" * 100])
+async def test_imported_reference_labels_keep_names_fingerprints_and_fallbacks(name: str) -> None:
+    from servonaut.services.vault.display import terminal_safe
+
+    reference = {"vault_item_id": "item-1", "source_ref": "bw-1", "name": name,
+                 "fingerprint": "SHA256:[fixture\\"}
+    legacy = {"vault_item_id": "item-2", "source_ref": "bw-2"}
+    unnamed = {"vault_item_id": "item-3", "source_ref": "bw-3", "name": "", "fingerprint": ""}
+    app = _StyledModalHost(VaultImportedReferenceModal([reference, legacy, unnamed]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_bind_continue")))
+        listing = app.screen.query_one("#vault_import_bind_list", SelectionList)
+        labels = [listing.get_option_at_index(index).prompt.plain for index in range(3)]
+        shown_name = terminal_safe(name)
+        if len(shown_name) > 60:
+            shown_name = shown_name[:60] + "…"
+        assert labels == [shown_name + "  SHA256:[fixture\\ ",
+                          "Imported Bitwarden SSH key 2", "Imported Bitwarden SSH key 3"]
+        await pilot.pause()
+        app.screen.query_one("#vault_import_bind_continue", Button).press()
+        await wait_until(lambda: bool(app.results))
+        assert app.results[0] is reference
+
+
+@pytest.mark.asyncio
+async def test_imported_reference_demo_toggle_redraws_names_and_keeps_selection() -> None:
+    references = [
+        {"vault_item_id": "item-1", "source_ref": "bw-1", "name": "web-key", "fingerprint": "SHA256:web"},
+        {"vault_item_id": "item-2", "source_ref": "bw-2", "name": "ops-key", "fingerprint": "SHA256:ops"},
+    ]
+    app = _demo_host(VaultImportedReferenceModal(references))
+    app.demo_mode = True
+    async with app.run_test(size=(100, 30)) as pilot:
+        await wait_until(lambda: bool(app.screen.query("#vault_import_bind_continue")))
+        listing = app.screen.query_one("#vault_import_bind_list", SelectionList)
+        assert [listing.get_option_at_index(index).prompt.plain for index in range(2)] == ["redacted  redacted "] * 2
+        listing.deselect_all()
+        listing.select(1)
+        await _toggle_demo(app, pilot, False)
+        assert [listing.get_option_at_index(index).prompt.plain for index in range(2)] == [
+            "web-key  SHA256:web ", "ops-key  SHA256:ops ",
+        ]
+        assert listing.selected == [1]
+        await _toggle_demo(app, pilot, True)
+        assert [listing.get_option_at_index(index).prompt.plain for index in range(2)] == ["redacted  redacted "] * 2
+        assert listing.selected == [1]
+        app.screen.query_one("#vault_import_bind_continue", Button).press()
+        await wait_until(lambda: bool(app.results))
+        assert app.results[0] is references[1]
