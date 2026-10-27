@@ -49,6 +49,8 @@ GUARD = load_guard()
 DEFAULT_TIMEOUT = 20.0
 # How long a pause may wait for the app to catch up, as Textual's own pilot allows.
 _PAUSE_TIMEOUT = 30.0
+# How often a pause waiting for a screen's layout checks that the screen is still shown.
+_SCREEN_CHECK_INTERVAL = 0.25
 # The child imports the whole app and verifies the frontend bundle before it
 # reports ready; a loaded CI runner needs more than the launcher's default.
 CHILD_STARTUP_TIMEOUT = 30.0
@@ -465,8 +467,32 @@ class _LoopPilot:
             screen = app.screen
             nodes = (app, *screen.walk_children(with_self=True))
             await _callbacks_ran([node.call_later for node in nodes], "queued messages")
-            await _callbacks_ran([screen.call_after_refresh], "the screen's layout")
+            await _screen_laid_out(app)
         await asyncio.sleep(delay or 0)
+
+
+async def _screen_laid_out(app: Any) -> None:
+    """Wait until the screen shown has laid out any pending change.
+
+    A callback queued after a screen's refresh is dropped with the screen when
+    it closes first: the command palette closes as soon as the journey picks
+    an entry. When the screen shown changes while waiting, wait for the one
+    shown now instead.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PAUSE_TIMEOUT
+    while app.screen_stack:  # else the session has ended: nothing to wait for
+        screen = app.screen
+        done = asyncio.Event()
+        screen.call_after_refresh(done.set)  # queues nothing on a closing screen
+        while app.screen_stack and app.screen is screen:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise DesktopTimeout(f"the app did not get through the screen's layout in {_PAUSE_TIMEOUT:.0f}s")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(done.wait(), min(_SCREEN_CHECK_INTERVAL, remaining))
+            if done.is_set():
+                return
 
 
 async def _callbacks_ran(schedulers: Sequence[Callable[[Callable[[], None]], bool]], desc: str) -> None:
