@@ -366,6 +366,11 @@ pip install 'servonaut[voice-output]'     # spoken replies / conversation mode
 pip install 'servonaut[all]'
 ```
 
+The batch voice engine (`servonaut[voice]`) needs Python 3.14 or earlier
+for now: its speech runtime publishes no Python 3.15 build yet. On 3.15,
+`servonaut[all]` installs everything else, including the streaming engine
+and spoken replies.
+
 Voice also needs the PortAudio system library (`sudo apt install
 libportaudio2`, `brew install portaudio`) and one-time model downloads,
 both surfaced in Settings → AI → Voice Input. See
