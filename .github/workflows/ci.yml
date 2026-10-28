@@ -51,6 +51,27 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
+  # Resolves `servonaut[all]` on the newest CPython without installing it,
+  # so an extra that cannot install there (a dependency with no build for
+  # that version yet) fails here before a user's `pipx install` does.
+  # Meant to stay out of the required checks: a third-party release can
+  # turn it red without any change in this repository.
+  install-resolution:
+    name: install resolution / Python 3.15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.15
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.15"
+
+      - name: Resolve the all extra
+        run: python -m pip install --dry-run ".[all]"
+
   desktop-host:
     name: desktop host / Python 3.12
     runs-on: ubuntu-latest
