@@ -31,6 +31,13 @@ pip install 'servonaut[voice-streaming]'  # voice input, live text as you speak
 pip install 'servonaut[voice-output]'     # spoken replies
 ```
 
+The batch engine needs Python 3.14 or earlier for now: it runs on
+`onnxruntime`, which publishes no Python 3.15 build yet, so
+`servonaut[voice]` cannot install on 3.15. The streaming engine and spoken
+replies work on 3.15, and `servonaut[all]` installs them there without the
+batch engine. To use the batch engine, install Servonaut under an earlier
+Python, for example `pipx install --python python3.14 'servonaut[all]'`.
+
 You do not have to run these yourself: **Settings → AI → Voice Input** has
 **Install packages** and **Install speech packages** buttons that detect how
 Servonaut was installed (pip or pipx) and run the matching command. For

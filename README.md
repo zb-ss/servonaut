@@ -349,8 +349,8 @@ See [Configuration Guide](docs/configuration.md) for the full reference includin
 ### Optional Dependencies
 
 ```bash
-# MCP server for AI agents
-pipx inject servonaut mcp
+# MCP server for AI agents (name any other extras you use, e.g. 'servonaut[mcp,ovh]')
+pipx install --force 'servonaut[mcp]'
 # or: pip install 'servonaut[mcp]'
 
 # Hetzner Cloud / OVHcloud provider SDKs
@@ -365,6 +365,11 @@ pip install 'servonaut[voice-output]'     # spoken replies / conversation mode
 # Install everything
 pip install 'servonaut[all]'
 ```
+
+The batch voice engine (`servonaut[voice]`) needs Python 3.14 or earlier
+for now: its speech runtime publishes no Python 3.15 build yet. On 3.15,
+`servonaut[all]` installs everything else, including the streaming engine
+and spoken replies.
 
 Voice also needs the PortAudio system library (`sudo apt install
 libportaudio2`, `brew install portaudio`) and one-time model downloads,

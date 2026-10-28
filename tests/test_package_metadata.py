@@ -25,19 +25,41 @@ def _project_section() -> str:
     return document.split("[project]", maxsplit=1)[1].split("\n[", maxsplit=1)[0]
 
 
-def _requirement_names(table: str, key: str) -> set[str]:
-    """Extract normalized package names from a simple dependency array."""
+def _optional_dependencies_section() -> str:
+    """Return the text from the optional-dependencies table onwards."""
+    document = PYPROJECT.read_text(encoding="utf-8")
+    return document.split("[project.optional-dependencies]", maxsplit=1)[1]
+
+
+def _requirements(table: str, key: str) -> list[str]:
+    """Extract the raw requirement strings from a simple dependency array."""
     match = re.search(
         rf"^{re.escape(key)}\s*=\s*\[(?P<requirements>.*?)^\]",
         table,
         flags=re.MULTILINE | re.DOTALL,
     )
     assert match is not None, f"Missing {key!r} dependency list"
-    requirements = re.findall(r'"([^"]+)"', match.group("requirements"))
+    return re.findall(r'"([^"]+)"', match.group("requirements"))
+
+
+def _requirement_names(table: str, key: str) -> set[str]:
+    """Extract normalized package names from a simple dependency array."""
     return {
-        re.split(r"[\s<>=!~\[]", requirement, maxsplit=1)[0].lower()
-        for requirement in requirements
+        re.split(r"[\s<>=!~\[;]", requirement, maxsplit=1)[0].lower()
+        for requirement in _requirements(table, key)
     }
+
+
+def _names_installed_on(requirements: list[str], python_version: str) -> set[str]:
+    """Names whose environment marker admits *python_version*."""
+    from packaging.requirements import Requirement
+
+    installed = set()
+    for requirement in map(Requirement, requirements):
+        marker = requirement.marker
+        if marker is None or marker.evaluate({"python_version": python_version}):
+            installed.add(requirement.name.lower())
+    return installed
 
 
 def _source_version() -> str:
@@ -66,13 +88,26 @@ def test_distribution_version_matches_source_identity() -> None:
 
 
 def test_desktop_build_dependencies_stay_out_of_base_and_all_extras() -> None:
-    document = PYPROJECT.read_text(encoding="utf-8")
     base_dependencies = _requirement_names(_project_section(), "dependencies")
-    extras = document.split("[project.optional-dependencies]", maxsplit=1)[1]
-    all_dependencies = _requirement_names(extras, "all")
+    all_dependencies = _requirement_names(_optional_dependencies_section(), "all")
 
     assert not base_dependencies & DESKTOP_ONLY_DEPENDENCIES
     assert not all_dependencies & DESKTOP_ONLY_DEPENDENCIES
+
+
+def test_all_extra_skips_batch_voice_engine_where_onnxruntime_has_no_build() -> None:
+    # Regression: `pipx install 'servonaut[all]'` failed to resolve on
+    # Python 3.15 because faster-whisper needs onnxruntime, which publishes
+    # no cp315 build. The version strings are pinned on purpose.
+    extras = _optional_dependencies_section()
+    all_requirements = _requirements(extras, "all")
+
+    assert "faster-whisper" in _names_installed_on(all_requirements, "3.14")
+    assert "faster-whisper" not in _names_installed_on(all_requirements, "3.15")
+    assert {"mcp", "sherpa-onnx"} <= _names_installed_on(all_requirements, "3.15")
+    # Asking for the batch engine by name must still fail loudly on 3.15
+    # instead of installing an extra that cannot work.
+    assert "faster-whisper" in _names_installed_on(_requirements(extras, "voice"), "3.15")
 
 
 def test_public_project_urls_reference_servonaut_repository() -> None:
