@@ -349,8 +349,8 @@ See [Configuration Guide](docs/configuration.md) for the full reference includin
 ### Optional Dependencies
 
 ```bash
-# MCP server for AI agents
-pipx inject servonaut mcp
+# MCP server for AI agents (name any other extras you use, e.g. 'servonaut[mcp,ovh]')
+pipx install --force 'servonaut[mcp]'
 # or: pip install 'servonaut[mcp]'
 
 # Hetzner Cloud / OVHcloud provider SDKs

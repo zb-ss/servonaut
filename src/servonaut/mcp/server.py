@@ -8,8 +8,23 @@ from __future__ import annotations
 
 import logging
 import sys
+from typing import NoReturn
 
 logger = logging.getLogger(__name__)
+
+_MISSING_SDK_MESSAGE = "MCP SDK not installed. Install with: pip install 'servonaut[mcp]'"
+
+
+def _exit_missing_sdk() -> NoReturn:
+    """Report the missing SDK where an MCP client can see it, then exit.
+
+    The log file alone is not enough: the client only sees the process
+    close, so a stdio client reports a bare "connection closed". stderr is
+    safe to write to here because the protocol uses stdout only.
+    """
+    logger.error(_MISSING_SDK_MESSAGE)
+    print(f"servonaut: {_MISSING_SDK_MESSAGE}", file=sys.stderr)
+    sys.exit(1)
 
 
 def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=None):
@@ -324,8 +339,7 @@ def create_mcp_server():
         from mcp.server import Server
         from mcp.types import Tool, TextContent
     except ImportError:
-        logger.error("MCP SDK not installed. Install with: pip install 'servonaut[mcp]'")
-        sys.exit(1)
+        _exit_missing_sdk()
 
     from servonaut.config.manager import ConfigManager
 
@@ -432,8 +446,7 @@ async def run_server() -> None:
     try:
         from mcp.server.stdio import stdio_server
     except ImportError:
-        logger.error("MCP SDK not installed. Install with: pip install 'servonaut[mcp]'")
-        sys.exit(1)
+        _exit_missing_sdk()
 
     server = create_mcp_server()
 

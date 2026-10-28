@@ -194,6 +194,30 @@ PowerShell window: run `Remove-Item Env:SERVONAUT_PRE` or open a new window.
 See [Release candidates](release-candidates.md) for how candidates and their
 updates work.
 
+## MCP Client Cannot Connect
+
+If your AI agent reports that the `servonaut` MCP server failed to connect,
+or shows only "connection closed", start the server by hand:
+
+```bash
+servonaut --mcp < /dev/null
+```
+
+`MCP SDK not installed` means Servonaut was installed without the `mcp`
+extra. Reinstall with it, naming any other extras you use:
+
+```bash
+pipx install --force 'servonaut[mcp]'   # or 'servonaut[all]'
+pip install 'servonaut[mcp]'            # pip
+```
+
+`pipx install` does nothing when Servonaut is already installed, so keep
+`--force`. Avoid `pipx inject servonaut mcp`: it installs the newest MCP SDK
+rather than a version Servonaut supports.
+
+Then restart the agent, or reconnect its MCP servers, so it starts the
+server again. Other start-up errors are written to the log described below.
+
 ## Logging
 
 Logs are always written to `~/.servonaut/logs/servonaut.log` and include:
