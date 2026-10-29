@@ -284,7 +284,13 @@ async def test_team_names_are_literal_and_redraw_in_demo_mode() -> None:
 @pytest.mark.asyncio
 async def test_team_binding_status_keeps_the_existing_personal_key() -> None:
     app = _Host([_own(), _shared()])
-    app.vault_command_service.personal_binding.return_value = {"source": "servonaut_vault"}
+    team_binding = _signed_binding()
+    app.vault_command_service.bind = AsyncMock(return_value=team_binding)
+    # The own binding already has the team's key and login: nothing to offer.
+    app.vault_command_service.personal_binding.return_value = {
+        "source": "servonaut_vault", "login_user": "deploy",
+        "public_fingerprint": team_binding["public_fingerprint"],
+    }
     async with app.run_test() as pilot:
         await _start(pilot)
         await _choose_scope(pilot, 0)
@@ -486,3 +492,73 @@ async def test_scope_dialog_warns_when_replacing_existing_team_key() -> None:
         assert "Replaces the key everyone in team-b uses now." in opt_b.prompt.plain
         assert "Team members connect to this server with this key." not in opt_b.prompt.plain
 
+
+
+async def _bind_team_key(pilot: Any) -> None:
+    app = pilot.app
+    await _start(pilot)
+    await _choose_scope(pilot, 0)
+    await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+    await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+    app.screen.query_one("#vault_bind_confirm", Button).press()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("update", [False, True])
+async def test_a_team_key_on_your_own_server_offers_to_update_your_own_binding(
+    size: tuple[int, int], update: bool,
+) -> None:
+    # Regression: the team key's new login changed nothing for the owner,
+    # whose own row kept connecting with their personal binding's old login.
+    from servonaut.screens.server_actions import OwnKeyUpdateModal
+
+    app = _Host([_own(), _shared()])
+    service = app.vault_command_service
+    team_binding = _signed_binding()
+    service.bind = AsyncMock(return_value=team_binding)
+    service.personal_binding.return_value = {
+        "source": "servonaut_vault", "login_user": "ec2-user", "public_fingerprint": "SHA256:old",
+    }
+    async with app.run_test(size=size) as pilot:
+        await _bind_team_key(pilot)
+        await _settle(pilot, lambda: isinstance(app.screen, OwnKeyUpdateModal))
+        modal = app.screen
+        await _settle(pilot, lambda: bool(modal.query("#own_key_keep")) and app.focused is not None)
+        body = str(modal.query_one("#own_key_body", Static).render())
+        assert "as ec2-user" in body and "logs in as deploy" in body
+        # Keep is the default: Enter never changes the user's own key.
+        assert app.focused is modal.query_one("#own_key_keep", Button)
+        assert modal.query_one("#own_key_update", Button).region.bottom <= size[1]
+        modal.query_one("#own_key_update" if update else "#own_key_keep", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+
+    if update:
+        service.bind_personal.assert_awaited_once()
+        sent = service.bind_personal.await_args.kwargs
+        assert (sent["vault_id"], sent["item_id"], sent["login"]) == (TEAM_VAULT, KEY_ITEM, "deploy")
+        assert (sent["provider"], sent["instance_id"], sent["hostname"]) == ("aws", "i-1", "9.9.9.9")
+        assert sent["host_keys"] == team_binding["host_keys"]
+        assert "Your own key now uses the team's key, as deploy." in app.notices[-1][0]
+    else:
+        service.bind_personal.assert_not_awaited()
+        assert "You still connect with your own key, as ec2-user." in app.notices[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_escape_keeps_your_own_binding() -> None:
+    from servonaut.screens.server_actions import OwnKeyUpdateModal
+
+    app = _Host([_own(), _shared()])
+    app.vault_command_service.personal_binding.return_value = {
+        "source": "servonaut_vault", "login_user": "ec2-user", "public_fingerprint": "SHA256:old",
+    }
+    async with app.run_test() as pilot:
+        await _bind_team_key(pilot)
+        await _settle(pilot, lambda: isinstance(app.screen, OwnKeyUpdateModal))
+        await _settle(pilot, lambda: bool(app.screen.query("#own_key_keep")))
+        await pilot.press("escape")
+        await _settle(pilot, lambda: bool(app.notices))
+
+    app.vault_command_service.bind_personal.assert_not_awaited()
+    assert "You still connect with your own key, as ec2-user." in app.notices[-1][0]
