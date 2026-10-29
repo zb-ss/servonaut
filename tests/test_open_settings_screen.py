@@ -53,6 +53,8 @@ class _Host(App):
 
     CSS_PATH = CSS_FILES
     open_settings_screen = ServonautApp.open_settings_screen
+    _refuse_navigation = ServonautApp._refuse_navigation
+    _navigation_hold_reason = ServonautApp._navigation_hold_reason
 
     def __init__(self) -> None:
         super().__init__()
