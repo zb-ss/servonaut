@@ -1149,3 +1149,25 @@ async def test_the_detail_says_where_the_login_comes_from() -> None:
         detail = lambda: str(app.screen.query_one("#auto_bind_detail", Static).render())  # noqa: E731
         await wait_until(lambda: "Login: ec2-user (from default username)" in detail())
         assert "Note: The login ec2-user is only the default username" in detail()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vault, shared_rows, reason", [
+    ({"my_grant": None}, True, "Ops: your access to its vault is not granted yet"),
+    ({"my_grant": {"version": 1}}, False,
+     "Ops: no shared servers are listed (open the team on the Teams screen)"),
+    ({"my_grant": {"version": 1}}, True, "Ops: only a team owner or admin can bind its keys"),
+])
+async def test_without_an_offered_vault_it_says_why_each_team_vault_is_not_offered(
+    vault, shared_rows, reason,
+) -> None:
+    # Regression: it only said "no personal vault" although a team vault existed.
+    team_vault = {"vault_id": "t", "label": "Ops", "kind": "team", "team": {"slug": "ops", "name": "Ops"}, **vault}
+    rows = [{
+        "id": "s1", "name": "web-1", "is_shared": True, "team_slug": "ops", "team_name": "Ops",
+        "team_role": "member", "hostname": "web.example.test",
+    }] if shared_rows else []
+    app = _Host(_Service(vaults=[team_vault]), instances=rows)
+    async with app.run_test(size=(160, 50)):
+        await wait_until(lambda: "no personal vault" in _status(app))
+        assert f"Team vaults not offered: {reason}." in _status(app)

@@ -470,22 +470,34 @@ class VaultAutoBindScreen(Screen):
 
             team_vault_map: dict[str, tuple[str, str, str, str]] = {}
             team_vault_options_raw: list[tuple[str, str, str]] = []
+            # Why each team vault is not offered, for when nothing is.
+            not_offered: list[str] = []
             for v in vaults:
-                if v.get("kind") == "team" and v.get("my_grant") is not None:
-                    team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
-                    slug = str(team_info.get("slug") or v.get("team_slug") or "")
-                    if not slug:
-                        continue
-                    team_shared = shared_by_slug.get(slug, [])
-                    if not team_shared:
-                        continue
-                    real_role = str(team_shared[0].get("team_role") or "")
-                    role = real_role.lower()
-                    if role in {"owner", "admin"}:
-                        raw_name = str(team_shared[0].get("team_name") or team_info.get("name") or slug)
-                        key = f"team:{slug}"
-                        team_vault_options_raw.append((key, slug, raw_name))
-                        team_vault_map[key] = (str(v["vault_id"]), slug, raw_name, real_role)
+                if v.get("kind") != "team":
+                    continue
+                team_info = v.get("team") if isinstance(v.get("team"), Mapping) else {}
+                slug = str(team_info.get("slug") or v.get("team_slug") or "")
+                if not slug:
+                    continue
+                team_shared = shared_by_slug.get(slug, [])
+                label = str(
+                    (team_shared[0].get("team_name") if team_shared else None)
+                    or team_info.get("name") or v.get("label") or slug
+                )
+                if v.get("my_grant") is None:
+                    not_offered.append(f"{label}: your access to its vault is not granted yet")
+                    continue
+                if not team_shared:
+                    not_offered.append(f"{label}: no shared servers are listed (open the team on the Teams screen)")
+                    continue
+                real_role = str(team_shared[0].get("team_role") or "")
+                role = real_role.lower()
+                if role in {"owner", "admin"}:
+                    key = f"team:{slug}"
+                    team_vault_options_raw.append((key, slug, label))
+                    team_vault_map[key] = (str(v["vault_id"]), slug, label, real_role)
+                else:
+                    not_offered.append(f"{label}: only a team owner or admin can bind its keys")
 
             self._has_personal_vault = bool(personal_vault_id)
             self._team_vault_options_raw = team_vault_options_raw
@@ -493,9 +505,12 @@ class VaultAutoBindScreen(Screen):
 
             options = self._build_picker_options()
             if not options:
-                self._status(
+                message = (
                     "You have no personal vault yet: create one on the Vault screen and import your SSH keys into it."
                 )
+                if not_offered:
+                    message += " Team vaults not offered: " + "; ".join(not_offered) + "."
+                self._status(message)
                 return
 
             select = self.query_one("#auto_bind_vault_select", Select)
