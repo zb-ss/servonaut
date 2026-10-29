@@ -2136,7 +2136,7 @@ class TestTeamManagementDemoMode:
         import asyncio
         from servonaut.screens.team_management import TeamManagementScreen
 
-        screen = object.__new__(TeamManagementScreen)
+        screen = TeamManagementScreen()
         screen._members = []
         screen._current_team_name = ""
         screen._current_team_role = None
@@ -2158,6 +2158,7 @@ class TestTeamManagementDemoMode:
         mock_team_svc.list_shared_servers = _fake_list_servers
         mock_app.team_service = mock_team_svc
 
+        screen._show_agent_rules = AsyncMock()
         header_updates: list = []
         mock_header = MagicMock()
         mock_header.update.side_effect = lambda t: header_updates.append(t)

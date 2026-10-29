@@ -51,12 +51,28 @@ def _make_team_service(teams: list[dict] | None = None) -> MagicMock:
             {"name": "web-01", "host": "1.2.3.4", "provider": "aws"},
         ]
     )
+    svc.list_team_configs = AsyncMock(return_value=[])
     svc.create_team = AsyncMock(return_value={"slug": "new-team", "name": "New Team"})
     svc.invite_member = AsyncMock(return_value={"email_sent": True})
     svc.resend_invite = AsyncMock(return_value={"email_sent": True})
     svc.remove_member = AsyncMock(return_value={})
     svc.update_role = AsyncMock(return_value={})
     svc.push_server = AsyncMock(return_value={})
+    async def push_servers(_slug, payloads, *, on_progress=None, **_options):
+        from servonaut.services.team_service import FAILED, SHARED, ShareResult
+
+        results = []
+        for index, payload in enumerate(payloads, start=1):
+            try:
+                created = await svc.push_server(_slug, payload)
+                result = ShareResult(payload, SHARED, server=created)
+            except Exception as exc:
+                result = ShareResult(payload, FAILED, error=getattr(exc, "message", str(exc)))
+            results.append(result)
+            if on_progress is not None:
+                on_progress(index, len(payloads), result)
+        return results
+    svc.push_servers = AsyncMock(side_effect=push_servers)
     return svc
 
 
@@ -1318,12 +1334,15 @@ class TestTeamManagementShareServer:
              "username": "ubuntu", "port": 2222},
             {"id": "i-stop", "name": "stopped", "public_ip": "", "private_ip": ""},
         ]
+        # Only a custom server's own username is a sharing default.
+        instances[2]["is_custom"] = True
         app = _WrapperApp(auth_service=auth, team_service=team_svc, instances=instances)
         async with app.run_test(headless=True) as pilot:
             await pilot.pause()
             await pilot.pause()
             screen = app.screen
             screen._current_team_slug = "eng"
+            screen._loaded_team_slug = "eng"
             screen._current_team_role = "owner"
             screen._shared_servers = []  # nothing shared yet
             screen._action_share_all_servers()
@@ -1351,6 +1370,7 @@ class TestTeamManagementShareServer:
             await pilot.pause()
             screen = app.screen
             screen._current_team_slug = "eng"
+            screen._loaded_team_slug = "eng"
             screen._current_team_role = "owner"
             screen._shared_servers = [
                 {"name": "aws-1", "hostname": "1.1.1.1", "instance_id": "i-1"},
@@ -1361,12 +1381,12 @@ class TestTeamManagementShareServer:
             assert team_svc.push_server.call_args.args[1]["name"] == "aws-2"
 
     @pytest.mark.asyncio
-    async def test_share_all_skips_already_shared_by_hostname_when_no_instance_id(self):
+    async def test_share_all_skips_already_shared_by_public_hostname_when_no_instance_id(self):
         # Custom servers without instance_id should still dedupe by hostname.
         auth = _make_auth_service(authenticated=True)
         team_svc = _make_team_service()
         instances = [
-            {"id": "custom-x", "name": "no-id-server", "public_ip": "10.5.5.5"},
+            {"id": "custom-x", "name": "no-id-server", "public_ip": "web.example.com"},
         ]
         app = _WrapperApp(auth_service=auth, team_service=team_svc, instances=instances)
         async with app.run_test(headless=True) as pilot:
@@ -1374,13 +1394,15 @@ class TestTeamManagementShareServer:
             await pilot.pause()
             screen = app.screen
             screen._current_team_slug = "eng"
+            screen._loaded_team_slug = "eng"
             screen._current_team_role = "owner"
             screen._shared_servers = [
-                {"name": "no-id-server", "hostname": "10.5.5.5"},  # no instance_id field
+                {"name": "no-id-server", "hostname": "web.example.com"},  # no instance_id field
             ]
             screen._action_share_all_servers()
             for _ in range(10):
                 await pilot.pause()
+            assert app.screen is screen
             team_svc.push_server.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1394,6 +1416,7 @@ class TestTeamManagementShareServer:
             await pilot.pause()
             screen = app.screen
             screen._current_team_slug = "eng"
+            screen._loaded_team_slug = "eng"
             screen._current_team_role = "owner"
             screen._shared_servers = [
                 {"name": "aws-1", "hostname": "1.1.1.1", "instance_id": "i-1"},
@@ -1425,6 +1448,7 @@ class TestTeamManagementShareServer:
             await pilot.pause()
             screen = app.screen
             screen._current_team_slug = "eng"
+            screen._loaded_team_slug = "eng"
             screen._current_team_role = "owner"
             screen._shared_servers = []
             notes = _capture_notifications(screen)

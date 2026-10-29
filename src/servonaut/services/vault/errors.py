@@ -36,7 +36,8 @@ class VaultKeyInUse(VaultUserError):
         message = (
             "this key is still used by the servers listed: give them another vault key first"
             if self.team_servers or self.own_servers else
-            "could not check whether the servers listed still use this key: try again when they can be reached"
+            "could not read the saved key assignments from the Servonaut service; "
+            "the hosts do not need to be running: retry the service check or use the Vault screen to confirm deletion with unchecked assignments"
         )
         super().__init__(message)
 

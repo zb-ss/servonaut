@@ -112,7 +112,7 @@ def test_delete_refuses_and_names_in_use_or_unchecked_servers(service, capsys, f
     assert _run("delete", "key", "--vault", VAULT_ID, "--yes") == 1
     error = capsys.readouterr().err
     assert f"{label}: db-1" in error
-    assert ("try again when they can be reached" if field == "unchecked" else "another vault key") in error
+    assert ("hosts do not need to be running" if field == "unchecked" else "another vault key") in error
     assert "\x1b" not in error and "\u202e" not in error
     service.delete_ssh_key.assert_not_awaited()
 

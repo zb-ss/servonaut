@@ -51,7 +51,10 @@ async def _open_team(app, pilot) -> TeamManagementScreen:
     screen._current_team_slug = "eng"
     screen._current_team_name = TEAM
     screen._current_team_role = "owner"
+    screen._loaded_team_slug = "eng"
+    screen._has_team_detail = True
     screen._shared_servers = []
+    screen._hide_share_server_form()
     screen._show_detail_section()  # as View Team does: the team's cards are on screen
     return screen
 
@@ -192,6 +195,7 @@ class TestShareAllConfirmation:
         async with app.run_test(headless=True) as pilot:
             app.demo_mode = True
             app.redaction_service = RedactionService()
+            app._instances_pristine = list(SHAREABLE)
             modal = await _open_share_all(app, pilot)
             title = modal.query_one("#share_confirm_title", Static)
             assert TEAM not in _text(title)
