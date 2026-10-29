@@ -2194,11 +2194,21 @@ class VaultCommandService:
 
     def ssh_login(self, instance: Mapping[str, Any]) -> str | None:
         """The login SSH would use for *instance* without a binding, if known."""
+        return self.ssh_login_source(instance)[0]
+
+    def ssh_login_source(self, instance: Mapping[str, Any]) -> tuple[str | None, str | None]:
+        """``(login, source)``: :meth:`ssh_login` and where it comes from.
+
+        The source is one of the ``LOGIN_FROM_*`` values of
+        :mod:`.auto_bind`; both are None when no login is known.
+        """
+        from .auto_bind import LOGIN_FROM_ACCOUNT, LOGIN_FROM_DEFAULT, LOGIN_FROM_RULE, LOGIN_FROM_SERVER
+
         login = instance.get("login_user") or instance.get("username")
         if isinstance(login, str) and login:
-            return login
+            return login, LOGIN_FROM_SERVER
         if self.connection_service is None or self.ssh_service is None:
-            return None
+            return None, None
         from servonaut.services.connection_service import server_connection
 
         route = server_connection(
@@ -2206,7 +2216,15 @@ class VaultCommandService:
             getattr(self.config, "default_username", None) or "",
         )
         username = route.get("username")
-        return username if isinstance(username, str) and username else None
+        if not isinstance(username, str) or not username:
+            return None, None
+        profile = route.get("profile")
+        if profile is not None and getattr(profile, "username", None) == username:
+            return username, LOGIN_FROM_RULE
+        if instance.get("is_ovh"):
+            return username, LOGIN_FROM_ACCOUNT
+        # The configured default username, or the built-in ``root``.
+        return username, LOGIN_FROM_DEFAULT
 
     def records_new_host_keys(self) -> bool:
         """True when a first connection records a server's host key (``accept-new``)."""

@@ -1135,3 +1135,17 @@ async def test_a_configured_key_file_matches_first_and_a_missing_one_is_noted(tm
         await wait_until(lambda: "Note: The key file set for this server (cache-old.pem) is not in this vault" in str(
             app.screen.query_one("#auto_bind_detail", Static).render()
         ))
+
+
+@pytest.mark.asyncio
+async def test_the_detail_says_where_the_login_comes_from() -> None:
+    class _Sourced(_Service):
+        def ssh_login_source(self, instance):
+            return "ec2-user", "default username"
+
+    app = _Host(_Sourced())
+    async with app.run_test(size=(160, 50)):
+        await wait_until(lambda: _rows(app))
+        detail = lambda: str(app.screen.query_one("#auto_bind_detail", Static).render())  # noqa: E731
+        await wait_until(lambda: "Login: ec2-user (from default username)" in detail())
+        assert "Note: The login ec2-user is only the default username" in detail()

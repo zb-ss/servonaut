@@ -2929,6 +2929,13 @@ def test_ssh_login_is_the_one_ssh_would_use() -> None:
     assert service.ssh_login({"id": "i-rule"}) == "deploy"  # a connection rule's username
     assert service.ssh_login({"id": "i-own", "username": "admin"}) == "admin"  # the server's own
     assert VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config()).ssh_login({"id": "i-1"}) is None
+    # And where each comes from.
+    assert service.ssh_login_source({"id": "i-plain"}) == ("ec2-user", "default username")
+    assert service.ssh_login_source({"id": "i-rule"}) == ("deploy", "connection rule")
+    assert service.ssh_login_source({"id": "i-own", "username": "admin"}) == ("admin", "server")
+    assert VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config()).ssh_login_source(
+        {"id": "i-1"}
+    ) == (None, None)
 
 
 @pytest.mark.asyncio

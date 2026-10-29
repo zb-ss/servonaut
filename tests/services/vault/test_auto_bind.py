@@ -1121,3 +1121,62 @@ def test_a_key_files_pub_file_names_its_fingerprint(tmp_path) -> None:
 
     assert key_file_fingerprint(private) == ssh_public_fingerprint(public)
     assert key_file_fingerprint(tmp_path / "missing") is None
+
+
+class _SourcedService(_Service):
+    """A service that says where each login comes from, as VaultCommandService does."""
+
+    def __init__(self, sources: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.sources = sources
+
+    def ssh_login_source(self, instance):
+        return self.sources.get(instance["id"], (None, None))
+
+
+@pytest.mark.asyncio
+async def test_each_row_says_where_its_login_comes_from_and_warns_on_the_default() -> None:
+    # Regression: every login came silently from default_username.
+    service = _SourcedService({
+        "i-rule": ("deploy", "connection rule"),
+        "i-default": ("ec2-user", "default username"),
+    })
+    rows = await plan_auto_bind(
+        service,
+        [_server("i-rule", "web-1"), _server("i-default", "web-2")],
+        [_key("k1", "web-1"), _key("k2", "web-2")],
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+    by_id = {row.instance["id"]: row for row in rows}
+
+    assert (by_id["i-rule"].login, by_id["i-rule"].login_source) == ("deploy", "connection rule")
+    assert by_id["i-rule"].notes == []
+    assert (by_id["i-default"].login, by_id["i-default"].login_source) == ("ec2-user", "default username")
+    assert by_id["i-default"].notes == [
+        "The login ec2-user is only the default username: if this server's system uses another login "
+        "(ubuntu, ec2-user, admin...), set it in a connection rule before binding."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_team_row_names_the_share_or_the_own_servers_login_source() -> None:
+    own = {"id": "i-1", "name": "web-1", "public_ip": "198.51.100.1"}
+    shared_own = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1",
+    }
+    shared_named = {
+        "id": "srv-2", "name": "web-2", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.2", "login_user": "admin",
+    }
+    service = _SourcedService({"i-1": ("ec2-user", "default username")})
+    rows = await plan_auto_bind(
+        service, [own, shared_own, shared_named], [_key("k1", "web-1"), _key("k2", "web-2")],
+        team="devs", host_keys_for=lambda *_: [HOST_KEY],
+    )
+    by_id = {row.instance["id"]: row for row in rows}
+
+    assert (by_id["srv-2"].login, by_id["srv-2"].login_source) == ("admin", "team share")
+    assert by_id["srv-2"].notes == []
+    assert (by_id["srv-1"].login, by_id["srv-1"].login_source) == ("ec2-user", "default username")
+    assert "set it in a connection rule or on the team's shared server" in by_id["srv-1"].notes[0]

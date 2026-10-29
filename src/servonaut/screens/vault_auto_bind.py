@@ -393,6 +393,8 @@ class VaultAutoBindScreen(Screen):
             return
         row = self._rows[table.cursor_row]
         text = f"{self._server_name(row)}: {row.status_text_for('tui')}"
+        if row.login and row.login_source:
+            text += f"\nLogin: {row.login} (from {row.login_source})"
         for note in row.notes:
             text += f"\nNote: {note}"
         if row.host_keys:
