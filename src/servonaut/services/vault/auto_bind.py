@@ -1,6 +1,9 @@
 """Bind vault SSH keys to the servers they are named after.
 
-A server is matched to the vault key named like its cloud key pair (an AWS
+A server with a key file set for it (``instance_keys``, the key its own SSH
+connection uses) is matched to that key first: by the file's public-key
+fingerprint, else by the file's name. Otherwise, or when that key is not in
+the vault, it is matched to the vault key named like its cloud key pair (an AWS
 instance's ``key_name``, the key it was launched with; a custom server's key
 file) or, failing that, like the server itself. Names compare without case and without a key-file
 extension, so ``web-1.pem`` matches a server called ``Web-1``. Two different
@@ -44,9 +47,20 @@ _BINDING_READS = 6
 # Host key visits run a few at a time.
 _HOST_KEY_VISITS = 4
 
+# A private key file larger than this is not read: no SSH key is that big.
+_KEY_FILE_MAX_BYTES = 64 * 1024
+
+MATCHED_BY_CONFIGURED_KEY = "configured key"  # the key file set for the server (instance_keys)
 MATCHED_BY_KEY_PAIR = "key pair"
 MATCHED_BY_KEY_FILE = "key file"  # a custom server's own key file
 MATCHED_BY_SERVER_NAME = "server name"
+
+# Where a row's login comes from.
+LOGIN_FROM_SHARE = "team share"  # the login the team's shared server names
+LOGIN_FROM_SERVER = "server"  # the server's own record (a custom server's username)
+LOGIN_FROM_RULE = "connection rule"
+LOGIN_FROM_ACCOUNT = "account defaults"  # an OVH account's SSH defaults
+LOGIN_FROM_DEFAULT = "default username"  # only the configured default (or root)
 
 # Row states, in the order the review lists them.
 READY = "ready"
@@ -115,20 +129,106 @@ class KeyMatch:
         return self.item_id is None
 
 
+@dataclass(frozen=True)
+class ConfiguredKey:
+    """The key file set for a server (``instance_keys``): its file name and, when readable, fingerprint."""
+
+    name: str
+    fingerprint: Optional[str] = None
+
+
+def key_file_fingerprint(path: Path) -> Optional[str]:
+    """The SHA256 fingerprint of the SSH key in *path*; None when it cannot be read.
+
+    The key's ``.pub`` file is read first, else the private key when it is not
+    passphrase-protected (OpenSSH or PEM format). Nothing read is kept.
+    """
+    from cryptography.exceptions import UnsupportedAlgorithm
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        PublicFormat,
+        load_pem_private_key,
+        load_ssh_private_key,
+    )
+
+    from .crypto import ssh_public_fingerprint
+
+    public = path.with_name(path.name + ".pub")
+    try:
+        if public.is_file() and public.stat().st_size <= _KEY_FILE_MAX_BYTES:
+            return ssh_public_fingerprint(public.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        pass  # an unreadable .pub: the private key may still say
+    try:
+        if path.stat().st_size > _KEY_FILE_MAX_BYTES:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    for load in (load_ssh_private_key, load_pem_private_key):
+        try:
+            key = load(data, password=None)
+            line = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+            return ssh_public_fingerprint(line)
+        except (TypeError, ValueError, UnsupportedAlgorithm, AttributeError):
+            continue  # not this format, or protected by a passphrase
+    return None
+
+
+def _mapped_key_path(service: Any, instance: Mapping[str, Any]) -> Optional[str]:
+    """The key file the user set for *instance* (``instance_keys``), as configured."""
+    instance_keys = getattr(getattr(service, "config", None), "instance_keys", None)
+    if not isinstance(instance_keys, Mapping):
+        return None
+    path = instance_keys.get(str(instance.get("id") or ""))
+    return path.strip() if isinstance(path, str) and path.strip() else None
+
+
+def configured_key(service: Any, instance: Optional[Mapping[str, Any]]) -> Optional[ConfiguredKey]:
+    """The key file set for *instance* when that file exists; None otherwise.
+
+    A custom server's own key file is matched by its name already
+    (``MATCHED_BY_KEY_FILE``).
+    """
+    if instance is None or instance.get("is_custom") is True:
+        return None
+    raw = _mapped_key_path(service, instance)
+    if raw is None:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        return None
+    return ConfiguredKey(path.name, key_file_fingerprint(path))
+
+
 def match_ssh_key(
     instance: Mapping[str, Any],
     keys: Iterable[Mapping[str, Any]],
     *,
     own_instance: Optional[Mapping[str, Any]] = None,
+    configured: Optional[ConfiguredKey] = None,
 ) -> Optional[KeyMatch]:
-    """The vault key named like *instance*'s key pair, else like the server.
+    """The vault key set for the server, else the one named like *instance*'s key pair, else like the server.
 
     *keys* are ``ssh_key_choices`` rows: ``item_id``, ``name`` (``None`` when
-    unknown) and ``fingerprint``. When *own_instance* is given, its key-pair
-    name (or key file if custom) and server name are checked first.
+    unknown) and ``fingerprint``. *configured* (the key file set for the
+    server) is matched first: by its fingerprint, else by its file name.
+    When *own_instance* is given, its key-pair name (or key file if custom)
+    and server name are checked next.
     """
+    keys = list(keys)
+    if configured is not None and configured.fingerprint is not None:
+        same = sorted(
+            (key for key in keys if key.get("fingerprint") == configured.fingerprint),
+            key=lambda key: str(key["item_id"]),
+        )
+        if same:
+            key = same[0]
+            return KeyMatch(str(key["item_id"]), str(key.get("name") or configured.name), MATCHED_BY_CONFIGURED_KEY)
     named = [key for key in keys if isinstance(key.get("name"), str) and key["name"].strip()]
     candidates: list[tuple[str, Any]] = []
+    if configured is not None and configured.fingerprint is None:
+        candidates.append((MATCHED_BY_CONFIGURED_KEY, configured.name))
     if own_instance is not None:
         by_key = MATCHED_BY_KEY_FILE if own_instance.get("is_custom") is True else MATCHED_BY_KEY_PAIR
         candidates.append((by_key, own_instance.get("key_name")))
@@ -165,6 +265,8 @@ class AutoBindRow:
     host: Optional[str] = None
     port: int = 22
     login: Optional[str] = None
+    # One of the LOGIN_FROM_* values; None when unknown.
+    login_source: Optional[str] = None
     host_keys: list[str] = field(default_factory=list)
     verified: bool = False
     verification_source: Optional[str] = None
@@ -176,6 +278,8 @@ class AutoBindRow:
     result: Optional[str] = None
     skipped: Optional[str] = None
     binding_result: Optional[Mapping[str, Any]] = None
+    # What the user should know before binding (shown with the row).
+    notes: list[str] = field(default_factory=list)
 
     @property
     def ready(self) -> bool:
@@ -292,10 +396,47 @@ async def plan_auto_bind(
     return sorted(rows, key=lambda row: (order.index(row.status), str(row.instance.get("name") or "").lower()))
 
 
+def _configured_key_note(configured: Optional[ConfiguredKey], match: Optional[KeyMatch]) -> Optional[str]:
+    """Why the key file set for the server was not the match, when it was readable and not."""
+    if configured is None or configured.fingerprint is None:
+        return None
+    if match is not None and match.matched_by == MATCHED_BY_CONFIGURED_KEY:
+        return None
+    note = f"The key file set for this server ({configured.name}) is not in this vault"
+    if match is None or match.ambiguous:
+        return f"{note}: import it, or choose a key with Use Vault Key."
+    return f"{note}: this key was matched by its {match.matched_by} instead. Check that it logs in."
+
+
+def _login_and_source(service: Any, instance: Mapping[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """``service.ssh_login_source(instance)``; the login alone from a service without it."""
+    with_source = getattr(service, "ssh_login_source", None)
+    if callable(with_source):
+        login, source = with_source(instance)
+    else:
+        login, source = service.ssh_login(instance), None
+    return (login.strip(), source) if isinstance(login, str) and login.strip() else (None, None)
+
+
+def _default_login_note(row: AutoBindRow, *, team: bool) -> Optional[str]:
+    """A warning when the row's login is only the default username."""
+    if row.login_source != LOGIN_FROM_DEFAULT or not row.login or row.match is None or row.match.ambiguous:
+        return None
+    where = "a connection rule or on the team's shared server" if team else "a connection rule"
+    return (
+        f"The login {row.login} is only the default username: if this server's system uses "
+        f"another login (ubuntu, ec2-user, admin...), set it in {where} before binding."
+    )
+
+
 def _row(service: Any, instance: Mapping[str, Any], keys: Sequence[Mapping[str, Any]]) -> AutoBindRow:
-    match = match_ssh_key(instance, keys)
+    configured = configured_key(service, instance)
+    match = match_ssh_key(instance, keys, configured=configured)
     host, port = service.ssh_destination(instance)
     row = AutoBindRow(instance=instance, status=READY, match=match, port=port if isinstance(port, int) else 22)
+    note = _configured_key_note(configured, match)
+    if note:
+        row.notes.append(note)
     if match is None:
         row.status = NO_KEY
     elif match.ambiguous:
@@ -304,9 +445,12 @@ def _row(service: Any, instance: Mapping[str, Any], keys: Sequence[Mapping[str, 
         row.status = NO_ADDRESS
     else:
         row.host = host
-        row.login = service.ssh_login(instance)
+        row.login, row.login_source = _login_and_source(service, instance)
         if not row.login:
             row.status = NO_LOGIN
+    note = _default_login_note(row, team=False)
+    if note:
+        row.notes.append(note)
     return row
 
 
@@ -318,7 +462,8 @@ def _team_row(
     team: str,
     own_instance: Optional[Mapping[str, Any]] = None,
 ) -> AutoBindRow:
-    match = match_ssh_key(shared, keys, own_instance=own_instance)
+    configured = configured_key(service, own_instance) or configured_key(service, shared)
+    match = match_ssh_key(shared, keys, own_instance=own_instance, configured=configured)
     host = str(shared.get("hostname") or shared.get("host") or shared.get("public_ip") or "").strip()
     raw_port = shared.get("port")
     port = raw_port if isinstance(raw_port, int) and 1 <= raw_port <= 65535 else 22
@@ -331,11 +476,17 @@ def _team_row(
         team=team,
         own_instance=own_instance,
     )
+    note = _configured_key_note(configured, match)
+    if note:
+        row.notes.append(note)
     login = shared.get("login_user")
-    if not login and own_instance is not None:
-        login = service.ssh_login(own_instance)
     if isinstance(login, str) and login.strip():
-        row.login = login.strip()
+        row.login, row.login_source = login.strip(), LOGIN_FROM_SHARE
+    elif own_instance is not None:
+        row.login, row.login_source = _login_and_source(service, own_instance)
+    note = _default_login_note(row, team=True)
+    if note:
+        row.notes.append(note)
 
     if shared.get("credential_binding") is not None:
         row.status = ALREADY_BOUND
@@ -411,6 +562,19 @@ async def apply_auto_bind(
                 row.result = vault_failure_reason(exc)
             else:
                 row.result = "bound"
+
+
+def _visit_target(service: Any, row: AutoBindRow) -> Mapping[str, Any]:
+    """The record a host-key visit to *row*'s server logs in with.
+
+    A team's shared row names no key of the user's (no key pair, no key
+    file), so the user's own record of the same server logs in, as their own
+    ``servonaut ssh`` does. A key the user mapped to the shared row itself
+    (``instance_keys``) still wins: that row is then the one known to log in.
+    """
+    if row.own_instance is None or _mapped_key_path(service, row.instance) is not None:
+        return row.instance
+    return row.own_instance
 
 
 async def fetch_host_keys_for_rows(
@@ -521,7 +685,7 @@ async def fetch_host_keys_for_rows(
             failure: Optional[str] = None
             try:
                 failure = await service.visit_for_host_key(
-                    row.instance,
+                    _visit_target(service, row),
                     login=row.login,
                     known_hosts_path=temp_kh,
                 )
@@ -601,6 +765,7 @@ async def fetch_host_keys_for_rows(
 __all__ = [
     "FETCHED", "FETCH_FAILED", "HOST_KEY_MISMATCH", "READY", "ALREADY_BOUND", "AMBIGUOUS",
     "NO_HOST_KEYS", "NO_ADDRESS", "NO_LOGIN", "NO_KEY", "CHECK_FAILED", "_HOST_KEY_VISITS",
-    "AutoBindRow", "KeyMatch", "MATCHED_BY_KEY_FILE", "MATCHED_BY_KEY_PAIR", "MATCHED_BY_SERVER_NAME",
-    "apply_auto_bind", "fetch_host_keys_for_rows", "is_personal_server", "match_ssh_key", "normalize_key_name", "plan_auto_bind",
+    "AutoBindRow", "ConfiguredKey", "KeyMatch",
+    "LOGIN_FROM_ACCOUNT", "LOGIN_FROM_DEFAULT", "LOGIN_FROM_RULE", "LOGIN_FROM_SERVER", "LOGIN_FROM_SHARE", "MATCHED_BY_CONFIGURED_KEY", "MATCHED_BY_KEY_FILE", "MATCHED_BY_KEY_PAIR", "MATCHED_BY_SERVER_NAME",
+    "apply_auto_bind", "configured_key", "fetch_host_keys_for_rows", "key_file_fingerprint", "is_personal_server", "match_ssh_key", "normalize_key_name", "plan_auto_bind",
 ]

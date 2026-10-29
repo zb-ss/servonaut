@@ -25,6 +25,7 @@ from servonaut.services.api_client import APIError
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST,
     grant_summary,
+    member_approval_lines,
     ssh_rotation_failure,
     terminal_safe,
 )
@@ -223,7 +224,10 @@ def add_vault_parser(subparsers: Any) -> None:
     bind_personal.add_argument("--yes", action="store_true")
     auto_bind = commands.add_parser(
         "auto-bind",
-        help="Bind personal-vault SSH keys to the servers named like them (key pair name, then server name).",
+        help=(
+            "Bind personal-vault SSH keys to your servers: the key file set for a server, "
+            "else the key named like its key pair, then like the server."
+        ),
     )
     auto_bind.add_argument("--vault", default=None, help=f"{_VAULT_HELP} Default: your personal vault.")
     auto_bind.add_argument("--team", default=None, help="Bind a team vault's keys to that team's shared servers.")
@@ -253,7 +257,10 @@ def add_vault_parser(subparsers: Any) -> None:
     grant_sub = grants.add_subparsers(dest="vault_grants_command", required=True)
     process = grant_sub.add_parser("process", help="Process grants for one vault or all readable vaults.")
     process.add_argument("--vault", default=None, help=_VAULT_HELP)
-    process.add_argument("--yes", action="store_true")
+    process.add_argument(
+        "--yes", action="store_true",
+        help="Do not ask: members who need your approval (safety number) stay pending.",
+    )
     verify = commands.add_parser("verify-member", help="Display a member safety number for out-of-band comparison.")
     verify.add_argument("member")
 
@@ -553,6 +560,14 @@ def _confirm_sas(sas: str) -> bool:
     return sys.stdin.readline().strip().lower() in {"y", "yes"}
 
 
+def _confirm_member_sas(entry: Mapping[str, Any], safety_number: str, changed: bool) -> bool:
+    """Ask on the terminal whether to let one team member's vault identity in; never by default."""
+    for line in member_approval_lines(entry, safety_number, changed):
+        print(terminal_safe(line), file=sys.stderr)
+    print("Approve this member? [y/N] ", end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower() in {"y", "yes"}
+
+
 def _approval_poll_delay(services: Any, attempt: int) -> float:
     """Use the facade's validated exponential delay for approval and reset polling."""
     delay_for = getattr(services, "approval_poll_delay", None)
@@ -586,6 +601,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "key_name": row.match.name if row.match is not None else None,
         "matched_by": row.match.matched_by if row.match is not None else None,
         "login": row.login,
+        "login_source": getattr(row, "login_source", None),
         "host": row.host,
         "port": row.port,
         "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
@@ -596,6 +612,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "team": getattr(row, "team", None),
         "status": row.status,
         "result": row.result,
+        "notes": list(getattr(row, "notes", None) or []),
     }
     if getattr(row, "skipped", None) is not None:
         rec["skipped"] = row.skipped
@@ -617,15 +634,19 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                 print(f"    fetch error: {terminal_safe(str(fetch_err))}")
             if mismatch_det and str(mismatch_det) not in status:
                 print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
+            _print_auto_bind_notes(record)
             continue
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
             parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
+            if record["login_source"]:
+                parts.append(f"(login from {record['login_source']})")
         print(" ".join(parts) + f" - {status}")
         if fetch_err and str(fetch_err) not in status:
             print(f"    fetch error: {terminal_safe(str(fetch_err))}")
         if mismatch_det and str(mismatch_det) not in status:
             print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
+        _print_auto_bind_notes(record)
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
                 if getattr(row, "verified", False):
@@ -636,6 +657,11 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                     print(f"    host key {fingerprint} ({source})")
                 else:
                     print(f"    host key {fingerprint}")
+
+
+def _print_auto_bind_notes(record: Mapping[str, Any]) -> None:
+    for note in record["notes"]:
+        print(f"    note: {terminal_safe(str(note))}")
 
 
 async def _load_team_shared_servers(
@@ -1091,7 +1117,14 @@ async def _handle(args: argparse.Namespace) -> int:
                 if not output:
                     _note_replaced_keys(listed)
         elif command == "grants":
-            processed = await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes)
+            if not args.yes and sys.stdin.isatty():
+                # Members who need a local approval are asked about one by one.
+                processed = await _invoke(
+                    services, "process_grants", vault_id=args.vault, approval=_confirm_member_sas,
+                )
+            else:
+                # Nobody to ask (or --yes): they stay pending, never approved.
+                processed = await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes)
             if output:
                 _print(processed, json_output=True)
             else:

@@ -519,27 +519,46 @@ class AuthService(AuthServiceInterface):
             # snapshot can't poison the cache.
             return [dict(t) if isinstance(t, dict) else t
                     for t in self._token.teams_cached]
+        return await self._fetch_teams(retry_after_refresh=True)
 
+    async def _fetch_teams(self, *, retry_after_refresh: bool) -> List[dict]:
+        """Fetch and cache the team list; on a 401, refresh and retry at most once.
+
+        A failure is never cached: the next call asks again.
+        """
+        if not self.is_authenticated or not HAS_HTTPX:
+            return []
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.get(
                     f"{_api_base()}/api/v1/teams",
                     headers={"Authorization": f"Bearer {self._token.access_token}"},
                 )
-                if response.status_code == 200:
-                    data = response.json()
-                    teams = data if isinstance(data, list) else data.get("teams", [])
-                    # Persist to cache + disk so re-loads across a
-                    # restart still see the cached list within the TTL.
-                    self._token.teams_cached = list(teams)
-                    self._token.teams_fetched_at = now
-                    self._save_token()
-                    return [dict(t) if isinstance(t, dict) else t for t in teams]
-                logger.warning("list_teams: unexpected status %s", response.status_code)
-                return []
         except Exception as e:
             logger.warning("list_teams error: %s", e)
             return []
+        if response.status_code == 401:
+            if retry_after_refresh and await self.refresh_token():
+                return await self._fetch_teams(retry_after_refresh=False)
+            logger.warning("list_teams: the access token was refused (401)")
+            return []
+        if response.status_code != 200:
+            logger.warning("list_teams: unexpected status %s", response.status_code)
+            return []
+        try:
+            data = response.json()
+        except ValueError as e:
+            logger.warning("list_teams error: %s", e)
+            return []
+        if isinstance(data, dict):
+            data = data.get("teams", [])
+        teams = data if isinstance(data, list) else []
+        # Persist to cache + disk so re-loads across a
+        # restart still see the cached list within the TTL.
+        self._token.teams_cached = list(teams)
+        self._token.teams_fetched_at = time.time()
+        self._save_token()
+        return [dict(t) if isinstance(t, dict) else t for t in teams]
 
     # Plan → feature mapping (fallback when /api/entitlements is unavailable)
     _PLAN_FEATURES: dict = {

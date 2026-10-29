@@ -887,3 +887,100 @@ async def test_ca_confirmation_names_the_job_and_each_user_ca_role_without_termi
         assert f"{fingerprint(active)} (active (pinned))" in text
         assert f"{fingerprint(upcoming)} (next (new))" in text
         assert "\x1b" not in text and "\x07" not in text
+
+
+class _GrantsService(_OnboardingService):
+    """An owner's team vault with one member whose changed identity needs an approval."""
+
+    def __init__(self) -> None:
+        super().__init__(vaults=[{
+            "vault_id": "team-v", "kind": "team", "name": "Ops", "my_role": "owner",
+            "my_grant": {"version": 1}, "counts": {"items": 1, "open_exposures": 0},
+        }])
+        self.decisions: list[bool] = []
+
+    async def process_grants(self, *, vault_id=None, interactive=False, approval=None):
+        assert approval is not None, "the Vault screen must ask about members who need an approval"
+        entry = {"user_id": 8, "display_name": "Member Two", "email": "member@example.com",
+                 "role": "member", "status": "identity_changed"}
+        decided = await approval(entry, "12345 67890 13579", True)
+        self.decisions.append(decided)
+        if decided:
+            return [{"accepted": [{"recipient_user_id": 8}], "skipped": [], "pending_confirmation": []}]
+        return [{"accepted": [], "skipped": [], "pending_confirmation": [
+            {"user_id": 8, "identity_id": "x", "safety_number": "12345 67890 13579", "identity_changed": True},
+        ]}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+@pytest.mark.parametrize("button, approved, summary", [
+    ("#vault_member_approve", True, "Granted access to 1 member."),
+    ("#vault_member_skip", False, "1 member still needs approval before getting access (1 with a changed vault identity)."),
+])
+async def test_grants_ask_about_a_member_with_a_changed_identity(size, button, approved, summary) -> None:
+    # Regression: Grants always declined, so such a member never got access.
+    from servonaut.screens.vault import VaultMemberApprovalModal
+
+    service = _GrantsService()
+    app = _StyledVaultHost(service)
+
+    async with app.run_test(size=size) as pilot:
+        screen = app.screen
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 1)
+        screen.action_grants()
+        await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
+        modal = app.screen
+        await wait_until(lambda: bool(modal.query("#vault_member_skip")) and app.focused is not None)
+        await pilot.pause()
+        text = " ".join(str(widget.render()) for widget in modal.query(Static))
+        assert "Member Two <member@example.com> (member) is waiting for access to this vault." in text
+        assert "Their vault identity changed since this computer last saw it." in text
+        assert "12345 67890 13579" in text
+        # Skip is the default: Enter never approves by accident.
+        assert app.focused is modal.query_one("#vault_member_skip", Button)
+        approve = modal.query_one("#vault_member_approve", Button)
+        assert approve.region.bottom <= size[1] and approve.region.right <= size[0]
+        await pilot.click(button)
+        await wait_until(lambda: service.decisions == [approved])
+        await wait_until(lambda: summary in _status_text(screen))
+
+
+@pytest.mark.asyncio
+async def test_escape_skips_a_member_waiting_for_approval() -> None:
+    from servonaut.screens.vault import VaultMemberApprovalModal
+
+    service = _GrantsService()
+    app = _StyledVaultHost(service)
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 1)
+        screen.action_grants()
+        await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
+        await pilot.press("escape")
+        await wait_until(lambda: service.decisions == [False])
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_hides_the_waiting_members_name_and_address() -> None:
+    from servonaut.screens.vault import VaultMemberApprovalModal
+    from servonaut.services.redaction_service import RedactionService
+
+    service = _GrantsService()
+    app = _StyledVaultHost(service)
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 1)
+        screen.action_grants()
+        await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
+        modal = app.screen
+        await wait_until(lambda: bool(modal.query("#vault_member_skip")))
+        text = " ".join(str(widget.render()) for widget in modal.query(Static))
+        assert "member@example.com" not in text
+        assert "12345 67890 13579" in text  # the number to compare is never hidden
+        await pilot.press("escape")
+        await wait_until(lambda: service.decisions == [False])

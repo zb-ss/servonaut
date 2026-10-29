@@ -1855,3 +1855,114 @@ def test_vault_grants_process_says_what_happened(capsys) -> None:
     out = capsys.readouterr().out
     assert out.strip() == "Granted access to 1 member. 1 member still needs approval before getting access."
     assert "identity-7" not in out
+
+
+def test_auto_bind_notes_print_under_their_server_and_go_in_the_json(capsys) -> None:
+    from servonaut.cli import vault
+    from servonaut.services.vault.auto_bind import READY, AutoBindRow, KeyMatch
+
+    note = "The key file set for this server (web-1-new.pem) is not in this vault: import it."
+    row = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=READY,
+        match=KeyMatch(item_id="k1", name="kp-a", matched_by="key pair"),
+        login="ubuntu",
+        host="198.51.100.1",
+        notes=[note],
+    )
+    vault._print_auto_bind([row], results=False)
+
+    assert f"    note: {note}" in capsys.readouterr().out
+    assert vault._auto_bind_record(row)["notes"] == [note]
+
+
+def test_auto_bind_output_says_where_the_login_comes_from(capsys) -> None:
+    from servonaut.cli import vault
+    from servonaut.services.vault.auto_bind import READY, AutoBindRow, KeyMatch
+
+    row = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=READY,
+        match=KeyMatch(item_id="k1", name="web-1", matched_by="server name"),
+        login="deploy",
+        login_source="connection rule",
+        host="198.51.100.1",
+    )
+    vault._print_auto_bind([row], results=False)
+
+    assert "web-1: web-1 (by server name) deploy@198.51.100.1 (login from connection rule) - ready" in (
+        capsys.readouterr().out
+    )
+    assert vault._auto_bind_record(row)["login_source"] == "connection rule"
+
+
+class _Tty:
+    """A terminal on stdin that answers *answer*."""
+
+    def __init__(self, answer: str, *, tty: bool = True) -> None:
+        self.answer = answer
+        self.tty = tty
+        self.asked = 0
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def readline(self) -> str:
+        self.asked += 1
+        return self.answer
+
+
+_PENDING_MEMBER = {
+    "user_id": 8, "display_name": "Member Two", "email": "member@example.com", "role": "member",
+    "status": "identity_changed",
+}
+
+
+def _grants_service(decisions: list) -> SimpleNamespace:
+    """A facade whose grant run asks *approval* about one member, as GrantProcessor does."""
+
+    async def process_grants(*, vault_id=None, interactive=False, approval=None):
+        if approval is not None:
+            decisions.append(approval(_PENDING_MEMBER, "12345 67890", True))
+        else:
+            decisions.append(("not asked", interactive))
+        return [{"accepted": [], "skipped": [], "pending_confirmation": []}]
+
+    return SimpleNamespace(process_grants=process_grants)
+
+
+@pytest.mark.parametrize("answer, approved", [("y\n", True), ("yes\n", True), ("n\n", False), ("\n", False)])
+def test_vault_grants_process_asks_on_a_terminal_and_approves_only_on_yes(
+    monkeypatch, capsys, answer, approved,
+) -> None:
+    # Regression: the approval callback always declined, so a member who
+    # needed a local approval stayed "still needs approval" forever.
+    stdin = _Tty(answer)
+    monkeypatch.setattr("sys.stdin", stdin)
+    decisions: list = []
+
+    assert _run_with(_grants_service(decisions), ["vault", "grants", "process"]) == 0
+
+    assert decisions == [approved]
+    err = capsys.readouterr().err
+    assert "Member Two <member@example.com> (member) is waiting for access to this vault." in err
+    assert "Their vault identity changed since this computer last saw it." in err
+    assert "Safety number: 12345 67890" in err
+    assert "Approve this member? [y/N]" in err
+
+
+@pytest.mark.parametrize("argv, tty, interactive", [
+    (["vault", "grants", "process"], False, True),
+    (["vault", "grants", "process", "--yes"], True, False),
+])
+def test_vault_grants_process_never_approves_without_a_terminal_or_with_yes(
+    monkeypatch, argv, tty, interactive,
+) -> None:
+    stdin = _Tty("y\n", tty=tty)
+    monkeypatch.setattr("sys.stdin", stdin)
+    decisions: list = []
+
+    assert _run_with(_grants_service(decisions), argv) == 0
+
+    assert decisions == [("not asked", interactive)]
+    assert stdin.asked == 0

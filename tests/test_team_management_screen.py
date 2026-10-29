@@ -1529,6 +1529,66 @@ class TestSharedServerConnect:
         assert opened[0]["port"] == 2222
         assert opened[1] == "connect"
 
+    @staticmethod
+    def _admin_team_service(servers: list[dict]) -> MagicMock:
+        teams = [
+            {"id": 7, "slug": "eng", "name": "Engineering", "role": "admin", "member_count": 3},
+            {"id": 8, "slug": "ops", "name": "Ops", "role": "member", "member_count": 1},
+        ]
+        team_svc = _make_team_service(teams)
+        # The detail read names no role: the team list's role is the caller's.
+        team_svc.get_team = AsyncMock(
+            return_value={"id": 7, "slug": "eng", "name": "Engineering", "members": []},
+        )
+        team_svc.list_shared_servers = AsyncMock(return_value=list(servers))
+        return team_svc
+
+    @pytest.mark.asyncio
+    async def test_viewing_a_team_keeps_the_callers_role_and_team_id_on_its_rows(self):
+        # Regression: the rows were rebuilt from the slug and name alone, so
+        # team_role and team_id came out '' and Auto-bind, Use Vault Key and
+        # the team agent rules lost the caller's role until a restart.
+        from servonaut.screens.server_actions import _can_bind_team
+
+        team_svc = self._admin_team_service(self._SERVERS)
+        app = _WrapperApp(auth_service=_make_auth_service(), team_service=team_svc)
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            await pilot.pause()
+            await _until(pilot, lambda: bool(app.screen._team_roles), "the team list")
+            await app.screen._load_team_detail("eng")
+            await pilot.pause()
+
+        shared = [row for row in app.instances if row.get("is_shared")]
+        assert [row["name"] for row in shared] == ["web-01", "db-01"]
+        for row in shared:
+            assert row["team_slug"] == "eng"
+            assert row["team_id"] == "7"
+            assert row["team_role"] == "admin"
+            assert row["team_name"] == "Engineering"
+            assert _can_bind_team(row)
+
+    @pytest.mark.asyncio
+    async def test_share_all_keeps_the_callers_role_on_the_teams_rows(self):
+        team_svc = self._admin_team_service(self._SERVERS)
+        app = _WrapperApp(
+            auth_service=_make_auth_service(), team_service=team_svc,
+            instances=[{"id": "i-1", "name": "app-1", "public_ip": "1.1.1.1"}],
+        )
+        async with app.run_test(headless=True, size=(160, 50)) as pilot:
+            await pilot.pause()
+            await _until(pilot, lambda: bool(app.screen._team_roles), "the team list")
+            screen = app.screen
+            screen._current_team_slug = "eng"
+            await screen._load_team_detail("eng")
+            screen._action_share_all_servers()
+            await _confirm_share_all(app, pilot)
+            await _until(pilot, lambda: team_svc.list_shared_servers.await_count >= 2, "the reload")
+            await pilot.pause()
+
+        shared = [row for row in app.instances if row.get("is_shared")]
+        assert shared and all(row["team_role"] == "admin" for row in shared)
+        assert all(row["team_id"] == "7" for row in shared)
+
     @pytest.mark.asyncio
     async def test_connect_with_nothing_shared_says_so(self):
         team_svc = _make_team_service(_SAMPLE_TEAMS)

@@ -916,3 +916,267 @@ async def test_fetch_host_keys_type_error_in_visit_fails_row_without_retrying_or
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_visits_the_users_own_server_not_the_shared_row() -> None:
+    # Regression: the console was read from the own server but the SSH visit
+    # went to the shared row, which names no key pair or key file, so the
+    # login offered no usable key ("Permission denied (publickey)").
+    own = {"id": "i-1", "name": "web-1", "key_name": "kp-1", "public_ip": "198.51.100.1"}
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    rows = await plan_auto_bind(
+        service, [own, shared], [_key("k1", "kp-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+    assert rows[0].status == NO_HOST_KEYS
+
+    read: list[str] = []
+
+    def console(inst):
+        read.append(inst["id"])
+        return ""
+
+    await fetch_host_keys_for_rows(
+        service, rows, console_output_reader=console, host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert read == ["i-1"]
+    assert service.visits == ["i-1"]
+    assert rows[0].status == FETCHED
+    assert rows[0].host_keys == [HOST_KEY]
+    # Still bound to the team's shared server.
+    assert rows[0].instance is shared
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_without_an_own_server_visits_the_shared_row() -> None:
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    rows = await plan_auto_bind(
+        service, [shared], [_key("k1", "web-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+
+    await fetch_host_keys_for_rows(service, rows, host_keys_for=lambda *_: [HOST_KEY])
+
+    assert service.visits == ["srv-1"]
+    assert rows[0].status == FETCHED
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_visits_the_shared_row_when_a_key_is_mapped_to_it() -> None:
+    own = {"id": "i-1", "name": "web-1", "key_name": "kp-1", "public_ip": "198.51.100.1"}
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    service.config = SimpleNamespace(instance_keys={"srv-1": "/keys/web-1.pem"})
+    rows = await plan_auto_bind(
+        service, [own, shared], [_key("k1", "kp-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+
+    await fetch_host_keys_for_rows(
+        service, rows, console_output_reader=lambda inst: "", host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert service.visits == ["srv-1"]
+
+
+# -- the key file set for a server (instance_keys) -------------------------
+
+
+def _key_file(path, *, pem: bool = False) -> str:
+    """Write an unencrypted private key to *path*; return its fingerprint."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import NoEncryption, PrivateFormat
+
+    if pem:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        data = key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption())
+    else:
+        key = ed25519.Ed25519PrivateKey.generate()
+        data = key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption())
+    path.write_bytes(data)
+    path.chmod(0o600)
+    public = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    return ssh_public_fingerprint(public)
+
+
+def _configured(service, mapping: dict) -> None:
+    service.config = SimpleNamespace(instance_keys=mapping)
+
+
+@pytest.mark.asyncio
+async def test_the_key_file_set_for_the_server_wins_over_its_key_pair(tmp_path) -> None:
+    # Regression: the key pair named key A, the server's own key file was
+    # key B (the key it accepts), and Auto-bind bound key A.
+    fingerprint_b = _key_file(tmp_path / "web-1-new.pem")
+    server = _server("i-1", "web-1", key_name="kp-a")
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "web-1-new.pem")})
+    keys = [_key("ka", "kp-a"), _key("kb", "imported key", fingerprint=fingerprint_b)]
+
+    [row] = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [HOST_KEY])
+
+    assert row.match.item_id == "kb"
+    assert row.match.matched_by == "configured key"
+    assert row.status == READY
+    assert row.notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_configured_aws_pem_key_matches_by_fingerprint(tmp_path) -> None:
+    fingerprint = _key_file(tmp_path / "legacy.pem", pem=True)
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "legacy.pem")})
+    keys = [_key("k1", "something else", fingerprint=fingerprint), _key("k2", "web-1")]
+
+    [row] = await plan_auto_bind(
+        service, [_server("i-1", "web-1")], keys, host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert (row.match.item_id, row.match.matched_by) == ("k1", "configured key")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_configured_key_file_keeps_todays_matching(tmp_path) -> None:
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "gone.pem")})
+    keys = [_key("ka", "kp-a"), _key("kg", "gone")]
+
+    [row] = await plan_auto_bind(
+        service, [_server("i-1", "web-1", key_name="kp-a")], keys, host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert (row.match.item_id, row.match.matched_by) == ("ka", "key pair")
+    assert row.notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_configured_key_without_a_readable_fingerprint_matches_by_file_name(tmp_path) -> None:
+    (tmp_path / "web-1-new.pem").write_text("not a key we can read without its passphrase\n")
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "web-1-new.pem")})
+    keys = [_key("ka", "kp-a"), _key("kb", "web-1-new")]
+
+    [row] = await plan_auto_bind(
+        service, [_server("i-1", "web-1", key_name="kp-a")], keys, host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key")
+
+
+@pytest.mark.asyncio
+async def test_a_configured_key_missing_from_the_vault_falls_back_with_a_note(tmp_path) -> None:
+    _key_file(tmp_path / "web-1-new.pem")
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "web-1-new.pem")})
+
+    [row] = await plan_auto_bind(
+        service, [_server("i-1", "web-1", key_name="kp-a")], [_key("ka", "kp-a")],
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert (row.match.item_id, row.match.matched_by) == ("ka", "key pair")
+    assert row.notes == [
+        "The key file set for this server (web-1-new.pem) is not in this vault: "
+        "this key was matched by its key pair instead. Check that it logs in."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_auto_bind_matches_the_own_servers_configured_key_first(tmp_path) -> None:
+    fingerprint = _key_file(tmp_path / "web-1-new.pem")
+    own = {"id": "i-1", "name": "web-1", "key_name": "kp-a", "public_ip": "198.51.100.1"}
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu",
+    }
+    service = _Service()
+    _configured(service, {"i-1": str(tmp_path / "web-1-new.pem")})
+    keys = [_key("ka", "kp-a"), _key("kb", "team copy", fingerprint=fingerprint)]
+
+    [row] = await plan_auto_bind(
+        service, [own, shared], keys, team="devs", host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key")
+
+
+def test_a_key_files_pub_file_names_its_fingerprint(tmp_path) -> None:
+    from servonaut.services.vault.auto_bind import key_file_fingerprint
+
+    private = tmp_path / "id_web"
+    private.write_text("encrypted, unreadable here\n")
+    key = ed25519.Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+    (tmp_path / "id_web.pub").write_text(public + " user@host\n")
+
+    assert key_file_fingerprint(private) == ssh_public_fingerprint(public)
+    assert key_file_fingerprint(tmp_path / "missing") is None
+
+
+class _SourcedService(_Service):
+    """A service that says where each login comes from, as VaultCommandService does."""
+
+    def __init__(self, sources: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.sources = sources
+
+    def ssh_login_source(self, instance):
+        return self.sources.get(instance["id"], (None, None))
+
+
+@pytest.mark.asyncio
+async def test_each_row_says_where_its_login_comes_from_and_warns_on_the_default() -> None:
+    # Regression: every login came silently from default_username.
+    service = _SourcedService({
+        "i-rule": ("deploy", "connection rule"),
+        "i-default": ("ec2-user", "default username"),
+    })
+    rows = await plan_auto_bind(
+        service,
+        [_server("i-rule", "web-1"), _server("i-default", "web-2")],
+        [_key("k1", "web-1"), _key("k2", "web-2")],
+        host_keys_for=lambda *_: [HOST_KEY],
+    )
+    by_id = {row.instance["id"]: row for row in rows}
+
+    assert (by_id["i-rule"].login, by_id["i-rule"].login_source) == ("deploy", "connection rule")
+    assert by_id["i-rule"].notes == []
+    assert (by_id["i-default"].login, by_id["i-default"].login_source) == ("ec2-user", "default username")
+    assert by_id["i-default"].notes == [
+        "The login ec2-user is only the default username: if this server's system uses another login "
+        "(ubuntu, ec2-user, admin...), set it in a connection rule before binding."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_team_row_names_the_share_or_the_own_servers_login_source() -> None:
+    own = {"id": "i-1", "name": "web-1", "public_ip": "198.51.100.1"}
+    shared_own = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1",
+    }
+    shared_named = {
+        "id": "srv-2", "name": "web-2", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.2", "login_user": "admin",
+    }
+    service = _SourcedService({"i-1": ("ec2-user", "default username")})
+    rows = await plan_auto_bind(
+        service, [own, shared_own, shared_named], [_key("k1", "web-1"), _key("k2", "web-2")],
+        team="devs", host_keys_for=lambda *_: [HOST_KEY],
+    )
+    by_id = {row.instance["id"]: row for row in rows}
+
+    assert (by_id["srv-2"].login, by_id["srv-2"].login_source) == ("admin", "team share")
+    assert by_id["srv-2"].notes == []
+    assert (by_id["srv-1"].login, by_id["srv-1"].login_source) == ("ec2-user", "default username")
+    assert "set it in a connection rule or on the team's shared server" in by_id["srv-1"].notes[0]

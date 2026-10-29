@@ -102,6 +102,7 @@ VaultRevealModal {
 VaultSecretPromptModal,
 VaultRecoveryConfirmModal,
 VaultSasConfirmModal,
+VaultMemberApprovalModal,
 VaultExposureActionModal,
 VaultImportedReferenceModal,
 VaultImportedTeamBindingModal,
@@ -114,6 +115,7 @@ CaEnrollmentConfirmModal {
 #vault_secret_modal,
 #vault_recovery_confirm_modal,
 #vault_sas_modal,
+#vault_member_modal,
 #vault_pending_device_modal,
 #vault_exposure_modal,
 #vault_import_bind_reference_modal,
@@ -179,7 +181,8 @@ CaEnrollmentConfirmModal {
 }
 
 #vault_recovery_key,
-#vault_sas {
+#vault_sas,
+#vault_member_sas {
     margin: 1 0;
     padding: 1;
     border: round $accent;
@@ -204,6 +207,10 @@ CaEnrollmentConfirmModal {
     height: auto;
     max-height: 12;
     margin-top: 1;
+}
+
+#vault_member_modal > Horizontal {
+    height: auto;
 }
 
 #vault_import_bind_reference_modal Horizontal,
@@ -240,6 +247,8 @@ CaEnrollmentConfirmModal {
 #vault_recovery_confirm,
 #vault_sas_no,
 #vault_sas_yes,
+#vault_member_skip,
+#vault_member_approve,
 #vault_pending_device_later,
 #vault_pending_device_review,
 #vault_exposure_cancel,
