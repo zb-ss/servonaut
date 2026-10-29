@@ -240,3 +240,69 @@ async def test_auto_grants_skip_an_unconfirmed_member_and_grant_the_confirmed_on
     assert (method, path) == ("POST", f"/api/v1/vaults/{vault['vault_id']}/grants")
     assert [grant["recipient_identity_id"] for grant in body["grants"]] == [member_id]
     assert result["pending_confirmation"] == []
+
+
+def _owner_vault_with_waiting_member(status: str):
+    """An owner's client and a vault whose member (user 3) waits with *status*."""
+    from unittest.mock import AsyncMock
+
+    owner_seed, owner_enc, vault_secret = b"a" * 32, b"b" * 32, b"v" * 32
+    member_id = "55555555-5555-4555-8555-555555555555"
+    owner = _identity(owner_seed, owner_enc, _OWNER_ID, 1, grantable=True)
+    member = _identity(b"e" * 32, b"f" * 32, member_id, 3, grantable=True)
+    vault = _team_vault(
+        creator_seed=owner_seed, creator_id=_OWNER_ID,
+        identities={_OWNER_ID: owner, member_id: member}, roster_ids=[],
+    )
+    vault["roster"] = [
+        {"user_id": 1, "role": "owner", "status": "granted", "identity": owner},
+        {"user_id": 3, "role": "member", "status": status, "identity": member, "display_name": "Member"},
+    ]
+    version_public = base64.b64decode(vault["versions"][0]["public_key"])
+    sealed = crypto.seal(vault_secret, crypto.x25519_public(owner_enc))
+    vault["my_grant"] = {
+        "version": 1, "sealed_private_key": base64.b64encode(sealed).decode(),
+        "granter_identity_id": _OWNER_ID,
+        "signature": base64.b64encode(crypto.sign(owner_seed, crypto.grant_message(
+            vault["vault_id"], vault["scope"], 1, version_public, 1, _OWNER_ID,
+            bytes.fromhex(owner["fingerprint"]), sealed, _OWNER_ID,
+        ))).decode(),
+    }
+    local = SimpleNamespace(
+        identity_id=_OWNER_ID, user_id=1, signing_seed=owner_seed,
+        encryption_secret_key=owner_enc, fingerprint=owner["fingerprint"],
+    )
+    pin_data: dict[str, str] = {}
+    client = TeamVaultClient(
+        None, SimpleNamespace(identity=local),
+        RosterPins(lambda: pin_data, lambda value: pin_data.update(value)), _State(),
+    )
+    client._signed = AsyncMock(return_value={"accepted": [3], "skipped": []})
+    return client, vault, member_id
+
+
+@pytest.mark.asyncio
+async def test_a_member_awaiting_approval_is_granted_only_after_the_approver_says_yes() -> None:
+    from servonaut.services.vault.grant_processor import GrantProcessor
+
+    client, vault, member_id = _owner_vault_with_waiting_member("awaiting_approval")
+    asked: list = []
+
+    declined = await GrantProcessor(client).process_auto_grants(
+        vault, approval=lambda entry, sas, changed: asked.append((entry["user_id"], changed)) or False,
+    )
+
+    assert asked == [(3, False)]
+    client._signed.assert_not_awaited()
+    assert [entry["user_id"] for entry in declined["pending_confirmation"]] == [3]
+
+    approved = await GrantProcessor(client).process_auto_grants(vault, approval=lambda *_: True)
+
+    paths = [call.args[1] for call in client._signed.await_args_list]
+    assert paths == [
+        f"/api/v1/vaults/{vault['vault_id']}/recipients/3/approve",
+        f"/api/v1/vaults/{vault['vault_id']}/grants",
+    ]
+    grants = client._signed.await_args_list[1].args[2]["grants"]
+    assert [grant["recipient_identity_id"] for grant in grants] == [member_id]
+    assert approved["pending_confirmation"] == []

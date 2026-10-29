@@ -32,7 +32,8 @@ from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.vault_rename_key_modal import VaultRenameKeyModal
 from servonaut.services.vault import onboarding
 from servonaut.services.vault.display import (
-    VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, ssh_rotation_failure, terminal_safe,
+    VAULT_KEY_ROTATED_FIRST, grant_summary, markup_literal, member_approval_lines, ssh_rotation_failure,
+    terminal_safe,
 )
 from servonaut.services.vault.errors import VaultKeyInUse, vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -199,6 +200,44 @@ class VaultSasConfirmModal(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "vault_sas_yes")
+
+
+class VaultMemberApprovalModal(ModalScreen[bool]):
+    """Approve or skip one team member waiting for vault access; Skip is the default."""
+
+    BINDINGS = [Binding("escape", "skip", "Skip", show=False)]
+
+    def __init__(self, entry: Mapping[str, Any], safety_number: str, changed: bool) -> None:
+        super().__init__()
+        self._lines = member_approval_lines(entry, safety_number, changed)
+        self._safety_number = safety_number
+        self._changed = changed
+
+    def compose(self) -> ComposeResult:
+        yield SafeHeader()
+        title = "Changed identity: approve vault access?" if self._changed else "Approve vault access?"
+        # Names and e-mail addresses come from other users: inert text.
+        body = [Static(Text(line)) for line in self._lines if not line.startswith("Safety number:")]
+        yield Vertical(
+            Static(f"[bold]{title}[/bold]"),
+            *body[:-1],
+            Static(Text(self._safety_number), id="vault_member_sas"),
+            body[-1],
+            Horizontal(
+                Button("Skip", id="vault_member_skip"),
+                Button("Approve", id="vault_member_approve", variant="warning" if self._changed else "primary"),
+            ),
+            id="vault_member_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#vault_member_skip", Button).focus()
+
+    def action_skip(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "vault_member_approve")
 
 
 class VaultPendingDeviceModal(ModalScreen[bool]):
@@ -2217,9 +2256,13 @@ class VaultScreen(Screen):
         service = self._service()
         if service is None:
             return
+
+        async def approve(entry: Mapping[str, Any], safety_number: str, changed: bool) -> bool:
+            return bool(await self.app.push_screen_wait(VaultMemberApprovalModal(entry, safety_number, changed)))
+
         try:
             async with self._busy('Processing access requests…', holds_screen=True):
-                result = await _invoke(service, "process_grants", vault_id=vault_id, interactive=True)
+                result = await _invoke(service, "process_grants", vault_id=vault_id, approval=approve)
         except Exception as exc:
             self.app.notify(f"Could not process grants ({vault_failure_reason(exc)}).", severity="error", markup=False)
             return

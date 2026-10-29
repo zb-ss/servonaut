@@ -1894,3 +1894,75 @@ def test_auto_bind_output_says_where_the_login_comes_from(capsys) -> None:
         capsys.readouterr().out
     )
     assert vault._auto_bind_record(row)["login_source"] == "connection rule"
+
+
+class _Tty:
+    """A terminal on stdin that answers *answer*."""
+
+    def __init__(self, answer: str, *, tty: bool = True) -> None:
+        self.answer = answer
+        self.tty = tty
+        self.asked = 0
+
+    def isatty(self) -> bool:
+        return self.tty
+
+    def readline(self) -> str:
+        self.asked += 1
+        return self.answer
+
+
+_PENDING_MEMBER = {
+    "user_id": 8, "display_name": "Member Two", "email": "member@example.com", "role": "member",
+    "status": "identity_changed",
+}
+
+
+def _grants_service(decisions: list) -> SimpleNamespace:
+    """A facade whose grant run asks *approval* about one member, as GrantProcessor does."""
+
+    async def process_grants(*, vault_id=None, interactive=False, approval=None):
+        if approval is not None:
+            decisions.append(approval(_PENDING_MEMBER, "12345 67890", True))
+        else:
+            decisions.append(("not asked", interactive))
+        return [{"accepted": [], "skipped": [], "pending_confirmation": []}]
+
+    return SimpleNamespace(process_grants=process_grants)
+
+
+@pytest.mark.parametrize("answer, approved", [("y\n", True), ("yes\n", True), ("n\n", False), ("\n", False)])
+def test_vault_grants_process_asks_on_a_terminal_and_approves_only_on_yes(
+    monkeypatch, capsys, answer, approved,
+) -> None:
+    # Regression: the approval callback always declined, so a member who
+    # needed a local approval stayed "still needs approval" forever.
+    stdin = _Tty(answer)
+    monkeypatch.setattr("sys.stdin", stdin)
+    decisions: list = []
+
+    assert _run_with(_grants_service(decisions), ["vault", "grants", "process"]) == 0
+
+    assert decisions == [approved]
+    err = capsys.readouterr().err
+    assert "Member Two <member@example.com> (member) is waiting for access to this vault." in err
+    assert "Their vault identity changed since this computer last saw it." in err
+    assert "Safety number: 12345 67890" in err
+    assert "Approve this member? [y/N]" in err
+
+
+@pytest.mark.parametrize("argv, tty, interactive", [
+    (["vault", "grants", "process"], False, True),
+    (["vault", "grants", "process", "--yes"], True, False),
+])
+def test_vault_grants_process_never_approves_without_a_terminal_or_with_yes(
+    monkeypatch, argv, tty, interactive,
+) -> None:
+    stdin = _Tty("y\n", tty=tty)
+    monkeypatch.setattr("sys.stdin", stdin)
+    decisions: list = []
+
+    assert _run_with(_grants_service(decisions), argv) == 0
+
+    assert decisions == [("not asked", interactive)]
+    assert stdin.asked == 0

@@ -25,6 +25,7 @@ from servonaut.services.api_client import APIError
 from servonaut.services.vault.display import (
     VAULT_KEY_ROTATED_FIRST,
     grant_summary,
+    member_approval_lines,
     ssh_rotation_failure,
     terminal_safe,
 )
@@ -253,7 +254,10 @@ def add_vault_parser(subparsers: Any) -> None:
     grant_sub = grants.add_subparsers(dest="vault_grants_command", required=True)
     process = grant_sub.add_parser("process", help="Process grants for one vault or all readable vaults.")
     process.add_argument("--vault", default=None, help=_VAULT_HELP)
-    process.add_argument("--yes", action="store_true")
+    process.add_argument(
+        "--yes", action="store_true",
+        help="Do not ask: members who need your approval (safety number) stay pending.",
+    )
     verify = commands.add_parser("verify-member", help="Display a member safety number for out-of-band comparison.")
     verify.add_argument("member")
 
@@ -550,6 +554,14 @@ def _confirm_sas(sas: str) -> bool:
         return False
     print(f"Safety number: {sas}", file=sys.stderr)
     print("Does the other device show exactly this safety number? [y/N] ", end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip().lower() in {"y", "yes"}
+
+
+def _confirm_member_sas(entry: Mapping[str, Any], safety_number: str, changed: bool) -> bool:
+    """Ask on the terminal whether to let one team member's vault identity in; never by default."""
+    for line in member_approval_lines(entry, safety_number, changed):
+        print(terminal_safe(line), file=sys.stderr)
+    print("Approve this member? [y/N] ", end="", file=sys.stderr, flush=True)
     return sys.stdin.readline().strip().lower() in {"y", "yes"}
 
 
@@ -1102,7 +1114,14 @@ async def _handle(args: argparse.Namespace) -> int:
                 if not output:
                     _note_replaced_keys(listed)
         elif command == "grants":
-            processed = await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes)
+            if not args.yes and sys.stdin.isatty():
+                # Members who need a local approval are asked about one by one.
+                processed = await _invoke(
+                    services, "process_grants", vault_id=args.vault, approval=_confirm_member_sas,
+                )
+            else:
+                # Nobody to ask (or --yes): they stay pending, never approved.
+                processed = await _invoke(services, "process_grants", vault_id=args.vault, interactive=not args.yes)
             if output:
                 _print(processed, json_output=True)
             else:

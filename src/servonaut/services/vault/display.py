@@ -47,6 +47,35 @@ def _count(number: int, one: str, many: str) -> str:
     return f"{number} {one if number == 1 else many}"
 
 
+def member_label(entry: Mapping[str, Any]) -> str:
+    """A vault roster member as people know them: name and e-mail, else the user id."""
+    name = str(entry.get("display_name") or entry.get("name") or "").strip()
+    email = str(entry.get("email") or "").strip()
+    if name and email and email != name:
+        return f"{name} <{email}>"
+    return name or email or f"user {entry.get('user_id')}"
+
+
+def member_approval_lines(entry: Mapping[str, Any], safety_number: str, changed: bool) -> list[str]:
+    """What an approver reads before a team member's vault identity is let into a vault.
+
+    *entry* is the member's roster entry; *changed* says their identity is
+    not the one this computer saw before. Every value may come from another
+    user: callers show the lines as inert text.
+    """
+    role = str(entry.get("role") or "").strip()
+    lines = [f"{member_label(entry)}{f' ({role})' if role else ''} is waiting for access to this vault."]
+    if changed:
+        lines.append(
+            "Their vault identity changed since this computer last saw it. Approve only if they "
+            "confirm they set Servonaut up again (a new computer, a reset): otherwise someone "
+            "else may be using their account."
+        )
+    lines.append(f"Safety number: {safety_number}")
+    lines.append("Approve only if they confirm exactly this safety number over a channel you trust.")
+    return lines
+
+
 def grant_summary(results: Any) -> str:
     """What a grant-processing run did, in one or two sentences for people.
 
