@@ -206,3 +206,68 @@ class TestStaleCacheReBootstrap:
         # 4. active_team_slug re-bootstraps cleanly.
         slug = run(authed_service.active_team_slug())
         assert slug == "current-team"
+
+
+# ---------------------------------------------------------------------------
+# list_teams with an expired access token
+# ---------------------------------------------------------------------------
+
+
+class TestListTeamsRefreshesAnExpiredToken:
+    @staticmethod
+    def _serve(monkeypatch, statuses: dict) -> list:
+        """Answer GET /api/v1/teams by bearer token; return the tokens seen."""
+        import httpx
+
+        seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            token = request.headers["Authorization"].removeprefix("Bearer ")
+            seen.append(token)
+            status = statuses[token]
+            body = [{"slug": "team-a", "name": "Team A", "role": "owner"}] if status == 200 else {}
+            return httpx.Response(status, json=body)
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(
+            "servonaut.services.auth_service.httpx.AsyncClient",
+            lambda **kwargs: real(transport=httpx.MockTransport(handler), **kwargs),
+        )
+        return seen
+
+    def test_a_401_refreshes_the_token_and_retries_once(self, authed_service, monkeypatch):
+        # Regression: a stale token logged "unexpected status 401" and the
+        # user's teams vanished until the next sign-in.
+        seen = self._serve(monkeypatch, {"A": 401, "B": 200})
+
+        async def refresh() -> bool:
+            authed_service._token.access_token = "B"
+            return True
+
+        monkeypatch.setattr(authed_service, "refresh_token", refresh)
+
+        teams = run(authed_service.list_teams())
+
+        assert [team["slug"] for team in teams] == ["team-a"]
+        assert seen == ["A", "B"]
+
+    def test_a_failed_refresh_lists_nothing_and_caches_nothing(self, authed_service, monkeypatch):
+        seen = self._serve(monkeypatch, {"A": 401})
+        monkeypatch.setattr(authed_service, "refresh_token", AsyncMock(return_value=False))
+
+        assert run(authed_service.list_teams()) == []
+        assert seen == ["A"]
+        assert authed_service._token.teams_fetched_at == 0
+
+    def test_a_second_401_is_not_retried_again(self, authed_service, monkeypatch):
+        seen = self._serve(monkeypatch, {"A": 401, "B": 401})
+
+        async def refresh() -> bool:
+            authed_service._token.access_token = "B"
+            return True
+
+        monkeypatch.setattr(authed_service, "refresh_token", refresh)
+
+        assert run(authed_service.list_teams()) == []
+        assert seen == ["A", "B"]
+        assert authed_service._token.teams_fetched_at == 0
