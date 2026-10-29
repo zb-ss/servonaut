@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import argparse
 import asyncio
 import sys
@@ -902,6 +904,58 @@ class TestConnectionRules:
         assert argv[argv.index("-p") + 1] == "2200"
         assert "ServerAliveCountMax=9" in _options(argv)
         assert any(o.startswith("ProxyCommand=") for o in _options(argv))
+
+
+class TestBastionVaultHop:
+    def test_the_hop_uses_the_bastions_vault_key_and_closes_it(self, tmp_path, capsys):
+        from servonaut.cli import ssh as ssh_mod
+
+        hop = SimpleNamespace(
+            identity_agent=str(tmp_path / "bastion.sock"), identity_file=str(tmp_path / "bastion.pub"),
+            certificate_path=None, known_hosts_path=str(tmp_path / "bastion_known_hosts"),
+            login_user="admin", target_host="198.51.100.20", target_port=22, close=MagicMock(),
+        )
+        seen: list = []
+
+        async def lease(profile, rows, **_kwargs):
+            seen.append((profile.bastion_host, [row["name"] for row in rows]))
+            return hop
+
+        with patch.object(ssh_mod, "bastion_lease", side_effect=lease), \
+                patch("servonaut.services.connection_service.get_os", return_value="linux"):
+            argv = _ssh_argv(_make_args("app-1"), _app_instance(), _rule_config())
+
+        proxy = next(o for o in _options(argv) if o.startswith("ProxyCommand="))
+        assert "admin@bastion-1" in proxy and "IdentityAgent=" in proxy
+        assert "HostKeyAlias=198.51.100.20" in proxy
+        assert seen == [("bastion-1", ["app-1"])]
+        hop.close.assert_called_once_with()
+        assert "Bastion bastion-1: its Servonaut Vault key, as admin." in capsys.readouterr().err
+
+    def test_a_bastion_key_that_must_not_be_used_stops_the_connection(self, capsys):
+        from servonaut.cli import ssh as ssh_mod
+        from servonaut.services.ssh_credentials import VaultCredentialError
+        from servonaut.services.ssh_service import SSHService
+
+        config = _rule_config()
+        config_manager = MagicMock()
+        config_manager.get.return_value = config
+        headless = (config, MagicMock(is_authenticated=True), MagicMock(), MagicMock(),
+                    MagicMock(), SSHService(config_manager), MagicMock())
+        with (
+            patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+            patch.object(ssh_mod, "_load_instances", return_value=[_app_instance()]),
+            patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as MockResolver,
+            patch.object(ssh_mod, "bastion_lease", AsyncMock(
+                side_effect=VaultCredentialError("The bastion bastion-1: binding signature is invalid"),
+            )),
+            patch("subprocess.run") as mock_subproc,
+        ):
+            MockResolver.return_value.resolve = AsyncMock(return_value=_resolved_local("/keys/app.pem"))
+            assert ssh_mod.handle_ssh_command(_make_args("app-1")) != _EXIT_SUCCESS
+
+        mock_subproc.assert_not_called()
+        assert "The bastion bastion-1" in capsys.readouterr().err
 
 
 class TestResolveUsernameWithARule:

@@ -54,6 +54,17 @@ def real_fleet_rows(app: Any) -> Optional[List[Dict[str, Any]]]:
     return [dict(row) for row in rows or [] if isinstance(row, dict)]
 
 
+def fleet_rows(app: Any) -> List[Dict[str, Any]]:
+    """Every server of the fleet, the user's own and the teams' shared ones, as real records.
+
+    Where a connection rule's bastion is looked up (see
+    ``ssh_credentials.bastion_row``). Empty when demo mode has no real
+    records behind its rows: the hop then keeps the user's own setup rather
+    than route through a stand-in.
+    """
+    return real_fleet_rows(app) or []
+
+
 UNRESOLVED_MESSAGE = (
     "The real server behind this row is not known in demo mode, so nothing "
     "was sent. Press ctrl+shift+d to turn demo mode off and try again."

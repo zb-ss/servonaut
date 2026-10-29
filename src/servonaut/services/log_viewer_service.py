@@ -92,11 +92,13 @@ class LogViewerService(LogViewerServiceInterface):
     async def resolve_connection(
         self, instance: dict, ssh_service: Any, connection_service: Any,
         *, team_rows: Iterable[Mapping[str, Any]] = (),
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """The connection for *instance*, with its vault credential applied.
 
         *team_rows* are the team shared servers a server of the user's own
-        may connect through (see ``ssh_credentials.resolve_with_vault``).
+        may connect through, *rows* the whole fleet a bastion is looked up in
+        (see ``ssh_credentials.resolve_with_vault``).
 
         Raises:
             VaultCredentialError: the server's vault credential cannot be used.
@@ -107,7 +109,7 @@ class LogViewerService(LogViewerServiceInterface):
             self._resolve_connection(instance, ssh_service, connection_service),
             instance, vault_runtime=self._vault_runtime,
             connection_service=connection_service, cache=self._vault_leases,
-            team_rows=team_rows,
+            team_rows=team_rows, rows=rows,
         )
 
     def _resolve_connection(
@@ -171,6 +173,8 @@ class LogViewerService(LogViewerServiceInterface):
         instance: dict,
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Return readable log paths, preferring cached memory when available.
 
@@ -212,7 +216,7 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
@@ -361,6 +365,8 @@ class LogViewerService(LogViewerServiceInterface):
         connection_service: "ConnectionServiceInterface",
         directories: Optional[List[str]] = None,
         max_depth: int = 2,
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Scan remote directories for log files via SSH find command."""
         config = self._config_manager.get()
@@ -379,7 +385,7 @@ class LogViewerService(LogViewerServiceInterface):
             f"2>/dev/null | sort -u"
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
@@ -424,6 +430,8 @@ class LogViewerService(LogViewerServiceInterface):
         directory: str,
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Scan a remote directory for log files and save it to custom paths.
 
@@ -454,7 +462,7 @@ class LogViewerService(LogViewerServiceInterface):
             "2>/dev/null | sort -u"
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],

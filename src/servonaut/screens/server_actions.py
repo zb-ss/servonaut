@@ -42,6 +42,7 @@ from servonaut.services.vault.auto_bind import MATCHED_BY_KEY_FILE, MATCHED_BY_K
 from servonaut.screens._demo_resolve import (
     connection_instance,
     display_text,
+    fleet_rows,
     display_username,
     hide_login,
     refuse_unresolved,
@@ -1605,6 +1606,29 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             vault_runtime=getattr(self.app, "vault_command_service", None),
         )
 
+    async def _bastion_hop(self, instance: Dict[str, Any]) -> tuple[bool, Any]:
+        """``(ok, hop)``: the vault lease of the bastion *instance*'s rule routes it through.
+
+        *hop* is None when the bastion has no vault key here (the hop uses
+        the user's own SSH setup); *ok* is False, after saying why, when the
+        bastion's vault key must not be used.
+        """
+        from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
+
+        connection_service = self.app.connection_service
+        try:
+            profile = connection_service.resolve_profile(instance)
+            hop = await bastion_lease(
+                profile, fleet_rows(self.app),
+                vault_runtime=getattr(self.app, "vault_command_service", None),
+                connection_service=connection_service,
+                cache=getattr(self.app, "vault_lease_cache", None),
+            )
+        except VaultCredentialError as exc:
+            self.app.notify(scrub_for_display(self.app, str(exc)), severity="error", markup=False)
+            return False, None
+        return True, hop
+
     def _native_ssh_command(
         self,
         instance: Dict[str, Any],
@@ -1612,11 +1636,13 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         *,
         remote_command: Optional[str] = None,
         options: tuple[str, ...] = (),
+        hop: Any = None,
     ) -> Optional[list[str]]:
         """The ssh argv for a Vault or certificate credential, or None after saying why.
 
         It connects exactly where the pinned known_hosts entry points, through
-        the resolved private agent. *options* are extra ``KEY=VALUE`` entries.
+        the resolved private agent. *options* are extra ``KEY=VALUE`` entries;
+        *hop* is the bastion's own vault lease (:meth:`_bastion_hop`).
         """
         if (
             not resolved.identity_agent
@@ -1637,9 +1663,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         if not host:
             self.app.notify("No IP address available for this instance.", severity="error")
             return None
-        proxy_args = self.app.connection_service.get_proxy_args(
-            profile, identity_agent=resolved.identity_agent
-        ) if profile else []
+        proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
         username = (
             resolved.login_user
             or (profile.username if profile else None)
@@ -1711,13 +1735,25 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         # Build the SSH command depending on the resolution source
         # ------------------------------------------------------------------
         source = resolved.source
+        # Only the paths that go through a connection rule's bastion lease
+        # the bastion's vault key (Bitwarden, OVH, custom and Hetzner servers
+        # connect directly).
+        hop = None
+        uses_rule_route = source in ("ca", "vault") or (
+            source == "local"
+            and not (instance.get("is_ovh") or instance.get("is_custom") or instance.get("is_hetzner"))
+        )
+        if uses_rule_route:
+            ok, hop = await self._bastion_hop(instance)
+            if not ok:
+                return
         via_team = ""
         if own_row and instance.get("is_shared") is True:
             team = instance.get("team_name") or instance.get("team_slug") or ""
             via_team = f" with team {rich_escape(str(team))}'s key"
 
         if source in ("ca", "vault"):
-            ssh_cmd = self._native_ssh_command(instance, resolved)
+            ssh_cmd = self._native_ssh_command(instance, resolved, hop=hop)
             if ssh_cmd is None:
                 return
             if self.app.terminal_service.launch_ssh_in_terminal(ssh_cmd):
@@ -1879,7 +1915,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     )
                     key_path = resolved.local_key_path
                     proxy_args = (
-                        self.app.connection_service.get_proxy_args(profile) if profile else []
+                        self.app.connection_service.get_proxy_args(profile, hop=hop) if profile else []
                     )
                     extra_options = self.app.connection_service.get_extra_options(instance, profile)
                     ssh_cmd = self.app.ssh_service.build_ssh_command(
@@ -1925,7 +1961,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
 
                     proxy_args = []
                     if profile:
-                        proxy_args = self.app.connection_service.get_proxy_args(profile)
+                        proxy_args = self.app.connection_service.get_proxy_args(profile, hop=hop)
 
                     username = (
                         (profile.username if profile else None)
@@ -2549,9 +2585,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 markup=False,
             )
             return
+        ok, hop = await self._bastion_hop(instance)
+        if not ok:
+            return
         cmd = self._native_ssh_command(
             instance, resolved, remote_command="true",
-            options=("BatchMode=yes", "ConnectTimeout=5"),
+            options=("BatchMode=yes", "ConnectTimeout=5"), hop=hop,
         )
         if cmd is None:
             return
