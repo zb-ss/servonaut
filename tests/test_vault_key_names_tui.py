@@ -94,6 +94,36 @@ class _Service:
         return {"item_id": item_id, "deleted": True}
 
 
+    async def ssh_keys_usage(self, *, vault_id, item_ids, servers):
+        from servonaut.services.vault.errors import vault_failure_reason
+
+        result = {}
+        for key in item_ids:
+            try:
+                result[key] = await self.ssh_key_usage(vault_id=vault_id, item_id=key, servers=servers)
+            except Exception as exc:
+                result[key] = {"error": vault_failure_reason(exc)}
+        return result
+
+    async def delete_ssh_keys(self, *, vault_id, item_ids, servers, unchecked_by_key=None, on_progress=None):
+        from servonaut.services.vault.command_service import KeyDeletion
+
+        results = []
+        for index, key in enumerate(item_ids, start=1):
+            options = {}
+            if key in (unchecked_by_key or {}):
+                options = {"allow_unchecked": True, "unchecked_targets": unchecked_by_key[key]}
+            try:
+                await self.delete_ssh_key(vault_id=vault_id, item_id=key, servers=servers, **options)
+                result = KeyDeletion(key, True)
+            except Exception as exc:
+                result = KeyDeletion(key, False, exc)
+            results.append(result)
+            if on_progress is not None:
+                on_progress(index, len(item_ids), result)
+        return results
+
+
 class _Host(App):
     CSS_PATH = CSS_FILES
 
@@ -389,18 +419,60 @@ async def test_ssh_eligibility_uses_the_row_type_even_when_a_name_is_cached(acti
 
 
 @pytest.mark.asyncio
-async def test_unchecked_only_refusal_has_retry_guidance_and_safe_grouped_names() -> None:
+async def test_unchecked_assignments_require_a_distinct_phrase_and_have_safe_names() -> None:
     app = _Host(_Service(usage={"team_servers": [], "own_servers": [], "unchecked": ["web-1\u202e\n[bold]"], "checked": 0}))
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _loaded(app, pilot)
         screen.action_delete_key()
-        await wait_until(lambda: any("Could not check whether" in msg for msg, _ in app.notes))
-        notice, options = next((msg, opts) for msg, opts in app.notes if "Could not check whether" in msg)
-        assert "Could not check: web-1[bold]" in notice
-        assert "try again when they can be reached" in notice
-        assert "\u202e" not in notice
-        assert options["markup"] is False
-        assert app.screen is screen
+        await wait_until(lambda: _confirm_open(app))
+        modal = app.screen
+        consequence = modal._consequences[-1]
+        assert "unavailable saved assignments" in consequence and "web-1\\[bold]" in consequence
+        assert "\u202e" not in consequence and "\n" not in consequence
+        modal.query_one("#confirm_input", Input).value = "DELETE"
+        await pilot.pause()
+        assert modal.query_one("#btn_confirm", Button).disabled
+        assert not app.vault_command_service.delete_calls
+        await pilot.press("escape")
+        await wait_until(lambda: app.screen is screen)
+
+
+@pytest.mark.asyncio
+async def test_unchecked_confirmation_explicitly_passes_acknowledgement_to_the_service() -> None:
+    service = _Service(usage={"team_servers": [], "own_servers": [], "unchecked": ["web-1"], "checked": 0,
+                              "unchecked_targets": [["aws", "", "i-1"]]})
+    service.delete_ssh_key = AsyncMock(return_value={"deleted": True})
+    app = _Host(service)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _loaded(app, pilot)
+        screen.action_delete_key()
+        await wait_until(lambda: _confirm_open(app))
+        app.screen.query_one("#confirm_input", Input).value = "DELETE UNCHECKED"
+        await pilot.pause()
+        app.screen.query_one("#btn_confirm", Button).press()
+        await wait_until(lambda: service.delete_ssh_key.await_count == 1)
+        service.delete_ssh_key.assert_awaited_once_with(
+            vault_id=VAULT, item_id="k1", servers=[], allow_unchecked=True, unchecked_targets=[["aws", "", "i-1"]],
+        )
+
+
+@pytest.mark.asyncio
+async def test_long_unchecked_server_list_keeps_confirmation_controls_reachable() -> None:
+    service = _Service(usage={
+        "team_servers": [], "own_servers": [], "unchecked": [f"server-{n}" for n in range(80)], "checked": 0,
+    })
+    app = _Host(service)
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _loaded(app, pilot)
+        screen.action_delete_key()
+        await wait_until(lambda: _confirm_open(app))
+        for selector in ("#confirm_input", "#btn_cancel", "#btn_confirm"):
+            control = app.screen.query_one(selector)
+            control.focus()
+            await wait_until(lambda: app.screen.region.contains_region(control.region))
+        await pilot.press("escape")
+        await wait_until(lambda: app.screen is screen)
+        assert service.delete_calls == []
 
 
 @pytest.mark.asyncio
@@ -496,6 +568,7 @@ async def test_grouped_refusal_names_are_scrubbed_in_demo_mode() -> None:
     app.demo_mode = True
     app.redaction_service = MagicMock()
     app.redaction_service.scrub_stream.side_effect = lambda text: text.replace("web-1", "server-1")
+    app.redaction_service.redact_name.side_effect = lambda text: text.replace("web-1", "server-1")
     async with app.run_test(size=(160, 50)) as pilot:
         screen = await _loaded(app, pilot)
         screen._notify_key_in_use(VaultKeyInUse(team_servers=["web-1"], own_servers=[], unchecked=[]))
@@ -528,7 +601,7 @@ async def test_delete_confirmation_shows_hostile_key_name_without_markup_crash(n
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team_servers, unchecked, sentence", [
     (["web-1"], [], "This key is still used by the servers listed: give them another vault key first."),
-    ([], ["web-1"], "Could not check whether the servers listed still use this key: try again when they can be reached."),
+    ([], ["web-1"], "Could not read the saved key assignments from the Servonaut service; the hosts do not need to be running: retry the service check or use the Vault screen to confirm deletion with unchecked assignments."),
 ])
 async def test_key_in_use_notice_starts_with_a_complete_sentence(team_servers, unchecked, sentence: str) -> None:
     app = _Host(_Service())

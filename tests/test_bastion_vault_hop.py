@@ -447,3 +447,30 @@ def test_a_transfer_without_a_vault_key_keeps_the_bastions_hop(tmp_path, known_h
 
     assert "IdentityAgent=" in _proxy_command(sent[0]["proxy_args"])
     assert sent[0]["key_path"] == "/keys/app.pem"
+
+
+class TestFleetRowsForTheHop:
+    """The rows a bastion is looked up in: always real records, never demo stand-ins."""
+
+    def test_outside_demo_mode_they_are_the_fleet(self):
+        from servonaut.screens._demo_resolve import fleet_rows
+
+        app = SimpleNamespace(demo_mode=False, instances=[{"id": "i-1", "name": "jump-1"}])
+        assert fleet_rows(app) == [{"id": "i-1", "name": "jump-1"}]
+
+    def test_in_demo_mode_they_are_the_real_records(self):
+        from servonaut.screens._demo_resolve import fleet_rows
+
+        app = SimpleNamespace(
+            demo_mode=True, instances=[{"id": "i-1", "name": "server-a"}],
+            _instances_pristine=[{"id": "i-1", "name": "jump-1"}],
+        )
+        assert fleet_rows(app) == [{"id": "i-1", "name": "jump-1"}]
+
+    def test_demo_mode_without_real_records_finds_no_bastion(self):
+        # The stand-in rows must never match a rule's bastion: no row means
+        # the hop keeps the user's own setup.
+        from servonaut.screens._demo_resolve import fleet_rows
+
+        app = SimpleNamespace(demo_mode=True, instances=[{"id": "i-1", "name": "server-a"}])
+        assert fleet_rows(app) == []

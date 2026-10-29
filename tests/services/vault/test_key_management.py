@@ -151,7 +151,8 @@ async def test_usage_filters_shared_rows_and_keeps_failed_reads_separate(service
 
     usage = await service.ssh_key_usage(vault_id="vault", item_id="key", servers=servers)
 
-    assert usage == {"team_servers": ["team-web"], "own_servers": ["web-1"], "unchecked": ["db-1"], "checked": 2,
+    assert usage == {"team_servers": ["team-web"], "own_servers": ["web-1"], "unchecked": ["db-1"],
+                     "unchecked_targets": [["aws", "", "down"]], "checked": 2,
                      "name": "web-1", "fingerprint": "SHA256:key"}
     assert service.personal_binding.await_count == 3
 
@@ -197,7 +198,7 @@ async def test_delete_refuses_every_kind_of_usage_or_failed_check(service, kind)
     error = caught.value
     assert getattr(error, {"team": "team_servers", "own": "own_servers", "unchecked": "unchecked"}[kind]) == ["web-1"]
     assert "web-1" not in str(error)
-    assert ("try again when they can be reached" if kind == "unchecked" else "another vault key") in str(error)
+    assert ("hosts do not need to be running" if kind == "unchecked" else "another vault key") in str(error)
     service.items.delete_item.assert_not_awaited()
 
 
@@ -231,6 +232,101 @@ async def test_delete_conflict_does_not_retry_a_stale_tombstone(service) -> None
     with pytest.raises(APIError):
         await service.delete_ssh_key(vault_id="vault", item_id="key", servers=[])
     assert service.items.delete_item.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_unbound_key_never_contacts_offline_hosts(service) -> None:
+    service._remote_executor = MagicMock(side_effect=AssertionError("SSH must not be used for vault deletion"))
+    servers = [{"id": "i-0001", "name": "offline-1", "state": "stopped", "public_ip": "10.0.0.1"}]
+    assert await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers) == {
+        "item_id": "key", "deleted": True,
+    }
+    service._remote_executor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_saved_assignments_need_explicit_acknowledgement(service) -> None:
+    service.personal_binding.side_effect = APIError(code="unavailable", message="opaque", status=503)
+    servers = [{"id": "i-0001", "name": "offline-1"}]
+    with pytest.raises(VaultKeyInUse):
+        await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers)
+    service.items.delete_item.assert_not_awaited()
+    with pytest.raises(VaultKeyInUse):
+        await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers, allow_unchecked=True)
+    result = await service.delete_ssh_key(
+        vault_id="vault", item_id="key", servers=servers, allow_unchecked=True,
+        unchecked_targets=[["aws", "", "i-0001"]],
+    )
+    assert result["deleted"] is True
+    service.items.delete_item.assert_awaited_once_with("vault", "key", 3)
+
+
+@pytest.mark.asyncio
+async def test_unchecked_override_is_limited_to_the_reviewed_servers(service) -> None:
+    service.personal_binding.side_effect = APIError(code="unavailable", message="opaque", status=503)
+    servers = [{"id": "i-0001", "name": "web-1"}, {"id": "i-0002", "name": "db-1"}]
+    with pytest.raises(VaultUserError, match="assignment checks changed"):
+        await service.delete_ssh_key(
+            vault_id="vault", item_id="key", servers=servers,
+            allow_unchecked=True, unchecked_targets=[["aws", "", "i-0001"]],
+        )
+    service.items.delete_item.assert_not_awaited()
+    await service.delete_ssh_key(
+        vault_id="vault", item_id="key", servers=servers,
+        allow_unchecked=True, unchecked_targets=[["aws", "", "i-0001"], ["aws", "", "i-0002"]],
+    )
+    service.items.delete_item.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["id", "account", "resolved"])
+async def test_unchecked_review_is_bound_to_exact_server_identities(service, changed) -> None:
+    service.personal_binding.side_effect = RuntimeError("unavailable")
+    server = {"id": "i-0001", "account": "first", "name": "web-1"}
+    usage = await service.ssh_key_usage(vault_id="vault", item_id="key", servers=[server])
+    reviewed = usage["unchecked_targets"]
+    assert reviewed == [["aws", "first", "i-0001"]]
+    if changed == "resolved":
+        service.personal_binding.side_effect = None
+    else:
+        server[changed] = "second" if changed == "account" else "i-0002"
+    with pytest.raises(VaultUserError, match="assignment checks changed"):
+        await service.delete_ssh_key(
+            vault_id="vault", item_id="key", servers=[server],
+            allow_unchecked=True, unchecked_targets=reviewed,
+        )
+    service.items.delete_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unchecked_review_uses_the_custom_binding_identity(service) -> None:
+    from servonaut.services.vault.personal_targets import custom_binding_id
+
+    service.personal_binding.side_effect = RuntimeError("unavailable")
+    server = {"id": "custom-web", "name": "web-1", "is_custom": True}
+    usage = await service.ssh_key_usage(vault_id="vault", item_id="key", servers=[server])
+    assert usage["unchecked_targets"] == [["custom", "", custom_binding_id("web-1")]]
+    await service.delete_ssh_key(
+        vault_id="vault", item_id="key", servers=[server], allow_unchecked=True,
+        unchecked_targets=usage["unchecked_targets"],
+    )
+    service.items.delete_item.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["personal", "team", "exposure"])
+async def test_acknowledgement_never_bypasses_known_assignments_or_open_exposures(service, kind) -> None:
+    if kind == "personal":
+        service.personal_binding.return_value = {"vault_id": "vault", "vault_item_id": "key"}
+    elif kind == "team":
+        service.items.get_item.return_value["bound_server_ids"] = [{"server_id": "s1", "name": "web-1"}]
+    else:
+        service.list_exposures.return_value = {"data": [{"item_id": "key", "status": "open"}]}
+    with pytest.raises(VaultUserError):
+        await service.delete_ssh_key(
+            vault_id="vault", item_id="key", servers=[{"id": "i-0001", "name": "web-1"}], allow_unchecked=True,
+        )
+    service.items.delete_item.assert_not_awaited()
 
 
 @pytest.mark.asyncio

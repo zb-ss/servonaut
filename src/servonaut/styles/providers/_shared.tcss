@@ -207,7 +207,8 @@
 #team_actions_row,
 #member_actions_row,
 #config_actions_row,
-#server_actions_row {
+#server_actions_row,
+#server_remove_actions_row {
     height: auto;
 }
 

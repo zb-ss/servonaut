@@ -1475,6 +1475,12 @@ class AppConfig:
     cache_ttl_seconds: int = 3600
     account_retry_seconds: int = 30
     account_check_timeout_seconds: int = 10
+    # Batch sharing honours Retry-After only within this wait budget. Set
+    # retries to zero to leave throttled shares for the next manual attempt.
+    team_share_rate_limit_wait_seconds: float = 30.0
+    team_share_rate_limit_retries: int = 1
+    team_share_rate_limit_default_wait_seconds: float = 5.0
+    batch_failure_detail_limit: int = 3
     default_scan_paths: List[str] = field(default_factory=lambda: ["~/"])
     scan_rules: List[ScanRule] = field(default_factory=list)
     connection_profiles: List[ConnectionProfile] = field(default_factory=list)

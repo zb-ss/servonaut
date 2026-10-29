@@ -41,16 +41,28 @@ def team_rows(app: Any) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows or [] if isinstance(row, dict) and is_shared_row(row)]
 
 
+def real_fleet_rows(app: Any) -> Optional[List[Dict[str, Any]]]:
+    """The fleet for mutations, or None when demo rows have no real backing.
+
+    An absent snapshot is different from a known empty fleet: treating it as
+    empty could skip saved key-assignment checks or publish stand-in servers.
+    """
+    demo = bool(getattr(app, "demo_mode", False))
+    rows = getattr(app, "_instances_pristine", None) if demo else getattr(app, "instances", None)
+    if demo and (not isinstance(rows, list) or (not rows and getattr(app, "instances", None))):
+        return None
+    return [dict(row) for row in rows or [] if isinstance(row, dict)]
+
+
 def fleet_rows(app: Any) -> List[Dict[str, Any]]:
     """Every server of the fleet, the user's own and the teams' shared ones, as real records.
 
     Where a connection rule's bastion is looked up (see
-    ``ssh_credentials.bastion_row``). Demo mode redacts ``app.instances``,
-    so the pre-redaction copy is read then.
+    ``ssh_credentials.bastion_row``). Empty when demo mode has no real
+    records behind its rows: the hop then keeps the user's own setup rather
+    than route through a stand-in.
     """
-    demo = bool(getattr(app, "demo_mode", False)) and getattr(app, "redaction_service", None) is not None
-    rows = getattr(app, "_instances_pristine", None) if demo else getattr(app, "instances", None)
-    return [dict(row) for row in rows or [] if isinstance(row, dict)]
+    return real_fleet_rows(app) or []
 
 
 UNRESOLVED_MESSAGE = (

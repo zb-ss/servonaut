@@ -44,6 +44,10 @@ _FIELD_TO_PANEL = {
     "cache_ttl_seconds": "general",
     "account_retry_seconds": "_no_ui",  # advanced lookup tuning for several accounts; editable via config.json, not surfaced in the Settings TUI
     "account_check_timeout_seconds": "_no_ui",  # advanced CLI lookup tuning; editable via config.json, not surfaced in the Settings TUI
+    "team_share_rate_limit_wait_seconds": "_no_ui",  # advanced batch throttling policy, documented in the configuration guide
+    "team_share_rate_limit_retries": "_no_ui",  # advanced batch throttling policy, documented in the configuration guide
+    "team_share_rate_limit_default_wait_seconds": "_no_ui",  # advanced retry tuning, documented in the configuration guide
+    "batch_failure_detail_limit": "_no_ui",  # advanced notification verbosity, documented in the configuration guide
     "default_scan_paths": "scan",
     "scan_rules": "scan",
     "connection_profiles": "connections",

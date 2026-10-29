@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, ScrollableContainer
@@ -16,15 +17,22 @@ from textual.widgets import Button, DataTable, Footer, Input, Select, SelectionL
 from textual.widgets.selection_list import Selection
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._batch_status import failure_details
+from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens.confirm_action import ConfirmActionScreen
+from servonaut.screens.bulk_action import BulkActionModal
 from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
 from servonaut.services.api_client import APIError
+from servonaut.services.team_sharing import already_shared, share_candidates, share_payload
+from servonaut.services.team_service import ALREADY_SHARED, FAILED, SHARED, ShareResult
+from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.services.team_rules_view import (
     TITLE as AGENT_RULES_TITLE,
     agent_rules_lines,
     agent_rules_view,
 )
 from servonaut.widgets.safe_header import SafeHeader
+from servonaut.widgets.busy_indicator import BusyIndicator
 from servonaut.widgets.sidebar import Sidebar
 
 logger = logging.getLogger(__name__)
@@ -61,6 +69,8 @@ class TeamManagementScreen(Screen):
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self._server_busy:
+            return False
         return check_action_passthrough(self, action)
 
     def __init__(self) -> None:
@@ -85,6 +95,12 @@ class TeamManagementScreen(Screen):
         self._teams_by_slug: dict[str, dict] = {}
         # Custom-server names the open push form offers (ticked or not).
         self._push_server_names: list[str] = []
+        self._server_busy = False
+        self._loaded_team_slug: Optional[str] = None
+        self._team_load_generation = 0
+        self._has_team_detail = False
+        self._team_seat_line = ""
+        self._share_form_username = ("", "")
 
     # ------------------------------------------------------------------
     # Compose
@@ -241,6 +257,7 @@ class TeamManagementScreen(Screen):
                 # --- Shared Servers section (curved card) ---
                 Container(
                     Static("[bold]Shared Servers[/bold]", id="section_servers", classes="section_header"),
+                    BusyIndicator(id="team_servers_busy"),
                     DataTable(id="servers_table"),
                     Horizontal(
                         Button("Connect", variant="success", id="btn_connect_shared"),
@@ -248,6 +265,12 @@ class TeamManagementScreen(Screen):
                         Button("Share All", variant="default", id="btn_share_all"),
                         classes="add_row",
                         id="server_actions_row",
+                    ),
+                    Horizontal(
+                        Button("Remove server", variant="error", id="btn_remove_server"),
+                        Button("Remove multiple", variant="error", id="btn_remove_servers"),
+                        classes="add_row",
+                        id="server_remove_actions_row",
                     ),
                     Container(
                         Static("[bold]Share Server[/bold]", classes="section_header"),
@@ -399,7 +422,10 @@ class TeamManagementScreen(Screen):
         self.query_one("#input_share_username", Input).value = ""
         self.query_one("#input_share_port", Input).value = ""
         select = self.query_one("#select_share_instance", Select)
-        options = self._build_share_options(instances)
+        candidates, _, _ = share_candidates(instances, self._shared_servers)
+        by_id = {str(row.get("id")): row for row in candidates}
+        options = [(Text(self._share_option_label(by_id[key])), key)
+                   for _label, key in self._build_share_options(candidates)]
         if not options:
             select.set_options([("(no servers available)", Select.BLANK)])
             select.value = Select.BLANK
@@ -419,14 +445,43 @@ class TeamManagementScreen(Screen):
         not. Leaving inputs blank → backend receives null/22 default, which the
         consumer's CLI will then fall back on per the cloud-specific default.
         """
-        instances = getattr(self.app, "instances", [])
+        instances = self._share_inventory()
         instance = next((i for i in instances if str(i.get("id")) == instance_id), None)
         if instance is None:
             return
-        username = instance.get("username") or ""
-        port = instance.get("port")
-        self.query_one("#input_share_username", Input).value = username
+        defaults = self._share_defaults(instance)
+        username = defaults.get("username") or ""
+        port = defaults.get("port")
+        displayed = username
+        if self.app.demo_mode and self.app.redaction_service and username:
+            displayed = self.app.redaction_service.redact_username(username)
+        self._share_form_username = (username, displayed)
+        self.query_one("#input_share_username", Input).value = displayed
         self.query_one("#input_share_port", Input).value = str(port) if port and port != 22 else ""
+
+    def _share_defaults(self, instance: dict) -> dict:
+        """Share only a server's own login or an explicitly matched rule login."""
+        result = dict(instance)
+        connection = getattr(self.app, "connection_service", None)
+        profile = connection.resolve_profile(instance) if connection is not None else None
+        from servonaut.services.connection_service import rule_username
+
+        own_username = instance.get("username") if instance.get("is_custom") is True else ""
+        result["username"] = instance.get("login_user") or rule_username(instance, profile) or own_username or ""
+        result["port"] = instance.get("port") or 22
+        return result
+
+    def _share_inventory(self) -> list[dict]:
+        rows = real_fleet_rows(self.app)
+        if rows is None:
+            self.notify(UNRESOLVED_MESSAGE, severity="error", markup=False)
+            return []
+        return rows
+
+    def _share_option_label(self, instance: dict) -> str:
+        name = self._display_server_name(instance.get("name") or instance.get("id") or "?")
+        host = self._display_server_address(server_address(instance))
+        return f"{name} ({host})"
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """React to share-form instance switches by re-prefilling connection inputs."""
@@ -446,7 +501,7 @@ class TeamManagementScreen(Screen):
         to fail on submit.
         """
         options: List[Tuple[str, str]] = []
-        for instance in instances:
+        for instance in share_candidates(instances, [])[0]:
             instance_id = instance.get("id")
             if not instance_id:
                 continue
@@ -468,7 +523,7 @@ class TeamManagementScreen(Screen):
             else email
         )
         self.query_one("#change_role_header", Static).update(
-            f"[bold]Change Role: {display_email}[/bold]"
+            Text(f"Change Role: {terminal_safe(display_email)}", style="bold")
         )
         role_select = self.query_one("#select_change_role", Select)
         role_select.set_options(self._role_options_for_caller())
@@ -503,6 +558,8 @@ class TeamManagementScreen(Screen):
         # Share Server / Share All require MANAGE_MEMBERS too.
         self.query_one("#btn_share").display = can_manage
         self.query_one("#btn_share_all").display = can_manage
+        self.query_one("#btn_remove_server").display = can_manage
+        self.query_one("#btn_remove_servers").display = can_manage
         # Push Current = admin-only on the backend (hasAdminAccess). Pull is
         # readable by any member, so it stays visible regardless.
         self.query_one("#btn_push_config").display = can_manage
@@ -588,54 +645,94 @@ class TeamManagementScreen(Screen):
 
     async def _load_team_detail(self, slug: str) -> None:
         team_svc = getattr(self.app, "team_service", None)
-        if team_svc is None:
+        if team_svc is None or self._current_team_slug not in (None, slug):
             return
+        keep_view = self._current_team_slug == slug and self._has_team_detail
+        positions = [(table, table.cursor_coordinate, table.scroll_offset)
+                     for table in self.query(DataTable)] if keep_view else []
+        if keep_view:
+            self._team_load_generation += 1
+            self._loaded_team_slug = None
+            self._render_team_header("Refreshing team details…")
+        else:
+            self._invalidate_team_detail(slug)
+        generation = self._team_load_generation
         try:
             team = await team_svc.get_team(slug)
             members = team.get("members", [])
-            self._members = members
-            # Caller role drives mutation-button visibility. Prefer the
-            # top-level ``role`` field (set per-caller by the backend) and
-            # fall back to scanning members for the authenticated user.
-            self._current_team_role = (
-                team.get("role")
-                or self._team_roles.get(slug)
-                or self._infer_caller_role(members)
-            )
-            self._populate_members_table(members)
-
             servers = await team_svc.list_shared_servers(slug)
-            self._shared_servers = servers
-            self._populate_servers_table(servers)
-            self._list_shared_servers(self._team_record(slug, team), servers)
-
             try:
                 configs = await team_svc.list_team_configs(slug)
-            except Exception as exc:  # noqa: BLE001 — list failure shouldn't abort the whole detail load
-                logger.warning("Failed to list team configs for %s: %s", slug, exc)
+            except Exception:
+                if keep_view:
+                    raise
+                logger.warning("Could not load shared configurations", exc_info=True)
                 configs = []
-            self._team_configs = configs
+            if generation != self._team_load_generation:
+                return
+            self._members, self._shared_servers, self._team_configs = members, servers, configs
+            self._current_team_role = team.get("role") or self._team_roles.get(slug) or self._infer_caller_role(members)
+            self._populate_members_table(members)
+            self._populate_servers_table(servers)
+            self._list_shared_servers(self._team_record(slug, team), servers)
             self._populate_configs_table(configs)
             self._hide_push_config_form()
             self._hide_pull_config_form()
-
+            self._current_team_name = team.get("name", slug)
+            self._team_seat_line = self._format_seat_line(team, members)
+            self._has_team_detail = True
+            self._loaded_team_slug = slug
+            self._render_team_header()
             self._show_detail_section()
-            team_name = team.get("name", slug)
-            self._current_team_name = team_name
-            display_team_name = (
-                self.app.redaction_service.redact_name(team_name)
-                if self.app.demo_mode and self.app.redaction_service
-                else team_name
-            )
-            seat_line = self._format_seat_line(team, members)
-            self.query_one("#team_header", Static).update(
-                f"[bold]Team: {display_team_name}[/bold]\n{seat_line}"
-            )
+            self._restore_table_positions(positions)
             self._refresh_member_buttons()
             await self._show_agent_rules(slug, team, servers)
         except Exception as exc:
-            logger.error("Failed to load team detail: %s", exc)
+            if generation != self._team_load_generation:
+                return
+            self._loaded_team_slug = None
+            if keep_view:
+                self._render_team_header("Could not refresh. Showing the last view; refresh before making server changes.")
+            else:
+                self._invalidate_team_detail(slug)
+            logger.error("Failed to load team detail", exc_info=True)
             self.notify(f"Failed to load team: {exc}", severity="error", markup=False)
+
+    def _render_team_header(self, status: str = "") -> None:
+        name = terminal_safe(self._current_team_name or self._current_team_slug or "")
+        if self.app.demo_mode and self.app.redaction_service:
+            name = self.app.redaction_service.redact_name(name)
+        text = Text.assemble((f"Team: {name}", "bold"), f"\n{self._team_seat_line}")
+        if status:
+            text.append(f"\n{status}")
+        self.query_one("#team_header", Static).update(text)
+
+    def _restore_table_positions(self, positions: list) -> None:
+        for table, cursor, offset in positions:
+            if table.row_count:
+                table.move_cursor(row=min(cursor.row, table.row_count - 1), column=cursor.column)
+                self.call_after_refresh(table.scroll_to, x=offset.x, y=offset.y, animate=False, force=True)
+
+    def _invalidate_team_detail(self, slug: str) -> int:
+        self._team_load_generation += 1
+        self._current_team_slug = slug
+        self._has_team_detail = False
+        self._loaded_team_slug = None
+        self._current_team_role = None
+        self._shared_servers = []
+        self._members = []
+        self._team_configs = []
+        for selector in ("#servers_table", "#members_table", "#configs_table"):
+            self.query_one(selector, DataTable).clear()
+        self._hide_invite_form()
+        self._hide_change_role_form()
+        self._hide_share_server_form()
+        self._hide_push_config_form()
+        self._hide_pull_config_form()
+        if not self._server_busy:
+            self._hide_detail_section()
+        self._refresh_member_buttons()
+        return self._team_load_generation
 
     async def _show_agent_rules(self, slug: str, team: dict, servers: list[dict]) -> None:
         """Show what agents may do on the team's servers: what this device has, then fresh.
@@ -674,7 +771,7 @@ class TeamManagementScreen(Screen):
         lines = agent_rules_lines(view)
         if self.app.demo_mode and self.app.redaction_service:
             lines = [self.app.redaction_service.scrub_stream(line) for line in lines]
-        body = [escape(line) for line in lines]
+        body = [markup_literal(line) for line in lines]
         if not view["in_force"]:
             # The fallback (and why) is the line that matters.
             body[0] = f"[$text-warning]{body[0]}[/$text-warning]"
@@ -911,6 +1008,7 @@ class TeamManagementScreen(Screen):
             self.notify(
                 f"Server '{server_data.get('name', '')}' shared with team.",
                 severity="information",
+                markup=False,
             )
             await self._load_team_detail(slug)
         except APIError as exc:
@@ -947,9 +1045,9 @@ class TeamManagementScreen(Screen):
             if role == "owner":
                 owned_count += 1
             table.add_row(
-                _s(team.get("name", "")),
-                role,
-                str(team.get("member_count", "")),
+                markup_literal(terminal_safe(_s(team.get("name", "")))),
+                markup_literal(terminal_safe(role)),
+                markup_literal(terminal_safe(team.get("member_count", ""))),
                 key=slug,
             )
         # Backend caps team creation at one-team-per-Teams-subscription. Hide
@@ -968,8 +1066,8 @@ class TeamManagementScreen(Screen):
 
         for member in members:
             table.add_row(
-                _s(self._member_display_email(member)),
-                member.get("role", ""),
+                markup_literal(terminal_safe(_s(self._member_display_email(member)))),
+                markup_literal(terminal_safe(member.get("role", ""))),
                 self._format_status(member),
             )
 
@@ -991,10 +1089,27 @@ class TeamManagementScreen(Screen):
 
         for cfg in configs:
             version = cfg.get("version", "?")
-            description = (cfg.get("description") or "")[:40]
-            pushed_by = str(cfg.get("pushed_by", ""))
+            description = terminal_safe(cfg.get("description") or "")[:40]
+            pushed_by = terminal_safe(self._config_author(cfg))
+            if self.app.demo_mode and self.app.redaction_service:
+                pushed_by = self.app.redaction_service.redact_name(pushed_by)
             created = (cfg.get("created_at") or "")[:10]  # YYYY-MM-DD portion
-            table.add_row(str(version), _s(description), created, pushed_by, key=str(cfg.get("id", "")))
+            table.add_row(str(version), markup_literal(_s(description)), created, markup_literal(pushed_by), key=str(cfg.get("id", "")))
+
+    def _config_author(self, config: dict) -> str:
+        author = config.get("pushed_by")
+        if isinstance(author, dict):
+            return str(author.get("name") or author.get("display_name") or author.get("email") or "Unknown member")
+        if config.get("pushed_by_name"):
+            return str(config["pushed_by_name"])
+        for member in self._members:
+            user = member.get("user") or {}
+            user_id = user.get("id", member.get("user_id"))
+            if user_id is not None and str(user_id) == str(author):
+                return str(user.get("name") or user.get("email") or self._member_display_email(member))
+        if isinstance(author, str) and author and not author.isdecimal():
+            return author
+        return "Former member" if author is not None else "Unknown member"
 
     def _hide_push_config_form(self) -> None:
         self.query_one("#push_config_form").display = False
@@ -1046,7 +1161,7 @@ class TeamManagementScreen(Screen):
         listing.clear_options()
         listing.add_options([
             Selection(
-                f"{escape(name.ljust(width))}  [dim]{escape(_host(server.host))}[/dim]",
+                f"{markup_literal(name.ljust(width))}  [dim]{markup_literal(_host(server.host))}[/dim]",
                 server.name,
                 server.name in selected,
             )
@@ -1087,8 +1202,8 @@ class TeamManagementScreen(Screen):
             width = max(len(name) for name in names)
             lines = ["[bold]Connection profiles[/bold] [dim]— all of them are shared[/dim]"]
             lines += [
-                f"  • {escape(name.ljust(width))}  "
-                f"[dim]{escape(_host(self._profile_route(profile)))}[/dim]"
+                f"  • {markup_literal(name.ljust(width))}  "
+                f"[dim]{markup_literal(_host(self._profile_route(profile)))}[/dim]"
                 for name, profile in zip(names, profiles)
             ]
         else:
@@ -1165,10 +1280,10 @@ class TeamManagementScreen(Screen):
 
         for server in servers:
             table.add_row(
-                _name(server.get("name", "")),
+                markup_literal(terminal_safe(_name(server.get("name", "")))),
                 # Backend field is "hostname"; tolerate legacy "host" key for back-compat.
-                _host(server.get("hostname") or server.get("host", "")),
-                server.get("region", "") or "",
+                markup_literal(terminal_safe(_host(server.get("hostname") or server.get("host", "")))),
+                markup_literal(terminal_safe(server.get("region", "") or "")),
             )
 
     # ------------------------------------------------------------------
@@ -1176,6 +1291,9 @@ class TeamManagementScreen(Screen):
     # ------------------------------------------------------------------
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if self._server_busy:
+            event.stop()
+            return
         button_id = event.button.id
 
         if button_id == "btn_create_team":
@@ -1228,6 +1346,12 @@ class TeamManagementScreen(Screen):
 
         elif button_id == "btn_share_all":
             self._action_share_all_servers()
+
+        elif button_id == "btn_remove_server":
+            self._action_remove_shared_server()
+
+        elif button_id == "btn_remove_servers":
+            self._action_remove_shared_servers()
 
         elif button_id == "btn_confirm_share":
             self._submit_share_server()
@@ -1284,11 +1408,8 @@ class TeamManagementScreen(Screen):
             self.notify("No team selected.", severity="warning")
             return
 
-        self._current_team_slug = slug
-        # Close any open inline forms so they don't leak context across teams.
-        self._hide_invite_form()
-        self._hide_change_role_form()
-        self._hide_share_server_form()
+        if slug != self._current_team_slug or not self._has_team_detail:
+            self._invalidate_team_detail(slug)
         self.run_worker(
             self._load_team_detail(slug),
             exclusive=True,
@@ -1471,13 +1592,15 @@ class TeamManagementScreen(Screen):
 
     def _action_share_server(self) -> None:
         """Open the share-server picker form."""
+        if self._server_busy:
+            return
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
             return
         if not self._can_manage_members():
             self.notify("Only owners and admins can share servers.", severity="warning")
             return
-        instances = getattr(self.app, "instances", [])
+        instances = self._share_inventory()
         if not instances:
             self.notify("No servers available to share.", severity="warning")
             return
@@ -1604,46 +1727,25 @@ class TeamManagementScreen(Screen):
     def _action_share_all_servers(self) -> None:
         """Offer every eligible instance not yet on the team, then share the ones confirmed.
 
-        Eligible = has a routable hostname (public or private IP). Dedupe is
-        applied client-side via instance_id first (most reliable), then by
-        hostname (handles non-cloud custom servers without an id). Nothing is
+        Eligible = has a hostname (public or private IP). Dedupe uses stable
+        provider ids and unambiguous host/port matches. Nothing is
         sent until the user confirms the list in ShareServersConfirmModal.
         """
+        if self._server_busy:
+            return
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
             return
         if not self._can_manage_members():
             self.notify("Only owners and admins can share servers.", severity="warning")
             return
-        instances = getattr(self.app, "instances", [])
+        instances = self._share_inventory()
         if not instances:
             self.notify("No servers available to share.", severity="warning")
             return
 
-        # Build dedupe sets from the team's currently-shared list. Both lookups
-        # tolerate the server returning either or both fields.
-        already_shared_ids = {
-            s.get("instance_id") for s in self._shared_servers if s.get("instance_id")
-        }
-        already_shared_hosts = {
-            s.get("hostname") for s in self._shared_servers if s.get("hostname")
-        }
-
-        to_share: list[dict] = []
-        skipped_existing = 0
-        skipped_no_ip = 0
-        for instance in instances:
-            hostname = server_address(instance)
-            if not hostname:
-                skipped_no_ip += 1
-                continue
-            if instance.get("id") and instance["id"] in already_shared_ids:
-                skipped_existing += 1
-                continue
-            if hostname in already_shared_hosts:
-                skipped_existing += 1
-                continue
-            to_share.append(instance)
+        candidates, skipped_existing, skipped_no_ip = share_candidates(instances, self._shared_servers)
+        to_share = [self._share_defaults(instance) for instance in candidates]
 
         if not to_share:
             self.notify(
@@ -1676,12 +1778,13 @@ class TeamManagementScreen(Screen):
         """Share the servers ticked in Share All's confirmation; nothing when it was cancelled."""
         if not chosen:
             return
-        self.run_worker(
-            self._do_share_all(
-                slug, chosen, skipped_existing, skipped_no_ip, left_out=offered - len(chosen)
-            ),
-            exclusive=True,
-            name="share_all_servers",
+        if slug != self._loaded_team_slug or slug != self._current_team_slug:
+            self.notify("Team data changed or is refreshing. Reload the team and reopen Share All.", severity="warning")
+            return
+        self._start_server_operation(
+            partial(self._do_share_all, slug, chosen, skipped_existing, skipped_no_ip,
+                    left_out=offered - len(chosen)),
+            "Preparing to share servers…",
         )
 
     async def _do_share_all(
@@ -1696,31 +1799,17 @@ class TeamManagementScreen(Screen):
         team_svc = getattr(self.app, "team_service", None)
         if team_svc is None:
             return
-        succeeded = 0
-        failed: list[str] = []
-        for instance in instances:
-            payload: dict = {
-                "name": instance.get("name") or instance.get("id", ""),
-                "hostname": server_address(instance),
-            }
-            if instance.get("id"):
-                payload["instance_id"] = instance["id"]
-            if instance.get("region"):
-                payload["region"] = instance["region"]
-            if instance.get("username"):
-                payload["username"] = instance["username"]
-            port = instance.get("port")
-            if port and port != 22:
-                payload["port"] = port
-            try:
-                await team_svc.push_server(slug, payload)
-                succeeded += 1
-            except APIError as exc:
-                logger.warning("Bulk share failed for %s (%s): %s", payload["name"], exc.status, exc.message)
-                failed.append(f"{payload['name']} ({exc.message})")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Bulk share failed for %s: %s", payload["name"], exc)
-                failed.append(f"{payload['name']} ({exc})")
+        indicator = self.query_one("#team_servers_busy", BusyIndicator)
+        indicator.start(f"Sharing 1/{len(instances)} servers…")
+
+        def progress(index: int, total: int, _result: ShareResult) -> None:
+            indicator.start(f"Sharing {min(index + 1, total)}/{total} servers…")
+
+        results = await team_svc.push_servers(slug, [share_payload(row) for row in instances], on_progress=progress)
+        succeeded = sum(result.status == SHARED for result in results)
+        skipped_existing += sum(result.status == ALREADY_SHARED for result in results)
+        failed = [f"{self._display_server_name(result.payload.get('name', ''))} ({result.error})"
+                  for result in results if result.status == FAILED]
 
         parts = [f"Shared {succeeded}"]
         if left_out:
@@ -1733,15 +1822,18 @@ class TeamManagementScreen(Screen):
             parts.append(f"failed {len(failed)}")
         summary = "Share All: " + ", ".join(parts) + "."
         severity = "warning" if failed else "information"
-        self.notify(summary, severity=severity, timeout=12 if failed else 6)
+        self.notify(summary, severity=severity, timeout=12 if failed else 6, markup=False)
         if failed:
-            # Surface the first 3 failure reasons so the user has something to act on.
-            for line in failed[:3]:
+            for line in failed:
                 logger.warning("Share All failure detail: %s", line)
+            for line in failure_details(self.app, failed):
+                self.notify(line, severity="error", markup=False)
         await self._load_team_detail(slug)
 
     def _submit_share_server(self) -> None:
         """Submit the share form: build payload from selected instance."""
+        if self._server_busy:
+            return
         if not self._current_team_slug:
             self.notify("Select a team first.", severity="warning")
             return
@@ -1753,11 +1845,14 @@ class TeamManagementScreen(Screen):
             self.notify("Pick a server to share.", severity="warning")
             return
         instance = next(
-            (i for i in getattr(self.app, "instances", []) if str(i.get("id")) == selected_value),
+            (i for i in self._share_inventory() if str(i.get("id")) == selected_value),
             None,
         )
         if instance is None:
             self.notify("Selected server is no longer in your inventory; refresh and try again.", severity="error")
+            return
+        if instance.get("is_shared") is True or already_shared(instance, self._shared_servers):
+            self.notify("This server is already shared with the team.", severity="warning")
             return
         hostname = instance.get("public_ip") or instance.get("private_ip") or ""
         if not hostname:
@@ -1772,6 +1867,9 @@ class TeamManagementScreen(Screen):
         # backend defaults and the consumer's CLI applies a cloud-specific
         # username fallback when the stored value is null.
         username = self.query_one("#input_share_username", Input).value.strip()
+        raw_username, displayed_username = self._share_form_username
+        if username == displayed_username:
+            username = raw_username
         port_raw = self.query_one("#input_share_port", Input).value.strip()
         port: Optional[int] = None
         if port_raw:
@@ -1798,15 +1896,167 @@ class TeamManagementScreen(Screen):
             server_data["username"] = username
         if port is not None and port != 22:
             server_data["port"] = port
-        self.run_worker(
-            self._do_push_server(self._current_team_slug, server_data),
-            exclusive=True,
-            name="push_server",
+        self._start_server_operation(
+            partial(self._do_push_server, self._current_team_slug, server_data), "Sharing the server…",
         )
+
+    def _start_server_operation(self, operation: Callable[[], Awaitable[None]], message: str) -> None:
+        """Hold the screen's controls from the first click through the final reload."""
+        if self._server_busy:
+            return
+        self._server_busy = True
+        focused = self.focused
+        controls = [(widget, widget.disabled) for widget in self.query("Button, DataTable, Select, Input")]
+        for widget, _ in controls:
+            widget.disabled = True
+        indicator = self.query_one("#team_servers_busy", BusyIndicator)
+        indicator.start(message)
+        self.call_after_refresh(indicator.scroll_visible, animate=False)
+
+        async def run() -> None:
+            try:
+                await operation()
+            except Exception as exc:
+                logger.exception("Shared server operation failed")
+                self.notify(f"Could not update the shared servers: {exc}", severity="error", markup=False)
+            finally:
+                indicator.stop()
+                for widget, was_disabled in controls:
+                    widget.disabled = was_disabled
+                self._server_busy = False
+                if focused is not None and focused.is_mounted:
+                    self.call_after_refresh(focused.focus)
+
+        self.run_worker(run(), group="team_servers", exclusive=True, name="team_servers")
+
+    def _can_remove_servers(self) -> bool:
+        if self._server_busy:
+            return False
+        if not self._current_team_slug:
+            self.notify("Select a team first.", severity="warning")
+        elif self._loaded_team_slug != self._current_team_slug:
+            self.notify("Load the selected team's shared inventory first.", severity="warning")
+        elif not self._can_manage_members():
+            self.notify("Only owners and admins can remove shared servers.", severity="warning")
+        elif not self._shared_servers:
+            self.notify("No shared servers to remove.", severity="information")
+        else:
+            return True
+        return False
+
+    def _action_remove_shared_server(self) -> None:
+        if not self._can_remove_servers():
+            return
+        row = self.query_one("#servers_table", DataTable).cursor_row
+        if not 0 <= row < len(self._shared_servers):
+            self.notify("Select a shared server first.", severity="warning")
+            return
+        slug = self._current_team_slug
+        server = dict(self._shared_servers[row])
+        label = self._display_server_name(server.get("name") or "Unnamed server")
+
+        async def confirm() -> None:
+            if await self.app.push_screen_wait(ConfirmActionScreen(
+                "Remove shared server", f"Remove {markup_literal(label)} from the team's shared inventory?",
+                ["remove this server from the team's shared inventory", "keep your local server and its configuration"],
+                "REMOVE", "Remove", severity="warning",
+            )):
+                self._start_server_operation(partial(self._do_remove_shared_servers, slug, [server]), "Removing the shared server…")
+
+        self.run_worker(confirm(), group="team_server_confirm", exclusive=True)
+
+    def _action_remove_shared_servers(self) -> None:
+        if not self._can_remove_servers():
+            return
+        slug = self._current_team_slug
+        servers = [dict(server) for server in self._shared_servers]
+
+        def selected(indices: list[str] | None) -> None:
+            if not indices:
+                return
+            if slug != self._current_team_slug:
+                self.notify("The selected team changed. Reopen removal and try again.", severity="warning")
+                return
+            if slug != self._loaded_team_slug:
+                self.notify("Team data is not current. Reload the team before retrying removal.", severity="warning")
+                return
+            chosen = [servers[int(index)] for index in indices]
+            self._start_server_operation(partial(self._do_remove_shared_servers, slug, chosen), "Removing shared servers…")
+
+        self.app.push_screen(BulkActionModal(
+            "Remove shared servers",
+            "Remove the selected servers from the team's shared inventory. Hosts and your local configuration stay in place.",
+            [(str(index), f"{server.get('name') or '?'}  {server_address(server)}")
+             for index, server in enumerate(servers)],
+            action_label="Remove", confirm_text="REMOVE",
+            label_builder=lambda key: f"{self._display_server_name(servers[int(key)].get('name') or '?')}  "
+                                      f"{self._display_server_address(server_address(servers[int(key)]))}",
+        ), callback=selected)
+
+    async def _do_remove_shared_servers(self, slug: str, servers: list[dict]) -> None:
+        service = getattr(self.app, "team_service", None)
+        if service is None:
+            return
+        removed = 0
+        failures: list[str] = []
+        for index, server in enumerate(servers, start=1):
+            self.query_one("#team_servers_busy", BusyIndicator).start(f"Removing {index}/{len(servers)} shared servers…")
+            failure = await self._remove_one_shared_server(service, slug, server)
+            if failure is None:
+                removed += 1
+            else:
+                failures.append(failure)
+                logger.warning("Shared server removal failed: %s", failure)
+        self.notify(
+            f"Removed {removed} shared server(s)." + (f" Failed: {len(failures)}." if failures else ""),
+            severity="warning" if failures else "information", markup=False,
+        )
+        for failure in failure_details(self.app, failures):
+            self.notify(failure, severity="error", markup=False)
+        await self._load_team_detail(slug)
+
+    async def _remove_one_shared_server(self, service: Any, slug: str, server: dict) -> str | None:
+        name = self._display_server_name(server.get("name") or "")
+        try:
+            if slug != self._loaded_team_slug or slug != self._current_team_slug:
+                raise ValueError("the selected team's inventory changed; reload and try again")
+            server_id = str(server.get("id") or "")
+            if not server_id:
+                raise ValueError("the shared server has no ID; reload and try again")
+            await service.remove_shared_server(slug, server_id)
+        except APIError as exc:
+            if exc.status == 404:
+                try:
+                    remaining = await service.list_shared_servers(slug)
+                except Exception:
+                    return f"{name}: the team's inventory could not be checked; reload and try again"
+                if not any(str(row.get("id")) == server_id for row in remaining):
+                    return None
+            return f"{name}: {exc.message}"
+        except Exception as exc:
+            logger.warning("Shared server removal failed", exc_info=exc)
+            return f"{name}: {exc}"
+        return None
+
+    def _display_server_name(self, name: object) -> str:
+        label = terminal_safe(name)
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_name(label)
+        return label
+
+    def _display_server_address(self, address: str) -> str:
+        if self.app.demo_mode and self.app.redaction_service:
+            return self.app.redaction_service.redact_host(address)
+        return terminal_safe(address)
 
     # ------------------------------------------------------------------
     # Binding actions
     # ------------------------------------------------------------------
 
     def action_back(self) -> None:
+        if self._server_busy:
+            return
         self.app.pop_screen()
+
+    def navigation_hold_reason(self) -> str | None:
+        return "Wait for the server changes to finish before leaving." if self._server_busy else None

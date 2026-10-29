@@ -310,7 +310,7 @@ class AccountData:
 
     def share_server(self, slug: str, user_id: int, body: dict[str, Any], *,
                      scenario_account: bool) -> dict[str, Any]:
-        """``POST /api/v1/teams/{slug}/servers``: name and hostname required, both unique."""
+        """``POST /api/v1/teams/{slug}/servers``: name and hostname required."""
         self._require_manager(slug, user_id, scenario_account=scenario_account)
         name, hostname, port = body.get("name"), body.get("hostname"), body.get("port", 22)
         if not all(isinstance(value, str) and value.strip() for value in (name, hostname)):
@@ -321,10 +321,6 @@ class AccountData:
         username = body.get("username") if isinstance(body.get("username"), str) else None
         with self._lock:
             rows = self._shared.setdefault(slug, [])
-            if any(row.get("hostname") == hostname for row in rows):
-                raise Refusal(409, "already_shared", "A server with this hostname is already shared.")
-            if any(row.get("name") == name for row in rows):
-                raise Refusal(409, "already_shared", "A server with this name is already shared.")
             row = {
                 "id": str(uuid.uuid4()), "name": name, "hostname": hostname, "port": port,
                 "login_user": username, "username": username,
@@ -336,16 +332,16 @@ class AccountData:
             rows.append(row)
             return copy.deepcopy(row)
 
-    def unshare_server(self, slug: str, user_id: int, name: str, *, scenario_account: bool) -> dict[str, Any]:
-        """``DELETE /api/v1/teams/{slug}/servers/{name}``."""
+    def unshare_server(self, slug: str, user_id: int, server_id: str, *, scenario_account: bool) -> None:
+        """``DELETE /api/v1/teams/{slug}/servers/{id}`` takes the canonical id."""
         self._require_manager(slug, user_id, scenario_account=scenario_account)
         with self._lock:
             rows = self._shared.get(slug, [])
-            row = next((r for r in rows if r.get("name") == name), None)
+            row = next((r for r in rows if str(r.get("id")) == server_id), None)
             if row is None:
                 raise Refusal(404, "not_found", "Shared server not found.")
             rows.remove(row)
-            return {"deleted": True, "name": name}
+            return None
 
     def report_team_verify(self, slug: str, user_id: int, server_id: str, body: dict[str, Any], *,
                            scenario_account: bool) -> dict[str, Any]:
@@ -441,7 +437,7 @@ def add_routes(
         """The requesting user's id, and whether they are the scenario's account."""
         return store.snapshot().user_id, current_account() is None
 
-    def answer(change: Callable[[], dict[str, Any]], status: int = 200) -> web.Response:
+    def answer(change: Callable[[], dict[str, Any] | None], status: int = 200) -> web.Response:
         try:
             return web.json_response(change(), status=status)
         except Refusal as refusal:
@@ -498,15 +494,15 @@ def add_routes(
     async def share_server(request: web.Request) -> web.Response:
         user_id, scenario_account = caller()
         body = await json_body(request)
-        return answer(lambda: data.share_server(
+        return answer(lambda: {"data": data.share_server(
             request.match_info["slug"], user_id, body, scenario_account=scenario_account,
-        ), status=201)
+        )}, status=201)
 
     async def unshare_server(request: web.Request) -> web.Response:
         user_id, scenario_account = caller()
         return answer(lambda: data.unshare_server(
-            request.match_info["slug"], user_id, request.match_info["name"], scenario_account=scenario_account,
-        ))
+            request.match_info["slug"], user_id, request.match_info["server_id"], scenario_account=scenario_account,
+        ), status=204)
 
     async def team_verify_report(request: web.Request) -> web.Response:
         user_id, scenario_account = caller()
@@ -590,7 +586,7 @@ def add_routes(
     app.router.add_post("/api/v1/teams", guarded(create_team))
     app.router.add_get(f"{team}/servers", guarded(team_servers))
     app.router.add_post(f"{team}/servers", guarded(share_server))
-    app.router.add_delete(f"{team}/servers/{{name}}", guarded(unshare_server))
+    app.router.add_delete(f"{team}/servers/{{server_id}}", guarded(unshare_server))
     app.router.add_post(f"{team}/servers/{{server_id}}/ssh-verify-report", guarded(team_verify_report))
     app.router.add_get(f"{team}/servers/{{server_id}}/ssh-verify-status", guarded(team_verify_status))
     app.router.add_post(f"{team}/members", guarded(invite))
