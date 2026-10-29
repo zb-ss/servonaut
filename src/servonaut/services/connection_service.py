@@ -12,6 +12,7 @@ from servonaut.services.ssh_host_keys import (
     HostKeyPolicy,
     host_key_alias_options,
     identity_file_args,
+    pinned_hop_alias_value,
     pinned_host_key_option_values,
     proxy_command_word,
     ssh_config_word,
@@ -54,17 +55,25 @@ def _hop_option(name: str, value: str) -> List[str]:
     return ['-o', shlex.quote(f'{name}={word}')]
 
 
-def _vault_hop_words(hop: Any, ssh_cfg: SSHConfig, defaults: SSHConfig) -> List[str]:
+def _vault_hop_words(
+    hop: Any, profile: ConnectionProfile, ssh_cfg: SSHConfig, defaults: SSHConfig,
+) -> List[str]:
     """The hop's options after ``ssh``: the bastion's vault key, its pins and its login.
 
     Like a leased target (see ``SSHService.build_ssh_command``): the signed
     pins come first so no configurable host-key option can weaken them, and
     the hop logs in with the lease's agent, public identity, certificate and
-    login, at exactly the address the pins name.
+    login. It dials the bastion as *profile* names it, so an ssh_config alias
+    still routes it (its HostName, Port or ProxyJump), and checks the host
+    key against the pins written for the bound address.
     """
+    target_port = _int_setting(getattr(hop, 'target_port', None), 22)
     words = [
         word
-        for value in pinned_host_key_option_values(str(hop.known_hosts_path), expansions=2)
+        for value in (
+            *pinned_host_key_option_values(str(hop.known_hosts_path), expansions=2),
+            pinned_hop_alias_value(str(hop.target_host), target_port),
+        )
         for word in ('-o', shlex.quote(value))
     ]
     words += [
@@ -76,11 +85,12 @@ def _vault_hop_words(hop: Any, ssh_cfg: SSHConfig, defaults: SSHConfig) -> List[
     if isinstance(certificate, str) and certificate:
         words.extend(_hop_option('CertificateFile', certificate))
     words.extend(_keepalive_words(ssh_cfg, defaults))
-    port = _int_setting(getattr(hop, 'target_port', None), 22)
+    port = _int_setting(profile.ssh_port, 22)
     if port != 22:
         words.extend(['-p', str(port)])
-    login = getattr(hop, 'login_user', None)
-    host = str(hop.target_host)
+    # The bound login: the vault key is authorized for it, not bastion_user.
+    login = getattr(hop, 'login_user', None) or profile.bastion_user
+    host = str(profile.bastion_host)
     destination = f'{login}@{host}' if isinstance(login, str) and login else host
     words.extend(['-W', "'[%h]:%p'", '--', proxy_command_word(destination)])
     return words
@@ -394,7 +404,7 @@ class ConnectionService(ConnectionServiceInterface):
         # unset (interactive sessions), the hop reports on stderr as before.
         parts = ['ssh', f'${{{SSH_LOG_ENV}:+-E "${SSH_LOG_ENV}"}}']
         if hop is not None:
-            return ' '.join([*parts, *_vault_hop_words(hop, ssh_cfg, defaults)])
+            return ' '.join([*parts, *_vault_hop_words(hop, profile, ssh_cfg, defaults)])
         if profile.bastion_key:
             key_expanded = os.path.expanduser(profile.bastion_key)
             # Escaped for both expansions (this ProxyCommand, then the hop).

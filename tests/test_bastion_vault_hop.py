@@ -28,9 +28,9 @@ from tests.test_ssh_host_keys import (
     posix_hop,  # noqa: F401 - fixture
 )
 
-BASTION = {"id": "i-0b", "name": "bastion-1", "public_ip": "198.51.100.20", "region": "us-east-1"}
+BASTION = {"id": "i-0b", "name": "bastion-1", "public_ip": "9.9.9.9", "region": "us-east-1"}
 APP = {"id": "i-0a", "name": "app-1", "private_ip": "10.0.1.21", "region": "us-east-1"}
-PROFILE = ConnectionProfile(name="via-bastion", bastion_host="198.51.100.20", bastion_user="ec2-user")
+PROFILE = ConnectionProfile(name="via-bastion", bastion_host="9.9.9.9", bastion_user="ec2-user")
 
 
 def _hop(tmp_path, **overrides):
@@ -43,7 +43,7 @@ def _hop(tmp_path, **overrides):
         "certificate_path": None,
         "known_hosts_path": str(tmp_path / "bastion_known_hosts"),
         "login_user": "admin",
-        "target_host": "198.51.100.20",
+        "target_host": "9.9.9.9",
         "target_port": 22,
         "close": lambda: None,
     }
@@ -97,14 +97,27 @@ class TestVaultHop:
         assert _contains_run(argv, ["-o", f'IdentityAgent="{hop.identity_agent}"', "-o", "IdentitiesOnly=yes"])
         assert _contains_run(argv, ["-o", f'IdentityFile="{hop.identity_file}"'])
         # The binding's login and pinned address, not the profile's bastion_user.
-        assert argv[-4:] == ["-W", "[10.0.0.5]:22", "--", "admin@198.51.100.20"]
+        assert argv[-4:] == ["-W", "[10.0.0.5]:22", "--", "admin@9.9.9.9"]
 
     def test_a_certificate_and_a_port_go_to_the_hop(self, tmp_path, known_hosts, posix_hop):
         hop = _hop(tmp_path, certificate_path=str(tmp_path / "bastion-cert.pub"), target_port=2222)
-        argv = _proxy_command_argv(_service().get_proxy_args(PROFILE, hop=hop))
+        profile = ConnectionProfile(name="p", bastion_host="9.9.9.9", ssh_port=2222)
+        argv = _proxy_command_argv(_service().get_proxy_args(profile, hop=hop))
 
         assert _contains_run(argv, ["-o", f'CertificateFile="{hop.certificate_path}"'])
         assert _contains_run(argv, ["-p", "2222"])
+        # The pins are written for the bound address and port.
+        assert _contains_run(argv, ["-o", "HostKeyAlias=[9.9.9.9]:2222"])
+
+    def test_a_bastion_named_by_its_server_name_is_dialled_as_named(self, tmp_path, known_hosts, posix_hop):
+        # An ssh_config alias of that name keeps routing it (HostName, Port,
+        # ProxyJump); its host key is still checked against the pins.
+        profile = ConnectionProfile(name="p", bastion_host="bastion-1")
+        argv = _proxy_command_argv(_service().get_proxy_args(profile, hop=_hop(tmp_path)))
+
+        assert _contains_run(argv, ["-o", "HostKeyAlias=9.9.9.9"])
+        assert "-p" not in argv
+        assert argv[-1] == "admin@bastion-1"
 
     def test_the_hop_is_a_proxy_command_even_with_host_key_checking_off(self, tmp_path, known_hosts, posix_hop):
         args = _service(mode="off").get_proxy_args(PROFILE, hop=_hop(tmp_path))
@@ -116,7 +129,7 @@ class TestVaultHop:
         monkeypatch.setattr("servonaut.services.connection_service.get_os", lambda: "windows")
         args = _service().get_proxy_args(PROFILE, hop=_hop(tmp_path))
 
-        assert args == ["-J", "ec2-user@198.51.100.20"]
+        assert args == ["-J", "ec2-user@9.9.9.9"]
 
     def test_a_percent_in_a_lease_path_survives_both_expansions(self, tmp_path, known_hosts, posix_hop):
         hop = _hop(tmp_path, identity_agent=str(tmp_path / "a%b.sock"))
@@ -130,7 +143,7 @@ class TestVaultHop:
         hop = _hop(tmp_path, certificate_path=str(tmp_path / "c%1.pub"))
         argv = _proxy_command_argv(_service().get_proxy_args(PROFILE, hop=hop))
         resolved = subprocess.run(
-            ["ssh", "-F", "/dev/null", "-G", *argv[1:argv.index("-W")], "198.51.100.20"],
+            ["ssh", "-F", "/dev/null", "-G", *argv[1:argv.index("-W")], "9.9.9.9"],
             capture_output=True, text=True, timeout=10, check=True,
         ).stdout.splitlines()
 
@@ -155,7 +168,7 @@ class TestVaultHop:
 
         assert not any(word.startswith("IdentityAgent") for word in argv)
         assert "IdentitiesOnly=yes" not in argv
-        assert argv[-1] == "ec2-user@198.51.100.20"
+        assert argv[-1] == "ec2-user@9.9.9.9"
         # The target itself still uses its lease.
         assert resolved["identity_agent"] == target_lease.identity_agent
 
@@ -170,9 +183,9 @@ class TestBastionRow:
         assert bastion_row(PROFILE, [APP, BASTION]) is BASTION
 
     def test_the_port_must_match_too(self):
-        profile = ConnectionProfile(name="p", bastion_host="198.51.100.20", ssh_port=2222)
+        profile = ConnectionProfile(name="p", bastion_host="9.9.9.9", ssh_port=2222)
         assert bastion_row(profile, [APP, BASTION]) is None
-        assert bastion_row(profile, [{**BASTION, "is_custom": True, "host": "198.51.100.20", "port": 2222}])
+        assert bastion_row(profile, [{**BASTION, "is_custom": True, "host": "9.9.9.9", "port": 2222}])
 
     def test_a_cloud_servers_private_address_never_matches(self):
         # The same private address exists in many networks.
@@ -189,9 +202,23 @@ class TestBastionRow:
 
     def test_the_users_own_server_wins_over_a_teams(self):
         shared = {"id": "srv-1", "name": "bastion", "is_shared": True, "team_slug": "devs",
-                  "hostname": "198.51.100.20", "public_ip": "198.51.100.20"}
+                  "hostname": "9.9.9.9", "public_ip": "9.9.9.9"}
         assert bastion_row(PROFILE, [shared, BASTION]) is BASTION
         assert bastion_row(PROFILE, [shared]) is shared
+
+    def test_the_users_own_server_by_name_wins_over_a_teams_by_address(self):
+        # Review finding: the address tier ran over both groups first.
+        profile = ConnectionProfile(name="p", bastion_host="bastion-1")
+        shared = {"id": "srv-1", "name": "other", "is_shared": True, "team_slug": "devs",
+                  "hostname": "bastion-1", "public_ip": "bastion-1"}
+        assert bastion_row(profile, [shared, BASTION]) is BASTION
+
+    def test_a_teams_private_address_never_matches(self):
+        # The team's 10.0.0.5 is not necessarily the user's 10.0.0.5.
+        profile = ConnectionProfile(name="p", bastion_host="10.0.0.5")
+        shared = {"id": "srv-1", "name": "jump", "is_shared": True, "team_slug": "devs",
+                  "hostname": "10.0.0.5", "public_ip": "10.0.0.5"}
+        assert bastion_row(profile, [shared]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -233,10 +260,47 @@ class TestBastionLease:
         with pytest.raises(VaultCredentialError, match="The bastion bastion-1"):
             _lease(PROFILE, [BASTION], runtime)
 
-    def test_an_unreachable_vault_service_keeps_the_users_setup(self):
-        runtime = _Runtime(raises=APIError(code="unavailable", message="service down", status=503))
+    @pytest.mark.parametrize("failure", [
+        APIError(code="unavailable", message="service down", status=503),
+        OSError("connection refused"),
+        RuntimeError("Server disconnected without sending a response"),
+    ])
+    def test_a_key_that_cannot_be_used_here_keeps_the_users_setup(self, failure):
+        assert _lease(PROFILE, [BASTION], _Runtime(raises=failure)) is None
+
+    def test_a_private_agent_that_cannot_start_keeps_the_users_setup(self):
+        # Review finding: on Windows, or without ssh-agent, this failed closed.
+        from servonaut.services.vault.ssh_agent import PrivateSshAgentError
+
+        assert _lease(PROFILE, [BASTION], _Runtime(raises=PrivateSshAgentError("no ssh-agent"))) is None
+
+    def test_a_missing_identity_keeps_the_users_setup(self):
+        from servonaut.services.vault.team_vault_client import VaultIdentityMissingError
+
+        assert _lease(PROFILE, [BASTION], _Runtime(raises=VaultIdentityMissingError("no identity"))) is None
+
+    def test_a_moved_bastion_stops_the_connection(self):
+        from servonaut.services.vault.bindings import BindingDestinationChangedError
+
+        runtime = _Runtime(raises=BindingDestinationChangedError("the server moved since it was bound"))
+        with pytest.raises(VaultCredentialError, match="The bastion bastion-1"):
+            _lease(PROFILE, [BASTION], runtime)
+
+    def test_windows_never_leases_the_bastions_key(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "windows")
+        runtime = _Runtime({"i-0b": _hop(tmp_path)})
 
         assert _lease(PROFILE, [BASTION], runtime) is None
+        assert runtime.asked == []
+
+    def test_a_bastion_behind_a_proxy_command_is_not_leased(self, tmp_path):
+        manager = _config_manager()
+        config = manager.get.return_value
+        config.connection_profiles = [PROFILE, ConnectionProfile(name="ssm", proxy_command="aws ssm start-session")]
+        config.connection_rules = [ConnectionRule(name="b", match_conditions={"name_contains": "bastion"}, profile_name="ssm")]
+        runtime = _Runtime({"i-0b": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION], runtime, ConnectionService(manager)) is None
 
 
 class TestResolveWithVault:
@@ -252,7 +316,7 @@ class TestResolveWithVault:
 
         assert resolved["key_path"] == "/keys/app.pem"
         assert "IdentityAgent=" in _proxy_command(resolved["proxy_args"])
-        assert "admin@198.51.100.20" in _proxy_command(resolved["proxy_args"])
+        assert "admin@9.9.9.9" in _proxy_command(resolved["proxy_args"])
 
     def test_one_bastion_lease_serves_every_target_behind_it(self, tmp_path, known_hosts, posix_hop):
         service = _service(APP_RULE)
@@ -267,6 +331,119 @@ class TestResolveWithVault:
                 vault_runtime=runtime, connection_service=service, cache=cache,
                 rows=[APP, app_2, BASTION],
             ))
-            assert "admin@198.51.100.20" in _proxy_command(resolved["proxy_args"])
+            assert "admin@9.9.9.9" in _proxy_command(resolved["proxy_args"])
 
         assert runtime.asked.count("i-0b") == 1
+
+
+# ---------------------------------------------------------------------------
+# The MCP server: the hop and the target's own credential are always closed
+# ---------------------------------------------------------------------------
+
+
+class TestMcpHop:
+    @staticmethod
+    def _tools(service, runtime, shared_rows=None):
+        async def shared():
+            if isinstance(shared_rows, BaseException):
+                raise shared_rows
+            return list(shared_rows or [])
+
+        return SimpleNamespace(
+            _vault_runtime=runtime, _connection_service=service,
+            _directory=SimpleNamespace(custom_rows=lambda: [], cached_provider_rows=lambda p: [BASTION] if p == "aws" else []),
+            _shared_server_rows=shared,
+        )
+
+    @staticmethod
+    def _call(tools, cleanup):
+        from servonaut.mcp.tools import ServonautTools
+
+        return asyncio.run(ServonautTools._with_bastion_hop(
+            tools, APP, {"proxy_args": [], "host": "10.0.1.21"}, cleanup,
+        ))
+
+    def test_the_hop_is_closed_with_the_targets_cleanup(self, tmp_path, known_hosts, posix_hop):
+        closed: list[str] = []
+        hop = _hop(tmp_path, close=lambda: closed.append("hop"))
+
+        async def cleanup():
+            closed.append("target")
+
+        conn, combined = self._call(self._tools(_service(APP_RULE), _Runtime({"i-0b": hop})), cleanup)
+        assert "IdentityAgent=" in _proxy_command(conn["proxy_args"])
+        asyncio.run(combined())
+        assert closed == ["target", "hop"]
+
+    @pytest.mark.parametrize("failure", [VaultStateError("bad signature"), asyncio.CancelledError()])
+    def test_a_failure_or_a_cancelled_call_still_cleans_up_the_target(self, failure):
+        # Review finding: the caller only cleans up what it receives.
+        closed: list[str] = []
+
+        async def cleanup():
+            closed.append("target")
+
+        tools = self._tools(_service(APP_RULE), _Runtime(raises=failure if isinstance(failure, VaultStateError) else None),
+                            shared_rows=failure if isinstance(failure, asyncio.CancelledError) else None)
+        with pytest.raises((RuntimeError, asyncio.CancelledError)):
+            self._call(tools, cleanup)
+        assert closed == ["target"]
+
+
+# ---------------------------------------------------------------------------
+# servonaut ssh: a refused bastion key closes the target's lease too
+# ---------------------------------------------------------------------------
+
+
+def test_the_cli_closes_the_targets_lease_when_the_bastion_key_is_refused(monkeypatch, capsys):
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from servonaut.cli import ssh as ssh_mod
+    from tests.test_cli_ssh import _app_instance, _make_args, _rule_config
+
+    target_lease = SimpleNamespace(close=MagicMock())
+    resolved = SimpleNamespace(source="vault", lease=target_lease, login_user="deploy", identity_agent="/a",
+                               identity_file="/a.pub", known_hosts_path="/kh", certificate_path=None)
+    config = _rule_config()
+    manager = MagicMock()
+    manager.get.return_value = config
+    from servonaut.services.ssh_service import SSHService
+
+    headless = (config, MagicMock(is_authenticated=True), MagicMock(), MagicMock(),
+                MagicMock(), SSHService(manager), MagicMock())
+    with (
+        patch.object(ssh_mod, "_init_headless_services", return_value=headless),
+        patch.object(ssh_mod, "_load_instances", return_value=[_app_instance()]),
+        patch("servonaut.services.ssh_ref_resolver.SshRefResolver") as resolver,
+        patch.object(ssh_mod, "bastion_lease", AsyncMock(side_effect=VaultCredentialError("The bastion bastion-1: bad"))),
+        patch("subprocess.run") as run,
+    ):
+        resolver.return_value.resolve = AsyncMock(return_value=resolved)
+        assert ssh_mod.handle_ssh_command(_make_args("app-1")) != 0
+
+    run.assert_not_called()
+    target_lease.close.assert_called_once_with()
+
+
+def test_a_transfer_without_a_vault_key_keeps_the_bastions_hop(tmp_path, known_hosts, posix_hop):
+    # Review finding: the transfer fell back to its own options (and their
+    # hop) whenever the target had no vault lease.
+    from servonaut.screens.scp_transfer import SCPTransferScreen
+
+    service = _service(APP_RULE)
+    app = SimpleNamespace(
+        vault_command_service=_Runtime({"i-0b": _hop(tmp_path)}), connection_service=service,
+        vault_lease_cache=None, instances=[APP, BASTION], demo_mode=False, redaction_service=None,
+    )
+    sent: list = []
+    screen = SimpleNamespace(
+        app=app,
+        _transfer_options=lambda conn: {"host": "10.0.1.21", "username": "ec2-user", "key_path": "/keys/app.pem",
+                                        "proxy_args": service.get_proxy_args(PROFILE), "port": None},
+        _command_for=lambda options, local, remote: sent.append(options) or ["scp"],
+    )
+
+    asyncio.run(SCPTransferScreen._vault_transfer_command(screen, dict(APP), "/tmp/a", "/tmp/b"))
+
+    assert "IdentityAgent=" in _proxy_command(sent[0]["proxy_args"])
+    assert sent[0]["key_path"] == "/keys/app.pem"

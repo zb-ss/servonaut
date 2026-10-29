@@ -173,6 +173,8 @@ class LogViewerService(LogViewerServiceInterface):
         instance: dict,
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Return readable log paths, preferring cached memory when available.
 
@@ -214,7 +216,7 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
@@ -363,6 +365,8 @@ class LogViewerService(LogViewerServiceInterface):
         connection_service: "ConnectionServiceInterface",
         directories: Optional[List[str]] = None,
         max_depth: int = 2,
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Scan remote directories for log files via SSH find command."""
         config = self._config_manager.get()
@@ -381,7 +385,7 @@ class LogViewerService(LogViewerServiceInterface):
             f"2>/dev/null | sort -u"
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],
@@ -426,6 +430,8 @@ class LogViewerService(LogViewerServiceInterface):
         directory: str,
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
+        *,
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Scan a remote directory for log files and save it to custom paths.
 
@@ -456,7 +462,7 @@ class LogViewerService(LogViewerServiceInterface):
             "2>/dev/null | sort -u"
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service)
+        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],

@@ -4578,19 +4578,23 @@ class ServonautTools:
         profile = self._connection_service.resolve_profile(row)
         if profile is None or not getattr(profile, 'bastion_host', None):
             return conn, cleanup
-        rows = [*self._directory.custom_rows()]
-        for provider in ('aws', 'ovh', 'hetzner'):
-            rows.extend(self._directory.cached_provider_rows(provider))
-        rows.extend(await self._shared_server_rows())
         try:
+            rows = [*self._directory.custom_rows()]
+            for provider in ('aws', 'ovh', 'hetzner'):
+                rows.extend(self._directory.cached_provider_rows(provider))
+            rows.extend(await self._shared_server_rows())
             hop = await bastion_lease(
                 profile, rows, vault_runtime=self._vault_runtime,
                 connection_service=self._connection_service,
             )
-        except VaultCredentialError as exc:
+        except BaseException as exc:
+            # The caller only cleans up what it receives: a failure or a
+            # cancelled call here must not leave the target's key behind.
             if cleanup is not None:
                 await cleanup()
-            raise RuntimeError(str(exc)) from exc
+            if isinstance(exc, VaultCredentialError):
+                raise RuntimeError(str(exc)) from exc
+            raise
         if hop is None:
             return conn, cleanup
         conn = dict(conn)

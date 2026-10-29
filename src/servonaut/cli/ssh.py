@@ -488,10 +488,17 @@ async def _handle_ssh_async(args: Any) -> int:
         )
     except VaultCredentialError as exc:
         print(str(exc), file=sys.stderr)
+        close = getattr(resolved.lease, "close", None)
+        if callable(close):
+            close()
         return _EXIT_GENERIC_ERROR
-    if hop is not None:
-        route = {**route, "proxy_args": connection_service.get_proxy_args(route["profile"], hop=hop)}
     try:
+        if hop is not None:
+            route = {**route, "proxy_args": connection_service.get_proxy_args(route["profile"], hop=hop)}
+            print(
+                f"Bastion {route['profile'].bastion_host}: its Servonaut Vault key, as {hop.login_user}.",
+                file=sys.stderr,
+            )
         return await _connect_resolved(
             args, config, instance, iid, host, route, resolved,
             ssh_service=ssh_service, bw_ssh_config_service=bw_ssh_config_service,

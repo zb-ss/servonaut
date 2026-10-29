@@ -171,6 +171,7 @@ class LogViewerScreen(Screen):
                 self._connection_instance(),
                 self.app.ssh_service,
                 self.app.connection_service,
+                rows=fleet_rows(self.app),
             )
         except Exception as e:
             logger.error("Error probing log paths: %s", e)
@@ -200,6 +201,7 @@ class LogViewerScreen(Screen):
                 self._connection_instance(),
                 self.app.ssh_service,
                 self.app.connection_service,
+                rows=fleet_rows(self.app),
             )
             self._discovered_logs = discovered
             count = len(set(discovered) - set(self._available_logs))
@@ -719,6 +721,7 @@ class LogViewerScreen(Screen):
                 directory,
                 self.app.ssh_service,
                 self.app.connection_service,
+                rows=fleet_rows(self.app),
             )
         except Exception as e:
             logger.error("Error adding directory %s: %s", directory, e)

@@ -411,6 +411,7 @@ class AIAnalysisScreen(Screen):
                 self._instance,
                 self.app.ssh_service,
                 self.app.connection_service,
+                rows=fleet_rows(self.app),
             )
             self._available_logs = available
 
@@ -456,6 +457,7 @@ class AIAnalysisScreen(Screen):
                 self._instance,
                 self.app.ssh_service,
                 self.app.connection_service,
+                rows=fleet_rows(self.app),
             )
             self._discovered_logs = discovered
             self._scan_complete = True

@@ -1731,14 +1731,22 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
             )
             return
 
-        ok, hop = await self._bastion_hop(instance)
-        if not ok:
-            return
-
         # ------------------------------------------------------------------
         # Build the SSH command depending on the resolution source
         # ------------------------------------------------------------------
         source = resolved.source
+        # Only the paths that go through a connection rule's bastion lease
+        # the bastion's vault key (Bitwarden, OVH, custom and Hetzner servers
+        # connect directly).
+        hop = None
+        uses_rule_route = source in ("ca", "vault") or (
+            source == "local"
+            and not (instance.get("is_ovh") or instance.get("is_custom") or instance.get("is_hetzner"))
+        )
+        if uses_rule_route:
+            ok, hop = await self._bastion_hop(instance)
+            if not ok:
+                return
         via_team = ""
         if own_row and instance.get("is_shared") is True:
             team = instance.get("team_name") or instance.get("team_slug") or ""

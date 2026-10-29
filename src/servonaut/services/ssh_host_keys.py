@@ -66,6 +66,16 @@ def pinned_host_key_option_values(known_hosts_file: str | Path, *, expansions: i
     return [f"UserKnownHostsFile={path}", "StrictHostKeyChecking=yes"]
 
 
+def pinned_hop_alias_value(host: str, port: Optional[int] = None) -> str:
+    """``HostKeyAlias`` for a hop whose pins are written for *host*:*port*.
+
+    The hop dials the bastion as the connection profile names it (an ssh
+    alias may route it), and looks its host key up under the name the
+    pinned file uses for the bound address.
+    """
+    return f"HostKeyAlias={known_hosts_name(host, port)}"
+
+
 def pinned_host_key_options(known_hosts_file: str | Path) -> List[str]:
     """Render strict verified-pin values as OpenSSH ``-o`` argument pairs."""
     values = pinned_host_key_option_values(known_hosts_file)

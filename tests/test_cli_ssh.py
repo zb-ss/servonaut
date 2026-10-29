@@ -907,7 +907,7 @@ class TestConnectionRules:
 
 
 class TestBastionVaultHop:
-    def test_the_hop_uses_the_bastions_vault_key_and_closes_it(self, tmp_path):
+    def test_the_hop_uses_the_bastions_vault_key_and_closes_it(self, tmp_path, capsys):
         from servonaut.cli import ssh as ssh_mod
 
         hop = SimpleNamespace(
@@ -926,9 +926,11 @@ class TestBastionVaultHop:
             argv = _ssh_argv(_make_args("app-1"), _app_instance(), _rule_config())
 
         proxy = next(o for o in _options(argv) if o.startswith("ProxyCommand="))
-        assert "admin@198.51.100.20" in proxy and "IdentityAgent=" in proxy
+        assert "admin@bastion-1" in proxy and "IdentityAgent=" in proxy
+        assert "HostKeyAlias=198.51.100.20" in proxy
         assert seen == [("bastion-1", ["app-1"])]
         hop.close.assert_called_once_with()
+        assert "Bastion bastion-1: its Servonaut Vault key, as admin." in capsys.readouterr().err
 
     def test_a_bastion_key_that_must_not_be_used_stops_the_connection(self, capsys):
         from servonaut.cli import ssh as ssh_mod
