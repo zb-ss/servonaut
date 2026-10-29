@@ -607,7 +607,7 @@ class TeamManagementScreen(Screen):
             servers = await team_svc.list_shared_servers(slug)
             self._shared_servers = servers
             self._populate_servers_table(servers)
-            self._list_shared_servers(slug, team.get("name") or slug, servers)
+            self._list_shared_servers(self._team_record(slug, team), servers)
 
             try:
                 configs = await team_svc.list_team_configs(slug)
@@ -653,10 +653,7 @@ class TeamManagementScreen(Screen):
             redact = self.app.redaction_service.redact_name
             servers = [dict(server, name=redact(str(server.get("name") or ""))) for server in servers]
 
-        row = dict(self._teams_by_slug.get(slug) or {})
-        row.setdefault("slug", slug)
-        if not row.get("id") and team.get("id"):
-            row["id"] = team.get("id")
+        row = self._team_record(slug, team)
         # By id: another team may have used this slug before a rename.
         team_id = team_id_text(row) or None
 
@@ -690,14 +687,31 @@ class TeamManagementScreen(Screen):
         body[-1] = f"[dim]{body[-1]}[/dim]"
         self.query_one("#agent_rules_body", Static).update("\n".join(body))
 
-    def _list_shared_servers(self, slug: str, team_name: str, servers: list[dict]) -> None:
-        """Make the team's shared servers in the server list the ones listed here.
+    def _team_record(self, slug: str, team: dict) -> dict:
+        """Team *slug* as the team list describes it, filled in from its detail *team*.
 
-        The other teams' shared servers stay as they are.
+        Its id and the caller's role must reach the shared rows: Auto-bind,
+        Use Vault Key and the team agent rules read them there.
+        """
+        record = dict(self._teams_by_slug.get(slug) or {})
+        record["slug"] = slug
+        if not record.get("id") and team.get("id"):
+            record["id"] = team.get("id")
+        record["name"] = team.get("name") or record.get("name") or slug
+        if self._current_team_role:
+            record["role"] = self._current_team_role
+        return record
+
+    def _list_shared_servers(self, team: dict, servers: list[dict]) -> None:
+        """Make *team*'s shared servers in the server list the ones listed here.
+
+        *team* is the full team record (``_team_record``). The other teams'
+        shared servers stay as they are.
         """
         from servonaut.screens._demo_resolve import replace_instances
         from servonaut.services.shared_servers import shared_row
 
+        slug = team["slug"]
         # The real records (the list shows them redacted in demo mode).
         current = getattr(self.app, "_instances_pristine", None)
         if not isinstance(current, list):
@@ -706,7 +720,6 @@ class TeamManagementScreen(Screen):
             row for row in current
             if row.get("is_shared") is True and row.get("team_slug") != slug
         ]
-        team = {"slug": slug, "name": team_name}
         replace_instances(
             self.app, "shared",
             others + [shared_row(server, team) for server in servers if isinstance(server, dict)],
