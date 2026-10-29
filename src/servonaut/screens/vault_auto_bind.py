@@ -393,6 +393,8 @@ class VaultAutoBindScreen(Screen):
             return
         row = self._rows[table.cursor_row]
         text = f"{self._server_name(row)}: {row.status_text_for('tui')}"
+        for note in row.notes:
+            text += f"\nNote: {note}"
         if row.host_keys:
             prints = "\n".join(f"  {crypto.ssh_public_fingerprint(key)}" for key in row.host_keys)
             if row.status == READY and not row.verification_source:
