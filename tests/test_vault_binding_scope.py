@@ -527,6 +527,7 @@ async def test_a_team_key_on_your_own_server_offers_to_update_your_own_binding(
         await _settle(pilot, lambda: bool(modal.query("#own_key_keep")) and app.focused is not None)
         body = str(modal.query_one("#own_key_body", Static).render())
         assert "as ec2-user" in body and "logs in as deploy" in body
+        assert "Update your own binding to the team's key and the login deploy?" in body
         # Keep is the default: Enter never changes the user's own key.
         assert app.focused is modal.query_one("#own_key_keep", Button)
         assert modal.query_one("#own_key_update", Button).region.bottom <= size[1]
@@ -562,3 +563,23 @@ async def test_escape_keeps_your_own_binding() -> None:
 
     app.vault_command_service.bind_personal.assert_not_awaited()
     assert "You still connect with your own key, as ec2-user." in app.notices[-1][0]
+
+
+@pytest.mark.asyncio
+async def test_the_offer_names_only_what_changes() -> None:
+    from servonaut.screens.server_actions import OwnKeyUpdateModal
+
+    app = _Host([_own(), _shared()])
+    # Same login as the team key, another key.
+    app.vault_command_service.personal_binding.return_value = {
+        "source": "servonaut_vault", "login_user": "deploy", "public_fingerprint": "SHA256:old",
+    }
+    async with app.run_test() as pilot:
+        await _bind_team_key(pilot)
+        await _settle(pilot, lambda: isinstance(app.screen, OwnKeyUpdateModal))
+        await _settle(pilot, lambda: bool(app.screen.query("#own_key_body")))
+        body = str(app.screen.query_one("#own_key_body", Static).render())
+        assert "Update your own binding to the team's key?" in body
+        assert "the login" not in body
+        await pilot.press("escape")
+        await _settle(pilot, lambda: bool(app.notices))

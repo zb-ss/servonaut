@@ -2223,12 +2223,16 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         destination, port = service.ssh_destination(own)
         if not team_login or not host_keys or not destination or not isinstance(port, int):
             return kept
-        key_change = "" if same_key else "the team's key and "
+        changes = [
+            change for change, differs in (
+                ("the team's key", not same_key), (f"the login {team_login}", own_login != team_login),
+            ) if differs
+        ]
         body = (
             f"You connect to this server with your own vault key{f', as {own_login}' if own_login else ''}. "
             f"The team key you just set logs in as {team_login}.\n\n"
-            f"Update your own binding to {key_change}the login {team_login}? "
-            "The pinned host keys stay the same."
+            f"Update your own binding to {' and '.join(changes)}? "
+            "It pins the same host keys as the team key."
         )
         if not await self.app.push_screen_wait(OwnKeyUpdateModal(scrub_for_display(self.app, body))):
             return kept
