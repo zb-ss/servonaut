@@ -1078,6 +1078,14 @@ class TeamServiceInterface(ABC):
         pass
 
     @abstractmethod
+    async def remove_shared_server(self, slug: str, server_id: str) -> dict:
+        pass
+
+    @abstractmethod
+    async def push_servers(self, slug: str, servers: Any, *, on_progress: Any = None) -> List[Any]:
+        """Share many servers at once: one inventory read, each server once (see TeamService)."""
+
+    @abstractmethod
     async def list_team_configs(self, slug: str) -> List[dict]:
         pass
 

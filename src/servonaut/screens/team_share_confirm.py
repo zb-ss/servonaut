@@ -10,18 +10,15 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, SelectionList, Static
+from textual.widgets import Button, Input, SelectionList, Static
 from textual.widgets.selection_list import Selection
-
-
-def server_address(server: dict) -> str:
-    """The address a share sends for *server*: its public IP, else its private IP."""
-    return server.get("public_ip") or server.get("private_ip") or ""
+from servonaut.services.team_sharing import server_address
+from servonaut.services.vault.display import terminal_safe
 
 
 def _server_name(server: dict) -> str:
@@ -50,21 +47,27 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
     ShareServersConfirmModal #share_confirm_modal {
         width: 84;
         max-width: 94%;
-        height: auto;
-        max-height: 94%;
+        height: 90%;
+        max-height: 40;
         padding: 1 2;
         border: round $warning;
         background: $surface;
     }
     ShareServersConfirmModal #share_confirm_title { text-style: bold; color: $text-warning; }
     ShareServersConfirmModal #share_confirm_intro { margin: 1 0 0 0; }
+    ShareServersConfirmModal #share_confirm_body { height: 1fr; }
     ShareServersConfirmModal #share_confirm_pick { height: auto; margin: 1 0 0 0; }
     ShareServersConfirmModal #share_confirm_pick Button { min-width: 14; margin: 0 1 0 0; }
     ShareServersConfirmModal #share_confirm_list { height: auto; max-height: 14; margin: 1 0 0 0; }
     ShareServersConfirmModal #share_confirm_skipped { color: $text-muted; margin: 1 0 0 0; }
     ShareServersConfirmModal #share_confirm_actions { height: auto; margin: 1 0 0 0; align: right middle; }
     ShareServersConfirmModal #share_confirm_cancel { margin: 0 1 0 0; }
-    ShareServersConfirmModal.-medium #share_confirm_list { max-height: 8; }
+    ShareServersConfirmModal #share_confirm_connection { height: 3; }
+    ShareServersConfirmModal #share_confirm_username { width: 2fr; margin-right: 1; }
+    ShareServersConfirmModal #share_confirm_port { width: 1fr; }
+    ShareServersConfirmModal #share_confirm_editor_label { height: auto; }
+    ShareServersConfirmModal #share_confirm_name { width: 1fr; }
+    ShareServersConfirmModal.-medium #share_confirm_list { max-height: 4; }
     ShareServersConfirmModal.-short #share_confirm_intro,
     ShareServersConfirmModal.-short #share_confirm_pick,
     ShareServersConfirmModal.-short #share_confirm_skipped,
@@ -82,21 +85,38 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
     ) -> None:
         super().__init__()
         self._team_name = team_name
-        self._servers = list(servers)
+        self._servers = [dict(server) for server in servers]
         self._skipped_existing = skipped_existing
         self._skipped_no_address = skipped_no_address
+        self._drafts = [{
+            "name": terminal_safe(_server_name(server)),
+            "username": terminal_safe(server.get("username") or server.get("login_user") or ""),
+            "port": str(server.get("port") or 22),
+        } for server in servers]
+        self._editing_index: int | None = None
+        self._editor_display: dict[str, str] = {}
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static("", id="share_confirm_title"),
             Static("", id="share_confirm_intro"),
-            Horizontal(
-                Button("Select All", id="share_confirm_all"),
-                Button("Select None", id="share_confirm_none"),
-                id="share_confirm_pick",
+            VerticalScroll(
+                Horizontal(
+                    Button("Select All", id="share_confirm_all"),
+                    Button("Select None", id="share_confirm_none"),
+                    id="share_confirm_pick",
+                ),
+                SelectionList(id="share_confirm_list"),
+                Static("Highlight a server to edit its name, SSH username and port:", id="share_confirm_editor_label"),
+                Input(placeholder="Server name", id="share_confirm_name"),
+                Horizontal(
+                    Input(placeholder="SSH username (cloud default if blank)", id="share_confirm_username"),
+                    Input(placeholder="SSH port", type="integer", id="share_confirm_port"),
+                    id="share_confirm_connection",
+                ),
+                Static(self._skipped_text(), id="share_confirm_skipped"),
+                id="share_confirm_body",
             ),
-            SelectionList(id="share_confirm_list"),
-            Static(self._skipped_text(), id="share_confirm_skipped"),
             Horizontal(
                 Button("Cancel", id="share_confirm_cancel"),
                 Button("", variant="primary", id="share_confirm_share"),
@@ -108,13 +128,18 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
     def on_mount(self) -> None:
         self._render_text()
         self._render_rows(selected=set(range(len(self._servers))))
+        if self._servers:
+            self._show_editor(0)
         self.query_one("#share_confirm_skipped", Static).display = bool(self._skipped_text())
         self.query_one("#share_confirm_cancel", Button).focus()
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the team name and rows for the new mode, keeping the ticks."""
+        self._save_editor()
         self._render_text()
         self._render_rows(selected=set(self._list().selected))
+        if self._editing_index is not None:
+            self._show_editor(self._editing_index)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -128,32 +153,93 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
         redactor = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redactor is not None:
             team_name = str(redactor.redact_name(team_name))
-        team = escape(team_name)
-        self.query_one("#share_confirm_title", Static).update(f"Share servers with {team}?")
+        team = terminal_safe(team_name)
+        self.query_one("#share_confirm_title", Static).update(Text(f"Share servers with {team}?"))
         self.query_one("#share_confirm_intro", Static).update(
-            f"Every member of {team} will be able to see and connect to the ticked servers. "
-            "Untick any server that should stay private."
+            Text(f"Every member of {team} will be able to see and connect to the ticked servers. "
+                 "Untick any server that should stay private.")
         )
 
     def _render_rows(self, *, selected: set) -> None:
         listing = self._list()
         highlighted = listing.highlighted or 0
         # Names padded to the longest one, so the addresses line up in a column.
-        width = max((len(_server_name(server)) for server in self._servers), default=0)
+        rows = [dict(server, name=draft["name"]) for server, draft in zip(self._servers, self._drafts)]
+        width = max((len(self._display(_server_name(server), field="name")) for server in rows), default=0)
         listing.clear_options()
         listing.add_options([
             Selection(self._row_label(server, width), index, index in selected)
-            for index, server in enumerate(self._servers)
+            for index, server in enumerate(rows)
         ])
         if self._servers:
             # Space then toggles a row as soon as the list has focus.
             listing.highlighted = min(highlighted, len(self._servers) - 1)
         self._render_confirm()
 
-    @staticmethod
-    def _row_label(server: dict, width: int) -> str:
-        name = _server_name(server).ljust(width)
-        return f"{escape(name)}  [dim]{escape(server_address(server))}[/dim]"
+    def _row_label(self, server: dict, width: int) -> Text:
+        name = self._display(_server_name(server), field="name").ljust(width)
+        return Text.assemble(name, "  ", (self._display(server_address(server), field="host"), "dim"))
+
+    def _display(self, value: str, *, field: str) -> str:
+        value = terminal_safe(value)
+        redactor = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redactor is not None:
+            if field == "name":
+                return str(redactor.redact_name(value))
+            if field == "username":
+                return str(redactor.redact_username(value))
+            if field == "host":
+                return str(redactor.redact_host(value))
+            return str(redactor.scrub_stream(value))
+        return value
+
+    def _save_editor(self) -> None:
+        if self._editing_index is None:
+            return
+        draft = self._drafts[self._editing_index]
+        for field in ("name", "username", "port"):
+            value = self.query_one(f"#share_confirm_{field}", Input).value
+            # Redrawing demo labels must not change what is sent to the team.
+            if value != self._editor_display.get(field):
+                draft[field] = value
+        rows = [dict(server, name=entry["name"]) for server, entry in zip(self._servers, self._drafts)]
+        width = max((len(self._display(_server_name(server), field="name")) for server in rows), default=0)
+        for index, server in enumerate(rows):
+            self._list().replace_option_prompt_at_index(index, self._row_label(server, width))
+
+    def _show_editor(self, index: int) -> None:
+        self._editing_index = index
+        self._editor_display = {key: self._display(value, field=key) for key, value in self._drafts[index].items()}
+        for field, value in self._editor_display.items():
+            self.query_one(f"#share_confirm_{field}", Input).value = value
+
+    def _chosen_servers(self) -> list[dict] | None:
+        self._save_editor()
+        chosen = []
+        for index in sorted(self._list().selected):
+            draft = self._drafts[index]
+            name, username = draft["name"].strip(), draft["username"].strip()
+            try:
+                port = int(draft["port"].strip() or "22")
+                if not 1 <= port <= 65535:
+                    raise ValueError
+            except ValueError:
+                self._editor_error(index, "port", "Port must be a number between 1 and 65535.")
+                return None
+            if not name or terminal_safe(name) != name:
+                self._editor_error(index, "name", "Give each selected server a nonempty name without control characters.")
+                return None
+            if username.startswith("-") or any(char.isspace() for char in username) or terminal_safe(username) != username:
+                self._editor_error(index, "username", "Enter an SSH username without spaces or control characters.")
+                return None
+            chosen.append({**self._servers[index], "name": name, "username": username, "port": port})
+        return chosen
+
+    def _editor_error(self, index: int, field: str, message: str) -> None:
+        self._list().highlighted = index
+        self._show_editor(index)
+        self.query_one(f"#share_confirm_{field}", Input).focus()
+        self.notify(message, severity="error", markup=False)
 
     def _skipped_text(self) -> str:
         parts = []
@@ -177,6 +263,12 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
         event.stop()
         self._render_confirm()
 
+    def on_selection_list_selection_highlighted(self, event: SelectionList.SelectionHighlighted) -> None:
+        event.stop()
+        if event.selection_index != self._editing_index:
+            self._save_editor()
+            self._show_editor(event.selection_index)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         button_id = event.button.id
@@ -187,9 +279,9 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
         elif button_id == "share_confirm_cancel":
             self.dismiss(None)
         elif button_id == "share_confirm_share":
-            chosen = set(self._list().selected)
+            chosen = self._chosen_servers()
             if chosen:
-                self.dismiss([server for index, server in enumerate(self._servers) if index in chosen])
+                self.dismiss(chosen)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

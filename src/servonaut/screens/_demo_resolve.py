@@ -41,6 +41,19 @@ def team_rows(app: Any) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows or [] if isinstance(row, dict) and is_shared_row(row)]
 
 
+def real_fleet_rows(app: Any) -> Optional[List[Dict[str, Any]]]:
+    """The fleet for mutations, or None when demo rows have no real backing.
+
+    An absent snapshot is different from a known empty fleet: treating it as
+    empty could skip saved key-assignment checks or publish stand-in servers.
+    """
+    demo = bool(getattr(app, "demo_mode", False))
+    rows = getattr(app, "_instances_pristine", None) if demo else getattr(app, "instances", None)
+    if demo and (not isinstance(rows, list) or (not rows and getattr(app, "instances", None))):
+        return None
+    return [dict(row) for row in rows or [] if isinstance(row, dict)]
+
+
 UNRESOLVED_MESSAGE = (
     "The real server behind this row is not known in demo mode, so nothing "
     "was sent. Press ctrl+shift+d to turn demo mode off and try again."

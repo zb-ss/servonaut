@@ -1188,7 +1188,7 @@ class ServonautApp(App):
             self.ai_conversations_client = AIConversationsClient(self.api_client)
             self.entitlement_guard = EntitlementGuard(self.auth_service)
             self.config_sync_service = ConfigSyncService(self.api_client, self.config_manager)
-            self.team_service = TeamService(self.api_client)
+            self.team_service = TeamService(self.api_client, config=self.config_manager.get())
             from servonaut.services.vault.command_service import VaultCommandService
             if self.vault_command_service is not None:
                 self.vault_command_service.close()
@@ -2681,6 +2681,33 @@ class ServonautApp(App):
         logger.warning("Demo mode: no real record behind a listed row")
         return instance
 
+    def _navigation_hold_reason(self) -> str | None:
+        for screen in reversed(self.screen_stack):
+            check = getattr(screen, "navigation_hold_reason", None)
+            if callable(check) and (reason := check()):
+                return reason
+        return None
+
+    def _refuse_navigation(self) -> bool:
+        reason = self._navigation_hold_reason()
+        if reason is None:
+            return False
+        self.notify(reason, severity="warning", markup=False)
+        return True
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in {"quit", "command_palette"} and self._navigation_hold_reason():
+            return False
+        return super().check_action(action, parameters)
+
+    async def action_quit(self) -> None:
+        if not self._refuse_navigation():
+            await super().action_quit()
+
+    def action_command_palette(self) -> None:
+        if not self._refuse_navigation():
+            super().action_command_palette()
+
     def open_settings_screen(self, panel_id: Optional[str] = None) -> None:
         """Show Settings, opened on *panel_id* (e.g. ``"ai_provider"``) if given.
 
@@ -2689,6 +2716,8 @@ class ServonautApp(App):
         management screen), those are closed and that Settings screen switches
         category in place, so its unsaved edits and their prompt are kept.
         """
+        if self._refuse_navigation():
+            return
         from servonaut.screens.settings import SettingsScreen
 
         stack = self.screen_stack
@@ -2706,6 +2735,8 @@ class ServonautApp(App):
 
     def on_sidebar_navigation_requested(self, message: "Sidebar.NavigationRequested") -> None:
         """Handle navigation events from the sidebar."""
+        if self._refuse_navigation():
+            return
         target_id = message.target_id
         if not target_id:
             return

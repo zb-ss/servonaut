@@ -173,14 +173,15 @@ async def test_a_managed_team_follows_the_documented_member_rules(fake_cloud):
     assert all("accept_url" not in row for row in viewer_view["members"])
     await refused(owner.invite_member(slug, "fourth@example.com", "member"), 422, "seat_limit_reached")
 
-    # Shared servers: managers add and remove them, by name; hostnames are unique.
+    # Shared servers: managers add and remove the canonical record by id.
     shared = await admin.push_server(slug, {"name": "web-9", "hostname": "10.0.0.9", "port": 2222})
     assert (shared["name"], shared["hostname"], shared["port"]) == ("web-9", "10.0.0.9", 2222)
     assert "web-9" in [row["name"] for row in await second.list_shared_servers(slug)]
-    await refused(owner.push_server(slug, {"name": "web-10", "hostname": "10.0.0.9"}), 409, "already_shared")
+    await refused(owner.push_server(slug, {"name": "web-10", "hostname": "10.0.0.9", "port": 2222}), 409, "already_shared")
     await refused(owner.push_server(slug, {"name": "web-10"}), 422, "validation_failed")
-    await owner.remove_shared_server(slug, "web-9")
     await refused(owner.remove_shared_server(slug, "web-9"), 404, "not_found")
+    await owner.remove_shared_server(slug, shared["id"])
+    await refused(owner.remove_shared_server(slug, shared["id"]), 404, "not_found")
 
     # Removing a member takes the team away from them.
     await owner.remove_member(slug, str(second_invite["id"]))

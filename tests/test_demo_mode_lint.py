@@ -59,6 +59,12 @@ class AllowlistEntry(NamedTuple):
 # ---------------------------------------------------------------------------
 
 _ALLOWLIST: List[AllowlistEntry] = [
+    AllowlistEntry("screens/bulk_action.py", "refresh_after_demo_toggle", "update",
+                   "Descriptions are fixed copy or supplied by domain builders that "
+                   "redact names and server labels individually before returning plain Text."),
+    AllowlistEntry("screens/bulk_action.py", "_update_submit", "update",
+                   "Only selection counts and fixed client confirmation phrases; "
+                   "record labels are rendered separately with a demo guard."),
     AllowlistEntry("screens/vault_rename_key_modal.py", "_submit", "update",
                    "Only fixed required-name and length-validation messages; "
                    "no key name, secret or server data is interpolated."),

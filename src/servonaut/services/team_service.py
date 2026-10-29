@@ -1,11 +1,19 @@
 """Team management service for shared workspaces."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from urllib.parse import quote
 
 from .interfaces import TeamServiceInterface
+from servonaut.config.schema import AppConfig
 from servonaut.services.bw_ssh_config_service import (
     BITWARDEN_PM_PROVIDER,
     VALID_VERIFY_STATUSES,
@@ -18,6 +26,57 @@ logger = logging.getLogger(__name__)
 
 # The server's team slug shape; a slug is checked before it goes into a URL.
 _TEAM_SLUG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+SHARED = "shared"
+ALREADY_SHARED = "already_shared"
+FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ShareResult:
+    """What sharing one server of a batch did (:meth:`TeamService.push_servers`)."""
+
+    payload: Dict[str, Any]
+    status: str  # SHARED, ALREADY_SHARED or FAILED
+    server: Optional[Dict[str, Any]] = None  # the team's new record
+    error: Optional[str] = None  # why it failed, as plain text
+    retry_after: Optional[float] = None  # seconds the service asked to wait
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """The wait a 429's ``Retry-After`` asks for (seconds or an HTTP date); None when absent."""
+    headers = getattr(exc, "response_headers", None) or {}
+    value = str(headers.get("retry-after") or "").strip()
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        pass
+    else:
+        # "inf", "nan" or an overflowing number name no wait that can be honoured.
+        return max(0.0, seconds) if math.isfinite(seconds) else None
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    from servonaut.services.api_client import APIError
+
+    return isinstance(exc, APIError) and exc.status == 429
+
+
+def _wait_text(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "try again later"
+    if seconds < 60:
+        return f"try again in {max(1, round(seconds))} s"
+    return f"try again in {max(1, round(seconds / 60))} min"
 
 # RBAC permissions matrix
 ROLE_PERMISSIONS = {
@@ -41,8 +100,10 @@ ROLE_PERMISSIONS = {
 class TeamService(TeamServiceInterface):
     """Team CRUD operations via servonaut.dev API."""
 
-    def __init__(self, api_client: 'APIClient') -> None:
+    def __init__(self, api_client: 'APIClient', *, config: AppConfig | None = None) -> None:
         self._api = api_client
+        self._config = config if config is not None else AppConfig()
+        self._server_locks: dict[str, asyncio.Lock] = {}
 
     async def list_teams(self) -> List[dict]:
         """List user's teams.
@@ -131,11 +192,99 @@ class TeamService(TeamServiceInterface):
         return servers
 
     async def push_server(self, slug: str, server_data: dict) -> dict:
-        """Push a local server to a team's shared inventory."""
-        return await self._api.post(
-            f"/api/v1/teams/{slug}/servers",
-            json=server_data,
-        )
+        """Share once, rechecking the live inventory even when the UI is stale."""
+        from servonaut.services.api_client import APIError
+        from servonaut.services.team_sharing import already_shared
+
+        async with self._server_locks.setdefault(slug, asyncio.Lock()):
+            servers = await self.list_shared_servers(slug)
+            if already_shared(server_data, servers):
+                raise APIError(code="already_shared", message="This server is already shared with the team.", status=409)
+            result = await self._api.post(f"/api/v1/teams/{slug}/servers", json=server_data)
+            return result.get("data", result) if isinstance(result, dict) else {}
+
+    async def push_servers(
+        self,
+        slug: str,
+        servers: Sequence[Mapping[str, Any]],
+        *,
+        on_progress: Optional[Callable[[int, int, ShareResult], None]] = None,
+        max_wait_seconds: float | None = None,
+    ) -> List[ShareResult]:
+        """Share each of *servers* (share payloads) with team *slug* once; one result each, in order.
+
+        The team's inventory is read once, under the same lock as
+        :meth:`push_server`; a server already in it, or earlier in the batch,
+        is not sent again. One server's failure does not stop the others. A
+        rate limit (429) uses the configured retry count and a total wait
+        budget per server, as ``Retry-After`` asks; when it persists, the
+        remaining servers are not sent. *on_progress* gets ``(index, total,
+        result)`` after each server, from 1.
+
+        Raises:
+            APIError: the team's inventory could not be read; nothing is sent.
+        """
+        from servonaut.services.team_sharing import already_shared
+
+        wait_budget = float(self._config.team_share_rate_limit_wait_seconds if max_wait_seconds is None else max_wait_seconds)
+        retries = self._config.team_share_rate_limit_retries
+        default_wait = float(self._config.team_share_rate_limit_default_wait_seconds)
+        if (
+            not math.isfinite(wait_budget) or wait_budget < 0 or type(retries) is not int or retries < 0
+            or not math.isfinite(default_wait) or default_wait < 0
+        ):
+            raise ValueError("Team sharing needs a non-negative finite wait and retry count.")
+        payloads = [dict(server) for server in servers]
+        results: List[ShareResult] = []
+        async with self._server_locks.setdefault(slug, asyncio.Lock()):
+            known: List[Mapping[str, Any]] = list(await self.list_shared_servers(slug))
+            stopped: Optional[ShareResult] = None
+            for index, payload in enumerate(payloads, start=1):
+                if stopped is not None:
+                    result = ShareResult(payload, FAILED, error=stopped.error, retry_after=stopped.retry_after)
+                elif already_shared(payload, known):
+                    result = ShareResult(payload, ALREADY_SHARED)
+                else:
+                    result = await self._share_once(slug, payload, wait_budget, retries, default_wait)
+                    if result.status == SHARED:
+                        known.append(result.server or {**payload, "instance_id": payload.get("instance_id")})
+                    elif result.retry_after is not None or (result.error or "").startswith("rate limited"):
+                        stopped = result
+                results.append(result)
+                if on_progress is not None:
+                    on_progress(index, len(payloads), result)
+        return results
+
+    async def _share_once(
+        self, slug: str, payload: Dict[str, Any], max_wait_seconds: float, retries: int,
+        default_wait: float = 0.0,
+    ) -> ShareResult:
+        """POST one share with a bounded, configured rate-limit retry budget.
+
+        A 429 that names no usable ``Retry-After`` waits *default_wait*, within
+        what is left of the budget.
+        """
+        from servonaut.services.api_client import APIError
+
+        remaining_wait = max_wait_seconds
+        for attempt in range(retries + 1):
+            try:
+                created = await self._api.post(f"/api/v1/teams/{slug}/servers", json=payload)
+            except Exception as exc:  # noqa: BLE001 - reported on its row, the batch goes on
+                if not _is_rate_limited(exc):
+                    reason = exc.message if isinstance(exc, APIError) else type(exc).__name__
+                    logger.warning("Sharing a server failed", exc_info=True)
+                    return ShareResult(payload, FAILED, error=reason)
+                asked = _retry_after_seconds(exc)
+                wait = asked if asked is not None else min(default_wait, remaining_wait)
+                if attempt == retries or remaining_wait <= 0 or wait > remaining_wait:
+                    return ShareResult(payload, FAILED, error=f"rate limited: {_wait_text(asked)}", retry_after=asked)
+                await asyncio.sleep(wait)
+                remaining_wait -= wait
+                continue
+            row = created.get("data", created) if isinstance(created, dict) else None
+            return ShareResult(payload, SHARED, server=dict(row) if isinstance(row, Mapping) else None)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def list_team_configs(self, slug: str) -> List[dict]:
         """List every shared-config version for a team (any team member can read).
@@ -186,9 +335,13 @@ class TeamService(TeamServiceInterface):
             return result["data"]
         return result if isinstance(result, dict) else {}
 
-    async def remove_shared_server(self, slug: str, server_name: str) -> dict:
-        """Remove a shared server from team inventory."""
-        return await self._api.delete(f"/api/v1/teams/{slug}/servers/{server_name}")
+    async def remove_shared_server(self, slug: str, server_id: str) -> dict:
+        """Remove the canonical shared-server record, even when names repeat."""
+        if not isinstance(slug, str) or not _TEAM_SLUG_RE.fullmatch(slug):
+            raise ValueError("a valid team slug is required")
+        if not isinstance(server_id, str) or server_id.strip() in {"", ".", ".."}:
+            raise ValueError("a shared server id is required")
+        return await self._api.delete(f"/api/v1/teams/{slug}/servers/{quote(server_id, safe='')}")
 
     async def get_team_policy(self, slug: str) -> dict:
         """Get team MCP policy."""
