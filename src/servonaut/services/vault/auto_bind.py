@@ -413,6 +413,22 @@ async def apply_auto_bind(
                 row.result = "bound"
 
 
+def _visit_target(service: Any, row: AutoBindRow) -> Mapping[str, Any]:
+    """The record a host-key visit to *row*'s server logs in with.
+
+    A team's shared row names no key of the user's (no key pair, no key
+    file), so the user's own record of the same server logs in, as their own
+    ``servonaut ssh`` does. A key the user mapped to the shared row itself
+    (``instance_keys``) still wins: that row is then the one known to log in.
+    """
+    if row.own_instance is None:
+        return row.instance
+    instance_keys = getattr(getattr(service, "config", None), "instance_keys", None)
+    if isinstance(instance_keys, Mapping) and instance_keys.get(str(row.instance.get("id") or "")):
+        return row.instance
+    return row.own_instance
+
+
 async def fetch_host_keys_for_rows(
     service: Any,
     rows: Sequence[AutoBindRow],
@@ -521,7 +537,7 @@ async def fetch_host_keys_for_rows(
             failure: Optional[str] = None
             try:
                 failure = await service.visit_for_host_key(
-                    row.instance,
+                    _visit_target(service, row),
                     login=row.login,
                     known_hosts_path=temp_kh,
                 )

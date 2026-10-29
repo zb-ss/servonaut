@@ -916,3 +916,74 @@ async def test_fetch_host_keys_type_error_in_visit_fails_row_without_retrying_or
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_visits_the_users_own_server_not_the_shared_row() -> None:
+    # Regression: the console was read from the own server but the SSH visit
+    # went to the shared row, which names no key pair or key file, so the
+    # login offered no usable key ("Permission denied (publickey)").
+    own = {"id": "i-1", "name": "web-1", "key_name": "kp-1", "public_ip": "198.51.100.1"}
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    rows = await plan_auto_bind(
+        service, [own, shared], [_key("k1", "kp-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+    assert rows[0].status == NO_HOST_KEYS
+
+    read: list[str] = []
+
+    def console(inst):
+        read.append(inst["id"])
+        return ""
+
+    await fetch_host_keys_for_rows(
+        service, rows, console_output_reader=console, host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert read == ["i-1"]
+    assert service.visits == ["i-1"]
+    assert rows[0].status == FETCHED
+    assert rows[0].host_keys == [HOST_KEY]
+    # Still bound to the team's shared server.
+    assert rows[0].instance is shared
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_without_an_own_server_visits_the_shared_row() -> None:
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    rows = await plan_auto_bind(
+        service, [shared], [_key("k1", "web-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+
+    await fetch_host_keys_for_rows(service, rows, host_keys_for=lambda *_: [HOST_KEY])
+
+    assert service.visits == ["srv-1"]
+    assert rows[0].status == FETCHED
+
+
+@pytest.mark.asyncio
+async def test_team_fetch_visits_the_shared_row_when_a_key_is_mapped_to_it() -> None:
+    own = {"id": "i-1", "name": "web-1", "key_name": "kp-1", "public_ip": "198.51.100.1"}
+    shared = {
+        "id": "srv-1", "name": "web-1", "is_shared": True, "team_slug": "devs",
+        "provider": "Team Devs", "hostname": "198.51.100.1", "instance_id": "i-1", "login_user": "ubuntu",
+    }
+    service = _VisitService()
+    service.config = SimpleNamespace(instance_keys={"srv-1": "/keys/web-1.pem"})
+    rows = await plan_auto_bind(
+        service, [own, shared], [_key("k1", "kp-1")], team="devs", host_keys_for=lambda *_: [],
+    )
+
+    await fetch_host_keys_for_rows(
+        service, rows, console_output_reader=lambda inst: "", host_keys_for=lambda *_: [HOST_KEY],
+    )
+
+    assert service.visits == ["srv-1"]
