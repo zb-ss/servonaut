@@ -49,6 +49,7 @@
 #vault_actions #vault_reveal,
 #vault_actions #vault_rename_key,
 #vault_actions #vault_delete_key,
+#vault_actions #vault_delete_keys,
 #vault_actions #vault_exposures,
 #vault_actions #vault_resolve_exposure,
 #vault_actions #vault_rotate_exposure,
@@ -79,6 +80,11 @@ VaultScreen.-narrow #vault_action_scroll {
 
 VaultScreen.-short #vault_action_scroll {
     max-height: 7;
+}
+
+ConfirmActionScreen.vault_key_delete #modal_container {
+    max-height: 90%;
+    overflow-y: auto;
 }
 
 VaultRevealModal {
