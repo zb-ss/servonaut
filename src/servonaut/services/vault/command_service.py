@@ -215,6 +215,15 @@ async def _remove_key_best_effort(executor: Any, login: str, public_key: str) ->
     return None
 
 
+@dataclass(frozen=True)
+class KeyDeletion:
+    """What deleting one key of a batch did (:meth:`VaultCommandService.delete_ssh_keys`)."""
+
+    item_id: str
+    deleted: bool
+    error: Exception | None = None  # why it was kept: VaultKeyInUse, VaultUserError or another failure
+
+
 class VaultCommandService:
     """Concrete facade used by ``servonaut vault`` and ``servonaut ca``."""
 
@@ -1124,51 +1133,158 @@ class VaultCommandService:
         finally:
             payload.clear()
 
-    async def _ssh_key_usage(
-        self, vault_id: str, item_id: str, item: Mapping[str, Any],
-        servers: Sequence[Mapping[str, Any]],
-    ) -> dict[str, Any]:
+    async def _own_binding_states(
+        self, servers: Sequence[Mapping[str, Any]],
+    ) -> list[tuple[str, str, list[str], Any]]:
+        """Each of the user's own servers' saved binding, read once: ``(state, name, target, binding)``.
+
+        *state* is ``"skipped"`` (no addressable target, it cannot be bound),
+        ``"unchecked"`` (the read failed) or ``"read"``.
+        """
         own = [server for server in servers if is_personal_server(server)]
         gate = asyncio.Semaphore(_KEY_USAGE_FETCHES)
 
-        async def check(server: Mapping[str, Any]) -> tuple[str, str]:
+        async def read(server: Mapping[str, Any]) -> tuple[str, str, list[str], Any]:
             name = terminal_safe(server.get("name") or server.get("id") or "Unnamed server")
             try:
-                instance_target(server)
+                provider, target_id = instance_target(server)
             except ValidationError:
                 # Unsupported route IDs cannot be bound; omit them from checked reads.
-                return "skipped", name
+                return "skipped", name, [], None
+            target = [provider, str(server.get("account") or ""), target_id]
             async with gate:
                 try:
                     binding = await self.personal_binding(server)
                 except Exception:  # an unavailable binding must prevent deletion
-                    return "unchecked", name
-            used = binding and binding.get("vault_item_id") == item_id and binding.get("vault_id") == vault_id
-            return ("own_servers" if used else "unused"), name
+                    return "unchecked", name, target, None
+            return "read", name, target, binding
 
-        results = await asyncio.gather(*(check(server) for server in own))
+        return list(await asyncio.gather(*(read(server) for server in own)))
+
+    @staticmethod
+    def _usage_from(
+        vault_id: str, item_id: str, item: Mapping[str, Any],
+        states: Sequence[tuple[str, str, list[str], Any]],
+    ) -> dict[str, Any]:
+        """Key *item_id*'s usage, from the binding reads of :meth:`_own_binding_states`."""
+        results = []
+        for state, name, target, binding in states:
+            if state == "read":
+                used = bool(binding) and binding.get("vault_item_id") == item_id and binding.get("vault_id") == vault_id
+                state = "own_servers" if used else "unused"
+            results.append((state, name, target))
         return {
             "team_servers": [terminal_safe(row.get("name") or row.get("server_id") or "Unnamed server")
                              for row in item.get("bound_server_ids", [])],
-            "own_servers": [name for state, name in results if state == "own_servers"],
-            "unchecked": [name for state, name in results if state == "unchecked"],
-            "checked": sum(state in {"own_servers", "unused"} for state, _ in results),
+            "own_servers": [name for state, name, _ in results if state == "own_servers"],
+            "unchecked": [name for state, name, _ in results if state == "unchecked"],
+            "unchecked_targets": [target for state, _, target in results if state == "unchecked"],
+            "checked": sum(state in {"own_servers", "unused"} for state, _, _ in results),
         }
 
-    async def delete_ssh_key(
-        self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
+    async def _ssh_key_usage(
+        self, vault_id: str, item_id: str, item: Mapping[str, Any],
+        servers: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        """Delete only an unused, unexposed SSH key at its current revision."""
-        item = await self._ssh_key_record(vault_id, item_id)
-        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
-        if usage["team_servers"] or usage["own_servers"] or usage["unchecked"]:
+        return self._usage_from(vault_id, item_id, item, await self._own_binding_states(servers))
+
+    async def ssh_keys_usage(
+        self, *, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """:meth:`ssh_key_usage` of several keys, each own server's binding read once for all of them.
+
+        A key that cannot be read gets ``{"error": <reason>}`` instead.
+        """
+        states = await self._own_binding_states(servers)
+        usages: dict[str, dict[str, Any]] = {}
+        for item_id in item_ids:
+            try:
+                item = await self._ssh_key_record(vault_id, item_id)
+                usages[item_id] = {
+                    **self._usage_from(vault_id, item_id, item, states),
+                    "name": await self._ssh_key_display_name(vault_id, item),
+                    "fingerprint": terminal_safe(item.get("public_fingerprint") or ""),
+                }
+            except Exception as exc:  # noqa: BLE001 - reported on its key, the others still get theirs
+                usages[item_id] = {"error": vault_failure_reason(exc)}
+        return usages
+
+    @staticmethod
+    def _check_deletable(
+        item_id: str, usage: Mapping[str, Any], exposures: Mapping[str, Any], *,
+        allow_unchecked: bool, unchecked_targets: Sequence[Sequence[str]] | None,
+    ) -> None:
+        """Refuse deleting a key in use, with open exposures, or with unreviewed unchecked servers."""
+        if usage["team_servers"] or usage["own_servers"]:
             raise VaultKeyInUse.from_usage(usage)
-        exposures = await self.list_exposures(vault_id=vault_id)
+        if unchecked_targets is not None:
+            valid = all(isinstance(target, (list, tuple)) and len(target) == 3
+                        and all(isinstance(value, str) for value in target) for target in unchecked_targets)
+            if not valid or {tuple(target) for target in unchecked_targets} != {tuple(target) for target in usage["unchecked_targets"]}:
+                raise VaultUserError("saved assignment checks changed; review the key again before deleting")
+        if usage["unchecked"] and (allow_unchecked is not True or unchecked_targets is None):
+            raise VaultKeyInUse.from_usage(usage)
         if any(row.get("item_id") == item_id and row.get("status", "open") == "open"
                and row.get("resolved_at") is None for row in exposures["data"]):
             raise VaultUserError("resolve or rotate its open exposures first")
+
+    async def delete_ssh_key(
+        self, *, vault_id: str, item_id: str, servers: Sequence[Mapping[str, Any]],
+        allow_unchecked: bool = False, unchecked_targets: Sequence[Sequence[str]] | None = None,
+    ) -> dict[str, Any]:
+        """Delete an unassigned, unexposed key, optionally acknowledging unavailable binding reads."""
+        item = await self._ssh_key_record(vault_id, item_id)
+        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
+        if usage["team_servers"] or usage["own_servers"]:
+            raise VaultKeyInUse.from_usage(usage)
+        exposures = await self.list_exposures(vault_id=vault_id)
+        self._check_deletable(
+            item_id, usage, exposures, allow_unchecked=allow_unchecked, unchecked_targets=unchecked_targets,
+        )
         await self.items.delete_item(vault_id, item_id, item["revision"])
         return {"item_id": item_id, "deleted": True}
+
+    async def delete_ssh_keys(
+        self, *, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
+        unchecked_by_key: Mapping[str, Sequence[Sequence[str]]] | None = None,
+        on_progress: Callable[[int, int, KeyDeletion], None] | None = None,
+    ) -> list[KeyDeletion]:
+        """Delete several keys with :meth:`delete_ssh_key`'s guards; one result each, in order, never raising.
+
+        Each own server's binding is read once, fresh, before the pass, and
+        the vault's exposures once. *unchecked_by_key* names, per key, the
+        unchecked servers the user reviewed: the override applies only when
+        they are exactly that key's unchecked servers now. *on_progress* gets
+        ``(index, total, result)`` after each key, from 1.
+        """
+        ids = list(item_ids)
+        approved = dict(unchecked_by_key or {})
+        try:
+            states = await self._own_binding_states(servers)
+            exposures = await self.list_exposures(vault_id=vault_id)
+        except Exception as exc:  # noqa: BLE001 - nothing can be checked, so nothing is deleted
+            failed = [KeyDeletion(item_id, False, exc) for item_id in ids]
+            for index, result in enumerate(failed, start=1):
+                if on_progress is not None:
+                    on_progress(index, len(ids), result)
+            return failed
+        results: list[KeyDeletion] = []
+        for index, item_id in enumerate(ids, start=1):
+            try:
+                item = await self._ssh_key_record(vault_id, item_id)
+                targets = approved.get(item_id)
+                self._check_deletable(
+                    item_id, self._usage_from(vault_id, item_id, item, states), exposures,
+                    allow_unchecked=targets is not None, unchecked_targets=targets,
+                )
+                await self.items.delete_item(vault_id, item_id, item["revision"])
+                result = KeyDeletion(item_id, True)
+            except Exception as exc:  # noqa: BLE001 - reported on its key, the others go on
+                result = KeyDeletion(item_id, False, exc)
+            results.append(result)
+            if on_progress is not None:
+                on_progress(index, len(ids), result)
+        return results
 
     async def process_grants(
         self, *, vault_id: str | None = None, interactive: bool = False,
