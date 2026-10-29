@@ -50,7 +50,7 @@ _HOST_KEY_VISITS = 4
 # A private key file larger than this is not read: no SSH key is that big.
 _KEY_FILE_MAX_BYTES = 64 * 1024
 
-MATCHED_BY_CONFIGURED_KEY = "configured key file"  # the key file set for the server (instance_keys)
+MATCHED_BY_CONFIGURED_KEY = "configured key"  # the key file set for the server (instance_keys)
 MATCHED_BY_KEY_PAIR = "key pair"
 MATCHED_BY_KEY_FILE = "key file"  # a custom server's own key file
 MATCHED_BY_SERVER_NAME = "server name"

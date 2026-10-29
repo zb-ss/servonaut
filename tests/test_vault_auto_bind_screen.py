@@ -1129,7 +1129,7 @@ async def test_a_configured_key_file_matches_first_and_a_missing_one_is_noted(tm
     async with app.run_test(size=(160, 50)):
         await wait_until(lambda: _rows(app))
         rows = {row[1]: row for row in _rows(app)}
-        assert rows["web-1"][3:5] == ("deploy copy", "configured key file")
+        assert rows["web-1"][3:5] == ("deploy copy", "configured key")
         table = app.screen.query_one("#auto_bind_table", DataTable)
         table.move_cursor(row=[row[1] for row in _rows(app)].index("db-1"))
         await wait_until(lambda: "Note: The key file set for this server (cache-old.pem) is not in this vault" in str(

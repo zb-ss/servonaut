@@ -1026,7 +1026,7 @@ async def test_the_key_file_set_for_the_server_wins_over_its_key_pair(tmp_path) 
     [row] = await plan_auto_bind(service, [server], keys, host_keys_for=lambda *_: [HOST_KEY])
 
     assert row.match.item_id == "kb"
-    assert row.match.matched_by == "configured key file"
+    assert row.match.matched_by == "configured key"
     assert row.status == READY
     assert row.notes == []
 
@@ -1042,7 +1042,7 @@ async def test_a_configured_aws_pem_key_matches_by_fingerprint(tmp_path) -> None
         service, [_server("i-1", "web-1")], keys, host_keys_for=lambda *_: [HOST_KEY],
     )
 
-    assert (row.match.item_id, row.match.matched_by) == ("k1", "configured key file")
+    assert (row.match.item_id, row.match.matched_by) == ("k1", "configured key")
 
 
 @pytest.mark.asyncio
@@ -1070,7 +1070,7 @@ async def test_a_configured_key_without_a_readable_fingerprint_matches_by_file_n
         service, [_server("i-1", "web-1", key_name="kp-a")], keys, host_keys_for=lambda *_: [HOST_KEY],
     )
 
-    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key file")
+    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key")
 
 
 @pytest.mark.asyncio
@@ -1107,7 +1107,7 @@ async def test_team_auto_bind_matches_the_own_servers_configured_key_first(tmp_p
         service, [own, shared], keys, team="devs", host_keys_for=lambda *_: [HOST_KEY],
     )
 
-    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key file")
+    assert (row.match.item_id, row.match.matched_by) == ("kb", "configured key")
 
 
 def test_a_key_files_pub_file_names_its_fingerprint(tmp_path) -> None:
