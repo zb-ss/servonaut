@@ -513,6 +513,34 @@ class RelayExecutors:
             return None, dict(instance)
         return team_lease, team
 
+    async def _bastion_hop(self, conn: Mapping[str, Any]) -> tuple[list, Any | None]:
+        """``(proxy_args, hop)``: *conn*'s proxy args, with its bastion's vault key when it has one.
+
+        Raises:
+            RuntimeError: the bastion's vault key must not be used; like a
+                target's, the command fails closed.
+        """
+        from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
+
+        profile = conn.get('profile')
+        proxy_args = list(conn.get('proxy_args') or [])
+        if profile is None or self._vault_runtime is None or not getattr(profile, 'bastion_host', None):
+            return proxy_args, None
+        rows = [*self._directory.custom_rows()]
+        for provider in ('aws', 'ovh', 'hetzner'):
+            rows.extend(self._directory.cached_provider_rows(provider))
+        rows.extend(await self._shared_rows())
+        try:
+            hop = await bastion_lease(
+                profile, rows, vault_runtime=self._vault_runtime,
+                connection_service=self._connection_service,
+            )
+        except VaultCredentialError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if hop is None:
+            return proxy_args, None
+        return self._connection_service.get_proxy_args(profile, hop=hop), hop
+
     @staticmethod
     def _lease_options(lease: Any | None) -> list[str]:
         """Return strict, per-command options for an agent-held vault lease."""
@@ -746,6 +774,7 @@ class RelayExecutors:
             command = team_guard.guard.command_for_execution(command)
 
         lease, target = await self._lease_and_target(instance)
+        hop = None
         try:
             # Validate all native lease metadata before command construction.
             # SSH consumes it through explicit arguments; SCP also receives
@@ -753,11 +782,12 @@ class RelayExecutors:
             self._lease_options(lease)
             conn = self._resolve_connection(target)
             host, port = self._lease_destination(lease, conn)
+            proxy_args, hop = await self._bastion_hop(conn)
             ssh_cmd = self._ssh_service.build_ssh_command(
                 host=host,
                 username=self._lease_login(lease, conn['username']),
                 key_path=None if lease is not None else conn['key_path'],
-                proxy_args=conn['proxy_args'],
+                proxy_args=proxy_args,
                 remote_command=command,
                 port=port,
                 identity_agent=getattr(lease, "identity_agent", None),
@@ -782,6 +812,7 @@ class RelayExecutors:
                 error_message=str(e),
             )
         finally:
+            self._close_lease(hop)
             self._close_lease(lease)
 
         host_key_problem = detect_host_key_problem(
@@ -894,12 +925,13 @@ class RelayExecutors:
                 return rejection
 
         lease, target = await self._lease_and_target(instance)
+        hop = None
         try:
             conn = self._resolve_connection(target)
             host, port = self._lease_destination(lease, conn)
             username = self._lease_login(lease, conn['username'])
             key_path = None if lease is not None else conn['key_path']
-            proxy_args = conn['proxy_args']
+            proxy_args, hop = await self._bastion_hop(conn)
             profile = conn['profile']
             # Nobody can answer a prompt here.
             extra_options = ["BatchMode=yes", *(conn.get('extra_options') or [])]
@@ -928,6 +960,7 @@ class RelayExecutors:
                 )
             returncode, stdout, stderr = await self._scp_service.execute_transfer(scp_cmd)
         finally:
+            self._close_lease(hop)
             self._close_lease(lease)
 
         if returncode == 0:

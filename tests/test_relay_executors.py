@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1618,3 +1619,44 @@ class TestTeamKeyFallbackOnRelay:
 
         assert runtime.teams.list_teams.await_count <= 2
         assert runtime.teams.list_shared_servers.await_count <= 2
+
+
+class TestRelayBastionVaultHop:
+    """A relayed command's hop uses the bastion's own vault key, and closes it."""
+
+    @staticmethod
+    def _executors_with_bastion(hop):
+        executors = make_executors()
+        profile = MagicMock(bastion_host="198.51.100.20")
+        executors._connection_service.resolve_profile.return_value = profile
+        executors._connection_service.get_proxy_args.side_effect = (
+            lambda _profile, hop=None: ["-o", "ProxyCommand=vault-hop"] if hop is not None else ["-o", "ProxyCommand=own-hop"]
+        )
+        executors._vault_runtime = SimpleNamespace(is_unlocked=True, resolve_ssh=AsyncMock(return_value=None))
+        return executors
+
+    def test_the_command_hops_with_the_bastions_key_and_closes_it(self):
+        from unittest.mock import patch
+
+        hop = SimpleNamespace(close=MagicMock())
+        executors = self._executors_with_bastion(hop)
+        with patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=hop)), \
+                patch("servonaut.services.relay_executors.run_ssh_subprocess",
+                      AsyncMock(return_value=(b"ok", b""))):
+            asyncio.run(executors.execute(make_request(payload={"command": "uptime"})))
+
+        proxy_args = executors._ssh_service.build_ssh_command.call_args.kwargs["proxy_args"]
+        assert proxy_args == ["-o", "ProxyCommand=vault-hop"]
+        hop.close.assert_called_once_with()
+
+    def test_without_a_bastion_key_the_hop_keeps_the_users_setup(self):
+        from unittest.mock import patch
+
+        executors = self._executors_with_bastion(None)
+        with patch("servonaut.services.ssh_credentials.bastion_lease", AsyncMock(return_value=None)), \
+                patch("servonaut.services.relay_executors.run_ssh_subprocess",
+                      AsyncMock(return_value=(b"ok", b""))):
+            asyncio.run(executors.execute(make_request(payload={"command": "uptime"})))
+
+        proxy_args = executors._ssh_service.build_ssh_command.call_args.kwargs["proxy_args"]
+        assert proxy_args == ["-o", "ProxyCommand=own-hop"]

@@ -287,13 +287,15 @@ class ConnectionServiceInterface(ABC):
         pass
 
     @abstractmethod
-    def get_proxy_args(self, profile: ConnectionProfile) -> List[str]:
+    def get_proxy_args(self, profile: ConnectionProfile, *, hop: Any = None) -> List[str]:
         """Build SSH proxy arguments for bastion connection.
 
-        Uses ProxyCommand when bastion_key is specified, ProxyJump otherwise.
+        Uses ProxyCommand when bastion_key or a vault *hop* is given, or
+        while host keys are verified; ProxyJump otherwise.
 
         Args:
             profile: Connection profile with bastion config.
+            hop: The bastion's own vault lease, if any.
 
         Returns:
             List of SSH arguments for proxy, or empty list if no bastion.

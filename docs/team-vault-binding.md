@@ -95,6 +95,17 @@ you confirm.
 A server that already has a team key keeps it: Auto-bind never replaces one.
 Change it with **Use Vault Key** on the server instead.
 
+## Servers behind a bastion
+
+A shared server that is reachable only through a bastion needs the bastion
+too. Share the bastion with the team and bind a team vault key to it like
+any other server. A member then connects through it when their own
+connection rule names the bastion: its `bastion_host` is the bastion's
+shared hostname (and `ssh_port` its port), and the rule matches the shared
+servers behind it. The hop logs in with the bastion's team key and checks its
+pinned host keys; see
+[A bastion with a Servonaut Vault key](configuration.md#a-bastion-with-a-servonaut-vault-key).
+
 ## Letting members use the team vault
 
 A member can use the team's keys once the vault is shared with their vault

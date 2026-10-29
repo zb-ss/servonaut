@@ -4545,21 +4545,71 @@ class ServonautTools:
         team's key points. A team's key that cannot be used here leaves the
         user's own SSH setup, as before (an agent may hold the server's key);
         the team's rules still apply to it, the stricter reading.
+
+        The hop to a bastion that is one of the servers and has a vault key
+        uses that key (``ssh_credentials.bastion_lease``).
         """
         conn, cleanup = await self._resolve_credential_chain(instance)
         team = team_key_target(instance)
         if team is None or cleanup is not None or conn.get('key_path'):
-            return conn, cleanup
+            return await self._with_bastion_hop(instance, conn, cleanup)
         try:
             team_conn, team_cleanup = await self._resolve_credential_chain(team)
         except Exception as exc:  # noqa: BLE001 — the team's key is only a fallback here
             logger.warning(
                 "Not using the team's key for %s: %s", instance.get('id'), type(exc).__name__,
             )
-            return conn, cleanup
+            return await self._with_bastion_hop(instance, conn, cleanup)
         if team_cleanup is None and not team_conn.get('key_path'):
+            return await self._with_bastion_hop(instance, conn, cleanup)
+        return await self._with_bastion_hop(team, team_conn, team_cleanup)
+
+    async def _with_bastion_hop(self, row: Dict, conn: Dict, cleanup):
+        """*conn* whose hop uses the vault key of *row*'s bastion, when that bastion has one.
+
+        Raises:
+            RuntimeError: the bastion's vault key must not be used (after
+                running *cleanup*); like a target's, it fails closed.
+        """
+        from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
+
+        if self._vault_runtime is None or self._connection_service is None:
             return conn, cleanup
-        return team_conn, team_cleanup
+        profile = self._connection_service.resolve_profile(row)
+        if profile is None or not getattr(profile, 'bastion_host', None):
+            return conn, cleanup
+        try:
+            rows = [*self._directory.custom_rows()]
+            for provider in ('aws', 'ovh', 'hetzner'):
+                rows.extend(self._directory.cached_provider_rows(provider))
+            rows.extend(await self._shared_server_rows())
+            hop = await bastion_lease(
+                profile, rows, vault_runtime=self._vault_runtime,
+                connection_service=self._connection_service,
+            )
+        except BaseException as exc:
+            # The caller only cleans up what it receives: a failure or a
+            # cancelled call here must not leave the target's key behind.
+            if cleanup is not None:
+                await cleanup()
+            if isinstance(exc, VaultCredentialError):
+                raise RuntimeError(str(exc)) from exc
+            raise
+        if hop is None:
+            return conn, cleanup
+        conn = dict(conn)
+        conn['proxy_args'] = self._connection_service.get_proxy_args(profile, hop=hop)
+
+        async def _cleanup_with_hop() -> None:
+            try:
+                if cleanup is not None:
+                    await cleanup()
+            finally:
+                close = getattr(hop, 'close', None)
+                if callable(close):
+                    close()
+
+        return conn, _cleanup_with_hop
 
     async def _resolve_credential_chain(self, instance: Dict):
         """Resolve connection params through the canonical SSH-ref chain.
@@ -4634,9 +4684,9 @@ class ServonautTools:
                 profile = self._connection_service.resolve_profile(instance)
                 proxy_args = conn['proxy_args']
                 if profile is not None:
-                    proxy_args = self._connection_service.get_proxy_args(
-                        profile, identity_agent=getattr(lease, 'identity_agent', None)
-                    )
+                    # The bastion's own vault key is added by
+                    # _resolve_connection_with_vault; never the target's agent.
+                    proxy_args = self._connection_service.get_proxy_args(profile)
                 conn.update(
                     {
                         'username': getattr(lease, 'login_user', None) or conn['username'],

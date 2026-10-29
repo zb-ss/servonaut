@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
-from typing import Optional, List
+from typing import Any, Optional, List
 
 from servonaut.services.interfaces import ConnectionServiceInterface, SSHConnectionOptions
 from servonaut.services.ssh_host_keys import (
@@ -12,7 +12,10 @@ from servonaut.services.ssh_host_keys import (
     HostKeyPolicy,
     host_key_alias_options,
     identity_file_args,
+    pinned_hop_alias_value,
+    pinned_host_key_option_values,
     proxy_command_word,
+    ssh_config_word,
 )
 from servonaut.utils.ssh_utils import SSH_LOG_ENV
 from servonaut.config.manager import ConfigManager
@@ -29,6 +32,68 @@ def _int_setting(value: object, default: int) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _keepalive_words(ssh_cfg: SSHConfig, defaults: SSHConfig) -> List[str]:
+    """The hop's keepalive and timeout options, numbers coerced to integers."""
+    interval = _int_setting(ssh_cfg.server_alive_interval, defaults.server_alive_interval)
+    count_max = _int_setting(ssh_cfg.server_alive_count_max, defaults.server_alive_count_max)
+    timeout = _int_setting(ssh_cfg.connect_timeout, defaults.connect_timeout)
+    return [
+        '-o', f'ServerAliveInterval={interval}',
+        '-o', f'ServerAliveCountMax={count_max}',
+        '-o', f"TCPKeepAlive={'yes' if ssh_cfg.tcp_keepalive else 'no'}",
+        '-o', f'ConnectTimeout={timeout}',
+    ]
+
+
+def _hop_option(name: str, value: str) -> List[str]:
+    """``-o NAME="value"`` for a path the outer ssh and then the hop's ssh expand."""
+    word = ssh_config_word(value, expansions=2)
+    if word is None:
+        raise ValueError(f"the bastion's vault {name} path cannot be passed to ssh")
+    return ['-o', shlex.quote(f'{name}={word}')]
+
+
+def _vault_hop_words(
+    hop: Any, profile: ConnectionProfile, ssh_cfg: SSHConfig, defaults: SSHConfig,
+) -> List[str]:
+    """The hop's options after ``ssh``: the bastion's vault key, its pins and its login.
+
+    Like a leased target (see ``SSHService.build_ssh_command``): the signed
+    pins come first so no configurable host-key option can weaken them, and
+    the hop logs in with the lease's agent, public identity, certificate and
+    login. It dials the bastion as *profile* names it, so an ssh_config alias
+    still routes it (its HostName, Port or ProxyJump), and checks the host
+    key against the pins written for the bound address.
+    """
+    target_port = _int_setting(getattr(hop, 'target_port', None), 22)
+    words = [
+        word
+        for value in (
+            *pinned_host_key_option_values(str(hop.known_hosts_path), expansions=2),
+            pinned_hop_alias_value(str(hop.target_host), target_port),
+        )
+        for word in ('-o', shlex.quote(value))
+    ]
+    words += [
+        *_hop_option('IdentityAgent', str(hop.identity_agent)),
+        '-o', 'IdentitiesOnly=yes',
+        *_hop_option('IdentityFile', os.path.expanduser(str(hop.identity_file))),
+    ]
+    certificate = getattr(hop, 'certificate_path', None)
+    if isinstance(certificate, str) and certificate:
+        words.extend(_hop_option('CertificateFile', certificate))
+    words.extend(_keepalive_words(ssh_cfg, defaults))
+    port = _int_setting(profile.ssh_port, 22)
+    if port != 22:
+        words.extend(['-p', str(port)])
+    # The bound login: the vault key is authorized for it, not bastion_user.
+    login = getattr(hop, 'login_user', None) or profile.bastion_user
+    host = str(profile.bastion_host)
+    destination = f'{login}@{host}' if isinstance(login, str) and login else host
+    words.extend(['-W', "'[%h]:%p'", '--', proxy_command_word(destination)])
+    return words
 
 
 def _ovh_account_config(config, instance: dict):
@@ -246,9 +311,7 @@ class ConnectionService(ConnectionServiceInterface):
         logger.debug("Built ProxyJump string: %s", proxy_jump)
         return proxy_jump
 
-    def get_proxy_args(
-        self, profile: ConnectionProfile, identity_agent: Optional[str] = None
-    ) -> List[str]:
+    def get_proxy_args(self, profile: ConnectionProfile, *, hop: Any = None) -> List[str]:
         """Build SSH proxy arguments for bastion connection.
 
         The bastion hop is a second ssh process. OpenSSH applies
@@ -258,12 +321,16 @@ class ConnectionService(ConnectionServiceInterface):
         target. ``-J`` remains for ``ssh.host_key_checking = "off"`` (the
         previous argv) and on Windows, where OpenSSH does not run a
         ProxyCommand through a POSIX shell; there the jump host follows the
-        user's own ssh configuration. A ``bastion_key`` always uses the
-        ProxyCommand form, the only way to give the hop its own ``-i``. A
-        raw ``proxy_command`` is used verbatim.
+        user's own ssh configuration. A ``bastion_key`` or a vault *hop*
+        always uses the ProxyCommand form, the only way to give the hop its
+        own key. A raw ``proxy_command`` is used verbatim.
 
         Args:
             profile: Connection profile with bastion config.
+            hop: The bastion's own vault lease (``ssh_credentials.bastion_lease``):
+                the hop then logs in with the bastion's vault key and checks
+                its signed host-key pins. Without one the hop uses the
+                user's own SSH setup (agent, ssh_config, ``bastion_key``).
 
         Returns:
             List of SSH arguments for proxy, or empty list if no bastion.
@@ -281,10 +348,14 @@ class ConnectionService(ConnectionServiceInterface):
 
         ssh_cfg = self._ssh_config()
         policy = HostKeyPolicy.from_ssh_config(ssh_cfg)
-        if profile.bastion_key or self._hop_uses_proxy_command(policy):
-            proxy_cmd = self._bastion_proxy_command(
-                profile, ssh_cfg, policy, identity_agent=identity_agent
+        if hop is not None and get_os() == 'windows':
+            logger.info(
+                "The bastion %s has a Servonaut Vault key, but OpenSSH on Windows cannot run the "
+                "hop that would use it: the hop uses your own SSH setup.", profile.bastion_host,
             )
+            hop = None
+        if profile.bastion_key or hop is not None or self._hop_uses_proxy_command(policy):
+            proxy_cmd = self._bastion_proxy_command(profile, ssh_cfg, policy, hop=hop)
             logger.debug("Using ProxyCommand for the bastion hop: %s", proxy_cmd)
             return ['-o', f'ProxyCommand={proxy_cmd}']
 
@@ -317,7 +388,7 @@ class ConnectionService(ConnectionServiceInterface):
         ssh_cfg: SSHConfig,
         policy: HostKeyPolicy,
         *,
-        identity_agent: Optional[str] = None,
+        hop: Any = None,
     ) -> str:
         """Return the ProxyCommand that reaches the target via the bastion.
 
@@ -332,6 +403,8 @@ class ConnectionService(ConnectionServiceInterface):
         # ssh_utils.SshLog), the hop writes its own messages there too;
         # unset (interactive sessions), the hop reports on stderr as before.
         parts = ['ssh', f'${{{SSH_LOG_ENV}:+-E "${SSH_LOG_ENV}"}}']
+        if hop is not None:
+            return ' '.join([*parts, *_vault_hop_words(hop, profile, ssh_cfg, defaults)])
         if profile.bastion_key:
             key_expanded = os.path.expanduser(profile.bastion_key)
             # Escaped for both expansions (this ProxyCommand, then the hop).
@@ -347,25 +420,13 @@ class ConnectionService(ConnectionServiceInterface):
         )
         if profile.bastion_key:
             parts.extend(['-o', 'IdentitiesOnly=yes'])
-        elif identity_agent:
-            # The ProxyCommand is a separate SSH process. Give it the same
-            # process-scoped agent explicitly; do not alter SSH_AUTH_SOCK.
-            parts.extend(
-                ['-o', shlex.quote(f'IdentityAgent={identity_agent}'), '-o', 'IdentitiesOnly=yes']
-            )
-        # Add keepalive options on the bastion hop so long operations
-        # don't get reaped by the gateway firewall before the inner
-        # connection completes.
-        _tcp_ka = 'yes' if ssh_cfg.tcp_keepalive else 'no'
-        interval = _int_setting(ssh_cfg.server_alive_interval, defaults.server_alive_interval)
-        count_max = _int_setting(ssh_cfg.server_alive_count_max, defaults.server_alive_count_max)
-        timeout = _int_setting(ssh_cfg.connect_timeout, defaults.connect_timeout)
-        parts.extend([
-            '-o', f'ServerAliveInterval={interval}',
-            '-o', f'ServerAliveCountMax={count_max}',
-            '-o', f'TCPKeepAlive={_tcp_ka}',
-            '-o', f'ConnectTimeout={timeout}',
-        ])
+        # Without a key of its own (bastion_key) or the bastion's vault key,
+        # the hop uses the user's own setup: their agent, ssh_config and
+        # default keys. It is never given the target's vault agent, which
+        # holds only the target's key and would hide the user's agent.
+        # Keepalives so long operations are not reaped by the gateway
+        # firewall before the inner connection completes.
+        parts.extend(_keepalive_words(ssh_cfg, defaults))
         port = _int_setting(profile.ssh_port, 22)
         if port != 22:
             parts.extend(['-p', str(port)])

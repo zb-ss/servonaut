@@ -13,7 +13,7 @@ from textual.worker import Worker
 
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
-from servonaut.screens._demo_resolve import connection_instance, team_rows
+from servonaut.screens._demo_resolve import connection_instance, fleet_rows, team_rows
 from servonaut.services.ssh_host_keys import (
     SCP_REFUSAL_EXIT_CODES,
     HostKeyPolicy,
@@ -184,8 +184,11 @@ class SCPTransferScreen(Screen):
             connection_service=self.app.connection_service,
             cache=getattr(self.app, "vault_lease_cache", None),
             team_rows=team_rows(self.app),
+            rows=fleet_rows(self.app),
         )
         if resolved.get("identity_agent") is None:
+            # No vault key for the server; its hop may still use the bastion's.
+            options = {**options, "proxy_args": resolved.get("proxy_args", options.get("proxy_args"))}
             return self._command_for(options, local_path, remote_path)
         options = {
             **{key: resolved.get(key) for key in options},

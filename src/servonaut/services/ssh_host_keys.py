@@ -48,9 +48,32 @@ HOST_KEY_CHECKING_ACCEPT_NEW = "accept-new"
 KNOWN_HOSTS_FILENAME = "known_hosts"
 
 
-def pinned_host_key_option_values(known_hosts_file: str | Path) -> List[str]:
-    """Strict host-key values for an already verified, connection-specific pin file."""
-    return [f"UserKnownHostsFile={known_hosts_file}", "StrictHostKeyChecking=yes"]
+def pinned_host_key_option_values(known_hosts_file: str | Path, *, expansions: int = 0) -> List[str]:
+    """Strict host-key values for an already verified, connection-specific pin file.
+
+    *expansions* > 0 quotes the path for that many percent expansions (2
+    inside a ProxyCommand hop, see :func:`ssh_config_word`).
+
+    Raises:
+        ValueError: the path cannot be given to ssh literally.
+    """
+    path = str(known_hosts_file)
+    if expansions:
+        word = ssh_config_word(path, expansions=expansions)
+        if word is None:
+            raise ValueError("the pinned known_hosts path cannot be passed to ssh")
+        path = word
+    return [f"UserKnownHostsFile={path}", "StrictHostKeyChecking=yes"]
+
+
+def pinned_hop_alias_value(host: str, port: Optional[int] = None) -> str:
+    """``HostKeyAlias`` for a hop whose pins are written for *host*:*port*.
+
+    The hop dials the bastion as the connection profile names it (an ssh
+    alias may route it), and looks its host key up under the name the
+    pinned file uses for the bound address.
+    """
+    return f"HostKeyAlias={known_hosts_name(host, port)}"
 
 
 def pinned_host_key_options(known_hosts_file: str | Path) -> List[str]:

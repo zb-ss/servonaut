@@ -8,6 +8,11 @@ private agent, public identity file, pinned host keys and login instead of any
 local key. A server whose row names a native binding fails closed when no
 lease can be produced; every other server keeps its local connection.
 
+A bastion (jump host) that is itself one of the fleet's servers and has a
+vault key gets its own lease too (:func:`bastion_lease`): the hop then logs in
+with the bastion's key and checks its signed host-key pins. Without one the hop
+uses the user's own SSH setup.
+
 A long-running app shares one :class:`VaultLeaseCache`, so a server's lease
 (one private agent holding the key) is reused while the key is still loaded,
 instead of starting an agent for every command. Headless one-shot callers pass
@@ -16,13 +21,19 @@ no cache and close the lease when they are done.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
-from servonaut.services.shared_servers import row_team_label, team_key_fallback, team_key_target
+from servonaut.services.shared_servers import (
+    is_shared_row,
+    row_team_label,
+    team_key_fallback,
+    team_key_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,26 +176,162 @@ def lease_destination(lease: Any, host: Any, port: Any) -> tuple[Any, Any]:
     return target_host, target_port
 
 
+def _is_private_address(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False  # a DNS name names one host wherever it is used
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def _row_address(row: Mapping[str, Any]) -> tuple[str, int]:
+    """The address and port this machine dials for *row* directly, as a bastion is dialled.
+
+    A cloud server's public address only: the same private address exists in
+    many networks. A custom server's host is what the user connects to, so it
+    counts whatever it is. A team's shared server's host counts unless it is
+    a private address: the team's network is not necessarily the user's.
+    """
+    if is_shared_row(row):
+        host = row.get("hostname") or row.get("public_ip")
+        if _is_private_address(str(host or "").strip()):
+            host = None
+    elif row.get("is_custom") is True:
+        host = row.get("host") or row.get("public_ip")
+    else:
+        host = row.get("public_ip")
+    port = row.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        port = 22
+    return str(host or "").strip().casefold(), port
+
+
+def bastion_row(profile: Any, rows: Iterable[Mapping[str, Any]]) -> Optional[Mapping[str, Any]]:
+    """The server row that is *profile*'s bastion, or None.
+
+    The bastion is the one row the profile dials: same address and port,
+    else (a bastion named by its server name) the one row of that name. The
+    user's own rows are searched first, both ways, then a team's shared rows.
+    Several matches find none: guessing could lease the wrong server's key.
+    """
+    host = str(getattr(profile, "bastion_host", None) or "").strip().casefold()
+    if not host:
+        return None
+    try:
+        port = int(getattr(profile, "ssh_port", 22) or 22)
+    except (TypeError, ValueError):
+        port = 22
+    rows = [row for row in rows if isinstance(row, Mapping)]
+    own = [row for row in rows if not is_shared_row(row)]
+    shared = [row for row in rows if is_shared_row(row)]
+    for group in (own, shared):
+        by_address = [row for row in group if _row_address(row) == (host, port)]
+        if not by_address:
+            by_address = [row for row in group if str(row.get("name") or "").strip().casefold() == host]
+        if len(by_address) == 1:
+            return by_address[0]
+        if by_address:
+            return None
+    return None
+
+
+def _is_untrusted(exc: BaseException) -> bool:
+    """Whether *exc* (or what it wraps) says the bastion's vault key must not be trusted.
+
+    A binding, signature or pin that does not verify, or a bound address
+    that changed. Anything else (a locked or missing identity, an agent that
+    cannot start, an unreachable service) only means the key cannot be used
+    here.
+    """
+    from servonaut.services.vault.ca_pins import CaPinMismatchError
+    from servonaut.services.vault.crypto import IntegrityError
+    from servonaut.services.vault.team_vault_client import VaultIdentityMissingError
+
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (IntegrityError, CaPinMismatchError)) and not isinstance(
+            current, VaultIdentityMissingError,
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def bastion_lease(
+    profile: Any,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    vault_runtime: Any,
+    connection_service: Any,
+    cache: Optional[VaultLeaseCache] = None,
+) -> Any:
+    """The vault lease of *profile*'s bastion, or None to keep the user's own hop setup.
+
+    None when the profile has no bastion, the vault is locked, no single
+    server is the bastion (:func:`bastion_row`), the bastion has no vault
+    key, the key cannot be used here (the vault service cannot be reached,
+    no private agent can start, Windows), or the bastion is itself reached
+    through a bastion or a proxy command (its binding pins an address only
+    reachable that way).
+
+    Raises:
+        VaultCredentialError: the bastion's vault key must not be trusted (a
+            binding, signature or pin that does not verify, a changed
+            address): as for a target, the connection stops rather than
+            trust the hop.
+    """
+    from servonaut.utils.platform_utils import get_os
+
+    if profile is None or getattr(profile, "proxy_command", None) or not getattr(profile, "bastion_host", None):
+        return None
+    if vault_runtime is None or getattr(vault_runtime, "is_unlocked", False) is not True:
+        return None
+    if get_os() == "windows":
+        # OpenSSH on Windows runs no hop that could use the key (see
+        # ConnectionService.get_proxy_args): never start an agent for it.
+        return None
+    row = bastion_row(profile, rows)
+    if row is None:
+        return None
+    name = str(row.get("name") or row.get("id") or profile.bastion_host)
+    if connection_service is not None:
+        try:
+            own_profile = connection_service.resolve_profile(dict(row))
+        except Exception:  # noqa: BLE001 - a row without rules is reached directly
+            own_profile = None
+        if own_profile is not None and (
+            getattr(own_profile, "bastion_host", None) or getattr(own_profile, "proxy_command", None)
+        ):
+            logger.info("Not using the vault key of the bastion %s: a connection rule routes it through a proxy too", name)
+            return None
+    try:
+        return await vault_lease(row, vault_runtime, cache=cache)
+    except VaultCredentialError as exc:
+        if _is_untrusted(exc):
+            raise VaultCredentialError(f"The bastion {name}: {exc}") from exc
+        logger.warning("The vault key of the bastion %s cannot be used here; the hop uses your own SSH setup: %s", name, exc)
+        return None
+
+
 def apply_vault_lease(
     conn: Mapping[str, Any],
     lease: Any,
     *,
     instance: Mapping[str, Any],
     connection_service: Any,
+    hop: Any = None,
 ) -> dict[str, Any]:
-    """*conn* with the lease's agent, identity, host pins and login in place of a local key."""
+    """*conn* with the lease's agent, identity, host pins and login in place of a local key.
+
+    *hop* is the bastion's own vault lease, if any (:func:`bastion_lease`).
+    """
     applied = dict(conn)
     proxy_args = list(applied.get("proxy_args") or [])
-    profile = applied.get("profile")
-    if profile is None and connection_service is not None:
-        try:
-            profile = connection_service.resolve_profile(instance)
-        except Exception:  # noqa: BLE001 - a row without rules keeps its proxy args
-            profile = None
+    profile = _route_profile(applied, instance, connection_service)
     if profile is not None and connection_service is not None:
-        proxy_args = connection_service.get_proxy_args(
-            profile, identity_agent=getattr(lease, "identity_agent", None)
-        )
+        proxy_args = connection_service.get_proxy_args(profile, hop=hop)
     applied.update(
         {
             "username": getattr(lease, "login_user", None) or applied.get("username"),
@@ -205,6 +352,17 @@ def apply_vault_lease(
     return applied
 
 
+def _route_profile(conn: Mapping[str, Any], instance: Mapping[str, Any], connection_service: Any) -> Any:
+    """The connection rule's profile *conn* routes *instance* by."""
+    profile = conn.get("profile")
+    if profile is None and connection_service is not None:
+        try:
+            profile = connection_service.resolve_profile(instance)
+        except Exception:  # noqa: BLE001 - a row without rules keeps its proxy args
+            profile = None
+    return profile
+
+
 async def resolve_with_vault(
     conn: Mapping[str, Any],
     instance: Mapping[str, Any],
@@ -213,6 +371,7 @@ async def resolve_with_vault(
     connection_service: Any,
     cache: Optional[VaultLeaseCache] = None,
     team_rows: Iterable[Mapping[str, Any]] = (),
+    rows: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> dict[str, Any]:
     """*conn* unchanged, or with the server's vault credential applied.
 
@@ -227,23 +386,37 @@ async def resolve_with_vault(
     setup applies as before: an agent or ssh's default keys may hold the
     server's key.
 
+    The hop to a bastion that is one of *rows* (the fleet; *team_rows*
+    when not given) and has a vault key uses that key (:func:`bastion_lease`).
+
     Raises:
         VaultCredentialError: see :func:`vault_lease` (the server's own
-            vault credential).
+            vault credential) and :func:`bastion_lease`.
     """
+    team_rows = list(team_rows)
+    fleet = list(rows) if rows is not None else team_rows
+
+    async def hop_for(profile: Any) -> Any:
+        return await bastion_lease(
+            profile, fleet, vault_runtime=vault_runtime, connection_service=connection_service, cache=cache,
+        )
+
     lease = await vault_lease(instance, vault_runtime, cache=cache)
     if lease is not None:
-        return apply_vault_lease(conn, lease, instance=instance, connection_service=connection_service)
+        profile = _route_profile(conn, instance, connection_service)
+        return apply_vault_lease(
+            conn, lease, instance=instance, connection_service=connection_service, hop=await hop_for(profile),
+        )
     team = team_key_target(instance) or team_key_fallback(instance, team_rows, conn.get("key_path"))
     if team is None:
-        return dict(conn)
+        return await _with_hop(conn, instance, connection_service, hop_for)
     try:
         lease = await vault_lease(team, vault_runtime, cache=cache)
     except VaultCredentialError as exc:
         logger.warning("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
-        return dict(conn)
+        return await _with_hop(conn, instance, connection_service, hop_for)
     if lease is None:
-        return dict(conn)
+        return await _with_hop(conn, instance, connection_service, hop_for)
     # The team's route: its connection rule and options, not the user's own row's.
     profile, extra_options = None, []
     if connection_service is not None:
@@ -254,9 +427,21 @@ async def resolve_with_vault(
             profile, extra_options = None, []
     applied = apply_vault_lease(
         {**conn, "profile": profile, "proxy_args": [], "extra_options": extra_options}, lease,
-        instance=team, connection_service=connection_service,
+        instance=team, connection_service=connection_service, hop=await hop_for(profile),
     )
     applied["key_team"] = row_team_label(team)
+    return applied
+
+
+async def _with_hop(conn: Mapping[str, Any], instance: Mapping[str, Any], connection_service: Any, hop_for: Any) -> dict[str, Any]:
+    """*conn* for a server without a vault key: its hop uses the bastion's vault key if it has one."""
+    applied = dict(conn)
+    profile = _route_profile(applied, instance, connection_service)
+    if profile is None or connection_service is None:
+        return applied
+    hop = await hop_for(profile)
+    if hop is not None:
+        applied["proxy_args"] = connection_service.get_proxy_args(profile, hop=hop)
     return applied
 
 
