@@ -30,6 +30,7 @@ from servonaut.services.connection_service import (
     profile_route,
     rule_username,
 )
+from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
 from servonaut.utils.instance_resolver import describe_candidate, match_instances, qualified_reference
 
 logger = logging.getLogger(__name__)
@@ -478,6 +479,44 @@ async def _handle_ssh_async(args: Any) -> int:
     route = profile_route(instance, ConnectionService.for_config(config))
     host = route["host"] or instance.get("host") or instance.get("hostname") or iid
 
+    # The bastion's own vault key, when the bastion is one of the servers and
+    # has one: the hop then logs in with it and checks its signed host keys.
+    connection_service = ConnectionService.for_config(config)
+    try:
+        hop = await bastion_lease(
+            route["profile"], instances, vault_runtime=vault_runtime, connection_service=connection_service,
+        )
+    except VaultCredentialError as exc:
+        print(str(exc), file=sys.stderr)
+        return _EXIT_GENERIC_ERROR
+    if hop is not None:
+        route = {**route, "proxy_args": connection_service.get_proxy_args(route["profile"], hop=hop)}
+    try:
+        return await _connect_resolved(
+            args, config, instance, iid, host, route, resolved,
+            ssh_service=ssh_service, bw_ssh_config_service=bw_ssh_config_service,
+            team_service=team_service,
+        )
+    finally:
+        close = getattr(hop, "close", None)
+        if callable(close):
+            close()
+
+
+async def _connect_resolved(
+    args: Any, config: Any, instance: dict, iid: str, host: str, route: dict, resolved: Any,
+    *, ssh_service: Any, bw_ssh_config_service: Any, team_service: Any,
+) -> int:
+    """Run ssh to *instance* with its resolved credential over *route*; the exit status."""
+    from servonaut.services.bw_resolver import (
+        BwResolver,
+        BwCliMissingError,
+        BwSessionMissingError,
+        BwItemNotFoundError,
+        BwItemShapeError,
+    )
+    from servonaut.utils.ephemeral_key import ephemeral_ssh_key
+
     # --- Determine username ---
     username = (
         args.user
@@ -506,10 +545,6 @@ async def _handle_ssh_async(args: Any) -> int:
         port = getattr(resolved.lease, "target_port", None) or port
         try:
             proxy_args = route["proxy_args"]
-            if route["profile"]:
-                proxy_args = ConnectionService.for_config(config).get_proxy_args(
-                    route["profile"], identity_agent=resolved.identity_agent
-                )
             cmd = ssh_service.build_ssh_command(
                 host=host,
                 username=username,

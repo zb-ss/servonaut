@@ -76,7 +76,10 @@ class TestResolveWithVault:
         assert conn["extra_options"] == LOCAL["extra_options"]
         assert conn["key_source"] == "vault_vault"
 
-    def test_a_bastion_profile_reaches_the_jump_host_through_the_private_agent(self, tmp_path):
+    def test_a_bastion_profile_hop_never_gets_the_targets_agent(self, tmp_path):
+        # The target's agent holds only the target's key and would hide the
+        # user's own agent from the hop: a bastion without a vault key of
+        # its own keeps the user's SSH setup.
         lease = _lease(tmp_path)
         profile = object()
         connection_service = MagicMock()
@@ -86,7 +89,7 @@ class TestResolveWithVault:
         conn = _resolve({**LOCAL, "proxy_args": ["-J", "old"]}, CUSTOM, _runtime(lease),
                         connection_service=connection_service)
 
-        connection_service.get_proxy_args.assert_called_once_with(profile, identity_agent=lease.identity_agent)
+        connection_service.get_proxy_args.assert_called_once_with(profile, hop=None)
         assert conn["proxy_args"] == ["-J", "bastion"]
 
     def test_an_unusable_vault_credential_fails_closed(self):

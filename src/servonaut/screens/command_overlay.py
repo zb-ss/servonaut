@@ -28,7 +28,7 @@ from servonaut.utils.ssh_utils import (
     track_background_process,
 )
 from servonaut.widgets.command_output import CommandOutput
-from servonaut.screens._demo_resolve import connection_instance, display_username, hide_login, team_rows
+from servonaut.screens._demo_resolve import connection_instance, display_username, fleet_rows, hide_login, team_rows
 from servonaut.services.shared_servers import shared_login
 
 logger = logging.getLogger(__name__)
@@ -324,6 +324,7 @@ class CommandOverlay(ModalScreen):
             connection_service=self.app.connection_service,
             cache=getattr(self.app, "vault_lease_cache", None),
             team_rows=team_rows(self.app),
+            rows=fleet_rows(self.app),
         )
         self._host = resolved["host"]
         self._username = resolved["username"]

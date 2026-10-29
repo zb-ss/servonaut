@@ -48,9 +48,22 @@ HOST_KEY_CHECKING_ACCEPT_NEW = "accept-new"
 KNOWN_HOSTS_FILENAME = "known_hosts"
 
 
-def pinned_host_key_option_values(known_hosts_file: str | Path) -> List[str]:
-    """Strict host-key values for an already verified, connection-specific pin file."""
-    return [f"UserKnownHostsFile={known_hosts_file}", "StrictHostKeyChecking=yes"]
+def pinned_host_key_option_values(known_hosts_file: str | Path, *, expansions: int = 0) -> List[str]:
+    """Strict host-key values for an already verified, connection-specific pin file.
+
+    *expansions* > 0 quotes the path for that many percent expansions (2
+    inside a ProxyCommand hop, see :func:`ssh_config_word`).
+
+    Raises:
+        ValueError: the path cannot be given to ssh literally.
+    """
+    path = str(known_hosts_file)
+    if expansions:
+        word = ssh_config_word(path, expansions=expansions)
+        if word is None:
+            raise ValueError("the pinned known_hosts path cannot be passed to ssh")
+        path = word
+    return [f"UserKnownHostsFile={path}", "StrictHostKeyChecking=yes"]
 
 
 def pinned_host_key_options(known_hosts_file: str | Path) -> List[str]:

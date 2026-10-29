@@ -22,6 +22,7 @@ from servonaut.widgets.sidebar import Sidebar
 from typing import TYPE_CHECKING
 from servonaut.screens._demo_resolve import (
     connection_instance,
+    fleet_rows,
     real_instance_id,
     refuse_unresolved,
     replace_instances,
@@ -1048,6 +1049,7 @@ class InstanceListScreen(Screen):
                 connection_service=self.app.connection_service,
                 cache=getattr(self.app, "vault_lease_cache", None),
                 team_rows=team_rows(self.app),
+                rows=fleet_rows(self.app),
             )
         except VaultCredentialError as exc:
             self.app.notify(str(exc), severity="error", markup=False)

@@ -92,11 +92,13 @@ class LogViewerService(LogViewerServiceInterface):
     async def resolve_connection(
         self, instance: dict, ssh_service: Any, connection_service: Any,
         *, team_rows: Iterable[Mapping[str, Any]] = (),
+        rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """The connection for *instance*, with its vault credential applied.
 
         *team_rows* are the team shared servers a server of the user's own
-        may connect through (see ``ssh_credentials.resolve_with_vault``).
+        may connect through, *rows* the whole fleet a bastion is looked up in
+        (see ``ssh_credentials.resolve_with_vault``).
 
         Raises:
             VaultCredentialError: the server's vault credential cannot be used.
@@ -107,7 +109,7 @@ class LogViewerService(LogViewerServiceInterface):
             self._resolve_connection(instance, ssh_service, connection_service),
             instance, vault_runtime=self._vault_runtime,
             connection_service=connection_service, cache=self._vault_leases,
-            team_rows=team_rows,
+            team_rows=team_rows, rows=rows,
         )
 
     def _resolve_connection(

@@ -36,7 +36,7 @@ from servonaut.screens.log_picker import (
     REMOVE_PATH_SENTINEL,
     EDIT_PATH_SENTINEL,
 )
-from servonaut.screens._demo_resolve import connection_instance, real_instance_id, team_rows
+from servonaut.screens._demo_resolve import connection_instance, fleet_rows, real_instance_id, team_rows
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +257,7 @@ class LogViewerScreen(Screen):
                 self.app.ssh_service,
                 self.app.connection_service,
                 team_rows=team_rows(self.app),
+                rows=fleet_rows(self.app),
             )
         except VaultCredentialError as exc:
             message = str(exc)

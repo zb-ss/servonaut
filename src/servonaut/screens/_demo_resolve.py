@@ -41,6 +41,18 @@ def team_rows(app: Any) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows or [] if isinstance(row, dict) and is_shared_row(row)]
 
 
+def fleet_rows(app: Any) -> List[Dict[str, Any]]:
+    """Every server of the fleet, the user's own and the teams' shared ones, as real records.
+
+    Where a connection rule's bastion is looked up (see
+    ``ssh_credentials.bastion_row``). Demo mode redacts ``app.instances``,
+    so the pre-redaction copy is read then.
+    """
+    demo = bool(getattr(app, "demo_mode", False)) and getattr(app, "redaction_service", None) is not None
+    rows = getattr(app, "_instances_pristine", None) if demo else getattr(app, "instances", None)
+    return [dict(row) for row in rows or [] if isinstance(row, dict)]
+
+
 UNRESOLVED_MESSAGE = (
     "The real server behind this row is not known in demo mode, so nothing "
     "was sent. Press ctrl+shift+d to turn demo mode off and try again."

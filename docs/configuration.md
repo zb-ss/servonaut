@@ -152,6 +152,7 @@ The proxy method is chosen automatically based on what's configured:
 
 | Configuration | SSH Method | Use Case |
 |---------------|------------|----------|
+| The bastion is one of your servers with a Servonaut Vault key | `-o ProxyCommand` with the bastion's vault key and pinned host keys | Bastion key kept in the vault (see below) |
 | `bastion_key` is set | `-o ProxyCommand` with `-i` flag | Bastion needs a different key than the target |
 | No `bastion_key` | `-o ProxyCommand` (`-J` when `ssh.host_key_checking` is `off`, and on Windows) | Bastion uses your SSH agent or default keys |
 | `proxy_command` is set | `-o ProxyCommand` (raw) | Advanced/custom proxy setups |
@@ -168,6 +169,34 @@ bastion is verified by your own OpenSSH configuration: add
 `StrictHostKeyChecking accept-new` for it in `~/.ssh/config` so it is never
 asked about interactively. A raw `proxy_command` is used exactly as written;
 its host-key handling is up to that command.
+
+#### A bastion with a Servonaut Vault key
+
+When the bastion is itself one of your servers (an AWS, OVH or Hetzner
+instance, a custom server, or a server a team shares) and that server has a
+Servonaut Vault key, the hop logs in with that key, as the bastion's own
+binding names it: its login, its pinned host keys and its address. No key
+file for the bastion is needed on this computer, and `bastion_key` is not
+used. Every surface does this: `servonaut ssh`, the app, the MCP server and
+the relay.
+
+- The bastion is found by `bastion_host` and `ssh_port`: the one server
+  whose address is that host and port (a cloud server's public address, a
+  custom server's host, a shared server's hostname), else the one server
+  named `bastion_host`. Your own servers come before a team's shared ones.
+  When no server, or several, match, the hop uses your own SSH setup.
+- A bastion binding that fails verification, or a bastion whose address
+  changed since it was bound, stops the connection, as for any server bound
+  to a vault key. A locked vault, or a Servonaut service that cannot be
+  reached, leaves the hop to your own SSH setup.
+- A bastion that a connection rule itself routes through a bastion is
+  reached the usual way.
+- On Windows the hop keeps `-J` and your own SSH setup: OpenSSH there cannot
+  run the hop that would use the vault key.
+
+Without a vault key for the bastion, the hop uses your own SSH setup: your
+SSH agent, your `~/.ssh/config` and default keys, or `bastion_key`. It is
+never given the target's vault key.
 
 ### Per-host SSH tuning
 
