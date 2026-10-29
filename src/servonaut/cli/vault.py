@@ -224,7 +224,10 @@ def add_vault_parser(subparsers: Any) -> None:
     bind_personal.add_argument("--yes", action="store_true")
     auto_bind = commands.add_parser(
         "auto-bind",
-        help="Bind personal-vault SSH keys to the servers named like them (key pair name, then server name).",
+        help=(
+            "Bind personal-vault SSH keys to your servers: the key file set for a server, "
+            "else the key named like its key pair, then like the server."
+        ),
     )
     auto_bind.add_argument("--vault", default=None, help=f"{_VAULT_HELP} Default: your personal vault.")
     auto_bind.add_argument("--team", default=None, help="Bind a team vault's keys to that team's shared servers.")
