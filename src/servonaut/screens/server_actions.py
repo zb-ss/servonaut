@@ -186,6 +186,52 @@ class VaultBindingScopeModal(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class OwnKeyUpdateModal(ModalScreen[bool]):
+    """After a team key is set on the user's own server: also move their own binding to it?
+
+    Keep is the default (Escape and Enter): the user's binding only changes
+    on an explicit Update.
+    """
+
+    DEFAULT_CSS = """
+    OwnKeyUpdateModal { align: center middle; }
+    #own_key_modal {
+        width: 76; max-width: 92%; height: auto; max-height: 88%;
+        border: round $primary; background: $surface; padding: 1 2;
+    }
+    #own_key_body { margin: 1 0; }
+    #own_key_buttons { height: auto; }
+    #own_key_keep, #own_key_update { min-width: 12; margin-right: 1; }
+    """
+    BINDINGS = [Binding("escape", "keep", "Keep mine", show=False)]
+
+    def __init__(self, body: str) -> None:
+        super().__init__()
+        self._body = body
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("[bold]Also update your own key for this server?[/bold]"),
+            # Logins and names come from servers and other users: inert text.
+            Static(Text(self._body), id="own_key_body"),
+            Horizontal(
+                Button("Keep mine", id="own_key_keep"),
+                Button("Update mine", id="own_key_update", variant="primary"),
+                id="own_key_buttons",
+            ),
+            id="own_key_modal",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#own_key_keep", Button).focus()
+
+    def action_keep(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "own_key_update")
+
+
 class ConfirmSshVerifyModal(ModalScreen[bool]):
     """Brief blocking confirmation for the SSH probe action.
 
@@ -2132,11 +2178,74 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 self._render_server_info()
             scope = scrub_for_display(self.app, scope)
             message = f"Vault key bound. {scope}: {label}."
-            if selected_team and self._vault_binding_source:
-                message += " You keep connecting with your key."
+            if selected_team and self._instance.get("is_shared") is not True:
+                own = await self._own_binding_after_team_bind(service, values, result)
+                if own:
+                    message += f" {scrub_for_display(self.app, own)}"
             self.app.notify(message, markup=False)
 
         self.run_worker(flow(), group="vault", exclusive=True)
+
+    async def _own_binding_after_team_bind(
+        self, service: Any, values: Mapping[str, Any], result: object,
+    ) -> Optional[str]:
+        """Offer to move the user's own binding to the team key just set on their own server.
+
+        The own row connects with the user's personal binding first, so a
+        team key with another key or login changes nothing for the user
+        until they agree to update their own. Returns the sentence to add to
+        the outcome; None when they have no personal binding or it matches.
+        """
+        from servonaut.services.vault.errors import vault_failure_reason
+        from servonaut.services.vault.personal_targets import instance_provider
+
+        own = connection_instance(self.app, self._instance)
+        try:
+            personal = await service.personal_binding(own)
+        except Exception:  # noqa: BLE001 — unknown, so nothing is offered or claimed
+            logger.debug("Could not read the own binding after a team bind", exc_info=True)
+            return None
+        if not isinstance(personal, Mapping):
+            return None
+        team = result.get("credential_binding", result) if isinstance(result, Mapping) else None
+        team = team if isinstance(team, Mapping) else {}
+        own_login = str(personal.get("login_user") or "")
+        team_login = str(team.get("login_user") or values.get("login") or "")
+        same_key = bool(team.get("public_fingerprint")) and (
+            personal.get("public_fingerprint") == team.get("public_fingerprint")
+        )
+        kept = f"You still connect with your own key, as {own_login}." if own_login else (
+            "You still connect with your own key."
+        )
+        if same_key and own_login == team_login:
+            return "You keep connecting with your key."
+        host_keys = [key for key in team.get("host_keys") or [] if isinstance(key, str) and key]
+        destination, port = service.ssh_destination(own)
+        if not team_login or not host_keys or not destination or not isinstance(port, int):
+            return kept
+        key_change = "" if same_key else "the team's key and "
+        body = (
+            f"You connect to this server with your own vault key{f', as {own_login}' if own_login else ''}. "
+            f"The team key you just set logs in as {team_login}.\n\n"
+            f"Update your own binding to {key_change}the login {team_login}? "
+            "The pinned host keys stay the same."
+        )
+        if not await self.app.push_screen_wait(OwnKeyUpdateModal(scrub_for_display(self.app, body))):
+            return kept
+        custom = own.get("is_custom") is True
+        try:
+            await service.bind_personal(
+                vault_id=values["vault_id"], item_id=values["item_id"],
+                provider=instance_provider(own),
+                instance_id=str(own.get("name") or "") if custom else str(own.get("id") or ""),
+                hostname=str(destination), port=port, login=team_login, host_keys=host_keys,
+            )
+        except Exception as exc:  # noqa: BLE001 — the team key is bound either way
+            return f"Your own key was not updated ({vault_failure_reason(exc)}). {kept}"
+        leases = getattr(self.app, "vault_lease_cache", None)
+        if leases is not None:
+            leases.forget(own)
+        return f"Your own key now uses the team's key, as {team_login}."
 
     def _team_binding_target(
         self, slug: str, *, server: Optional[str] = None,
