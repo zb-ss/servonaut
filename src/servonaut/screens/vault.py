@@ -216,8 +216,12 @@ class VaultMemberApprovalModal(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield SafeHeader()
         title = "Changed identity: approve vault access?" if self._changed else "Approve vault access?"
-        # Names and e-mail addresses come from other users: inert text.
-        body = [Static(Text(line)) for line in self._lines if not line.startswith("Safety number:")]
+        # Names and e-mail addresses come from other users: inert text,
+        # hidden in demo mode.
+        body = [
+            Static(Text(scrub_for_demo(self.app, line)))
+            for line in self._lines if not line.startswith("Safety number:")
+        ]
         yield Vertical(
             Static(f"[bold]{title}[/bold]"),
             *body[:-1],

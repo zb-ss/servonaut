@@ -960,3 +960,27 @@ async def test_escape_skips_a_member_waiting_for_approval() -> None:
         await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
         await pilot.press("escape")
         await wait_until(lambda: service.decisions == [False])
+
+
+@pytest.mark.asyncio
+async def test_demo_mode_hides_the_waiting_members_name_and_address() -> None:
+    from servonaut.screens.vault import VaultMemberApprovalModal
+    from servonaut.services.redaction_service import RedactionService
+
+    service = _GrantsService()
+    app = _StyledVaultHost(service)
+    app.demo_mode = True
+    app.redaction_service = RedactionService()
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = app.screen
+        await wait_until(lambda: screen.query_one("#vault_table", DataTable).row_count == 1)
+        screen.action_grants()
+        await wait_until(lambda: isinstance(app.screen, VaultMemberApprovalModal))
+        modal = app.screen
+        await wait_until(lambda: bool(modal.query("#vault_member_skip")))
+        text = " ".join(str(widget.render()) for widget in modal.query(Static))
+        assert "member@example.com" not in text
+        assert "12345 67890 13579" in text  # the number to compare is never hidden
+        await pilot.press("escape")
+        await wait_until(lambda: service.decisions == [False])
