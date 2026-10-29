@@ -596,6 +596,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "team": getattr(row, "team", None),
         "status": row.status,
         "result": row.result,
+        "notes": list(getattr(row, "notes", None) or []),
     }
     if getattr(row, "skipped", None) is not None:
         rec["skipped"] = row.skipped
@@ -617,6 +618,7 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                 print(f"    fetch error: {terminal_safe(str(fetch_err))}")
             if mismatch_det and str(mismatch_det) not in status:
                 print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
+            _print_auto_bind_notes(record)
             continue
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
@@ -626,6 +628,7 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
             print(f"    fetch error: {terminal_safe(str(fetch_err))}")
         if mismatch_det and str(mismatch_det) not in status:
             print(f"    mismatch: {terminal_safe(str(mismatch_det))}")
+        _print_auto_bind_notes(record)
         if row.ready and not results:
             for fingerprint in record["host_key_fingerprints"]:
                 if getattr(row, "verified", False):
@@ -636,6 +639,11 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
                     print(f"    host key {fingerprint} ({source})")
                 else:
                     print(f"    host key {fingerprint}")
+
+
+def _print_auto_bind_notes(record: Mapping[str, Any]) -> None:
+    for note in record["notes"]:
+        print(f"    note: {terminal_safe(str(note))}")
 
 
 async def _load_team_shared_servers(

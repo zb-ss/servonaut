@@ -1096,3 +1096,42 @@ async def test_team_auto_bind_matches_shared_server_through_own_server_key_pair(
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_a_configured_key_file_matches_first_and_a_missing_one_is_noted(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding, NoEncryption, PrivateFormat, PublicFormat,
+    )
+
+    from servonaut.services.vault.crypto import ssh_public_fingerprint
+
+    def key_file(name: str) -> str:
+        key = ed25519.Ed25519PrivateKey.generate()
+        (tmp_path / name).write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()))
+        public = key.public_key().public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii")
+        return ssh_public_fingerprint(public)
+
+    in_vault = key_file("web-1-new.pem")
+    key_file("cache-old.pem")
+    service = _Service(keys=[
+        {"item_id": "k1", "label": "web-1", "name": "web-1.pem", "fingerprint": "SHA256:a"},
+        {"item_id": "k9", "label": "copy", "name": "deploy copy", "fingerprint": in_vault},
+    ])
+    service.config = SimpleNamespace(instance_keys={
+        "i-web1": str(tmp_path / "web-1-new.pem"),
+        "i-db": str(tmp_path / "cache-old.pem"),
+    })
+    app = _Host(service)
+    async with app.run_test(size=(160, 50)):
+        await wait_until(lambda: _rows(app))
+        rows = {row[1]: row for row in _rows(app)}
+        assert rows["web-1"][3:5] == ("deploy copy", "configured key file")
+        table = app.screen.query_one("#auto_bind_table", DataTable)
+        table.move_cursor(row=[row[1] for row in _rows(app)].index("db-1"))
+        await wait_until(lambda: "Note: The key file set for this server (cache-old.pem) is not in this vault" in str(
+            app.screen.query_one("#auto_bind_detail", Static).render()
+        ))

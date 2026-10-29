@@ -1855,3 +1855,22 @@ def test_vault_grants_process_says_what_happened(capsys) -> None:
     out = capsys.readouterr().out
     assert out.strip() == "Granted access to 1 member. 1 member still needs approval before getting access."
     assert "identity-7" not in out
+
+
+def test_auto_bind_notes_print_under_their_server_and_go_in_the_json(capsys) -> None:
+    from servonaut.cli import vault
+    from servonaut.services.vault.auto_bind import READY, AutoBindRow, KeyMatch
+
+    note = "The key file set for this server (web-1-new.pem) is not in this vault: import it."
+    row = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=READY,
+        match=KeyMatch(item_id="k1", name="kp-a", matched_by="key pair"),
+        login="ubuntu",
+        host="198.51.100.1",
+        notes=[note],
+    )
+    vault._print_auto_bind([row], results=False)
+
+    assert f"    note: {note}" in capsys.readouterr().out
+    assert vault._auto_bind_record(row)["notes"] == [note]
