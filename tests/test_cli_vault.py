@@ -1874,3 +1874,23 @@ def test_auto_bind_notes_print_under_their_server_and_go_in_the_json(capsys) -> 
 
     assert f"    note: {note}" in capsys.readouterr().out
     assert vault._auto_bind_record(row)["notes"] == [note]
+
+
+def test_auto_bind_output_says_where_the_login_comes_from(capsys) -> None:
+    from servonaut.cli import vault
+    from servonaut.services.vault.auto_bind import READY, AutoBindRow, KeyMatch
+
+    row = AutoBindRow(
+        instance={"id": "i-1", "name": "web-1"},
+        status=READY,
+        match=KeyMatch(item_id="k1", name="web-1", matched_by="server name"),
+        login="deploy",
+        login_source="connection rule",
+        host="198.51.100.1",
+    )
+    vault._print_auto_bind([row], results=False)
+
+    assert "web-1: web-1 (by server name) deploy@198.51.100.1 (login from connection rule) - ready" in (
+        capsys.readouterr().out
+    )
+    assert vault._auto_bind_record(row)["login_source"] == "connection rule"

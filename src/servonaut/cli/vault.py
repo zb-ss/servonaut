@@ -586,6 +586,7 @@ def _auto_bind_record(row: Any) -> dict[str, Any]:
         "key_name": row.match.name if row.match is not None else None,
         "matched_by": row.match.matched_by if row.match is not None else None,
         "login": row.login,
+        "login_source": getattr(row, "login_source", None),
         "host": row.host,
         "port": row.port,
         "host_key_fingerprints": [crypto.ssh_public_fingerprint(key) for key in row.host_keys],
@@ -623,6 +624,8 @@ def _print_auto_bind(rows: Sequence[Any], *, results: bool) -> None:
         parts = [f"{name}: {terminal_safe(str(record['key_name']))} (by {record['matched_by']})"]
         if record["login"] and record["host"]:
             parts.append(terminal_safe(f"{record['login']}@{record['host']}"))
+            if record["login_source"]:
+                parts.append(f"(login from {record['login_source']})")
         print(" ".join(parts) + f" - {status}")
         if fetch_err and str(fetch_err) not in status:
             print(f"    fetch error: {terminal_safe(str(fetch_err))}")
