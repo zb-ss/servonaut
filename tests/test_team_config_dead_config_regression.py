@@ -27,6 +27,9 @@ def test_push_config_form_resolves_config_via_config_manager():
     screen.query_one = MagicMock()
     screen.notify = MagicMock()
     screen.call_after_refresh = MagicMock()  # the form scrolls into view once laid out
+    # No team is loaded: the form marks no server as already shared with it.
+    screen._current_team_slug = screen._loaded_team_slug = None
+    screen._shared_servers = []
 
     sentinel_config = AppConfig()
     mock_app = MagicMock()

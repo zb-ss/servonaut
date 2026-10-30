@@ -1171,3 +1171,19 @@ async def test_without_an_offered_vault_it_says_why_each_team_vault_is_not_offer
     async with app.run_test(size=(160, 50)):
         await wait_until(lambda: "no personal vault" in _status(app))
         assert f"Team vaults not offered: {reason}." in _status(app)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_auto_bind_is_logged_once_per_server(caplog: pytest.LogCaptureFixture) -> None:
+    service = _Service(fail_bind={"i-web1"})
+    app = _Host(service)
+    caplog.set_level("WARNING", logger=vault_auto_bind.__name__)
+    async with app.run_test(size=(160, 50)):
+        await wait_until(lambda: _rows(app))
+        app.screen.query_one("#auto_bind_trust", Checkbox).value = True
+        app.screen.query_one("#auto_bind_apply", Button).press()
+        await wait_until(lambda: "failed" in _status(app))
+
+    lines = [r.getMessage() for r in caplog.records if r.name == vault_auto_bind.__name__ and r.levelname == "WARNING"]
+    assert lines == ["Vault key binding failed for web-1: this server already has a vault key"]
+    assert HOST_KEY.split()[1] not in lines[0]

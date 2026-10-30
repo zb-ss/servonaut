@@ -23,6 +23,7 @@ the service answers, so the journey checks both.
 from __future__ import annotations
 
 import pytest
+from textual.geometry import Region
 
 from e2e.harness import fleet
 from e2e.harness.fake_cloud.wire import expected
@@ -201,6 +202,11 @@ async def test_owner_invites_promotes_removes_and_shares(tui, seed, fake_cloud):
         servers_before = t.table_rows("#servers_table")
         await _press(t, "#btn_share")
         await t.wait_until(lambda: t.on_screen("#share_server_form").display, desc="share form open")
+        # A pointer user sees the whole form, Share included, without scrolling.
+        await t.wait_until(
+            lambda: Region(0, 0, *t.app.size).contains_region(t.on_screen("#btn_confirm_share").region),
+            desc="the share form in view",
+        )
         await t.fill("#input_share_username", "deploy")
         await _press(t, "#btn_confirm_share")
         await t.wait_for_toast(rf"^Server '{fleet.APP_1.name}' shared with team\.$")
@@ -330,14 +336,20 @@ async def test_servers_leave_for_the_team_only_when_the_owner_confirms(tui, seed
         assert [p["name"] for p in sent["connection_profiles"]] == [fleet.BASTION_PROFILE]
         await _screen_idle(t)
 
-        # Pulling the partial push back applies cleanly.
+        # Pulling the partial push back applies cleanly, and keeps the
+        # user's own key path for team-box (a push never carries one).
         await _press(t, "#btn_pull_config")
         await t.wait_until(lambda: "Custom Servers: 2 → 1" in _text(t, "#pull_config_preview"),
                            desc="pull preview")
+        assert "1 entry keeps your own SSH key path: a team config never carries key paths." in _text(
+            t, "#pull_config_preview",
+        )
         await _press(t, "#btn_confirm_pull_config")
-        await t.wait_for_toast(r"^Team config applied\.")
+        await t.wait_for_toast(r"^Team config applied; 1 entry keeps your own SSH key path\. Restart")
         saved = seed.read_config()
-        assert [(s["name"], s["host"], s["ssh_key"]) for s in saved["custom_servers"]] == [(*TEAM_BOX, "")]
+        assert [(s["name"], s["host"], s["ssh_key"]) for s in saved["custom_servers"]] == [
+            (*TEAM_BOX, "~/.ssh/team_box"),
+        ]
         assert [p["name"] for p in saved["connection_profiles"]] == [fleet.BASTION_PROFILE]
 
     fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))

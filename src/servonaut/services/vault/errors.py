@@ -24,6 +24,27 @@ class VaultUserError(RuntimeError):
     """A fixed, secret-free message that is safe to show the user as-is."""
 
 
+class HostKeysNeeded(VaultUserError):
+    """A first vault binding has no host keys to pin.
+
+    The message names no surface's controls: each surface adds its own way
+    to supply the keys (command-line flags, or the dialog's buttons).
+    *looked_up_trusted_keys* says whether the keys this machine trusts were
+    looked up (and none found), or the caller chose neither to pin them nor
+    to supply any.
+    """
+
+    def __init__(self, *, looked_up_trusted_keys: bool) -> None:
+        self.looked_up_trusted_keys = looked_up_trusted_keys
+        super().__init__(
+            "this machine does not trust a host key for the server yet: connect to it once and check "
+            "its fingerprint, or supply verified host keys"
+            if looked_up_trusted_keys else
+            "the first vault key for a server needs its host keys pinned: pin the ones this machine "
+            "trusts, or supply verified host keys"
+        )
+
+
 class VaultKeyInUse(VaultUserError):
     """A key still bound to servers, or whose bindings could not be checked."""
 

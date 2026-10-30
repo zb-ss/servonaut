@@ -485,6 +485,30 @@ def test_bind_refuses_a_host_key_line_with_a_host_field_before_any_request(capsy
     Service.bind.assert_not_called()
 
 
+@pytest.mark.parametrize("typed", [False, True])
+def test_bind_pin_host_key_also_looks_at_your_own_servers(monkeypatch, typed: bool) -> None:
+    own = [{"id": "i-0123456789abcdef0", "name": "web-1", "public_ip": "9.9.9.9"}]
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: own)
+
+    class Service:
+        close = MagicMock()
+        bind = AsyncMock(return_value={"source": "servonaut_vault"})
+
+    host_key = ["--host-key", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDkr"] if typed else []
+    vault.set_vault_service_factory(Service)
+    try:
+        args = _parser().parse_args([
+            "vault", "bind", "server-1", "item-1", "--vault", VAULT_ID, "--team", "team-a",
+            "--pin-host-key", *host_key, "--yes",
+        ])
+        assert vault.handle_vault_command(args) == 0
+    finally:
+        vault.set_vault_service_factory(None)
+
+    # Typed keys are pinned as given: the fleet is only read to find trusted ones.
+    assert Service.bind.await_args.kwargs["own_rows"] == ([] if typed else own)
+
+
 def test_incomplete_ssh_rotation_warns_and_exits_non_zero(capsys) -> None:
     class Service:
         close = MagicMock()
@@ -1966,3 +1990,25 @@ def test_vault_grants_process_never_approves_without_a_terminal_or_with_yes(
 
     assert decisions == [("not asked", interactive)]
     assert stdin.asked == 0
+
+
+@pytest.mark.parametrize("looked_up, flags", [(True, ["--host-key"]), (False, ["--pin-host-key", "--host-key"])])
+def test_bind_without_host_keys_names_the_cli_flags(monkeypatch, capsys, looked_up: bool, flags: list[str]) -> None:
+    from servonaut.services.vault.errors import HostKeysNeeded
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [])
+
+    class Service:
+        close = MagicMock()
+        bind = AsyncMock(side_effect=HostKeysNeeded(looked_up_trusted_keys=looked_up))
+
+    vault.set_vault_service_factory(Service)
+    try:
+        argv = ["vault", "bind", "server-1", "item-1", "--vault", VAULT_ID, "--team", "team-a", "--yes"]
+        args = _parser().parse_args(argv + (["--pin-host-key"] if looked_up else []))
+        assert vault.handle_vault_command(args) == 1
+    finally:
+        vault.set_vault_service_factory(None)
+
+    err = capsys.readouterr().err
+    assert all(flag in err for flag in flags)
