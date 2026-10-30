@@ -21,9 +21,16 @@ from servonaut.screens._batch_status import failure_details
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.bulk_action import BulkActionModal
-from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
+from servonaut.screens.team_share_confirm import ShareServersConfirmModal
 from servonaut.services.api_client import APIError
-from servonaut.services.team_sharing import already_shared, share_candidates, share_payload
+from servonaut.services.team_sharing import (
+    SHARE_ADDRESS,
+    address_choices,
+    already_shared,
+    server_address,
+    share_candidates,
+    share_payload,
+)
 from servonaut.services.team_service import ALREADY_SHARED, FAILED, SHARED, ShareResult
 from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.services.team_rules_view import (
@@ -280,6 +287,13 @@ class TeamManagementScreen(Screen):
                             allow_blank=True,
                             id="select_share_instance",
                         ),
+                        Select(
+                            [("Public address", "public"), ("Private address", "private")],
+                            value="public",
+                            allow_blank=False,
+                            id="select_share_address",
+                        ),
+                        Static("", id="share_address_note"),
                         Input(
                             placeholder="SSH username (optional — leave blank for cloud default)",
                             id="input_share_username",
@@ -421,6 +435,9 @@ class TeamManagementScreen(Screen):
         # pre-fill from the next-selected instance always wins.
         self.query_one("#input_share_username", Input).value = ""
         self.query_one("#input_share_port", Input).value = ""
+        # Shown again for a server with both a public and a private address.
+        self.query_one("#select_share_address", Select).display = False
+        self.query_one("#share_address_note", Static).display = False
         select = self.query_one("#select_share_instance", Select)
         candidates, _, _ = share_candidates(instances, self._shared_servers)
         by_id = {str(row.get("id")): row for row in candidates}
@@ -458,6 +475,29 @@ class TeamManagementScreen(Screen):
         self._share_form_username = (username, displayed)
         self.query_one("#input_share_username", Input).value = displayed
         self.query_one("#input_share_port", Input).value = str(port) if port and port != 22 else ""
+        self._prefill_share_address(instance, defaults)
+
+    def _prefill_share_address(self, instance: dict, defaults: dict) -> None:
+        """Offer the public or the private address of a server that has both, and say which suits."""
+        select = self.query_one("#select_share_address", Select)
+        note = self.query_one("#share_address_note", Static)
+        public, private = address_choices(instance)
+        select.display = note.display = bool(private)
+        if not private:
+            return
+        select.set_options([
+            (Text(f"Public address ({self._display_server_address(public)})"), "public"),
+            (Text(f"Private address ({self._display_server_address(private)})"), "private"),
+        ])
+        behind_bastion = defaults.get(SHARE_ADDRESS) == private
+        select.value = "private" if behind_bastion else "public"
+        note.update(Text(
+            "Your connection rules reach this server through a bastion, so its private address is "
+            "chosen: members need the same rule (push it with the team config)."
+            if behind_bastion else
+            "Members connect to the address you share. Choose the private one if they reach the "
+            "server through a bastion."
+        ))
 
     def _share_defaults(self, instance: dict) -> dict:
         """Share only a server's own login or an explicitly matched rule login."""
@@ -469,6 +509,10 @@ class TeamManagementScreen(Screen):
         own_username = instance.get("username") if instance.get("is_custom") is True else ""
         result["username"] = instance.get("login_user") or rule_username(instance, profile) or own_username or ""
         result["port"] = instance.get("port") or 22
+        # Behind a bastion, members are let in from inside the network only.
+        _public, private = address_choices(instance)
+        if private and getattr(profile, "bastion_host", None):
+            result[SHARE_ADDRESS] = private
         return result
 
     def _share_inventory(self) -> list[dict]:
@@ -1807,11 +1851,18 @@ class TeamManagementScreen(Screen):
 
         results = await team_svc.push_servers(slug, [share_payload(row) for row in instances], on_progress=progress)
         succeeded = sum(result.status == SHARED for result in results)
+        private = {row[SHARE_ADDRESS] for row in instances if row.get(SHARE_ADDRESS)}
+        shared_private = sum(
+            result.status == SHARED and result.payload.get("hostname") in private for result in results
+        )
         skipped_existing += sum(result.status == ALREADY_SHARED for result in results)
         failed = [f"{self._display_server_name(result.payload.get('name', ''))} ({result.error})"
                   for result in results if result.status == FAILED]
 
         parts = [f"Shared {succeeded}"]
+        if shared_private:
+            parts.append(f"{shared_private} under {'its' if shared_private == 1 else 'their'} private address "
+                         "(reached through a bastion)")
         if left_out:
             parts.append(f"left out {left_out}")
         if skipped_existing:
@@ -1855,6 +1906,9 @@ class TeamManagementScreen(Screen):
             self.notify("This server is already shared with the team.", severity="warning")
             return
         hostname = instance.get("public_ip") or instance.get("private_ip") or ""
+        _public, private = address_choices(instance)
+        if private and self.query_one("#select_share_address", Select).value == "private":
+            hostname = private
         if not hostname:
             # Defensive — _build_share_options should have filtered this row out,
             # but the inventory may have changed since the form was opened.

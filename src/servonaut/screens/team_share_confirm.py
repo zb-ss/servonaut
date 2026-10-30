@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, SelectionList, Static
 from textual.widgets.selection_list import Selection
-from servonaut.services.team_sharing import server_address
+from servonaut.services.team_sharing import SHARE_ADDRESS, share_address
 from servonaut.services.vault.display import terminal_safe
 
 
@@ -155,10 +155,12 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
             team_name = str(redactor.redact_name(team_name))
         team = terminal_safe(team_name)
         self.query_one("#share_confirm_title", Static).update(Text(f"Share servers with {team}?"))
-        self.query_one("#share_confirm_intro", Static).update(
-            Text(f"Every member of {team} will be able to see and connect to the ticked servers. "
+        intro = (f"Every member of {team} will be able to see and connect to the ticked servers. "
                  "Untick any server that should stay private.")
-        )
+        if any(server.get(SHARE_ADDRESS) for server in self._servers):
+            intro += (" Servers your connection rules reach through a bastion are shared under their "
+                      "private address: members reach them the same way.")
+        self.query_one("#share_confirm_intro", Static).update(Text(intro))
 
     def _render_rows(self, *, selected: set) -> None:
         listing = self._list()
@@ -178,7 +180,10 @@ class ShareServersConfirmModal(ModalScreen[Optional[List[dict]]]):
 
     def _row_label(self, server: dict, width: int) -> Text:
         name = self._display(_server_name(server), field="name").ljust(width)
-        return Text.assemble(name, "  ", (self._display(server_address(server), field="host"), "dim"))
+        address = self._display(share_address(server), field="host")
+        if server.get(SHARE_ADDRESS):
+            address += " (private address)"
+        return Text.assemble(name, "  ", (address, "dim"))
 
     def _display(self, value: str, *, field: str) -> str:
         value = terminal_safe(value)

@@ -5,10 +5,30 @@ import ipaddress
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+# The address a share form chose for a server (see share_address).
+SHARE_ADDRESS = "share_address"
+
 
 def server_address(server: Mapping[str, Any]) -> str:
     """The destination offered by a local server, or saved with a shared one."""
     return str(server.get("hostname") or server.get("host") or server.get("public_ip") or server.get("private_ip") or "")
+
+
+def address_choices(server: Mapping[str, Any]) -> tuple[str, str]:
+    """``(public, private)`` for a server of your own with two different addresses, else ``("", "")``.
+
+    A server that names its host, and a team's server, have one address.
+    """
+    if server.get("is_shared") is True or server.get("hostname") or server.get("host"):
+        return "", ""
+    public = str(server.get("public_ip") or "").strip()
+    private = str(server.get("private_ip") or "").strip()
+    return (public, private) if public and private and public != private else ("", "")
+
+
+def share_address(server: Mapping[str, Any]) -> str:
+    """The address *server* is shared under: the one chosen for it, else :func:`server_address`."""
+    return str(server.get(SHARE_ADDRESS) or "").strip() or server_address(server)
 
 
 def _host_key(server: Mapping[str, Any]) -> str:
@@ -72,7 +92,7 @@ def share_payload(instance: Mapping[str, Any]) -> dict[str, Any]:
     """Public connection fields only: no local key paths, credentials or flags."""
     payload: dict[str, Any] = {
         "name": instance.get("name") or instance.get("id") or "",
-        "hostname": server_address(instance),
+        "hostname": share_address(instance),
     }
     for source, target in (("id", "instance_id"), ("region", "region"), ("username", "username")):
         if instance.get(source):

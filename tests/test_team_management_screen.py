@@ -1484,6 +1484,136 @@ class TestTeamManagementShareServer:
 
 
 # ---------------------------------------------------------------------------
+# Share Server / Share All: which address a server is shared under
+# ---------------------------------------------------------------------------
+
+
+def _routing(app, behind_bastion: set[str]) -> None:
+    """Connection rules that reach the servers named in *behind_bastion* through a bastion."""
+    from servonaut.config.schema import ConnectionProfile
+
+    jump = ConnectionProfile(name="via-jump", bastion_host="jump-1.example.com", bastion_user="ops")
+    app.connection_service = MagicMock()
+    app.connection_service.resolve_profile.side_effect = (
+        lambda instance: jump if instance.get("name") in behind_bastion else None
+    )
+
+
+_BEHIND = {"id": "i-0a1", "name": "app-1", "public_ip": "1.1.1.1", "private_ip": "10.0.1.5"}
+_DIRECT = {"id": "i-0b2", "name": "web-1", "public_ip": "8.8.8.8", "private_ip": "10.0.1.6"}
+
+
+class TestShareAddress:
+    async def _open_form(self, pilot, app, instance_id: str):
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        screen._current_team_slug = "eng"
+        screen._current_team_role = "owner"
+        screen._show_share_server_form(app.instances)
+        await pilot.pause()
+        screen.query_one("#select_share_instance", Select).value = instance_id
+        await pilot.pause()
+        return screen
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("instance, expected", [(_BEHIND, "private"), (_DIRECT, "public")])
+    async def test_share_form_defaults_to_the_private_address_behind_a_bastion(self, instance, expected):
+        team_svc = _make_team_service()
+        app = _WrapperApp(
+            auth_service=_make_auth_service(authenticated=True), team_service=team_svc,
+            instances=[dict(_BEHIND), dict(_DIRECT)],
+        )
+        _routing(app, {"app-1"})
+        async with app.run_test(headless=True) as pilot:
+            screen = await self._open_form(pilot, app, instance["id"])
+            address = screen.query_one("#select_share_address", Select)
+            note = str(screen.query_one("#share_address_note", Static).render())
+            assert address.display is True and address.value == expected
+            assert ("rules reach this server through a bastion" in note) is (expected == "private")
+            screen._submit_share_server()
+            await _until(pilot, lambda: team_svc.push_server.called, "the share")
+
+        _, payload = team_svc.push_server.call_args.args
+        assert payload["hostname"] == instance[f"{expected}_ip"]
+        assert payload["instance_id"] == instance["id"]
+
+    @pytest.mark.asyncio
+    async def test_share_form_shares_the_address_the_user_chose(self):
+        team_svc = _make_team_service()
+        app = _WrapperApp(
+            auth_service=_make_auth_service(authenticated=True), team_service=team_svc,
+            instances=[dict(_BEHIND)],
+        )
+        _routing(app, {"app-1"})
+        async with app.run_test(headless=True) as pilot:
+            screen = await self._open_form(pilot, app, "i-0a1")
+            screen.query_one("#select_share_address", Select).value = "public"
+            screen._submit_share_server()
+            await _until(pilot, lambda: team_svc.push_server.called, "the share")
+
+        assert team_svc.push_server.call_args.args[1]["hostname"] == "1.1.1.1"
+
+    @pytest.mark.asyncio
+    async def test_share_form_offers_no_choice_for_a_server_with_one_address(self):
+        app = _WrapperApp(
+            auth_service=_make_auth_service(authenticated=True), team_service=_make_team_service(),
+            instances=[{"id": "custom-a", "name": "db-1", "public_ip": "10.0.0.9", "private_ip": "10.0.0.9",
+                        "is_custom": True}],
+        )
+        _routing(app, {"db-1"})
+        async with app.run_test(headless=True) as pilot:
+            screen = await self._open_form(pilot, app, "custom-a")
+            assert screen.query_one("#select_share_address", Select).display is False
+            assert screen.query_one("#share_address_note", Static).display is False
+
+    @pytest.mark.asyncio
+    async def test_share_all_shares_bastion_routed_servers_under_their_private_address(self):
+        from servonaut.screens.team_share_confirm import ShareServersConfirmModal
+
+        team_svc = _make_team_service()
+        notices: list[str] = []
+        app = _WrapperApp(
+            auth_service=_make_auth_service(authenticated=True), team_service=team_svc,
+            instances=[dict(_BEHIND), dict(_DIRECT)],
+        )
+        _routing(app, {"app-1"})
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen.notify = lambda message, **_kwargs: notices.append(str(message))
+            screen._current_team_slug = screen._loaded_team_slug = "eng"
+            screen._current_team_role = "owner"
+            screen._shared_servers = []
+            screen._action_share_all_servers()
+            await _until(pilot, lambda: isinstance(app.screen, ShareServersConfirmModal), "the confirmation")
+            await pilot.pause()
+            modal = app.screen
+            listing = modal.query_one("#share_confirm_list")
+            rows = [str(listing.get_option_at_index(index).prompt) for index in range(listing.option_count)]
+            assert "10.0.1.5" in rows[0] and "private address" in rows[0]
+            assert "8.8.8.8" in rows[1] and "private address" not in rows[1]
+            assert "bastion" in str(modal.query_one("#share_confirm_intro", Static).render())
+            await _confirm_share_all(app, pilot)
+            await _until(pilot, lambda: team_svc.push_server.call_count == 2, "two shares")
+            await _until(pilot, lambda: any(n.startswith("Share All:") for n in notices), "the summary")
+
+        hosts = {call.args[1]["name"]: call.args[1]["hostname"] for call in team_svc.push_server.call_args_list}
+        assert hosts == {"app-1": "10.0.1.5", "web-1": "8.8.8.8"}
+        summary = next(n for n in notices if n.startswith("Share All:"))
+        assert "1 under its private address" in summary
+
+
+def test_share_payload_uses_the_address_chosen_for_the_server() -> None:
+    from servonaut.services.team_sharing import SHARE_ADDRESS, share_payload
+
+    server = {"id": "i-0a1", "name": "app-1", "public_ip": "1.1.1.1", "private_ip": "10.0.1.5"}
+    assert share_payload(server)["hostname"] == "1.1.1.1"
+    assert share_payload({**server, SHARE_ADDRESS: "10.0.1.5"})["hostname"] == "10.0.1.5"
+    assert SHARE_ADDRESS not in share_payload({**server, SHARE_ADDRESS: "10.0.1.5"})
+
+
+# ---------------------------------------------------------------------------
 # Shared servers: listed in the server list, connected from here
 # ---------------------------------------------------------------------------
 

@@ -185,6 +185,17 @@
     margin: 0 0 1 0;
 }
 
+/* Only a server with both a public and a private address offers the choice. */
+#select_share_address,
+#share_address_note {
+    display: none;
+}
+
+#share_address_note {
+    color: $text-muted;
+    margin: 0 0 1 0;
+}
+
 #push_config_form Input {
     margin: 0 0 1 0;
     width: 1fr;

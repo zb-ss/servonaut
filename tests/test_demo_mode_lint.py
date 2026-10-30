@@ -326,6 +326,9 @@ _ALLOWLIST: List[AllowlistEntry] = [
     AllowlistEntry("screens/team_management.py", "_show_pull_config_form", "update",
                    "Pull preview Static — renders local→remote counts per section "
                    "from diff_against_local; numerical counts, not user-typed text."),
+    AllowlistEntry("screens/team_management.py", "_prefill_share_address", "update",
+                   "Share Server address note — fixed explanatory text; the addresses "
+                   "are only in the picker's options, redacted by _display_server_address."),
 
     # memory.py — sync status and AI summary update UI labels, not raw data.
     AllowlistEntry(
