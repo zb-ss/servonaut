@@ -568,6 +568,7 @@ These environment variables override hardcoded API endpoints. Useful for pointin
 | `SERVONAUT_RELAY_TOKEN` | — | Legacy/CI override: auth token for `servonaut connect` (the stored `servonaut login` session is used when unset) |
 | `SERVONAUT_USER_ID` | — | Legacy/CI override: user ID for `servonaut connect` |
 | `SERVONAUT_PYPI_URL` | `https://pypi.org/pypi/servonaut/json` | PyPI JSON document read by the update check (pip and pipx installs) |
+| `SERVONAUT_RELEASE_MANIFEST_URL` | `https://releases.servonaut.dev/manifest/stable.json`, or `…/manifest/preview.json` for preview builds | Release manifest read by the update check of packaged builds, such as the desktop app. It must still be signed by a release key built into Servonaut |
 | `SERVONAUT_HETZNER_API_URL` | `https://api.hetzner.cloud/v1` | Hetzner Cloud API base URL, version path included |
 | `SERVONAUT_IP_API_URL` | `http://ip-api.com` | Base URL for IP geolocation lookups (CloudWatch IP info, `enrich_ips`) |
 | `SERVONAUT_ABUSEIPDB_URL` | `https://api.abuseipdb.com/api/v2` | Base URL for AbuseIPDB reputation lookups |
