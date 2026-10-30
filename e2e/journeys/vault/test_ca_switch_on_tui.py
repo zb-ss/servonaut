@@ -75,6 +75,8 @@ async def test_the_ssh_certificates_screen_switches_certificates_on_after_confir
         (await _modal(app, open_=True)).query_one("#ca_enable_cancel", Button).press()
         await _modal(app, open_=False)
         assert fake_cloud.vault.ca_payload(TEAM_SLUG)["enabled"] is False
+        # The cancelled action ends after its dialog closes; until then the button stays held back.
+        await wait_for_async(lambda: enable.display and not enable.disabled, desc="the switch-on button again")
 
         enable.press()
         (await _modal(app, open_=True)).query_one("#ca_enable_confirm", Button).press()
