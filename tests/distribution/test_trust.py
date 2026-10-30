@@ -35,6 +35,7 @@ from servonaut.distribution.trust import (
     load_ed25519_public_key,
     normalize_arch,
     normalize_platform,
+    parse_build_version,
     parse_semver,
     release_trust_policy,
     resolve_target_artifact,
@@ -149,6 +150,39 @@ class TestSemVerAndDowngrade:
     def test_non_semver_current_version_raises_schema_error(self) -> None:
         with pytest.raises(ManifestSchemaError):
             check_downgrade(make_test_manifest(product_version="2.28.0"), current_version="2.28.0.dev0")
+
+    def test_a_release_candidate_build_orders_like_its_manifest_spelling(self) -> None:
+        # Candidate builds report the Python package version of their tag.
+        check_downgrade(make_test_manifest(product_version="2.28.0-rc.2"), current_version="2.28.0rc1")
+        check_downgrade(make_test_manifest(product_version="2.28.0-rc.10"), current_version="2.28.0rc9")
+        check_downgrade(make_test_manifest(product_version="2.28.0"), current_version="2.28.0rc9")
+        with pytest.raises(ManifestDowngradeError, match="No update available"):
+            check_downgrade(
+                make_test_manifest(product_version="2.28.0-rc.1", packaging_revision=1),
+                current_version="2.28.0rc1",
+                current_packaging_revision=1,
+            )
+        with pytest.raises(ManifestDowngradeError, match="Refusing downgrade"):
+            check_downgrade(make_test_manifest(product_version="2.28.0-rc.9"), current_version="2.28.0rc10")
+        with pytest.raises(ManifestDowngradeError, match="Refusing downgrade"):
+            check_downgrade(make_test_manifest(product_version="2.27.9"), current_version="2.28.0rc1")
+
+    def test_build_version_parses_both_spellings_of_a_candidate_alike(self) -> None:
+        assert parse_build_version("2.28.0rc3") == parse_semver("2.28.0-rc.3")
+        assert parse_build_version("2.28.0") == parse_semver("2.28.0")
+        assert parse_build_version("2.28.0-rc.3") == parse_semver("2.28.0-rc.3")
+
+    @pytest.mark.parametrize(
+        "version", ["2.28.0rc0", "2.28.0rc01", "2.28.0.rc1", "2.28.0rc", "2.28rc1", "v2.28.0rc1", "2.28.0rc1\n", 7]
+    )
+    def test_build_version_refuses_other_candidate_spellings(self, version: object) -> None:
+        with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
+            parse_build_version(version)
+
+    def test_a_manifest_version_must_be_a_semantic_version(self) -> None:
+        # Only the running build may use the package spelling.
+        with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
+            parse_semver("2.28.0rc1")
 
     def test_parse_semver_invalid(self) -> None:
         with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):

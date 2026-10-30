@@ -10,6 +10,7 @@ from servonaut.distribution.manifest import (
     ReleaseManifest,
     SemVer,
     canonicalize_json,
+    parse_build_version,
     parse_semver,
 )
 from servonaut.distribution.trust import (
@@ -75,6 +76,7 @@ __all__ = [
     "load_ed25519_public_key",
     "normalize_arch",
     "normalize_platform",
+    "parse_build_version",
     "parse_semver",
     "release_trust_policy",
     "resolve_target_artifact",

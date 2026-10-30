@@ -449,7 +449,7 @@ class TestUntrustedManifestInput:
         assert service.check_for_update() is None
         assert service.last_check_result is UpdateCheckResult.VERIFICATION_FAILED
 
-    @pytest.mark.parametrize("current", ["2.27.0.dev0", "2.28.0rc1"])
+    @pytest.mark.parametrize("current", ["2.27.0.dev0", "2.28.0.post1", "2.28.0rc0"])
     def test_non_semver_running_version_is_reported_not_raised(self, tmp_path, trust_setup, current) -> None:
         priv_key, key_id, policy = trust_setup
         manifest = _make_manifest_with_signature(priv_key, key_id, version="2.27.0")
@@ -758,6 +758,44 @@ class TestPackagingRevision:
         )
 
         assert service.check_for_update() == "2.27.0"
+
+
+class TestReleaseCandidateBuilds:
+    """A candidate build reports X.Y.ZrcN; its manifests spell it X.Y.Z-rc.N."""
+
+    def _check(self, tmp_path, trust_setup, manifest_version: str) -> UpdateService:
+        priv_key, key_id, _ = trust_setup
+        policy = TrustPolicy(
+            trusted_public_keys={key_id: priv_key.public_key()},
+            allowed_origin_prefixes=(f"{_RELEASES}/",),
+            allowed_channels=(ReleaseChannel.PREVIEW, ReleaseChannel.STABLE),
+        )
+        manifest = _make_manifest_with_signature(
+            priv_key, key_id, version=manifest_version, revision=1, channel=ReleaseChannel.PREVIEW
+        )
+        service = _service(
+            tmp_path, policy, _MockResponse(_raw(manifest)),
+            kind=DistributionKind.PACKAGED_DESKTOP, version="2.31.0rc2",
+            channel="preview", packaging_revision=1,
+        )
+        service.check_for_update()
+        return service
+
+    @pytest.mark.parametrize("newer", ["2.31.0-rc.3", "2.31.0-rc.10", "2.31.0"])
+    def test_a_newer_candidate_or_the_release_is_offered(self, tmp_path, trust_setup, linux_x64, newer) -> None:
+        service = self._check(tmp_path, trust_setup, newer)
+
+        assert service.last_check_result is UpdateCheckResult.UPDATE_AVAILABLE
+        assert service.latest_version == newer
+
+    @pytest.mark.parametrize("same_or_older", ["2.31.0-rc.2", "2.31.0-rc.1", "2.30.9"])
+    def test_its_own_candidate_or_an_older_one_is_not_offered(
+        self, tmp_path, trust_setup, linux_x64, same_or_older
+    ) -> None:
+        service = self._check(tmp_path, trust_setup, same_or_older)
+
+        assert service.last_check_result is UpdateCheckResult.UP_TO_DATE
+        assert service.target_artifact is None
 
 
 class TestBoundedDownload:

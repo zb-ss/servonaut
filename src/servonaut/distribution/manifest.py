@@ -27,6 +27,11 @@ _SEMVER_REGEX = re.compile(
     rf"(?:-({_PRERELEASE_IDENTIFIER}(?:\.{_PRERELEASE_IDENTIFIER})*))?"
     rf"(?:\+({_BUILD_IDENTIFIER}(?:\.{_BUILD_IDENTIFIER})*))?"
 )
+# A release candidate build carries its tag's Python package version, X.Y.ZrcN,
+# while manifests spell the same version X.Y.Z-rc.N.
+_CANDIDATE_VERSION_REGEX = re.compile(
+    rf"({_NUMERIC_IDENTIFIER})\.({_NUMERIC_IDENTIFIER})\.({_NUMERIC_IDENTIFIER})rc([1-9][0-9]*)"
+)
 _HEX_64_REGEX = re.compile(r"[0-9a-fA-F]{64}")
 _HEX_SIGNATURE_REGEX = re.compile(r"[0-9a-fA-F]{128}")
 # On platforms whose host version can be read, min_os is a dotted decimal
@@ -136,6 +141,27 @@ def parse_semver(version: object) -> SemVer:
         patch=int(patch),
         prerelease=tuple(prerelease.split(".")) if prerelease else (),
         build=tuple(build.split(".")) if build else (),
+    )
+
+
+def parse_build_version(version: object) -> SemVer:
+    """Parse the product version a running build reports.
+
+    Accepts a semantic version, and a release candidate's X.Y.ZrcN, which
+    orders exactly like its manifest spelling X.Y.Z-rc.N.
+
+    Raises:
+        ManifestSchemaError: If the value is neither.
+    """
+    match = _CANDIDATE_VERSION_REGEX.fullmatch(version) if isinstance(version, str) else None
+    if match is None:
+        return parse_semver(version)
+    major, minor, patch, candidate = match.groups()
+    return SemVer(
+        major=int(major),
+        minor=int(minor),
+        patch=int(patch),
+        prerelease=("rc", candidate),
     )
 
 
