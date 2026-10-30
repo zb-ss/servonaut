@@ -363,3 +363,27 @@ class TestPullApply:
         assert [(p.name, p.bastion_key) for p in saved.connection_profiles] == [
             ("via-bastion", "/keys/bastion"), ("plain", None),
         ]
+
+
+class TestPullFormLayout:
+    """The Pull form grows with its preview: Apply and Cancel are never cut off."""
+
+    async def test_apply_and_cancel_fit_at_100x30(self):
+        from servonaut.services.team_config_subset import build_shareable_subset
+        from servonaut.styles import CSS_FILES
+
+        class _StyledApp(_ConfigApp):
+            CSS_PATH = CSS_FILES
+
+        payload, _ = build_shareable_subset(_push_config(), custom_servers=["team-box"])
+        app = _StyledApp(config=_push_config(), auth_service=_make_auth_service(), team_service=_make_team_service())
+        async with app.run_test(headless=True, size=(100, 30)) as pilot:
+            screen = await _open_team(app, pilot)
+            # The kept-paths line wraps here: the longest preview this form shows.
+            screen._show_pull_config_form(payload)
+            form = screen.query_one("#pull_config_form")
+            for button_id in ("#btn_confirm_pull_config", "#btn_cancel_pull_config"):
+                button = screen.query_one(button_id, Button)
+                button.scroll_visible(animate=False)
+                await pilot.pause()
+                assert form.content_region.contains_region(button.region), (button_id, form.content_region, button.region)
