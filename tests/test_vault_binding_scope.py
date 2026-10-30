@@ -691,3 +691,30 @@ async def test_a_bind_without_host_keys_says_what_to_do_here_not_on_the_command_
     notice = app.notices[-1][0]
     assert notice.startswith("Vault key binding failed:")
     assert "--" not in notice and "Fetch host key" in notice and "paste verified host keys" in notice
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("demo", [False, True])
+async def test_a_failed_bind_is_logged_once_with_the_shown_name_and_reason(
+    demo: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from servonaut.services.vault.errors import VaultUserError
+
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda *_args: [])
+    app = _Host([{**_own(), "name": "web-1"}], demo=demo)
+    host_key = _host_key()
+    app.vault_command_service.bind_personal.side_effect = VaultUserError("this server already has a vault key")
+    caplog.set_level("WARNING", logger=server_actions.__name__)
+    async with app.run_test() as pilot:
+        await _start(pilot)
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        app.screen.query_one("#vault_bind_host_keys", Input).value = host_key
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+
+    [record] = [r for r in caplog.records if r.name == server_actions.__name__ and r.levelname == "WARNING"]
+    line = record.getMessage()
+    assert line.startswith("Vault key binding failed for ")
+    assert line.endswith(": this server already has a vault key")
+    assert ("web-1" in line) is not demo
+    assert host_key.split()[1] not in line and "9.9.9.9" not in line

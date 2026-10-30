@@ -101,6 +101,13 @@ def scrub_for_display(app: Any, value: object) -> str:
     return text
 
 
+def log_safe(app: Any, value: object) -> str:
+    """*value* for the log: one line, and demo-safe like the screen."""
+    from servonaut.services.vault.display import terminal_safe
+
+    return terminal_safe(scrub_for_display(app, value))
+
+
 def _can_bind_team(row: Mapping[str, Any]) -> bool:
     """Whether this user's team role permits setting a shared key."""
     return row.get("team_role") in ("owner", "admin")
@@ -2228,6 +2235,11 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     "this machine does not trust a host key for the server yet: use Fetch host key "
                     "(or connect to it once) and check its fingerprint, or paste verified host keys"
                     if isinstance(exc, HostKeysNeeded) else vault_failure_reason(exc)
+                )
+                # Kept for later: the notice goes once it is closed.
+                logger.warning(
+                    "Vault key binding failed for %s: %s",
+                    log_safe(self.app, display_name(instance) or "server"), log_safe(self.app, reason),
                 )
                 self.app.notify(f"Vault key binding failed: {reason}", severity="error", markup=False)
                 return
