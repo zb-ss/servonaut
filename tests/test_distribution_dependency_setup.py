@@ -14,7 +14,7 @@ from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
 from servonaut.screens.hetzner_setup import HetznerSetupScreen
 from servonaut.screens.ovh_setup import OVHSetupScreen
 from servonaut.screens.settings.panels.voice import VoicePanel
-from servonaut.services.update_service import UpdateService
+from servonaut.services.update_service import RELEASE_MANIFEST_URL_ENV, UpdateService
 from servonaut.services.voice_setup_service import VoiceSetupService
 
 
@@ -36,9 +36,14 @@ def _runtime(kind: DistributionKind):
     ))
 
 
-def test_frozen_updater_does_not_query_or_spawn_an_installer() -> None:
+def test_frozen_updater_does_not_query_or_spawn_an_installer(monkeypatch) -> None:
+    # An unmarked frozen build has no pinned manifest; the shell's override must not supply one.
+    monkeypatch.delenv(RELEASE_MANIFEST_URL_ENV, raising=False)
     service = UpdateService(_runtime(DistributionKind.FROZEN_CLI))
-    with patch("urllib.request.urlopen") as request, patch(
+    # urlopen and the service's own HTTPS-only opener both end in OpenerDirector.open.
+    with patch(
+        "urllib.request.OpenerDirector.open", side_effect=AssertionError("unexpected request")
+    ) as request, patch(
         "asyncio.create_subprocess_exec", new_callable=AsyncMock
     ) as spawn:
         assert service.check_for_update() is None
