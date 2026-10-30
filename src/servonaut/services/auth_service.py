@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -210,6 +211,11 @@ def _is_revoked_grant(response: "httpx.Response") -> bool:
     )
 
 
+def _token_digest(token: str) -> bytes:
+    """A fingerprint of *token* that can be kept without keeping the token."""
+    return hashlib.sha256(token.encode("utf-8")).digest()
+
+
 def _refresh_lock_path() -> Path:
     """The OS lock file beside ``auth.json`` that serialises refreshes."""
     return AUTH_FILE.with_name(AUTH_FILE.name + ".lock")
@@ -285,6 +291,9 @@ class AuthService(AuthServiceInterface):
         # (429/5xx, a WAF's HTML 403) MUST NOT set this — they'd nuke the
         # session over a passing blip. See _is_revoked_grant.
         self._refresh_grant_revoked: bool = False
+        # SHA-256 of the refresh_token the API last refused, so it is not
+        # presented again (every 401 of a fleet-wide loop would).
+        self._refused_refresh_digest: Optional[bytes] = None
         # The refresh_token this process last read from or wrote to
         # auth.json. A cache save compares it with the stored one to tell
         # whether another process changed the pair meanwhile.
@@ -918,6 +927,10 @@ class AuthService(AuthServiceInterface):
                         "refreshing; will retry on next 401"
                     )
                     return False
+                if _token_digest(self._token.refresh_token) == self._refused_refresh_digest:
+                    # Refused already and no newer pair on disk: sending it
+                    # again cannot succeed, so the user has to sign in.
+                    return False
                 return await self._exchange_refresh_token()
 
     async def _exchange_refresh_token(self) -> bool:
@@ -964,6 +977,7 @@ class AuthService(AuthServiceInterface):
             return True
 
         self._refresh_grant_revoked = True
+        self._refused_refresh_digest = _token_digest(presented)
         logger.warning(
             "Refresh token revoked or expired (invalid_grant) — "
             "user must re-authenticate"
