@@ -33,6 +33,7 @@ from .ec2_host_keys import (
     parse_ec2_console_output,
     verify_fetched_host_keys,
 )
+from .binding_reads import BindingReadsPaused
 from .errors import vault_failure_reason
 from .personal_targets import instance_provider
 
@@ -340,12 +341,17 @@ async def plan_auto_bind(
     existing binding only once it has a key, an address and a login; its
     trusted host keys (by default, those in this computer's known_hosts
     files) are read off the event loop.
+
+    Raises:
+        BindingReadsPaused: the service refused the binding reads (rate
+            limit or sign-in), so the review stopped there.
     """
     read_host_keys = host_keys_for or trusted_host_keys
 
     if team is None:
         rows = [_row(service, instance, keys) for instance in instances if is_personal_server(instance)]
         gate = asyncio.Semaphore(_BINDING_READS)
+        paused: list[BindingReadsPaused] = []
 
         async def check(row: AutoBindRow) -> None:
             if row.status != READY:
@@ -353,6 +359,10 @@ async def plan_auto_bind(
             async with gate:
                 try:
                     binding = await service.personal_binding(row.instance)
+                except BindingReadsPaused as exc:
+                    # The checks queued behind this one fail at once, without a request.
+                    paused.append(exc)
+                    return
                 except Exception:  # shown on the row; the other servers still get their answer
                     row.status = CHECK_FAILED
                     return
@@ -365,6 +375,8 @@ async def plan_auto_bind(
                 row.status = NO_HOST_KEYS
 
         await asyncio.gather(*(check(row) for row in rows))
+        if paused:
+            raise paused[0]
     else:
         own_instances = [inst for inst in instances if not is_shared_row(inst)]
         shared_instances = [

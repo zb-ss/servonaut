@@ -66,6 +66,8 @@ def _vault_config() -> SimpleNamespace:
         vault=SimpleNamespace(
             allow_file_key_store=False,
             request_timeout_seconds=30.0,
+            binding_read_cache_seconds=60.0,
+            binding_read_backoff_seconds=60.0,
             strict_verification=False,
             auto_grant=True,
             agent_key_ttl_seconds=60,

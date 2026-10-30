@@ -44,7 +44,7 @@ def service() -> VaultCommandService:
 async def test_a_review_reads_each_servers_binding_once_for_every_key(service) -> None:
     # Regression: each key re-read every server's binding (keys x servers
     # signed reads), which could trip the service's rate limit.
-    async def binding(row):
+    async def binding(row, **_kwargs):
         return {"vault_id": "vault", "vault_item_id": "k2"} if row["id"] == "i-0002" else None
 
     service.personal_binding.side_effect = binding
@@ -69,7 +69,7 @@ async def test_a_review_reports_an_unreadable_key_without_stopping(service) -> N
 
 @pytest.mark.asyncio
 async def test_a_delete_pass_reads_bindings_and_exposures_once_and_reports_each_key(service) -> None:
-    async def binding(row):
+    async def binding(row, **_kwargs):
         return {"vault_id": "vault", "vault_item_id": "k2"} if row["id"] == "i-0002" else None
 
     service.personal_binding.side_effect = binding
@@ -82,6 +82,8 @@ async def test_a_delete_pass_reads_bindings_and_exposures_once_and_reports_each_
     )
 
     assert service.personal_binding.await_count == 3
+    # A deletion reads every binding again: a reused read could miss one made since the review.
+    assert all(call.kwargs == {"fresh": True} for call in service.personal_binding.await_args_list)
     assert service.list_exposures.await_count == 1
     assert [r.item_id for r in results] == ["k1", "k2", "k3"]
     assert [r.deleted for r in results] == [True, False, False]

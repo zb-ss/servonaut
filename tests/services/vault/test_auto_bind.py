@@ -31,6 +31,7 @@ from servonaut.services.vault.auto_bind import (
     normalize_key_name,
     plan_auto_bind,
 )
+from servonaut.services.vault.binding_reads import BindingReadsPaused
 from servonaut.services.vault.crypto import ssh_public_fingerprint
 from servonaut.services.vault.ec2_host_keys import (
     BEGIN_FINGERPRINTS,
@@ -173,6 +174,20 @@ async def test_the_review_says_why_each_server_cannot_be_bound() -> None:
     )
     # The rows are the records given, so a screen can map them back to what it shows.
     assert ready.instance is servers[0]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_binding_read_stops_the_review_with_its_reason() -> None:
+    # Rate limited or signed out: one clear reason, not a "check failed" row per server.
+    class Refusing(_Service):
+        async def personal_binding(self, instance):
+            raise BindingReadsPaused("the Servonaut service is limiting requests from this computer")
+
+    servers = [_server(f"i-{n}", f"web-{n}") for n in range(8)]
+    keys = [_key(f"k{n}", f"web-{n}") for n in range(8)]
+
+    with pytest.raises(BindingReadsPaused, match="limiting requests"):
+        await plan_auto_bind(Refusing(), servers, keys, host_keys_for=lambda *_: [HOST_KEY])
 
 
 @pytest.mark.asyncio
