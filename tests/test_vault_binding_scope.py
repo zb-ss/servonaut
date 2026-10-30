@@ -583,3 +583,91 @@ async def test_the_offer_names_only_what_changes() -> None:
         assert "the login" not in body
         await pilot.press("escape")
         await _settle(pilot, lambda: bool(app.notices))
+
+
+def _trusted_for_own_only(monkeypatch: pytest.MonkeyPatch, keys: list[str]) -> list[Any]:
+    """Keys trusted only under the own row's name, as connecting to it records them."""
+    seen: list[Any] = []
+
+    def trusted(instance: dict, _host: str, _port: Any = None) -> list[str]:
+        seen.append(instance.get("id"))
+        return list(keys) if instance.get("id") == "i-1" else []
+
+    monkeypatch.setattr(server_actions, "trusted_host_keys", trusted)
+    return seen
+
+
+async def _open_team_key_dialog(pilot: Any) -> None:
+    app = pilot.app
+    await _start(pilot)
+    await _choose_scope(pilot, 0)
+    await _settle(pilot, lambda: isinstance(app.screen, VaultBindingModal))
+    await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(160, 50), (100, 30)])
+async def test_a_team_key_for_your_own_server_pins_the_keys_trusted_under_its_own_name(
+    size: tuple[int, int], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_key = _host_key()
+    seen = _trusted_for_own_only(monkeypatch, [host_key])
+    app = _Host([_own(), _shared()])
+    async with app.run_test(size=size) as pilot:
+        await _open_team_key_dialog(pilot)
+        trusted = app.screen.query_one("#vault_bind_trusted", Static)
+        await _settle(pilot, lambda: crypto.ssh_public_fingerprint(host_key) in str(trusted.render()))
+        assert "pinned for the team" in str(trusted.render())
+        assert not app.screen.query("#vault_bind_use_trusted")
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+
+    assert seen == ["shared-team-a", "i-1"]
+    call = app.vault_command_service.bind.await_args.kwargs
+    assert call["team"] == "team-a" and call["host_keys"] == (host_key,)
+    assert [row["id"] for row in call["own_rows"]] == ["i-1"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_host_key_for_a_team_key_on_your_own_server_connects_as_you(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[str] = []
+    _trusted_for_own_only(monkeypatch, recorded)
+    app = _Host([_own(), _shared()])
+    service = app.vault_command_service
+    service.records_new = True
+    visits: list[tuple[Any, Any]] = []
+
+    async def visit(instance: dict, *, login: Any = None) -> None:
+        visits.append((instance.get("id"), login))
+        recorded.append(_host_key())
+
+    service.visit_for_host_key = visit
+    async with app.run_test() as pilot:
+        await _open_team_key_dialog(pilot)
+        fetch = app.screen.query_one("#vault_bind_fetch_host_key", Button)
+        await _settle(pilot, lambda: not fetch.has_class("-hidden"))
+        fetch.press()
+        trusted = app.screen.query_one("#vault_bind_trusted", Static)
+        await _settle(pilot, lambda: bool(recorded) and crypto.ssh_public_fingerprint(recorded[0]) in str(trusted.render()))
+
+    # The own row, with the login it connects with by itself: never the team's row.
+    assert visits == [("i-1", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_team_key_that_replaces_another_keeps_its_pins_and_shows_no_host_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _trusted_for_own_only(monkeypatch, [_host_key()])
+    app = _Host([_own(), _shared(credential_binding=_signed_binding())])
+    async with app.run_test() as pilot:
+        await _open_team_key_dialog(pilot)
+        assert not app.screen.query("#vault_bind_trusted")
+        assert not app.screen.query("#vault_bind_fetch_host_key")
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+
+    assert seen == []
+    assert app.vault_command_service.bind.await_args.kwargs["host_keys"] == ()

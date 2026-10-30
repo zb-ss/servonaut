@@ -342,11 +342,20 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
     AUTO_FOCUS = ""
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 
-    def __init__(self, service: Any, instance: Dict[str, Any]) -> None:
+    def __init__(
+        self, service: Any, instance: Dict[str, Any], own_instance: Optional[Dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
         self._service = service
         self._instance = instance
         self._team = instance.get("team_slug") if instance.get("is_shared") is True else None
+        # A team's first key for a server the user also lists as their own: its
+        # host keys are found, and fetched, through the own row, which is where
+        # connecting to it records them. A team key that replaces another keeps
+        # the pins it already has.
+        binding = instance.get("credential_binding")
+        rebinding = isinstance(binding, Mapping) and binding.get("source") == _VAULT_SOURCE
+        self._own = own_instance if self._team and not rebinding else None
         self._trusted_keys: list[str] = []
         # What is on screen, kept raw so a demo-mode toggle can redraw it.
         self._vault_choices: list[dict[str, str]] = []
@@ -386,16 +395,19 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             Label("Login user"),
             Input(value=self._login_for_display(), placeholder="Login user", id="vault_bind_login"),
         ]
-        if self._team:
+        if not self._shows_host_keys:
             rows.append(Input(placeholder="Verified OpenSSH host keys, comma separated (optional)", id="vault_bind_host_keys"))
         else:
             rows.extend((
                 Static("Checking the host keys this machine trusts…", id="vault_bind_trusted"),
                 Button("Fetch host key", id="vault_bind_fetch_host_key", classes="-hidden"),
-                Checkbox("I checked these fingerprints: pin them", value=False, id="vault_bind_use_trusted",
-                         disabled=True, classes="-hidden"),
-                Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
             ))
+            if not self._team:
+                rows.append(Checkbox("I checked these fingerprints: pin them", value=False, id="vault_bind_use_trusted",
+                                     disabled=True, classes="-hidden"))
+            rows.append(
+                Input(placeholder="Or paste verified OpenSSH host keys, comma separated", id="vault_bind_host_keys"),
+            )
         rows.extend((
             Static("", id="vault_bind_message"),
             Vertical(
@@ -411,8 +423,13 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
 
     def on_mount(self) -> None:
         self.run_worker(self._load_vaults(), group="vault_bind_choices", exclusive=True)
-        if not self._team:
+        if self._shows_host_keys:
             self.run_worker(self._load_trusted_host_keys(), group="vault_bind_host_keys")
+
+    @property
+    def _shows_host_keys(self) -> bool:
+        """Whether the dialog lists the host keys this machine trusts (and can fetch them)."""
+        return not self._team or self._own is not None
 
     def _suggested_login(self) -> str:
         """The login SSH would use for this server today, so a binding keeps it."""
@@ -468,7 +485,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         self.query_one("#vault_bind_scope", Static).update(escape(self.scrub_for_display(self._scope_text())))
         self._say(self._message)
         self._show_match(self._match_text)
-        if not self._team:
+        if self._shows_host_keys:
             self._show_trusted(self._trusted_text)
 
     # Each picker's search box.
@@ -550,12 +567,14 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         visit = getattr(self._service, "visit_for_host_key", None)
         if not callable(visit):
             return
-        login = self._login_value() or None
+        # A server of your own is visited as you connect to it, with your own login.
+        target = self._own if self._own is not None else self._instance
+        login = None if self._own is not None else self._login_value() or None
         self._say("")
         try:
             with self._busy.running("Connecting once to record the server's host key…",
                                     hold=(*_BIND_BUTTON, "#vault_bind_fetch_host_key")):
-                failure = await visit(self._instance, login=login)
+                failure = await visit(target, login=login)
         except Exception:
             logger.debug("Recording the host key for the vault binding failed", exc_info=True)
             failure = "Could not connect to the server."
@@ -564,7 +583,7 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         )
         if self._trusted_keys:
             try:
-                self.query_one("#vault_bind_use_trusted", Checkbox).focus()
+                self.query_one("#vault_bind_use_trusted" if not self._team else "#vault_bind_confirm").focus()
             except NoMatches:
                 pass  # the dialog closed meanwhile
 
@@ -688,29 +707,37 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
         try:
             with self._busy.running("Reading the host keys this machine trusts…", hold=_BIND_BUTTON):
                 keys = await asyncio.to_thread(trusted_host_keys, self._instance, host, port) if host else []
+                if not keys and host and self._own is not None:
+                    keys = await asyncio.to_thread(trusted_host_keys, self._own, host, port)
                 self._can_fetch_host_key = bool(host) and await asyncio.to_thread(self._records_new_host_keys)
         except Exception:
             keys = []
         try:
-            box = self.query_one("#vault_bind_use_trusted", Checkbox)
             fetch = self.query_one("#vault_bind_fetch_host_key", Button)
         except NoMatches:
             return  # the dialog closed while the keys were read
+        # Only a server of your own asks to tick the fingerprints: a team's key
+        # pins them unless other keys are pasted.
+        box = next(iter(self.query("#vault_bind_use_trusted").results(Checkbox)), None)
         if not keys:
             self._trusted_keys = []
-            box.value = False
-            box.disabled = True
-            box.add_class("-hidden")
+            if box is not None:
+                box.value = False
+                box.disabled = True
+                box.add_class("-hidden")
             fetch.set_class(not self._can_fetch_host_key, "-hidden")
             self._show_trusted(self._no_trusted_keys_text(failure))
             return
         fetch.add_class("-hidden")
         self._trusted_keys = list(keys)
-        self._show_trusted(f"Host keys this machine trusts for {host}:\n" + "\n".join(
+        heading = (f"Host keys this machine trusts for {host}, pinned for the team unless you paste others:"
+                   if self._team else f"Host keys this machine trusts for {host}:")
+        self._show_trusted(heading + "\n" + "\n".join(
             f"  {crypto.ssh_public_fingerprint(key)}" for key in keys
         ))
-        box.disabled = False
-        box.remove_class("-hidden")
+        if box is not None:
+            box.disabled = False
+            box.remove_class("-hidden")
 
     def on_select_changed(self, event: Select.Changed) -> None:
         # A redraw that restores the same vault is not a new choice.
@@ -747,8 +774,12 @@ class VaultBindingModal(ModalScreen[Optional[dict]]):
             self._say("This server's SSH port is not a number: fix it in Custom Servers first.")
             return
         typed = [key.strip() for key in self.query_one("#vault_bind_host_keys", Input).value.split(",") if key.strip()]
-        use_trusted = not self._team and self.query_one("#vault_bind_use_trusted", Checkbox).value
-        host_keys = [*(self._trusted_keys if use_trusted else []), *typed]
+        if self._team:
+            # Pasted keys win; otherwise the trusted keys shown for a server of your own.
+            host_keys = typed or list(self._trusted_keys)
+        else:
+            use_trusted = self.query_one("#vault_bind_use_trusted", Checkbox).value
+            host_keys = [*(self._trusted_keys if use_trusted else []), *typed]
         if not self._team and not host_keys:
             self._say(self._missing_host_keys_text())
             return
@@ -2113,6 +2144,8 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                 self.app.notify("Vault services are unavailable.", severity="warning", markup=False)
                 return
             instance = connection_instance(self.app, self._instance)
+            # Set when a team's key is bound to this server of your own.
+            own: Optional[dict[str, Any]] = None
             teams = self._sharing_teams()
             selected_team = ""
             if teams:
@@ -2125,12 +2158,12 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     target = self._team_binding_target(selected_team)
                     if target is None:
                         return
-                    instance = target
+                    own, instance = instance, target
             server = str(instance.get("id") or "")
             if not server:
                 self.app.notify("This server has no usable identifier.", severity="error", markup=False)
                 return
-            values = await self.app.push_screen_wait(VaultBindingModal(service, instance))
+            values = await self.app.push_screen_wait(VaultBindingModal(service, instance, own_instance=own))
             if not values:
                 return
             if selected_team and self._team_binding_target(
@@ -2145,7 +2178,7 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                     result = await service.bind(
                         vault_id=values["vault_id"], server=server, item_id=values["item_id"],
                         team=values["team"], login=values["login"], pin_host_key=True,
-                        host_keys=tuple(host_keys),
+                        host_keys=tuple(host_keys), own_rows=[own] if own is not None else [],
                     )
                 else:
                     if not host_keys:

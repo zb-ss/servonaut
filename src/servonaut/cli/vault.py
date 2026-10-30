@@ -1054,7 +1054,12 @@ async def _handle(args: argparse.Namespace) -> int:
                 return _EXIT_USAGE
             if (args.pin_host_key or args.host_key) and not _confirm(args, "Trust and pin the server's host keys"):
                 return _EXIT_ABORTED
-            _print(await _invoke(services, "bind", vault_id=args.vault, server=args.server, item_id=args.item_id, team=args.team, login=args.login, pin_host_key=args.pin_host_key, host_keys=tuple(args.host_key)), json_output=output)
+            # Connecting to a server of your own records its keys under its own name.
+            own_rows = _auto_bind_servers() if args.pin_host_key and not args.host_key else []
+            _print(await _invoke(
+                services, "bind", vault_id=args.vault, server=args.server, item_id=args.item_id, team=args.team,
+                login=args.login, pin_host_key=args.pin_host_key, host_keys=tuple(args.host_key), own_rows=own_rows,
+            ), json_output=output)
         elif command == "bind-personal":
             if not _host_keys_are_well_formed(args.host_key):
                 return _EXIT_USAGE

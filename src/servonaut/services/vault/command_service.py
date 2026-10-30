@@ -56,7 +56,7 @@ from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
-from servonaut.services.shared_servers import team_id_text
+from servonaut.services.shared_servers import own_twin, team_id_text
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
 from .rotation import RotationService
@@ -1804,12 +1804,15 @@ class VaultCommandService:
         self,
         *, vault_id: str, server: str, item_id: str, team: str | None,
         login: str | None, pin_host_key: bool, host_keys: Sequence[str] = (),
-        replace_existing: bool = True,
+        replace_existing: bool = True, own_rows: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Write a signed binding only after an explicit host-pin decision.
 
         The first binding pins *host_keys* when given, otherwise the keys this
         machine already trusts for the server (from an earlier SSH login).
+        *own_rows* are the user's own servers: when one of them is the shared
+        server, the keys trusted under its own name count too, since that is
+        where connecting to it records them.
         With ``replace_existing=False`` a shared server that already has a
         credential_binding is refused instead of updated.
         """
@@ -1827,7 +1830,9 @@ class VaultCommandService:
         vault = await self.vaults.get_vault(vault_id)
         item = await self.items.get_item(vault_id, item_id)
         payload = self.items.read_item(vault, item)
-        host_keys, revision = self._binding_pins(shared, vault, hostname, port, pin_host_key, host_keys)
+        host_keys, revision = self._binding_pins(
+            shared, vault, hostname, port, pin_host_key, host_keys, own_rows=own_rows,
+        )
         login_user = login or shared.get("login_user") or shared.get("username")
         if not isinstance(login_user, str) or not login_user:
             raise ValueError("a non-empty SSH login is required")
@@ -2150,7 +2155,7 @@ class VaultCommandService:
 
     def _binding_pins(
         self, shared: Mapping[str, Any], vault: Mapping[str, Any], hostname: str, port: int, explicit_pin: bool,
-        host_keys: Sequence[str] = (),
+        host_keys: Sequence[str] = (), *, own_rows: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[tuple[str, ...], int]:
         existing = shared.get("credential_binding")
         target = f"shared_server:{shared.get('id')}"
@@ -2160,6 +2165,9 @@ class VaultCommandService:
         if not explicit_pin and not host_keys:
             raise ValueError("--pin-host-key or --host-key is required for the first native-vault binding")
         pins = list(host_keys) or trusted_host_keys(shared, hostname, port)
+        own = own_twin(shared, own_rows) if not pins else None
+        if own is not None:
+            pins = trusted_host_keys(own, hostname, port)
         if not pins:
             raise VaultUserError(
                 "this machine does not trust a host key for the server yet; connect once "

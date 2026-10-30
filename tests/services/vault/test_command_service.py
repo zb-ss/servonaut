@@ -1457,6 +1457,93 @@ def test_first_team_binding_without_any_trusted_key_says_what_to_do(monkeypatch)
         service._binding_pins({"id": "s1"}, {}, "127.0.0.1", 2222, False)
 
 
+# A team's row of a server the user also lists as their own cloud server, and
+# that own row: connecting to it records its host key under the cloud alias.
+_SHARED_OWN = {"id": "s1", "hostname": "9.9.9.9", "port": 22}
+_OWN_ROW = {"id": "i-0123456789abcdef0", "name": "web-1", "region": "eu-west-2", "public_ip": "9.9.9.9"}
+_OWN_ALIAS = "aws:eu-west-2:i-0123456789abcdef0"
+
+
+def _trusted_under_alias_only(monkeypatch, keys_by_alias: dict[str, list[str]]) -> list:
+    """trusted_host_keys that finds keys only under a cloud instance's alias."""
+    from servonaut.services.ssh_host_keys import host_key_alias
+
+    seen: list = []
+
+    def trusted(instance, _host, _port=None):
+        seen.append(instance)
+        return list(keys_by_alias.get(host_key_alias(instance) or "", []))
+
+    monkeypatch.setattr("servonaut.services.vault.command_service.trusted_host_keys", trusted)
+    return seen
+
+
+def _pins_service() -> VaultCommandService:
+    service = VaultCommandService(_Api({}), SimpleNamespace(user_id=1), _config())
+    service.bindings = MagicMock()
+    return service
+
+
+def test_first_team_binding_pins_keys_trusted_under_the_own_servers_alias(monkeypatch) -> None:
+    _trusted_under_alias_only(monkeypatch, {_OWN_ALIAS: [_HOST_KEY]})
+
+    pins, revision = _pins_service()._binding_pins(
+        _SHARED_OWN, {}, "9.9.9.9", 22, True, own_rows=[_OWN_ROW],
+    )
+
+    assert pins == (_HOST_KEY,) and revision == 1
+
+
+def test_first_team_binding_never_pins_keys_of_an_unrelated_own_server(monkeypatch) -> None:
+    other = {**_OWN_ROW, "id": "i-0fedcba9876543210", "public_ip": "8.8.8.8"}
+    seen = _trusted_under_alias_only(monkeypatch, {"aws:eu-west-2:i-0fedcba9876543210": [_HOST_KEY]})
+
+    with pytest.raises(VaultUserError):
+        _pins_service()._binding_pins(_SHARED_OWN, {}, "9.9.9.9", 22, True, own_rows=[other])
+    assert other not in seen
+
+
+def test_first_team_binding_prefers_keys_trusted_for_the_teams_row(monkeypatch) -> None:
+    team_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDkrteamrowkey"
+    seen: list = []
+
+    def trusted(instance, _host, _port=None):
+        seen.append(instance)
+        return [team_key] if instance is _SHARED_OWN else [_HOST_KEY]
+
+    monkeypatch.setattr("servonaut.services.vault.command_service.trusted_host_keys", trusted)
+
+    pins, _revision = _pins_service()._binding_pins(
+        _SHARED_OWN, {}, "9.9.9.9", 22, True, own_rows=[_OWN_ROW],
+    )
+
+    assert pins == (team_key,) and seen == [_SHARED_OWN]
+
+
+@pytest.mark.asyncio
+async def test_team_bind_looks_up_host_keys_of_the_users_own_row(monkeypatch) -> None:
+    from servonaut.services.shared_servers import shared_row
+
+    _trusted_under_alias_only(monkeypatch, {_OWN_ALIAS: [_HOST_KEY]})
+    service = _pins_service()
+    service._shared_server = AsyncMock(return_value=dict(_SHARED_OWN))  # type: ignore[method-assign]
+    service.vaults = SimpleNamespace(get_vault=AsyncMock(return_value={"scope": "team:1"}))
+    service.items = MagicMock()
+    service.items.get_item = AsyncMock(return_value={})
+    service.items.read_item.return_value = {"public_fingerprint": "SHA256:x"}
+    service.bindings.put_team_binding = AsyncMock(return_value={"ok": True})
+    # A team's row is never the user's own, even at the same address.
+    team_twin = shared_row({"id": "s1", "hostname": "9.9.9.9"}, {"slug": "team-a"})
+
+    await service.bind(
+        vault_id="11111111-1111-4111-8111-111111111111", server="s1",
+        item_id="22222222-2222-4222-8222-222222222222", team="team-a", login="deploy",
+        pin_host_key=True, own_rows=[team_twin, _OWN_ROW],
+    )
+
+    assert service.bindings.build_binding.call_args.kwargs["host_keys"] == (_HOST_KEY,)
+
+
 @pytest.mark.asyncio
 async def test_claimed_enrollment_that_fails_is_reported_so_the_job_closes() -> None:
     from servonaut.services.vault.ca_enrollment import EnrollmentError
