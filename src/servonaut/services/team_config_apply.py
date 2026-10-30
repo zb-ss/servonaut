@@ -3,10 +3,12 @@
 Apply semantics are REPLACE-WHOLE-SECTION for v1 — the team's section
 overwrites the local one in its entirety. This is the simplest model that
 makes the feature useful (admin pushes a baseline → members pull → they
-have it). Selective per-item import is the v2 release.
+have it). Selective per-item import is the v2 release. One exception: a
+custom server the team also shares is not added (see
+:func:`apply_team_config`).
 
-Key paths are the exception: a push never carries them (they name files on
-the sender's computer), so a pulled profile's ``bastion_key`` and a pulled
+Key paths are the other exception: a push never carries them (they name files
+on the sender's computer), so a pulled profile's ``bastion_key`` and a pulled
 custom server's ``ssh_key`` are blank. The member's own path for the entry of
 the same name, still pointing at the same bastion or host, is kept
 (:func:`local_key_paths`).
@@ -19,7 +21,7 @@ filesystem dependency.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, NamedTuple, Sequence
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AppConfig
@@ -27,11 +29,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def apply_team_config(local: "AppConfig", remote_payload: dict) -> int:
+class AppliedTeamConfig(NamedTuple):
+    """What a pull did beyond replacing the four sections."""
+
+    skipped_custom_servers: List[str]
+    kept_key_paths: int
+
+
+def apply_team_config(
+    local: "AppConfig", remote_payload: dict, *, shared_servers: Sequence[Mapping[str, Any]] = (),
+) -> AppliedTeamConfig:
     """Replace the four shareable sections on ``local`` with ``remote_payload``'s.
 
-    Returns how many of the user's own key paths were kept
-    (:func:`local_key_paths`).
+    A pulled custom server that one of the team's *shared_servers* also is,
+    is left out: as the user's own server it would hide the team's row and
+    connect without the team's key. Returns the names of those left out and
+    how many of the user's own key paths were kept (:func:`local_key_paths`).
 
     The four sections (in order applied):
 
@@ -52,7 +65,8 @@ def apply_team_config(local: "AppConfig", remote_payload: dict) -> int:
         ScanRule,
     )
 
-    kept = local_key_paths(local, remote_payload)
+    servers, skipped = team_custom_servers(remote_payload, shared_servers)
+    kept = local_key_paths(local, {**remote_payload, "custom_servers": servers})
     local.connection_profiles = _rehydrate_list(
         remote_payload.get("connection_profiles", []), ConnectionProfile
     )
@@ -62,16 +76,27 @@ def apply_team_config(local: "AppConfig", remote_payload: dict) -> int:
     local.scan_rules = _rehydrate_list(
         remote_payload.get("scan_rules", []), ScanRule
     )
-    local.custom_servers = _rehydrate_list(
-        remote_payload.get("custom_servers", []), CustomServer
-    )
+    local.custom_servers = _rehydrate_list(servers, CustomServer)
     for profile in local.connection_profiles:
         if profile.name in kept["bastion_key"]:
             profile.bastion_key = kept["bastion_key"][profile.name]
     for server in local.custom_servers:
         if server.name in kept["ssh_key"]:
             server.ssh_key = kept["ssh_key"][server.name]
-    return len(kept["bastion_key"]) + len(kept["ssh_key"])
+    return AppliedTeamConfig(skipped, len(kept["bastion_key"]) + len(kept["ssh_key"]))
+
+
+def team_custom_servers(
+    remote_payload: dict, shared_servers: Sequence[Mapping[str, Any]],
+) -> tuple[List[Any], List[str]]:
+    """The pulled custom servers to add, and the names of those the team already shares."""
+    from servonaut.services.team_sharing import shared_custom_servers
+
+    servers = list(remote_payload.get("custom_servers", []) or [])
+    entries = [server for server in servers if isinstance(server, dict)]
+    skipped = shared_custom_servers(entries, shared_servers)
+    kept = [server for server in servers if not (isinstance(server, dict) and server.get("name") in skipped)]
+    return kept, skipped
 
 
 def local_key_paths(local: "AppConfig", remote_payload: dict) -> Dict[str, Dict[str, str]]:

@@ -29,7 +29,7 @@ from servonaut.services.vault.display import (
     ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import VaultKeyInUse, VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import HostKeysNeeded, VaultKeyInUse, VaultUserError, vault_failure_reason
 from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
@@ -1054,7 +1054,12 @@ async def _handle(args: argparse.Namespace) -> int:
                 return _EXIT_USAGE
             if (args.pin_host_key or args.host_key) and not _confirm(args, "Trust and pin the server's host keys"):
                 return _EXIT_ABORTED
-            _print(await _invoke(services, "bind", vault_id=args.vault, server=args.server, item_id=args.item_id, team=args.team, login=args.login, pin_host_key=args.pin_host_key, host_keys=tuple(args.host_key)), json_output=output)
+            # Connecting to a server of your own records its keys under its own name.
+            own_rows = _auto_bind_servers() if args.pin_host_key and not args.host_key else []
+            _print(await _invoke(
+                services, "bind", vault_id=args.vault, server=args.server, item_id=args.item_id, team=args.team,
+                login=args.login, pin_host_key=args.pin_host_key, host_keys=tuple(args.host_key), own_rows=own_rows,
+            ), json_output=output)
         elif command == "bind-personal":
             if not _host_keys_are_well_formed(args.host_key):
                 return _EXIT_USAGE
@@ -1150,6 +1155,16 @@ async def _handle(args: argparse.Namespace) -> int:
                 _print(await _invoke(services, "recover_escrow", vault_id=args.vault, escrow_key=escrow_key), json_output=output)
         else:
             raise ValueError(f"Unknown vault command: {command}")
+    except HostKeysNeeded as exc:
+        print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        print(
+            "Connect once with `servonaut ssh` and check the fingerprint, then pass --pin-host-key; "
+            "or pass verified keys with --host-key."
+            if exc.looked_up_trusted_keys else
+            "Pass --pin-host-key to pin the host keys this machine trusts, or --host-key with verified keys.",
+            file=sys.stderr,
+        )
+        return _EXIT_ERROR
     except VaultKeyInUse as exc:
         for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
                              ("Could not check", exc.unchecked)):

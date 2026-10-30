@@ -320,12 +320,16 @@ _ALLOWLIST: List[AllowlistEntry] = [
                    "Writes a hard-coded '--- Switching to log: <path> ---' banner "
                    "where path comes from the config, not live server output."),
 
-    # team_management.py — the Shared Configs pull preview Static only ever
-    # contains counts and a code-controlled warning string — no user-streamed
-    # data. (The push form lists server and profile names; it redacts them.)
+    # team_management.py — the Shared Configs pull preview Static contains
+    # counts, code-controlled text and entry names that go through
+    # _names_for_display, which redacts them in demo mode. (The push form
+    # lists server and profile names; it redacts them.)
     AllowlistEntry("screens/team_management.py", "_show_pull_config_form", "update",
                    "Pull preview Static — renders local→remote counts per section "
-                   "from diff_against_local; numerical counts, not user-typed text."),
+                   "from diff_against_local; names are redacted by _names_for_display."),
+    AllowlistEntry("screens/team_management.py", "_prefill_share_address", "update",
+                   "Share Server address note — fixed explanatory text; the addresses "
+                   "are only in the picker's options, redacted by _display_server_address."),
 
     # memory.py — sync status and AI summary update UI labels, not raw data.
     AllowlistEntry(
