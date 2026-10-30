@@ -56,6 +56,13 @@ _DISTRIBUTIONS = (
     "keyring",
     "certifi",
 )
+# The started app checks the release manifest pinned for the build's channel.
+# The check is sent to a loopback port where nothing listens instead, so the
+# self-test never reaches the release host. The variable is
+# servonaut.services.update_service.RELEASE_MANIFEST_URL_ENV, named here
+# because this module imports no application code at load time.
+_MANIFEST_URL_ENV = "SERVONAUT_RELEASE_MANIFEST_URL"
+_UNREACHABLE_MANIFEST_URL = "https://127.0.0.1:9/manifest.json"
 
 
 class _SelftestFailure(Exception):
@@ -284,6 +291,7 @@ def _isolated_environment(home: Path, inherited: dict[str, str]) -> dict[str, st
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_CONFIG_FILE": str(home / ".aws" / "config"),
         "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials"),
+        _MANIFEST_URL_ENV: _UNREACHABLE_MANIFEST_URL,
     }
     for name in ("LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM"):
         if inherited.get(name):
