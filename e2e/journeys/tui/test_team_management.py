@@ -23,6 +23,7 @@ the service answers, so the journey checks both.
 from __future__ import annotations
 
 import pytest
+from textual.geometry import Region
 
 from e2e.harness import fleet
 from e2e.harness.fake_cloud.wire import expected
@@ -201,6 +202,11 @@ async def test_owner_invites_promotes_removes_and_shares(tui, seed, fake_cloud):
         servers_before = t.table_rows("#servers_table")
         await _press(t, "#btn_share")
         await t.wait_until(lambda: t.on_screen("#share_server_form").display, desc="share form open")
+        # A pointer user sees the whole form, Share included, without scrolling.
+        await t.wait_until(
+            lambda: Region(0, 0, *t.app.size).contains_region(t.on_screen("#btn_confirm_share").region),
+            desc="the share form in view",
+        )
         await t.fill("#input_share_username", "deploy")
         await _press(t, "#btn_confirm_share")
         await t.wait_for_toast(rf"^Server '{fleet.APP_1.name}' shared with team\.$")

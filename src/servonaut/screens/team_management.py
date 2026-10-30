@@ -432,6 +432,9 @@ class TeamManagementScreen(Screen):
         """
         form = self.query_one("#share_server_form")
         form.display = True
+        # The form opens at the foot of the servers card: bring it into view
+        # once laid out, so its fields and Share are not below the fold.
+        self.call_after_refresh(form.scroll_visible, animate=False)
         # Clear any stale connection-detail input from a previous open so the
         # pre-fill from the next-selected instance always wins.
         self.query_one("#input_share_username", Input).value = ""
