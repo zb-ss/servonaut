@@ -1,0 +1,1150 @@
+name: Desktop preview macOS
+
+# Attaches signed and notarized preview disk images of the macOS desktop app,
+# one for Apple silicon and one for Intel Macs, to published GitHub releases
+# and pre-releases (vX.Y.Z and vX.Y.ZrcN):
+#
+#   resolve  decides what to build, from the release event or the inputs;
+#   qualify  builds each target's desktop payload from the release's tag
+#            commit, as a release build whose runtime marker names the tag's
+#            release channel, runs the desktop qualification's inspection and
+#            packaged self-test on it and assembles the unsigned Servonaut.app.
+#            An ad-hoc signed copy of the app must pass the self-test and open
+#            its window under the hardened runtime. It holds no secret and
+#            never a write token;
+#   sign     runs once a reviewer approves the desktop-signing environment,
+#            the only job that can reach the signing certificate and the
+#            notary key. It signs the unsigned app it was handed with the
+#            Developer ID, notarizes and staples it, then packages, signs,
+#            notarizes and staples the disk image, and runs the self-test and
+#            the window smoke on the signed app;
+#   publish  checks the disk images it was handed, attests their build
+#            provenance and uploads them with their SHA256SUMS, replacing only
+#            those three assets of the release.
+#
+# Nothing is uploaded unless every step passed. The PyPI publish and the
+# Linux preview are separate workflows with no dependency on this one.
+#
+# Re-run a release on the tag itself, so the provenance names the commit
+# that was built:
+#   gh workflow run desktop-preview-macos.yml --ref vX.Y.Z -f tag=vX.Y.Z
+# dry_run signs and notarizes for real, but hands no disk image on, so no
+# notarized build of an unreleased commit becomes downloadable: only reports
+# and screenshots are kept, and nothing is attested or uploaded. The signing
+# environment deploys only from release tags and release/* branches, so every
+# run starts from one of those. Without a tag, a dry run rehearses its
+# branch's commit as if it were tagged rehearsal_version. Name a rehearsal
+# branch anything but release/X.Y.Z, which the Release workflow takes for an
+# open release candidate:
+#   gh workflow run desktop-preview-macos.yml --ref release/<branch> -f dry_run=true -f rehearsal_version=X.Y.Z
+#
+# A published release gets the macOS preview only while two repository
+# variables allow it: DESKTOP_PREVIEW_PUBLISH (on or off, unset is on), which
+# holds back the Linux preview too, and DESKTOP_MACOS_PUBLISH (on or off,
+# unset is off). A manual run ignores both.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag vX.Y.Z or vX.Y.ZrcN (to publish, run the workflow on that tag)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Build, sign and notarize, but hand on, attest and upload no disk image"
+        type: boolean
+        default: false
+      rehearsal_version:
+        description: "Dry run without a tag only: rehearse this commit as version X.Y.Z or X.Y.ZrcN"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-preview-macos-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Never for forks; pull requests do not trigger this workflow at all.
+    if: github.repository == 'zb-ss/servonaut'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      build: ${{ steps.resolve.outputs.build }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+      rehearsal-version: ${{ steps.resolve.outputs.rehearsal-version }}
+      checkout-ref: ${{ steps.resolve.outputs.checkout-ref }}
+      expected-commit: ${{ steps.resolve.outputs.expected-commit }}
+    steps:
+      - name: Decide what to build
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_REHEARSAL_VERSION: ${{ inputs.rehearsal_version }}
+          PREVIEW_PUBLISH: ${{ vars.DESKTOP_PREVIEW_PUBLISH }}
+          MACOS_PUBLISH: ${{ vars.DESKTOP_MACOS_PUBLISH }}
+        run: |
+          set -euo pipefail
+          version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
+          dry_run=false
+          rehearsal=""
+          case "${GITHUB_EVENT_NAME}" in
+            release)
+              tag="${RELEASE_TAG}"
+              if [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::notice::Only releases vX.Y.Z and release candidates vX.Y.ZrcN carry a desktop preview."
+                echo "build=false" >> "${GITHUB_OUTPUT}"
+                exit 0
+              fi
+              later="gh workflow run desktop-preview-macos.yml --ref ${tag} -f tag=${tag}"
+              # The switches hold back only the automatic preview of a release.
+              case "$(printf '%s' "${PREVIEW_PUBLISH}" | tr '[:upper:]' '[:lower:]')" in
+                ""|on) ;;
+                off)
+                  echo "::notice::DESKTOP_PREVIEW_PUBLISH is off, so ${tag} gets no macOS desktop preview. To attach one later: ${later}"
+                  echo "No macOS desktop preview for ${tag}: the repository variable DESKTOP_PREVIEW_PUBLISH is off." >> "${GITHUB_STEP_SUMMARY}"
+                  echo "build=false" >> "${GITHUB_OUTPUT}"
+                  exit 0
+                  ;;
+                *)
+                  echo "::error::The repository variable DESKTOP_PREVIEW_PUBLISH must be on or off, not '${PREVIEW_PUBLISH}'."
+                  exit 1
+                  ;;
+              esac
+              # Unlike the Linux preview, the macOS preview is off until it is
+              # switched on.
+              case "$(printf '%s' "${MACOS_PUBLISH}" | tr '[:upper:]' '[:lower:]')" in
+                on) ;;
+                ""|off)
+                  echo "::notice::DESKTOP_MACOS_PUBLISH is not on, so ${tag} gets no macOS desktop preview. Set the repository variable to on to sign one for every release, or attach one to this release later: ${later}"
+                  echo "No macOS desktop preview for ${tag}: the repository variable DESKTOP_MACOS_PUBLISH is not on. Set it to on for every release, or attach one later with \`${later}\`." >> "${GITHUB_STEP_SUMMARY}"
+                  echo "build=false" >> "${GITHUB_OUTPUT}"
+                  exit 0
+                  ;;
+                *)
+                  echo "::error::The repository variable DESKTOP_MACOS_PUBLISH must be on or off, not '${MACOS_PUBLISH}'."
+                  exit 1
+                  ;;
+              esac
+              if [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+                echo "::error::The release event does not name its own tag."
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              tag="${INPUT_TAG}"
+              rehearsal="${INPUT_REHEARSAL_VERSION}"
+              if [ "${INPUT_DRY_RUN}" = "true" ]; then dry_run=true; fi
+              if [ -n "${rehearsal}" ]; then
+                if [ "${dry_run}" != "true" ] || [ -n "${tag}" ]; then
+                  echo "::error::rehearsal_version is for a dry run without a tag only."
+                  exit 1
+                fi
+                if [[ ! "${rehearsal}" =~ ^${version}$ ]]; then
+                  echo "::error::rehearsal_version must be X.Y.Z or X.Y.ZrcN."
+                  exit 1
+                fi
+                tag="v${rehearsal}"
+              elif [[ ! "${tag}" =~ ^v${version}$ ]]; then
+                echo "::error::tag must be a release vX.Y.Z or a release candidate vX.Y.ZrcN."
+                exit 1
+              elif [ "${dry_run}" != "true" ] && [ "${GITHUB_REF}" != "refs/tags/${tag}" ]; then
+                echo "::error::To publish, run this workflow on the tag: gh workflow run desktop-preview-macos.yml --ref ${tag} -f tag=${tag}"
+                exit 1
+              fi
+              # The desktop-signing environment deploys only from these refs; a
+              # run from any other would qualify both targets and then wait for
+              # an approval that cannot be given.
+              case "${GITHUB_REF}" in
+                refs/tags/v*|refs/heads/release/*) ;;
+                *)
+                  echo "::error::Signing runs only from a release tag or a release/* branch, not ${GITHUB_REF}. Run this workflow with --ref ${tag} or --ref release/<branch>."
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::This workflow runs for published releases and on request only."
+              exit 1
+              ;;
+          esac
+
+          # The commit to build: the tag's, unless a dry run rehearses its own.
+          if [ -n "${rehearsal}" ]; then
+            checkout_ref="${GITHUB_SHA}"
+            expected="${GITHUB_SHA}"
+          elif [ "${GITHUB_REF}" = "refs/tags/${tag}" ]; then
+            checkout_ref="refs/tags/${tag}"
+            expected="${GITHUB_SHA}"
+          else
+            checkout_ref="refs/tags/${tag}"
+            expected=""
+          fi
+          {
+            echo "build=true"
+            echo "tag=${tag}"
+            echo "dry-run=${dry_run}"
+            echo "rehearsal-version=${rehearsal}"
+            echo "checkout-ref=${checkout_ref}"
+            echo "expected-commit=${expected}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ -n "${rehearsal}" ]; then
+            echo "Rehearsal of this commit as ${tag}: signed and notarized, but nothing is handed on, attested or uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          elif [ "${dry_run}" = "true" ]; then
+            echo "Dry run for ${tag}: signed and notarized, but nothing is handed on, attested or uploaded." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "macOS desktop preview for ${tag}." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  qualify:
+    name: qualify (${{ matrix.target }})
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+            python-architecture: arm64
+          - target: macos-x64
+            runner: macos-15-intel
+            python-architecture: x64
+    # Both legs set this job's outputs and the leg that finishes last wins.
+    # The plan gives every leg the same values, and the digest a leg measures
+    # goes to an output named after its target, which the other leg leaves
+    # empty, so neither overwrites the other's.
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+      product-version: ${{ steps.plan.outputs.product-version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      packaging-revision: ${{ steps.plan.outputs.packaging-revision }}
+      dmg-asset-macos-arm64: ${{ steps.plan.outputs.dmg-asset-macos-arm64 }}
+      dmg-asset-macos-x64: ${{ steps.plan.outputs.dmg-asset-macos-x64 }}
+      sums-asset: ${{ steps.plan.outputs.sums-asset }}
+      app-sha256-macos-arm64: ${{ steps.handoff.outputs.app-sha256-macos-arm64 }}
+      app-sha256-macos-x64: ${{ steps.handoff.outputs.app-sha256-macos-x64 }}
+    env:
+      TARGET: ${{ matrix.target }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Confirm the commit to build
+        id: source
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve.outputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          if [ -n "${EXPECTED_COMMIT}" ] && [ "${commit}" != "${EXPECTED_COMMIT}" ]; then
+            echo "::error::${TAG} no longer points at the commit this run was started for."
+            exit 1
+          fi
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python-architecture }}
+
+      # A rehearsal sets the version exactly as the Release workflow does when
+      # it cuts a candidate, so everything below sees a release commit.
+      - name: Rehearse as a release commit
+        if: needs.resolve.outputs.rehearsal-version != ''
+        env:
+          REHEARSAL_VERSION: ${{ needs.resolve.outputs.rehearsal-version }}
+        run: python .github/scripts/release-policy.py set-version "${REHEARSAL_VERSION}"
+
+      - name: Prepare qualification paths
+        id: paths
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          BASE_TEMP="${RUNNER_TEMP}/servonaut-desktop-preview-${TARGET}-${GITHUB_RUN_ID}"
+          export BASE_TEMP
+          "${PYTHON_PATH}" -I -c '
+          import os
+          from pathlib import Path
+
+          base = Path(os.environ["BASE_TEMP"])
+          try:
+              base.mkdir(mode=0o700, parents=False, exist_ok=False)
+              for name in ("wheel-tools", "qualification", "evidence", "upload", "screenshots", "macos", "adhoc", "handoff"):
+                  (base / name).mkdir(mode=0o700)
+          except OSError:
+              raise SystemExit("qualification directories could not be created")
+          '
+          {
+            echo "python-path=${PYTHON_PATH}"
+            echo "base-temp=${BASE_TEMP}"
+            echo "wheel-tools-dir=${BASE_TEMP}/wheel-tools"
+            echo "qualification-dir=${BASE_TEMP}/qualification"
+            echo "build-dir=${BASE_TEMP}/build"
+            echo "evidence-dir=${BASE_TEMP}/evidence"
+            echo "upload-dir=${BASE_TEMP}/upload"
+            echo "screenshot-dir=${BASE_TEMP}/screenshots"
+            echo "macos-dir=${BASE_TEMP}/macos"
+            echo "adhoc-dir=${BASE_TEMP}/adhoc"
+            echo "handoff-dir=${BASE_TEMP}/handoff"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare hash-locked qualification environment
+        id: qualification-env
+        env:
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          ROOT: ${{ steps.paths.outputs.qualification-dir }}
+        run: |
+          set -euo pipefail
+          VENV="${ROOT}/venv"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -m venv "${VENV}"
+          QUALIFIED_PYTHON="${VENV}/bin/python"
+          if ! "${QUALIFIED_PYTHON}" -m pip --isolated install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/qualification-tools-${TARGET}.txt" \
+            >"${ROOT}/qualification-install.log" 2>&1; then
+            tail -n 40 "${ROOT}/qualification-install.log" >&2
+            exit 1
+          fi
+          "${QUALIFIED_PYTHON}" -m pip check
+          echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
+
+      # The tag decides the versions, the release identity and the asset
+      # names, and a checkout whose package versions disagree with the tag
+      # stops here, before any build.
+      - name: Plan the preview from the release tag
+        id: plan
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/distribution/desktop_preview.py ] \
+            || ! grep -q '^MACOS_TARGETS' scripts/distribution/desktop_preview.py; then
+            echo "::error::${TAG} predates the macOS desktop preview packaging, so it cannot carry a macOS preview."
+            exit 1
+          fi
+          # The distribution tooling imports the product's release-identity code.
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview plan \
+            --tag "${TAG}" --checkout "${GITHUB_WORKSPACE}" --platform macos > "${RUNNER_TEMP}/preview-plan"
+          cat "${RUNNER_TEMP}/preview-plan" >> "${GITHUB_OUTPUT}"
+          sed 's/^/    /' "${RUNNER_TEMP}/preview-plan"
+
+      - name: Build verified wheel with locked tools
+        id: wheel
+        uses: ./.github/actions/setup-standalone-cli
+        with:
+          python-path: ${{ steps.paths.outputs.python-path }}
+          checkout-path: ${{ github.workspace }}
+          temporary-directory: ${{ steps.paths.outputs.wheel-tools-dir }}
+
+      # A release build: the tag decides the channel its runtime marker
+      # names, and the plan the packaging revision the update check orders by.
+      - name: Build internal desktop onedir payload
+        id: build
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          WHEEL_PATH: ${{ steps.wheel.outputs.wheel-path }}
+          BUILD_DIR: ${{ steps.paths.outputs.build-dir }}
+          COMMIT: ${{ steps.source.outputs.commit }}
+          CHANNEL: ${{ steps.plan.outputs.channel }}
+          PACKAGING_REVISION: ${{ steps.plan.outputs.packaging-revision }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.build \
+            --wheel "${WHEEL_PATH}" \
+            --target "${TARGET}" \
+            --commit "${COMMIT}" \
+            --release-tag "${TAG}" \
+            --channel "${CHANNEL}" \
+            --packaging-revision "${PACKAGING_REVISION}" \
+            --output-dir "${BUILD_DIR}"
+          echo "payload-dir=${BUILD_DIR}/servonaut-desktop" >> "${GITHUB_OUTPUT}"
+          echo "metadata-dir=${BUILD_DIR}/build-metadata" >> "${GITHUB_OUTPUT}"
+
+      - name: Inspect desktop onedir payload
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.inspect \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --output "${EVIDENCE_DIR}/inspection-report-${TARGET}.json"
+
+      - name: Run policy-bound smoke checks
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          METADATA_DIR: ${{ steps.build.outputs.metadata-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${PAYLOAD_DIR}" \
+            --build-metadata "${METADATA_DIR}" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --selftest
+
+      # The qualified onedir becomes Servonaut.app in the layout the
+      # PyInstaller bootloader expects of an app bundle, unsigned. The bundle
+      # version is the product version alone, as the Debian package version
+      # is: the update check orders builds by the packaging revision in the
+      # runtime marker, so no --revision is passed.
+      - name: Assemble the unsigned macOS app
+        id: app
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          PAYLOAD_DIR: ${{ steps.build.outputs.payload-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          MACOS_DIR: ${{ steps.paths.outputs.macos-dir }}
+        run: |
+          set -euo pipefail
+          APP="${MACOS_DIR}/Servonaut.app"
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.package_macos --app-only \
+            --payload-dir "${PAYLOAD_DIR}" --output-dir "${MACOS_DIR}" \
+            --version "${PRODUCT_VERSION}" --arch "${TARGET}"
+          echo "Code in Contents/Frameworks: $(find "${APP}/Contents/Frameworks" -type f | wc -l) files;" \
+            "data in Contents/Resources: $(find "${APP}/Contents/Resources" -type f | wc -l) files;" \
+            "cross-links: $(find "${APP}/Contents" -type l | wc -l)"
+          echo "app-dir=${APP}" >> "${GITHUB_OUTPUT}"
+
+      # The runtime marker the app reads beside its executables must carry
+      # the release identity the tag decides.
+      - name: Check the release identity of the app
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.app.outputs.app-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview check-marker \
+            --tag "${TAG}" --marker "${APP_DIR}/Contents/MacOS/servonaut-runtime.json"
+
+      # A copy of the app, signed ad-hoc inside-out with the hardened runtime
+      # and the release entitlements, shows before anyone is asked to approve
+      # the signing that the bundle signs and runs under them. The app handed
+      # to the sign job stays unsigned. Gatekeeper (spctl) rejects every
+      # ad-hoc signed app by design, so it is not assessed here.
+      - name: Sign a copy of the app ad-hoc
+        id: adhoc
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.app.outputs.app-dir }}
+          ADHOC_DIR: ${{ steps.paths.outputs.adhoc-dir }}
+        run: |
+          set -euo pipefail
+          APP="${ADHOC_DIR}/Servonaut.app"
+          ditto "${APP_DIR}" "${APP}"
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.sign_macos --target "${APP}" --identity - --verify
+          codesign --verify --strict --deep --verbose=2 "${APP}"
+          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+            details="$(codesign -dv "${APP}/Contents/MacOS/${executable}" 2>&1)"
+            grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\([a-z,-]*runtime' <<< "${details}"
+          done
+          # uv keeps its publisher's Developer ID signature, sealed into the bundle.
+          UV="${APP}/Contents/Frameworks/voice/uv"
+          codesign --verify --strict --verbose=2 "${UV}"
+          grep -q '^Authority=Developer ID Application' <<< "$(codesign -dv --verbose=2 "${UV}" 2>&1)"
+          echo "app-dir=${APP}" >> "${GITHUB_OUTPUT}"
+
+      # The packaged self-test again, against the executables inside the
+      # ad-hoc signed bundle: the helpers run under the hardened runtime too.
+      - name: Run policy-bound smoke checks on the ad-hoc signed app
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.adhoc.outputs.app-dir }}
+          PRODUCT_VERSION: ${{ steps.plan.outputs.product-version }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          APP_EVIDENCE="${BASE_TEMP}/adhoc/evidence"
+          mkdir -m 700 "${APP_EVIDENCE}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${APP_EVIDENCE}" \
+            --selftest
+          mv "${APP_EVIDENCE}/smoke-report-${TARGET}.json" \
+            "${EVIDENCE_DIR}/adhoc-app-smoke-report-${TARGET}.json"
+
+      # Opens the ad-hoc signed app's window as a user would, in the runner's
+      # logged-in macOS session, from the executable inside the bundle.
+      - name: Run ad-hoc signed app window smoke
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.adhoc.outputs.app-dir }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.window_smoke \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --target "${TARGET}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --screenshot "${SCREENSHOT_DIR}/adhoc-desktop-window-${TARGET}.png"
+
+      # upload-artifact keeps neither symbolic links nor file modes, and the
+      # bundle needs both, so the unsigned app travels as a tar archive,
+      # without extended attributes or other Mac metadata. Its digest
+      # travels separately, as a job output named after the target.
+      - name: Archive the unsigned app for the sign job
+        id: handoff
+        env:
+          MACOS_DIR: ${{ steps.paths.outputs.macos-dir }}
+          HANDOFF_DIR: ${{ steps.paths.outputs.handoff-dir }}
+        run: |
+          set -euo pipefail
+          archive="${HANDOFF_DIR}/Servonaut-${TARGET}.app.tar"
+          tar -c -f "${archive}" --no-mac-metadata --no-xattrs --no-acls --no-fflags \
+            -C "${MACOS_DIR}" Servonaut.app
+          {
+            echo "archive-path=${archive}"
+            echo "app-sha256-${TARGET}=$(shasum -a 256 "${archive}" | cut -d ' ' -f 1)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Hand the unsigned app to the sign job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-preview-macos-app-${{ matrix.target }}
+          path: ${{ steps.handoff.outputs.archive-path }}
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of this run replaces the archive an earlier attempt handed over.
+          overwrite: true
+          include-hidden-files: false
+
+      - name: Collect qualification evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        env:
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+          UPLOAD_DIR: ${{ steps.paths.outputs.upload-dir }}
+        run: |
+          set -euo pipefail
+          find "${EVIDENCE_DIR}" -type f -name '*.json' -exec cp {} "${UPLOAD_DIR}/" \;
+          find "${SCREENSHOT_DIR}" -type f -name '*.png' -exec cp {} "${UPLOAD_DIR}/" \;
+
+      # Reports and the window screenshot, taken once the session opened or
+      # when it did not. No executable is kept.
+      - name: Upload qualification evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-preview-macos-qualification-${{ matrix.target }}
+          path: |
+            ${{ steps.paths.outputs.upload-dir }}/*.json
+            ${{ steps.paths.outputs.upload-dir }}/*.png
+          retention-days: 7
+          if-no-files-found: warn
+          overwrite: true
+          include-hidden-files: false
+
+      - name: Remove build material
+        if: always()
+        env:
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
+            chmod -R u+w "${BASE_TEMP}"
+            rm -r -- "${BASE_TEMP}"
+          fi
+
+  sign:
+    name: sign (${{ matrix.target }})
+    needs: [resolve, qualify]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    # The only job that can reach the signing certificate and the notary key:
+    # the desktop-signing environment releases them once a reviewer approves.
+    environment: desktop-signing
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+            python-architecture: arm64
+          - target: macos-x64
+            runner: macos-15-intel
+            python-architecture: x64
+    # Each leg measures its own disk image, named after its target.
+    outputs:
+      dmg-sha256-macos-arm64: ${{ steps.dmg.outputs.dmg-sha256-macos-arm64 }}
+      dmg-sha256-macos-x64: ${{ steps.dmg.outputs.dmg-sha256-macos-x64 }}
+    env:
+      TARGET: ${{ matrix.target }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry-run }}
+      PRODUCT_VERSION: ${{ needs.qualify.outputs.product-version }}
+      DMG_ASSET: ${{ needs.qualify.outputs[format('dmg-asset-{0}', matrix.target)] }}
+      APP_SHA256: ${{ needs.qualify.outputs[format('app-sha256-{0}', matrix.target)] }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Confirm the commit to sign
+        env:
+          QUALIFIED_COMMIT: ${{ needs.qualify.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "${QUALIFIED_COMMIT}" ]; then
+            echo "::error::${TAG} no longer points at the commit the qualify job built."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.python-architecture }}
+
+      - name: Prepare signing paths
+        id: paths
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_TEMP:-}" || ! -d "${RUNNER_TEMP}" ]]; then
+            echo "runner temporary directory is unavailable" >&2
+            exit 1
+          fi
+          PYTHON_PATH="$(python -c 'import sys; print(sys.executable)')"
+          BASE_TEMP="${RUNNER_TEMP}/servonaut-desktop-signing-${TARGET}-${GITHUB_RUN_ID}"
+          export BASE_TEMP
+          "${PYTHON_PATH}" -I -c '
+          import os
+          from pathlib import Path
+
+          base = Path(os.environ["BASE_TEMP"])
+          try:
+              base.mkdir(mode=0o700, parents=False, exist_ok=False)
+              for name in ("qualification", "handoff", "app", "notary", "dmg", "signing", "evidence", "upload", "screenshots"):
+                  (base / name).mkdir(mode=0o700)
+          except OSError:
+              raise SystemExit("signing directories could not be created")
+          '
+          {
+            echo "python-path=${PYTHON_PATH}"
+            echo "base-temp=${BASE_TEMP}"
+            echo "qualification-dir=${BASE_TEMP}/qualification"
+            echo "handoff-dir=${BASE_TEMP}/handoff"
+            echo "app-parent=${BASE_TEMP}/app"
+            echo "notary-dir=${BASE_TEMP}/notary"
+            echo "dmg-dir=${BASE_TEMP}/dmg"
+            echo "signing-dir=${BASE_TEMP}/signing"
+            echo "evidence-dir=${BASE_TEMP}/evidence"
+            echo "upload-dir=${BASE_TEMP}/upload"
+            echo "screenshot-dir=${BASE_TEMP}/screenshots"
+          } >> "${GITHUB_OUTPUT}"
+
+      # The same locked tools as the qualify job, for the signing scripts and
+      # the smoke checks of the signed app.
+      - name: Prepare hash-locked qualification environment
+        id: qualification-env
+        env:
+          SELECTED_PYTHON: ${{ steps.paths.outputs.python-path }}
+          ROOT: ${{ steps.paths.outputs.qualification-dir }}
+        run: |
+          set -euo pipefail
+          VENV="${ROOT}/venv"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${SELECTED_PYTHON}" -m venv "${VENV}"
+          QUALIFIED_PYTHON="${VENV}/bin/python"
+          if ! "${QUALIFIED_PYTHON}" -m pip --isolated install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r "${GITHUB_WORKSPACE}/packaging/standalone_cli/requirements/qualification-tools-${TARGET}.txt" \
+            >"${ROOT}/qualification-install.log" 2>&1; then
+            tail -n 40 "${ROOT}/qualification-install.log" >&2
+            exit 1
+          fi
+          "${QUALIFIED_PYTHON}" -m pip check
+          echo "python-path=${QUALIFIED_PYTHON}" >> "${GITHUB_OUTPUT}"
+
+      - name: Receive the unsigned app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-preview-macos-app-${{ matrix.target }}
+          path: ${{ steps.paths.outputs.handoff-dir }}
+
+      - name: Verify and unpack the unsigned app
+        id: unpacked
+        env:
+          HANDOFF_DIR: ${{ steps.paths.outputs.handoff-dir }}
+          APP_PARENT: ${{ steps.paths.outputs.app-parent }}
+        run: |
+          set -euo pipefail
+          archive="Servonaut-${TARGET}.app.tar"
+          if [[ ! "${APP_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::The qualify job handed over no digest for ${TARGET}."
+            exit 1
+          fi
+          if [ "$(ls -A "${HANDOFF_DIR}")" != "${archive}" ]; then
+            echo "::error::Expected exactly ${archive} from the qualify job."
+            exit 1
+          fi
+          # The archive the qualify job measured, byte for byte.
+          (cd "${HANDOFF_DIR}" && echo "${APP_SHA256}  ${archive}" | shasum -a 256 --check -)
+          tar -x -p -f "${HANDOFF_DIR}/${archive}" --no-mac-metadata --no-xattrs --no-acls --no-fflags \
+            -C "${APP_PARENT}"
+          if [ "$(ls -A "${APP_PARENT}")" != "Servonaut.app" ]; then
+            echo "::error::${archive} holds more than Servonaut.app."
+            exit 1
+          fi
+          APP="${APP_PARENT}/Servonaut.app"
+          # Links and modes came through.
+          test -L "${APP}/Contents/MacOS/servonaut-runtime.json"
+          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+            test -x "${APP}/Contents/MacOS/${executable}"
+          done
+          echo "app-dir=${APP}" >> "${GITHUB_OUTPUT}"
+
+      # A temporary keychain with a random password holds the Developer ID
+      # identity for this job only; the cleanup step deletes it and restores
+      # the search list, whatever happened. The certificate file is removed
+      # as soon as it is imported; the notary key file stays, readable by
+      # this user only, until the cleanup step. No secret is printed.
+      - name: Prepare the signing keychain
+        id: keychain
+        env:
+          SIGNING_DIR: ${{ steps.paths.outputs.signing-dir }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for setting in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_NOTARY_KEY_P8_BASE64 \
+            MACOS_SIGNING_IDENTITY APPLE_TEAM_ID APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID; do
+            if [ -z "${!setting}" ]; then
+              echo "::error::The desktop-signing environment does not set ${setting}."
+              exit 1
+            fi
+          done
+          keychain="${SIGNING_DIR}/signing.keychain-db"
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::${password}"
+          umask 077
+          # The search list as it is now, for the cleanup step to restore.
+          security list-keychains -d user \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "${SIGNING_DIR}/search-list"
+          printf '%s' "${MACOS_CERTIFICATE_P12_BASE64}" | base64 --decode > "${SIGNING_DIR}/certificate.p12"
+          printf '%s' "${APPLE_NOTARY_KEY_P8_BASE64}" | base64 --decode > "${SIGNING_DIR}/notary-key.p8"
+          security create-keychain -p "${password}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${password}" "${keychain}"
+          security import "${SIGNING_DIR}/certificate.p12" -k "${keychain}" -f pkcs12 \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          rm -f -- "${SIGNING_DIR}/certificate.p12"
+          # codesign may use the key without a prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${password}" "${keychain}" > /dev/null
+          set --
+          while IFS= read -r listed; do set -- "$@" "${listed}"; done < "${SIGNING_DIR}/search-list"
+          security list-keychains -d user -s "${keychain}" "$@"
+          identities="$(security find-identity -v -p codesigning "${keychain}")"
+          if ! grep -qF "\"${MACOS_SIGNING_IDENTITY}\"" <<< "${identities}"; then
+            echo "::error::The signing keychain holds no valid code-signing identity named MACOS_SIGNING_IDENTITY."
+            exit 1
+          fi
+          echo "notary-key=${SIGNING_DIR}/notary-key.p8" >> "${GITHUB_OUTPUT}"
+
+      # Inside-out, with the hardened runtime, the release entitlements and a
+      # secure timestamp. No --verify: Gatekeeper (spctl) rejects the app
+      # until it is notarized, which is the next step.
+      - name: Sign the app with the Developer ID
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP: ${{ steps.unpacked.outputs.app-dir }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.sign_macos --target "${APP}" \
+            --identity "${MACOS_SIGNING_IDENTITY}"
+          codesign --verify --strict --deep --verbose=2 "${APP}"
+          # Notarization needs each executable signed by the Developer ID,
+          # with a secure timestamp and the hardened runtime.
+          expect() {
+            local description="$1"
+            shift
+            if ! grep -q "$@" <<< "${details}"; then
+              echo "::error::${executable} is not signed with ${description}."
+              exit 1
+            fi
+          }
+          for executable in servonaut-desktop servonaut-desktop-child servonaut; do
+            details="$(codesign -dv --verbose=2 "${APP}/Contents/MacOS/${executable}" 2>&1)"
+            expect "the identity MACOS_SIGNING_IDENTITY names" -xF "Authority=${MACOS_SIGNING_IDENTITY}"
+            expect "the team APPLE_TEAM_ID names" -xF "TeamIdentifier=${APPLE_TEAM_ID}"
+            expect "a secure timestamp" '^Timestamp='
+            expect "the hardened runtime" -E '^CodeDirectory .*flags=0x[0-9a-f]+\([a-z,-]*runtime'
+            echo "${executable}: Developer ID, secure timestamp, hardened runtime"
+          done
+          # uv keeps its publisher's Developer ID signature, sealed into the bundle.
+          codesign --verify --strict --verbose=2 "${APP}/Contents/Frameworks/voice/uv"
+
+      # notarytool takes the app as a zip archive, which ditto writes with the
+      # bundle's links and signatures intact; the ticket is stapled to the
+      # app itself, so the disk image made from it carries it.
+      - name: Notarize and staple the app
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP: ${{ steps.unpacked.outputs.app-dir }}
+          NOTARY_DIR: ${{ steps.paths.outputs.notary-dir }}
+          NOTARY_KEY: ${{ steps.keychain.outputs.notary-key }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          archive="${NOTARY_DIR}/Servonaut-${TARGET}.zip"
+          ditto -c -k --keepParent "${APP}" "${archive}"
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.notarize_macos --artifact "${archive}" \
+            --api-key-file "${NOTARY_KEY}" --api-key-id "${APPLE_NOTARY_KEY_ID}" \
+            --api-issuer "${APPLE_NOTARY_ISSUER_ID}"
+          xcrun stapler staple "${APP}"
+          xcrun stapler validate "${APP}"
+          # Gatekeeper runs the app as a user who downloaded it would.
+          if ! assessment="$(spctl --assess --type execute -vv "${APP}" 2>&1)"; then
+            echo "::error::Gatekeeper rejects the notarized app: ${assessment}"
+            exit 1
+          fi
+          if ! grep -qx 'source=Notarized Developer ID' <<< "${assessment}"; then
+            echo "::error::Gatekeeper does not accept the app as notarized: ${assessment}"
+            exit 1
+          fi
+          echo "Gatekeeper accepts the app: notarized Developer ID"
+
+      # The stapled app becomes the drag-to-Applications disk image, whose
+      # app must keep its signature; the image is then signed, notarized and
+      # stapled itself, so Gatekeeper accepts it offline too.
+      - name: Package, sign and notarize the disk image
+        id: dmg
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP: ${{ steps.unpacked.outputs.app-dir }}
+          DMG_DIR: ${{ steps.paths.outputs.dmg-dir }}
+          NOTARY_KEY: ${{ steps.keychain.outputs.notary-key }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          distribution() {
+            env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+              PYTHONPATH="${GITHUB_WORKSPACE}/src" "${QUALIFIED_PYTHON}" -m "$@"
+          }
+          distribution scripts.distribution.package_macos --app-bundle "${APP}" \
+            --output-dir "${DMG_DIR}" --version "${PRODUCT_VERSION}" --arch "${TARGET}" \
+            --filename "${DMG_ASSET}" --verify-image
+          dmg="${DMG_DIR}/${DMG_ASSET}"
+          distribution scripts.distribution.sign_macos --target "${dmg}" \
+            --identity "${MACOS_SIGNING_IDENTITY}"
+          codesign --verify --strict --verbose=2 "${dmg}"
+          distribution scripts.distribution.notarize_macos --artifact "${dmg}" \
+            --api-key-file "${NOTARY_KEY}" --api-key-id "${APPLE_NOTARY_KEY_ID}" \
+            --api-issuer "${APPLE_NOTARY_ISSUER_ID}" --staple
+          xcrun stapler validate "${dmg}"
+          if ! assessment="$(spctl --assess --type open --context context:primary-signature -vv "${dmg}" 2>&1)"; then
+            echo "::error::Gatekeeper rejects the notarized disk image: ${assessment}"
+            exit 1
+          fi
+          if ! grep -qx 'source=Notarized Developer ID' <<< "${assessment}"; then
+            echo "::error::Gatekeeper does not accept the disk image as notarized: ${assessment}"
+            exit 1
+          fi
+          digest="$(shasum -a 256 "${dmg}" | cut -d ' ' -f 1)"
+          {
+            echo "dmg-path=${dmg}"
+            echo "dmg-sha256-${TARGET}=${digest}"
+          } >> "${GITHUB_OUTPUT}"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "- \`${DMG_ASSET}\`: signed and notarized, SHA-256 \`${digest}\`; a dry run hands it on to nobody." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "- \`${DMG_ASSET}\`: signed and notarized, SHA-256 \`${digest}\`." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      # Runs whatever happened, as soon as nothing needs the identity or the
+      # notary key any more.
+      - name: Remove signing material
+        if: always()
+        env:
+          SIGNING_DIR: ${{ steps.paths.outputs.signing-dir }}
+        run: |
+          set -uo pipefail
+          status=0
+          if [ -n "${SIGNING_DIR}" ] && [ -d "${SIGNING_DIR}" ]; then
+            if [ -f "${SIGNING_DIR}/search-list" ]; then
+              set --
+              while IFS= read -r listed; do set -- "$@" "${listed}"; done < "${SIGNING_DIR}/search-list"
+              security list-keychains -d user -s "$@" || status=1
+            fi
+            if [ -e "${SIGNING_DIR}/signing.keychain-db" ]; then
+              security delete-keychain "${SIGNING_DIR}/signing.keychain-db" || status=1
+            fi
+            rm -f -- "${SIGNING_DIR}/certificate.p12" "${SIGNING_DIR}/notary-key.p8" || status=1
+          fi
+          exit "${status}"
+
+      # The packaged self-test again, against the executables inside the
+      # signed, notarized and stapled bundle the disk image holds.
+      - name: Run policy-bound smoke checks on the signed app
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.unpacked.outputs.app-dir }}
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+        run: |
+          set -euo pipefail
+          APP_EVIDENCE="${BASE_TEMP}/app-evidence"
+          mkdir -m 700 "${APP_EVIDENCE}"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.smoke_artifact \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --target "${TARGET}" \
+            --product-version "${PRODUCT_VERSION}" \
+            --evidence-dir "${APP_EVIDENCE}" \
+            --selftest
+          mv "${APP_EVIDENCE}/smoke-report-${TARGET}.json" \
+            "${EVIDENCE_DIR}/signed-app-smoke-report-${TARGET}.json"
+
+      - name: Run signed app window smoke
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          APP_DIR: ${{ steps.unpacked.outputs.app-dir }}
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            "${QUALIFIED_PYTHON}" -m scripts.desktop_shell.window_smoke \
+            --payload-root "${APP_DIR}/Contents/MacOS" \
+            --target "${TARGET}" \
+            --evidence-dir "${EVIDENCE_DIR}" \
+            --screenshot "${SCREENSHOT_DIR}/signed-desktop-window-${TARGET}.png"
+
+      # Only a real run hands the disk image on, for the publish job to check,
+      # attest and upload. Its digest travels separately, as a job output.
+      - name: Hand the disk image to the publish job
+        if: env.DRY_RUN != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-preview-macos-dmg-${{ matrix.target }}
+          path: ${{ steps.dmg.outputs.dmg-path }}
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of this run replaces the image an earlier attempt handed over.
+          overwrite: true
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Collect signing evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        env:
+          EVIDENCE_DIR: ${{ steps.paths.outputs.evidence-dir }}
+          SCREENSHOT_DIR: ${{ steps.paths.outputs.screenshot-dir }}
+          UPLOAD_DIR: ${{ steps.paths.outputs.upload-dir }}
+        run: |
+          set -euo pipefail
+          find "${EVIDENCE_DIR}" -type f -name '*.json' -exec cp {} "${UPLOAD_DIR}/" \;
+          find "${SCREENSHOT_DIR}" -type f -name '*.png' -exec cp {} "${UPLOAD_DIR}/" \;
+
+      # Reports and the signed app's window screenshot. No executable is kept.
+      - name: Upload signing evidence
+        if: always() && steps.paths.outputs.base-temp != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-preview-macos-signed-${{ matrix.target }}
+          path: |
+            ${{ steps.paths.outputs.upload-dir }}/*.json
+            ${{ steps.paths.outputs.upload-dir }}/*.png
+          retention-days: 7
+          if-no-files-found: warn
+          overwrite: true
+          include-hidden-files: false
+
+      - name: Remove build material
+        if: always()
+        env:
+          BASE_TEMP: ${{ steps.paths.outputs.base-temp }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_TEMP}" ] && [ -d "${BASE_TEMP}" ]; then
+            chmod -R u+w "${BASE_TEMP}"
+            rm -r -- "${BASE_TEMP}"
+          fi
+
+  publish:
+    name: publish
+    needs: [resolve, qualify, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The only job with write access, and it runs no code from the
+    # repository. It has no environment, so no signing secret reaches it. A
+    # dry run only summarizes.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry-run }}
+      COMMIT: ${{ needs.qualify.outputs.commit }}
+      CHANNEL: ${{ needs.qualify.outputs.channel }}
+      PACKAGING_REVISION: ${{ needs.qualify.outputs.packaging-revision }}
+      ARM64_DMG: ${{ needs.qualify.outputs.dmg-asset-macos-arm64 }}
+      X64_DMG: ${{ needs.qualify.outputs.dmg-asset-macos-x64 }}
+      SUMS_ASSET: ${{ needs.qualify.outputs.sums-asset }}
+      ARM64_SHA256: ${{ needs.sign.outputs.dmg-sha256-macos-arm64 }}
+      X64_SHA256: ${{ needs.sign.outputs.dmg-sha256-macos-x64 }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Receive the signed disk images
+        if: env.DRY_RUN != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-preview-macos-dmg-*
+          merge-multiple: true
+          path: preview
+
+      - name: Verify the disk images and write their checksums
+        if: env.DRY_RUN != 'true'
+        working-directory: preview
+        run: |
+          set -euo pipefail
+          if [ "$(LC_ALL=C ls -A)" != "$(printf '%s\n' "${ARM64_DMG}" "${X64_DMG}" | LC_ALL=C sort)" ]; then
+            echo "::error::Expected exactly ${ARM64_DMG} and ${X64_DMG} from the sign job."
+            exit 1
+          fi
+          # The files the sign job measured, byte for byte.
+          printf '%s  %s\n' "${ARM64_SHA256}" "${ARM64_DMG}" "${X64_SHA256}" "${X64_DMG}" \
+            | sha256sum --check --strict -
+          sha256sum "${ARM64_DMG}" "${X64_DMG}" > "${SUMS_ASSET}"
+          sha256sum --check --strict "${SUMS_ASSET}"
+
+      # The release must exist and its tag must still name the commit that
+      # was built.
+      - name: Confirm the release and its tag
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-before"; then
+            echo "::error::${TAG} has no published release to attach the macOS preview to."
+            exit 1
+          fi
+          tagged="$(gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}" --jq '.sha')"
+          if [ "${tagged}" != "${COMMIT}" ]; then
+            echo "::error::${TAG} was moved after the macOS preview was built from ${COMMIT}."
+            exit 1
+          fi
+          echo "Assets of ${TAG} now:"
+          sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
+
+      - name: Attest the disk images' build provenance
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            preview/${{ needs.qualify.outputs.dmg-asset-macos-arm64 }}
+            preview/${{ needs.qualify.outputs.dmg-asset-macos-x64 }}
+
+      # --clobber replaces this workflow's own three assets, so a re-run is
+      # idempotent; every other asset of the release is left alone.
+      - name: Upload the macOS preview to the release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" "preview/${ARM64_DMG}" "preview/${X64_DMG}" "preview/${SUMS_ASSET}" --clobber
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > "${RUNNER_TEMP}/assets-after"
+          while IFS= read -r name; do
+            if ! grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-after"; then
+              echo "::error::The upload removed another asset of ${TAG}."
+              exit 1
+            fi
+          done < "${RUNNER_TEMP}/assets-before"
+          # What a user downloads must check out against the published sums.
+          mkdir "${RUNNER_TEMP}/published"
+          gh release download "${TAG}" --dir "${RUNNER_TEMP}/published" \
+            --pattern "${ARM64_DMG}" --pattern "${X64_DMG}" --pattern "${SUMS_ASSET}"
+          (cd "${RUNNER_TEMP}/published" && sha256sum --check --strict "${SUMS_ASSET}")
+
+      - name: Summarize
+        run: |
+          set -euo pipefail
+          {
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "## macOS desktop preview for ${TAG} (dry run, not published)"
+            else
+              echo "## macOS desktop preview for ${TAG}"
+            fi
+            echo ""
+            echo "- Built from \`${COMMIT}\`; release identity: channel \`${CHANNEL}\`, packaging revision \`${PACKAGING_REVISION}\`"
+            echo "- Apple silicon: \`${ARM64_DMG}\`, SHA-256 \`${ARM64_SHA256}\`"
+            echo "- Intel: \`${X64_DMG}\`, SHA-256 \`${X64_SHA256}\`"
+            if [ "${DRY_RUN}" != "true" ]; then
+              echo "- Checksums: \`${SUMS_ASSET}\`"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

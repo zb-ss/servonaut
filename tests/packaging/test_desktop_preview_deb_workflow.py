@@ -8,6 +8,7 @@ environment the workflow gives them.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -227,6 +228,7 @@ def test_the_package_is_qualified_before_it_leaves_the_job(workflow: str) -> Non
         "-m scripts.desktop_shell.smoke_artifact",
         "-m scripts.desktop_shell.window_smoke",
         "-m scripts.distribution.package_deb",
+        "- name: Check the release identity of the package",
         "- name: Install, run and remove the package",
         "- name: Hand the qualified package to the publish job",
     ]
@@ -268,6 +270,24 @@ def test_the_build_is_the_checked_out_commit_with_locked_tools(workflow: str) ->
     installs = [line for line in qualify.splitlines() if "pip" in line and " install " in line]
     assert installs and all("--require-hashes" in line for line in installs)
     assert "--upgrade" not in workflow
+
+
+def test_the_build_is_a_release_build_of_the_tag(workflow: str) -> None:
+    qualify = _job(workflow, "qualify")
+    build = _step(qualify, "Build internal desktop onedir payload")
+
+    assert '--release-tag "${TAG}"' in build
+    assert '--channel "${CHANNEL}"' in build
+    assert '--packaging-revision "${PACKAGING_REVISION}"' in build
+    assert "CHANNEL: ${{ steps.plan.outputs.channel }}" in build
+    assert "PACKAGING_REVISION: ${{ steps.plan.outputs.packaging-revision }}" in build
+    assert qualify.index("- name: Plan the preview from the release tag") < qualify.index(
+        "- name: Build internal desktop onedir payload"
+    )
+    # The Debian version stays the product version; the marker carries the revision.
+    package = _step(qualify, "Package the qualified payload")
+    assert "--revision" not in package
+    assert "--packaging-revision" not in package
 
 
 def test_linux_system_packages_follow_the_abi_contract(workflow: str) -> None:
@@ -795,6 +815,101 @@ def test_the_package_step_fails_when_the_package_disagrees_with_the_tag(
     assert result.returncode == 1
     assert "The package's Version is 2.28.0~rc1, but v2.28.0rc1 needs 2.28.0rc1." in result.stdout
     assert "deb-sha256" not in outputs
+
+
+def _release_marker(payload: Path, tag: str, **fields: object) -> None:
+    """The runtime marker the desktop builder writes for a release build of the tag."""
+    preview = preview_for_tag(tag)
+    marker = {
+        "schema_version": 1,
+        "distribution": "packaged-desktop",
+        "product_version": preview.product_version,
+        "build_revision": "1234",
+        **preview.identity.marker_fields(),
+        "console_helper": "servonaut",
+        "desktop_child": "servonaut-desktop-child",
+        **fields,
+    }
+    (payload / "servonaut-runtime.json").write_text(json.dumps(marker), encoding="utf-8")
+
+
+def _packaged(tmp_path: Path, payload: Path, tag: str) -> dict[str, str]:
+    preview = preview_for_tag(tag)
+    deb, _, _ = package_deb(
+        payload_dir=payload,
+        output_dir=tmp_path / "deb",
+        product_version=preview.product_version,
+        maintainer=_MAINTAINER,
+        filename=preview.deb_asset,
+    )
+    return {
+        "TAG": tag,
+        "QUALIFIED_PYTHON": sys.executable,
+        "GITHUB_WORKSPACE": str(_REPO_ROOT),
+        "DEB_PATH": str(deb),
+        "PACKAGE_NAME": "servonaut",
+    }
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+@pytest.mark.parametrize("tag", ["v2.28.0rc1", "v2.28.0"])
+def test_the_marker_check_accepts_the_tags_release_build(
+    workflow: str, tmp_path: Path, payload: Path, tag: str
+) -> None:
+    _release_marker(payload, tag)
+
+    result, _ = _run(
+        workflow,
+        "Check the release identity of the package",
+        tmp_path,
+        cwd=_REPO_ROOT,
+        **_packaged(tmp_path, payload, tag),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    channel = preview_for_tag(tag).identity.channel
+    assert f"on the {channel} channel at packaging revision 1." in result.stdout
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        # What a build without --release-tag writes: the development identity.
+        ({"channel": "stable"}, "follows the stable channel"),
+        ({"packaging_revision": 2}, "at packaging revision 2"),
+    ],
+)
+def test_the_marker_check_refuses_another_build(
+    workflow: str, tmp_path: Path, payload: Path, fields: dict[str, object], reason: str
+) -> None:
+    _release_marker(payload, "v2.28.0rc1", **fields)
+
+    result, _ = _run(
+        workflow,
+        "Check the release identity of the package",
+        tmp_path,
+        cwd=_REPO_ROOT,
+        **_packaged(tmp_path, payload, "v2.28.0rc1"),
+    )
+
+    assert result.returncode == 1
+    assert reason in result.stderr
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+def test_the_marker_check_fails_without_a_marker_in_the_package(
+    workflow: str, tmp_path: Path, payload: Path
+) -> None:
+    env = _packaged(tmp_path, payload, "v2.28.0")
+    env["PACKAGE_NAME"] = "other"
+
+    result, _ = _run(
+        workflow, "Check the release identity of the package", tmp_path, cwd=_REPO_ROOT, **env
+    )
+
+    assert result.returncode != 0
+    assert "on the stable channel" not in result.stdout
 
 
 def _handed_over(tmp_path: Path, payload: Path, tag: str) -> tuple[Path, dict[str, str]]:
