@@ -1613,6 +1613,77 @@ def test_share_payload_uses_the_address_chosen_for_the_server() -> None:
     assert SHARE_ADDRESS not in share_payload({**server, SHARE_ADDRESS: "10.0.1.5"})
 
 
+# Two hosting accounts on one machine: same host and port, different logins.
+def _account(name: str, username: str) -> dict:
+    return {"id": f"custom-{name}", "name": name, "public_ip": "9.9.9.9", "private_ip": "9.9.9.9",
+            "port": 22, "username": username, "is_custom": True}
+
+
+_SITE_A, _SITE_B = _account("site-a", "alpha"), _account("site-b", "beta")
+_SITE_A_SHARED = {"id": "srv-1", "name": "site-a", "hostname": "9.9.9.9", "instance_id": "custom-site-a",
+                  "username": "alpha"}
+
+
+def test_another_login_at_a_shared_address_is_another_server() -> None:
+    from servonaut.services.team_sharing import already_shared
+
+    assert already_shared(_SITE_A, [_SITE_A_SHARED])
+    assert not already_shared(_SITE_B, [_SITE_A_SHARED])
+    # A share recorded without an id is still matched by address and login.
+    unrecorded = {k: v for k, v in _SITE_A_SHARED.items() if k != "instance_id"}
+    assert already_shared({**_SITE_B, "id": "", "username": "alpha"}, [unrecorded])
+    assert not already_shared({**_SITE_B, "id": ""}, [unrecorded])
+    # Without a login on either side, the address and port still decide.
+    assert already_shared({**_SITE_B, "username": ""}, [unrecorded])
+
+
+def test_share_candidates_offer_every_login_on_one_machine() -> None:
+    from servonaut.services.team_sharing import share_candidates
+
+    offered, skipped, _missing = share_candidates([_SITE_A, _SITE_B], [])
+    assert [row["name"] for row in offered] == ["site-a", "site-b"] and skipped == 0
+    offered, skipped, _missing = share_candidates([_SITE_A, _SITE_B], [_SITE_A_SHARED])
+    assert [row["name"] for row in offered] == ["site-b"] and skipped == 1
+
+
+class TestEveryLoginCanBeShared:
+    @pytest.mark.asyncio
+    async def test_share_server_offers_and_shares_a_second_login_at_a_shared_address(self):
+        team_svc = _make_team_service()
+        app = _WrapperApp(
+            auth_service=_make_auth_service(authenticated=True), team_service=team_svc,
+            instances=[dict(_SITE_A), dict(_SITE_B)],
+        )
+        async with app.run_test(headless=True) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            screen._current_team_slug = "eng"
+            screen._current_team_role = "owner"
+            screen._shared_servers = [dict(_SITE_A_SHARED)]
+            screen._show_share_server_form(app.instances)
+            await pilot.pause()
+            select = screen.query_one("#select_share_instance", Select)
+            assert select.value == "custom-site-b"
+            screen._submit_share_server()
+            await _until(pilot, lambda: team_svc.push_server.called, "the share")
+
+        _, payload = team_svc.push_server.call_args.args
+        assert (payload["name"], payload["hostname"], payload["username"]) == ("site-b", "9.9.9.9", "beta")
+
+
+@pytest.mark.asyncio
+async def test_pushing_a_second_login_is_not_refused_as_already_shared() -> None:
+    from servonaut.services.team_service import TeamService
+
+    api = MagicMock()
+    api.get = AsyncMock(return_value={"data": [dict(_SITE_A_SHARED)]})
+    api.post = AsyncMock(return_value={"data": {"id": "srv-2"}})
+    service = TeamService(api)
+
+    assert await service.push_server("eng", {"name": "site-b", "hostname": "9.9.9.9", "username": "beta",
+                                             "instance_id": "custom-site-b"}) == {"id": "srv-2"}
+
+
 # ---------------------------------------------------------------------------
 # Shared servers: listed in the server list, connected from here
 # ---------------------------------------------------------------------------

@@ -59,11 +59,21 @@ def _same_server(candidate: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
     if source_id and source_id == shared_id:
         # Custom ids come from a local name, not a provider's stable identity.
         return same_destination if source_id.startswith("custom-") else True
+    if _other_login(candidate, row):
+        # Several logins on one machine (hosting accounts) are separate servers.
+        return False
     return same_destination and (_public_address(candidate) or not shared_id)
 
 
+def _other_login(candidate: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    """Whether both name a login, and not the same one."""
+    first = str(candidate.get("username") or "").strip()
+    second = str(row.get("username") or "").strip()
+    return bool(first and second and first != second)
+
+
 def already_shared(candidate: Mapping[str, Any], shared: Sequence[Mapping[str, Any]]) -> bool:
-    """Match stable provider ids or unambiguous addresses, without crossing private networks."""
+    """Match stable provider ids, or unambiguous addresses with the same login, without crossing private networks."""
     return any(_same_server(candidate, row) for row in shared)
 
 
