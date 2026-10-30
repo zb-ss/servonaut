@@ -238,9 +238,9 @@ class TestTeamSharedCustomServers:
     def test_apply_skips_a_pulled_custom_server_the_team_already_shares(self):
         local = _seeded_config()
 
-        skipped = apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
+        applied = apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
 
-        assert skipped == ["team-db"]
+        assert applied.skipped_custom_servers == ["team-db"]
         assert [s.name for s in local.custom_servers] == ["lab-2"]
         # Everything else is still replaced whole.
         assert [p.name for p in local.connection_profiles] == ["prod-bastion"]
@@ -249,14 +249,26 @@ class TestTeamSharedCustomServers:
     def test_apply_without_the_teams_servers_keeps_every_pulled_server(self):
         local = _seeded_config()
 
-        assert apply_team_config(local, _REMOTE_WITH_SHARED) == []
+        assert apply_team_config(local, _REMOTE_WITH_SHARED).skipped_custom_servers == []
         assert [s.name for s in local.custom_servers] == ["team-db", "lab-2"]
 
     def test_a_shared_server_at_another_port_is_not_the_pulled_one(self):
         local = _seeded_config()
         shared = [{**_SHARED_BY_TEAM[0], "port": 2222}]
 
-        assert apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=shared) == []
+        assert apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=shared).skipped_custom_servers == []
+
+    def test_a_skipped_server_keeps_no_key_path(self):
+        # The pull does not add it, so the user's own path for it is not kept either.
+        def member() -> AppConfig:
+            local = _seeded_config()
+            local.custom_servers = [CustomServer(name="team-db", host="team-db.example.com", ssh_key="~/.ssh/db")]
+            return local
+        remote = {**_REMOTE_WITH_SHARED, "connection_profiles": []}
+
+        assert diff_against_local(member(), remote, shared_servers=_SHARED_BY_TEAM)["kept_key_paths"] == 0
+        assert apply_team_config(member(), remote, shared_servers=_SHARED_BY_TEAM).kept_key_paths == 0
+        assert apply_team_config(member(), remote).kept_key_paths == 1
 
     def test_diff_names_what_pull_removes_and_skips(self):
         diff = diff_against_local(_seeded_config(), _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
@@ -284,10 +296,77 @@ class TestAnotherLoginAtASharedAddress:
     def test_only_the_shared_login_is_skipped(self):
         local = _seeded_config()
 
-        assert apply_team_config(local, self._PULLED, shared_servers=self._SHARED) == ["site-a"]
+        assert apply_team_config(local, self._PULLED, shared_servers=self._SHARED).skipped_custom_servers == ["site-a"]
         assert [s.name for s in local.custom_servers] == ["site-b"]
 
     def test_a_share_without_a_recorded_id_matches_by_address_and_login(self):
         shared = [{k: v for k, v in self._SHARED[0].items() if k != "instance_id"}]
 
-        assert apply_team_config(_seeded_config(), self._PULLED, shared_servers=shared) == ["site-a"]
+        assert apply_team_config(_seeded_config(), self._PULLED, shared_servers=shared).skipped_custom_servers == ["site-a"]
+
+
+class TestPullKeepsYourOwnKeyPaths:
+    """A push never carries key paths; a pull keeps the member's own for the same entry."""
+
+    @staticmethod
+    def _member() -> AppConfig:
+        member = AppConfig()
+        member.connection_profiles = [
+            ConnectionProfile(name="prod-bastion", bastion_host="Bastion.example.com", bastion_key="~/.ssh/jump"),
+        ]
+        member.custom_servers = [CustomServer(name="db-1", host="10.0.0.1", ssh_key="~/.ssh/db")]
+        return member
+
+    def test_a_pushed_config_keeps_the_members_own_paths(self):
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
+        member = self._member()
+
+        assert diff_against_local(member, payload)["kept_key_paths"] == 2
+        assert apply_team_config(member, payload).kept_key_paths == 2
+
+        assert [(p.name, p.bastion_key) for p in member.connection_profiles] == [
+            ("prod-bastion", "~/.ssh/jump"), ("staging", None),
+        ]
+        assert [(s.name, s.ssh_key) for s in member.custom_servers] == [("db-1", "~/.ssh/db"), ("cache-1", "")]
+
+    def test_an_entry_new_to_the_member_stays_without_a_path(self):
+        member = AppConfig()
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
+
+        assert apply_team_config(member, payload).kept_key_paths == 0
+        assert all(not p.bastion_key for p in member.connection_profiles)
+        assert all(not s.ssh_key for s in member.custom_servers)
+
+    def test_a_renamed_entry_gets_no_path(self):
+        remote = {
+            "connection_profiles": [{"name": "prod-jump", "bastion_host": "bastion.example.com", "bastion_key": ""}],
+            "custom_servers": [{"name": "db-primary", "host": "10.0.0.1", "ssh_key": ""}],
+        }
+        member = self._member()
+
+        assert diff_against_local(member, remote)["kept_key_paths"] == 0
+        apply_team_config(member, remote)
+        assert member.connection_profiles[0].bastion_key == ""
+        assert member.custom_servers[0].ssh_key == ""
+
+    def test_a_path_never_follows_an_entry_to_another_machine(self):
+        # A key offered to the wrong host only fails, and tells that host the key exists.
+        remote = {
+            "connection_profiles": [{"name": "prod-bastion", "bastion_host": "new-bastion.example.com"}],
+            "custom_servers": [{"name": "db-1", "host": "10.0.0.9"}],
+        }
+        member = self._member()
+
+        assert apply_team_config(member, remote).kept_key_paths == 0
+        assert not member.connection_profiles[0].bastion_key
+        assert not member.custom_servers[0].ssh_key
+
+    def test_a_path_in_the_payload_is_not_replaced(self):
+        remote = {"connection_profiles": [
+            {"name": "prod-bastion", "bastion_host": "bastion.example.com", "bastion_key": "~/.ssh/team-jump"},
+        ]}
+        member = self._member()
+
+        assert apply_team_config(member, remote).kept_key_paths == 0
+        assert member.connection_profiles[0].bastion_key == "~/.ssh/team-jump"
+

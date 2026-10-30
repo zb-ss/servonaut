@@ -1648,23 +1648,28 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
         """``(ok, hop)``: the vault lease of the bastion *instance*'s rule routes it through.
 
         *hop* is None when the bastion has no vault key here (the hop uses
-        the user's own SSH setup); *ok* is False, after saying why, when the
+        the user's own SSH setup, after a hint when a team's key for it needs
+        this computer's vault); *ok* is False, after saying why, when the
         bastion's vault key must not be used.
         """
-        from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
+        from servonaut.services.ssh_credentials import VaultCredentialError, bastion_hop_hint, bastion_lease
 
         connection_service = self.app.connection_service
+        vault_runtime = getattr(self.app, "vault_command_service", None)
+        rows = fleet_rows(self.app)
         try:
             profile = connection_service.resolve_profile(instance)
             hop = await bastion_lease(
-                profile, fleet_rows(self.app),
-                vault_runtime=getattr(self.app, "vault_command_service", None),
-                connection_service=connection_service,
+                profile, rows, vault_runtime=vault_runtime, connection_service=connection_service,
                 cache=getattr(self.app, "vault_lease_cache", None),
             )
         except VaultCredentialError as exc:
             self.app.notify(scrub_for_display(self.app, str(exc)), severity="error", markup=False)
             return False, None
+        if hop is None:
+            hint = bastion_hop_hint(profile, rows, vault_runtime)
+            if hint is not None:
+                self.app.notify(scrub_for_display(self.app, hint), severity="warning", markup=False)
         return True, hop
 
     def _native_ssh_command(

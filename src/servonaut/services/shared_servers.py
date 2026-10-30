@@ -275,6 +275,12 @@ def team_key_fallback(
     """
     if not lacks_own_key(own, key_path):
         return None
+    return team_twin(own, rows)
+
+
+def team_twin(own: Mapping[str, Any], rows: Iterable[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The first team row in *rows* that shares the user's own server *own*
+    with the team's own SSH access (:func:`has_team_access`), or None."""
     for row in rows:
         if (
             isinstance(row, Mapping) and is_shared_row(row)
