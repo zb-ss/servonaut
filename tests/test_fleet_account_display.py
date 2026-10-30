@@ -45,6 +45,17 @@ class TestSearch:
         assert _search_fields({"name": "x", "account": "aws"}) == ["x"]
         assert _search_fields(dict(SINGLE, account="eu-archive")) == ["web-2", "43", "hetzner"]
 
+    def test_public_and_private_ips_are_searchable(self):
+        fields = _search_fields(dict(SINGLE, public_ip="203.0.113.10", private_ip="10.0.0.5"))
+        assert "203.0.113.10" in fields
+        assert "10.0.0.5" in fields
+
+    def test_a_custom_server_host_is_searchable(self):
+        # Custom servers copy their host into both IP fields.
+        row = {"id": "custom-web-3", "name": "web-3", "is_custom": True,
+               "public_ip": "Web-3.Example.com", "private_ip": "Web-3.Example.com"}
+        assert "web-3.example.com" in _search_fields(row)
+
 
 class TestMatchConditions:
     def test_account_condition(self):
