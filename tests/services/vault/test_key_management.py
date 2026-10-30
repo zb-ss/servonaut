@@ -141,7 +141,7 @@ async def test_rename_conflict_is_propagated_with_reload_guidance(service) -> No
 @pytest.mark.asyncio
 async def test_usage_filters_shared_rows_and_keeps_failed_reads_separate(service) -> None:
     service.items.get_item.return_value["bound_server_ids"] = [{"server_id": "shared", "name": "\u202eteam-web\n"}]
-    async def binding(row):
+    async def binding(row, **_kwargs):
         if row["id"] == "down":
             raise APIError(code="unavailable", message="opaque", status=503)
         return {"vault_id": "other" if row["id"] == "other-vault" else "vault", "vault_item_id": "key"}
@@ -162,7 +162,7 @@ async def test_usage_limits_parallel_binding_reads(service) -> None:
     active = peak = 0
     release = asyncio.Event()
     first_batch = asyncio.Event()
-    async def binding(_row):
+    async def binding(_row, **_kwargs):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -426,7 +426,7 @@ async def test_real_aws_binding_read_failure_still_blocks_delete_beside_unsuppor
     with pytest.raises(VaultKeyInUse) as caught:
         await service.delete_ssh_key(vault_id="vault", item_id="key", servers=servers)
     assert caught.value.unchecked == ["web-1"]
-    service._personal_binding.assert_awaited_once_with("aws", "i-0001")
+    service._personal_binding.assert_awaited_once_with("aws", "i-0001", fresh=True)
     service.items.delete_item.assert_not_awaited()
 
 

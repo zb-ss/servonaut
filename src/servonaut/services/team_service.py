@@ -7,12 +7,11 @@ import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import quote
 
 from .interfaces import TeamServiceInterface
+from .retry_after import is_rate_limited, retry_after_seconds, wait_text
 from servonaut.config.schema import AppConfig
 from servonaut.services.bw_ssh_config_service import (
     BITWARDEN_PM_PROVIDER,
@@ -42,41 +41,6 @@ class ShareResult:
     error: Optional[str] = None  # why it failed, as plain text
     retry_after: Optional[float] = None  # seconds the service asked to wait
 
-
-def _retry_after_seconds(exc: Exception) -> Optional[float]:
-    """The wait a 429's ``Retry-After`` asks for (seconds or an HTTP date); None when absent."""
-    headers = getattr(exc, "response_headers", None) or {}
-    value = str(headers.get("retry-after") or "").strip()
-    if not value:
-        return None
-    try:
-        seconds = float(value)
-    except ValueError:
-        pass
-    else:
-        # "inf", "nan" or an overflowing number name no wait that can be honoured.
-        return max(0.0, seconds) if math.isfinite(seconds) else None
-    try:
-        when = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
-
-
-def _is_rate_limited(exc: Exception) -> bool:
-    from servonaut.services.api_client import APIError
-
-    return isinstance(exc, APIError) and exc.status == 429
-
-
-def _wait_text(seconds: Optional[float]) -> str:
-    if seconds is None:
-        return "try again later"
-    if seconds < 60:
-        return f"try again in {max(1, round(seconds))} s"
-    return f"try again in {max(1, round(seconds / 60))} min"
 
 # RBAC permissions matrix
 ROLE_PERMISSIONS = {
@@ -271,14 +235,14 @@ class TeamService(TeamServiceInterface):
             try:
                 created = await self._api.post(f"/api/v1/teams/{slug}/servers", json=payload)
             except Exception as exc:  # noqa: BLE001 - reported on its row, the batch goes on
-                if not _is_rate_limited(exc):
+                if not is_rate_limited(exc):
                     reason = exc.message if isinstance(exc, APIError) else type(exc).__name__
                     logger.warning("Sharing a server failed", exc_info=True)
                     return ShareResult(payload, FAILED, error=reason)
-                asked = _retry_after_seconds(exc)
+                asked = retry_after_seconds(exc)
                 wait = asked if asked is not None else min(default_wait, remaining_wait)
                 if attempt == retries or remaining_wait <= 0 or wait > remaining_wait:
-                    return ShareResult(payload, FAILED, error=f"rate limited: {_wait_text(asked)}", retry_after=asked)
+                    return ShareResult(payload, FAILED, error=f"rate limited: {wait_text(asked)}", retry_after=asked)
                 await asyncio.sleep(wait)
                 remaining_wait -= wait
                 continue

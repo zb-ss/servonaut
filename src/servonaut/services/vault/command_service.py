@@ -31,6 +31,7 @@ from servonaut.utils.validation import ValidationError
 
 from . import crypto
 from .auto_bind import is_personal_server
+from .binding_reads import BindingReadsPaused, PersonalBindingReads
 from .bindings import BindingDestinationChangedError, VaultBindingService
 from .ca_client import CertificateAuthorityClient
 from .ca_pins import CaPins
@@ -44,6 +45,7 @@ from .errors import (
     SERVER_MOVED_SINCE_BINDING,
     VAULT_ROTATION_FAILED,
     VAULT_ROTATION_NOT_PERMITTED,
+    HostKeysNeeded,
     VaultKeyInUse,
     VaultUserError,
     vault_failure_reason,
@@ -56,7 +58,7 @@ from .local_state import LocalStateError, VaultLocalState
 from . import onboarding
 from .personal_targets import CUSTOM_PROVIDER, instance_target, personal_target
 from .known_hosts import TeamKnownHosts
-from servonaut.services.shared_servers import team_id_text
+from servonaut.services.shared_servers import own_twin, team_id_text
 from servonaut.services.ssh_host_keys import trusted_host_keys
 from .roster_pins import RosterPins
 from .rotation import RotationService
@@ -258,6 +260,12 @@ class VaultCommandService:
         self.grants = GrantProcessor(self.vaults, strict_verification=settings.strict_verification)
         self.rotation = RotationService(self.vaults, self.items, strict_verification=settings.strict_verification)
         self.bindings = VaultBindingService(api, self.vaults)
+        # The user's own servers' bindings, reused briefly and paused after a refusal.
+        self.binding_reads = PersonalBindingReads(
+            ttl_seconds=settings.binding_read_cache_seconds,
+            backoff_seconds=settings.binding_read_backoff_seconds,
+            session=lambda: self.auth.access_token,
+        )
         self.teams = team_service or TeamService(api)
         self.remote_executor_factory = remote_executor_factory
         self._secret_references: dict[str, dict[str, str]] = {}
@@ -1134,12 +1142,17 @@ class VaultCommandService:
             payload.clear()
 
     async def _own_binding_states(
-        self, servers: Sequence[Mapping[str, Any]],
+        self, servers: Sequence[Mapping[str, Any]], *, fresh: bool = False,
     ) -> list[tuple[str, str, list[str], Any]]:
         """Each of the user's own servers' saved binding, read once: ``(state, name, target, binding)``.
 
         *state* is ``"skipped"`` (no addressable target, it cannot be bound),
-        ``"unchecked"`` (the read failed) or ``"read"``.
+        ``"unchecked"`` (the read failed) or ``"read"``. *fresh* skips
+        answers remembered from a recent read.
+
+        Raises:
+            BindingReadsPaused: the service refused the reads (rate limit or
+                sign-in); the other servers were not read either.
         """
         own = [server for server in servers if is_personal_server(server)]
         gate = asyncio.Semaphore(_KEY_USAGE_FETCHES)
@@ -1154,12 +1167,19 @@ class VaultCommandService:
             target = [provider, str(server.get("account") or ""), target_id]
             async with gate:
                 try:
-                    binding = await self.personal_binding(server)
+                    binding = await self.personal_binding(server, fresh=fresh)
+                except BindingReadsPaused as exc:
+                    # Reads queued behind this one fail at once, without a request.
+                    return "paused", name, target, exc
                 except Exception:  # an unavailable binding must prevent deletion
                     return "unchecked", name, target, None
             return "read", name, target, binding
 
-        return list(await asyncio.gather(*(read(server) for server in own)))
+        states = list(await asyncio.gather(*(read(server) for server in own)))
+        paused = next((exc for state, _, _, exc in states if state == "paused"), None)
+        if paused is not None:
+            raise paused
+        return states
 
     @staticmethod
     def _usage_from(
@@ -1184,9 +1204,9 @@ class VaultCommandService:
 
     async def _ssh_key_usage(
         self, vault_id: str, item_id: str, item: Mapping[str, Any],
-        servers: Sequence[Mapping[str, Any]],
+        servers: Sequence[Mapping[str, Any]], *, fresh: bool = False,
     ) -> dict[str, Any]:
-        return self._usage_from(vault_id, item_id, item, await self._own_binding_states(servers))
+        return self._usage_from(vault_id, item_id, item, await self._own_binding_states(servers, fresh=fresh))
 
     async def ssh_keys_usage(
         self, *, vault_id: str, item_ids: Sequence[str], servers: Sequence[Mapping[str, Any]],
@@ -1234,7 +1254,8 @@ class VaultCommandService:
     ) -> dict[str, Any]:
         """Delete an unassigned, unexposed key, optionally acknowledging unavailable binding reads."""
         item = await self._ssh_key_record(vault_id, item_id)
-        usage = await self._ssh_key_usage(vault_id, item_id, item, servers)
+        # Read now, not reused: another device may have bound a server to this key since the review.
+        usage = await self._ssh_key_usage(vault_id, item_id, item, servers, fresh=True)
         if usage["team_servers"] or usage["own_servers"]:
             raise VaultKeyInUse.from_usage(usage)
         exposures = await self.list_exposures(vault_id=vault_id)
@@ -1260,7 +1281,7 @@ class VaultCommandService:
         ids = list(item_ids)
         approved = dict(unchecked_by_key or {})
         try:
-            states = await self._own_binding_states(servers)
+            states = await self._own_binding_states(servers, fresh=True)
             exposures = await self.list_exposures(vault_id=vault_id)
         except Exception as exc:  # noqa: BLE001 - nothing can be checked, so nothing is deleted
             failed = [KeyDeletion(item_id, False, exc) for item_id in ids]
@@ -1804,12 +1825,15 @@ class VaultCommandService:
         self,
         *, vault_id: str, server: str, item_id: str, team: str | None,
         login: str | None, pin_host_key: bool, host_keys: Sequence[str] = (),
-        replace_existing: bool = True,
+        replace_existing: bool = True, own_rows: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Write a signed binding only after an explicit host-pin decision.
 
         The first binding pins *host_keys* when given, otherwise the keys this
         machine already trusts for the server (from an earlier SSH login).
+        *own_rows* are the user's own servers: when one of them is the shared
+        server, the keys trusted under its own name count too, since that is
+        where connecting to it records them.
         With ``replace_existing=False`` a shared server that already has a
         credential_binding is refused instead of updated.
         """
@@ -1827,7 +1851,9 @@ class VaultCommandService:
         vault = await self.vaults.get_vault(vault_id)
         item = await self.items.get_item(vault_id, item_id)
         payload = self.items.read_item(vault, item)
-        host_keys, revision = self._binding_pins(shared, vault, hostname, port, pin_host_key, host_keys)
+        host_keys, revision = self._binding_pins(
+            shared, vault, hostname, port, pin_host_key, host_keys, own_rows=own_rows,
+        )
         login_user = login or shared.get("login_user") or shared.get("username")
         if not isinstance(login_user, str) or not login_user:
             raise ValueError("a non-empty SSH login is required")
@@ -1875,7 +1901,9 @@ class VaultCommandService:
         if not isinstance(fingerprint, str) or not fingerprint.startswith("SHA256:"):
             raise VaultStateError("personal binding item has no verified SSH fingerprint")
         target = f"instance:{normalized_provider}:{normalized_instance_id}"
-        existing, existing_target = await self._personal_binding(normalized_provider, normalized_instance_id)
+        existing, existing_target = await self._personal_binding(
+            normalized_provider, normalized_instance_id, fresh=True,
+        )
         if existing is not None and not replace_existing:
             raise VaultUserError("this server already has a vault key")
         if existing is None:
@@ -1903,6 +1931,9 @@ class VaultCommandService:
                     "this Servonaut service does not accept vault keys for custom servers yet"
                 ) from exc
             raise
+        finally:
+            # Whatever the PUT did, the remembered answer may no longer be the stored one.
+            self._forget_personal_binding(normalized_provider, normalized_instance_id)
         self._binding_generation += 1
         return result
 
@@ -2150,7 +2181,7 @@ class VaultCommandService:
 
     def _binding_pins(
         self, shared: Mapping[str, Any], vault: Mapping[str, Any], hostname: str, port: int, explicit_pin: bool,
-        host_keys: Sequence[str] = (),
+        host_keys: Sequence[str] = (), *, own_rows: Sequence[Mapping[str, Any]] = (),
     ) -> tuple[tuple[str, ...], int]:
         existing = shared.get("credential_binding")
         target = f"shared_server:{shared.get('id')}"
@@ -2158,13 +2189,13 @@ class VaultCommandService:
             verified = self.bindings.verify_binding(existing, vault, target=target, hostname=hostname, port=port)
             return tuple(verified["host_keys"]), _positive_int(verified.get("binding_revision"), "binding.binding_revision") + 1
         if not explicit_pin and not host_keys:
-            raise ValueError("--pin-host-key or --host-key is required for the first native-vault binding")
+            raise HostKeysNeeded(looked_up_trusted_keys=False)
         pins = list(host_keys) or trusted_host_keys(shared, hostname, port)
+        own = own_twin(shared, own_rows) if not pins else None
+        if own is not None:
+            pins = trusted_host_keys(own, hostname, port)
         if not pins:
-            raise VaultUserError(
-                "this machine does not trust a host key for the server yet; connect once "
-                "with `servonaut ssh` and check its fingerprint, or pass --host-key"
-            )
+            raise HostKeysNeeded(looked_up_trusted_keys=True)
         self.bindings._validate_host_keys(pins)
         return tuple(pins), 1
 
@@ -2372,9 +2403,19 @@ class VaultCommandService:
             **kwargs,
         )
 
-    async def personal_binding(self, instance: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """The signed binding stored for one of the user's own servers, if any."""
-        binding, _ = await self._personal_binding(*instance_target(instance))
+    async def personal_binding(
+        self, instance: Mapping[str, Any], *, fresh: bool = False,
+    ) -> Mapping[str, Any] | None:
+        """The signed binding stored for one of the user's own servers, if any.
+
+        An answer read within ``vault.binding_read_cache_seconds`` is reused
+        unless *fresh*.
+
+        Raises:
+            BindingReadsPaused: the service refused binding reads (rate limit
+                or sign-in) and they are paused for now.
+        """
+        binding, _ = await self._personal_binding(*instance_target(instance), fresh=fresh)
         return binding
 
     async def credential_team(self, instance: Mapping[str, Any]) -> str | None:
@@ -2427,24 +2468,40 @@ class VaultCommandService:
         return await self._personal_binding(*instance_target(instance))
 
     async def _personal_binding(
-        self, provider: str, instance_id: str,
+        self, provider: str, instance_id: str, *, fresh: bool = False,
     ) -> tuple[Mapping[str, Any] | None, str]:
-        """GET the signed personal binding for already-validated route keys."""
+        """The signed personal binding for already-validated route keys (see :meth:`personal_binding`)."""
+        device = self.store.signer()
+        binding = await self.binding_reads.read(
+            (device.device_id, provider, instance_id),
+            lambda: self._get_personal_binding(provider, instance_id, device),
+            fresh=fresh,
+        )
+        return binding, f"instance:{provider}:{instance_id}"
+
+    def _forget_personal_binding(self, provider: str, instance_id: str) -> None:
+        if self.store.identity is not None:
+            self.binding_reads.forget((self.store.signer().device_id, provider, instance_id))
+
+    async def _get_personal_binding(
+        self, provider: str, instance_id: str, device: Any,
+    ) -> Mapping[str, Any] | None:
+        """GET the signed personal binding; None when none is bound (404)."""
         path = f"/api/v1/me/instances/{provider}/{instance_id}/credential-binding"
         try:
-            response = await self.api.request_signed("GET", path, json={}, device=self.store.signer())
+            response = await self.api.request_signed("GET", path, json={}, device=device)
         except APIError as exc:
             if exc.status == 404:
-                return None, f"instance:{provider}:{instance_id}"
+                return None
             raise
         if not isinstance(response, Mapping):
             raise VaultStateError("personal credential binding response is malformed")
         candidate = response.get("credential_binding", response)
         if candidate is None:
-            return None, f"instance:{provider}:{instance_id}"
+            return None
         if not isinstance(candidate, Mapping):
             raise VaultStateError("personal credential binding response is malformed")
-        return candidate, f"instance:{provider}:{instance_id}"
+        return candidate
 
     async def resolve_relay_target(self, identifier: str) -> dict[str, Any] | None:
         """Find a shared-server target for relay commands after local lookup.

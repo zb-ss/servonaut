@@ -164,7 +164,8 @@
 #invite_form,
 #change_role_form,
 #share_server_form,
-#push_config_form {
+#push_config_form,
+#pull_config_form {
     height: auto;
     padding: 1;
     margin: 1 0 0 0;
@@ -182,6 +183,17 @@
 
 #push_config_profiles,
 #push_config_preview {
+    margin: 0 0 1 0;
+}
+
+/* Only a server with both a public and a private address offers the choice. */
+#select_share_address,
+#share_address_note {
+    display: none;
+}
+
+#share_address_note {
+    color: $text-muted;
     margin: 0 0 1 0;
 }
 

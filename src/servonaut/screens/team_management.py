@@ -21,9 +21,17 @@ from servonaut.screens._batch_status import failure_details
 from servonaut.screens._demo_resolve import UNRESOLVED_MESSAGE, real_fleet_rows
 from servonaut.screens.confirm_action import ConfirmActionScreen
 from servonaut.screens.bulk_action import BulkActionModal
-from servonaut.screens.team_share_confirm import ShareServersConfirmModal, server_address
+from servonaut.screens.team_share_confirm import ShareServersConfirmModal
 from servonaut.services.api_client import APIError
-from servonaut.services.team_sharing import already_shared, share_candidates, share_payload
+from servonaut.services.team_sharing import (
+    SHARE_ADDRESS,
+    address_choices,
+    already_shared,
+    server_address,
+    share_candidates,
+    share_payload,
+    shared_custom_servers,
+)
 from servonaut.services.team_service import ALREADY_SHARED, FAILED, SHARED, ShareResult
 from servonaut.services.vault.display import markup_literal, terminal_safe
 from servonaut.services.team_rules_view import (
@@ -55,6 +63,11 @@ _DETAIL_SECTIONS = (
     "team_header", "members_section", "configs_section", "servers_section",
     "agent_rules_section",
 )
+
+
+def _kept_key_paths_text(count: int) -> str:
+    """How many pulled entries keep the user's own SSH key path (a push never carries one)."""
+    return "1 entry keeps your own SSH key path" if count == 1 else f"{count} entries keep your own SSH key paths"
 
 
 class TeamManagementScreen(Screen):
@@ -280,6 +293,13 @@ class TeamManagementScreen(Screen):
                             allow_blank=True,
                             id="select_share_instance",
                         ),
+                        Select(
+                            [("Public address", "public"), ("Private address", "private")],
+                            value="public",
+                            allow_blank=False,
+                            id="select_share_address",
+                        ),
+                        Static("", id="share_address_note"),
                         Input(
                             placeholder="SSH username (optional — leave blank for cloud default)",
                             id="input_share_username",
@@ -417,10 +437,16 @@ class TeamManagementScreen(Screen):
         """
         form = self.query_one("#share_server_form")
         form.display = True
+        # The form opens at the foot of the servers card: bring it into view
+        # once laid out, so its fields and Share are not below the fold.
+        self.call_after_refresh(form.scroll_visible, animate=False)
         # Clear any stale connection-detail input from a previous open so the
         # pre-fill from the next-selected instance always wins.
         self.query_one("#input_share_username", Input).value = ""
         self.query_one("#input_share_port", Input).value = ""
+        # Shown again for a server with both a public and a private address.
+        self.query_one("#select_share_address", Select).display = False
+        self.query_one("#share_address_note", Static).display = False
         select = self.query_one("#select_share_instance", Select)
         candidates, _, _ = share_candidates(instances, self._shared_servers)
         by_id = {str(row.get("id")): row for row in candidates}
@@ -458,6 +484,29 @@ class TeamManagementScreen(Screen):
         self._share_form_username = (username, displayed)
         self.query_one("#input_share_username", Input).value = displayed
         self.query_one("#input_share_port", Input).value = str(port) if port and port != 22 else ""
+        self._prefill_share_address(instance, defaults)
+
+    def _prefill_share_address(self, instance: dict, defaults: dict) -> None:
+        """Offer the public or the private address of a server that has both, and say which suits."""
+        select = self.query_one("#select_share_address", Select)
+        note = self.query_one("#share_address_note", Static)
+        public, private = address_choices(instance)
+        select.display = note.display = bool(private)
+        if not private:
+            return
+        select.set_options([
+            (Text(f"Public address ({self._display_server_address(public)})"), "public"),
+            (Text(f"Private address ({self._display_server_address(private)})"), "private"),
+        ])
+        behind_bastion = defaults.get(SHARE_ADDRESS) == private
+        select.value = "private" if behind_bastion else "public"
+        note.update(Text(
+            "Your connection rules reach this server through a bastion, so its private address is "
+            "chosen: members need the same rule (push it with the team config)."
+            if behind_bastion else
+            "Members connect to the address you share. Choose the private one if they reach the "
+            "server through a bastion."
+        ))
 
     def _share_defaults(self, instance: dict) -> dict:
         """Share only a server's own login or an explicitly matched rule login."""
@@ -469,6 +518,10 @@ class TeamManagementScreen(Screen):
         own_username = instance.get("username") if instance.get("is_custom") is True else ""
         result["username"] = instance.get("login_user") or rule_username(instance, profile) or own_username or ""
         result["port"] = instance.get("port") or 22
+        # Behind a bastion, members are let in from inside the network only.
+        _public, private = address_choices(instance)
+        if private and getattr(profile, "bastion_host", None):
+            result[SHARE_ADDRESS] = private
         return result
 
     def _share_inventory(self) -> list[dict]:
@@ -1157,11 +1210,16 @@ class TeamManagementScreen(Screen):
         names = [_name(server.name) for server in servers]
         # Names padded to the longest one, so the hosts line up in a column.
         width = max((len(name) for name in names), default=0)
+        # Pushing one of these would hide the team's row from members behind
+        # a copy without the team's key: say so, and never tick it for them.
+        shared = set(shared_custom_servers(servers, self._team_shared_servers()))
         listing = self.query_one("#push_config_servers", SelectionList)
         listing.clear_options()
         listing.add_options([
             Selection(
-                f"{markup_literal(name.ljust(width))}  [dim]{markup_literal(_host(server.host))}[/dim]",
+                f"{markup_literal(name.ljust(width))}  [dim]{markup_literal(_host(server.host))}[/dim]"
+                + ("  [dim](already shared, with the team key)[/dim]"
+                   if server.name in shared else ""),
                 server.name,
                 server.name in selected,
             )
@@ -1176,6 +1234,19 @@ class TeamManagementScreen(Screen):
             if servers
             else "[dim]No custom servers in your config.[/dim]"
         )
+
+    def _team_shared_servers(self) -> list[dict]:
+        """The shared servers of the team on screen, or none while another team's are loaded."""
+        if self._loaded_team_slug != self._current_team_slug:
+            return []
+        return list(self._shared_servers)
+
+    def _names_for_display(self, names: list[str], limit: int = 8) -> str:
+        """*names* as plain text, demo-safe, the first *limit* of them."""
+        demo = self.app.demo_mode and self.app.redaction_service
+        shown = [self.app.redaction_service.redact_name(name) if demo else name for name in names[:limit]]
+        text = ", ".join(terminal_safe(str(name)) for name in shown)
+        return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
     def _push_selected_servers(self) -> list[str]:
         """Names of the custom servers ticked in the push form."""
@@ -1251,12 +1322,23 @@ class TeamManagementScreen(Screen):
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
-        diff = diff_against_local(config, remote_payload)
+        diff = diff_against_local(config, remote_payload, shared_servers=self._team_shared_servers())
         lines = ["Pull will replace these sections (current → after):"]
         for section in ("connection_profiles", "connection_rules", "scan_rules", "custom_servers"):
             d = diff[section]
             change_hint = "[$text-success]no change[/$text-success]" if d["local"] == d["after"] else f"[bold]{d['local']} → {d['after']}[/bold]"
             lines.append(f"  • {section.replace('_', ' ').title()}: {change_hint}")
+            removed = diff["removed"][section]
+            if removed:
+                lines.append(f"      [dim]Removes yours: {markup_literal(self._names_for_display(removed))}[/dim]")
+        skipped = diff["skipped_custom_servers"]
+        if skipped:
+            lines.append(
+                "Not added, the team already shares it (members connect with the team key): "
+                + markup_literal(self._names_for_display(skipped))
+            )
+        if diff["kept_key_paths"]:
+            lines.append(f"  {_kept_key_paths_text(diff['kept_key_paths'])}: a team config never carries key paths.")
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
@@ -1710,7 +1792,7 @@ class TeamManagementScreen(Screen):
         from servonaut.services.team_config_apply import apply_team_config
         payload = self._pending_pull_payload
         try:
-            apply_team_config(config, payload)
+            applied = apply_team_config(config, payload, shared_servers=self._team_shared_servers())
             config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
@@ -1718,10 +1800,16 @@ class TeamManagementScreen(Screen):
             return
         self._pending_pull_payload = None
         self._hide_pull_config_form()
+        skipped, kept = applied
+        message = "Team config applied" + (f"; {_kept_key_paths_text(kept)}." if kept else ".")
+        if skipped:
+            message += (f" Not added, the team already shares {'it' if len(skipped) == 1 else 'them'} "
+                        f"(connect with the team key): {self._names_for_display(skipped)}.")
         self.notify(
-            "Team config applied. Restart Servonaut for connection-profile changes to take full effect.",
+            message + " Restart Servonaut for connection-profile changes to take full effect.",
             severity="information",
             timeout=10,
+            markup=False,
         )
 
     def _action_share_all_servers(self) -> None:
@@ -1807,11 +1895,18 @@ class TeamManagementScreen(Screen):
 
         results = await team_svc.push_servers(slug, [share_payload(row) for row in instances], on_progress=progress)
         succeeded = sum(result.status == SHARED for result in results)
+        private = {row[SHARE_ADDRESS] for row in instances if row.get(SHARE_ADDRESS)}
+        shared_private = sum(
+            result.status == SHARED and result.payload.get("hostname") in private for result in results
+        )
         skipped_existing += sum(result.status == ALREADY_SHARED for result in results)
         failed = [f"{self._display_server_name(result.payload.get('name', ''))} ({result.error})"
                   for result in results if result.status == FAILED]
 
         parts = [f"Shared {succeeded}"]
+        if shared_private:
+            parts.append(f"{shared_private} under {'its' if shared_private == 1 else 'their'} private address "
+                         "(reached through a bastion)")
         if left_out:
             parts.append(f"left out {left_out}")
         if skipped_existing:
@@ -1855,6 +1950,9 @@ class TeamManagementScreen(Screen):
             self.notify("This server is already shared with the team.", severity="warning")
             return
         hostname = instance.get("public_ip") or instance.get("private_ip") or ""
+        _public, private = address_choices(instance)
+        if private and self.query_one("#select_share_address", Select).value == "private":
+            hostname = private
         if not hostname:
             # Defensive — _build_share_options should have filtered this row out,
             # but the inventory may have changed since the form was opened.

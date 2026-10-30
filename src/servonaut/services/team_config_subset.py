@@ -9,9 +9,10 @@ before sending:
 * **Operator-personal**: terminal preference, command-history path, demo-mode
   flag, dismissed banners, cache TTLs.
 * **Local-filesystem paths**: ``ssh_key`` on custom servers, ``bastion_key``
-  on connection profiles. These are reset to ``""`` and the recipient
-  re-binds them locally; we surface the count of stripped paths in the push
-  warning so the operator knows what's missing on the other side.
+  on connection profiles. These are reset to ``""``; a recipient keeps their
+  own path for the same entry (``team_config_apply.local_key_paths``) or sets
+  one locally. We surface the count of stripped paths in the push warning so
+  the operator knows what's missing on the other side.
 
 The shareable subset is intentionally narrow — connection profiles, scan
 rules, the custom servers the operator picks (sanitised), and connection
@@ -22,7 +23,7 @@ UUIDs, security-group IDs) that won't exist in another teammate's account.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Collection, Tuple
+from typing import TYPE_CHECKING, Any, Collection, Mapping, Sequence, Tuple
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AppConfig
@@ -103,7 +104,9 @@ def _sanitise_custom_server(d: dict) -> dict:
     return d
 
 
-def diff_against_local(local: "AppConfig", remote_payload: dict) -> dict:
+def diff_against_local(
+    local: "AppConfig", remote_payload: dict, *, shared_servers: Sequence[Mapping[str, Any]] = (),
+) -> dict:
     """Summarise what would change if ``remote_payload`` were applied over ``local``.
 
     Returned shape (suitable for an Apply-confirmation modal):
@@ -115,36 +118,40 @@ def diff_against_local(local: "AppConfig", remote_payload: dict) -> dict:
             "connection_rules":    {"local": 1, "remote": 2, "after": 2},
             "scan_rules":          {"local": 7, "remote": 7, "after": 7},
             "custom_servers":      {"local": 0, "remote": 5, "after": 5},
-            "stripped_paths_in_remote": 3,
+            "removed": {"connection_profiles": ["old-bastion"], ...},
+            "skipped_custom_servers": ["web-1"],
+            "kept_key_paths": 1,
         }
+
+    ``removed`` names the local entries of each section that the team's
+    section has no entry of the same name for: they are gone after the pull.
+    ``skipped_custom_servers`` names the pulled custom servers that one of
+    the team's *shared_servers* also is: the pull does not add them.
+    ``kept_key_paths`` counts the user's own key paths the pull keeps (see
+    ``team_config_apply.local_key_paths``): a push never carries them.
 
     Apply semantics are REPLACE-WHOLE-SECTION — the team's section overwrites
     the local one. Selective-per-item import is deferred to v2 (see the plan
     note for design).
     """
+    from servonaut.services.team_config_apply import local_key_paths, team_custom_servers
+
     sections = ("connection_profiles", "connection_rules", "scan_rules", "custom_servers")
-    diff: dict = {}
+    kept_servers, skipped = team_custom_servers(remote_payload, shared_servers)
+    diff: dict = {"removed": {}, "skipped_custom_servers": skipped}
     for name in sections:
-        local_count = len(getattr(local, name, []) or [])
-        remote_count = len(remote_payload.get(name, []) or [])
+        local_entries = getattr(local, name, []) or []
+        remote_entries = remote_payload.get(name, []) or []
+        after = kept_servers if name == "custom_servers" else remote_entries
         diff[name] = {
-            "local": local_count,
-            "remote": remote_count,
-            "after": remote_count,  # replace-whole-section
+            "local": len(local_entries),
+            "remote": len(remote_entries),
+            "after": len(after),  # replace-whole-section
         }
-    # Re-count stripped paths from the payload so apply-side can mention them
-    # ("3 SSH key paths were stripped — re-bind them in Settings after Apply").
-    stripped = 0
-    for p in remote_payload.get("connection_profiles", []) or []:
-        if not (p.get("bastion_key") or "").strip():
-            # A blank bastion_key in the payload means the publisher had one
-            # locally that got stripped, OR they never had one. We can't
-            # distinguish without an explicit marker. Conservative: don't
-            # falsely accuse the payload of stripping. Operators see the
-            # accurate count from the PUSH-side summary anyway.
-            pass
-    for s in remote_payload.get("custom_servers", []) or []:
-        if not (s.get("ssh_key") or "").strip():
-            pass
-    diff["stripped_paths_in_remote"] = stripped
+        kept_names = {entry.get("name") for entry in after if isinstance(entry, dict)}
+        diff["removed"][name] = [
+            entry.name for entry in local_entries if getattr(entry, "name", None) not in kept_names
+        ]
+    kept = local_key_paths(local, {**remote_payload, "custom_servers": kept_servers})
+    diff["kept_key_paths"] = len(kept["bastion_key"]) + len(kept["ssh_key"])
     return diff
