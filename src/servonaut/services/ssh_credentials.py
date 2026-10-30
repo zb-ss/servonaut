@@ -10,7 +10,9 @@ lease can be produced; every other server keeps its local connection.
 
 A bastion (jump host) that is itself one of the fleet's servers and has a
 vault key gets its own lease too (:func:`bastion_lease`): the hop then logs in
-with the bastion's key and checks its signed host-key pins. Without one the hop
+with the bastion's key and checks its signed host-key pins. A bastion the user
+lists as their own without a vault key uses a team's key for the same server,
+unless the user set a key of their own for the hop. Without either the hop
 uses the user's own SSH setup.
 
 A long-running app shares one :class:`VaultLeaseCache`, so a server's lease
@@ -33,6 +35,7 @@ from servonaut.services.shared_servers import (
     row_team_label,
     team_key_fallback,
     team_key_target,
+    team_twin,
 )
 
 logger = logging.getLogger(__name__)
@@ -269,6 +272,11 @@ async def bastion_lease(
 ) -> Any:
     """The vault lease of *profile*'s bastion, or None to keep the user's own hop setup.
 
+    A bastion the user lists as their own (from their own cloud account)
+    without a vault key of their own hops with a team's key for the same
+    server (:func:`shared_servers.team_twin`), unless the profile names a
+    ``bastion_key``: a key the user set for the hop is never replaced.
+
     None when the profile has no bastion, the vault is locked, no single
     server is the bastion (:func:`bastion_row`), the bastion has no vault
     key, the key cannot be used here (the vault service cannot be reached,
@@ -292,26 +300,51 @@ async def bastion_lease(
         # OpenSSH on Windows runs no hop that could use the key (see
         # ConnectionService.get_proxy_args): never start an agent for it.
         return None
+    rows = [row for row in rows if isinstance(row, Mapping)]
     row = bastion_row(profile, rows)
     if row is None:
         return None
     name = str(row.get("name") or row.get("id") or profile.bastion_host)
-    if connection_service is not None:
-        try:
-            own_profile = connection_service.resolve_profile(dict(row))
-        except Exception:  # noqa: BLE001 - a row without rules is reached directly
-            own_profile = None
-        if own_profile is not None and (
-            getattr(own_profile, "bastion_host", None) or getattr(own_profile, "proxy_command", None)
-        ):
-            logger.info("Not using the vault key of the bastion %s: a connection rule routes it through a proxy too", name)
-            return None
+    if _behind_proxy(row, name, connection_service):
+        return None
+    lease = await _bastion_row_lease(row, name, vault_runtime, cache)
+    if lease is not None or is_shared_row(row) or getattr(profile, "bastion_key", None):
+        return lease
+    team = team_twin(row, rows)
+    if team is None or _behind_proxy(team, name, connection_service):
+        return None
+    lease = await _bastion_row_lease(team, name, vault_runtime, cache)
+    if lease is not None:
+        logger.info("The hop to the bastion %s uses the key of the team %s", name, row_team_label(team))
+    return lease
+
+
+def _behind_proxy(row: Mapping[str, Any], name: str, connection_service: Any) -> bool:
+    """Whether a connection rule routes the bastion's server *row* through a bastion or proxy itself."""
+    if connection_service is None:
+        return False
+    try:
+        own_profile = connection_service.resolve_profile(dict(row))
+    except Exception:  # noqa: BLE001 - a row without rules is reached directly
+        return False
+    if own_profile is not None and (
+        getattr(own_profile, "bastion_host", None) or getattr(own_profile, "proxy_command", None)
+    ):
+        logger.info("Not using the vault key of the bastion %s: a connection rule routes it through a proxy too", name)
+        return True
+    return False
+
+
+async def _bastion_row_lease(
+    row: Mapping[str, Any], name: str, vault_runtime: Any, cache: Optional[VaultLeaseCache],
+) -> Any:
+    """The vault lease of the bastion's server *row* (:func:`bastion_lease`), or None."""
     try:
         return await vault_lease(row, vault_runtime, cache=cache)
     except VaultCredentialError as exc:
         if _is_untrusted(exc):
             raise VaultCredentialError(f"The bastion {name}: {exc}") from exc
-        logger.warning("The vault key of the bastion %s cannot be used here; the hop uses your own SSH setup: %s", name, exc)
+        logger.warning("The vault key of the bastion %s cannot be used here: %s", name, exc)
         return None
 
 

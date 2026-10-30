@@ -6,6 +6,9 @@ private address the bastion forwards, by a connection rule naming the bastion
 by address (not the sandbox's ``bastion-1`` alias, whose ssh_config entry would
 give the hop a key file by itself). No key file for the bastion exists on this
 computer: only the vault key can log the hop in.
+
+A team can share the same bastion with the team's vault key: a user who lists
+it as their own server without a key of their own hops with the team's key.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import pytest
 
 from e2e.harness import keygen_lookup_shim, remote_fleet
 from e2e.harness.bootstrap import Sandbox
+from e2e.harness.fake_cloud.routes_vault import SERVER_ID, TEAM_ID, TEAM_SLUG
 from e2e.harness.seed import HomeSeeder
 from e2e.harness.session_seed import seed_relay_config, seed_session
 from e2e.harness.sshd import LOOPBACK
@@ -31,6 +35,8 @@ pytestmark = [pytest.mark.e2e_pr, pytest.mark.needs_sshd]
 
 APP_ADDRESS = "10.9.0.5"
 LOGIN = "deploy"
+# The scenario account every seeded session signs in as.
+OWNER_ID = 4242
 
 
 def _json(result: Any) -> Any:
@@ -102,6 +108,53 @@ def test_the_hop_logs_in_with_the_bastions_vault_key(journey, fake_cloud, sshd, 
     logins = sshd.bastion.sessions("auth")
     assert logins and logins[-1]["accepted"], logins
     assert logins[-1]["user"] == LOGIN
+    assert [f["destination"] for f in sshd.bastion.sessions("forward")] == [f"{APP_ADDRESS}:22"]
+    assert sshd.target.commands(user=LOGIN) == ["hostname"]
+
+
+def test_a_bastion_you_list_as_your_own_hops_with_the_teams_vault_key(
+    journey, fake_cloud, sshd, cli, servonaut_cmd,
+):
+    # Regression: the user's own jump-1 has no vault key, so the hop offered
+    # the user's own keys and the bastion refused them, though the team
+    # shares the same server with its key.
+    fake_cloud.configure(plan="teams", mcp_connections=0)
+    fake_cloud.account.configure(teams=[])
+    fake_cloud.account.create_team(name="Example team", slug=TEAM_SLUG, team_id=TEAM_ID, owner_user_id=OWNER_ID)
+    fake_cloud.account.place_shared_server(
+        TEAM_SLUG, SERVER_ID, name="jump", hostname=LOOPBACK, port=sshd.bastion.port, login_user=LOGIN,
+    )
+    _configure_test_custody(journey)
+    keygen = shutil.which("ssh-keygen", path="/usr/bin:/bin:/usr/local/bin")
+    assert keygen is not None
+    keygen_lookup_shim.install(str(journey.shims.directory), keygen, str(journey.ctx.root))
+    sshd.route(APP_ADDRESS)
+    sshd.target.remote.write("/etc/hostname", "app-1\n")
+    home = _home(journey, fake_cloud, sshd)
+
+    setup, _ = _setup_with_recovery_confirmation(journey, home, servonaut_cmd)
+    assert setup.returncode == 0, setup.text
+    _assert_only_getpass_tty_access(journey)
+    vault_id = _json(cli(home, "vault", "create", "--team", TEAM_SLUG, "--name", "Team vault", "--json"))["vault_id"]
+    key_path = home.home / "jump.pem"
+    key_path.write_bytes(sshd.bastion_key_path.read_bytes())
+    key_path.chmod(0o600)
+    item_id = _json(cli(home, "vault", "import", "ssh", "--vault", vault_id, "--path", str(key_path), "--json"))["item_id"]
+    key_path.unlink()
+    bastion_host_key = " ".join(sshd.bastion.host_key.export_public_key("openssh").decode("ascii").split()[:2])
+    bound = _json(cli(
+        home, "vault", "bind", SERVER_ID, item_id, "--vault", vault_id, "--team", TEAM_SLUG,
+        "--login", LOGIN, "--host-key", bastion_host_key, "--yes", "--json",
+    ))
+    assert bound["source"] == "servonaut_vault" and bound["valid"] is True, bound
+
+    connected = cli(home, "ssh", "app-1", "--", "hostname")
+
+    assert connected.returncode == 0, connected.describe()
+    assert connected.stdout.strip() == "app-1"
+    assert f"Bastion {LOOPBACK}: its Servonaut Vault key, as {LOGIN}." in connected.stderr, connected.describe()
+    logins = sshd.bastion.sessions("auth")
+    assert logins and logins[-1]["accepted"], logins
     assert [f["destination"] for f in sshd.bastion.sessions("forward")] == [f"{APP_ADDRESS}:22"]
     assert sshd.target.commands(user=LOGIN) == ["hostname"]
 

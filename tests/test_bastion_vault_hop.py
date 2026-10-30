@@ -52,7 +52,10 @@ def _hop(tmp_path, **overrides):
 
 
 class _Runtime:
-    """The parts of VaultCommandService the leases use, with one lease per server id."""
+    """The parts of VaultCommandService the leases use, with one lease per server id.
+
+    *raises* fails every lookup, or (a dict) only those of the servers it names.
+    """
 
     def __init__(self, leases=None, *, unlocked=True, raises=None):
         self.leases = dict(leases or {})
@@ -62,8 +65,9 @@ class _Runtime:
 
     async def resolve_ssh(self, instance):
         self.asked.append(str(instance.get("id")))
-        if self.raises is not None:
-            raise self.raises
+        raises = self.raises.get(instance.get("id")) if isinstance(self.raises, dict) else self.raises
+        if raises is not None:
+            raise raises
         return self.leases.get(instance.get("id"))
 
 
@@ -76,6 +80,14 @@ def _service(*rules, mode="accept-new"):
 
 
 APP_RULE = ConnectionRule(name="app", match_conditions={"name_contains": "app"}, profile_name="via-bastion")
+
+# The same bastion, shared by a team with the team's vault key: a member who
+# also lists it from their own cloud account sees both rows.
+TEAM_BASTION = {
+    "id": "srv-9", "name": "jump-shared", "is_shared": True, "team_slug": "devs", "team_name": "Devs",
+    "hostname": "9.9.9.9", "public_ip": "9.9.9.9", "port": 22,
+    "credential_binding": {"source": "servonaut_vault"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +313,92 @@ class TestBastionLease:
         runtime = _Runtime({"i-0b": _hop(tmp_path)})
 
         assert _lease(PROFILE, [BASTION], runtime, ConnectionService(manager)) is None
+
+
+class TestBastionLeaseTeamFallback:
+    """A bastion the user lists as their own, without a vault key of their own,
+    hops with the team's key for the same server."""
+
+    def test_the_teams_key_when_your_own_bastion_row_has_none(self, tmp_path):
+        team_hop = _hop(tmp_path)
+        runtime = _Runtime({"srv-9": team_hop})
+
+        assert _lease(PROFILE, [APP, BASTION, TEAM_BASTION], runtime, _service(APP_RULE)) is team_hop
+        assert runtime.asked == ["i-0b", "srv-9"]
+
+    def test_your_own_vault_key_wins(self, tmp_path):
+        own_hop = _hop(tmp_path)
+        runtime = _Runtime({"i-0b": own_hop, "srv-9": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION, TEAM_BASTION], runtime) is own_hop
+        assert runtime.asked == ["i-0b"]
+
+    def test_a_bastion_key_you_set_is_never_replaced(self, tmp_path):
+        profile = ConnectionProfile(name="p", bastion_host="9.9.9.9", bastion_key="~/.ssh/jump.pem")
+        runtime = _Runtime({"srv-9": _hop(tmp_path)})
+
+        assert _lease(profile, [BASTION, TEAM_BASTION], runtime) is None
+        assert runtime.asked == ["i-0b"]
+
+    def test_a_team_binding_that_fails_verification_stops_the_connection(self):
+        runtime = _Runtime(raises={"srv-9": VaultStateError("binding signature is invalid")})
+
+        with pytest.raises(VaultCredentialError, match="The bastion bastion-1"):
+            _lease(PROFILE, [BASTION, TEAM_BASTION], runtime)
+
+    def test_a_team_key_that_cannot_be_used_here_keeps_your_setup(self, caplog):
+        from servonaut.services.vault.team_vault_client import VaultIdentityMissingError
+
+        runtime = _Runtime(raises={"srv-9": VaultIdentityMissingError("no identity")})
+        with caplog.at_level("WARNING", logger="servonaut.services.ssh_credentials"):
+            assert _lease(PROFILE, [BASTION, TEAM_BASTION], runtime) is None
+        assert "bastion-1 cannot be used here" in caplog.text
+
+    def test_a_team_row_of_another_server_is_not_used(self, tmp_path):
+        elsewhere = {**TEAM_BASTION, "hostname": "8.8.8.8", "public_ip": "8.8.8.8"}
+        runtime = _Runtime({"srv-9": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION, elsewhere], runtime) is None
+        assert runtime.asked == ["i-0b"]
+
+    def test_a_team_row_without_the_teams_access_is_not_used(self, tmp_path):
+        keyless = {key: value for key, value in TEAM_BASTION.items() if key != "credential_binding"}
+        runtime = _Runtime({"srv-9": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION, keyless], runtime) is None
+        assert runtime.asked == ["i-0b"]
+
+    def test_a_team_row_behind_its_own_proxy_rule_is_not_leased(self, tmp_path):
+        shared_rule = ConnectionRule(name="s", match_conditions={"name_contains": "shared"}, profile_name="via-bastion")
+        runtime = _Runtime({"srv-9": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION, TEAM_BASTION], runtime, _service(shared_rule)) is None
+        assert runtime.asked == ["i-0b"]
+
+    def test_your_own_bastion_behind_a_proxy_rule_is_not_leased_by_the_teams_name(self, tmp_path):
+        # The rule matches your own row's name only: the team's row of the
+        # same machine must not slip past it.
+        own_rule = ConnectionRule(name="b", match_conditions={"name_contains": "bastion-1"}, profile_name="via-bastion")
+        runtime = _Runtime({"srv-9": _hop(tmp_path)})
+
+        assert _lease(PROFILE, [BASTION, TEAM_BASTION], runtime, _service(own_rule)) is None
+        assert runtime.asked == []
+
+    def test_a_target_without_a_vault_key_hops_with_the_teams_bastion_key(self, tmp_path, known_hosts, posix_hop):
+        service = _service(APP_RULE)
+        team_hop = _hop(tmp_path)
+        conn = {"host": "10.0.1.21", "username": "ec2-user", "key_path": "/keys/app.pem",
+                "proxy_args": service.get_proxy_args(PROFILE), "port": None}
+
+        resolved = asyncio.run(resolve_with_vault(
+            conn, APP, vault_runtime=_Runtime({"srv-9": team_hop}), connection_service=service,
+            rows=[APP, BASTION, TEAM_BASTION],
+        ))
+
+        argv = _proxy_command_argv(resolved["proxy_args"])
+        assert _contains_run(argv, ["-o", f'IdentityAgent="{team_hop.identity_agent}"', "-o", "IdentitiesOnly=yes"])
+        assert argv[-1] == "admin@9.9.9.9"
+        assert resolved["key_path"] == "/keys/app.pem"
 
 
 class TestResolveWithVault:
