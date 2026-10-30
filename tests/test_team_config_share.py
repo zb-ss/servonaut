@@ -220,6 +220,91 @@ class TestDiffAgainstLocal:
         assert diff["custom_servers"] == {"local": 2, "remote": 0, "after": 0}
 
 
+# A custom server the team also shares: members get it as the team's row, with the team's key.
+_SHARED_BY_TEAM = [{"id": "srv-9", "name": "team-db", "hostname": "team-db.example.com",
+                    "instance_id": "custom-team-db"}]
+_REMOTE_WITH_SHARED = {
+    "connection_profiles": [{"name": "prod-bastion", "bastion_host": "bastion.example.com"}],
+    "connection_rules": [],
+    "scan_rules": [{"name": "nginx-logs", "match_conditions": {}}],
+    "custom_servers": [
+        {"name": "team-db", "host": "team-db.example.com", "username": "root", "port": 22},
+        {"name": "lab-2", "host": "10.0.0.9", "username": "root", "port": 22},
+    ],
+}
+
+
+class TestTeamSharedCustomServers:
+    def test_apply_skips_a_pulled_custom_server_the_team_already_shares(self):
+        local = _seeded_config()
+
+        applied = apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
+
+        assert applied.skipped_custom_servers == ["team-db"]
+        assert [s.name for s in local.custom_servers] == ["lab-2"]
+        # Everything else is still replaced whole.
+        assert [p.name for p in local.connection_profiles] == ["prod-bastion"]
+        assert local.connection_rules == []
+
+    def test_apply_without_the_teams_servers_keeps_every_pulled_server(self):
+        local = _seeded_config()
+
+        assert apply_team_config(local, _REMOTE_WITH_SHARED).skipped_custom_servers == []
+        assert [s.name for s in local.custom_servers] == ["team-db", "lab-2"]
+
+    def test_a_shared_server_at_another_port_is_not_the_pulled_one(self):
+        local = _seeded_config()
+        shared = [{**_SHARED_BY_TEAM[0], "port": 2222}]
+
+        assert apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=shared).skipped_custom_servers == []
+
+    def test_a_skipped_server_keeps_no_key_path(self):
+        # The pull does not add it, so the user's own path for it is not kept either.
+        def member() -> AppConfig:
+            local = _seeded_config()
+            local.custom_servers = [CustomServer(name="team-db", host="team-db.example.com", ssh_key="~/.ssh/db")]
+            return local
+        remote = {**_REMOTE_WITH_SHARED, "connection_profiles": []}
+
+        assert diff_against_local(member(), remote, shared_servers=_SHARED_BY_TEAM)["kept_key_paths"] == 0
+        assert apply_team_config(member(), remote, shared_servers=_SHARED_BY_TEAM).kept_key_paths == 0
+        assert apply_team_config(member(), remote).kept_key_paths == 1
+
+    def test_diff_names_what_pull_removes_and_skips(self):
+        diff = diff_against_local(_seeded_config(), _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
+
+        assert diff["removed"] == {
+            "connection_profiles": ["staging"],
+            "connection_rules": ["prod-rule"],
+            "scan_rules": [],
+            "custom_servers": ["db-1", "cache-1"],
+        }
+        assert diff["skipped_custom_servers"] == ["team-db"]
+        assert diff["custom_servers"] == {"local": 2, "remote": 2, "after": 1}
+
+
+class TestAnotherLoginAtASharedAddress:
+    """Two hosting accounts on one machine: the team sharing one is not sharing the other."""
+
+    _SHARED = [{"id": "srv-1", "name": "site-a", "hostname": "9.9.9.9", "instance_id": "custom-site-a",
+                "username": "alpha"}]
+    _PULLED = {"custom_servers": [
+        {"name": "site-a", "host": "9.9.9.9", "username": "alpha", "port": 22},
+        {"name": "site-b", "host": "9.9.9.9", "username": "beta", "port": 22},
+    ]}
+
+    def test_only_the_shared_login_is_skipped(self):
+        local = _seeded_config()
+
+        assert apply_team_config(local, self._PULLED, shared_servers=self._SHARED).skipped_custom_servers == ["site-a"]
+        assert [s.name for s in local.custom_servers] == ["site-b"]
+
+    def test_a_share_without_a_recorded_id_matches_by_address_and_login(self):
+        shared = [{k: v for k, v in self._SHARED[0].items() if k != "instance_id"}]
+
+        assert apply_team_config(_seeded_config(), self._PULLED, shared_servers=shared).skipped_custom_servers == ["site-a"]
+
+
 class TestPullKeepsYourOwnKeyPaths:
     """A push never carries key paths; a pull keeps the member's own for the same entry."""
 
@@ -237,7 +322,7 @@ class TestPullKeepsYourOwnKeyPaths:
         member = self._member()
 
         assert diff_against_local(member, payload)["kept_key_paths"] == 2
-        assert apply_team_config(member, payload) == 2
+        assert apply_team_config(member, payload).kept_key_paths == 2
 
         assert [(p.name, p.bastion_key) for p in member.connection_profiles] == [
             ("prod-bastion", "~/.ssh/jump"), ("staging", None),
@@ -248,7 +333,7 @@ class TestPullKeepsYourOwnKeyPaths:
         member = AppConfig()
         payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
 
-        assert apply_team_config(member, payload) == 0
+        assert apply_team_config(member, payload).kept_key_paths == 0
         assert all(not p.bastion_key for p in member.connection_profiles)
         assert all(not s.ssh_key for s in member.custom_servers)
 
@@ -272,7 +357,7 @@ class TestPullKeepsYourOwnKeyPaths:
         }
         member = self._member()
 
-        assert apply_team_config(member, remote) == 0
+        assert apply_team_config(member, remote).kept_key_paths == 0
         assert not member.connection_profiles[0].bastion_key
         assert not member.custom_servers[0].ssh_key
 
@@ -282,6 +367,6 @@ class TestPullKeepsYourOwnKeyPaths:
         ]}
         member = self._member()
 
-        assert apply_team_config(member, remote) == 0
+        assert apply_team_config(member, remote).kept_key_paths == 0
         assert member.connection_profiles[0].bastion_key == "~/.ssh/team-jump"
 

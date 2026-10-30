@@ -23,7 +23,7 @@ UUIDs, security-group IDs) that won't exist in another teammate's account.
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Collection, Tuple
+from typing import TYPE_CHECKING, Any, Collection, Mapping, Sequence, Tuple
 
 if TYPE_CHECKING:
     from servonaut.config.schema import AppConfig
@@ -104,7 +104,9 @@ def _sanitise_custom_server(d: dict) -> dict:
     return d
 
 
-def diff_against_local(local: "AppConfig", remote_payload: dict) -> dict:
+def diff_against_local(
+    local: "AppConfig", remote_payload: dict, *, shared_servers: Sequence[Mapping[str, Any]] = (),
+) -> dict:
     """Summarise what would change if ``remote_payload`` were applied over ``local``.
 
     Returned shape (suitable for an Apply-confirmation modal):
@@ -116,9 +118,15 @@ def diff_against_local(local: "AppConfig", remote_payload: dict) -> dict:
             "connection_rules":    {"local": 1, "remote": 2, "after": 2},
             "scan_rules":          {"local": 7, "remote": 7, "after": 7},
             "custom_servers":      {"local": 0, "remote": 5, "after": 5},
+            "removed": {"connection_profiles": ["old-bastion"], ...},
+            "skipped_custom_servers": ["web-1"],
             "kept_key_paths": 1,
         }
 
+    ``removed`` names the local entries of each section that the team's
+    section has no entry of the same name for: they are gone after the pull.
+    ``skipped_custom_servers`` names the pulled custom servers that one of
+    the team's *shared_servers* also is: the pull does not add them.
     ``kept_key_paths`` counts the user's own key paths the pull keeps (see
     ``team_config_apply.local_key_paths``): a push never carries them.
 
@@ -126,18 +134,24 @@ def diff_against_local(local: "AppConfig", remote_payload: dict) -> dict:
     the local one. Selective-per-item import is deferred to v2 (see the plan
     note for design).
     """
-    sections = ("connection_profiles", "connection_rules", "scan_rules", "custom_servers")
-    diff: dict = {}
-    for name in sections:
-        local_count = len(getattr(local, name, []) or [])
-        remote_count = len(remote_payload.get(name, []) or [])
-        diff[name] = {
-            "local": local_count,
-            "remote": remote_count,
-            "after": remote_count,  # replace-whole-section
-        }
-    from servonaut.services.team_config_apply import local_key_paths
+    from servonaut.services.team_config_apply import local_key_paths, team_custom_servers
 
-    kept = local_key_paths(local, remote_payload)
+    sections = ("connection_profiles", "connection_rules", "scan_rules", "custom_servers")
+    kept_servers, skipped = team_custom_servers(remote_payload, shared_servers)
+    diff: dict = {"removed": {}, "skipped_custom_servers": skipped}
+    for name in sections:
+        local_entries = getattr(local, name, []) or []
+        remote_entries = remote_payload.get(name, []) or []
+        after = kept_servers if name == "custom_servers" else remote_entries
+        diff[name] = {
+            "local": len(local_entries),
+            "remote": len(remote_entries),
+            "after": len(after),  # replace-whole-section
+        }
+        kept_names = {entry.get("name") for entry in after if isinstance(entry, dict)}
+        diff["removed"][name] = [
+            entry.name for entry in local_entries if getattr(entry, "name", None) not in kept_names
+        ]
+    kept = local_key_paths(local, {**remote_payload, "custom_servers": kept_servers})
     diff["kept_key_paths"] = len(kept["bastion_key"]) + len(kept["ssh_key"])
     return diff

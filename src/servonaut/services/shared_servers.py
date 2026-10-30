@@ -166,6 +166,19 @@ def is_same_server(shared: Mapping[str, Any], own: Mapping[str, Any]) -> bool:
     return bool(address[0]) and _public_address(shared) == address
 
 
+def own_twin(shared: Mapping[str, Any], rows: Iterable[Any]) -> Optional[Mapping[str, Any]]:
+    """The user's own row in *rows* that is the server *shared*, else None.
+
+    *shared* is a team's server, as its record or its row. Rows of teams are
+    never the user's own, whatever their address.
+    """
+    row = as_shared_row(shared)
+    for own in rows:
+        if isinstance(own, Mapping) and not is_shared_row(own) and is_same_server(row, own):
+            return own
+    return None
+
+
 def fold_shared(
     rows: Sequence[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[int, List[str]]]:

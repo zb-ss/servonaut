@@ -35,6 +35,7 @@ from servonaut.services.vault.auto_bind import (
     fetch_host_keys_for_rows,
     plan_auto_bind,
 )
+from servonaut.services.vault.display import terminal_safe
 from servonaut.services.vault.ec2_host_keys import key_family_from_public_key
 from servonaut.services.vault.errors import vault_failure_reason
 from servonaut.widgets.busy_indicator import BusyIndicator
@@ -783,6 +784,13 @@ class VaultAutoBindScreen(Screen):
         self._selected.clear()
         self.query_one("#auto_bind_trust", Checkbox).value = False
         self._render_rows()
+        for row in chosen:
+            if row.result not in (None, "bound"):
+                # Kept for later: the row's status goes with the next review.
+                logger.warning(
+                    "Vault key binding failed for %s: %s",
+                    terminal_safe(self._server_name(row)), terminal_safe(self.scrub_for_display(row.result)),
+                )
         bound = sum(row.result == "bound" for row in chosen)
         failed = len(chosen) - bound
         message = f"Bound vault keys to {bound} of {len(chosen)} servers."
