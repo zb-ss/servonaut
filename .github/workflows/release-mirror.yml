@@ -6,20 +6,30 @@ name: Release mirror
 #   resolve  decides which release to mirror, from the finished workflow that
 #            attached its files or from the inputs;
 #   mirror   downloads the release's files from GitHub, checks each against
-#            the SHA256SUMS asset that lists it and the desktop package
+#            the SHA256SUMS asset that lists it and each desktop package
 #            against its build-provenance attestation, uploads them under
 #            <tag>/ without ever replacing a different file, downloads them
 #            again through the public URL, then points latest.json (newest
 #            stable release) and channels/pre.json (newest release,
-#            candidates included) at the release when it is the newest;
-#   notes    links the mirrored desktop package from the release notes, and
-#            removes that link once the package is gone from the release;
-#   audit    every day, re-checks the channel files and every file they list
-#            against GitHub, and opens an issue when they disagree.
+#            candidates included) at the release when it is the newest, and
+#            signs the update manifests the packaged desktop app reads,
+#            manifest/stable.json and manifest/preview.json, to match;
+#   notes    links the mirrored desktop packages from the release notes, and
+#            removes those links once the packages are gone from the release;
+#   refresh  every day, re-signs the update manifests with a fresh expiry
+#            before they expire;
+#   audit    every day, re-checks the channel files, every file they list and
+#            the update manifests against GitHub, and opens an issue when
+#            they disagree.
 #
 # Every trigger runs the default branch's copy of this workflow, and no job
-# checks out a tag. The upload credentials live in the release-mirror
-# environment, which only the default branch can use.
+# checks out a tag. The upload credentials and the manifest signing key live
+# in the release-mirror environment, which only the default branch can use.
+# Until the environment holds RELEASE_MANIFEST_SIGNING_KEY and
+# RELEASE_MANIFEST_KEY_ID, the manifests are skipped with a notice. The
+# repository variables RELEASE_MANIFEST_VALIDITY_DAYS (default 14) and
+# RELEASE_MANIFEST_REFRESH_DAYS (default 7) set how long a signed manifest is
+# valid and how many days before its expiry it is re-signed.
 #
 # The repository variable RELEASE_MIRROR (on or off) switches the mirror;
 # while it is off, runs end without uploading. A dry run works either way:
@@ -31,7 +41,7 @@ name: Release mirror
 
 on:
   workflow_run:
-    workflows: ["Desktop preview .deb", "Release install scripts"]
+    workflows: ["Desktop preview .deb", "Desktop preview macOS", "Release install scripts"]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -209,6 +219,22 @@ jobs:
             --signer-workflow "${GH_REPO}/.github/workflows/desktop-preview-deb.yml" \
             --source-ref "refs/tags/${TAG}"
 
+      # Likewise each disk image, from the macOS preview workflow.
+      - name: Verify the macOS disk images' build provenance
+        if: steps.verify.outputs.desktop-dmgs != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DMGS: ${{ steps.verify.outputs.desktop-dmgs }}
+        run: |
+          set -euo pipefail
+          read -r -a images <<< "${DMGS}"
+          for dmg in "${images[@]}"; do
+            gh attestation verify "${RUNNER_TEMP}/mirror/files/${dmg}" \
+              --repo "${GH_REPO}" \
+              --signer-workflow "${GH_REPO}/.github/workflows/desktop-preview-macos.yml" \
+              --source-ref "refs/tags/${TAG}"
+          done
+
       # Error text from the storage client can name the endpoint's host,
       # which the endpoint secret alone would not mask.
       - name: Mask the bucket's address
@@ -244,6 +270,7 @@ jobs:
             --base "${MIRROR_PUBLIC_BASE}"
 
       - name: Point the channel files at the release
+        id: channels
         env:
           GH_TOKEN: ${{ github.token }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
@@ -255,6 +282,7 @@ jobs:
           # GitHub's latest release: the only one latest.json may name.
           latest="$(gh release list --limit 100 --exclude-drafts --json tagName,isLatest \
             --jq '.[] | select(.isLatest) | .tagName')"
+          echo "github-latest-tag=${latest}" >> "${GITHUB_OUTPUT}"
           dry_run_flag=()
           if [ "${DRY_RUN}" = "true" ]; then dry_run_flag=(--dry-run); fi
           python .github/scripts/release-mirror.py channels \
@@ -262,6 +290,33 @@ jobs:
             --base "${MIRROR_PUBLIC_BASE}" \
             --repo "${GH_REPO}" \
             --github-latest-tag "${latest}" \
+            "${dry_run_flag[@]}"
+
+      # They follow the channel files and must pass the app's own trust
+      # policy before they are uploaded. Only this step and the refresh
+      # receive the signing key; a dry run signs and checks, but writes nothing.
+      - name: Sign the update manifests
+        env:
+          LATEST_TAG: ${{ steps.channels.outputs.github-latest-tag }}
+          MANIFEST_VALIDITY_DAYS: ${{ vars.RELEASE_MANIFEST_VALIDITY_DAYS }}
+          MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+          RELEASE_MANIFEST_KEY_ID: ${{ vars.RELEASE_MANIFEST_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          set -euo pipefail
+          dry_run_flag=()
+          if [ "${DRY_RUN}" = "true" ]; then dry_run_flag=(--dry-run); fi
+          # The manifest code is the app's own, from this checkout.
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py manifests \
+            --plan "${RUNNER_TEMP}/mirror/plan.json" \
+            --base "${MIRROR_PUBLIC_BASE}" \
+            --github-latest-tag "${LATEST_TAG}" \
+            --validity-days "${MANIFEST_VALIDITY_DAYS}" \
+            --refresh-days "${MANIFEST_REFRESH_DAYS}" \
             "${dry_run_flag[@]}"
 
       # The notes job needs the plan, not the files.
@@ -327,10 +382,77 @@ jobs:
             gh api -X PATCH "repos/${GH_REPO}/releases/${release_id}" -F "body=@${RUNNER_TEMP}/new-body.md" --jq '.html_url'
           fi
 
-  audit:
-    name: audit
+  # The audit cannot write to the mirror, so re-signing the update manifests
+  # before they expire is a job of its own, in the release-mirror environment.
+  # A manifest is renewed only when a pinned key signed it and GitHub's
+  # SHA256SUMS still list every file it names.
+  refresh:
+    name: refresh
     if: >-
       github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
+      (github.event_name == 'schedule' || inputs.audit == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-mirror
+    permissions:
+      contents: read
+    outputs:
+      signing: ${{ steps.refresh.outputs.signing }}
+    env:
+      GH_REPO: ${{ github.repository }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the uploader
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
+      - name: Mask the bucket's address
+        env:
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          host="${MIRROR_ENDPOINT#*://}"
+          host="${host%%/*}"
+          echo "::add-mask::${host}"
+          echo "::add-mask::${host%%.*}"
+
+      - name: Re-sign the update manifests before they expire
+        id: refresh
+        env:
+          MANIFEST_VALIDITY_DAYS: ${{ vars.RELEASE_MANIFEST_VALIDITY_DAYS }}
+          MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+          RELEASE_MANIFEST_KEY_ID: ${{ vars.RELEASE_MANIFEST_KEY_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_MIRROR_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_ENDPOINT: ${{ secrets.R2_MIRROR_ENDPOINT }}
+          MIRROR_BUCKET: ${{ secrets.R2_MIRROR_BUCKET }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py refresh \
+            --repo "${GH_REPO}" \
+            --validity-days "${MANIFEST_VALIDITY_DAYS}" \
+            --refresh-days "${MANIFEST_REFRESH_DAYS}"
+
+  # Runs after the refresh, even a failed one, so it sees the manifests as
+  # users get them; it checks them once the refresh found a signing key.
+  audit:
+    name: audit
+    needs: refresh
+    if: >-
+      !cancelled() && github.repository == 'zb-ss/servonaut' && vars.RELEASE_MIRROR == 'on' &&
       (github.event_name == 'schedule' || inputs.audit == true)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -352,20 +474,35 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The manifest checks need the signature library.
+      - name: Install the checker
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes \
+            -r .github/requirements/release-mirror.txt
+
       - name: Compare the mirror with GitHub
         id: audit
         env:
           GH_TOKEN: ${{ github.token }}
+          MANIFESTS_SIGNED: ${{ needs.refresh.outputs.signing }}
+          MANIFEST_REFRESH_DAYS: ${{ vars.RELEASE_MANIFEST_REFRESH_DAYS }}
+          REFRESH_RESULT: ${{ needs.refresh.result }}
         run: |
           set -euo pipefail
           gh release list --limit 100 --exclude-drafts --json tagName,isLatest,publishedAt \
             --jq '.[] | select(.isLatest)' > "${RUNNER_TEMP}/latest.json"
-          python .github/scripts/release-mirror.py audit \
+          manifests_flag=()
+          if [ "${MANIFESTS_SIGNED}" = "true" ]; then manifests_flag=(--manifests); fi
+          PYTHONPATH="${GITHUB_WORKSPACE}/src" python .github/scripts/release-mirror.py audit \
             --base "${MIRROR_PUBLIC_BASE}" \
             --repo "${GH_REPO}" \
             --github-latest-tag "$(jq -r '.tagName // empty' "${RUNNER_TEMP}/latest.json")" \
             --github-latest-published-at "$(jq -r '.publishedAt // empty' "${RUNNER_TEMP}/latest.json")" \
-            --report "${RUNNER_TEMP}/audit.md"
+            --refresh-days "${MANIFEST_REFRESH_DAYS}" \
+            --refresh-result "${REFRESH_RESULT}" \
+            --report "${RUNNER_TEMP}/audit.md" \
+            "${manifests_flag[@]}"
 
       - name: Report the failed audit
         if: failure() && steps.audit.outcome == 'failure'
