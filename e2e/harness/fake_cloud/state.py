@@ -58,6 +58,9 @@ class Scenario:
     pypi_version: str = "0.0.0"
     # Wheel files the fake package index offers (absolute paths).
     pypi_files: list[str] = field(default_factory=list)
+    # When set, personal binding reads answer 429 with this Retry-After
+    # (seconds), like the service's per-user request limiter.
+    binding_reads_retry_after: Optional[int] = None
 
 
 class ScenarioStore:

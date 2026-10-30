@@ -39,3 +39,19 @@ def test_file_key_store_requires_boolean_consent(value):
 def test_timeouts_are_positive_finite_numbers(value):
     with pytest.raises(ValueError):
         VaultConfig(request_timeout_seconds=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, "60"])
+def test_the_binding_read_backoff_is_a_positive_finite_number(value):
+    with pytest.raises(ValueError):
+        VaultConfig(binding_read_backoff_seconds=value)
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), True, "60"])
+def test_the_binding_read_cache_window_is_a_finite_number_of_zero_or_more(value):
+    with pytest.raises(ValueError):
+        VaultConfig(binding_read_cache_seconds=value)
+
+
+def test_a_zero_binding_read_cache_window_is_allowed():
+    assert VaultConfig(binding_read_cache_seconds=0).binding_read_cache_seconds == 0

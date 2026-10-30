@@ -1420,6 +1420,10 @@ class VaultConfig:
     approval_poll_initial_seconds: float = 2.0
     approval_poll_max_seconds: float = 10.0
     request_timeout_seconds: float = 30.0
+    # How long one read of an own server's vault key binding is reused; 0 reads every time.
+    binding_read_cache_seconds: float = 60.0
+    # The pause after the service refuses a binding read (429 without a Retry-After, or 401).
+    binding_read_backoff_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         for name in ("strict_verification", "auto_grant", "allow_file_key_store"):
@@ -1431,11 +1435,14 @@ class VaultConfig:
                 raise ValueError(f"vault.{name} must be a positive integer")
         for name in (
             "approval_poll_initial_seconds", "approval_poll_max_seconds",
-            "request_timeout_seconds",
+            "request_timeout_seconds", "binding_read_backoff_seconds",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float) or not 0 < value < float("inf"):
                 raise ValueError(f"vault.{name} must be a positive finite number")
+        value = self.binding_read_cache_seconds
+        if type(value) not in (int, float) or not 0 <= value < float("inf"):
+            raise ValueError("vault.binding_read_cache_seconds must be a finite number of 0 or more")
         if self.approval_poll_initial_seconds > self.approval_poll_max_seconds:
             raise ValueError("vault approval polling maximum is below its initial delay")
 
