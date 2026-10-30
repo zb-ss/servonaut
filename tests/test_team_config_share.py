@@ -218,3 +218,70 @@ class TestDiffAgainstLocal:
         assert diff["connection_rules"] == {"local": 1, "remote": 0, "after": 0}
         assert diff["scan_rules"] == {"local": 1, "remote": 1, "after": 1}
         assert diff["custom_servers"] == {"local": 2, "remote": 0, "after": 0}
+
+
+class TestPullKeepsYourOwnKeyPaths:
+    """A push never carries key paths; a pull keeps the member's own for the same entry."""
+
+    @staticmethod
+    def _member() -> AppConfig:
+        member = AppConfig()
+        member.connection_profiles = [
+            ConnectionProfile(name="prod-bastion", bastion_host="Bastion.example.com", bastion_key="~/.ssh/jump"),
+        ]
+        member.custom_servers = [CustomServer(name="db-1", host="10.0.0.1", ssh_key="~/.ssh/db")]
+        return member
+
+    def test_a_pushed_config_keeps_the_members_own_paths(self):
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
+        member = self._member()
+
+        assert diff_against_local(member, payload)["kept_key_paths"] == 2
+        assert apply_team_config(member, payload) == 2
+
+        assert [(p.name, p.bastion_key) for p in member.connection_profiles] == [
+            ("prod-bastion", "~/.ssh/jump"), ("staging", None),
+        ]
+        assert [(s.name, s.ssh_key) for s in member.custom_servers] == [("db-1", "~/.ssh/db"), ("cache-1", "")]
+
+    def test_an_entry_new_to_the_member_stays_without_a_path(self):
+        member = AppConfig()
+        payload, _ = build_shareable_subset(_seeded_config(), custom_servers=_ALL_SERVERS)
+
+        assert apply_team_config(member, payload) == 0
+        assert all(not p.bastion_key for p in member.connection_profiles)
+        assert all(not s.ssh_key for s in member.custom_servers)
+
+    def test_a_renamed_entry_gets_no_path(self):
+        remote = {
+            "connection_profiles": [{"name": "prod-jump", "bastion_host": "bastion.example.com", "bastion_key": ""}],
+            "custom_servers": [{"name": "db-primary", "host": "10.0.0.1", "ssh_key": ""}],
+        }
+        member = self._member()
+
+        assert diff_against_local(member, remote)["kept_key_paths"] == 0
+        apply_team_config(member, remote)
+        assert member.connection_profiles[0].bastion_key == ""
+        assert member.custom_servers[0].ssh_key == ""
+
+    def test_a_path_never_follows_an_entry_to_another_machine(self):
+        # A key offered to the wrong host only fails, and tells that host the key exists.
+        remote = {
+            "connection_profiles": [{"name": "prod-bastion", "bastion_host": "new-bastion.example.com"}],
+            "custom_servers": [{"name": "db-1", "host": "10.0.0.9"}],
+        }
+        member = self._member()
+
+        assert apply_team_config(member, remote) == 0
+        assert not member.connection_profiles[0].bastion_key
+        assert not member.custom_servers[0].ssh_key
+
+    def test_a_path_in_the_payload_is_not_replaced(self):
+        remote = {"connection_profiles": [
+            {"name": "prod-bastion", "bastion_host": "bastion.example.com", "bastion_key": "~/.ssh/team-jump"},
+        ]}
+        member = self._member()
+
+        assert apply_team_config(member, remote) == 0
+        assert member.connection_profiles[0].bastion_key == "~/.ssh/team-jump"
+

@@ -350,9 +350,16 @@ class TestPullApply:
             screen = await _open_team(app, pilot)
             notes = _capture_notifications(screen)
             screen._show_pull_config_form(payload)
+            # The push carried no key paths: the user's own stay.
+            preview = _text(screen.query_one("#pull_config_preview", Static))
+            assert "2 entries keep your own SSH key paths: a team config never carries key paths." in preview, preview
             screen.query_one("#btn_confirm_pull_config", Button).press()
             await _until(pilot, lambda: any("Team config applied" in msg for _, msg in notes), "the apply")
+            assert any(msg.startswith("Team config applied; 2 entries keep your own SSH key paths. Restart")
+                       for _, msg in notes), notes
 
         saved = ConfigManager(config_path=tmp_path / "config.json").load()
-        assert [(s.name, s.host, s.ssh_key) for s in saved.custom_servers] == [("team-box", "10.0.0.5", "")]
-        assert [p.name for p in saved.connection_profiles] == ["via-bastion", "plain"]
+        assert [(s.name, s.host, s.ssh_key) for s in saved.custom_servers] == [("team-box", "10.0.0.5", "/keys/team")]
+        assert [(p.name, p.bastion_key) for p in saved.connection_profiles] == [
+            ("via-bastion", "/keys/bastion"), ("plain", None),
+        ]
