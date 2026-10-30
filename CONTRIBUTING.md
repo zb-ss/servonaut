@@ -67,6 +67,14 @@ own two assets; run it on the tag itself
 (`gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z`), or add
 `-f dry_run=true` to build and qualify without attaching anything.
 
+Both desktop preview workflows (this one and the macOS one below) build the
+app as a release build of its tag: the runtime marker carries the release
+channel the tag decides (`stable` for `vX.Y.Z`, `preview` for `vX.Y.ZrcN`) and
+packaging revision `1`, and a package whose marker says anything else is
+refused before it is attached. The installed app checks for updates on that
+channel (see the update manifests below). The Debian package version and the
+macOS bundle version stay the product version.
+
 While the desktop app is known to be broken, set the repository variable
 `DESKTOP_PREVIEW_PUBLISH` to `off`
 (`gh variable set DESKTOP_PREVIEW_PUBLISH --body off --repo zb-ss/servonaut`).
@@ -92,6 +100,53 @@ delete its copy on the mirror: published files there are locked against
 replacement and deletion, and taking one down needs a maintainer with
 administrative access to the storage.
 
+Releases and candidates can also get a signed and notarized macOS desktop
+preview from the Desktop preview macOS workflow: one disk image for Apple
+silicon and one for Intel Macs,
+`servonaut-desktop-preview_<version>_macos-arm64.dmg` and
+`servonaut-desktop-preview_<version>_macos-x64.dmg`, with
+`servonaut-desktop-preview_<version>_macos_SHA256SUMS` and a build-provenance
+attestation for each image. Its `qualify` job holds no secret: it builds the
+app from the release's tag commit on a macOS runner per architecture, runs the
+packaged self-test on it, and runs the self-test and the window smoke again on
+an ad-hoc signed copy under the hardened runtime. The `sign` job then waits for
+a reviewer to approve the run's deployment to the `desktop-signing`
+environment, which deploys only from `v*` tags and `release/*` branches. That
+environment holds the secrets `MACOS_CERTIFICATE_P12_BASE64` and
+`MACOS_CERTIFICATE_PASSWORD` (the Developer ID Application certificate) and
+`APPLE_NOTARY_KEY_P8_BASE64` (an App Store Connect API key for the notary
+service), and the variables `MACOS_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
+`APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`. The job signs the app,
+notarizes and staples it, packages, signs, notarizes and staples the disk
+image, has Gatekeeper assess both, and runs the self-test and the window smoke
+on the signed app. Its temporary keychain and key files are removed however
+the job ends. When notarization refuses a submission, the job prints the
+notary service's log. Only then does `publish` attest the two images and
+attach the three assets, replacing nothing else on the release.
+
+A published release gets the macOS preview only while the repository variable
+`DESKTOP_MACOS_PUBLISH` is `on`; unset counts as `off`, and
+`DESKTOP_PREVIEW_PUBLISH` set to `off` holds it back too. Any other value
+fails the run. While it is off, the run ends with a notice, and its summary
+names the command that attaches the preview later, on the tag itself:
+`gh workflow run desktop-preview-macos.yml --ref vX.Y.Z -f tag=vX.Y.Z`. A
+manual run ignores both variables. Add `-f dry_run=true` to build, sign and
+notarize for real without keeping or attaching a disk image: only reports and
+screenshots are uploaded, so no notarized build of an unreleased commit
+becomes downloadable. To rehearse signing without a release, push a branch
+whose name starts with `release/` but is not `release/X.Y.Z` (the Release
+workflow takes such a branch for an open candidate), and rehearse its commit
+as a version of your choice:
+
+```bash
+gh workflow run desktop-preview-macos.yml --ref release/macos-signing-rehearsal -f dry_run=true -f rehearsal_version=X.Y.Z
+```
+
+To take a broken macOS preview off a release, delete its two disk images and
+its `SHA256SUMS` the same way as the Linux package, for example
+`gh release delete-asset v2.31.0rc1 servonaut-desktop-preview_2.31.0rc1_macos-arm64.dmg --yes --repo zb-ss/servonaut`,
+then run the release mirror for that tag again.
+
 Every published release and candidate also carries the install scripts,
 `install.sh` and `install.ps1`, with `install-scripts_SHA256SUMS`, attached by
 the Release install scripts workflow from the release's tag commit. An install
@@ -105,13 +160,14 @@ scripts are used whichever branch runs it. Add `-f dry_run=true` to check
 without uploading. Tags from before the workflow existed are refused, since
 their scripts fall back to installing the default branch.
 
-Once those two workflows have attached a release's files, the Release mirror
-workflow copies them to the download mirror, at
+Each time one of those workflows has attached a release's files, the Release
+mirror workflow copies them to the download mirror, at
 `https://releases.servonaut.dev/<tag>/<asset>`, which stays fast on slow or
 lossy connections. GitHub remains the source of truth: a file is uploaded only
-when the `SHA256SUMS` asset that lists it matches, the desktop package only
-with a build-provenance attestation from the Desktop preview .deb workflow for
-that very tag, and files no `SHA256SUMS` lists are skipped. An upload never
+when the `SHA256SUMS` asset that lists it matches, each desktop package or
+disk image only with a build-provenance attestation from the workflow that
+built it (Desktop preview .deb or Desktop preview macOS) for that very tag,
+and files no `SHA256SUMS` lists are skipped. An upload never
 replaces a file the mirror already holds, and every file is downloaded again
 through its public URL and compared before the run goes on. The run then
 updates two channel files:
@@ -122,13 +178,33 @@ updates two channel files:
 - `channels/pre.json` has the same shape and names the newest release of any
   kind, candidates included.
 
-Neither ever moves to an older release. While the release has a mirrored
-desktop package, its notes carry a "Faster download" block between
-`<!-- release-mirror:start -->` and `<!-- release-mirror:end -->`; a re-run
-replaces the block, and removes it once the package is gone from the release.
-Every day an audit downloads both channel files and every file they list,
-compares them with GitHub, and opens a "Release mirror audit failed" issue (or
-comments on the open one) when they disagree.
+Neither ever moves to an older release. While the release has mirrored
+desktop files, its notes carry a "Faster download" block between
+`<!-- release-mirror:start -->` and `<!-- release-mirror:end -->` that links
+each of them; a re-run replaces the block, and removes it once the files are
+gone from the release.
+
+The run then signs the two update manifests the packaged desktop app reads:
+`manifest/stable.json` for the release `latest.json` names and
+`manifest/preview.json` for the one `channels/pre.json` names. Each lists that
+release's mirrored desktop files with their mirror address, size and SHA-256,
+the release channel (`stable`, or `preview` for a candidate) and the packaging
+revision the release builds carry, and expires after
+`RELEASE_MANIFEST_VALIDITY_DAYS` days (a repository variable; default 14, at
+most 90). Before a manifest is uploaded it is read back and checked with the
+app's own trust policy, the keys and download origins pinned in
+`src/servonaut/distribution/trust_root.py`, so a manifest the app would refuse
+is never published. Neither manifest ever moves to an older release, and a
+release with no desktop files leaves both as they are. A release without macOS
+disk images gets a manifest without them, so Macs are offered nothing for it.
+
+Every day a `refresh` job re-signs the manifests with a fresh expiry once
+fewer than `RELEASE_MANIFEST_REFRESH_DAYS` days (a repository variable;
+default 7) are left, as long as GitHub's `SHA256SUMS` still list every file
+they name. An audit then downloads both channel files, every file they list
+and both update manifests, compares them with GitHub, checks the manifests'
+signatures and expiry, and opens a "Release mirror audit failed" issue (or
+comments on the open one) when anything disagrees.
 
 The repository variable `RELEASE_MIRROR` switches the mirror. While it is
 `off`, or unset, runs end with a notice and upload nothing, and the audit does
@@ -142,6 +218,23 @@ The workflow needs the repository variable `MIRROR_PUBLIC_BASE` and the
 with the secrets `R2_MIRROR_ACCESS_KEY_ID`, `R2_MIRROR_SECRET_ACCESS_KEY`,
 `R2_MIRROR_ENDPOINT` and `R2_MIRROR_BUCKET`: a storage token that can only read
 and write objects in that one bucket.
+
+Signing the update manifests also needs that environment's secret
+`RELEASE_MANIFEST_SIGNING_KEY`, an unencrypted Ed25519 private key in PEM
+form, and its variable `RELEASE_MANIFEST_KEY_ID`, which must name the key
+`trust_root.py` pins for it. Until both are set, runs skip the manifests with
+a notice and the audit does not check them. Once they are set, mirror
+GitHub's latest release again (`gh workflow run release-mirror.yml -f tag=vX.Y.Z`),
+then the newest candidate if it is newer, or the next audit reports the
+manifests missing.
+
+The app pins two manifest keys: the active one, which signs, and a standby. To
+rotate, switch `RELEASE_MANIFEST_SIGNING_KEY` and `RELEASE_MANIFEST_KEY_ID` to
+the standby, which every supported build already trusts, and ship a release
+that pins a new standby in place of the retired key. A key is only ever
+retired after a release has pinned the key that signs next. A build that
+trusts none of the keys a manifest is signed with reports that the update
+could not be verified, and has to be updated by hand.
 
 Binary release candidates (standalone CLI archives and desktop installers)
 are assembled and verified by the Release candidate workflow, separately from
@@ -243,6 +336,16 @@ access token with Contents: read/write on this repository) and a
 stage refuses to run while that environment requires no reviewer. The token is
 never stored in the checkout: only the steps that push, create releases or
 look for a draft release receive it.
+
+Publishing a candidate or a stable release also starts the desktop preview
+workflows described under
+[Release channels and notes](#release-channels-and-notes). While
+`DESKTOP_MACOS_PUBLISH` is `on`, each release's macOS preview waits for a
+second approval, in the `desktop-signing` environment, before anything is
+signed. Approve it once the release itself is out; rejecting it, or letting
+it expire, only skips the macOS preview, which a manual run can attach later.
+The update manifests follow by themselves once the mirror has copied the
+release's desktop files.
 
 ## Release qualification
 

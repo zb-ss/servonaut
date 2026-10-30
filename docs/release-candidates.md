@@ -179,7 +179,7 @@ repository, and records the commit it was built from.
 
 If downloads from GitHub are slow for you, the same files are also served
 from a download mirror that stays fast on slow or lossy connections. Each
-release's notes link its package there, and
+release's notes link its desktop files there, and
 [servonaut.dev/download](https://servonaut.dev/download) offers the newest
 stable one. The mirrored package is byte-for-byte the GitHub asset, so the
 same two commands check it.
@@ -219,8 +219,10 @@ where that shortcut is.
 A candidate's package version is `2.28.0~rc1`, so apt counts the release
 `2.28.0` as newer and installs it over the candidate as an upgrade.
 
-An installed preview does **not** update itself yet. To move to a newer
-candidate or release, download its package and install it the same way.
+An installed preview tells you when a newer one is out (see
+[Updates in the desktop preview](#updates-in-the-desktop-preview)), but never
+installs it by itself. To move to a newer candidate or release, install its
+package the same way.
 
 To remove it:
 
@@ -229,6 +231,93 @@ sudo apt remove servonaut
 ```
 
 Removing the package keeps your configuration and data in `~/.servonaut/`.
+
+## macOS desktop preview
+
+Releases and release candidates can also carry a preview of the desktop app
+for macOS 13 (Ventura) or later, attached some time after the release is
+published:
+
+- `servonaut-desktop-preview_<version>_macos-arm64.dmg`, for Macs with Apple
+  silicon (M1 or later);
+- `servonaut-desktop-preview_<version>_macos-x64.dmg`, for Macs with an Intel
+  processor;
+- `servonaut-desktop-preview_<version>_macos_SHA256SUMS`, the checksums of
+  both disk images.
+
+To see which one you need, open the Apple menu and choose **About This Mac**:
+a **Chip** line naming Apple M1 or later means Apple silicon, a **Processor**
+line naming Intel means an Intel Mac. In Terminal, `uname -m` prints `arm64`
+or `x86_64`.
+
+Like the Linux package, it is a **preview** for trying the desktop app out and
+reporting problems, and a release can go out without one. The app and its disk
+image are signed with an Apple Developer ID and notarized by Apple, so macOS
+opens them without a warning. The app must pass its self-test and open its
+window both before and after it is signed, or the disk image is not attached.
+
+Check the download before you open it. Set `version` to the version you
+downloaded and `image` to `macos-arm64` or `macos-x64`; both checks must
+succeed, and the second needs the GitHub CLI 2.67 or later, as above:
+
+```bash
+version=X.Y.Z
+image=macos-arm64
+grep "_${image}.dmg\$" "servonaut-desktop-preview_${version}_macos_SHA256SUMS" | shasum -a 256 -c -
+gh attestation verify "servonaut-desktop-preview_${version}_${image}.dmg" --repo zb-ss/servonaut
+```
+
+macOS can also show you the signature it checks when you open the image:
+
+```bash
+spctl --assess --type open --context context:primary-signature -v "servonaut-desktop-preview_${version}_${image}.dmg"
+```
+
+It prints `accepted` and `source=Notarized Developer ID`.
+
+To install it, open the disk image, drag **Servonaut** onto the
+**Applications** folder next to it, and eject the image. Start Servonaut from
+Launchpad or the Applications folder. It uses your configuration in
+`~/.servonaut/`, like any other installation.
+
+The download mirror described above serves the disk images too, and each
+release's notes link them. To move to a newer candidate or release, install
+its disk image the same way, and let Finder replace the copy you have.
+
+To remove it, drag **Servonaut** from the Applications folder to the Trash.
+Your configuration and data in `~/.servonaut/` are kept.
+
+## Updates in the desktop preview
+
+The desktop preview checks for a newer release each time it starts. Previews
+published before this check existed never offer an update, so install a newer
+one by hand once.
+
+The check reads a small update manifest from the download mirror at
+`releases.servonaut.dev`, and acts on it only when it is signed with a release
+key built into the app and has not expired. It is a plain HTTPS request that
+carries the app's version in its `User-Agent` header and nothing about you or
+your servers. What you are offered follows the preview you run, as it does for
+pip and pipx installations:
+
+| You run the preview of | You are offered |
+|------------------------|-----------------|
+| A stable release | Newer stable releases only |
+| A release candidate | The newest candidate or stable release, whichever is newer |
+
+A release that has no preview for your system is not offered.
+
+When a newer preview is out, Servonaut shows a notice and an **Update** button
+in the sidebar. The button downloads the package or disk image for your
+system, checks its size and SHA-256 against the signed manifest, and tells you
+how to install it: with `sudo apt install` on Linux, or by opening the disk
+image and dragging Servonaut to Applications on macOS. Nothing is installed
+for you. On Linux, `servonaut --update` does the same from a terminal.
+
+To check a different manifest, such as your own copy of it, set
+`SERVONAUT_RELEASE_MANIFEST_URL` (see
+[Configuration](configuration.md)); it must still be signed by a key built into
+the app.
 
 ## Report a problem
 

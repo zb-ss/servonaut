@@ -985,7 +985,12 @@ def test_the_user_guide_matches_the_published_names() -> None:
     assert f"sudo apt install ./{preview.deb_asset}\n" in section
     assert "sudo apt remove servonaut\n" in section
     assert f"`{preview.debian_version}`" in section
-    assert "does **not** update itself yet" in section
+    # The packaged app checks for updates, but only ever reports them.
+    prose = " ".join(section.split())
+    assert "tells you when a newer one is out" in prose
+    assert "never installs it by itself" in prose
+    assert "(#updates-in-the-desktop-preview)" in section
+    assert "\n## Updates in the desktop preview\n" in guide
     assert "**preview**" in section
 
 

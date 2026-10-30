@@ -38,6 +38,14 @@ pipx install servonaut
 [Linux desktop preview](docs/release-candidates.md#linux-desktop-preview)
 notes before you install it.
 
+**Desktop app (preview), macOS 13 or later:** releases that carry it have a
+signed and notarized disk image for Apple silicon (`macos-arm64.dmg`) and one
+for Intel Macs (`macos-x64.dmg`) on the
+[releases page](https://github.com/zb-ss/servonaut/releases); see the
+[macOS desktop preview](docs/release-candidates.md#macos-desktop-preview)
+notes. Both desktop previews tell you when a newer one is out, and never
+install it by themselves.
+
 ### Try a release candidate
 
 Each release is published as a release candidate (for example `2.28.0rc1`)

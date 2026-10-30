@@ -1625,3 +1625,46 @@ def test_both_images_are_attested_before_they_are_uploaded(workflow: str) -> Non
     confirm = _step(publish, "Confirm the release and its tag")
     assert 'gh api "repos/${GH_REPO}/commits/refs/tags/${TAG}"' in confirm
     assert '"${tagged}" != "${COMMIT}"' in confirm
+
+
+def test_the_user_guide_matches_the_published_names() -> None:
+    guide = (_REPO_ROOT / "docs" / "release-candidates.md").read_text(encoding="utf-8")
+    section = guide.split("## macOS desktop preview\n", 1)[1].split("\n## ", 1)[0]
+    preview = preview_for_tag("v2.28.0rc1")
+
+    def spelled(asset: str, version: str) -> str:
+        return asset.replace(preview.product_version, version)
+
+    for target in MACOS_TARGETS:
+        assert f"`{spelled(preview.macos_dmg_asset(target), '<version>')}`" in section
+        assert f"`{target}`" in section
+    assert f"`{spelled(preview.macos_sums_asset, '<version>')}`" in section
+    # The commands build the same names from the version and the image.
+    image = spelled(preview.macos_dmg_asset("macos-arm64"), "${version}").replace("macos-arm64", "${image}")
+    assert "| shasum -a 256 -c -\n" in section
+    assert f'"{spelled(preview.macos_sums_asset, "${version}")}"' in section
+    assert f'gh attestation verify "{image}" --repo zb-ss/servonaut\n' in section
+    assert "source=Notarized Developer ID" in section
+    assert "macOS 13" in section
+
+
+def test_the_switch_signing_and_rehearsal_are_documented(workflow: str) -> None:
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    preview = preview_for_tag("v2.31.0rc1")
+
+    assert "`DESKTOP_MACOS_PUBLISH`" in guide
+    assert "`desktop-signing`" in guide
+    for name in (*_SECRETS, *_SIGNING_VARIABLES):
+        assert f"`{name}`" in guide
+    for command in (
+        "gh workflow run desktop-preview-macos.yml --ref vX.Y.Z -f tag=vX.Y.Z",
+        "gh workflow run desktop-preview-macos.yml --ref release/macos-signing-rehearsal "
+        "-f dry_run=true -f rehearsal_version=X.Y.Z",
+    ):
+        assert command in guide
+    # The rehearsal is the one the workflow itself describes.
+    assert "--ref release/<branch> -f dry_run=true -f rehearsal_version=X.Y.Z" in workflow
+    assert (
+        f"gh release delete-asset v2.31.0rc1 {preview.macos_dmg_asset('macos-arm64')} "
+        "--yes --repo zb-ss/servonaut"
+    ) in guide
