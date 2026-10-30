@@ -48,6 +48,12 @@ _RELEASES = "https://github.com/zb-ss/servonaut/releases/download"
 _FUTURE_EXPIRY = "2099-01-01T00:00:00Z"
 
 
+@pytest.fixture(autouse=True)
+def _no_manifest_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test without a manifest override from the calling shell."""
+    monkeypatch.delenv(update_module.RELEASE_MANIFEST_URL_ENV, raising=False)
+
+
 def _make_frozen_runtime(
     tmp_path: Path,
     *,
@@ -400,9 +406,13 @@ class TestUpdateServiceFrozen:
 
     def test_check_for_update_unconfigured_frozen_guidance(self, tmp_path: Path) -> None:
         from unittest.mock import AsyncMock
-        runtime = _make_frozen_runtime(tmp_path)
+        # No build marker, so no packaging revision and no pinned default.
+        runtime = _make_frozen_runtime(tmp_path, packaging_revision=None)
         service = UpdateService(runtime=runtime)
-        with patch("urllib.request.urlopen") as request, patch(
+        # Every opener, the service's HTTPS-only one included, ends in OpenerDirector.open.
+        with patch(
+            "urllib.request.OpenerDirector.open", side_effect=AssertionError("unexpected request")
+        ) as request, patch(
             "asyncio.create_subprocess_exec", new_callable=AsyncMock
         ) as spawn:
             assert service.check_for_update() is None
@@ -545,6 +555,186 @@ class TestReleaseChannelPolicy:
         assert service.last_check_result is UpdateCheckResult.NOT_CONFIGURED
         assert "not configured" in service.update_status
         assert opener.requests == []
+
+
+class TestManifestUrlSelection:
+    """Constructor URL, then the validated override, then the pinned default of the channel."""
+
+    _MIRROR_URL = "https://mirror.example.net/servonaut/manifest.json"
+
+    @pytest.fixture
+    def pinned_key(self, monkeypatch) -> Ed25519PrivateKey:
+        key = Ed25519PrivateKey.generate()
+        monkeypatch.setattr(
+            trust_root, "PINNED_RELEASE_KEYS", {"release-1": key.public_key().public_bytes_raw().hex()}
+        )
+        return key
+
+    def _check(
+        self,
+        tmp_path: Path,
+        *responses: object,
+        manifest_url: str | None = None,
+        kind: DistributionKind = DistributionKind.PACKAGED_DESKTOP,
+        channel: str = "stable",
+        packaging_revision: int | None = 1,
+    ) -> tuple[UpdateService, _FakeOpener]:
+        opener = _FakeOpener(*responses)
+        service = UpdateService(
+            runtime=_make_frozen_runtime(
+                tmp_path,
+                kind=kind,
+                channel=channel,
+                packaging_revision=packaging_revision,
+            ),
+            manifest_url=manifest_url,
+            opener=opener,  # type: ignore[arg-type]
+        )
+        service.check_for_update()
+        return service, opener
+
+    @staticmethod
+    def _desktop_manifest(key: Ed25519PrivateKey, channel: ReleaseChannel) -> _MockResponse:
+        return _MockResponse(_raw(_make_manifest_with_signature(key, "release-1", channel=channel)))
+
+    @pytest.mark.parametrize(
+        "channel,expected_url",
+        [
+            # Pinned on purpose: the release mirror publishes the manifests here.
+            ("stable", "https://releases.servonaut.dev/manifest/stable.json"),
+            ("preview", "https://releases.servonaut.dev/manifest/preview.json"),
+        ],
+    )
+    def test_packaged_build_checks_the_pinned_manifest_of_its_channel(
+        self, tmp_path, pinned_key, linux_x64, channel, expected_url
+    ) -> None:
+        manifest = self._desktop_manifest(pinned_key, ReleaseChannel(channel))
+
+        service, opener = self._check(tmp_path, manifest, channel=channel)
+
+        assert [request.full_url for request in opener.requests] == [expected_url]
+        assert service.last_check_result is UpdateCheckResult.UPDATE_AVAILABLE
+        assert service.target_artifact is not None
+        assert service.target_artifact.artifact_id == "desktop-ubuntu-deb"
+
+    def test_pinned_default_is_verified_against_the_pinned_keys(self, tmp_path, pinned_key) -> None:
+        forged = _make_manifest_with_signature(Ed25519PrivateKey.generate(), "release-1")
+
+        service, opener = self._check(tmp_path, _MockResponse(_raw(forged)))
+
+        assert len(opener.requests) == 1
+        assert service.last_check_result is UpdateCheckResult.VERIFICATION_FAILED
+        assert service.target_artifact is None
+
+    def test_override_replaces_the_pinned_default(self, tmp_path, pinned_key, linux_x64, monkeypatch) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, self._MIRROR_URL)
+
+        service, opener = self._check(tmp_path, self._desktop_manifest(pinned_key, ReleaseChannel.STABLE))
+
+        assert [request.full_url for request in opener.requests] == [self._MIRROR_URL]
+        assert service.last_check_result is UpdateCheckResult.UPDATE_AVAILABLE
+
+    def test_override_must_still_be_signed_by_a_pinned_key(self, tmp_path, pinned_key, monkeypatch) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, self._MIRROR_URL)
+        forged = _make_manifest_with_signature(Ed25519PrivateKey.generate(), "release-1")
+
+        service, _opener = self._check(tmp_path, _MockResponse(_raw(forged)))
+
+        assert service.last_check_result is UpdateCheckResult.VERIFICATION_FAILED
+
+    def test_loopback_http_override_reaches_a_local_fake(self, tmp_path, pinned_key, linux_x64, monkeypatch) -> None:
+        local = "http://127.0.0.1:8765/manifest.json"
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, local)
+
+        service, opener = self._check(tmp_path, self._desktop_manifest(pinned_key, ReleaseChannel.STABLE))
+
+        assert [request.full_url for request in opener.requests] == [local]
+        assert service.last_check_result is UpdateCheckResult.UPDATE_AVAILABLE
+
+    def test_constructor_url_takes_precedence_over_the_override(
+        self, tmp_path, pinned_key, linux_x64, monkeypatch
+    ) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, self._MIRROR_URL)
+
+        _service, opener = self._check(
+            tmp_path,
+            self._desktop_manifest(pinned_key, ReleaseChannel.STABLE),
+            manifest_url=_TEST_MANIFEST_URL,
+        )
+
+        assert [request.full_url for request in opener.requests] == [_TEST_MANIFEST_URL]
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            "http://mirror.example.net/manifest.json",
+            "https://user:secret@mirror.example.net/manifest.json",  # leak-guard:allow
+            "ftp://mirror.example.net/manifest.json",
+            "manifest.json",
+        ],
+    )
+    def test_invalid_override_is_refused_without_falling_back(
+        self, tmp_path, pinned_key, monkeypatch, caplog, override
+    ) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, override)
+
+        with caplog.at_level("WARNING", logger=update_module.__name__):
+            service, opener = self._check(tmp_path)
+
+        assert opener.requests == []
+        assert service.last_check_result is UpdateCheckResult.OFFLINE
+        assert update_module.RELEASE_MANIFEST_URL_ENV in service.update_status
+        assert override not in service.update_status
+        assert override not in caplog.text
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_override_keeps_the_pinned_default(
+        self, tmp_path, pinned_key, linux_x64, monkeypatch, blank
+    ) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, blank)
+
+        _service, opener = self._check(tmp_path, self._desktop_manifest(pinned_key, ReleaseChannel.STABLE))
+
+        assert [request.full_url for request in opener.requests] == [
+            trust_root.DEFAULT_MANIFEST_URLS["stable"]
+        ]
+
+    def test_override_is_read_when_the_check_runs(self, tmp_path, pinned_key, linux_x64, monkeypatch) -> None:
+        opener = _FakeOpener(self._desktop_manifest(pinned_key, ReleaseChannel.STABLE))
+        service = UpdateService(
+            runtime=_make_frozen_runtime(tmp_path, packaging_revision=1),
+            opener=opener,  # type: ignore[arg-type]
+        )
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, self._MIRROR_URL)
+
+        service.check_for_update()
+
+        assert [request.full_url for request in opener.requests] == [self._MIRROR_URL]
+
+    def test_frozen_layout_without_a_marker_gets_no_default(self, tmp_path) -> None:
+        # Uses the shipped pinned keys: only the missing default stops the check.
+        service, opener = self._check(
+            tmp_path, kind=DistributionKind.FROZEN_CLI, packaging_revision=None
+        )
+
+        assert opener.requests == []
+        assert service.last_check_result is UpdateCheckResult.NOT_CONFIGURED
+
+    @pytest.mark.parametrize("channel", ["development", "nightly", ""])
+    def test_channel_without_a_pinned_manifest_is_not_configured(self, tmp_path, channel) -> None:
+        service, opener = self._check(tmp_path, channel=channel)
+
+        assert opener.requests == []
+        assert service.last_check_result is UpdateCheckResult.NOT_CONFIGURED
+        assert "not configured" in service.update_status
+
+    def test_channel_packaged_builds_cannot_follow_trusts_no_override(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv(update_module.RELEASE_MANIFEST_URL_ENV, self._MIRROR_URL)
+
+        service, opener = self._check(tmp_path, channel="nightly")
+
+        assert opener.requests == []
+        assert service.last_check_result is UpdateCheckResult.NOT_CONFIGURED
 
 
 class TestPackagingRevision:

@@ -20,6 +20,8 @@ from scripts.standalone_cli.smoke_artifact import (
     CheckResult,
     SmokePolicy,
     SmokeRequest,
+    _OFFLINE_UPDATE_STATUS,
+    _UPDATE_SMOKE_ENVIRONMENT,
     _close_selftest_caller,
     _contains_caller_canary,
     _decode,
@@ -743,13 +745,12 @@ def run_container_smoke(
         if help_result.stderr:
             _fail("container help wrote to stderr")
 
-        update = invoke("update", ["--update"])
+        update = invoke("update", ["--update"], extra_env=_UPDATE_SMOKE_ENVIRONMENT)
         _require_exit(update, 0, "container update")
         update_text = _decode(update.stdout, "container update")
         if (
             f"Current version: {request.product_version}" not in update_text
-            or "Automatic updates are not configured for this packaged Servonaut build."
-            not in update_text
+            or _OFFLINE_UPDATE_STATUS not in update_text
         ):
             _fail("container update guidance is invalid")
         if update.stderr:

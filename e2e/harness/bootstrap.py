@@ -278,6 +278,9 @@ def _service_env(home: Path, ca_cert: Path) -> dict[str, str]:
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         "SERVONAUT_API_URL": DEAD_HTTPS_URL,
         "SERVONAUT_MCP_URL": DEAD_HTTPS_URL,
+        # A packaged build would otherwise check the release manifest pinned
+        # for its channel on the real release host.
+        "SERVONAUT_RELEASE_MANIFEST_URL": f"{DEAD_HTTPS_URL}/manifest.json",
         # Only the suite's own CA is trusted.
         "SSL_CERT_FILE": str(ca_cert),
     }

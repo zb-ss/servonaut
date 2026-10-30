@@ -1,4 +1,9 @@
-"""Distribution-aware checks and upgrades for Servonaut."""
+"""Distribution-aware checks and upgrades for Servonaut.
+
+Installations from the package index (pip, pipx) ask PyPI for the newest
+version. Packaged builds read a signed release manifest instead and verify it
+against the release keys pinned in :mod:`servonaut.distribution.trust_root`.
+"""
 
 from __future__ import annotations
 
@@ -30,9 +35,11 @@ from servonaut.distribution import (
     ReleaseChannel,
     ReleaseManifest,
     TrustPolicy,
+    channels_accepted_by,
     check_downgrade,
     release_trust_policy,
     resolve_target_artifact,
+    trust_root,
     verify_manifest,
 )
 from servonaut.runtime import (
@@ -49,6 +56,9 @@ log = logging.getLogger(__name__)
 PYPI_URL = "https://pypi.org/pypi/servonaut/json"
 # Replaces PYPI_URL (the whole JSON document URL) for a mirror or a local fake.
 PYPI_URL_ENV: Final = "SERVONAUT_PYPI_URL"
+# Replaces the pinned release manifest URL of a packaged build's channel for a
+# mirror or a local fake. The manifest must still be signed by a pinned key.
+RELEASE_MANIFEST_URL_ENV: Final = "SERVONAUT_RELEASE_MANIFEST_URL"
 
 # A release manifest lists a handful of artifacts, so anything larger is not a
 # manifest. This is a protocol bound, not deployment configuration.
@@ -147,7 +157,14 @@ def build_https_opener() -> urllib.request.OpenerDirector:
 
 
 class UpdateService:
-    """Check for published updates and upgrade mutable or frozen installations."""
+    """Check for published updates and upgrade mutable or frozen installations.
+
+    A packaged build reads the release manifest named by ``manifest_url``,
+    else by :data:`RELEASE_MANIFEST_URL_ENV`, else the one pinned for the
+    channel its build marker names (:func:`default_manifest_url`). Without
+    any of them, or for a channel packaged builds cannot follow, updates are
+    not configured.
+    """
 
     def __init__(
         self,
@@ -165,12 +182,12 @@ class UpdateService:
         # the build wrote into its marker. The free-form build_revision label
         # (for example a CI run identifier) is never parsed for ordering.
         self._current_revision = self._runtime.packaging_revision
-        self._manifest_url = (
-            manifest_url
-            or os.environ.get("SERVONAUT_RELEASE_MANIFEST_URL")
-        )
-        self._trust_policy = trust_policy or release_trust_policy(
-            ReleaseChannel(self._runtime.release_channel)
+        # The override and the pinned default are resolved at check time, like
+        # the other endpoint overrides, so a value loaded from the secrets
+        # file after construction applies.
+        self._manifest_url = manifest_url
+        self._trust_policy = trust_policy or _pinned_trust_policy(
+            self._runtime.release_channel
         )
         self._opener = opener or build_https_opener()
         self._manifest_deadline_seconds = manifest_deadline_seconds
@@ -236,10 +253,7 @@ class UpdateService:
         try:
             override = endpoint_override(PYPI_URL_ENV)
         except EndpointOverrideError as exc:
-            log.warning("Version check skipped: %s", exc)
-            self._last_result = UpdateCheckResult.OFFLINE
-            self._update_status = f"Could not check for updates: {exc}"
-            return None
+            return self._record_refused_override(exc)
         try:
             latest = self._fetch_pypi_version(override or PYPI_URL)
         except (*_TRANSFER_ERRORS, KeyError, TypeError) as exc:
@@ -283,10 +297,14 @@ class UpdateService:
 
     def _check_frozen_update(self) -> Optional[str]:
         """Check the canonical signed release manifest for frozen distributions."""
-        if not self._manifest_url or self._trust_policy is None:
+        try:
+            manifest_url = self._resolve_manifest_url()
+        except EndpointOverrideError as exc:
+            return self._record_refused_override(exc)
+        if manifest_url is None or self._trust_policy is None:
             return self._record(UpdateCheckResult.NOT_CONFIGURED)
         try:
-            raw_bytes = self._fetch_manifest(self._manifest_url)
+            raw_bytes = self._fetch_manifest(manifest_url)
         except UpdateIntegrityError as exc:
             log.warning("Release manifest rejected: %s", exc)
             return self._record(UpdateCheckResult.INVALID_MANIFEST)
@@ -304,6 +322,26 @@ class UpdateService:
             log.warning("Release manifest failed trust verification: %s", exc)
             return self._record(UpdateCheckResult.VERIFICATION_FAILED)
         return self._select_update(manifest)
+
+    def _resolve_manifest_url(self) -> Optional[str]:
+        """The constructor's manifest URL, else the validated override, else the pinned default.
+
+        Raises:
+            EndpointOverrideError: The override is set to an unacceptable URL;
+                the pinned default is never used in its place.
+        """
+        if self._manifest_url:
+            return self._manifest_url
+        return endpoint_override(RELEASE_MANIFEST_URL_ENV) or default_manifest_url(
+            self._runtime
+        )
+
+    def _record_refused_override(self, exc: EndpointOverrideError) -> None:
+        """Report an endpoint override that was refused before any request was made."""
+        log.warning("Version check skipped: %s", exc)
+        self._last_result = UpdateCheckResult.OFFLINE
+        self._update_status = f"Could not check for updates: {exc}"
+        return None
 
     def _fetch_manifest(self, url: str) -> bytes:
         request = urllib.request.Request(
@@ -695,6 +733,29 @@ class UpdateService:
         if latest_version is None or current_version is None:
             return False
         return latest_version > current_version
+
+
+def default_manifest_url(runtime: RuntimeLayout) -> Optional[str]:
+    """The pinned release manifest URL of the channel a packaged build was cut for.
+
+    Only a build marker states a build's channel and packaging revision. A
+    frozen layout without one reports the stable channel as a fallback and,
+    with no revision to order by, would be offered its own version again, so
+    it gets no default. Neither does a channel without a pinned manifest.
+    """
+    if runtime.packaging_revision is None:
+        return None
+    return trust_root.DEFAULT_MANIFEST_URLS.get(runtime.release_channel)
+
+
+def _pinned_trust_policy(channel: str) -> Optional[TrustPolicy]:
+    """The pinned trust policy for a build channel, or None if packaged builds cannot follow it."""
+    try:
+        build_channel = ReleaseChannel(channel)
+        channels_accepted_by(build_channel)
+    except ValueError:
+        return None
+    return release_trust_policy(build_channel)
 
 
 @contextlib.contextmanager

@@ -381,6 +381,48 @@ class TestPinnedTrustRoot:
         for encoded in trust_root.PINNED_RELEASE_KEYS.values():
             load_ed25519_public_key(encoded)
 
+    def test_an_active_and_a_standby_key_are_pinned(self) -> None:
+        # Rotation retires a key only once a standby is already pinned, so a
+        # shipped build always trusts at least two distinct keys.
+        raw_keys = {
+            load_ed25519_public_key(encoded).public_bytes_raw()
+            for encoded in trust_root.PINNED_RELEASE_KEYS.values()
+        }
+        assert len(trust_root.PINNED_RELEASE_KEYS) >= 2
+        assert len(raw_keys) == len(trust_root.PINNED_RELEASE_KEYS)
+
+    def test_pinned_keys_cannot_be_changed_at_runtime(self) -> None:
+        with pytest.raises(TypeError):
+            trust_root.PINNED_RELEASE_KEYS["extra"] = "00" * 32  # type: ignore[index]
+        with pytest.raises(TypeError):
+            trust_root.DEFAULT_MANIFEST_URLS["nightly"] = "https://example.net/m.json"  # type: ignore[index]
+
+    @pytest.mark.parametrize("channel", [ReleaseChannel.STABLE, ReleaseChannel.PREVIEW])
+    def test_shipped_keys_configure_every_packaged_channel(self, channel: ReleaseChannel) -> None:
+        policy = release_trust_policy(channel)
+
+        assert policy is not None
+        assert set(policy.trusted_public_keys) == set(trust_root.PINNED_RELEASE_KEYS)
+        assert policy.minimum_signatures == 1
+
+    def test_every_followable_channel_has_a_pinned_manifest(self) -> None:
+        followable = set()
+        for channel in ReleaseChannel:
+            try:
+                channels_accepted_by(channel)
+            except ValueError:
+                continue
+            followable.add(channel.value)
+
+        assert set(trust_root.DEFAULT_MANIFEST_URLS) == followable
+
+    def test_pinned_manifest_urls(self) -> None:
+        # Pinned on purpose: the release mirror publishes the manifests here.
+        assert dict(trust_root.DEFAULT_MANIFEST_URLS) == {
+            "stable": "https://releases.servonaut.dev/manifest/stable.json",
+            "preview": "https://releases.servonaut.dev/manifest/preview.json",
+        }
+
 
 class TestOriginAndFreshness:
     def test_disallowed_channel(self) -> None:
