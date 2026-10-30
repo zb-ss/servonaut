@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -32,12 +33,16 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from servonaut.distribution import (
+    ManifestDowngradeError,
     OperatingSystemTooOldError,
     ReleaseChannel,
     ReleaseManifest,
     TrustPolicy,
     canonicalize_json,
     channels_accepted_by,
+    check_downgrade,
+    normalize_arch,
+    normalize_platform,
     parse_semver,
     release_trust_policy,
     resolve_target_artifact,
@@ -46,6 +51,8 @@ from servonaut.distribution import (
 )
 from servonaut.distribution.manifest import parse_timestamp
 from servonaut.runtime import DistributionKind
+
+from scripts.distribution import desktop_preview, package_macos
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".github/scripts/release-mirror.py"
@@ -694,6 +701,80 @@ def test_the_published_bytes_are_the_signed_manifest(tmp_path: Path) -> None:
 
     assert ReleaseManifest.from_json(body) == manifest
     assert body.endswith(b"\n") and b"\n" not in body[:-1]
+
+
+# ---------------------------------------------------------------------------
+# The manifests agree with the release builds and with the app that reads them
+# ---------------------------------------------------------------------------
+
+
+def test_the_mirror_checks_its_manifests_with_the_keys_the_app_ships(tmp_path: Path) -> None:
+    for channel in ("stable", "preview"):
+        assert set(mirror.app_trust_policy(channel).trusted_public_keys) == set(trust_root.PINNED_RELEASE_KEYS)
+    mirror_origin = next(o for o in trust_root.ALLOWED_ARTIFACT_ORIGINS if not o.startswith("https://github.com/"))
+    pinned_id = next(iter(trust_root.PINNED_RELEASE_KEYS))
+    # Neither another key under a pinned id, nor an id the app does not pin, gets through.
+    for signer, refusal in (
+        ((Ed25519PrivateKey.generate(), pinned_id), "verification failed"),
+        ((KEY, "not-a-pinned-key"), "found 0"),
+    ):
+        _, _, manifest = _update_manifest(tmp_path, base=mirror_origin, signer=signer)
+        with pytest.raises(mirror.MirrorError, match=f"stable channel would refuse .*{refusal}"):
+            mirror.published_manifest(manifest, "stable", SIGNED_AT)
+
+
+def test_the_manifests_are_written_where_the_app_reads_them() -> None:
+    mirror_origin = next(o for o in trust_root.ALLOWED_ARTIFACT_ORIGINS if not o.startswith("https://github.com/"))
+    written = {channel: mirror_origin + key for key, channel in mirror.UPDATE_MANIFESTS.values()}
+
+    assert written == dict(trust_root.DEFAULT_MANIFEST_URLS)
+
+
+@pytest.mark.parametrize("tag", ["v2.31.0", "v2.31.0rc2"])
+def test_every_file_the_desktop_previews_attach_is_mirrored_as_the_app_spells_its_host(tag: str) -> None:
+    preview = desktop_preview.preview_for_tag(tag)
+    version = preview.product_version
+    builds = {preview.deb_asset: ("linux", desktop_preview.ARCHITECTURE)} | {
+        preview.macos_dmg_asset(target): tuple(target.split("-")) for target in desktop_preview.MACOS_TARGETS
+    }
+
+    for name, (system, machine) in builds.items():
+        described = mirror.describe(name, version)
+        assert described is not None and described["kind"] in mirror.DESKTOP_KINDS
+        assert (described["platform"], described["arch"]) == (normalize_platform(system), normalize_arch(machine))
+    for sums in (preview.sums_asset, preview.macos_sums_asset):
+        assert mirror.describe(sums, version) == {"kind": "checksums", "content_type": mirror.TEXT}
+    assert mirror.desktop_checksums_names(version) == (preview.sums_asset, preview.macos_sums_asset)
+    assert mirror.DESKTOP_PREFIX == desktop_preview.ASSET_PREFIX
+
+
+def test_the_disk_images_need_the_macos_version_the_app_bundle_declares() -> None:
+    declared = inspect.signature(package_macos.assemble_app_bundle).parameters["min_os_version"].default
+
+    assert mirror.DESKTOP_KINDS["desktop-dmg"][1] == declared
+
+
+@pytest.mark.parametrize("tag,channel", [("v2.31.0", "stable"), ("v2.31.0rc2", "preview")])
+def test_a_release_build_is_never_offered_its_own_release(tmp_path: Path, tag: str, channel: str) -> None:
+    # The release identity the preview workflows stamp into the build's marker.
+    build = desktop_preview.preview_for_tag(tag)
+    _, _, manifest = _update_manifest(tmp_path, tag)
+
+    assert manifest.channel.value == build.identity.channel == channel
+    assert manifest.packaging_revision == build.identity.packaging_revision == mirror.PACKAGING_REVISION
+    with pytest.raises(ManifestDowngradeError, match="No update available"):
+        check_downgrade(manifest, build.product_version, build.identity.packaging_revision)
+
+
+def test_builds_of_earlier_releases_are_offered_the_newer_one(tmp_path: Path) -> None:
+    _, _, candidate = _update_manifest(tmp_path, "v2.31.0rc2")
+    _, _, final = _update_manifest(tmp_path, "v2.31.0")
+
+    for older in ("v2.30.4", "v2.31.0rc1"):
+        build = desktop_preview.preview_for_tag(older)
+        check_downgrade(candidate, build.product_version, build.identity.packaging_revision)
+    build = desktop_preview.preview_for_tag("v2.31.0rc2")
+    check_downgrade(final, build.product_version, build.identity.packaging_revision)
 
 
 @pytest.mark.parametrize(
@@ -1644,7 +1725,7 @@ UPSTREAM_WORKFLOWS = {
 
 
 def _upstream_files() -> list[Path]:
-    return [WORKFLOWS / file for file in UPSTREAM_WORKFLOWS if (WORKFLOWS / file).exists()]
+    return [WORKFLOWS / file for file in UPSTREAM_WORKFLOWS]
 
 
 def test_it_runs_after_the_workflows_that_attach_release_files(workflow: str) -> None:
