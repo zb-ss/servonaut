@@ -218,3 +218,76 @@ class TestDiffAgainstLocal:
         assert diff["connection_rules"] == {"local": 1, "remote": 0, "after": 0}
         assert diff["scan_rules"] == {"local": 1, "remote": 1, "after": 1}
         assert diff["custom_servers"] == {"local": 2, "remote": 0, "after": 0}
+
+
+# A custom server the team also shares: members get it as the team's row, with the team's key.
+_SHARED_BY_TEAM = [{"id": "srv-9", "name": "team-db", "hostname": "team-db.example.com",
+                    "instance_id": "custom-team-db"}]
+_REMOTE_WITH_SHARED = {
+    "connection_profiles": [{"name": "prod-bastion", "bastion_host": "bastion.example.com"}],
+    "connection_rules": [],
+    "scan_rules": [{"name": "nginx-logs", "match_conditions": {}}],
+    "custom_servers": [
+        {"name": "team-db", "host": "team-db.example.com", "username": "root", "port": 22},
+        {"name": "lab-2", "host": "10.0.0.9", "username": "root", "port": 22},
+    ],
+}
+
+
+class TestTeamSharedCustomServers:
+    def test_apply_skips_a_pulled_custom_server_the_team_already_shares(self):
+        local = _seeded_config()
+
+        skipped = apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
+
+        assert skipped == ["team-db"]
+        assert [s.name for s in local.custom_servers] == ["lab-2"]
+        # Everything else is still replaced whole.
+        assert [p.name for p in local.connection_profiles] == ["prod-bastion"]
+        assert local.connection_rules == []
+
+    def test_apply_without_the_teams_servers_keeps_every_pulled_server(self):
+        local = _seeded_config()
+
+        assert apply_team_config(local, _REMOTE_WITH_SHARED) == []
+        assert [s.name for s in local.custom_servers] == ["team-db", "lab-2"]
+
+    def test_a_shared_server_at_another_port_is_not_the_pulled_one(self):
+        local = _seeded_config()
+        shared = [{**_SHARED_BY_TEAM[0], "port": 2222}]
+
+        assert apply_team_config(local, _REMOTE_WITH_SHARED, shared_servers=shared) == []
+
+    def test_diff_names_what_pull_removes_and_skips(self):
+        diff = diff_against_local(_seeded_config(), _REMOTE_WITH_SHARED, shared_servers=_SHARED_BY_TEAM)
+
+        assert diff["removed"] == {
+            "connection_profiles": ["staging"],
+            "connection_rules": ["prod-rule"],
+            "scan_rules": [],
+            "custom_servers": ["db-1", "cache-1"],
+        }
+        assert diff["skipped_custom_servers"] == ["team-db"]
+        assert diff["custom_servers"] == {"local": 2, "remote": 2, "after": 1}
+
+
+class TestAnotherLoginAtASharedAddress:
+    """Two hosting accounts on one machine: the team sharing one is not sharing the other."""
+
+    _SHARED = [{"id": "srv-1", "name": "site-a", "hostname": "9.9.9.9", "instance_id": "custom-site-a",
+                "username": "alpha"}]
+    _PULLED = {"custom_servers": [
+        {"name": "site-a", "host": "9.9.9.9", "username": "alpha", "port": 22},
+        {"name": "site-b", "host": "9.9.9.9", "username": "beta", "port": 22},
+    ]}
+
+    def test_only_the_shared_login_is_skipped(self):
+        local = _seeded_config()
+
+        assert apply_team_config(local, self._PULLED, shared_servers=self._SHARED) == ["site-a"]
+        assert [s.name for s in local.custom_servers] == ["site-b"]
+
+    def test_a_share_without_a_recorded_id_matches_by_address_and_login(self):
+        shared = [{k: v for k, v in self._SHARED[0].items() if k != "instance_id"}]
+
+        assert apply_team_config(_seeded_config(), self._PULLED, shared_servers=shared) == ["site-a"]

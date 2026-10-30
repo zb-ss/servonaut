@@ -30,6 +30,7 @@ from servonaut.services.team_sharing import (
     server_address,
     share_candidates,
     share_payload,
+    shared_custom_servers,
 )
 from servonaut.services.team_service import ALREADY_SHARED, FAILED, SHARED, ShareResult
 from servonaut.services.vault.display import markup_literal, terminal_safe
@@ -1201,11 +1202,16 @@ class TeamManagementScreen(Screen):
         names = [_name(server.name) for server in servers]
         # Names padded to the longest one, so the hosts line up in a column.
         width = max((len(name) for name in names), default=0)
+        # Pushing one of these would hide the team's row from members behind
+        # a copy without the team's key: say so, and never tick it for them.
+        shared = set(shared_custom_servers(servers, self._team_shared_servers()))
         listing = self.query_one("#push_config_servers", SelectionList)
         listing.clear_options()
         listing.add_options([
             Selection(
-                f"{markup_literal(name.ljust(width))}  [dim]{markup_literal(_host(server.host))}[/dim]",
+                f"{markup_literal(name.ljust(width))}  [dim]{markup_literal(_host(server.host))}[/dim]"
+                + ("  [dim](already shared, with the team key)[/dim]"
+                   if server.name in shared else ""),
                 server.name,
                 server.name in selected,
             )
@@ -1220,6 +1226,19 @@ class TeamManagementScreen(Screen):
             if servers
             else "[dim]No custom servers in your config.[/dim]"
         )
+
+    def _team_shared_servers(self) -> list[dict]:
+        """The shared servers of the team on screen, or none while another team's are loaded."""
+        if self._loaded_team_slug != self._current_team_slug:
+            return []
+        return list(self._shared_servers)
+
+    def _names_for_display(self, names: list[str], limit: int = 8) -> str:
+        """*names* as plain text, demo-safe, the first *limit* of them."""
+        demo = self.app.demo_mode and self.app.redaction_service
+        shown = [self.app.redaction_service.redact_name(name) if demo else name for name in names[:limit]]
+        text = ", ".join(terminal_safe(str(name)) for name in shown)
+        return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
     def _push_selected_servers(self) -> list[str]:
         """Names of the custom servers ticked in the push form."""
@@ -1295,12 +1314,21 @@ class TeamManagementScreen(Screen):
         if config is None:
             self.notify("Local config not available.", severity="error")
             return
-        diff = diff_against_local(config, remote_payload)
+        diff = diff_against_local(config, remote_payload, shared_servers=self._team_shared_servers())
         lines = ["Pull will replace these sections (current → after):"]
         for section in ("connection_profiles", "connection_rules", "scan_rules", "custom_servers"):
             d = diff[section]
             change_hint = "[$text-success]no change[/$text-success]" if d["local"] == d["after"] else f"[bold]{d['local']} → {d['after']}[/bold]"
             lines.append(f"  • {section.replace('_', ' ').title()}: {change_hint}")
+            removed = diff["removed"][section]
+            if removed:
+                lines.append(f"      [dim]Removes yours: {markup_literal(self._names_for_display(removed))}[/dim]")
+        skipped = diff["skipped_custom_servers"]
+        if skipped:
+            lines.append(
+                "Not added, the team already shares it (members connect with the team key): "
+                + markup_literal(self._names_for_display(skipped))
+            )
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
@@ -1754,7 +1782,7 @@ class TeamManagementScreen(Screen):
         from servonaut.services.team_config_apply import apply_team_config
         payload = self._pending_pull_payload
         try:
-            apply_team_config(config, payload)
+            skipped = apply_team_config(config, payload, shared_servers=self._team_shared_servers())
             config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
@@ -1762,10 +1790,15 @@ class TeamManagementScreen(Screen):
             return
         self._pending_pull_payload = None
         self._hide_pull_config_form()
+        message = "Team config applied."
+        if skipped:
+            message += (f" Not added, the team already shares {'it' if len(skipped) == 1 else 'them'} "
+                        f"(connect with the team key): {self._names_for_display(skipped)}.")
         self.notify(
-            "Team config applied. Restart Servonaut for connection-profile changes to take full effect.",
+            message + " Restart Servonaut for connection-profile changes to take full effect.",
             severity="information",
             timeout=10,
+            markup=False,
         )
 
     def _action_share_all_servers(self) -> None:

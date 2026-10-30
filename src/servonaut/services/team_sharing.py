@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 # The address a share form chose for a server (see share_address).
@@ -65,6 +65,41 @@ def _same_server(candidate: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
 def already_shared(candidate: Mapping[str, Any], shared: Sequence[Mapping[str, Any]]) -> bool:
     """Match stable provider ids or unambiguous addresses, without crossing private networks."""
     return any(_same_server(candidate, row) for row in shared)
+
+
+def _custom_server_row(server: Any) -> dict[str, Any]:
+    """A custom server (its config entry, or the dict a team config carries) as the row sharing compares."""
+    def field(key: str) -> Any:
+        return server.get(key) if isinstance(server, Mapping) else getattr(server, key, None)
+
+    name, host = str(field("name") or ""), str(field("host") or "")
+    # The id and addresses CustomServerService gives the server's row.
+    return {"id": f"custom-{name}", "name": name, "public_ip": host, "private_ip": host,
+            "port": field("port") or 22, "username": str(field("username") or ""), "is_custom": True}
+
+
+def _shares_custom_server(shared: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    """Whether the team's *shared* server is the custom server *row*, not just its address.
+
+    Several logins on one machine share an address, so a share is this server
+    when it records the server's id, or (recording none) names its login.
+    """
+    if not _host_key(row) or _destination(row) != _destination(shared):
+        return False
+    recorded = str(shared.get("instance_id") or "")
+    if recorded:
+        return recorded == row["id"]
+    login = str(shared.get("username") or "")
+    return not login or login == row["username"]
+
+
+def shared_custom_servers(servers: Iterable[Any], shared: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Names of the custom *servers* that one of a team's *shared* servers is, in order."""
+    rows = [_custom_server_row(server) for server in servers]
+    return [
+        row["name"] for row in rows
+        if row["name"] and any(_shares_custom_server(team, row) for team in shared)
+    ]
 
 
 def share_candidates(

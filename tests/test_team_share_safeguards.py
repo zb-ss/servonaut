@@ -356,3 +356,82 @@ class TestPullApply:
         saved = ConfigManager(config_path=tmp_path / "config.json").load()
         assert [(s.name, s.host, s.ssh_key) for s in saved.custom_servers] == [("team-box", "10.0.0.5", "")]
         assert [p.name for p in saved.connection_profiles] == ["via-bastion", "plain"]
+
+
+# team-box is also one of the team's shared servers (shared from this machine).
+_TEAM_BOX_SHARED = [{"id": "srv-1", "name": "team-box", "hostname": "10.0.0.5", "instance_id": "custom-team-box"}]
+
+
+class TestCustomServersTheTeamShares:
+    async def test_push_form_marks_a_custom_server_the_team_already_shares(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_team(app, pilot)
+            screen._shared_servers = list(_TEAM_BOX_SHARED)
+            screen._action_push_config()
+            await _until(pilot, lambda: screen.query_one("#push_config_form").display, "the push form")
+            rows = _rows(screen.query_one("#push_config_servers", SelectionList))
+
+        assert rows[0][0].startswith("team-box") and "(already shared, with the team key)" in rows[0][0]
+        assert rows[1][0] == "private-box  10.0.0.6"
+        assert [ticked for _label, ticked in rows] == [False, False]
+
+    async def test_pull_names_what_it_removes_and_skips_the_teams_server(self, tmp_path):
+        from servonaut.config.manager import ConfigManager
+        from servonaut.services.team_config_subset import build_shareable_subset
+
+        manager = ConfigManager(config_path=tmp_path / "config.json")
+        manager.save(_push_config())
+        team = _push_config()
+        team.connection_profiles = team.connection_profiles[:1]
+        team.custom_servers.append(CustomServer(name="new-box", host="10.0.0.7"))
+        payload, _ = build_shareable_subset(team, custom_servers=["team-box", "new-box"])
+        app = _ConfigApp(config=manager.get(), config_manager=manager,
+                         auth_service=_make_auth_service(), team_service=_make_team_service())
+        async with app.run_test(headless=True) as pilot:
+            screen = await _open_team(app, pilot)
+            screen._shared_servers = list(_TEAM_BOX_SHARED)
+            notes = _capture_notifications(screen)
+            screen._show_pull_config_form(payload)
+            preview = _text(screen.query_one("#pull_config_preview", Static))
+            screen.query_one("#btn_confirm_pull_config", Button).press()
+            await _until(pilot, lambda: any("Team config applied" in msg for _, msg in notes), "the apply")
+
+        assert "Removes yours: plain" in preview
+        assert "Removes yours: team-box, private-box" in preview
+        assert "Not added, the team already shares it (members connect with the team key): team-box" in preview
+        saved = ConfigManager(config_path=tmp_path / "config.json").load()
+        assert [s.name for s in saved.custom_servers] == ["new-box"]
+        assert any("team-box" in msg and "already shares" in msg for _, msg in notes)
+
+    async def test_demo_mode_hides_the_names_in_the_pull_preview(self):
+        app, _svc = _push_app(_push_config())
+        async with app.run_test(headless=True) as pilot:
+            app.demo_mode = True
+            app.redaction_service = RedactionService()
+            screen = await _open_team(app, pilot)
+            screen._shared_servers = list(_TEAM_BOX_SHARED)
+            screen._show_pull_config_form({"custom_servers": [{"name": "team-box", "host": "10.0.0.5"}]})
+            preview = _text(screen.query_one("#pull_config_preview", Static))
+
+        for real in ("team-box", "private-box", "via-bastion"):
+            assert real not in preview, real
+
+
+async def test_push_form_does_not_mark_another_login_at_a_shared_address():
+    config = _push_config()
+    config.custom_servers = [
+        CustomServer(name="site-a", host="9.9.9.9", username="alpha"),
+        CustomServer(name="site-b", host="9.9.9.9", username="beta"),
+    ]
+    app, _svc = _push_app(config)
+    async with app.run_test(headless=True) as pilot:
+        screen = await _open_team(app, pilot)
+        screen._shared_servers = [{"id": "srv-1", "name": "site-a", "hostname": "9.9.9.9",
+                                   "instance_id": "custom-site-a", "username": "alpha"}]
+        screen._action_push_config()
+        await _until(pilot, lambda: screen.query_one("#push_config_form").display, "the push form")
+        rows = _rows(screen.query_one("#push_config_servers", SelectionList))
+
+    assert "already shared" in rows[0][0]
+    assert "already shared" not in rows[1][0]
