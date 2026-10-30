@@ -988,8 +988,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--release-tag",
         help=(
-            "Release tag vX.Y.Z or vX.Y.Z-preview.N for the product version; "
-            "marks a release build and decides its channel."
+            "Release tag vX.Y.Z, vX.Y.ZrcN or vX.Y.Z-preview.N for the product "
+            "version; marks a release build and decides its channel."
         ),
     )
     parser.add_argument("--revision", default=None)
