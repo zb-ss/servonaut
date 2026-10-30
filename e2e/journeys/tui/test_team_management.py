@@ -330,14 +330,20 @@ async def test_servers_leave_for_the_team_only_when_the_owner_confirms(tui, seed
         assert [p["name"] for p in sent["connection_profiles"]] == [fleet.BASTION_PROFILE]
         await _screen_idle(t)
 
-        # Pulling the partial push back applies cleanly.
+        # Pulling the partial push back applies cleanly, and keeps the
+        # user's own key path for team-box (a push never carries one).
         await _press(t, "#btn_pull_config")
         await t.wait_until(lambda: "Custom Servers: 2 → 1" in _text(t, "#pull_config_preview"),
                            desc="pull preview")
+        assert "1 entry keeps your own SSH key path: a team config never carries key paths." in _text(
+            t, "#pull_config_preview",
+        )
         await _press(t, "#btn_confirm_pull_config")
-        await t.wait_for_toast(r"^Team config applied\.")
+        await t.wait_for_toast(r"^Team config applied; 1 entry keeps your own SSH key path\. Restart")
         saved = seed.read_config()
-        assert [(s["name"], s["host"], s["ssh_key"]) for s in saved["custom_servers"]] == [(*TEAM_BOX, "")]
+        assert [(s["name"], s["host"], s["ssh_key"]) for s in saved["custom_servers"]] == [
+            (*TEAM_BOX, "~/.ssh/team_box"),
+        ]
         assert [p["name"] for p in saved["connection_profiles"]] == [fleet.BASTION_PROFILE]
 
     fake_cloud.assert_no_unexpected_errors(*expected("no secret store on file"))

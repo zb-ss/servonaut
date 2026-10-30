@@ -57,6 +57,11 @@ _DETAIL_SECTIONS = (
 )
 
 
+def _kept_key_paths_text(count: int) -> str:
+    """How many pulled entries keep the user's own SSH key path (a push never carries one)."""
+    return "1 entry keeps your own SSH key path" if count == 1 else f"{count} entries keep your own SSH key paths"
+
+
 class TeamManagementScreen(Screen):
     """Team management: list teams, manage members, share servers."""
 
@@ -1257,6 +1262,8 @@ class TeamManagementScreen(Screen):
             d = diff[section]
             change_hint = "[$text-success]no change[/$text-success]" if d["local"] == d["after"] else f"[bold]{d['local']} → {d['after']}[/bold]"
             lines.append(f"  • {section.replace('_', ' ').title()}: {change_hint}")
+        if diff["kept_key_paths"]:
+            lines.append(f"  {_kept_key_paths_text(diff['kept_key_paths'])}: a team config never carries key paths.")
         self.query_one("#pull_config_preview", Static).update("\n".join(lines))
         self._pending_pull_payload = remote_payload
         form = self.query_one("#pull_config_form")
@@ -1710,7 +1717,7 @@ class TeamManagementScreen(Screen):
         from servonaut.services.team_config_apply import apply_team_config
         payload = self._pending_pull_payload
         try:
-            apply_team_config(config, payload)
+            kept = apply_team_config(config, payload)
             config_manager.save(config)
         except Exception as exc:  # noqa: BLE001
             logger.error("Apply team config failed: %s", exc)
@@ -1719,7 +1726,9 @@ class TeamManagementScreen(Screen):
         self._pending_pull_payload = None
         self._hide_pull_config_form()
         self.notify(
-            "Team config applied. Restart Servonaut for connection-profile changes to take full effect.",
+            "Team config applied"
+            + (f"; {_kept_key_paths_text(kept)}. " if kept else ". ")
+            + "Restart Servonaut for connection-profile changes to take full effect.",
             severity="information",
             timeout=10,
         )
