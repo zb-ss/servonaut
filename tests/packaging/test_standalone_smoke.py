@@ -84,7 +84,11 @@ elif args == ['--help']:
 elif args == ['--update']:
     print('Current version: {version}')
     print('Checking for updates...')
-    print('Automatic updates are not configured for this packaged Servonaut build. Install a newer signed build when one is provided.')
+    # Offline only while the manifest check is sent to the smoke's loopback port.
+    if os.environ.get('SERVONAUT_RELEASE_MANIFEST_URL') == 'https://127.0.0.1:9/manifest.json':
+        print('Could not check for updates (offline).')
+    else:
+        print('Update available: v99.0.0')
 elif args == ['--list-backups']:
     sys.stdout.buffer.write({backups_stdout_bytes!r})
 elif args == ['--mcp-install', 'claude']:
@@ -174,6 +178,18 @@ def test_isolated_environment_drops_parent_credentials(
     assert environment["PYTHONUTF8"] == "1"
     assert environment["PYTHONIOENCODING"] == "utf-8"
     assert environment["AWS_CONFIG_FILE"].startswith(str(home))
+
+
+def test_isolated_environment_keeps_update_checks_off_the_release_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SERVONAUT_RELEASE_MANIFEST_URL", "https://mirror.example.net/m.json")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    environment = isolated_child_environment(home)
+
+    assert environment["SERVONAUT_RELEASE_MANIFEST_URL"] == "https://127.0.0.1:9/manifest.json"
 
 
 def test_selftest_caller_proof_preserves_fixed_state_and_unreadable_credential(
