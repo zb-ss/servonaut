@@ -1447,14 +1447,20 @@ def test_first_team_binding_falls_back_to_locally_trusted_host_keys(monkeypatch)
 
 
 def test_first_team_binding_without_any_trusted_key_says_what_to_do(monkeypatch) -> None:
-    from servonaut.services.vault.errors import VaultUserError
+    from servonaut.services.vault.errors import HostKeysNeeded
 
     service = _bind_service(monkeypatch, trusted=[])
 
-    with pytest.raises(VaultUserError, match="servonaut ssh.*--host-key"):
+    # Each surface words the remedy itself: the service names no command-line flag.
+    with pytest.raises(HostKeysNeeded, match="does not trust a host key") as untrusted:
         service._binding_pins({"id": "s1"}, {}, "127.0.0.1", 2222, True)
-    with pytest.raises(ValueError, match="--pin-host-key or --host-key"):
+    assert untrusted.value.looked_up_trusted_keys is True
+    with pytest.raises(HostKeysNeeded, match="needs its host keys pinned") as not_chosen:
         service._binding_pins({"id": "s1"}, {}, "127.0.0.1", 2222, False)
+    assert not_chosen.value.looked_up_trusted_keys is False
+    for raised in (untrusted.value, not_chosen.value):
+        assert "--" not in str(raised) and "servonaut ssh" not in str(raised)
+        assert vault_failure_reason(raised) == str(raised)
 
 
 # A team's row of a server the user also lists as their own cloud server, and

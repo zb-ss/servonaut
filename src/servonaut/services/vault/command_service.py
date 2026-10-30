@@ -44,6 +44,7 @@ from .errors import (
     SERVER_MOVED_SINCE_BINDING,
     VAULT_ROTATION_FAILED,
     VAULT_ROTATION_NOT_PERMITTED,
+    HostKeysNeeded,
     VaultKeyInUse,
     VaultUserError,
     vault_failure_reason,
@@ -2163,16 +2164,13 @@ class VaultCommandService:
             verified = self.bindings.verify_binding(existing, vault, target=target, hostname=hostname, port=port)
             return tuple(verified["host_keys"]), _positive_int(verified.get("binding_revision"), "binding.binding_revision") + 1
         if not explicit_pin and not host_keys:
-            raise ValueError("--pin-host-key or --host-key is required for the first native-vault binding")
+            raise HostKeysNeeded(looked_up_trusted_keys=False)
         pins = list(host_keys) or trusted_host_keys(shared, hostname, port)
         own = own_twin(shared, own_rows) if not pins else None
         if own is not None:
             pins = trusted_host_keys(own, hostname, port)
         if not pins:
-            raise VaultUserError(
-                "this machine does not trust a host key for the server yet; connect once "
-                "with `servonaut ssh` and check its fingerprint, or pass --host-key"
-            )
+            raise HostKeysNeeded(looked_up_trusted_keys=True)
         self.bindings._validate_host_keys(pins)
         return tuple(pins), 1
 

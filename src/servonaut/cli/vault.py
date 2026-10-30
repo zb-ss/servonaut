@@ -29,7 +29,7 @@ from servonaut.services.vault.display import (
     ssh_rotation_failure,
     terminal_safe,
 )
-from servonaut.services.vault.errors import VaultKeyInUse, VaultUserError, vault_failure_reason
+from servonaut.services.vault.errors import HostKeysNeeded, VaultKeyInUse, VaultUserError, vault_failure_reason
 from servonaut.services.vault.identity_client import DEVICE_PLATFORMS
 
 _EXIT_OK = 0
@@ -1155,6 +1155,16 @@ async def _handle(args: argparse.Namespace) -> int:
                 _print(await _invoke(services, "recover_escrow", vault_id=args.vault, escrow_key=escrow_key), json_output=output)
         else:
             raise ValueError(f"Unknown vault command: {command}")
+    except HostKeysNeeded as exc:
+        print(f"Vault operation failed ({vault_failure_reason(exc)}).", file=sys.stderr)
+        print(
+            "Connect once with `servonaut ssh` and check the fingerprint, then pass --pin-host-key; "
+            "or pass verified keys with --host-key."
+            if exc.looked_up_trusted_keys else
+            "Pass --pin-host-key to pin the host keys this machine trusts, or --host-key with verified keys.",
+            file=sys.stderr,
+        )
+        return _EXIT_ERROR
     except VaultKeyInUse as exc:
         for label, names in (("Team servers", exc.team_servers), ("Your servers", exc.own_servers),
                              ("Could not check", exc.unchecked)):

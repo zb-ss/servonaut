@@ -1990,3 +1990,25 @@ def test_vault_grants_process_never_approves_without_a_terminal_or_with_yes(
 
     assert decisions == [("not asked", interactive)]
     assert stdin.asked == 0
+
+
+@pytest.mark.parametrize("looked_up, flags", [(True, ["--host-key"]), (False, ["--pin-host-key", "--host-key"])])
+def test_bind_without_host_keys_names_the_cli_flags(monkeypatch, capsys, looked_up: bool, flags: list[str]) -> None:
+    from servonaut.services.vault.errors import HostKeysNeeded
+
+    monkeypatch.setattr(vault, "_auto_bind_servers", lambda: [])
+
+    class Service:
+        close = MagicMock()
+        bind = AsyncMock(side_effect=HostKeysNeeded(looked_up_trusted_keys=looked_up))
+
+    vault.set_vault_service_factory(Service)
+    try:
+        argv = ["vault", "bind", "server-1", "item-1", "--vault", VAULT_ID, "--team", "team-a", "--yes"]
+        args = _parser().parse_args(argv + (["--pin-host-key"] if looked_up else []))
+        assert vault.handle_vault_command(args) == 1
+    finally:
+        vault.set_vault_service_factory(None)
+
+    err = capsys.readouterr().err
+    assert all(flag in err for flag in flags)

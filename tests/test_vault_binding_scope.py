@@ -671,3 +671,23 @@ async def test_a_team_key_that_replaces_another_keeps_its_pins_and_shows_no_host
 
     assert seen == []
     assert app.vault_command_service.bind.await_args.kwargs["host_keys"] == ()
+
+
+@pytest.mark.asyncio
+async def test_a_bind_without_host_keys_says_what_to_do_here_not_on_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from servonaut.services.vault.errors import HostKeysNeeded
+
+    monkeypatch.setattr(server_actions, "trusted_host_keys", lambda *_args: [])
+    app = _Host([_shared()])
+    app.vault_command_service.bind.side_effect = HostKeysNeeded(looked_up_trusted_keys=True)
+    async with app.run_test() as pilot:
+        await _start(pilot)
+        await _settle(pilot, lambda: app.screen.query_one("#vault_bind_item", Select).value == KEY_ITEM)
+        app.screen.query_one("#vault_bind_confirm", Button).press()
+        await _settle(pilot, lambda: bool(app.notices))
+
+    notice = app.notices[-1][0]
+    assert notice.startswith("Vault key binding failed:")
+    assert "--" not in notice and "Fetch host key" in notice and "paste verified host keys" in notice

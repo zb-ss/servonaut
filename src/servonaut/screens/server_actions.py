@@ -2222,9 +2222,14 @@ class ServerActionsScreen(ServerAccountMixin, Screen):
                         host_keys=host_keys,
                     )
             except Exception as exc:
-                from servonaut.services.vault.errors import vault_failure_reason
+                from servonaut.services.vault.errors import HostKeysNeeded, vault_failure_reason
 
-                self.app.notify(f"Vault key binding failed: {vault_failure_reason(exc)}", severity="error", markup=False)
+                reason = (
+                    "this machine does not trust a host key for the server yet: use Fetch host key "
+                    "(or connect to it once) and check its fingerprint, or paste verified host keys"
+                    if isinstance(exc, HostKeysNeeded) else vault_failure_reason(exc)
+                )
+                self.app.notify(f"Vault key binding failed: {reason}", severity="error", markup=False)
                 return
             finally:
                 self._busy.end(job)
