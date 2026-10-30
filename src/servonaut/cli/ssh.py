@@ -30,7 +30,7 @@ from servonaut.services.connection_service import (
     profile_route,
     rule_username,
 )
-from servonaut.services.ssh_credentials import VaultCredentialError, bastion_lease
+from servonaut.services.ssh_credentials import VaultCredentialError, bastion_hop_hint, bastion_lease
 from servonaut.utils.instance_resolver import describe_candidate, match_instances, qualified_reference
 
 logger = logging.getLogger(__name__)
@@ -499,6 +499,10 @@ async def _handle_ssh_async(args: Any) -> int:
                 f"Bastion {route['profile'].bastion_host}: its Servonaut Vault key, as {hop.login_user}.",
                 file=sys.stderr,
             )
+        else:
+            hint = bastion_hop_hint(route["profile"], instances, vault_runtime)
+            if hint is not None:
+                print(hint, file=sys.stderr)
         return await _connect_resolved(
             args, config, instance, iid, host, route, resolved,
             ssh_service=ssh_service, bw_ssh_config_service=bw_ssh_config_service,

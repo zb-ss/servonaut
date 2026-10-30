@@ -819,7 +819,7 @@ def _app_instance(**extra: Any) -> Dict[str, Any]:
             "region": "eu-west-1", "public_ip": "9.9.9.9", "private_ip": "10.0.0.7", **extra}
 
 
-def _ssh_argv(args, instance, config, resolved=None) -> List[str]:
+def _ssh_argv(args, instance, config, resolved=None, team_service=None) -> List[str]:
     """The argv ``servonaut ssh`` runs, built by the real SSHService."""
     from servonaut.cli import ssh as ssh_mod
     from servonaut.services.ssh_service import SSHService
@@ -827,7 +827,7 @@ def _ssh_argv(args, instance, config, resolved=None) -> List[str]:
     config_manager = MagicMock()
     config_manager.get.return_value = config
     headless = (config, MagicMock(is_authenticated=True), MagicMock(), MagicMock(),
-                MagicMock(), SSHService(config_manager), MagicMock())
+                team_service or MagicMock(), SSHService(config_manager), MagicMock())
     with (
         patch.object(ssh_mod, "_init_headless_services", return_value=headless),
         patch.object(ssh_mod, "_load_instances", return_value=[instance]),
@@ -1010,6 +1010,27 @@ class TestBastionVaultHop:
         assert runtime.asked == ["i-0b", "srv-9"]
         hop.close.assert_called_once_with()
         assert "Bastion bastion-1: its Servonaut Vault key, as admin." in capsys.readouterr().err
+
+
+    def test_a_team_key_for_the_bastion_with_a_locked_vault_says_what_to_do(self, capsys):
+        from servonaut.cli import ssh as ssh_mod
+
+        team_bastion = {"id": "srv-9", "name": "bastion-1", "is_shared": True, "team_slug": "devs",
+                        "team_name": "Devs", "hostname": "8.8.4.4", "public_ip": "8.8.4.4", "port": 22,
+                        "credential_binding": {"source": "servonaut_vault"}}
+        locked = SimpleNamespace(is_unlocked=False)
+        with patch.object(ssh_mod, "_vault_runtime_for_cli", return_value=locked), \
+                patch.object(ssh_mod, "_load_shared_instances", AsyncMock(return_value=[team_bastion])), \
+                patch("servonaut.utils.platform_utils.get_os", return_value="linux"):
+            argv = _ssh_argv(_make_args("app-1"), _app_instance(), _rule_config(), team_service=MagicMock(
+                list_teams=AsyncMock(return_value=[{"slug": "devs", "name": "Devs"}]),
+            ))
+
+        # The connection still runs: the user's own SSH setup may log the hop in.
+        assert any(o.startswith("ProxyCommand=") and "hop@bastion-1" in o for o in _options(argv))
+        err = capsys.readouterr().err
+        assert "Team Devs shares the bastion bastion-1 with its own key" in err
+        assert "servonaut vault setup" in err
 
 
 class TestResolveUsernameWithARule:

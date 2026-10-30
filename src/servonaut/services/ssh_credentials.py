@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from servonaut.services.shared_servers import (
+    has_team_access,
     is_shared_row,
     row_team_label,
     team_key_fallback,
@@ -317,6 +318,44 @@ async def bastion_lease(
     if lease is not None:
         logger.info("The hop to the bastion %s uses the key of the team %s", name, row_team_label(team))
     return lease
+
+
+def bastion_hop_hint(profile: Any, rows: Iterable[Mapping[str, Any]], vault_runtime: Any) -> Optional[str]:
+    """What to do when *profile*'s bastion hop has no key here, but a team's could log it in.
+
+    A team that shares the bastion with its vault key or SSH certificate (the
+    team's row, or the one the user's own row of it falls back to, see
+    :func:`bastion_lease`) needs an unlocked Servonaut Vault identity on this
+    computer. Without one the hop quietly offers the user's own keys, and a
+    bastion that accepts only the team's refuses them all. None when the
+    vault is ready, the profile names a ``bastion_key``, no team key applies,
+    or this computer cannot hop with a vault key at all (Windows).
+    """
+    from servonaut.utils.platform_utils import get_os
+
+    if (
+        profile is None or getattr(profile, "proxy_command", None) or getattr(profile, "bastion_key", None)
+        or not getattr(profile, "bastion_host", None)
+        or getattr(vault_runtime, "is_unlocked", False) is True or get_os() == "windows"
+    ):
+        return None
+    rows = [row for row in rows if isinstance(row, Mapping)]
+    row = bastion_row(profile, rows)
+    if row is None:
+        return None
+    if is_shared_row(row):
+        team = dict(row) if has_team_access(row) else None
+    else:
+        team = team_twin(row, rows)
+    if team is None:
+        return None
+    label = row_team_label(team)
+    who = f"Team {label}" if label else "A team"
+    return (
+        f"{who} shares the bastion {profile.bastion_host} with its own key, which needs this computer's "
+        "Servonaut Vault identity: set it up with `servonaut vault setup` (or unlock it). "
+        "Until then the hop uses your own SSH setup."
+    )
 
 
 def _behind_proxy(row: Mapping[str, Any], name: str, connection_service: Any) -> bool:

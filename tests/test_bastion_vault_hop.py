@@ -14,6 +14,7 @@ from servonaut.services.connection_service import ConnectionService
 from servonaut.services.ssh_credentials import (
     VaultCredentialError,
     VaultLeaseCache,
+    bastion_hop_hint,
     bastion_lease,
     bastion_row,
     resolve_with_vault,
@@ -399,6 +400,54 @@ class TestBastionLeaseTeamFallback:
         assert _contains_run(argv, ["-o", f'IdentityAgent="{team_hop.identity_agent}"', "-o", "IdentitiesOnly=yes"])
         assert argv[-1] == "admin@9.9.9.9"
         assert resolved["key_path"] == "/keys/app.pem"
+
+
+class TestBastionHopHint:
+    """Why the hop has no key, when a team's would log it in but this computer's vault is not ready."""
+
+    def test_a_locked_vault_with_the_team_sharing_your_own_bastion(self):
+        for runtime in (None, _Runtime(unlocked=False)):
+            hint = bastion_hop_hint(PROFILE, [APP, BASTION, TEAM_BASTION], runtime)
+            assert hint is not None and hint.startswith("Team Devs shares the bastion 9.9.9.9 with its own key")
+            assert "servonaut vault setup" in hint and "the hop uses your own SSH setup" in hint
+
+    def test_the_teams_own_row_of_the_bastion(self):
+        hint = bastion_hop_hint(PROFILE, [APP, TEAM_BASTION], None)
+        assert hint is not None and hint.startswith("Team Devs shares the bastion 9.9.9.9")
+
+    def test_a_ready_vault_or_a_bastion_key_says_nothing(self):
+        rows = [BASTION, TEAM_BASTION]
+        assert bastion_hop_hint(PROFILE, rows, _Runtime()) is None
+        with_key = ConnectionProfile(name="p", bastion_host="9.9.9.9", bastion_key="~/.ssh/jump.pem")
+        assert bastion_hop_hint(with_key, rows, None) is None
+
+    def test_no_team_key_for_the_bastion_says_nothing(self):
+        keyless = {key: value for key, value in TEAM_BASTION.items() if key != "credential_binding"}
+        assert bastion_hop_hint(PROFILE, [BASTION], None) is None
+        assert bastion_hop_hint(PROFILE, [BASTION, keyless], None) is None
+        assert bastion_hop_hint(ConnectionProfile(name="direct"), [BASTION, TEAM_BASTION], None) is None
+
+    def test_windows_says_nothing(self, monkeypatch):
+        # OpenSSH on Windows never hops with a vault key: setting one up would not help.
+        monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "windows")
+        assert bastion_hop_hint(PROFILE, [BASTION, TEAM_BASTION], None) is None
+
+    def test_the_tui_shows_the_hint_and_still_connects(self):
+        from servonaut.screens.server_actions import ServerActionsScreen
+
+        notes: list = []
+        app = SimpleNamespace(
+            connection_service=_service(APP_RULE), vault_command_service=_Runtime(unlocked=False),
+            vault_lease_cache=None, instances=[APP, BASTION, TEAM_BASTION], demo_mode=False,
+            redaction_service=None, notify=lambda message, **kwargs: notes.append((message, kwargs)),
+        )
+
+        ok, hop = asyncio.run(ServerActionsScreen._bastion_hop(SimpleNamespace(app=app), APP))
+
+        assert (ok, hop) == (True, None)
+        [(message, kwargs)] = notes
+        assert message.startswith("Team Devs shares the bastion 9.9.9.9 with its own key")
+        assert kwargs == {"severity": "warning", "markup": False}
 
 
 class TestResolveWithVault:
