@@ -20,12 +20,17 @@ def auth_file(home: Path) -> Path:
     return home / ".servonaut" / "auth.json"
 
 
-def seed_session(home: Path, fake_cloud: Any, *, expires_in: float = 3600.0) -> Path:
-    """Sign *home* in with FakeCloud's current session; return ``auth.json``."""
+def seed_session(
+    home: Path, fake_cloud: Any, *, expires_in: float = 3600.0, user_id: Optional[int] = None
+) -> Path:
+    """Sign *home* in with FakeCloud's current session; return ``auth.json``.
+
+    As the added user *user_id* when given (``FakeCloud.add_user``).
+    """
     from servonaut.services.auth_service import AuthToken
 
-    access, refresh = fake_cloud.tokens()
-    entitlements = fake_cloud.entitlements()
+    access, refresh = fake_cloud.tokens() if user_id is None else fake_cloud.user_tokens(user_id)
+    entitlements = fake_cloud.entitlements(user_id)
     now = time.time()
     token = AuthToken(
         access_token=access,
