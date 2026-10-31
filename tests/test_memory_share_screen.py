@@ -32,7 +32,7 @@ _ROLES = {"viewer": 0, "member": 1, "admin": 2, "owner": 3}
 def _member(user_id: int, name: str, role: str = "member", *, key_changed: bool = False) -> Dict[str, Any]:
     pub = bytes(nacl.public.PrivateKey.generate().public_key)
     return {
-        "user_id": user_id, "fingerprint": f"{user_id:064x}",
+        "user_id": user_id, "fingerprint": crypto_module.fingerprint(pub),
         "public_key_b64": base64.b64encode(pub).decode(), "role": role, "name": name,
         "key_changed": key_changed,
     }

@@ -54,7 +54,7 @@ def _member_json(user_id: int, name: str, role: str = "member") -> Dict[str, Any
     pub = bytes(nacl.public.PrivateKey.generate().public_key)
     return {
         "user_id": user_id,
-        "fingerprint": f"{user_id:064x}",
+        "fingerprint": crypto_module.fingerprint(pub),
         "public_key_b64": base64.b64encode(pub).decode(),
         "role": role,
         "name": name,

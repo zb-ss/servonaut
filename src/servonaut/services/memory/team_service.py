@@ -153,6 +153,23 @@ class TeamMemberKey:
     name: str = ""
     key_changed: bool = False
 
+    def derived_fingerprint(self) -> Optional[str]:
+        """The fingerprint of the key actually held, or None if it is not a key.
+
+        Decoded strictly: the claimed ``fingerprint`` is only a claim, and a
+        pin or a check against it says nothing about the key a wrap is sealed
+        for.
+        """
+        try:
+            raw = base64.b64decode(self.public_key_b64, validate=True)
+        except ValueError:
+            return None
+        if len(raw) != 32:
+            return None
+        import hashlib
+
+        return hashlib.sha256(raw).hexdigest()
+
     @property
     def public_key_bytes(self) -> bytes:
         """Decode and return the raw 32-byte X25519 public key."""
@@ -656,8 +673,14 @@ class TeamMemoryService:
         pins = self._pins()
         changed = []
         for member in members:
+            derived = member.derived_fingerprint()
             pinned = pinned_fingerprint(pins, team_slug, member.user_id) if pins else None
-            if member.key_changed or (pinned is not None and pinned != member.fingerprint):
+            if (
+                member.key_changed
+                or derived is None
+                or derived != member.fingerprint
+                or (pinned is not None and pinned != derived)
+            ):
                 changed.append(member.name or f"member {member.user_id}")
         if changed:
             raise KeyChangedError(changed)
@@ -671,7 +694,7 @@ class TeamMemoryService:
         if pins is None or not sealed:
             return
         try:
-            pins.set_many({(team_slug, m.user_id): m.fingerprint
+            pins.set_many({(team_slug, m.user_id): m.derived_fingerprint() or m.fingerprint
                            for m in members if m.user_id in sealed})
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)

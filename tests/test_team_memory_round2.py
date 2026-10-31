@@ -155,11 +155,13 @@ def _svc_returning(material, payload, module):
 
 class TestChangedKeys:
     def _members(self):
-        pub = base64.b64encode(bytes(nacl.public.PrivateKey.generate().public_key)).decode()
-        return [
-            TeamMemberKey(1, "a" * 64, pub, "member", "Kim", key_changed=False),
-            TeamMemberKey(2, "b" * 64, pub, "member", "Lee", key_changed=True),
-        ]
+        def member(uid, name, changed):
+            raw = bytes(nacl.public.PrivateKey.generate().public_key)
+            return TeamMemberKey(uid, crypto_module.fingerprint(raw),
+                                 base64.b64encode(raw).decode(), "member", name,
+                                 key_changed=changed)
+
+        return [member(1, "Kim", False), member(2, "Lee", True)]
 
     def test_share_again_with_a_changed_key_revokes_nothing_and_posts_nothing(self):
         api = _api({})

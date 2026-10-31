@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -279,7 +280,7 @@ def _make_member_key(user_id: int, role: str = "member") -> TeamMemberKey:
     pub_b64 = base64.b64encode(bytes(private.public_key)).decode()
     return TeamMemberKey(
         user_id=user_id,
-        fingerprint="fp",
+        fingerprint=hashlib.sha256(bytes(private.public_key)).hexdigest(),
         public_key_b64=pub_b64,
         role=role,
     )

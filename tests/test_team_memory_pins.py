@@ -28,9 +28,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def _member(uid: int, fp: str, name: str = "Kim") -> TeamMemberKey:
-    pub = base64.b64encode(bytes(nacl.public.PrivateKey.generate().public_key)).decode()
-    return TeamMemberKey(uid, fp, pub, "member", name)
+def _key() -> bytes:
+    return bytes(nacl.public.PrivateKey.generate().public_key)
+
+
+def _member(uid: int, name: str = "Kim", key: bytes | None = None, claim: str | None = None) -> TeamMemberKey:
+    """A member with a real key; its fingerprint is the key's own unless *claim* lies."""
+    key = key or _key()
+    fp = claim or crypto_module.fingerprint(key)
+    return TeamMemberKey(uid, fp, base64.b64encode(key).decode(), "member", name)
 
 
 def _service(tmp_path):
@@ -61,7 +67,7 @@ def test_a_member_whose_fingerprint_differs_from_the_pin_is_refused(tmp_path):
     svc, api, pins = _service(tmp_path)
     pins.set_many({(SLUG, 2): "a" * 64})
     with pytest.raises(KeyChangedError) as err:
-        run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [_member(2, "b" * 64, "Lee")]))
+        run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [_member(2, "Lee")]))
     assert err.value.names == ["Lee"]
     api.delete.assert_not_awaited()
     api.post.assert_not_awaited()
@@ -71,29 +77,31 @@ def test_a_first_share_with_a_differing_pin_is_refused_too(tmp_path):
     svc, api, pins = _service(tmp_path)
     pins.set_many({(SLUG, 2): "a" * 64})
     with pytest.raises(KeyChangedError):
-        run(svc.share_instance(SLUG, OWNER, "member", ["os"], [_member(2, "b" * 64)]))
+        run(svc.share_instance(SLUG, OWNER, "member", ["os"], [_member(2)]))
     api.post.assert_not_awaited()
 
 
 def test_share_pins_the_fingerprints_it_sealed_for(tmp_path):
     svc, api, pins = _service(tmp_path)
-    run(svc.share_instance(SLUG, OWNER, "member", ["os"], [_member(2, "c" * 64)]))
-    assert pinned_fingerprint(pins, SLUG, 2) == "c" * 64
+    member = _member(2)
+    run(svc.share_instance(SLUG, OWNER, "member", ["os"], [member]))
+    assert pinned_fingerprint(pins, SLUG, 2) == member.fingerprint
 
 
 def test_share_again_pins_them_too_and_accepts_a_matching_pin(tmp_path):
     svc, api, pins = _service(tmp_path)
-    pins.set_many({(SLUG, 2): "c" * 64})
-    run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [_member(2, "c" * 64)]))
+    member = _member(2)
+    pins.set_many({(SLUG, 2): member.fingerprint})
+    run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [member]))
     api.delete.assert_awaited_once()
-    assert pinned_fingerprint(pins, SLUG, 2) == "c" * 64
+    assert pinned_fingerprint(pins, SLUG, 2) == member.fingerprint
 
 
 def test_a_failed_share_pins_nothing(tmp_path):
     svc, api, pins = _service(tmp_path)
     api.post.side_effect = RuntimeError("boom")
     with pytest.raises(RuntimeError):
-        run(svc.share_instance(SLUG, OWNER, "member", ["os"], [_member(2, "c" * 64)]))
+        run(svc.share_instance(SLUG, OWNER, "member", ["os"], [_member(2)]))
     assert pinned_fingerprint(pins, SLUG, 2) is None
 
 
@@ -105,3 +113,31 @@ def test_there_is_one_path_validator_in_the_codebase():
     pattern = re.compile(r"A-Za-z0-9\]\[A-Za-z0-9\._-\]")
     hits = [str(p) for p in root.rglob("*.py") if pattern.search(p.read_text(encoding="utf-8"))]
     assert [pathlib.Path(h).name for h in hits] == ["path_segments.py"]
+
+
+def test_a_key_that_is_not_the_claimed_fingerprints_key_is_refused_before_a_revoke(tmp_path):
+    svc, api, pins = _service(tmp_path)
+    honest = _member(2)
+    # The service keeps the pinned fingerprint but hands over another key.
+    liar = _member(2, claim=honest.fingerprint)
+    pins.set_many({(SLUG, 2): honest.fingerprint})
+    with pytest.raises(KeyChangedError):
+        run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [liar]))
+    api.delete.assert_not_awaited()
+    api.post.assert_not_awaited()
+
+
+def test_a_malformed_key_is_refused_before_a_revoke(tmp_path):
+    svc, api, _ = _service(tmp_path)
+    bad = TeamMemberKey(2, "d" * 64, "not base64!!", "member", "Lee")
+    with pytest.raises(KeyChangedError):
+        run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [bad]))
+    api.delete.assert_not_awaited()
+
+
+def test_the_pin_records_the_fingerprint_derived_from_the_key(tmp_path):
+    svc, _, pins = _service(tmp_path)
+    member = _member(2)
+    run(svc.share_instance(SLUG, OWNER, "member", ["os"], [member]))
+    assert pinned_fingerprint(pins, SLUG, 2) == crypto_module.fingerprint(
+        base64.b64decode(member.public_key_b64))
