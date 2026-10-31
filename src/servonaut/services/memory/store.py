@@ -78,13 +78,21 @@ def _load_object(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _check_finding_shape(record: Dict[str, Any], path: Path) -> None:
+def check_finding_record(record: Any, label: str = "finding") -> None:
+    """Raise ``MemoryCorruptError`` unless *record* is a finding of the stored shape.
+
+    An object with a text ``id`` whose ``created_at``, ``updated_at`` and
+    ``superseded_by`` are text when present. Local files and records read
+    from the service are held to the same schema.
+    """
+    if not isinstance(record, dict):
+        raise MemoryCorruptError(f"{label}: not an object")
     if not isinstance(record.get("id"), str):
-        raise MemoryCorruptError(f"{path.name}: finding id is not text")
+        raise MemoryCorruptError(f"{label}: finding id is not text")
     for key in ("created_at", "updated_at", "superseded_by"):
         value = record.get(key)
         if value is not None and not isinstance(value, str):
-            raise MemoryCorruptError(f"{path.name}: {key} is not text")
+            raise MemoryCorruptError(f"{label}: {key} is not text")
 
 
 # Regex that detects forbidden characters/sequences in instance IDs.
@@ -1068,6 +1076,23 @@ class MemoryStore:
         """
         return self._checked_dir(instance_id, provider).is_dir()
 
+    def share_merged(self, instance_id: str, share_id: str) -> bool:
+        """Whether *share_id*'s service-only memory was already merged into *instance_id*."""
+        entry = self.get_index_entry(instance_id) or {}
+        return share_id in entry.get("merged_share_ids", [])
+
+    def record_share_merged(self, instance_id: str, share_id: str) -> None:
+        """Record on *instance_id*'s index entry that *share_id* was merged into it."""
+        _validate_instance_id(instance_id)
+        index = self._load_index()
+        entry = index.get("instances", {}).get(self._resolve_id(instance_id))
+        if entry is None:
+            return
+        done = entry.setdefault("merged_share_ids", [])
+        if share_id not in done:
+            done.append(share_id)
+            self._save_index(index)
+
     def remove_index_entry(self, instance_id: str) -> None:
         """Drop *instance_id*'s index entry; its folder and files are untouched."""
         _validate_instance_id(instance_id)
@@ -1224,7 +1249,7 @@ class MemoryStore:
             try:
                 if strict:
                     record = _load_object(json_file)
-                    _check_finding_shape(record, json_file)
+                    check_finding_record(record, json_file.name)
                 else:
                     with open(json_file, "r") as fh:
                         record = json.load(fh)

@@ -70,6 +70,7 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
+from servonaut.services.memory.store import MemoryCorruptError, check_finding_record
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
@@ -633,7 +634,12 @@ class MemorySyncService:
         if envelope is None:
             return RemoteRead("absent")
         records = envelope.plaintext.get("findings") if isinstance(envelope.plaintext, dict) else None
-        if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+        try:
+            if not isinstance(records, list):
+                raise MemoryCorruptError("findings are not a list")
+            for record in records:
+                check_finding_record(record, "remote finding")
+        except MemoryCorruptError:
             return RemoteRead("unavailable")
         return RemoteRead("found", records=list(records))
 
