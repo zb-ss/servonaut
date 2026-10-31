@@ -33,6 +33,10 @@ MEMORY_ROOT = Path.home() / ".servonaut" / "memory"
 INDEX_PATH = MEMORY_ROOT / "index.json"
 INDEX_VERSION = 1
 
+# Where a team copy's directory is kept after it was merged into the user's own
+# record. Never deleted by Servonaut; the user may remove it by hand.
+TEAM_COPY_BACKUP_DIR = "team-copy-backups"
+
 # Regex that detects forbidden characters/sequences in instance IDs.
 _UNSAFE_ID_RE = re.compile(r"[/\\]|\.\.")
 
@@ -799,6 +803,68 @@ class MemoryStore:
         if annotations_modified_at is not None:
             entry["annotations_modified_at"] = annotations_modified_at
         self._save_index(index)
+
+    # ------------------------------------------------------------------
+    # Team copies
+    # ------------------------------------------------------------------
+
+    def has_instance_dir(self, instance_id: str, provider: str = "custom") -> bool:
+        """Whether any memory is filed on disk for *instance_id* under *provider*."""
+        _validate_instance_id(instance_id)
+        return self._instance_dir(instance_id, provider).is_dir()
+
+    def backup_instance_dir(
+        self, instance_id: str, provider: str = "custom"
+    ) -> Optional[Path]:
+        """Move an instance's directory under :data:`TEAM_COPY_BACKUP_DIR`.
+
+        Nothing is deleted: the directory keeps every file it held, with the
+        instance's index entry beside them as ``index_entry.json``, and the
+        index no longer lists the instance. A name already taken in the
+        backup directory gets a numeric suffix, so an earlier backup is
+        never replaced.
+
+        Returns the backup path, or ``None`` when there was no directory.
+
+        Raises:
+            ValueError: If *instance_id* or the provider slug is unsafe.
+        """
+        _validate_instance_id(instance_id)
+        slug = _provider_slug(provider)
+        _validate_instance_id(slug)
+        source = self._instance_dir(instance_id, provider)
+        if not source.is_dir():
+            return None
+        entry = self._load_index().get("instances", {}).get(instance_id)
+        target = self._root / TEAM_COPY_BACKUP_DIR / slug / instance_id
+        suffix = 1
+        while target.exists():
+            suffix += 1
+            target = self._root / TEAM_COPY_BACKUP_DIR / slug / f"{instance_id}-{suffix}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        if entry is not None:
+            _atomic_write_json(target / "index_entry.json", entry)
+            self._remove_from_index(instance_id)
+        logger.info("Moved team copy %s/%s to %s", slug, instance_id, target)
+        return target
+
+    def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
+        """Record which server a share is, on its index entry.
+
+        A share gets a new id whenever it is removed and added again; the
+        identity (the recorded instance id, else host, port and login) is how
+        an entry left behind by the old id is matched to the new one. Only an
+        existing entry is updated. Returns whether the entry changed.
+        """
+        _validate_instance_id(instance_id)
+        index = self._load_index()
+        entry = index.get("instances", {}).get(instance_id)
+        if entry is None or entry.get("share_identity") == identity:
+            return False
+        entry["share_identity"] = dict(identity)
+        self._save_index(index)
+        return True
 
     # ------------------------------------------------------------------
     # Findings storage

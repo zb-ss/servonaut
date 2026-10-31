@@ -376,6 +376,12 @@ class InstanceListScreen(Screen):
             exit_on_error=False,
         )
 
+    def _reconcile_team_memory(self) -> None:
+        """Fold the memory of team copies into the user's own servers (see the app)."""
+        reconcile = getattr(self.app, "reconcile_team_memory", None)
+        if callable(reconcile):
+            reconcile()
+
     def _shared_servers_loaded(self, worker: Worker) -> None:
         """List what :meth:`_fetch_shared_servers` found."""
         import logging
@@ -397,6 +403,7 @@ class InstanceListScreen(Screen):
         self._instances = replace_instances(self.app, "shared", found.rows)
         self._update_table()
         self._update_status_bar()
+        self._reconcile_team_memory()
         if found.problems:
             self.app.notify(
                 "Some team servers could not be listed: " + "; ".join(found.problems),
@@ -523,6 +530,7 @@ class InstanceListScreen(Screen):
                     self._update_table()
                     self._update_status_bar()
                     self._report_duplicate_accounts("aws")
+                    self._reconcile_team_memory()
 
                     aws = self.app.provider_inventory("aws")
                     fetch_error = getattr(aws, "last_fetch_error", None)

@@ -2139,6 +2139,46 @@ class ServonautApp(App):
     # App-owned manual fleet scan (survives screen navigation)
     # ------------------------------------------------------------------
 
+    def reconcile_team_memory(self) -> None:
+        """Fold the memory of team copies into the user's own servers.
+
+        Runs once the team's shared servers and the user's own are listed.
+        A team's copy of a server the user owns is merged into the user's
+        own record without losing anything (see
+        :mod:`servonaut.services.memory.team_merge`); the sync service is
+        told which shares are folded so nothing is uploaded for them. The
+        worker has its own group so no other memory work cancels it.
+        """
+        from servonaut.screens._demo_resolve import real_fleet_rows
+
+        if self.memory_service is None:
+            return
+        rows = real_fleet_rows(self)
+        if not rows or not any(row.get("is_shared") is True for row in rows):
+            return
+        self.run_worker(
+            self._do_reconcile_team_memory(rows),
+            name="team_memory_merge",
+            group="memory_team_merge",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _do_reconcile_team_memory(self, rows: list) -> None:
+        from servonaut.services.memory.team_fold import absorbed_share_ids
+        from servonaut.services.memory.team_merge import merge_team_copies
+
+        sync = getattr(self, "memory_sync_service", None)
+        try:
+            if sync is not None:
+                sync.set_folded_instance_ids(absorbed_share_ids(rows))
+            report = await merge_team_copies(self.memory_service, sync, rows)
+        except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
+            logger.exception("Merging team copies of server memory failed")
+            return
+        if report.copies:
+            self.notify(report.message(), markup=False)
+
     def start_fleet_manual_scan(
         self,
         instances: list,
