@@ -179,3 +179,16 @@ async def test_toggling_demo_mode_redraws_names_and_keeps_the_ticks():
         shown = _text(screen, "#keychange-list") + str(screen.query_one(Checkbox).label)
         assert "Real Person" not in shown and "stand-in" in shown
         assert screen.query_one(Checkbox).value is True
+
+
+async def test_service_text_in_a_fingerprint_is_shown_literally_and_never_breaks_the_screen():
+    app = _Host([
+        _change(2, "Lee", previous_fingerprint="[/bold]"),
+        _change(3, "Kim", previous_fingerprint="[link=https://example.test", fingerprint="[@click=app.quit]x"),
+    ])
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        text = _text(app.screen, "#keychange-list")
+        assert "Previous key: [/bold]" in text
+        assert "[link=https://example.te" in text and "[@click=app.quit]x" in text
+        assert app.screen.__class__ is MemberKeyChangeScreen

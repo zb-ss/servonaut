@@ -7,15 +7,19 @@ and its catch-up wraps.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import gc
+import logging
+import warnings
 from typing import Any, Dict, List
 
 import pytest
-from textual.widgets import Button, Checkbox
+from textual.widgets import Button, Checkbox, Select, SelectionList
 
 import servonaut.services.memory.crypto as crypto_module
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
-from servonaut.services.api_client import APIError
+from servonaut.services.api_client import APIError, InsufficientWrapsError
 from servonaut.services.memory.team_service import TeamMemoryService
 from servonaut.services.memory.team_wraps import WrapPinStore
 from tests.test_memory_share_screen import (
@@ -51,8 +55,17 @@ class _KeyBackend(_Backend):
         self.missing: List[Dict[str, Any]] = []
         self.coverage_error: Exception | None = None
         self.wrap_posts: List[Dict[str, Any]] = []
+        self.skip_users: set = set()  # answered as skipped (key_changed) and left missing
+        self.wrap_error: Exception | None = None
+        # Holds the member-key request of one team until released.
+        self.hold_team: str | None = None
+        self.held = asyncio.Event()
+        self.release = asyncio.Event()
 
     async def _get(self, path: str, **kw: Any) -> Dict[str, Any]:
+        if self.hold_team and path == f"/api/v1/memory/keys/team/{self.hold_team}":
+            self.held.set()
+            await self.release.wait()
         if path == COVERAGE:
             self.calls.append(f"GET {path}")
             if self.coverage_error is not None:
@@ -67,10 +80,18 @@ class _KeyBackend(_Backend):
             self.calls.append(f"POST {path}")
             body = kw["json"]
             self.wrap_posts.append(body)
-            stored = {w["recipient_user_id"] for w in body["wraps"]}
-            self.missing = [m for m in self.missing if m["user_id"] not in stored]
-            return {"wraps_stored": len(body["wraps"]), "wraps_unchanged": 0,
-                    "skipped_recipients": []}
+            if self.wrap_error is not None:
+                raise self.wrap_error
+            sent = {w["recipient_user_id"] for w in body["wraps"]}
+            skipped = sent & self.skip_users
+            self.missing = [m for m in self.missing if m["user_id"] not in sent - skipped]
+            for user_id in skipped:  # the member rotated again: the service holds a new key
+                rotated = _member(user_id, f"Lee Member", key_changed=True)
+                self.members = [rotated if m["user_id"] == user_id else m for m in self.members]
+                self.missing = [_descriptor(rotated) if m["user_id"] == user_id else m
+                                for m in self.missing]
+            return {"wraps_stored": len(sent - skipped), "wraps_unchanged": 0,
+                    "skipped_recipients": [{"user_id": u, "reason": "key_changed"} for u in skipped]}
         return await super()._post(path, **kw)
 
 
@@ -116,8 +137,16 @@ def _status(screen) -> str:
     return _text(screen, "#share-status")
 
 
-async def _wait_for_key_screen(app, pilot, screen):
-    await _settle(pilot, screen, lambda: isinstance(app.screen, MemberKeyChangeScreen), "key screen")
+async def _wait_for_key_screen(app, pilot, screen, previous=None):
+    """Wait for a mounted confirmation screen (not *previous*) with its controls."""
+    def ready() -> bool:
+        current = app.screen
+        return (isinstance(current, MemberKeyChangeScreen) and current is not previous
+                and current.is_mounted and bool(current.query(Checkbox))
+                and bool(current.query("#keychange-btn-confirm")))
+
+    await _settle(pilot, screen, ready, "key screen")
+    await pilot.pause()
     return app.screen
 
 
@@ -200,9 +229,7 @@ async def test_keys_that_changed_again_bring_the_screen_back_with_the_new_finger
         backend.members[0] = _member(2, "Lee Member", key_changed=True)
         second_fp = backend.members[0]["fingerprint"]
         await _confirm_keys(pilot, screen, key_screen)
-        await _settle(pilot, screen, lambda: app.screen is not key_screen
-                      and isinstance(app.screen, MemberKeyChangeScreen), "second screen")
-        again = app.screen
+        again = await _wait_for_key_screen(app, pilot, screen, previous=key_screen)
         text = _key_text(again)
         assert crypto_module.short_fingerprint(second_fp) in text
         assert crypto_module.short_fingerprint(first_fp) in text  # shown as the previous key
@@ -349,3 +376,144 @@ async def test_demo_mode_names_stand_ins_in_the_waiting_line_and_the_toast():
         await _confirm_keys(pilot, screen, key_screen)
         await _settle(pilot, screen, lambda: any("now" in n for n in app.notes), "toast")
         assert not any("Lee Member" in n for n in app.notes)
+
+
+# --- the action keeps its context ----------------------------------------
+
+TWO_TEAMS = [{"name": "Team A", "slug": "team-a"}, {"name": "Team B", "slug": "team-b"}]
+
+
+async def test_switching_team_while_sharing_opens_no_confirmation_and_shares_nothing():
+    backend = _KeyBackend(members=[_member(1, "Kim Member"), _member(2, "Lee Member", key_changed=True)])
+    app = _KeyHost(backend, teams=TWO_TEAMS)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        backend.hold_team = "team-a"
+        screen.query_one("#share-btn-confirm", Button).press()
+        await _settle(pilot, screen, lambda: backend.held.is_set(), "the pending key request")
+        backend.hold_team = None
+        screen.query_one("#share-team-select", Select).value = "team-b"
+        await _settle(pilot, screen, lambda: screen._selected_team() == "team-b", "team switch")
+        backend.release.set()
+        await _settle(pilot, screen, lambda: "team changed while sharing" in _status(screen), "message")
+        assert "Nothing was shared" in _status(screen) or "nothing was shared" in _status(screen)
+        assert app.screen is screen
+    assert backend.posted == []
+    assert app.pins.get(SLUG, 2) is None and app.pins.get("team-b", 2) is None
+
+
+async def test_the_retry_after_confirming_uses_the_choices_made_when_sharing_started():
+    backend = _KeyBackend(members=[_member(1, "Kim Member"), _member(2, "Lee Member", key_changed=True)])
+    app = _KeyHost(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        screen.query_one("#share-role-select", Select).value = "member"
+        chosen = list(screen.query_one("#share-modules-list", SelectionList).selected)
+        screen.query_one("#share-btn-confirm", Button).press()
+        key_screen = await _wait_for_key_screen(app, pilot, screen)
+        # The form behind the dialog changes while it is open.
+        screen.query_one("#share-role-select", Select).value = "admin"
+        screen.query_one("#share-modules-list", SelectionList).deselect_all()
+        await _confirm_keys(pilot, screen, key_screen)
+        await _settle(pilot, screen, lambda: backend.posted, "grant")
+    assert backend.posted[-1]["required_role"] == "member"
+    assert backend.posted[-1]["modules"] == chosen
+
+
+async def test_a_key_that_rotated_during_the_share_says_so_and_reloads_the_keys():
+    backend = _KeyBackend(members=[_member(1, "Kim Member")])
+    backend.fail_post = InsufficientWrapsError(
+        code="insufficient_wraps", message="missing", status=422,
+        details={"missing": [{"envelope_id": "e-os", "recipient_user_id": 1}]})
+    app = _KeyHost(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        loads = len([c for c in backend.calls if c.startswith("GET /api/v1/memory/keys/")])
+        screen.query_one("#share-btn-confirm", Button).press()
+        await _settle(pilot, screen, lambda: "key changed while sharing" in _status(screen), "message")
+        assert "Nothing was shared; try again." in _status(screen)
+        await _settle(pilot, screen, lambda: len(
+            [c for c in backend.calls if c.startswith("GET /api/v1/memory/keys/")]) > loads, "key reload")
+
+
+# --- the top-up tells the truth ------------------------------------------
+
+async def test_a_member_the_service_skipped_is_named_and_not_reported_as_shared():
+    backend, _ = _live_with_waiting_member()
+    backend.skip_users = {2}
+    app = _KeyHost(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _live_panel(app, pilot)
+        await _settle(pilot, screen, lambda: screen.query_one("#share-btn-keys", Button).display, "review button")
+        screen.query_one("#share-btn-keys", Button).press()
+        key_screen = await _wait_for_key_screen(app, pilot, screen)
+        await _confirm_keys(pilot, screen, key_screen)
+        await _settle(pilot, screen, lambda: "Could not add Lee Member" in _status(screen), "message")
+        await _settle(pilot, screen, lambda: "waiting for your confirmation"
+                      in _text(screen, "#share-existing-text"), "waiting again")
+        assert not any("shared with Lee Member now" in n for n in app.notes)
+    assert app.pins.get(SLUG, 2) is not None  # the user's confirmation stays
+    assert app.pins.get(SLUG, 2) != backend.members[1]["fingerprint"]  # not the unseen new key
+
+
+async def test_a_busy_service_during_the_top_up_is_retryable_not_a_gone_share():
+    backend, _ = _live_with_waiting_member()
+    backend.wrap_error = APIError(code="conflict_retry", message="busy", status=409)
+    app = _KeyHost(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _live_panel(app, pilot)
+        await _settle(pilot, screen, lambda: screen.query_one("#share-btn-keys", Button).display, "review button")
+        screen.query_one("#share-btn-keys", Button).press()
+        key_screen = await _wait_for_key_screen(app, pilot, screen)
+        await _confirm_keys(pilot, screen, key_screen)
+        await _settle(pilot, screen, lambda: "Try again" in _status(screen), "message")
+        assert "no longer exists" not in _status(screen)
+
+
+# --- workers and logs ----------------------------------------------------
+
+async def test_cancelled_refresh_workers_leave_no_unawaited_coroutine():
+    backend = _KeyBackend(members=[_member(1, "Kim Member")])
+    app = _KeyHost(backend)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        async with app.run_test(size=(120, 50)) as pilot:
+            screen = await _open(app, pilot)
+            for _ in range(5):  # each exclusive start cancels the one before it
+                screen._start_refresh(reload=True)
+            await pilot.pause(0.3)
+        gc.collect()
+    assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
+
+
+async def test_a_failed_top_up_logs_the_error_type_not_the_service_text(caplog):
+    backend, _ = _live_with_waiting_member()
+    backend.wrap_error = APIError(code="x", message="Team Secret Name is unhappy", status=500)
+    app = _KeyHost(backend)
+    caplog.set_level(logging.DEBUG)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _live_panel(app, pilot)
+        await _settle(pilot, screen, lambda: screen.query_one("#share-btn-keys", Button).display, "review button")
+        screen.query_one("#share-btn-keys", Button).press()
+        key_screen = await _wait_for_key_screen(app, pilot, screen)
+        await _confirm_keys(pilot, screen, key_screen)
+        await _settle(pilot, screen, lambda: "Could not share the latest" in _status(screen), "message")
+    assert "Team Secret Name" not in caplog.text and "APIError" in caplog.text
+
+
+async def test_a_failed_share_state_load_logs_the_error_type_not_the_service_text(caplog):
+    backend = _KeyBackend(members=[_member(1, "Kim Member")])
+    original = backend._get
+
+    async def failing(path, **kw):
+        if path.startswith("/api/v1/memory/keys/team/"):
+            raise APIError(code="x", message="Team Secret Name is unhappy", status=500)
+        return await original(path, **kw)
+
+    backend.api.get.side_effect = failing
+    app = _KeyHost(backend)
+    caplog.set_level(logging.DEBUG)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = app.screen
+        await _settle(pilot, screen, lambda: "Could not check the share" in _status(screen), "message")
+    assert "Team Secret Name" not in caplog.text

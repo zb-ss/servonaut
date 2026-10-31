@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, List, Literal, Optional
 
-from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -28,6 +27,16 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 Mode = Literal["share", "catch_up"]
+
+
+def escape(text: str) -> str:
+    """*text* with every ``[`` literal.
+
+    Service text (names, fingerprints) must never be read as markup. Rich's
+    escape leaves an unterminated ``[link=...`` alone, and Textual then refuses
+    to render it, so every bracket is escaped here.
+    """
+    return text.replace("[", "\\[")
 
 
 def _changed_on(raw: Optional[str]) -> Optional[str]:
@@ -77,13 +86,13 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
     def _describe(self, change: KeyChange) -> str:
         lines = [
             f"[bold]{escape(self._shown_name(change))}[/bold]",
-            f"New key: {short_fingerprint(change.fingerprint)}",
+            f"New key: {escape(short_fingerprint(change.fingerprint))}",
         ]
         if change.previous_fingerprint:
-            lines.append(f"Previous key: {short_fingerprint(change.previous_fingerprint)}")
+            lines.append(f"Previous key: {escape(short_fingerprint(change.previous_fingerprint))}")
         when = _changed_on(change.rotated_at)
         if when:
-            lines.append(f"Changed on: {when}")
+            lines.append(f"Changed on: {escape(when)}")
         return "\n".join(lines)
 
     def compose(self) -> ComposeResult:

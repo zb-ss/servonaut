@@ -15,8 +15,10 @@ modules / member key fetch / share) felt out of place as a popup.
 
 from __future__ import annotations
 
+import functools
 import logging
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -67,6 +69,29 @@ def _names(app: Any, names: List[str]) -> str:
     from rich.markup import escape
 
     return escape(_shown_names(app, names))
+
+
+@dataclass(frozen=True)
+class _ShareAction:
+    """What one Share, Share again or Review click is about.
+
+    Fixed when the button is pressed: a slow request, a key dialog and the
+    retry after it all keep to this, whatever the form shows by then.
+    ``modules`` is None for a share of every module.
+    """
+
+    team_slug: str
+    instance_id: str
+    role: str
+    modules: Optional[Tuple[str, ...]]
+    grant_id: Optional[str] = None
+
+
+def _failure(exc: Exception) -> str:
+    """The error's type (and HTTP status) for a log line; the service's text can name people."""
+    status = getattr(exc, "status", None)
+    name = type(exc).__name__
+    return f"{name} (HTTP {status})" if isinstance(status, int) else name
 
 
 def _module_options() -> List[tuple[str, str, bool]]:
@@ -295,7 +320,7 @@ class ShareInstanceScreen(Screen):
             self.app.pop_screen()
             self.app.push_screen(UpsellModal("memory_team_share"))
             return
-        self.run_worker(self._load_teams(), group="memory_fleet", name="share_load_teams")
+        self.run_worker(self._load_teams, group="memory_fleet", name="share_load_teams")
 
     async def _load_teams(self) -> None:
         auth = getattr(self.app, "auth_service", None)
@@ -393,8 +418,10 @@ class ShareInstanceScreen(Screen):
             self._start_refresh(reload=False)
 
     def _start_refresh(self, *, reload: bool) -> None:
+        # A callable, not a coroutine: a newer exclusive worker cancels this one
+        # before it starts, and a coroutine nobody awaits raises a RuntimeWarning.
         self.run_worker(
-            self._refresh_form(reload),
+            functools.partial(self._refresh_form, reload),
             group="memory_share_form",
             name="share_refresh",
             exclusive=True,
@@ -416,7 +443,7 @@ class ShareInstanceScreen(Screen):
                 self._keys_by_team[slug] = await team_memory_service.list_team_member_keys(slug)
                 self._grant = await team_memory_service.find_live_grant(slug, self._instance_id())
             except Exception as exc:  # noqa: BLE001 — a worker reports, never crashes the screen
-                logger.error("Could not load the share state: %s", exc)
+                logger.error("Could not load the share state: %s", _failure(exc))
                 self._grant = None
                 self._waiting = []
                 self._keys_by_team.pop(slug, None)
@@ -530,18 +557,22 @@ class ShareInstanceScreen(Screen):
     def _member_label(change: Any) -> str:
         return change.name or f"member {change.user_id}"
 
-    def _gone(self, exc: Exception) -> bool:
+    def _gone(self, exc: Exception, team_slug: Optional[str] = None) -> bool:
         """True (after saying so) when the service no longer knows the share.
 
         A revoke or purge answered 404: the share was removed meanwhile, so
         the form is refreshed to what is shared now instead of showing a
-        raw status.
+        raw status. An action for a team the form no longer shows only says
+        so and leaves the form alone.
         """
         from servonaut.services.api_client import APIError
         from servonaut.services.memory.team_service import ShareGoneError
 
         if not (isinstance(exc, ShareGoneError) or (isinstance(exc, APIError) and exc.status == 404)):
             return False
+        if team_slug is not None and team_slug != self._selected_team():
+            self.app.notify("That share no longer exists.", markup=False)
+            return True
         self._grant = None
         self._waiting = []
         self._keys_by_team.pop(self._selected_team(), None)
@@ -568,21 +599,23 @@ class ShareInstanceScreen(Screen):
         button_id = event.button.id
         self._status_locked = False
         if button_id == "share-btn-confirm":
-            self.run_worker(self._do_share(), group="memory_share", name="share_execute", exclusive=True)
+            self._start_action(self._do_share, name="share_execute")
         elif button_id == "share-btn-cancel":
             self.action_cancel()
         elif button_id == "share-btn-revoke":
-            self.run_worker(self._do_revoke(), group="memory_share", name="share_revoke", exclusive=True)
+            self.run_worker(self._do_revoke, group="memory_share", name="share_revoke", exclusive=True)
         elif button_id == "share-btn-reshare":
-            self.run_worker(self._do_reshare(), group="memory_share", name="share_again", exclusive=True)
+            self._start_action(self._do_reshare, name="share_again")
         elif button_id == "share-btn-keys":
-            self._ask_keys(list(self._waiting), mode="catch_up")
+            action = self._review_action()
+            if action is not None:
+                self._ask_keys(list(self._waiting), action, mode="catch_up")
         elif button_id == "share-btn-purge":
             self.app.push_screen(PurgeCopiesModal(), self._on_purge_answer)
 
     def _on_purge_answer(self, confirmed: Optional[bool]) -> None:
         if confirmed:
-            self.run_worker(self._do_purge(), group="memory_share", name="share_purge", exclusive=True)
+            self.run_worker(self._do_purge, group="memory_share", name="share_purge", exclusive=True)
 
     def _form_choices(self) -> Optional[tuple]:
         """``(team, role, modules)`` from the form, or None after saying why."""
@@ -598,8 +631,45 @@ class ShareInstanceScreen(Screen):
             return None
         return team_slug, role, modules
 
-    async def _do_share(self) -> None:
-        from servonaut.services.memory.team_service import GrantAlreadyExistsError, KeyChangedError
+    def _start_action(self, work: Any, *, name: str) -> None:
+        """Run Share or Share again for the choices on the form right now."""
+        choices = self._form_choices()
+        if choices is None:
+            return
+        team_slug, role, modules = choices
+        grant = self._grant
+        action = _ShareAction(
+            team_slug=team_slug, instance_id=self._instance_id(), role=role,
+            modules=tuple(modules), grant_id=grant.id if grant is not None else None,
+        )
+        self.run_worker(
+            functools.partial(work, action), group="memory_share", name=name, exclusive=True,
+        )
+
+    def _review_action(self) -> Optional[_ShareAction]:
+        """The action behind the review button: the live share, as it is now."""
+        grant = self._grant
+        if grant is None:
+            return None
+        return _ShareAction(
+            team_slug=self._selected_team(), instance_id=self._instance_id(),
+            role=grant.required_role,
+            modules=tuple(grant.modules) if grant.modules is not None else None,
+            grant_id=grant.id,
+        )
+
+    def _key_race(self, team_slug: str) -> None:
+        """Say that a member's key changed during the share, and read the keys again."""
+        self._keys_by_team.pop(team_slug, None)
+        self._start_refresh(reload=True)
+        self._show_error("A member's key changed while sharing. Nothing was shared; try again.")
+
+    async def _do_share(self, action: _ShareAction) -> None:
+        from servonaut.services.memory.team_service import (
+            GrantAlreadyExistsError,
+            InsufficientWrapsRequired,
+            KeyChangedError,
+        )
 
         team_memory_service = getattr(self.app, "team_memory_service", None)
         status = self.query_one("#share-status", Static)
@@ -607,35 +677,34 @@ class ShareInstanceScreen(Screen):
             self._say(status, "[$text-error]Team memory service not available.[/$text-error]")
             return
         try:
-            choices = self._form_choices()
-            if choices is None:
-                return
-            team_slug, role, modules = choices
             self._say(status, "[$text-warning]Fetching member keys…[/$text-warning]")
-            member_keys = await team_memory_service.list_team_member_keys(team_slug)
+            member_keys = await team_memory_service.list_team_member_keys(action.team_slug)
             self._say(status, "[$text-warning]Sharing…[/$text-warning]")
             grant = await team_memory_service.share_instance(
-                team_slug=team_slug,
-                instance_id=self._instance_id(),
-                required_role=role,
-                modules=modules,
+                team_slug=action.team_slug,
+                instance_id=action.instance_id,
+                required_role=action.role,
+                modules=list(action.modules or ()),
                 member_pubkeys=member_keys,
             )
         except KeyChangedError as exc:
             self._say(status, "")
-            self._ask_keys(exc.changes, mode="share", again=False)
+            self._ask_keys(exc.changes, action, mode="share", again=False)
             return
         except GrantAlreadyExistsError:
             # Someone shared it meanwhile: show that share instead of failing.
-            self._keys_by_team.pop(self._selected_team(), None)
+            self._keys_by_team.pop(action.team_slug, None)
             self._start_refresh(reload=True)
             self._show_error("This server is already shared with that team.")
             return
+        except InsufficientWrapsRequired:
+            self._key_race(action.team_slug)
+            return
         except Exception as exc:  # noqa: BLE001 — shown to the user, not raised from a worker
-            logger.error("Share failed: %s", exc)
+            logger.error("Share failed: %s", _failure(exc))
             self._show_error(self._explain("Share failed", exc))
             return
-        self._finish_share(team_slug, grant)
+        self._finish_share(action.team_slug, grant)
 
     def _finish_share(self, team_slug: str, grant: Any) -> None:
         """Tell the user it worked; stay open when someone cannot read it yet."""
@@ -653,6 +722,8 @@ class ShareInstanceScreen(Screen):
         if not pending:
             self.app.pop_screen()
             return
+        if self._selected_team() != team_slug:
+            return  # the form shows another team now; leave it alone
         self._grant = grant
         self._say_to("#share-status",
             "[$text-success]Shared successfully.[/$text-success]"
@@ -669,7 +740,7 @@ class ShareInstanceScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             if self._gone(exc):
                 return
-            logger.error("Revoke failed: %s", exc)
+            logger.error("Revoke failed: %s", _failure(exc))
             self._show_error(self._explain("Revoke failed", exc))
             return
         self.app.notify("Sharing stopped. Members can no longer read it.", markup=False)
@@ -677,33 +748,34 @@ class ShareInstanceScreen(Screen):
         self._say_to("#share-status", "")
         self._render_form(team_slug)
 
-    async def _do_reshare(self) -> None:
-        grant, team_slug = self._grant, self._selected_team()
+    async def _do_reshare(self, action: _ShareAction) -> None:
         service = getattr(self.app, "team_memory_service", None)
-        if grant is None or service is None:
+        if action.grant_id is None or service is None:
             return
-        choices = self._form_choices()
-        if choices is None:
-            return
-        _, role, modules = choices
-        from servonaut.services.memory.team_service import KeyChangedError
+        from servonaut.services.memory.team_service import InsufficientWrapsRequired, KeyChangedError
 
+        team_slug = action.team_slug
         status = self.query_one("#share-status", Static)
         try:
             self._say(status, "[$text-warning]Sharing again…[/$text-warning]")
             member_keys = await service.list_team_member_keys(team_slug)
             new_grant = await service.reshare_instance(
-                team_slug, grant.id, self._instance_id(), role, modules, member_keys,
+                team_slug, action.grant_id, action.instance_id, action.role,
+                list(action.modules or ()), member_keys,
             )
         except KeyChangedError as exc:
             # Raised before the revoke: nothing changed, the share is intact.
             self._say(status, "")
-            self._ask_keys(exc.changes, mode="share", again=True)
+            self._ask_keys(exc.changes, action, mode="share", again=True)
+            return
+        except InsufficientWrapsRequired:
+            # The revoke went through: the form shows what is shared now.
+            self._key_race(team_slug)
             return
         except Exception as exc:  # noqa: BLE001
-            if self._gone(exc):
+            if self._gone(exc, team_slug):
                 return
-            logger.error("Share again failed: %s", exc)
+            logger.error("Share again failed: %s", _failure(exc))
             # The revoke may have gone through: show what is true now.
             self._keys_by_team.pop(team_slug, None)
             self._start_refresh(reload=True)
@@ -712,16 +784,20 @@ class ShareInstanceScreen(Screen):
         self._keys_by_team[team_slug] = member_keys
         self._finish_share(team_slug, new_grant)
 
-    def _ask_keys(self, changes: List[Any], *, mode: str, again: bool = False) -> None:
-        """Open the confirmation for *changes*; act on the answer."""
-        team_slug = self._selected_team()
+    def _ask_keys(
+        self, changes: List[Any], action: _ShareAction, *, mode: str, again: bool = False
+    ) -> None:
+        """Open the confirmation for *changes*; act on the answer for *action*."""
+        if self._selected_team() != action.team_slug:
+            self._show_error("The team changed while sharing; nothing was shared.")
+            return
 
         def answered(confirmed: Optional[List[Any]]) -> None:
             if not confirmed:
                 self._show_error(self._cancelled_keys(changes))
                 return
             self.run_worker(
-                self._after_confirmation(team_slug, confirmed, mode, again),
+                functools.partial(self._after_confirmation, action, confirmed, mode, again),
                 group="memory_share", name="share_confirm_keys", exclusive=True,
             )
 
@@ -732,47 +808,54 @@ class ShareInstanceScreen(Screen):
         return f"Nothing was changed. {who} cannot read it until you confirm the new key."
 
     async def _after_confirmation(
-        self, team_slug: str, confirmed: List[Any], mode: str, again: bool
+        self, action: _ShareAction, confirmed: List[Any], mode: str, again: bool
     ) -> None:
         """Record the confirmed keys, then do what they were needed for."""
         service = getattr(self.app, "team_memory_service", None)
         if service is None:
             return
         try:
-            service.confirm_member_keys(team_slug, confirmed)
+            service.confirm_member_keys(action.team_slug, confirmed)
         except (OSError, ValueError, MemoryBackendError) as exc:
             logger.error("Could not save the confirmed keys: %s", type(exc).__name__)
             self._show_error("Could not save the confirmed keys. Nothing was changed.")
             return
         if mode == "catch_up":
-            await self._top_up(team_slug)
+            await self._top_up(action)
         elif again:
-            await self._do_reshare()
+            await self._do_reshare(action)
         else:
-            await self._do_share()
+            await self._do_share(action)
 
-    async def _top_up(self, team_slug: str) -> None:
+    async def _top_up(self, action: _ShareAction) -> None:
         """Seal the latest snapshots for the members whose key was just confirmed."""
-        grant = self._grant
         service = getattr(self.app, "team_memory_service", None)
-        if grant is None or service is None:
+        if action.grant_id is None or service is None:
             return
+        team_slug = action.team_slug
         self._say_to("#share-status", "[$text-warning]Sharing the latest snapshots…[/$text-warning]")
         try:
             result = await service.top_up_grant(
-                team_slug, grant.id, self._instance_id(), grant.modules
+                team_slug, action.grant_id, action.instance_id,
+                list(action.modules) if action.modules is not None else None,
             )
         except Exception as exc:  # noqa: BLE001
-            if self._gone(exc):
+            if self._gone(exc, team_slug):
                 return
-            logger.error("Top-up failed: %s", exc)
+            logger.error("Top-up failed: %s", _failure(exc))
             self._show_error(self._explain("Could not share the latest snapshots", exc))
             return
         self._say_to("#share-status", "")
         if result.sealed_names:
             who = _shown_names(self.app, list(result.sealed_names))
             self.app.notify(f"The latest snapshots are shared with {who} now.", markup=False)
-        else:
+        if result.skipped_names:
+            who = _shown_names(self.app, list(result.skipped_names))
+            self._show_error(
+                f"Could not add {who}: their key changed meanwhile. "
+                "Review the share to confirm the new key."
+            )
+        elif not result.sealed_names:
             self.app.notify("Keys confirmed. There was nothing to share right now.", markup=False)
         self._keys_by_team.pop(team_slug, None)
         self._start_refresh(reload=True)
@@ -787,7 +870,7 @@ class ShareInstanceScreen(Screen):
         except Exception as exc:  # noqa: BLE001
             if self._gone(exc):
                 return
-            logger.error("Purge failed: %s", exc)
+            logger.error("Purge failed: %s", _failure(exc))
             self._show_error(self._explain("Could not delete the copies", exc))
             return
         self.app.notify(
