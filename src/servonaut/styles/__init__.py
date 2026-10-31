@@ -42,4 +42,5 @@ CSS_FILES = [
     _S / "screens/vault.tcss",
     _S / "screens/db_vault.tcss",
     _S / "screens/findings.tcss",
+    _S / "screens/memory_key_change.tcss",
 ]

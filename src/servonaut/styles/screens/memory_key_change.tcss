@@ -1,0 +1,48 @@
+/* Confirm changed memory keys (Share / catch-up). The scroll holds the text
+   and the checkboxes; the button row sits below it, so it stays visible on a
+   short terminal. */
+#keychange-outer {
+    width: 1fr;
+    height: 100%;
+    padding: 1 2;
+    align: center top;
+    background: $surface;
+}
+
+#keychange-container {
+    width: 80%;
+    max-width: 90;
+    height: 100%;
+    border: round $primary;
+    background: $surface;
+    padding: 1 2;
+}
+
+#keychange-title {
+    margin-bottom: 1;
+}
+
+#keychange-scroll {
+    height: 1fr;
+}
+
+#keychange-body,
+#keychange-list {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.keychange-item {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#keychange-btn-row {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+#keychange-btn-row Button {
+    margin-left: 1;
+}
