@@ -489,6 +489,8 @@ key. Those values are stored separately with operating-system key protection.
 | `vault.poll_after_seconds` | int | Poll interval used when a live vault-event connection is unavailable. |
 | `vault.approval_poll_initial_seconds` / `vault.approval_poll_max_seconds` | number | Initial and capped delay while a new device waits for approval. |
 | `vault.agent_key_ttl_seconds` | int | Maximum lifetime of a key loaded into the private SSH agent. |
+| `vault.binding_read_cache_seconds` | number | How long Servonaut reuses its last check of which vault key one of your own servers is bound to (default `60`). Reviews that cover all your servers, such as Auto-bind or the check before a key is deleted, then send fewer requests. Deleting a key and binding a server always check again. `0` checks every time. A binding made on another computer can take this long to show here. |
+| `vault.binding_read_backoff_seconds` | number | How long Servonaut stops checking server bindings after the service refuses a check (default `60`). It applies when the service limits requests without saying how long to wait, or does not accept the sign-in. A sign-in pause ends as soon as you sign in again. |
 
 Native vault SSH keys are loaded into a private session agent and are never
 written as a key file. For unattended test environments only,

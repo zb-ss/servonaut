@@ -25,6 +25,8 @@ def _config(*, auto_grant: bool = True) -> SimpleNamespace:
     return SimpleNamespace(vault=SimpleNamespace(
         allow_file_key_store=False,
         request_timeout_seconds=30.0,
+        binding_read_cache_seconds=60.0,
+        binding_read_backoff_seconds=60.0,
         strict_verification=False,
         auto_grant=auto_grant,
         agent_key_ttl_seconds=60,
@@ -499,7 +501,7 @@ async def test_personal_binding_is_read_from_signed_canonical_endpoint() -> None
 
     api = SignedApi()
     service = VaultCommandService(api, SimpleNamespace(user_id=1), _config())
-    service.store.signer = lambda: object()  # type: ignore[method-assign]
+    service.store.signer = lambda: SimpleNamespace(device_id="device-1")  # type: ignore[method-assign]
 
     binding, target = await service._credential_binding({"provider": "AWS", "id": "i-abc_123"})
 
@@ -1161,8 +1163,9 @@ async def test_personal_binding_uses_canonical_target_and_advances_verified_revi
     service.items = Items()  # type: ignore[assignment]
     service.bindings = Bindings()  # type: ignore[assignment]
 
-    async def existing(provider, instance_id):
-        assert (provider, instance_id) == ("aws", "i-abc")
+    async def existing(provider, instance_id, *, fresh=False):
+        # The revision is computed from the stored binding, never a reused read.
+        assert (provider, instance_id, fresh) == ("aws", "i-abc", True)
         return ({"binding_revision": 4}, "instance:aws:i-abc")
 
     service._personal_binding = existing  # type: ignore[method-assign]
@@ -1966,7 +1969,7 @@ async def test_bind_personal_for_a_custom_server_signs_the_custom_target() -> No
     )
 
     route_id = custom_binding_id("Web 1")
-    service._personal_binding.assert_awaited_once_with("custom", route_id)
+    service._personal_binding.assert_awaited_once_with("custom", route_id, fresh=True)
     provider, instance_id, binding = service.bindings.put_personal_binding.await_args.args
     assert (provider, instance_id) == ("custom", route_id)
     assert binding["target"] == f"instance:custom:{route_id}"

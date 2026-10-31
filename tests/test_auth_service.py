@@ -707,6 +707,34 @@ def test_refresh_invalid_grant_sets_revoked_flag(tmp_path, monkeypatch):
     assert svc._token is not None
 
 
+def test_a_refused_refresh_token_is_not_presented_again(tmp_path, monkeypatch):
+    """Each 401 of a loop over many servers used to post the dead token again."""
+    svc, auth_file = _seed_authed_service(tmp_path, monkeypatch, "R0")
+
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    fake_client.post = AsyncMock(return_value=_FakeResponse(
+        400, {"error": {"code": "invalid_grant", "message": "revoked"}},
+    ))
+
+    with patch(
+        "servonaut.services.auth_service.httpx.AsyncClient",
+        return_value=fake_client,
+    ):
+        assert run(svc.refresh_token()) is False
+        assert run(svc.refresh_token()) is False
+        assert run(svc.refresh_token()) is False
+        assert fake_client.post.await_count == 1
+
+        # Any other refresh token is still presented.
+        stored = json.loads(auth_file.read_text())
+        auth_file.write_text(json.dumps({**stored, "refresh_token": "R1"}))
+        svc._token.refresh_token = "R1"
+        assert run(svc.refresh_token()) is False
+        assert fake_client.post.await_count == 2
+
+
 def test_refresh_429_is_transient_keeps_session(tmp_path, monkeypatch):
     """Per-IP rate limiter returns 429 under burst; that must NOT log the
     user out. The token stays usable; the next 401-retry will try again.

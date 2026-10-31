@@ -100,10 +100,11 @@ def _name_cell(instance: dict, max_width: Optional[int], *, shared: bool = False
 
 
 def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]:
-    """What the search box matches: name, type, id, provider and account.
+    """What the search box matches: name, type, id, provider, account and IPs.
 
     ``shared`` and the team's name match a team's server, and one of the
-    user's own servers that a team shares too.
+    user's own servers that a team shares too. A custom server keeps its
+    host in both IP fields, so its hostname matches as well.
     """
     fields = [
         instance.get("name"),
@@ -111,6 +112,8 @@ def _search_fields(instance: dict, shared_with: Sequence[str] = ()) -> List[str]
         instance.get("id"),
         instance.get("provider"),
         instance.get("account") if instance.get("account_qualified") else None,
+        instance.get("public_ip"),
+        instance.get("private_ip"),
     ]
     if shared_with:
         fields.extend(["shared", *shared_with])

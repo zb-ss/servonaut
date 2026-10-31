@@ -1889,6 +1889,11 @@ def add_routes(app: web.Application, store: ScenarioStore, vault: VaultCloud) ->
     personal_providers = {"aws", "ovh", "hetzner", "custom"}
 
     async def binding_get(request: web.Request, device: Optional[_Device]) -> web.Response:
+        retry_after = store.snapshot().binding_reads_retry_after
+        if retry_after is not None:
+            response = _error("rate_limited", "Too many requests", 429)
+            response.headers["Retry-After"] = str(retry_after)
+            return response
         if request.match_info["provider"] not in personal_providers:
             return _not_found()
         assert device is not None
