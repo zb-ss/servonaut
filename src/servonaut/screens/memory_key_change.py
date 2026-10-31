@@ -23,7 +23,9 @@ from textual.widgets import Button, Checkbox, Footer, Static
 from servonaut.services.memory.crypto import short_fingerprint
 from servonaut.services.memory.team_service import display_name
 from servonaut.services.memory.team_wraps import KeyChange
-from servonaut.utils.markup import escape_markup
+from textual.content import Content
+
+from servonaut.utils.markup import literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -74,17 +76,20 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
             return "Trust checked keys"
         return "Trust and share again" if self._again else "Trust and share"
 
-    def _describe(self, change: KeyChange) -> str:
-        lines = [
-            f"[bold]{escape_markup(self._shown_name(change))}[/bold]",
-            f"New key: {escape_markup(short_fingerprint(change.fingerprint))}",
+    def _describe(self, change: KeyChange) -> Content:
+        parts = [
+            literal(self._shown_name(change), "bold"),
+            Content(f"\nNew key: {short_fingerprint(change.fingerprint)}"),
         ]
         if change.previous_fingerprint:
-            lines.append(f"Previous key: {escape_markup(short_fingerprint(change.previous_fingerprint))}")
+            parts.append(Content(f"\nPrevious key: {short_fingerprint(change.previous_fingerprint)}"))
         when = _changed_on(change.rotated_at)
         if when:
-            lines.append(f"Changed on: {escape_markup(when)}")
-        return "\n".join(lines)
+            parts.append(Content(f"\nChanged on: {when}"))
+        return Content.assemble(*parts)
+
+    def _check_label(self, change: KeyChange) -> Content:
+        return Content.assemble(self._shown_name(change), "'s key matches")
 
     def compose(self) -> ComposeResult:
         many = len(self._changes) > 1
@@ -119,7 +124,7 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
                                 with Vertical(classes="keychange-item"):
                                     yield Static(self._describe(change), classes="keychange-details")
                                     yield Checkbox(
-                                        f"{escape_markup(self._shown_name(change))}'s key matches",
+                                        self._check_label(change),
                                         id=f"keychange-check-{index}",
                                     )
                     with Horizontal(id="keychange-btn-row"):
@@ -133,20 +138,18 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
     def on_mount(self) -> None:
         self.query_one("#keychange-btn-cancel", Button).focus()
 
-    def _say(self, widget: Static, markup: str) -> None:
-        """Write *markup*; the demo-mode scrub is a second line of defence after the stand-in names."""
+    def _say(self, widget: Static, content: Content) -> None:
+        """Write *content*; the demo-mode scrub is a second line of defence after the stand-in names."""
         redaction = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redaction is not None:
-            markup = redaction.scrub_stream(markup)
-        widget.update(markup)
+            content = scrub(content, redaction.scrub_stream)
+        widget.update(content)
 
     def refresh_after_demo_toggle(self) -> None:
         """Redraw the member names for the new demo mode; the ticks stay."""
         for index, change in enumerate(self._changes):
             self._say(self.query(".keychange-details")[index], self._describe(change))
-            self.query_one(f"#keychange-check-{index}", Checkbox).label = (
-                f"{escape_markup(self._shown_name(change))}'s key matches"
-            )
+            self.query_one(f"#keychange-check-{index}", Checkbox).label = self._check_label(change)
 
     def _ticked(self) -> List[KeyChange]:
         return [

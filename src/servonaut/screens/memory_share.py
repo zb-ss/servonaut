@@ -15,14 +15,16 @@ modules / member key fetch / share) felt out of place as a popup.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Container, Horizontal, ScrollableContainer, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Label, Select, SelectionList, Static
@@ -31,7 +33,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
 from servonaut.services.memory.interfaces import MemoryBackendError
-from servonaut.utils.markup import escape_markup
+from servonaut.utils.markup import escape_markup, literal, scrub
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -68,6 +70,21 @@ def _shown_names(app: Any, names: List[str]) -> str:
 def _names(app: Any, names: List[str]) -> str:
     """Markup-safe, comma-separated names; stand-ins in demo mode."""
     return escape_markup(_shown_names(app, names))
+
+
+# What the form says about a member the service did not add, by skip reason.
+_SKIPPED_WORDING = {
+    "key_changed": (
+        "Could not add {who}: their key changed meanwhile. "
+        "Review the share to confirm the new key."
+    ),
+    "no_memory_key": (
+        "Could not add {who}: no memory key at the moment. "
+        "They need to set up Memory Sync again."
+    ),
+    "not_eligible": "Could not add {who}: can no longer read this share.",
+    "unconfirmed": "Could not add {who}: the service did not confirm it; try again.",
+}
 
 
 @dataclass(frozen=True)
@@ -352,15 +369,15 @@ class ShareInstanceScreen(Screen):
             return redaction.redact_name(name)
         return name
 
-    def _say(self, widget: Static, markup: str) -> None:
-        """Write one status text.
+    def _say(self, widget: Static, markup: Union[str, Content]) -> None:
+        """Write one status text (markup, or literal content).
 
         Service text never gets here in demo mode (see :meth:`_explain`);
         the scrub is the second line of defence for anything else.
         """
         redaction = getattr(self.app, "redaction_service", None)
         if getattr(self.app, "demo_mode", False) and redaction is not None:
-            markup = redaction.scrub_stream(markup)
+            markup = scrub(markup, redaction.scrub_stream)
         widget.update(markup)
 
     def _explain(self, what: str, exc: Exception) -> str:
@@ -372,7 +389,7 @@ class ShareInstanceScreen(Screen):
         from servonaut.services.memory.team_service import UnusableMemberKeyError
 
         if isinstance(exc, UnusableMemberKeyError):
-            who = _names(self.app, exc.names)
+            who = _shown_names(self.app, exc.names)
             return (
                 f"{what}: the service sent a memory key for {who} that does not "
                 "match its fingerprint. Nothing was changed."
@@ -381,7 +398,7 @@ class ShareInstanceScreen(Screen):
             return f"{what}. Turn demo mode off to see why."
         return f"{what}: {exc}"
 
-    def _say_to(self, selector: str, markup: str) -> None:
+    def _say_to(self, selector: str, markup: Union[str, Content]) -> None:
         self._say(self.query_one(selector, Static), markup)
 
     def refresh_after_demo_toggle(self) -> None:
@@ -578,9 +595,7 @@ class ShareInstanceScreen(Screen):
 
     def _show_error(self, message: str) -> None:
         self._status_locked = True
-        self._say_to("#share-status",
-            f"[$text-error]{escape_markup(message)}[/$text-error]"
-        )
+        self._say_to("#share-status", literal(message, "$text-error"))
 
     # ------------------------------------------------------------------
     # Actions
@@ -809,7 +824,7 @@ class ShareInstanceScreen(Screen):
         if service is None:
             return
         try:
-            service.confirm_member_keys(action.team_slug, confirmed)
+            await asyncio.to_thread(service.confirm_member_keys, action.team_slug, confirmed)
         except (OSError, ValueError, MemoryBackendError) as exc:
             logger.error("Could not save the confirmed keys: %s", type(exc).__name__)
             self._show_error("Could not save the confirmed keys. Nothing was changed.")
@@ -844,15 +859,22 @@ class ShareInstanceScreen(Screen):
             who = _shown_names(self.app, list(result.sealed_names))
             self.app.notify(f"The latest snapshots are shared with {who} now.", markup=False)
         if result.skipped_names:
-            who = _shown_names(self.app, list(result.skipped_names))
-            self._show_error(
-                f"Could not add {who}: their key changed meanwhile. "
-                "Review the share to confirm the new key."
-            )
+            self._show_error(self._skipped_text(result))
         elif not result.sealed_names:
             self.app.notify("Keys confirmed. There was nothing to share right now.", markup=False)
         self._keys_by_team.pop(team_slug, None)
         self._start_refresh(reload=True)
+
+    def _skipped_text(self, result: Any) -> str:
+        """One sentence per skip reason; only a changed key points to the review."""
+        by_reason: Dict[str, List[str]] = {}
+        for name, reason in zip(result.skipped_names, result.skipped_reasons):
+            by_reason.setdefault(reason, []).append(name)
+        sentences = []
+        for reason, names in by_reason.items():
+            who = _shown_names(self.app, names)
+            sentences.append(_SKIPPED_WORDING.get(reason, _SKIPPED_WORDING["unconfirmed"]).format(who=who))
+        return " ".join(sentences)
 
     async def _do_purge(self) -> None:
         grant, team_slug = self._grant, self._selected_team()
