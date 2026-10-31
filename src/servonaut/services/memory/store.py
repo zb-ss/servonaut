@@ -314,10 +314,15 @@ class MemoryStore:
         self,
         instance_id: str,
         provider: str = "custom",
+        *,
+        strict: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
         """Return all stored modules for *instance_id* as ``{module: data}``.
 
-        Missing or corrupt modules are silently omitted.
+        Missing or corrupt modules are silently omitted. With ``strict`` a
+        module file that cannot be read or parsed raises ``OSError`` or
+        ``ValueError`` instead, so a caller that must not mistake it for an
+        absent module can tell the two apart.
         """
         _validate_instance_id(instance_id)
         result: Dict[str, Dict[str, Any]] = {}
@@ -341,6 +346,8 @@ class MemoryStore:
                     with open(json_file, "r") as fh:
                         result[module_name] = json.load(fh)
                 except (json.JSONDecodeError, OSError) as exc:
+                    if strict:
+                        raise
                     logger.warning(
                         "Skipping corrupt module file %s: %s", json_file, exc
                     )
@@ -698,6 +705,23 @@ class MemoryStore:
             pass
         return ""
 
+    def read_annotations_strict(
+        self,
+        instance_id: str,
+        provider: str = "custom",
+    ) -> str:
+        """Like :meth:`read_annotations`, but an unreadable file raises.
+
+        ``""`` means there is no annotations file (or it is empty). A file
+        that exists and cannot be read or decoded raises ``OSError`` or
+        ``ValueError`` (``UnicodeDecodeError``), so a caller that rewrites
+        the notes never treats unreadable text as empty.
+        """
+        path = self.get_annotations_path(instance_id, provider)
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
+
     def write_annotations(
         self,
         instance_id: str,
@@ -811,6 +835,7 @@ class MemoryStore:
     def has_instance_dir(self, instance_id: str, provider: str = "custom") -> bool:
         """Whether any memory is filed on disk for *instance_id* under *provider*."""
         _validate_instance_id(instance_id)
+        _validate_instance_id(_provider_slug(provider))
         return self._instance_dir(instance_id, provider).is_dir()
 
     def backup_instance_dir(
@@ -820,7 +845,8 @@ class MemoryStore:
 
         Nothing is deleted: the directory keeps every file it held, with the
         instance's index entry beside them as ``index_entry.json``, and the
-        index no longer lists the instance. A name already taken in the
+        index no longer lists the instance, unless the entry now belongs to
+        another provider's record of the same id (a merge target). A name already taken in the
         backup directory gets a numeric suffix, so an earlier backup is
         never replaced.
 
@@ -836,6 +862,8 @@ class MemoryStore:
         if not source.is_dir():
             return None
         entry = self._load_index().get("instances", {}).get(instance_id)
+        if entry is not None and _provider_slug(str(entry.get("provider") or "")) != slug:
+            entry = None
         target = self._root / TEAM_COPY_BACKUP_DIR / slug / instance_id
         suffix = 1
         while target.exists():
@@ -965,6 +993,7 @@ class MemoryStore:
         provider: str = "custom",
         *,
         include_superseded: bool = False,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return all findings for *instance_id*, sorted newest-first by ``created_at``.
 
@@ -974,6 +1003,9 @@ class MemoryStore:
             include_superseded: When ``False`` (default), findings whose
                 ``"superseded_by"`` key is non-empty are excluded.  Pass
                 ``True`` to include them.
+            strict: When ``True``, a finding file that cannot be read or
+                parsed raises ``OSError`` / ``ValueError`` instead of being
+                skipped.
 
         Returns:
             List of finding dicts.  Malformed files are silently skipped.
@@ -994,6 +1026,8 @@ class MemoryStore:
                 with open(json_file, "r") as fh:
                     record: Dict[str, Any] = json.load(fh)
             except (json.JSONDecodeError, OSError) as exc:
+                if strict:
+                    raise
                 logger.warning("Skipping corrupt finding file %s: %s", json_file, exc)
                 continue
             if not include_superseded and record.get("superseded_by"):

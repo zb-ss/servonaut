@@ -75,7 +75,11 @@ def _put_copy(service: MemoryService, **parts: Any) -> None:
 
 
 def _run(service: MemoryService, rows: List[Dict[str, Any]], sync: Any = None):
-    return asyncio.run(merge_team_copies(service, sync, rows, today="2026-10-31"))
+    async def listing():
+        return [SHARE_ID]
+    return asyncio.run(
+        merge_team_copies(service, sync, rows, today="2026-10-31", list_remote_ids=listing)
+    )
 
 
 class TestRules:
@@ -102,8 +106,8 @@ class TestRules:
         assert (again, changed_again) == (first, False)
 
     def test_text_the_own_notes_contain_adds_nothing(self):
-        assert merge_annotation_text("a theirs b", "theirs", source="s", merged_on="d") == (
-            "a theirs b", False,
+        assert merge_annotation_text("a\ntheirs\nb", "theirs", source="s", merged_on="d") == (
+            "a\ntheirs\nb", False,
         )
 
     def test_same_share_needs_an_id_or_host_port_and_login(self):
@@ -177,9 +181,11 @@ class TestMerge:
         _put_copy(service, notes="team note")
         other = _shared(instance_id="i-0def0def0def0def0", hostname="8.8.8.8")
         report = _run(service, [_own(), other])
-        assert report.copies == 0
+        # Not the user's own server: the note never reaches the own row. The
+        # row is a member's view, so its entry moves to the neutral slug.
         assert service.read_annotations(OWN_ID, "aws") == ""
-        assert (tmp_path / "team team a" / SHARE_ID / "annotations.md").is_file()
+        assert service.read_annotations(SHARE_ID, "shared") == "team note"
+        assert report.copies == 1
 
     def test_a_copy_is_kept_when_the_read_back_finds_something_missing(self, tmp_path, monkeypatch):
         service = _service(tmp_path)
@@ -204,7 +210,7 @@ class TestMerge:
         service = _service(tmp_path)
         _put_copy(service, notes="a note")
         assert _run(service, [_own(), _shared()]).message() == (
-            "Merged 1 team copies into your servers: 1 notes, 0 findings."
+            "Merged 1 team copy into your servers: 1 note, 0 findings."
         )
 
 
@@ -227,13 +233,15 @@ class TestSyncSide:
         assert sync.enqueue_annotations.call_args.args[0]["id"] == OWN_ID
         assert sync.enqueue_findings.call_args.args[0]["id"] == OWN_ID
 
-    def test_a_failing_pull_does_not_stop_the_merge(self, tmp_path):
+    def test_a_failing_pull_merges_but_keeps_the_copy(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="team note")
         sync = self._sync()
         sync.pull_annotations = AsyncMock(side_effect=RuntimeError("offline"))
         report = _run(service, [_own(), _shared()], sync)
-        assert report.copies == 1
+        # The local data is merged; the copy waits for a pass whose pulls work.
+        assert service.read_annotations(OWN_ID, "aws") == "team note"
+        assert report.copies == 0 and report.kept == [SHARE_ID]
 
 
 class TestReshare:

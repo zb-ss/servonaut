@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from servonaut.app import ServonautApp
 from servonaut.services.memory.team_merge import TeamMergeReport
@@ -43,7 +45,7 @@ def test_the_user_is_told_once_what_was_merged(monkeypatch):
     monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", merged)
     asyncio.run(app._do_reconcile_team_memory(app.instances))
     app.notify.assert_called_once_with(
-        "Merged 2 team copies into your servers: 3 notes, 1 findings.", markup=False,
+        "Merged 2 team copies into your servers: 3 notes, 1 finding.", markup=False,
     )
     app.memory_sync_service.set_folded_instance_ids.assert_called_once_with({_shared()["id"]})
 
@@ -73,3 +75,35 @@ def test_a_twin_that_loads_after_the_shared_rows_is_merged():
     app.instances = [_shared(), _own()]
     app.reconcile_team_memory()
     assert seen == [[_shared()["id"]], [_shared()["id"], _own()["id"]]]
+
+
+def test_the_fleet_listing_is_passed_to_the_merge_and_names_share_ids(monkeypatch):
+    from types import SimpleNamespace
+
+    app = _app([_own(), _shared()])
+    item = lambda **instance: SimpleNamespace(instance=instance)
+    app.fleet_service = MagicMock()
+    app.fleet_service.get_remote_fleet = AsyncMock(
+        return_value=SimpleNamespace(total=2, items=[item(instance_id="a"), item(id="b")])
+    )
+    seen = {}
+
+    async def merged(*args, **kwargs):
+        seen["ids"] = await kwargs["list_remote_ids"]()
+        return TeamMergeReport()
+
+    monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", merged)
+    asyncio.run(app._do_reconcile_team_memory(app.instances))
+    assert seen["ids"] == {"a", "b"}
+
+
+def test_an_incomplete_listing_is_an_error():
+    from types import SimpleNamespace
+
+    app = _app([])
+    app.fleet_service = MagicMock()
+    app.fleet_service.get_remote_fleet = AsyncMock(
+        return_value=SimpleNamespace(total=5, items=[])
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(app._remote_memory_ids())

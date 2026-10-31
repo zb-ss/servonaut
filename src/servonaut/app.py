@@ -2172,12 +2172,32 @@ class ServonautApp(App):
         try:
             if sync is not None:
                 sync.set_folded_instance_ids(absorbed_share_ids(rows))
-            report = await merge_team_copies(self.memory_service, sync, rows)
+            report = await merge_team_copies(
+                self.memory_service, sync, rows, list_remote_ids=self._remote_memory_ids,
+            )
         except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
             logger.exception("Merging team copies of server memory failed")
             return
         if report.copies:
             self.notify(report.message(), markup=False)
+
+    async def _remote_memory_ids(self) -> set:
+        """Ids the sync service holds memory for (one fleet listing request).
+
+        Raises when the listing is unavailable or incomplete, so the caller
+        keeps the team copies it could not check.
+        """
+        fleet_service = getattr(self, "fleet_service", None)
+        if fleet_service is None:
+            raise RuntimeError("fleet listing not available")
+        fleet = await fleet_service.get_remote_fleet()
+        if fleet.total > len(fleet.items):
+            raise RuntimeError("fleet listing incomplete")
+        ids = {
+            str(item.instance.get("instance_id") or item.instance.get("id") or "")
+            for item in fleet.items
+        }
+        return ids - {""}
 
     def start_fleet_manual_scan(
         self,
