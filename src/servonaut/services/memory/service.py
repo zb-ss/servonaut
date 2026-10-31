@@ -770,6 +770,19 @@ class MemoryService(MemoryServiceInterface):
         instance_id = self._resolve_id(instance_id)
         return self._store.read_annotations(instance_id, provider)
 
+    def read_annotations_strict(self, instance_id: str, provider: str = "custom") -> str:
+        """Like :meth:`read_annotations`, but an unreadable file raises (see the store)."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.read_annotations_strict(instance_id, provider)
+
+    def annotations_fingerprint(self, instance_id: str, provider: str = "custom"):
+        """Exact-bytes digest, size and modified time of the notes file, or ``None``.
+
+        Public proxy so the sync layer never reaches into ``_store``.
+        """
+        instance_id = self._resolve_id(instance_id)
+        return self._store.annotations_fingerprint(instance_id, provider)
+
     def write_annotations(
         self, instance_id: str, content: str, provider: str = "custom",
         *, modified_at: Optional[str] = None,

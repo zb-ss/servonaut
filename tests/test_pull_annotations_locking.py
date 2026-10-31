@@ -32,8 +32,7 @@ def _pull(tmp_path, service, text="remote"):
 
 
 def _aged(service):
-    service.write_annotations(OWN_ID, "old", "aws")
-    service.set_annotations_meta(OWN_ID, annotations_modified_at=OLD)
+    service.write_annotations(OWN_ID, "old", "aws", modified_at=OLD)
 
 
 def test_the_comparison_and_the_write_happen_while_the_record_is_locked(tmp_path):

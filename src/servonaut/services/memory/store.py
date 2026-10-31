@@ -30,7 +30,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 from servonaut.config.schema import (
     DEFAULT_RECORD_LOCK_POLL_SECONDS,
@@ -80,6 +80,18 @@ class RecordLockTimeout(FileLockTimeout):
 
 class RecordBusy(RecordLockTimeout):
     """A record is locked right now and the caller chose not to wait for it."""
+
+
+class NotesFingerprint(NamedTuple):
+    """What the notes file holds right now: exact-bytes digest, size, mtime (ISO UTC)."""
+
+    digest: str
+    size: int
+    modified_at: str
+
+
+#: SHA-256 of no text at all: the recorded hash of notes cleared on purpose.
+EMPTY_NOTES_DIGEST = hashlib.sha256(b"").hexdigest()
 
 
 class _HeldOsLock:
@@ -137,7 +149,9 @@ def _read_plain_text(path: Path) -> str:
         if path.is_symlink():
             raise MemoryCorruptError(f"{path.name} is a symlink") from exc
         raise
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+    # newline="": the text is exactly the bytes on disk, so what is hashed
+    # and compared is what was written, whatever the line endings.
+    with os.fdopen(fd, "r", encoding="utf-8", newline="") as fh:
         return fh.read()
 
 
@@ -262,7 +276,8 @@ def _write_private_atomic(path: Path, text: str, *, as_json: bool = False) -> No
         0o600,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # newline="": no translation, so the file holds exactly the encoded text.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             if as_json:
                 json.dump(text, fh, indent=2)
             else:
@@ -940,10 +955,41 @@ class MemoryStore:
         path = self.get_annotations_path(instance_id, provider)
         try:
             if path.exists():
-                return path.read_text(encoding="utf-8")
+                with open(path, "r", encoding="utf-8", newline="") as fh:
+                    return fh.read()
         except OSError:
             pass
         return ""
+
+    def annotations_fingerprint(
+        self, instance_id: str, provider: str = "custom"
+    ) -> Optional[NotesFingerprint]:
+        """The exact bytes' SHA-256, size and modified time of the notes file.
+
+        ``None`` when there is no notes file. Unlike :meth:`read_annotations`
+        this never decodes the text, so a file that is not valid UTF-8 still
+        has a fingerprint. A symlink in place of the file raises
+        ``MemoryCorruptError``; other read errors raise ``OSError``.
+        """
+        _validate_instance_id(instance_id)
+        path = self.get_annotations_path(instance_id, provider)
+        if not path.is_symlink() and not path.exists():
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            if path.is_symlink():
+                raise MemoryCorruptError(f"{path.name} is a symlink") from exc
+            raise
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read()
+            modified = os.fstat(fh.fileno()).st_mtime
+        return NotesFingerprint(
+            digest=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            modified_at=datetime.fromtimestamp(modified, tz=timezone.utc).isoformat(),
+        )
 
     def read_annotations_strict(
         self,
@@ -1183,7 +1229,7 @@ class MemoryStore:
         tmp = directory / f".draft-{secrets.token_hex(8)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(content)
                 fh.flush()
                 os.fsync(fh.fileno())
