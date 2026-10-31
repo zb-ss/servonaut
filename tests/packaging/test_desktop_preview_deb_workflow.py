@@ -743,6 +743,51 @@ def test_the_plan_step_names_a_tag_that_predates_the_tooling(
     assert "v2.27.0 predates the desktop preview packaging" in result.stdout
 
 
+def test_the_plan_step_names_a_tag_that_predates_the_release_identity(
+    workflow: str, tmp_path: Path
+) -> None:
+    """A dry run from a branch builds an older tag with that tag's own planner."""
+    checkout = tmp_path / "checkout"
+    tooling = checkout / "scripts" / "distribution"
+    tooling.mkdir(parents=True)
+    for package in (checkout / "scripts", tooling):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # What the planner of a tag from before the release identity prints.
+    older = {
+        "tag": "v2.31.0rc9",
+        "product-version": "2.31.0rc9",
+        "debian-version": "2.31.0~rc9",
+        "package-name": "servonaut",
+        "architecture": "amd64",
+        "deb-asset": "servonaut-desktop-preview_2.31.0rc9_amd64.deb",
+        "sums-asset": "servonaut-desktop-preview_2.31.0rc9_SHA256SUMS",
+        "prerelease": "true",
+    }
+    (tooling / "desktop_preview.py").write_text(
+        "".join(f"print({f'{key}={value}'!r})\n" for key, value in older.items()),
+        encoding="utf-8",
+    )
+
+    result, outputs = _run(
+        workflow,
+        "Plan the preview from the release tag",
+        tmp_path,
+        cwd=checkout,
+        TAG="v2.31.0rc9",
+        QUALIFIED_PYTHON=sys.executable,
+        GITHUB_WORKSPACE=str(checkout),
+    )
+
+    assert result.returncode == 1
+    assert "::error::v2.31.0rc9 predates the release identity of the desktop preview" in result.stdout
+    assert (
+        "gh workflow run desktop-preview-deb.yml --ref v2.31.0rc9 -f tag=v2.31.0rc9 -f dry_run=true"
+        in result.stdout
+    )
+    # Nothing reaches the build step, which would refuse an empty channel.
+    assert outputs == {}
+
+
 @pytest.fixture
 def payload(tmp_path: Path) -> Path:
     root = tmp_path / "payload"

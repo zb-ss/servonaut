@@ -23,7 +23,8 @@ name: Desktop preview .deb
 #   gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z
 # dry_run does everything except the attestation and the upload. A dry run
 # may start from a branch; without a tag it rehearses that branch's commit as
-# if it were tagged rehearsal_version.
+# if it were tagged rehearsal_version. A tag from before the previews'
+# release identity is built only by its own copy, run with --ref on the tag.
 #
 # While the desktop app is known to be broken, set the repository variable
 # DESKTOP_PREVIEW_PUBLISH to off: published releases then get no preview, and
@@ -296,6 +297,16 @@ jobs:
             PYTHONPATH="${GITHUB_WORKSPACE}/src" \
             "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview plan \
             --tag "${TAG}" --checkout "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/preview-plan"
+          # A dry run from a branch builds the tag with the tag's own scripts.
+          # A tag from before the previews' release identity plans neither the
+          # channel nor the packaging revision the steps below pass on, and
+          # has no marker check; only the tag's own copy of this workflow
+          # builds it.
+          if ! grep -q '^channel=' "${RUNNER_TEMP}/preview-plan" \
+            || ! grep -q '^packaging-revision=' "${RUNNER_TEMP}/preview-plan"; then
+            echo "::error::${TAG} predates the release identity of the desktop preview, so this copy of the workflow cannot build it. Run the tag's own: gh workflow run desktop-preview-deb.yml --ref ${TAG} -f tag=${TAG} -f dry_run=true"
+            exit 1
+          fi
           cat "${RUNNER_TEMP}/preview-plan" >> "${GITHUB_OUTPUT}"
           sed 's/^/    /' "${RUNNER_TEMP}/preview-plan"
 
