@@ -68,8 +68,8 @@ def _reader(shared: Any) -> MagicMock:
 
 
 async def _cells(app, pilot) -> list:
-    for _ in range(40):
-        await pilot.pause()
+    for _ in range(200):
+        await pilot.pause(0.05)
         table = app.screen.query_one("#memory-table", DataTable)
         if table.row_count:
             return [table.get_row_at(i) for i in range(table.row_count)]

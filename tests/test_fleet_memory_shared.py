@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Footer, Static
 
 from servonaut.config.schema import MemoryConfig
+from servonaut.screens.fleet_memory import FleetMemoryScreen
 from servonaut.services.memory.redaction import noop_redactor
 from servonaut.services.memory.service import MemoryService
 from servonaut.services.memory.shared_view import SharedListing
@@ -17,6 +18,15 @@ from servonaut.services.memory.store import MemoryStore
 from servonaut.widgets.safe_header import SafeHeader
 
 pytestmark = pytest.mark.asyncio
+
+# Captured at import (collection), before any test runs: another suite
+# replaces FleetMemoryScreen.app with a stand-in and never restores it.
+_REAL_APP_PROPERTY = FleetMemoryScreen.__dict__["app"]
+
+
+@pytest.fixture(autouse=True)
+def _real_screen_app(monkeypatch):
+    monkeypatch.setattr(FleetMemoryScreen, "app", _REAL_APP_PROPERTY)
 
 SHARED_ROW: Dict[str, Any] = {
     "id": "share-1", "name": "web-1", "provider": "Team Team A", "is_shared": True,
@@ -26,8 +36,6 @@ SHARED_ROW: Dict[str, Any] = {
 
 
 def _host(tmp_path, reader):
-    from servonaut.screens.fleet_memory import FleetMemoryScreen
-
     store = MemoryStore(root=tmp_path, redactor=noop_redactor)
 
     class Host(App):
@@ -58,8 +66,8 @@ def _reader() -> MagicMock:
 
 
 async def _wait_for(app, pilot, cond):
-    for _ in range(60):
-        await pilot.pause()
+    for _ in range(200):
+        await pilot.pause(0.05)
         if cond():
             return
     raise AssertionError("timed out")

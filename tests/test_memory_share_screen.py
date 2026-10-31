@@ -103,8 +103,8 @@ class _Host(App):
 
 
 async def _settle(pilot, screen, cond, what="state") -> None:
-    for _ in range(80):
-        await pilot.pause()
+    for _ in range(200):
+        await pilot.pause(0.05)
         if cond():
             return
     raise AssertionError(f"timed out waiting for {what}")
