@@ -64,3 +64,51 @@ def test_get_server_memory_given_a_team_reference_reads_the_own_rows_memory():
     tools = _tools(memory, found=None)
     run(tools.get_server_memory("team-a/web-1"))
     assert memory.get_all_modules.call_args.args[0] == OWN["id"]
+
+
+def _built_target(memory):
+    return memory.build_report.call_args.args[0]["id"]
+
+
+def test_build_given_a_team_reference_builds_the_own_row():
+    memory = _make_memory_service()
+    tools = _tools(memory, found=None)
+    run(tools.build_server_memory("team-a/web-1"))
+    assert _built_target(memory) == OWN["id"]
+
+
+def test_refresh_given_a_share_id_builds_the_own_row():
+    memory = _make_memory_service()
+    tools = _tools(memory, found=None)
+    run(tools.refresh_server_memory(TWIN["id"]))
+    assert _built_target(memory) == OWN["id"]
+
+
+def test_build_then_read_through_either_alias_reaches_the_same_record():
+    memory = _make_memory_service()
+    tools = _tools(memory, found=None)
+    for alias in ("team-a/web-1", TWIN["id"]):
+        memory.build_report.reset_mock()
+        memory.get_all_modules.reset_mock()
+        run(tools.build_server_memory(alias))
+        run(tools.get_server_memory(alias))
+        assert _built_target(memory) == memory.get_all_modules.call_args.args[0] == OWN["id"]
+
+
+def test_a_shared_only_server_is_still_built_under_its_own_id():
+    memory = _make_memory_service()
+    tools = _tools(memory, found=None)
+    tools._directory.all_instances = AsyncMock(return_value=[])
+    run(tools.build_server_memory("team-a/web-1"))
+    assert _built_target(memory) == TWIN["id"]
+
+
+def test_build_keeps_the_opt_out_of_the_team_reference():
+    memory = _make_memory_service()
+    tools = _tools(memory, found=None)
+    tools._config_manager.get().memory.is_instance_disabled = (
+        lambda iid, name: iid == TWIN["id"]
+    )
+    out = run(tools.build_server_memory(TWIN["id"]))
+    assert "opt_out" in out
+    memory.build_report.assert_not_called()

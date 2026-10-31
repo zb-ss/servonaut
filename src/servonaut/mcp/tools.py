@@ -2611,15 +2611,24 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        # Authorisation and team rules above ran for the reference the agent
+        # gave; the memory itself belongs to the server, so a team's copy of
+        # an own server is built (and later read) on the own record.
+        requested = instance
+        instance = await self._memory_target(instance)
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
         config = self._config_manager.get()
 
-        # Per-server opt-out check (checks both id and name).  Shape mirrors
-        # get_server_memory so agents can detect all "refused" outcomes with
-        # a single `error.code` lookup.
-        if (not config.memory.enabled) or config.memory.is_instance_disabled(iid, iname):
+        # Per-server opt-out check (checks both id and name) on the record
+        # built and on the reference given.  Shape mirrors get_server_memory
+        # so agents can detect all "refused" outcomes with a single
+        # `error.code` lookup.
+        if (not config.memory.enabled) or any(
+            config.memory.is_instance_disabled(row.get('id') or row.get('name', ''), row.get('name', ''))
+            for row in (instance, requested)
+        ):
             payload = json.dumps({
                 "error": {
                     "code": "opt_out",
