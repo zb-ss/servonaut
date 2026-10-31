@@ -6,6 +6,13 @@ Per-module JSON files live at::
 
 A global ``index.json`` tracks which instances have been scanned and when.
 All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
+
+Locks. A record lock (:meth:`MemoryStore.annotation_lock`) serialises changes
+to one server's folder. Every read-modify-write of ``index.json`` runs under
+the single index lock (an in-process lock plus ``<root>/.locks/index.lock``
+for other processes), which the record lock may enclose. The order is always
+record lock first, index lock second, never the reverse: nothing takes a
+record lock while holding the index lock.
 """
 
 from __future__ import annotations
@@ -52,6 +59,9 @@ TEAM_MERGED_MARKER = "team_merged.marker"
 #: Folder under the memory root that holds the cross-process lock files.
 LOCKS_DIR = ".locks"
 
+#: Lock file, inside :data:`LOCKS_DIR`, held while ``index.json`` is rewritten.
+INDEX_LOCK = "index.lock"
+
 #: File under the memory root held by the one running team-copy merge pass.
 TEAM_MERGE_LOCK = "team_merge.lock"
 
@@ -89,6 +99,20 @@ def _record_locked(method):
     def locked(self, instance_id, *args, **kwargs):
         with self.annotation_lock(instance_id):
             return method(self, instance_id, *args, **kwargs)
+
+    return locked
+
+
+def _index_locked(method):
+    """Run a store method that rewrites ``index.json`` under the index lock.
+
+    The read that feeds the write happens inside the lock, so two writers
+    never start from the same copy of the index.
+    """
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._index_lock():
+            return method(self, *args, **kwargs)
 
     return locked
 
@@ -329,6 +353,10 @@ class MemoryStore:
         self._annotation_locks: Dict[str, threading.RLock] = {}
         self._os_locks: Dict[str, _HeldOsLock] = {}
         self._locks_guard = threading.Lock()
+        # Serialises every read-modify-write of index.json: this lock between
+        # threads, an OS lock between processes (see the module docstring).
+        self._index_thread_lock = threading.RLock()
+        self._index_depth = 0
         self._record_lock_wait = (
             DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS, DEFAULT_RECORD_LOCK_POLL_SECONDS,
         )
@@ -703,10 +731,42 @@ class MemoryStore:
             logger.error("Index migration failed: %s", exc)
             return {"version": INDEX_VERSION, "instances": {}}
 
+    @contextlib.contextmanager
+    def _index_lock(self):
+        """Hold the lock that serialises changes to ``index.json``. Re-entrant.
+
+        Waits at most :attr:`record_lock_wait` for both stages, then fails with
+        :class:`RecordLockTimeout` (an ``OSError``) before anything is changed.
+        """
+        timeout, poll = self._record_lock_wait
+        deadline = time.monotonic() + timeout
+        if not self._index_thread_lock.acquire(timeout=timeout):
+            raise RecordLockTimeout("another thread is changing the memory index")
+        try:
+            if self._index_depth:
+                yield
+                return
+            lock = FileLock(self._root / LOCKS_DIR / INDEX_LOCK, private_dir=True)
+            try:
+                lock.acquire_until(deadline, poll)
+            except FileLockTimeout as exc:
+                raise RecordLockTimeout(
+                    "another Servonaut process is changing the memory index"
+                ) from exc
+            self._index_depth = 1
+            try:
+                yield
+            finally:
+                self._index_depth = 0
+                lock.release()
+        finally:
+            self._index_thread_lock.release()
+
     def _save_index(self, index: Dict[str, Any]) -> None:
         """Persist *index* to disk atomically."""
         _atomic_write_json(self._index_path, index)
 
+    @_index_locked
     def update_index(
         self,
         instance_id: str,
@@ -756,6 +816,7 @@ class MemoryStore:
         if identity is not None:
             entry["share_identity"] = dict(identity)
 
+    @_index_locked
     def ensure_index_entry(
         self, instance_id: str, name: str, provider: str, modules: List[str]
     ) -> None:
@@ -782,6 +843,7 @@ class MemoryStore:
         self._apply_share_identity(instance_id, stored)
         self._save_index(index)
 
+    @_index_locked
     def _remove_from_index(self, instance_id: str) -> None:
         """Remove *instance_id* from the index (called by ``clear``)."""
         instance_id = self._resolve_id(instance_id)
@@ -982,6 +1044,7 @@ class MemoryStore:
             "annotations_modified_at": entry.get("annotations_modified_at", ""),
         }
 
+    @_index_locked
     def set_annotations_meta(
         self,
         instance_id: str,
@@ -1236,6 +1299,7 @@ class MemoryStore:
         state = (entry.get("cloud_imports") or {}).get(share_id)
         return dict(state) if isinstance(state, dict) else None
 
+    @_index_locked
     def set_cloud_import(
         self, instance_id: str, share_id: str, state: str, upload_pending: bool
     ) -> None:
@@ -1259,6 +1323,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         self._remove_from_index(instance_id)
 
+    @_index_locked
     def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
         """Record which server a share is, on its index entry.
 
@@ -1488,6 +1553,7 @@ class MemoryStore:
             "findings_synced_at": entry.get("findings_synced_at", ""),
         }
 
+    @_index_locked
     def set_findings_meta(
         self,
         instance_id: str,
