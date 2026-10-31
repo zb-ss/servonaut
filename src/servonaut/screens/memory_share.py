@@ -31,6 +31,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance
 from servonaut.screens.memory_key_change import MemberKeyChangeScreen
 from servonaut.services.memory.interfaces import MemoryBackendError
+from servonaut.utils.markup import escape_markup
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
@@ -66,9 +67,7 @@ def _shown_names(app: Any, names: List[str]) -> str:
 
 def _names(app: Any, names: List[str]) -> str:
     """Markup-safe, comma-separated names; stand-ins in demo mode."""
-    from rich.markup import escape
-
-    return escape(_shown_names(app, names))
+    return escape_markup(_shown_names(app, names))
 
 
 @dataclass(frozen=True)
@@ -239,8 +238,7 @@ class ShareInstanceScreen(Screen):
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        from rich.markup import escape as rich_escape
-        name = rich_escape(str(self._instance.get("name") or self._instance.get("id", "?")))
+        name = escape_markup(str(self._instance.get("name") or self._instance.get("id", "?")))
         yield SafeHeader()
         with Horizontal(id="main-layout"):
             yield Sidebar()
@@ -542,11 +540,9 @@ class ShareInstanceScreen(Screen):
         if grant is None:
             return
         modules = ", ".join(grant.modules) if grant.modules else "all modules"
-        from rich.markup import escape
-
         text = (
-            f"Already shared with this team: role {escape(grant.required_role)}, "
-            f"modules {escape(modules)}."
+            f"Already shared with this team: role {escape_markup(grant.required_role)}, "
+            f"modules {escape_markup(modules)}."
         )
         if waiting:
             who = _names(self.app, [self._member_label(c) for c in self._waiting])
@@ -581,11 +577,9 @@ class ShareInstanceScreen(Screen):
         return True
 
     def _show_error(self, message: str) -> None:
-        from rich.markup import escape
-
         self._status_locked = True
         self._say_to("#share-status",
-            f"[$text-error]{escape(message)}[/$text-error]"
+            f"[$text-error]{escape_markup(message)}[/$text-error]"
         )
 
     # ------------------------------------------------------------------

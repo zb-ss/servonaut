@@ -459,3 +459,45 @@ async def test_revoke_and_purge_of_a_vanished_share_say_so_too():
             backend.live = []
             screen.query_one(button, Button).press()
             await _settle(pilot, screen, lambda: "no longer exists" in _text(screen, "#share-status"), "message")
+
+
+ODD_NAMES = ["[link=x", "[/bold]", "[@click=app.quit]", "[bold]Odd[/bold] Name"]
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+def test_the_shared_markup_escape_makes_every_bracket_literal(name):
+    from rich.text import Text
+
+    from servonaut.utils.markup import escape_markup
+
+    assert Text.from_markup(escape_markup(f"x {name} y")).plain == f"x {name} y"
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+async def test_odd_member_names_are_shown_literally_in_the_readers_line(name):
+    backend = _Backend(members=[_member(1, name)])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        assert name in _text(screen, "#share-readers")
+        assert app.is_running
+
+
+@pytest.mark.parametrize("name", ODD_NAMES)
+async def test_odd_names_are_shown_literally_in_the_status_and_existing_lines(name):
+    backend = _Backend(members=[_member(1, "Kim Member")])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        screen._show_error(f"{name} went wrong")
+        await pilot.pause()
+        assert f"{name} went wrong" in _text(screen, "#share-status")
+        screen._say_to("#share-existing-text", "Key changed, waiting: " + _names_for(app, name))
+        await pilot.pause()
+        assert name in _text(screen, "#share-existing-text")
+
+
+def _names_for(app, name):
+    from servonaut.screens.memory_share import _names
+
+    return _names(app, [name])

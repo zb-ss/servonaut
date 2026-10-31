@@ -23,20 +23,11 @@ from textual.widgets import Button, Checkbox, Footer, Static
 from servonaut.services.memory.crypto import short_fingerprint
 from servonaut.services.memory.team_service import display_name
 from servonaut.services.memory.team_wraps import KeyChange
+from servonaut.utils.markup import escape_markup
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 
 Mode = Literal["share", "catch_up"]
-
-
-def escape(text: str) -> str:
-    """*text* with every ``[`` literal.
-
-    Service text (names, fingerprints) must never be read as markup. Rich's
-    escape leaves an unterminated ``[link=...`` alone, and Textual then refuses
-    to render it, so every bracket is escaped here.
-    """
-    return text.replace("[", "\\[")
 
 
 def _changed_on(raw: Optional[str]) -> Optional[str]:
@@ -85,14 +76,14 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
 
     def _describe(self, change: KeyChange) -> str:
         lines = [
-            f"[bold]{escape(self._shown_name(change))}[/bold]",
-            f"New key: {escape(short_fingerprint(change.fingerprint))}",
+            f"[bold]{escape_markup(self._shown_name(change))}[/bold]",
+            f"New key: {escape_markup(short_fingerprint(change.fingerprint))}",
         ]
         if change.previous_fingerprint:
-            lines.append(f"Previous key: {escape(short_fingerprint(change.previous_fingerprint))}")
+            lines.append(f"Previous key: {escape_markup(short_fingerprint(change.previous_fingerprint))}")
         when = _changed_on(change.rotated_at)
         if when:
-            lines.append(f"Changed on: {escape(when)}")
+            lines.append(f"Changed on: {escape_markup(when)}")
         return "\n".join(lines)
 
     def compose(self) -> ComposeResult:
@@ -128,7 +119,7 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
                                 with Vertical(classes="keychange-item"):
                                     yield Static(self._describe(change), classes="keychange-details")
                                     yield Checkbox(
-                                        f"{escape(self._shown_name(change))}'s key matches",
+                                        f"{escape_markup(self._shown_name(change))}'s key matches",
                                         id=f"keychange-check-{index}",
                                     )
                     with Horizontal(id="keychange-btn-row"):
@@ -154,7 +145,7 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
         for index, change in enumerate(self._changes):
             self._say(self.query(".keychange-details")[index], self._describe(change))
             self.query_one(f"#keychange-check-{index}", Checkbox).label = (
-                f"{escape(self._shown_name(change))}'s key matches"
+                f"{escape_markup(self._shown_name(change))}'s key matches"
             )
 
     def _ticked(self) -> List[KeyChange]:
