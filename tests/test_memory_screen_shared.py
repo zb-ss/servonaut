@@ -81,7 +81,7 @@ async def test_a_member_sees_the_shared_os_module_and_where_it_comes_from(tmp_pa
     app = _host(tmp_path, dict(SHARED_ROW), reader)
     async with app.run_test(headless=True) as pilot:
         rows = await _cells(app, pilot)
-        assert [r[:3] for r in rows] == [["os", "distro", "Debian 12"]]
+        assert [[str(c) for c in r[:3]] for r in rows] == [["os", "distro", "Debian 12"]]
         label = str(app.screen.query_one("#memory-shared-source", Static).render())
         assert label == "Shared by Team A, probed 2026-10-20 08:00"
     # The share is asked for with the OWNER's instance id, not the row's.
@@ -135,7 +135,7 @@ async def test_an_own_server_the_team_also_shares_falls_back_to_the_team_copy(tm
     app = _host(tmp_path, dict(own), reader, fleet=[own, dict(SHARED_ROW)])
     async with app.run_test(headless=True) as pilot:
         rows = await _cells(app, pilot)
-        assert rows and rows[0][2] == "Debian 12"
+        assert rows and str(rows[0][2]) == "Debian 12"
     reader.read.assert_awaited_once_with("team-a", "Team A", "i-owner-1")
 
 
@@ -157,7 +157,7 @@ async def test_shared_notes_and_findings_are_shown_read_only(tmp_path):
     app = _host(tmp_path, dict(SHARED_ROW), _reader(shared))
     async with app.run_test(headless=True) as pilot:
         rows = await _cells(app, pilot)
-        assert ["annotations", "note", "Restart workers after deploy."] == rows[0][:3]
+        assert ["annotations", "note", "Restart workers after deploy."] == [str(c) for c in rows[0][:3]]
     # Nothing was written into the member's own editable record.
     assert app.memory_service.get_all_modules("share-1", "shared") == {}
 
@@ -193,3 +193,77 @@ async def test_a_row_with_a_host_keeps_its_actions(tmp_path):
         await _cells(app, pilot)
         assert not app.screen.query_one("#btn_refresh_all", Button).disabled
         assert app.screen.check_action("refresh_all", ())
+
+
+async def test_every_grant_candidate_is_tried_until_one_is_readable(tmp_path):
+    from servonaut.services.memory.shared_view import ShareCandidate
+
+    row = dict(MEMORY_ONLY_ROW)
+    row["grant_candidates"] = [ShareCandidate("team-a", "Team A", "i-owner-1"),
+                               ShareCandidate("team-b", "Team B", "i-owner-1")]
+    reader = MagicMock()
+    reader.read = AsyncMock(side_effect=[None, _shared("Team B")])
+    app = _host(tmp_path, row, reader)
+    async with app.run_test(headless=True) as pilot:
+        rows = await _cells(app, pilot)
+        assert rows and str(rows[0][2]) == "Debian 12"
+    assert [c.args[0] for c in reader.read.await_args_list] == ["team-a", "team-b"]
+
+
+async def test_an_own_row_reads_the_team_copy_through_its_candidates(tmp_path):
+    from servonaut.services.memory.shared_view import ShareCandidate
+
+    own = {"id": "i-owner-1", "name": "owner-web", "provider": "aws", "public_ip": "8.8.8.8",
+           "grant_candidates": [ShareCandidate("team-a", "Team A", "i-owner-1")]}
+    app = _host(tmp_path, own, _reader(_shared()), fleet=[dict(own)])
+    async with app.run_test(headless=True) as pilot:
+        rows = await _cells(app, pilot)
+        assert rows and str(rows[0][2]) == "Debian 12"
+
+
+async def test_a_memory_only_title_follows_demo_mode_while_open(tmp_path):
+    row = dict(MEMORY_ONLY_ROW)
+    row["real_name"], row["real_id"], row["real_provider"] = "owner-web", "i-owner-1", "aws"
+    app = _host(tmp_path, row, _reader(_shared()))
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        screen = app.screen
+        title = lambda: str(screen.query_one("#memory-title", Static).render())
+        assert "owner-web" in title()
+        app.demo_mode = True
+        app.redaction_service = MagicMock()
+        app.redaction_service.redact_name = lambda n: "stand-in-name"
+        app.redaction_service.redact_instance_id = lambda n: "i-stand-in"
+        app.redaction_service.redact_provider = lambda n: "stand-in-provider"
+        app.redaction_service.scrub_stream = lambda t: t
+        screen.refresh_after_demo_toggle()
+        await pilot.pause(0.1)
+        assert "owner-web" not in title() and "stand-in-name" in title()
+        app.demo_mode = False
+        screen.refresh_after_demo_toggle()
+        await pilot.pause(0.1)
+        assert "owner-web" in title()
+
+
+async def test_annotate_is_off_for_a_memory_only_row(tmp_path):
+    from textual.widgets import Button
+
+    app = _host(tmp_path, dict(MEMORY_ONLY_ROW), _reader(_shared()))
+    async with app.run_test(headless=True) as pilot:
+        await _cells(app, pilot)
+        assert app.screen.query_one("#btn_annotate", Button).disabled
+        assert not app.screen.check_action("annotate", ())
+
+
+async def test_shared_authored_text_is_shown_literally(tmp_path):
+    from rich.text import Text
+
+    shared = SharedMemory("team-a", "Team A", {
+        "annotations": {"observed": {"note": "[bold]Keep literal[/bold] and [/]"}, "declared": {},
+                        "probed_at": "2026-10-20T08:00:00+00:00"},
+    })
+    app = _host(tmp_path, dict(SHARED_ROW), _reader(shared))
+    async with app.run_test(headless=True) as pilot:
+        rows = await _cells(app, pilot)
+        cell = rows[0][2]
+        assert isinstance(cell, Text) and cell.plain == "[bold]Keep literal[/bold] and [/]"

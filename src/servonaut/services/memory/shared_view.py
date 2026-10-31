@@ -244,6 +244,29 @@ def share_candidates(target: Dict[str, Any], fleet_rows: Any) -> list:
     return found
 
 
+def apply_display_names(instance: Dict[str, Any], app: Any) -> None:
+    """Set a memory-only row's shown name, id and provider for the current demo mode.
+
+    The real values live under ``real_*`` and never change; what is shown is
+    derived again whenever demo mode is toggled.
+    """
+    real_id = instance.get("real_id")
+    if not real_id:
+        return
+    real = {
+        "id": str(real_id),
+        "name": str(instance.get("real_name") or real_id),
+        "provider": str(instance.get("real_provider") or "shared"),
+    }
+    redaction = getattr(app, "redaction_service", None)
+    if getattr(app, "demo_mode", False) and redaction is not None:
+        instance["id"] = redaction.redact_instance_id(real["id"])
+        instance["name"] = redaction.redact_name(real["name"])
+        instance["provider"] = redaction.redact_provider(real["provider"])
+        return
+    instance.update(real)
+
+
 def merge_shared(
     local: Dict[str, Dict[str, Any]], shared: Optional[SharedMemory]
 ) -> Dict[str, Dict[str, Any]]:

@@ -16,6 +16,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
+from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
@@ -30,6 +31,7 @@ from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
 from servonaut.services.shared_servers import own_twin
 from servonaut.services.memory.shared_view import (
+    apply_display_names,
     merge_shared,
     share_candidates,
     shared_source_text,
@@ -373,11 +375,11 @@ class MemoryScreen(Screen):
 
     # Actions that reach the server itself or change its stored memory.
     _HOST_ACTIONS = frozenset(
-        {"refresh_all", "refresh_module", "pin_key", "clear_module", "sync_now"}
+        {"refresh_all", "refresh_module", "pin_key", "clear_module", "sync_now", "annotate"}
     )
     _HOST_BUTTONS = (
         "#btn_refresh_all", "#btn_refresh_module", "#btn_pin_key",
-        "#btn_clear_module", "#btn_sync_now", "#btn_empty_probe",
+        "#btn_clear_module", "#btn_sync_now", "#btn_empty_probe", "#btn_annotate",
     )
 
     @property
@@ -571,6 +573,8 @@ class MemoryScreen(Screen):
         The displayed row is redacted or restored in place by the app, so
         the title only needs redrawing.
         """
+        if self._read_only:
+            apply_display_names(self._instance, self.app)
         self._render_title()
         self._render_table()
 
@@ -632,9 +636,13 @@ class MemoryScreen(Screen):
 
         local_modules = all_modules
         all_modules = merge_shared(local_modules, self._shared)
-        in_use = self._shared is not None and any(
-            all_modules.get(name) is module for name, module in self._shared.modules.items()
-        )
+        # Modules shown from the team's copy: their text is the owner's, so
+        # it is drawn literally (never as markup).
+        shared_names = {
+            name for name, module in (self._shared.modules.items() if self._shared else ())
+            if all_modules.get(name) is module
+        }
+        in_use = bool(shared_names)
         self._show_shared_source(self._shared, in_use)
 
         if not all_modules:
@@ -696,11 +704,12 @@ class MemoryScreen(Screen):
                     obs_str = self.app.redaction_service.scrub_stream(obs_str)
                     decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
+                literal = module_name in shared_names
                 table.add_row(
                     module_name,
-                    key,
-                    obs_str,
-                    decl_str,
+                    Text(str(key)) if literal else key,
+                    Text(obs_str) if literal else obs_str,
+                    Text(decl_str) if literal else decl_str,
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",
@@ -720,7 +729,13 @@ class MemoryScreen(Screen):
         if reader is None or self._shared_requested:
             return
         self._shared_requested = True
-        candidates = share_candidates(self._target, real_fleet_rows(self.app))
+        candidates = list(share_candidates(self._target, real_fleet_rows(self.app)))
+        # Grants the fleet screen found for this server (an own row, or a
+        # memory-only row several teams share).
+        for extra in self._instance.get("grant_candidates") or []:
+            if all((c.team_slug, c.instance_id) != (extra.team_slug, extra.instance_id)
+                   for c in candidates):
+                candidates.append(extra)
         if not candidates:
             return
         self.run_worker(

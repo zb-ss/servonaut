@@ -189,3 +189,44 @@ async def test_demo_mode_shows_stand_ins_for_a_memory_only_row(tmp_path):
         await _wait_for(pilot, lambda: _table(app).row_count)
         text = " ".join(str(c) for c in _cells(app)[0])
         assert "owner-web" not in text and "i-owner-1" not in text and "stand-in-name" in text
+
+
+def _listing_for(instance_id: str, modules: int) -> SharedInstance:
+    return _shared(instance_id=instance_id, modules=modules)
+
+
+async def test_an_own_row_keeps_the_grant_that_covers_it(tmp_path):
+    own = {"id": "i-owner-1", "name": "owner-web", "provider": "aws", "public_ip": "8.8.8.8"}
+    app, _ = _host(tmp_path, _Team({"team-a": [_shared()]}), rows=[own])
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: _table(app).row_count and app.screen._rows
+                        and app.screen._rows[0].get("grant_candidates"))
+        assert _table(app).row_count == 1
+        row = app.screen._rows[0]
+        assert [(c.team_slug, c.instance_id) for c in row["grant_candidates"]] == [("team-a", "i-owner-1")]
+
+
+async def test_two_teams_for_one_server_keep_every_candidate(tmp_path):
+    team = _Team({"team-a": [_shared(modules=0)], "team-b": [_shared(modules=1)]})
+    app, _ = _host(tmp_path, team, rows=[])
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: _table(app).row_count)
+        await pilot.pause(0.2)
+        assert _table(app).row_count == 1
+        row = app.screen._rows[0]
+        assert sorted(c.team_slug for c in row["grant_candidates"]) == ["team-a", "team-b"]
+        assert row["instance"]["grant_candidates"] == row["grant_candidates"]
+
+
+async def test_a_warm_cache_refresh_still_turns_a_revoked_row_back(tmp_path):
+    team = _Team({"team-a": [_shared()]})
+    app, reader = _host(tmp_path, team)
+    await reader.prefetch_all()  # the listing is cached before the screen opens
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: _table(app).row_count and "Shared" in str(_cells(app)[0][4]))
+        team.listings = {"team-a": []}
+        await reader.prefetch_all()
+        app.screen._sync_shared_rows()
+        await pilot.pause(0.1)
+        row = _cells(app)[0]
+        assert "Shared" not in str(row[4]) and str(row[5]) == "—"

@@ -399,10 +399,14 @@ class FleetMemoryScreen(Screen):
         reader = getattr(self.app, "shared_memory_reader", None)
         if reader is None or row.get("status") in (STATUS_FRESH, STATUS_STALE):
             return {}
-        candidate = self._share_candidate(inst)
-        if candidate is None:
-            return {}
-        listing = reader.cached_listing(candidate.team_slug, candidate.instance_id)
+        candidates = row.get("grant_candidates") or []
+        if not candidates and (own := self._share_candidate(inst)) is not None:
+            candidates = [own]
+        listings = [
+            found for c in candidates
+            if (found := reader.cached_listing(c.team_slug, c.instance_id)) is not None
+        ]
+        listing = max(listings, key=lambda found: found.module_count, default=None)
         if listing is None:
             return {}
         return {
@@ -450,47 +454,70 @@ class FleetMemoryScreen(Screen):
         reader = getattr(self.app, "shared_memory_reader", None)
         if reader is None:
             return
+        from servonaut.services.memory.shared_view import ShareCandidate
+
         listings = reader.cached_listings()
+        by_id: Dict[str, List[Any]] = {}
+        for (_slug, instance_id), listing in sorted(listings.items()):
+            if instance_id:
+                by_id.setdefault(instance_id, []).append(ShareCandidate(
+                    listing.team_slug, listing.team_name, instance_id))
         self._rows = [r for r in self._rows if not r.get("memory_only")]
         seen: set = set()
         for row in self._rows:
-            fields = self._shared_fields(row)
-            if fields:
-                row.setdefault("_before_share", {k: row.get(k) for k in self._SHARED_KEYS})
-                row.update(fields)
-            elif "_before_share" in row:
-                row.update(row.pop("_before_share"))
             inst = row.get("instance") or {}
-            candidate = self._share_candidate(inst)
-            seen.update({str(row.get("raw_id") or ""), str(inst.get("instance_id") or "")})
-            if candidate is not None:
-                seen.add(candidate.instance_id)
-        for (_slug, instance_id), listing in sorted(listings.items()):
-            if instance_id and instance_id not in seen:
-                seen.add(instance_id)
-                self._rows.append(self._memory_only_row(listing))
+            own = self._share_candidate(inst)
+            ids = {str(row.get("raw_id") or ""), str(inst.get("instance_id") or "")}
+            if own is not None:
+                ids.add(own.instance_id)
+            # Every grant that covers this server stays on its one row.
+            found = [c for i in sorted(ids) for c in by_id.get(i, [])]
+            if found:
+                row["grant_candidates"] = found
+            else:
+                row.pop("grant_candidates", None)
+            self._decorate_shared(row)
+            seen.update(i for i in ids if i)
+        for instance_id, candidates in by_id.items():
+            if instance_id not in seen:
+                first = listings[(candidates[0].team_slug, instance_id)]
+                self._rows.append(self._memory_only_row(first, candidates))
         self._redraw_table()
 
-    def _memory_only_row(self, listing: Any) -> Dict[str, Any]:
+    def _decorate_shared(self, row: Dict[str, Any]) -> None:
+        """Give *row* its shared look, or take it away, keeping its own fields.
+
+        The row's own fields are captured before the first decoration, so a
+        revoked share restores what the row really was (local or cloud).
+        """
+        fields = self._shared_fields(row)
+        if fields:
+            row.setdefault("_before_share", {k: row.get(k) for k in self._SHARED_KEYS})
+            for key, value in fields.items():
+                row[key] = value
+        elif "_before_share" in row:
+            for key, value in row.pop("_before_share").items():
+                row[key] = value
+
+    def _memory_only_row(self, listing: Any, candidates: List[Any]) -> Dict[str, Any]:
         """A read-only row for a server a team shares that the user does not list."""
+        from servonaut.services.memory.shared_view import apply_display_names
+
         real_id = listing.instance_id
-        name = str(listing.instance.get("display_name") or real_id)
-        provider = str(listing.instance.get("provider") or "shared")
-        redaction = getattr(self.app, "redaction_service", None)
-        if getattr(self.app, "demo_mode", False) and redaction is not None:
-            shown_id = redaction.redact_instance_id(real_id)
-            name = redaction.redact_name(name)
-            provider = redaction.redact_provider(provider)
-        else:
-            shown_id = real_id
-        instance = {
-            "id": shown_id, "name": name, "provider": provider, "is_shared": True,
-            "state": "shared", "memory_only": True,
-            # Kept for the lookups the Memory screen makes; never displayed.
+        instance: Dict[str, Any] = {
+            "is_shared": True, "state": "shared", "memory_only": True,
+            # The real values; what is shown is derived from them (and from
+            # demo mode) by apply_display_names, also while a screen is open.
+            "real_id": real_id,
+            "real_name": str(listing.instance.get("display_name") or real_id),
+            "real_provider": str(listing.instance.get("provider") or "shared"),
             "team_slug": listing.team_slug, "team_name": listing.team_name,
-            "instance_id": real_id,
+            "instance_id": real_id, "grant_candidates": list(candidates),
         }
+        apply_display_names(instance, self.app)
+        shown_id, name, provider = instance["id"], instance["name"], instance["provider"]
         return {
+            "grant_candidates": list(candidates),
             "instance": instance, "id": shown_id, "name": name, "provider": provider,
             "raw_id": real_id, "raw_provider": "shared", "source": "team",
             "status": STATUS_SHARED, "modules": listing.module_count, "drift_7d": 0,
@@ -680,7 +707,7 @@ class FleetMemoryScreen(Screen):
                 "age": age_text,
                 "reason": self._reason_cell(raw_iid),
             }
-            row.update(self._shared_fields(row))
+            self._decorate_shared(row)
             self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -757,7 +784,7 @@ class FleetMemoryScreen(Screen):
                 "age": age_text,
                 "reason": self._reason_cell(iid),
             }
-            row.update(self._shared_fields(row))
+            self._decorate_shared(row)
             self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -842,7 +869,11 @@ class FleetMemoryScreen(Screen):
             self.app.notify("Select a row first.", severity="warning")
             return
         from servonaut.screens.memory import MemoryScreen
-        self.app.push_screen(MemoryScreen(row["instance"]))
+        instance = row["instance"]
+        if row.get("grant_candidates"):
+            # A copy: the app's own server record is not ours to annotate.
+            instance = dict(instance, grant_candidates=row["grant_candidates"])
+        self.app.push_screen(MemoryScreen(instance))
 
     def action_share_selected(self) -> None:
         row = self._selected_row()
