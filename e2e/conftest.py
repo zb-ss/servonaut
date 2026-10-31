@@ -202,12 +202,17 @@ class Journey:
 
     def child_env(self, sandbox: Sandbox, **extra: str) -> dict[str, str]:
         """The complete environment for a child living in *sandbox*."""
+        # A short temp directory inside the test root: a child's SSH sharing
+        # socket must fit in ~100 bytes, which the sandbox's own is too deep for.
+        short_tmp = self.ctx.root / "t"
+        short_tmp.mkdir(mode=0o700, exist_ok=True)
+        temp = {"TMPDIR": str(short_tmp), "TMP": str(short_tmp), "TEMP": str(short_tmp)}
         return build_env(
             sandbox,
             shim_dir=self.shims.directory,
             guard_log=self.guard_log,
             armed_log=self.armed_log,
-            extra={**self.env_overrides, **extra},
+            extra={**temp, **self.env_overrides, **extra},
         )
 
     def take_escapes(self) -> list[dict]:

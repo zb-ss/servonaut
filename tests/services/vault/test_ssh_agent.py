@@ -279,6 +279,7 @@ def test_two_private_agents_can_hold_independent_leases(short_socket_dir):
     not os.path.exists("/bin/ssh-agent") or shutil.which("sshd") is None,
     reason="OpenSSH client, agent, or server is unavailable",
 )
+@pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
 def test_private_agent_authenticates_with_public_identity_file_only(tmp_path, monkeypatch):
     """OpenSSH selects an agent key under IdentitiesOnly via its public file."""
     # OpenSSH Unix sockets have a short path limit, so the default HOME used

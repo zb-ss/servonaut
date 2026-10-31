@@ -37,6 +37,21 @@ STATUS_STALE = "stale"
 STATUS_NONE = "none"
 STATUS_OPT_OUT = "opted-out"
 
+#: ``BuildReport.overall_reason`` / scan reason code for a server whose
+#: provider reports it as stopped or terminated. Nothing is probed.
+STOPPED_REASON = "stopped"
+
+# Provider states that mean "no SSH server is answering". Rows carry the
+# normalised state, so one set covers every provider:
+#   AWS EC2:  stopped, stopping, terminated, shutting-down
+#             (pending / running / rebooting are probed)
+#   Hetzner:  ``off`` and ``stopping`` map to ``stopped``
+#             (``initializing`` / ``starting`` / ``running`` / ... are probed)
+#   OVH:      VPS ``stopped``; Public Cloud ``SHUTOFF`` / ``SHELVED`` /
+#             ``SUSPENDED`` map to ``stopped``; dedicated servers have no
+#             stopped state (``error`` and unknown values are probed)
+_STOPPED_STATES = frozenset({"stopped", "stopping", "terminated", "shutting-down"})
+
 
 # ---------------------------------------------------------------------------
 # Age / threshold helpers
@@ -82,6 +97,19 @@ def _resolve_stale_threshold(memory_service: Any) -> float:
     if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
         return float(val)
     return float(DEFAULT_SNAPSHOT_STALE_SECONDS)
+
+
+def is_stopped_instance(instance: Dict[str, Any]) -> bool:
+    """Whether the provider reports *instance* as stopped or terminated.
+
+    Custom servers and team shared rows carry no reliable provider state, so
+    they are always probed. A missing or unrecognised state also counts as
+    "probe it": skipping a server on a guess would hide a running one.
+    """
+    if instance.get("is_custom") or instance.get("is_shared"):
+        return False
+    state = instance.get("state")
+    return isinstance(state, str) and state.strip().lower() in _STOPPED_STATES
 
 
 # ---------------------------------------------------------------------------

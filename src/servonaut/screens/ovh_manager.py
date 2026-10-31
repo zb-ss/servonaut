@@ -37,7 +37,12 @@ from textual.widgets import Button, DataTable, Footer, Static
 from rich.markup import escape
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin, display_text, replace_instances
+from servonaut.screens._demo_resolve import (
+    DemoRowsMixin,
+    display_text,
+    reconcile_team_memory,
+    replace_instances,
+)
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     fetched_row,
@@ -256,6 +261,7 @@ class OVHManagerScreen(DemoRowsMixin, Screen):
             # An empty answer from refused credentials is not an empty fleet.
             if update_fleet and not cred_error:
                 replace_instances(self.app, "ovh", instances)
+                reconcile_team_memory(self.app)
         except Exception as exc:
             logger.error("Failed to load OVH instances: %s", exc)
             err_msg = escape(self._provider_error(exc))

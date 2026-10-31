@@ -34,6 +34,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from servonaut.services.memory.redaction import default_redactor
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.shared_servers import fold_shared_rows
 from servonaut.services.memory.trust_notices import (
     MEMORY_TRUST_NOTICE,
     FINDINGS_PROVENANCE_NOTICE,
@@ -187,6 +188,8 @@ def resolve_instance_scope(
     """
     seen: set[str] = set()
     out: List[InstanceScope] = []
+    # A team's copy of a server the user owns is that server: one scope.
+    candidate_instances = fold_shared_rows(list(candidate_instances))
 
     def _add(inst: Dict[str, Any]) -> None:
         iid = inst.get("id") or inst.get("name") or ""

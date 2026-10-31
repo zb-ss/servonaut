@@ -178,6 +178,7 @@ class ScanService(ScanServiceInterface):
         self._config_manager = config_manager
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        self._connection_rows: Any = None
 
     async def scan_server(
         self,
@@ -243,6 +244,14 @@ class ScanService(ScanServiceInterface):
         self._vault_runtime = runtime
         self._vault_leases = leases
 
+    def set_connection_rows(self, supplier: Any) -> None:
+        """Ask *supplier* for ``(team_rows, fleet_rows)`` on every scan.
+
+        Same contract as ``MemoryService.set_connection_rows``: the rows a
+        team key and a bastion's vault key are looked up in, asked per scan.
+        """
+        self._connection_rows = supplier
+
     async def _with_vault(
         self, target: _ScanTarget, instance: dict, connection_service: Any,
     ) -> _ScanTarget:
@@ -251,17 +260,21 @@ class ScanService(ScanServiceInterface):
         Raises:
             ScanConnectionError: the vault credential exists but cannot be used.
         """
-        from servonaut.services.ssh_credentials import VaultCredentialError, resolve_with_vault
+        from servonaut.services.ssh_credentials import (
+            VaultCredentialError, load_connection_rows, resolve_with_vault,
+        )
 
         conn = {
             "host": target.host, "username": target.username, "key_path": target.key_path,
             "proxy_args": target.proxy_args, "port": target.port,
             "extra_options": target.extra_options,
         }
+        team_rows, fleet_rows = await load_connection_rows(self._connection_rows)
         try:
             resolved = await resolve_with_vault(
                 conn, instance, vault_runtime=self._vault_runtime,
                 connection_service=connection_service, cache=self._vault_leases,
+                team_rows=team_rows, rows=fleet_rows,
             )
         except VaultCredentialError as exc:
             raise ScanConnectionError(str(exc)) from exc

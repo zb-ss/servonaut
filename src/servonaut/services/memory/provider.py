@@ -28,6 +28,13 @@ _PROVIDER_SLUGS: Dict[str, str] = {
 }
 
 
+#: Slug a team's shared server is filed under when the user has no copy of
+#: their own. A share records no cloud provider, and the row's ``provider``
+#: field is the team's display label: it changes when the team is renamed,
+#: can hold spaces and would put the team's name into local paths.
+SHARED_MEMORY_PROVIDER = "shared"
+
+
 def provider_slug(provider: str) -> str:
     """Normalise a provider label to its canonical slug.
 
@@ -44,7 +51,11 @@ def instance_provider(instance: Mapping[str, Any]) -> str:
     AWS instance dicts carry no ``provider`` key (the rest of the app reads
     a missing provider as AWS); OVH, Hetzner and custom servers always set
     one. A dict flagged ``is_custom`` without a provider stays ``"custom"``.
+    A team's shared server is filed under :data:`SHARED_MEMORY_PROVIDER`,
+    never under the team's label.
     """
+    if instance.get("is_shared") is True:
+        return SHARED_MEMORY_PROVIDER
     raw = str(instance.get("provider") or "").strip()
     if raw:
         return provider_slug(raw)

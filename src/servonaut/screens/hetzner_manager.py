@@ -34,7 +34,12 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import DemoRowsMixin, display_text, replace_instances
+from servonaut.screens._demo_resolve import (
+    DemoRowsMixin,
+    display_text,
+    reconcile_team_memory,
+    replace_instances,
+)
 from servonaut.screens._provider_accounts import (
     UnknownAccountError,
     fetched_row,
@@ -234,6 +239,7 @@ class HetznerManagerScreen(DemoRowsMixin, Screen):
             self._raw_instances = list(instances)
             if update_fleet:
                 replace_instances(self.app, "hetzner", instances)
+                reconcile_team_memory(self.app)
             self._apply_display_rows()
             self._render_table()
             n = len(instances)

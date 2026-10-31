@@ -315,6 +315,7 @@ class TestHostKeyPolicy:
     def test_environment_reference_cannot_be_passed_literally(self):
         assert ssh_host_keys.ssh_config_word("/srv/${HOME}/kh") is None
 
+    @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
     @pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client not installed")
     @pytest.mark.parametrize("home_name", ["home dir", "100% home", 'q"uote\\home'])
     def test_openssh_reads_both_files_under_an_unusual_home(
@@ -474,6 +475,7 @@ class TestHostKeyAlias:
     def test_off_adds_no_alias(self, known_hosts):
         assert ConnectionService(_config_manager("off")).get_extra_options(AWS_INSTANCE) == []
 
+    @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
     @pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client not installed")
     def test_openssh_pins_the_instance_by_alias(self, known_hosts):
         manager = _config_manager()
@@ -540,6 +542,7 @@ class TestBastionHop:
         hop = _proxy_command_argv(ConnectionService(_config_manager()).get_proxy_args(profile))
         assert hop[-1] == "bastion.example.com"
 
+    @pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
     @pytest.mark.skipif(shutil.which("ssh") is None, reason="OpenSSH client not installed")
     def test_hop_reads_known_hosts_under_a_percent_home(self, tmp_path, monkeypatch, posix_hop):
         files = _use_home(tmp_path / "100% home", monkeypatch)
@@ -1243,6 +1246,7 @@ def test_memory_build_reports_changed_key_and_keeps_snapshot(tmp_path, known_hos
         process = MagicMock()
         process.communicate = AsyncMock(return_value=(b"", b""))
         process.returncode = 255
+        process.wait = AsyncMock(return_value=255)
         process._transport = None
         return process
 

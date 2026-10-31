@@ -206,13 +206,13 @@ async def test_save_writes_off_the_ui_thread(tmp_path: Path) -> None:
     service = _memory_service(tmp_path)
     app = _Host(service)
     writers: List[threading.Thread] = []
-    real_write = service.write_annotations
+    real_write = service.write_annotations_if_unchanged
 
-    def _write(*args: Any, **kwargs: Any) -> Path:
+    def _write(*args: Any, **kwargs: Any) -> bool:
         writers.append(threading.current_thread())
         return real_write(*args, **kwargs)
 
-    service.write_annotations = _write  # type: ignore[method-assign]
+    service.write_annotations_if_unchanged = _write  # type: ignore[method-assign]
 
     async with app.run_test(headless=True) as pilot:
         editor = await _open_editor(app, pilot)
@@ -323,3 +323,72 @@ async def test_modal_escape_without_changes_closes_at_once() -> None:
         await pilot.press("escape")
         await pilot.pause()
     assert app.result is None
+
+
+@pytest.mark.asyncio
+async def test_notes_changed_while_the_editor_was_open_are_not_overwritten(
+    tmp_path: Path,
+) -> None:
+    service = _memory_service(tmp_path)
+    app = _Host(service)
+
+    async with app.run_test(headless=True) as pilot:
+        editor = await _open_editor(app, pilot)
+        # A team-copy merge appends its block while the editor is open.
+        merged = "my note\n\n## Notes from a team's copy of this server\n\nteam note\n"
+        service.write_annotations("custom-web-1", merged, "custom")
+        editor.query_one("#text-editor-area", TextArea).load_text("my edited note\n")
+        await pilot.press("ctrl+s")
+        await _settle(app, pilot)
+
+    assert _annotations(service) == merged
+    assert any("changed" in message and level == "warning" for message, level in app.notes)
+    assert "Annotations saved." not in [message for message, _ in app.notes]
+    kept = next((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
+    assert kept.read_text() == "my edited note\n"
+    # The warning names the file the text was kept in, not a pattern.
+    warning = next(message for message, level in app.notes if level == "warning")
+    assert kept.name in warning and "<time>" not in warning
+    app.memory_sync_service.enqueue_annotations.assert_not_called()
+
+
+def test_a_merge_between_the_comparison_and_the_write_cannot_be_overwritten(tmp_path: Path) -> None:
+    """The comparison and the write are one locked step: a merge holding the lock wins."""
+    import hashlib
+    import threading
+
+    service = _memory_service(tmp_path)
+    service.write_annotations("custom-web-1", "BASE", "custom")
+    outcome: list = []
+    started = threading.Event()
+
+    def save() -> None:
+        started.set()
+        outcome.append(
+            MemoryScreen._write_unless_changed(service, "custom-web-1", "custom", "USER EDIT", "BASE")
+        )
+
+    store = service._store
+    with store.annotation_lock("custom-web-1"):
+        thread = threading.Thread(target=save)
+        thread.start()
+        started.wait(2)
+        thread.join(0.2)
+        assert thread.is_alive()
+        store.write_annotations("custom-web-1", "BASE\n\nMERGED NOTE", "custom")
+    thread.join(2)
+    assert len(outcome) == 1 and outcome[0] is not None  # kept as a draft
+    assert service.read_annotations("custom-web-1", "custom") == "BASE\n\nMERGED NOTE"
+    drafts = list((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
+    assert [d.read_text() for d in drafts] == ["USER EDIT"]
+    assert oct(drafts[0].stat().st_mode & 0o777) == "0o600"
+
+
+def test_two_rejected_saves_keep_both_drafts(tmp_path: Path) -> None:
+    service = _memory_service(tmp_path)
+    service.write_annotations("custom-web-1", "BASE", "custom")
+    service.write_annotations("custom-web-1", "CHANGED", "custom")
+    for text in ("first draft", "second draft"):
+        assert MemoryScreen._write_unless_changed(service, "custom-web-1", "custom", text, "BASE") is not None
+    drafts = sorted((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
+    assert sorted(d.read_text() for d in drafts) == ["first draft", "second draft"]
