@@ -7,10 +7,12 @@ import asyncio
 import io
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 # Forwarded variables that reached this process as empty strings and were
@@ -109,6 +111,61 @@ def _desktop_exec(argv: Sequence[str]) -> str:
     if "=" in argv[0]:
         raise ValueError("Desktop entry executable cannot contain '='.")
     return " ".join(_desktop_exec_argument(argument) for argument in argv)
+
+
+_DESKTOP_STRING_ESCAPES = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+
+
+def _desktop_exec_argv(value: str) -> list[str]:
+    """Decode a desktop-entry ``Exec`` value back into argv; the inverse of ``_desktop_exec``.
+
+    The value is first a desktop-entry string (``\\\\``, ``\\s``, ``\\n``... escapes),
+    then a space-separated command line in which a double-quoted argument
+    escapes the double quote, backtick, dollar sign and backslash with a
+    backslash, and finally ``%%`` stands for a literal percent sign.
+
+    Raises:
+        ValueError: The command line has an unterminated quote.
+    """
+    unescaped = re.sub(
+        r"\\(.)",
+        lambda match: _DESKTOP_STRING_ESCAPES.get(match.group(1), "\\" + match.group(1)),
+        value,
+    )
+    return [argument.replace("%%", "%") for argument in _split_desktop_command(unescaped)]
+
+
+def _split_desktop_command(command: str) -> list[str]:
+    """Split a desktop-entry command line into its arguments."""
+    arguments: list[str] = []
+    current: list[str] = []
+    in_argument = quoted = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        index += 1
+        if quoted:
+            if character == "\\" and index < len(command) and command[index] in '"`$\\':
+                current.append(command[index])
+                index += 1
+            elif character == '"':
+                quoted = False
+            else:
+                current.append(character)
+        elif character == '"':
+            quoted = in_argument = True
+        elif character in " \t":
+            if in_argument:
+                arguments.append("".join(current))
+                current, in_argument = [], False
+        else:
+            current.append(character)
+            in_argument = True
+    if quoted:
+        raise ValueError("Desktop entry command has an unterminated quote.")
+    if in_argument:
+        arguments.append("".join(current))
+    return arguments
 
 
 def _write_macos_command_helper(path: Path, argv: Sequence[str]) -> None:
@@ -361,6 +418,144 @@ def _install_macos_terminal_shortcut(app_argv: Sequence[str]) -> None:
     print(f"App bundle created: {bundle}")
     print(f"{_MACOS_TERMINAL_NAME} should now appear in ~/Applications and Spotlight.")
     _remove_legacy_macos_shortcut(applications / _LEGACY_MACOS_BUNDLE)
+
+
+@dataclass(frozen=True)
+class ShortcutRepair:
+    """A terminal shortcut whose Servonaut command was gone, and what became of it."""
+
+    path: Path
+    # None once the shortcut opens the running install; otherwise why not.
+    error: str | None = None
+
+
+def repair_terminal_shortcuts(app_argv: Sequence[str]) -> list[ShortcutRepair]:
+    """Repoint the terminal shortcuts ``--install-desktop`` wrote whose command is gone.
+
+    Only shortcuts Servonaut recognises as its own are read, and only their
+    command changes. Working shortcuts, even ones that open another install,
+    are left as they are.
+
+    Args:
+        app_argv: The validated command that opens the running install's TUI.
+    """
+    from servonaut.utils.platform_utils import get_os
+
+    os_type = get_os()
+    if os_type == "linux":
+        return _repair_linux_launchers(app_argv)
+    if os_type == "darwin":
+        return _repair_macos_shortcuts(app_argv)
+    return []
+
+
+def _repair_linux_launchers(app_argv: Sequence[str]) -> list[ShortcutRepair]:
+    repairs: list[ShortcutRepair] = []
+    for name in (_TERMINAL_LAUNCHER_FILE, _LEGACY_LINUX_LAUNCHER_FILE):
+        path = _linux_applications_dir() / name
+        if not _is_generated_linux_launcher(path):
+            continue
+        repair = _repair_linux_launcher(path, app_argv)
+        if repair is not None:
+            repairs.append(repair)
+    return repairs
+
+
+def _repair_linux_launcher(path: Path, app_argv: Sequence[str]) -> ShortcutRepair | None:
+    """Repoint one generated launcher if its terminal runs a command that is gone."""
+    from servonaut.mcp.registration_repair import is_command_missing
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return None
+    exec_lines = [index for index, line in enumerate(lines) if line.startswith("Exec=")]
+    if len(exec_lines) != 1:
+        return None
+    line = lines[exec_lines[0]]
+    try:
+        argv = _desktop_exec_argv(line.removeprefix("Exec=").rstrip("\r\n"))
+    except ValueError:
+        return None
+    terminal = tuple(argv[:2])
+    if len(argv) < 3 or terminal not in _LEGACY_TERMINAL_PREFIXES:
+        return None
+    if not is_command_missing(argv[2]):
+        return None
+    terminal = _available_terminal_prefix(terminal)
+    if terminal is None:
+        return ShortcutRepair(path, "no supported terminal emulator found")
+    ending = line[len(line.rstrip("\r\n")):]
+    try:
+        lines[exec_lines[0]] = f"Exec={_desktop_exec([*terminal, *app_argv])}{ending}"
+        path.write_text("".join(lines), encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        return ShortcutRepair(path, str(exc))
+    return ShortcutRepair(path)
+
+
+def _available_terminal_prefix(current: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Keep the launcher's terminal while it is installed, else the first one found."""
+    import shutil
+
+    if shutil.which(current[0]):
+        return current
+    return next(
+        (prefix for name, prefix in _TERMINAL_PREFIXES if shutil.which(name)), None
+    )
+
+
+def _repair_macos_shortcuts(app_argv: Sequence[str]) -> list[ShortcutRepair]:
+    from servonaut.mcp.registration_repair import is_command_missing
+
+    repairs: list[ShortcutRepair] = []
+    applications = _macos_applications_dir()
+    for bundle in (applications / _MACOS_TERMINAL_BUNDLE, applications / _LEGACY_MACOS_BUNDLE):
+        if not _is_repairable_macos_shortcut(bundle):
+            continue
+        helper = bundle / "Contents" / "MacOS" / _MACOS_COMMAND_HELPER
+        argv = _macos_helper_argv(helper)
+        if not argv or not is_command_missing(argv[0]):
+            continue
+        try:
+            _write_macos_command_helper(helper, app_argv)
+        except (OSError, ValueError) as exc:
+            repairs.append(ShortcutRepair(bundle, str(exc)))
+            continue
+        repairs.append(ShortcutRepair(bundle))
+    return repairs
+
+
+def _is_repairable_macos_shortcut(bundle: Path) -> bool:
+    """Whether *bundle* is a terminal shortcut ``--install-desktop`` wrote."""
+    import plistlib
+    from xml.parsers.expat import ExpatError
+
+    if bundle.name == _LEGACY_MACOS_BUNDLE:
+        return _is_generated_macos_shortcut(bundle)
+    if bundle.is_symlink() or not bundle.is_dir():
+        return False
+    try:
+        info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+    except (OSError, ValueError, ExpatError):
+        return False
+    return isinstance(info, dict) and info.get("CFBundleIdentifier") == _MACOS_TERMINAL_IDENTIFIER
+
+
+def _macos_helper_argv(helper: Path) -> list[str] | None:
+    """The command a ``_write_macos_command_helper`` script runs, if it is one."""
+    if helper.is_symlink() or not helper.is_file():
+        return None
+    try:
+        lines = helper.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if len(lines) != 2 or lines[0] != "#!/bin/sh" or not lines[1].startswith("exec "):
+        return None
+    try:
+        return shlex.split(lines[1].removeprefix("exec ")) or None
+    except ValueError:
+        return None
 
 
 def _install_desktop() -> None:
@@ -1305,6 +1500,9 @@ def _main() -> None:
                         help='Install MCP server into a coding agent '
                              '(claude, opencode, cursor, windsurf, vscode, '
                              'codex, agy, gemini, all)')
+    parser.add_argument('--mcp-repair', action='store_true',
+                        help='Repoint coding-agent MCP entries and the terminal shortcut '
+                             'that still name a removed Servonaut install')
     parser.add_argument('--list-backups', action='store_true',
                         help='List local config backups and exit')
     parser.add_argument('--restore-backup', type=_backup_number, metavar='N', nargs='?',
@@ -1582,6 +1780,10 @@ def _main() -> None:
         from servonaut.mcp.installer import install_mcp_server
         install_mcp_server(args.mcp_install)
         return
+
+    if args.mcp_repair:
+        from servonaut.mcp.registration_repair import run_repair_command
+        raise SystemExit(run_repair_command())
 
     if args.mcp:
         import asyncio

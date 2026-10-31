@@ -369,6 +369,17 @@ class ServonautApp(App):
             exclusive=True,
             exit_on_error=False,
         )
+        # Agent MCP configs and the terminal shortcut can still name an
+        # executable a change of install method removed (pipx -> desktop
+        # package, or back). Own group for the same reason as version_check.
+        if self.config_manager.get().repair_stale_install_paths:
+            self.run_worker(
+                self._repair_stale_install_paths(),
+                name="install_path_repair",
+                group="install_path_repair",
+                exclusive=True,
+                exit_on_error=False,
+            )
         # Refresh the plan and hosted-AI balance once per launch: the token's
         # cached entitlements date from sign-in, so the chat footer would
         # otherwise show stale money (or old token counters) until a chat turn.
@@ -3104,6 +3115,18 @@ class ServonautApp(App):
         for screen in list(self.screen_stack):
             for panel in screen.query(ChatPanel):
                 panel._update_quota_footer()
+
+    async def _repair_stale_install_paths(self) -> None:
+        """Repoint agent MCP entries left naming a removed install, then say so."""
+        from servonaut.mcp.registration_repair import repair_on_launch
+
+        try:
+            message = await asyncio.to_thread(repair_on_launch, self.runtime_layout)
+        except Exception as e:  # noqa: BLE001 — a repair must never break startup
+            logger.warning("Install path repair failed: %s", e)
+            return
+        if message:
+            self.notify(message, severity="information", timeout=20, markup=False)
 
     async def _check_for_update(self) -> None:
         """Check PyPI for a newer version in the background."""

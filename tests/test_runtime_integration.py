@@ -754,3 +754,68 @@ async def test_secrets_worker_rejects_invalid_packaged_commands_before_spawning(
     create_subprocess.assert_not_called()
     notify.assert_called_once()
     assert "command helper could not be launched" in notify.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_launch_repairs_stale_install_paths_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch hook hands the app's runtime to the repair and toasts its result."""
+    seen: list[object] = []
+
+    def repaired(runtime: object) -> str:
+        seen.append(runtime)
+        return "Servonaut repaired its MCP setup in Codex."
+
+    monkeypatch.setattr("servonaut.mcp.registration_repair.repair_on_launch", repaired)
+    app = _isolated_app(tmp_path, monkeypatch)
+    notes: list[tuple[str, dict]] = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: notes.append((message, kwargs)))
+
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+    assert seen == [app.runtime_layout]
+    assert ("Servonaut repaired its MCP setup in Codex.", {
+        "severity": "information", "timeout": 20, "markup": False,
+    }) in notes
+
+
+@pytest.mark.asyncio
+async def test_launch_repair_can_be_switched_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "servonaut.mcp.registration_repair.repair_on_launch", lambda runtime: calls.append(runtime)
+    )
+    app = _isolated_app(tmp_path, monkeypatch)
+    config_path = tmp_path / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["repair_stale_install_paths"] = False
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_repair_leaves_the_app_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_runtime: object) -> str:
+        raise PermissionError("config is read-only")
+
+    monkeypatch.setattr("servonaut.mcp.registration_repair.repair_on_launch", broken)
+    app = _isolated_app(tmp_path, monkeypatch)
+
+    async with app.run_test(headless=True, size=(120, 40)) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app.is_running

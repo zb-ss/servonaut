@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import os
 import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -404,3 +405,146 @@ def test_a_linked_bundle_is_kept(mac_applications: Path, tmp_path: Path) -> None
 
     assert legacy.is_symlink()
     assert _tree(target) == before
+
+
+# --- repairing a shortcut whose Servonaut install was removed ----------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["gnome-terminal", "--", "/opt/servonaut/servonaut"],
+        ["xterm", "-e", '/a b/$x`y"z\\w%q', "-m", "servonaut.main"],
+        ["kitty", "-e", "/new\nline\ttab", ""],
+    ],
+)
+def test_desktop_exec_decodes_what_it_encodes(argv: list[str]) -> None:
+    assert main._desktop_exec_argv(main._desktop_exec(argv)) == argv
+
+
+def test_an_unterminated_exec_quote_is_refused() -> None:
+    with pytest.raises(ValueError):
+        main._desktop_exec_argv('"gnome-terminal" "--')
+
+
+def _gone_console(home: Path) -> str:
+    return str(home / ".local" / "bin" / "servonaut")
+
+
+def test_a_legacy_launcher_with_a_removed_command_is_repointed(
+    applications: Path, home: Path
+) -> None:
+    launcher = applications / "servonaut.desktop"
+    launcher.write_text(
+        _legacy_launcher(f"gnome-terminal --  {_gone_console(home)}"), encoding="utf-8"
+    )
+    launcher.chmod(0o755)
+
+    repairs = main.repair_terminal_shortcuts(_APP_ARGV)
+
+    assert repairs == [main.ShortcutRepair(launcher)]
+    expected_exec = main._desktop_exec(["gnome-terminal", "--", *_APP_ARGV])
+    assert launcher.read_text(encoding="utf-8") == _legacy_launcher(expected_exec)
+    assert os.access(launcher, os.X_OK)
+
+
+def test_the_current_launcher_is_repointed_and_keeps_its_terminal(
+    applications: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    launcher = applications / _TERMINAL_LAUNCHER
+    launcher.write_text(
+        main._terminal_launcher_entry(
+            main._desktop_exec(["konsole", "-e", _gone_console(home)])
+        ),
+        encoding="utf-8",
+    )
+
+    assert main.repair_terminal_shortcuts(_APP_ARGV) == [main.ShortcutRepair(launcher)]
+    assert launcher.read_text(encoding="utf-8") == main._terminal_launcher_entry(
+        main._desktop_exec(["konsole", "-e", *_APP_ARGV])
+    )
+
+
+def test_a_launcher_whose_terminal_is_gone_gets_one_that_is_installed(
+    applications: Path, home: Path
+) -> None:
+    launcher = applications / _TERMINAL_LAUNCHER
+    launcher.write_text(
+        main._terminal_launcher_entry(main._desktop_exec(["kitty", "-e", _gone_console(home)])),
+        encoding="utf-8",
+    )
+
+    main.repair_terminal_shortcuts(_APP_ARGV)
+
+    assert f"Exec={main._desktop_exec(['gnome-terminal', '--', *_APP_ARGV])}" in (
+        launcher.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_without_any_terminal_the_launcher_is_reported_and_kept(
+    applications: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    launcher = applications / "servonaut.desktop"
+    launcher.write_text(_legacy_launcher(f"xterm -e {_gone_console(home)}"), encoding="utf-8")
+    before = launcher.read_bytes()
+
+    repairs = main.repair_terminal_shortcuts(_APP_ARGV)
+
+    assert [repair.error for repair in repairs] == ["no supported terminal emulator found"]
+    assert launcher.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Still opens an install that exists.
+        _legacy_launcher(f"gnome-terminal -- {Path(sys.executable).resolve()}"),
+        # Not written by --install-desktop.
+        _legacy_launcher("gnome-terminal -- /gone/servonaut", comment="Comment=My own"),
+    ],
+    ids=["working", "not-ours"],
+)
+def test_other_launchers_are_left_alone(applications: Path, content: str) -> None:
+    launcher = applications / "servonaut.desktop"
+    launcher.write_text(content, encoding="utf-8")
+
+    assert main.repair_terminal_shortcuts(_APP_ARGV) == []
+    assert launcher.read_text(encoding="utf-8") == content
+
+
+def test_the_macos_shortcut_with_a_removed_command_is_repointed(
+    mac_applications: Path, home: Path
+) -> None:
+    main._install_desktop()
+    helper = mac_applications / _TERMINAL_BUNDLE / "Contents" / "MacOS" / "Servonaut.command"
+    main._write_macos_command_helper(helper, [_gone_console(home)])
+
+    repairs = main.repair_terminal_shortcuts(_APP_ARGV)
+
+    assert repairs == [main.ShortcutRepair(mac_applications / _TERMINAL_BUNDLE)]
+    assert helper.read_text(encoding="utf-8") == f"#!/bin/sh\nexec {shlex.join(_APP_ARGV)}\n"
+
+
+def test_the_earlier_macos_shortcut_is_repointed(mac_applications: Path, home: Path) -> None:
+    bundle = _legacy_bundle(mac_applications)
+    helper = bundle / "Contents" / "MacOS" / "Servonaut.command"
+    main._write_macos_command_helper(helper, [_gone_console(home)])
+
+    assert main.repair_terminal_shortcuts(_APP_ARGV) == [main.ShortcutRepair(bundle)]
+    assert shlex.join(_APP_ARGV) in helper.read_text(encoding="utf-8")
+
+
+def test_the_desktop_app_bundle_is_never_touched(mac_applications: Path) -> None:
+    bundle = _desktop_app_bundle(mac_applications)
+    before = _tree(bundle)
+
+    assert main.repair_terminal_shortcuts(_APP_ARGV) == []
+    assert _tree(bundle) == before
+
+
+def test_no_shortcut_repair_on_windows(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("servonaut.utils.platform_utils.get_os", lambda: "windows")
+
+    assert main.repair_terminal_shortcuts(_APP_ARGV) == []
