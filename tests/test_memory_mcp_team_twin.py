@@ -12,7 +12,7 @@ OWN = {
     "public_ip": "9.9.9.9", "provider": "aws",
 }
 TWIN = shared_row(
-    {"id": "11111111-aaaa-bbbb-cccc-000000000001", "name": "web-1",
+    {"id": "11111111-aaaa-bbbb-cccc-000000000001", "name": "web-1",  # leak-guard:allow
      "hostname": "9.9.9.9", "instance_id": OWN["id"], "username": "deploy"},
     TEAM,
 )

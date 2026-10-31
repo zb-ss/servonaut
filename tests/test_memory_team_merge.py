@@ -29,7 +29,7 @@ from servonaut.services.shared_servers import shared_row
 
 TEAM = {"slug": "team-a", "name": "Team A", "id": 7}
 OWN_ID = "i-0abc0abc0abc0abc0"
-SHARE_ID = "11111111-aaaa-bbbb-cccc-000000000001"
+SHARE_ID = "11111111-aaaa-bbbb-cccc-000000000001"  # leak-guard:allow
 OLD = "2026-01-01T00:00:00+00:00"
 NEW = "2026-02-01T00:00:00+00:00"
 FIRST = "f_aaaaaaaaaaaaaaaa"
@@ -239,7 +239,7 @@ class TestSyncSide:
 class TestReshare:
     def test_an_entry_left_by_an_old_share_id_folds_into_the_new_one(self, tmp_path):
         service = _service(tmp_path)
-        old_id = "22222222-aaaa-bbbb-cccc-000000000002"
+        old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow
         row = _shared(instance_id=None, hostname="8.8.8.8")
         service._store.save_module(old_id, "os", _module(NEW, distro="old") | {"instance_id": old_id}, "shared")
         service.update_index(old_id, "web-1", "shared", ["os"])
@@ -254,7 +254,7 @@ class TestReshare:
 
     def test_an_entry_with_no_recorded_identity_is_left_alone(self, tmp_path):
         service = _service(tmp_path)
-        old_id = "22222222-aaaa-bbbb-cccc-000000000002"
+        old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow
         service._store.write_annotations(old_id, "kept note", "shared")
         service.update_index(old_id, "web-1", "shared", [])
         report = _run(service, [_shared(instance_id=None, hostname="8.8.8.8")])
@@ -263,10 +263,10 @@ class TestReshare:
 
     def test_an_ambiguous_identity_is_counted_and_never_merged(self, tmp_path):
         service = _service(tmp_path)
-        old_id = "22222222-aaaa-bbbb-cccc-000000000002"
+        old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow
         rows = [
             _shared(instance_id=None, hostname="8.8.8.8"),
-            _shared(id="33333333-aaaa-bbbb-cccc-000000000003", instance_id=None, hostname="8.8.8.8"),
+            _shared(id="33333333-aaaa-bbbb-cccc-000000000003", instance_id=None, hostname="8.8.8.8"),  # leak-guard:allow
         ]
         service._store.write_annotations(old_id, "kept note", "shared")
         service.update_index(old_id, "web-1", "shared", [])

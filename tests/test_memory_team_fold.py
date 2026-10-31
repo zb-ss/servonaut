@@ -39,7 +39,7 @@ def _own(**changes: Any) -> Dict[str, Any]:
 
 def _shared(**changes: Any) -> Dict[str, Any]:
     server = {
-        "id": "11111111-aaaa-bbbb-cccc-000000000001", "name": "web-1",
+        "id": "11111111-aaaa-bbbb-cccc-000000000001", "name": "web-1",  # leak-guard:allow
         "hostname": "9.9.9.9", "instance_id": "i-0abc0abc0abc0abc0",
         "username": "deploy",
     }
