@@ -198,7 +198,8 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
 }
 
 #share-status {
-    height: 1;
+    height: auto;
+    min-height: 1;
     margin-bottom: 1;
 }
 

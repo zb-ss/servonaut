@@ -154,7 +154,8 @@ class ShareInstanceScreen(Screen):
         margin-bottom: 1;
     }
     ShareInstanceScreen #share-status {
-        height: 1;
+        height: auto;
+        min-height: 1;
         margin-bottom: 1;
     }
     ShareInstanceScreen .share-field-row {
