@@ -1223,9 +1223,12 @@ class MemoryConfig:
             dropped connection; two failures before any answer make the
             server unreachable.
         ssh_control_socket_dir: Directory for each build's private socket
-            folder. Empty means a short system location (``/tmp``); set it
-            where ``/tmp`` is not writable. Too long a path (Unix sockets hold
-            about 100 bytes) turns connection sharing off.
+            folder. Empty means the system temp directory (``TMPDIR``) when a
+            socket path fits there, else ``/tmp`` when that is usable; with
+            neither, connections are not shared. A configured directory is
+            used as is, and refused (no sharing) when it contains a space or
+            ``%``, is missing, or is too long (Unix sockets hold about 100
+            bytes).
     """
 
     enabled: bool = True

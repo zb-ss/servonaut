@@ -432,6 +432,12 @@ class MemoryService(MemoryServiceInterface):
 
         tasks = [run_one(p) for p in selected_probers]
         try:
+            # Connection preparation (vault lookup, Retry-After, bastion slot,
+            # shared connection) has a budget of its own; the probers' command
+            # clocks start only once it is done.
+            prepare = getattr(ssh_runner, "prepare", None)
+            if prepare is not None:
+                await prepare()
             raw_results = await asyncio.gather(*tasks)
         finally:
             # Success, failure or cancellation: the shared connection ends with the build.
@@ -1951,6 +1957,27 @@ class MemoryService(MemoryServiceInterface):
                 return stdout, stderr, code
             raise AssertionError("unreachable: the second attempt always returns or raises")  # pragma: no cover
 
+        async def _prepare() -> None:
+            """Resolve the credentials and open the shared connection, within the preparation budget.
+
+            A failure is the server's verdict (recorded as the connection
+            problem, with the existing reasons); the probers then fail fast.
+            """
+            budget = (
+                3 * self._setting("ssh_master_connect_timeout_seconds")
+                + self._setting("ssh_connect_retry_backoff_seconds")
+                + self._setting("vault_rate_limit_max_wait_seconds")
+                + self._setting("vault_rate_limit_jitter_seconds")
+            )
+            try:
+                await asyncio.wait_for(_ensure_resolved(), timeout=budget)
+            except VaultCredentialError:
+                pass  # recorded by the resolution
+            except asyncio.TimeoutError:
+                _record_problem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
+            except Exception as exc:  # noqa: BLE001 - the commands try again (transient)
+                logger.warning("Preparing the connection for %s failed: %s", instance.get("id", "?"), type(exc).__name__)
+
         async def _cleanup() -> None:
             for task in resolution:
                 if not task.done():
@@ -1991,4 +2018,6 @@ class MemoryService(MemoryServiceInterface):
         _real_runner.commands_answered = 0  # type: ignore[attr-defined]
         # Ends the shared connection; build_report() calls it when the build ends.
         _real_runner.close = _close  # type: ignore[attr-defined]
+        # Awaited once by build_report() before any prober starts.
+        _real_runner.prepare = _prepare  # type: ignore[attr-defined]
         return _real_runner

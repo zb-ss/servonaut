@@ -449,3 +449,57 @@ class TestResolutionLifecycle:
         stdout, _err, code = asyncio.run(go())
 
         assert (stdout, code) == ("ok", 0)
+
+
+class TestPreparationHasItsOwnBudget:
+    """Vault lookup, Retry-After and connection setup must not eat the probers' command clock."""
+
+    def _build(self, tmp_path, lease, monkeypatch, runtime):
+        from servonaut.services.memory.modules import base
+        from servonaut.services.memory.modules.os import OSProber
+
+        monkeypatch.setattr(base, "_CMD_TIMEOUT_SECONDS", 0.1)
+        service, _ = _service_with(tmp_path, runtime, config=MemoryConfig(vault_rate_limit_jitter_seconds=0))
+        service._probers = [OSProber()]
+
+        async def slow_wait(seconds):
+            await asyncio.sleep(0.3)  # longer than one command's clock
+
+        os_release = b'ID=debian\nPRETTY_NAME="Debian GNU/Linux 12"\n'
+        with patch("servonaut.services.memory.service._wait", slow_wait), patch(
+            "servonaut.utils.ssh_utils.run_ssh_subprocess", AsyncMock(return_value=(os_release, b"")),
+        ), patch("servonaut.utils.ssh_utils.run_ssh_daemonizing", AsyncMock(return_value=(b"", b""))):
+            return asyncio.run(service.build_report(dict(CUSTOM), ["os"]))
+
+    def test_a_retry_after_longer_than_a_command_clock_does_not_fail_the_server(self, tmp_path, lease, monkeypatch):
+        runtime = _CountingRuntime(lease, fail_first=1, error=_rate_limited("1"))
+
+        report = self._build(tmp_path, lease, monkeypatch, runtime)
+
+        assert report.overall_reason is None and "os" in report.successes
+        assert runtime.calls == 2
+
+    def test_a_slow_lookup_does_not_fail_the_server(self, tmp_path, lease, monkeypatch):
+        class Slow(_CountingRuntime):
+            async def resolve_ssh(self, instance):
+                await asyncio.sleep(0.4)
+                return await super().resolve_ssh(instance)
+
+        report = self._build(tmp_path, lease, monkeypatch, Slow(lease))
+
+        assert report.overall_reason is None and "os" in report.successes
+
+    def test_a_failed_preparation_is_the_servers_verdict(self, tmp_path, lease, monkeypatch):
+        runtime = _CountingRuntime(lease, fail_first=99, error=RuntimeError("locked"))
+
+        report = self._build(tmp_path, lease, monkeypatch, runtime)
+
+        assert report.failures[0].reason == "vault_credential_unavailable"
+
+    def test_a_runner_outside_a_build_still_prepares_on_its_first_command(self, tmp_path, lease):
+        runtime = _CountingRuntime(lease)
+        service, _ = _service_with(tmp_path, runtime)
+
+        results = asyncio.run(_run_many(service, dict(CUSTOM), 2))
+
+        assert all(code == 0 for _o, _e, code in results) and runtime.calls == 1
