@@ -1628,21 +1628,33 @@ class MemoryService(MemoryServiceInterface):
         # bastion across every build of this service.
         server_gate = asyncio.Semaphore(max(1, int(self._setting("ssh_max_connections_per_server"))))
         retry_backoff = self._setting("ssh_connect_retry_backoff_seconds")
+        recovery_lock = asyncio.Lock()
+        reopened: List[bool] = []
 
         def _bastion_gate() -> Optional[asyncio.Semaphore]:
-            route = resolved.get("profile") or profile
+            # A team route resolved with no rules goes direct: its "profile" is
+            # None on purpose, not a cue to use the own row's bastion.
+            route = resolved["profile"] if "profile" in resolved else profile
             return self._bastion_gate(route)
 
         def _argv(remote_command: Optional[str], control_options: List[str]) -> List[str]:
             """The ssh command for *remote_command* (none: the connection alone)."""
+            # A command bound to the shared connection must never dial on its
+            # own: OpenSSH silently connects normally when the control socket
+            # is gone, outside every gate. A proxy that always fails (first
+            # value wins, ahead of any ProxyJump) makes it fail fast instead.
+            bound = remote_command is not None and "ControlMaster=no" in control_options
             return ssh_service.build_ssh_command(
                 host=resolved["host"],
                 username=resolved["username"],
                 key_path=resolved.get("key_path"),
-                proxy_args=resolved.get("proxy_args") or [],
+                proxy_args=[] if bound else (resolved.get("proxy_args") or []),
                 remote_command=remote_command,
                 port=resolved.get("port"),
-                extra_options=["BatchMode=yes", *control_options, *(resolved.get("extra_options") or [])],
+                extra_options=[
+                    *(["ProxyCommand=false"] if bound else []),
+                    "BatchMode=yes", *control_options, *(resolved.get("extra_options") or []),
+                ],
                 **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
             )
 
@@ -1673,7 +1685,7 @@ class MemoryService(MemoryServiceInterface):
             """Whether retrying cannot help: a refused login or host key is the same every time."""
             return failure == "ssh_auth_failed" or _real_runner.host_key_problem is not None  # type: ignore[attr-defined]
 
-        async def _open_master() -> None:
+        async def _open_master(record: bool = True) -> None:
             """Share one connection for the build, or leave the commands to connect on their own."""
             assert master is not None
             for attempt in (0, 1):
@@ -1689,11 +1701,13 @@ class MemoryService(MemoryServiceInterface):
                         logger.info("SSH multiplexing is unavailable here; connecting per command")
                         return
                     if _is_final(failure) or attempt == 1:
-                        _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
+                        if record:
+                            _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
                         return
                 except asyncio.TimeoutError:
                     if attempt == 1:
-                        _record_problem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
+                        if record:
+                            _record_problem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
                         return
                 except OSError as exc:
                     logger.error("SSH master error for instance %s: %s", instance.get("id", "?"), exc)
@@ -1767,13 +1781,12 @@ class MemoryService(MemoryServiceInterface):
             # Shielded: one cancelled prober must not cancel the others' resolution.
             await asyncio.shield(resolution[0])
 
-        async def _run_once(command: str) -> tuple[str, str, int, Optional[str]]:
+        async def _execute(command: str, control: List[str]) -> tuple[str, str, int, Optional[str]]:
             """One ssh run of *command*: ``(stdout, stderr, returncode, failure)``.
 
             *failure* is why ssh itself failed, None when the remote command
             ran (whatever its exit status).
             """
-            control = master.command_options() if master is not None and master.is_open else []
             ssh_cmd = _argv(command, control)
             async with contextlib.AsyncExitStack() as gates:
                 if not control:
@@ -1798,6 +1811,28 @@ class MemoryService(MemoryServiceInterface):
                 stdout_bytes.decode("utf-8", errors="replace"),
                 stderr_bytes.decode("utf-8", errors="replace"), 0, None,
             )
+
+        async def _recover_master() -> None:
+            """The shared connection is gone: reopen it once under the gates, else go direct."""
+            assert master is not None
+            async with recovery_lock:
+                if not (master.is_open and not master.socket_alive()):
+                    return  # another command already recovered it
+                master.mark_lost()
+                if not reopened:
+                    reopened.append(True)
+                    logger.info("The shared SSH connection for %s ended; reopening it once", instance.get("id", "?"))
+                    await _open_master(record=False)
+
+        async def _run_once(command: str) -> tuple[str, str, int, Optional[str]]:
+            """Run *command* over the shared connection, or on its own connection when there is none."""
+            control = master.command_options() if master is not None and master.is_open else []
+            result = await _execute(command, control)
+            if control and result[3] is not None and not master.socket_alive():
+                await _recover_master()
+                control = master.command_options() if master.is_open else []
+                result = await _execute(command, control)
+            return result
 
         def _may_retry(attempt: int) -> bool:
             # Only a connection that dropped before anything answered may be a
@@ -1857,8 +1892,7 @@ class MemoryService(MemoryServiceInterface):
                 return stdout, stderr, code
             raise AssertionError("unreachable: the second attempt always returns or raises")  # pragma: no cover
 
-        async def _close() -> None:
-            """End the build's shared connection and remove its socket directory."""
+        async def _cleanup() -> None:
             for task in resolution:
                 if not task.done():
                     task.cancel()
@@ -1866,6 +1900,13 @@ class MemoryService(MemoryServiceInterface):
                 await asyncio.gather(*resolution, return_exceptions=True)
             if master is not None:
                 await master.close(lambda opts: _argv(None, opts) if resolved else [])
+
+        async def _close() -> None:
+            """End the build's shared connection and remove its socket directory.
+
+            Shielded: a second cancel must not leave the master running.
+            """
+            await asyncio.shield(asyncio.ensure_future(_cleanup()))
 
         # Attach instance so LogsProber can read it from the runner directly,
         # eliminating the shared _instance field race in concurrent build_report calls.

@@ -83,7 +83,7 @@ class FakeSsh:
             raise result
         if kind == "master":
             # A real master leaves its control socket in the directory.
-            (Path(_control_path(argv)).parent / "socket").touch()
+            Path(_control_path(argv)).touch()
         return SSHOutput(result[0], result[1], 0, "")
 
 

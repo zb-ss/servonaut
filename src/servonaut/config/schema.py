@@ -1206,9 +1206,10 @@ class MemoryConfig:
         vault_rate_limit_jitter_seconds: Random extra pause (up to this long)
             added to that wait so servers refused together do not all retry
             at the same moment.
-        ssh_max_connections_per_bastion: Most SSH connections open at once
-            through one bastion (``host``), shared by every concurrent build.
-            With connection sharing it gates opening each server's master.
+        ssh_max_connections_per_bastion: Most SSH handshakes in progress at
+            once through one bastion (``host`` and port), shared by every
+            concurrent build. With connection sharing it gates opening each
+            server's master; an open master no longer counts.
         ssh_max_connections_per_server: Most connections one server's build
             opens at once where connections cannot be shared (Windows).
         ssh_master_connect_timeout_seconds: Time a build's shared master

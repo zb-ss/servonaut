@@ -330,6 +330,7 @@ async def bastion_lease(
     vault_runtime: Any,
     connection_service: Any,
     cache: Optional[VaultLeaseCache] = None,
+    raise_rate_limited: bool = False,
 ) -> Any:
     """The vault lease of *profile*'s bastion, or None to keep the user's own hop setup.
 
@@ -368,13 +369,13 @@ async def bastion_lease(
     name = str(row.get("name") or row.get("id") or profile.bastion_host)
     if _behind_proxy(row, name, connection_service):
         return None
-    lease = await _bastion_row_lease(row, name, vault_runtime, cache)
+    lease = await _bastion_row_lease(row, name, vault_runtime, cache, raise_rate_limited)
     if lease is not None or is_shared_row(row) or getattr(profile, "bastion_key", None):
         return lease
     team = team_twin(row, rows)
     if team is None or _behind_proxy(team, name, connection_service):
         return None
-    lease = await _bastion_row_lease(team, name, vault_runtime, cache)
+    lease = await _bastion_row_lease(team, name, vault_runtime, cache, raise_rate_limited)
     if lease is not None:
         logger.info("The hop to the bastion %s uses the key of the team %s", name, row_team_label(team))
     return lease
@@ -436,6 +437,7 @@ def _behind_proxy(row: Mapping[str, Any], name: str, connection_service: Any) ->
 
 async def _bastion_row_lease(
     row: Mapping[str, Any], name: str, vault_runtime: Any, cache: Optional[VaultLeaseCache],
+    raise_rate_limited: bool = False,
 ) -> Any:
     """The vault lease of the bastion's server *row* (:func:`bastion_lease`), or None."""
     try:
@@ -443,6 +445,8 @@ async def _bastion_row_lease(
     except VaultCredentialError as exc:
         if _is_untrusted(exc):
             raise VaultCredentialError(f"The bastion {name}: {exc}") from exc
+        if raise_rate_limited and rate_limit_wait(exc)[0]:
+            raise
         logger.warning("The vault key of the bastion %s cannot be used here: %s", name, exc)
         return None
 
@@ -536,6 +540,7 @@ async def resolve_with_vault(
     async def hop_for(profile: Any) -> Any:
         return await bastion_lease(
             profile, fleet, vault_runtime=vault_runtime, connection_service=connection_service, cache=cache,
+            raise_rate_limited=raise_rate_limited,
         )
 
     lease = await vault_lease(instance, vault_runtime, cache=cache)

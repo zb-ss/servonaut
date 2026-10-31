@@ -77,6 +77,14 @@ class ControlMaster:
     def is_open(self) -> bool:
         return self._opened
 
+    def socket_alive(self) -> bool:
+        """Whether the master's control socket still exists."""
+        return self._dir is not None and (self._dir / _SOCKET_NAME).exists()
+
+    def mark_lost(self) -> None:
+        """The master ended: commands must not be bound to it any more."""
+        self._opened = False
+
     def command_options(self) -> List[str]:
         """``-o`` values that make a command use the open master (never start one)."""
         return ["ControlMaster=no", f"ControlPath={self._socket_pattern()}"]
@@ -97,8 +105,13 @@ class ControlMaster:
         if self._dir is not None:  # a retry reuses the build's directory
             return True
         base = _socket_dir_base(self._socket_dir)
-        # mkdtemp adds a 8-character random suffix after the prefix.
-        if len(base) + len("/sv-") + 8 + 1 + len(_SOCKET_NAME) + _BIND_SUFFIX_LENGTH > _SOCKET_PATH_LIMIT:
+        # ssh splits an option value at spaces and expands "%" tokens in it.
+        if " " in base or "%" in base:
+            logger.warning("SSH multiplexing off: the socket directory contains a space or '%'")
+            return False
+        # Unix socket limits are in bytes. mkdtemp adds an 8-character random
+        # suffix after the prefix.
+        if len(os.fsencode(base)) + len("/sv-") + 8 + 1 + len(_SOCKET_NAME) + _BIND_SUFFIX_LENGTH > _SOCKET_PATH_LIMIT:
             logger.debug("SSH multiplexing off: the control socket path would be too long")
             return False
         try:
