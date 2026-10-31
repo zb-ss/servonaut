@@ -36,6 +36,7 @@ from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 
 # Status constants and classifier live in the dependency-free service module
@@ -398,7 +399,9 @@ class FleetMemoryScreen(Screen):
             return
 
         try:
-            merged = await fleet_service.get_merged_fleet()
+            merged = await fleet_service.get_merged_fleet(
+                hidden_ids=folded_share_ids(self.app)
+            )
         except BackendMaintenance:
             self.app.notify(
                 "Memory cloud sync is in maintenance — showing local data only.",
@@ -538,7 +541,7 @@ class FleetMemoryScreen(Screen):
     def _populate_table(self) -> None:
         """Rebuild table rows + status footer from local app state (no remote)."""
         memory_service = getattr(self.app, "memory_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
 
         self._rows = []
         for inst in instances:
@@ -736,7 +739,7 @@ class FleetMemoryScreen(Screen):
         service is not wired — used by pre-scan count display and legacy paths.
         """
         fleet_scan_service = getattr(self.app, "fleet_scan_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
         if fleet_scan_service is not None:
             return fleet_scan_service.eligible_instances(
                 instances, stale_only=stale_only
@@ -791,7 +794,7 @@ class FleetMemoryScreen(Screen):
         # completion hook are routed back to whichever Fleet Memory screen is
         # mounted via the app's _fleet_manual_scan_progress / on_fleet_manual_scan_done.
         started = self.app.start_fleet_manual_scan(
-            self.app.instances or [], stale_only=stale_only
+            memory_fleet_rows(self.app), stale_only=stale_only
         )
         if not started:
             self._set_progress("")
@@ -954,7 +957,7 @@ class FleetMemoryScreen(Screen):
 
         try:
             result = await fleet_scan_service.scan(
-                self.app.instances or [],
+                memory_fleet_rows(self.app),
                 stale_only=stale_only,
                 on_progress=self._on_scan_progress,
             )

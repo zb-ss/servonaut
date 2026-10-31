@@ -2109,7 +2109,9 @@ class ServonautApp(App):
 
         if self.fleet_scan_service is None or self.memory_service is None:
             return False
-        instances = self.instances or []
+        from servonaut.services.memory.team_fold import memory_fleet_rows
+
+        instances = memory_fleet_rows(self)
         if not instances:
             logger.debug("fleet auto-scan: instances not loaded yet; will retry")
             return False
