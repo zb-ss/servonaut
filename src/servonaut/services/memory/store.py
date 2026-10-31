@@ -1055,8 +1055,15 @@ class MemoryStore:
         try:
             _validate_instance_id(instance_id)
             _validate_instance_id(_provider_slug(provider))
-            resolved = self._instance_dir(instance_id, provider).resolve()
-            resolved.relative_to(self._root.resolve())
+            path = self._instance_dir(instance_id, provider)
+            # A folder that is a symlink must resolve all the way: a loop or a
+            # dangling link then raises on every Python version (3.13 stopped
+            # raising for a loop in a non-strict resolve). A folder that does
+            # not exist yet resolves leniently, as a target must.
+            for folder in (path.parent, path):
+                if folder.is_symlink():
+                    folder.resolve(strict=True)
+            path.resolve().relative_to(self._root.resolve())
         except (ValueError, OSError, RuntimeError):
             # RuntimeError: a symlink loop (Path.resolve on Python 3.12).
             return False
