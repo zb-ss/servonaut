@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import random
+import re
 import tempfile
 from collections import deque
 from datetime import datetime, timezone
@@ -105,6 +106,11 @@ logger = logging.getLogger(__name__)
 
 # Hard limits per spec §3.3
 _BATCH_SIZE = 50
+
+# A team share's id is a UUID; an own server's id never has this shape.
+_SHARE_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 _QUEUE_CAP = 5000
 _QUEUE_WATCHDOG_WARN = 1000
 
@@ -208,6 +214,9 @@ class MemorySyncService:
         # line per share.
         self._folded_ids: set[str] = set()
         self._folded_logged: set[str] = set()
+        # While True, envelopes keyed by a share id (UUID-shaped) stay queued:
+        # which shares fold into an own server is not known yet.
+        self._awaiting_folds = False
 
         # Persistent queue path
         self._queue_path = Path.home() / ".servonaut" / "memory" / "sync_queue.jsonl"
@@ -1053,7 +1062,25 @@ class MemorySyncService:
         Returns how many queued envelopes were dropped.
         """
         self._folded_ids = set(instance_ids)
+        self._awaiting_folds = False
         return self.drop_pending_for(self._folded_ids)
+
+    def hold_unfolded_shares(self) -> None:
+        """Keep share-keyed envelopes queued until the folded shares are known.
+
+        An app that lists a team's shared servers calls this at start-up: a
+        drain that ran before the list arrived would upload an envelope for a
+        share that then turns out to fold into an own server. The hold ends
+        in :meth:`set_folded_instance_ids` or :meth:`release_share_hold`.
+        """
+        self._awaiting_folds = True
+
+    def release_share_hold(self) -> None:
+        """End the hold without folding anything (no shares, or they could not be listed)."""
+        self._awaiting_folds = False
+
+    def _is_held(self, instance_id: str) -> bool:
+        return self._awaiting_folds and bool(_SHARE_ID_RE.match(instance_id))
 
     def _is_folded(self, instance_id: str) -> bool:
         """Whether *instance_id* is a folded share; logs the first time it is seen."""
@@ -1122,17 +1149,12 @@ class MemorySyncService:
         self, instance_id: Optional[str] = None
     ) -> List[SyncEnvelope]:
         """Remove one ordered batch, optionally scoped to one instance."""
-        if instance_id is None:
-            return [
-                self._pending.popleft()
-                for _ in range(min(_BATCH_SIZE, len(self._pending)))
-            ]
-
         batch: List[SyncEnvelope] = []
         deferred: deque[SyncEnvelope] = deque()
         while self._pending and len(batch) < _BATCH_SIZE:
             envelope = self._pending.popleft()
-            if envelope.instance_id == instance_id:
+            wanted = instance_id is None or envelope.instance_id == instance_id
+            if wanted and not self._is_held(envelope.instance_id):
                 batch.append(envelope)
             else:
                 deferred.append(envelope)

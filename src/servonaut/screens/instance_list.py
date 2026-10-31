@@ -364,6 +364,7 @@ class InstanceListScreen(Screen):
         team_service = getattr(self.app, "team_service", None)
         auth = getattr(self.app, "auth_service", None)
         if team_service is None or auth is None or not auth.is_authenticated:
+            self._release_team_memory_hold()
             if any(row.get("is_shared") is True for row in self.app.instances or []):
                 self._instances = replace_instances(self.app, "shared", [])
                 self._update_table()
@@ -377,9 +378,18 @@ class InstanceListScreen(Screen):
             exit_on_error=False,
         )
 
-    def _reconcile_team_memory(self) -> None:
-        """Fold the memory of team copies into the user's own servers (see the app)."""
-        reconcile_team_memory(self.app)
+    def _reconcile_team_memory(self) -> bool:
+        """Fold the memory of team copies into the user's own servers (see the app).
+
+        Returns whether the merge was started.
+        """
+        return reconcile_team_memory(self.app)
+
+    def _release_team_memory_hold(self) -> None:
+        """No shared servers will fold: lift the hold on share-keyed uploads (see the app)."""
+        release = getattr(self.app, "release_team_memory_hold", None)
+        if callable(release):
+            release()
 
     def _shared_servers_loaded(self, worker: Worker) -> None:
         """List what :meth:`_fetch_shared_servers` found."""
@@ -391,6 +401,7 @@ class InstanceListScreen(Screen):
             logging.getLogger(__name__).info(
                 "Team shared servers not listed: %s", worker.error,
             )
+            self._release_team_memory_hold()
             return
         found = worker.result
         # The team key tier of SSH connect reads the user's teams from here.
@@ -402,7 +413,8 @@ class InstanceListScreen(Screen):
         self._instances = replace_instances(self.app, "shared", found.rows)
         self._update_table()
         self._update_status_bar()
-        self._reconcile_team_memory()
+        if not self._reconcile_team_memory():
+            self._release_team_memory_hold()
         if found.problems:
             self.app.notify(
                 "Some team servers could not be listed: " + "; ".join(found.problems),

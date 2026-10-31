@@ -70,3 +70,49 @@ def test_other_instances_are_untouched(tmp_path):
 def _result(batch):
     from servonaut.services.memory.interfaces import SyncBatchResult
     return SyncBatchResult(accepted=[], rejected=[], quota=None)
+
+
+SHARE_SHAPED = "55555555-aaaa-bbbb-cccc-000000000005"  # leak-guard:allow
+
+
+def _posted(svc):
+    return [env.instance_id for call in svc._post_batch.await_args_list for env in call.args[0]]
+
+
+def _drain(svc):
+    import asyncio
+    svc._post_batch = AsyncMock(side_effect=lambda batch: _result(batch))
+    asyncio.run(svc.drain_now())
+    return _posted(svc)
+
+
+def test_a_share_shaped_envelope_waits_until_the_folds_are_known(tmp_path):
+    svc = _make_service(tmp_path=tmp_path)
+    svc.enqueue_module({"id": SHARE_SHAPED, "name": "web-1"}, "os", _make_module_result())
+    svc.enqueue_module(OWN, "os", _make_module_result())
+    svc.hold_unfolded_shares()
+    assert _drain(svc) == [OWN["id"]]
+    assert svc.pending_count(SHARE_SHAPED) == 1  # held, not lost
+
+
+def test_a_held_envelope_is_dropped_when_its_share_turns_out_folded(tmp_path):
+    svc = _make_service(tmp_path=tmp_path)
+    svc.enqueue_module({"id": SHARE_SHAPED, "name": "web-1"}, "os", _make_module_result())
+    svc.hold_unfolded_shares()
+    svc.set_folded_instance_ids({SHARE_SHAPED})
+    assert _drain(svc) == []
+    assert svc.pending_count() == 0
+
+
+def test_a_held_envelope_of_a_member_goes_out_once_the_hold_is_released(tmp_path):
+    svc = _make_service(tmp_path=tmp_path)
+    svc.enqueue_module({"id": SHARE_SHAPED, "name": "web-1"}, "os", _make_module_result())
+    svc.hold_unfolded_shares()
+    svc.release_share_hold()
+    assert _drain(svc) == [SHARE_SHAPED]
+
+
+def test_without_a_hold_nothing_changes(tmp_path):
+    svc = _make_service(tmp_path=tmp_path)
+    svc.enqueue_module({"id": SHARE_SHAPED, "name": "web-1"}, "os", _make_module_result())
+    assert _drain(svc) == [SHARE_SHAPED]

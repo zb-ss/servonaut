@@ -107,3 +107,30 @@ def test_an_incomplete_listing_is_an_error():
     )
     with pytest.raises(RuntimeError):
         asyncio.run(app._remote_memory_ids())
+
+
+def test_the_upload_hold_ends_when_the_merge_ends_even_if_it_fails(monkeypatch):
+    app = _app([_own(), _shared()])
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", boom)
+    asyncio.run(app._do_reconcile_team_memory(app.instances))
+    app.memory_sync_service.release_share_hold.assert_called_once_with()
+
+
+def test_reconcile_says_whether_it_started_a_worker():
+    app = _app([_own()])
+    app.run_worker = MagicMock()
+    assert app.reconcile_team_memory() is False
+    app.instances = [_own(), _shared()]
+    assert app.reconcile_team_memory() is True
+
+
+def test_the_app_holds_share_keyed_uploads_from_the_start(tmp_path):
+    app = ServonautApp(config_path=tmp_path / "config.json")
+    app._init_services()
+    app.api_client, app.auth_service = MagicMock(), MagicMock()
+    app._init_memory_cloud_services()
+    assert app.memory_sync_service._awaiting_folds is True

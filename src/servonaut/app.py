@@ -1453,6 +1453,9 @@ class ServonautApp(App):
             )
             if self.memory_service is not None and hasattr(self.memory_service, "set_sync_service"):
                 self.memory_service.set_sync_service(self.memory_sync_service)
+            # No share-keyed envelope is uploaded before the shared servers
+            # are listed and the shares that fold into own servers are known.
+            self.memory_sync_service.hold_unfolded_shares()
             if hasattr(self.memory_sync_service, "set_key_material_listener"):
                 self.memory_sync_service.set_key_material_listener(
                     self._propagate_memory_key_material
@@ -2139,7 +2142,18 @@ class ServonautApp(App):
     # App-owned manual fleet scan (survives screen navigation)
     # ------------------------------------------------------------------
 
-    def reconcile_team_memory(self) -> None:
+    def release_team_memory_hold(self) -> None:
+        """Let share-keyed memory envelopes upload: the shared servers are settled.
+
+        Called once the team's shared servers were listed and reconciled, or
+        could not be listed at all (nothing then folds).
+        """
+        sync = getattr(self, "memory_sync_service", None)
+        release = getattr(sync, "release_share_hold", None)
+        if callable(release):
+            release()
+
+    def reconcile_team_memory(self) -> bool:
         """Fold the memory of team copies into the user's own servers.
 
         Runs once the team's shared servers and the user's own are listed.
@@ -2148,14 +2162,17 @@ class ServonautApp(App):
         :mod:`servonaut.services.memory.team_merge`); the sync service is
         told which shares are folded so nothing is uploaded for them. The
         worker has its own group so no other memory work cancels it.
+
+        Returns whether the merge worker was started; its end lifts the hold
+        on share-keyed uploads.
         """
         from servonaut.screens._demo_resolve import real_fleet_rows
 
         if self.memory_service is None:
-            return
+            return False
         rows = real_fleet_rows(self)
         if not rows or not any(row.get("is_shared") is True for row in rows):
-            return
+            return False
         self.run_worker(
             self._do_reconcile_team_memory(rows),
             name="team_memory_merge",
@@ -2163,6 +2180,7 @@ class ServonautApp(App):
             exclusive=True,
             exit_on_error=False,
         )
+        return True
 
     async def _do_reconcile_team_memory(self, rows: list) -> None:
         from servonaut.services.memory.team_fold import absorbed_share_ids
@@ -2178,6 +2196,8 @@ class ServonautApp(App):
         except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
             logger.exception("Merging team copies of server memory failed")
             return
+        finally:
+            self.release_team_memory_hold()
         if report.copies:
             self.notify(report.message(), markup=False)
 

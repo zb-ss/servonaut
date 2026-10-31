@@ -360,13 +360,13 @@ def _real_id(redaction: Any, row: Dict[str, Any]) -> str:
     return real if isinstance(real, str) else shown
 
 
-def reconcile_team_memory(app: Any) -> None:
+def reconcile_team_memory(app: Any) -> bool:
     """Ask the app to fold team copies of memory into the user's own servers.
 
     Call it after any load that changes which servers are listed: a team
     copy and its own twin can arrive in either order, and the merge is
     idempotent. Apps without the hook (tests, headless hosts) are skipped.
+    Returns whether the merge was started.
     """
     reconcile = getattr(app, "reconcile_team_memory", None)
-    if callable(reconcile):
-        reconcile()
+    return bool(reconcile()) if callable(reconcile) else False
