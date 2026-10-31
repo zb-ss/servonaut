@@ -495,7 +495,7 @@ def reseal_dek(
     *,
     private_key: bytes,
     recipient_public_keys: Sequence[bytes],
-) -> List[str]:
+) -> List[Optional[str]]:
     """Open a data key sealed for the caller and seal it for other recipients.
 
     Used to top up an already-uploaded envelope with wraps for team members,
@@ -508,7 +508,9 @@ def reseal_dek(
         recipient_public_keys: Raw 32-byte X25519 public keys to seal for.
 
     Returns:
-        One base64 sealed wrap per recipient, in the order given.
+        One base64 sealed wrap per recipient, in the order given; ``None`` for
+        a key the sealed box refuses (a low-order point, for instance), so one
+        bad key never costs the others their wrap.
 
     Raises:
         DecryptionFailedError: If the caller's wrap cannot be opened.
@@ -519,13 +521,15 @@ def reseal_dek(
         dek = bytearray(nacl.public.SealedBox(nacl.public.PrivateKey(private_key)).decrypt(wrapped))
     except (nacl.exceptions.CryptoError, ValueError, TypeError) as exc:
         raise DecryptionFailedError("decryption failed") from exc
+    sealed: List[Optional[str]] = []
     try:
-        return [
-            base64.b64encode(
-                nacl.public.SealedBox(nacl.public.PublicKey(key)).encrypt(bytes(dek))
-            ).decode()
-            for key in recipient_public_keys
-        ]
+        for key in recipient_public_keys:
+            try:
+                box = nacl.public.SealedBox(nacl.public.PublicKey(key))
+                sealed.append(base64.b64encode(box.encrypt(bytes(dek))).decode())
+            except (nacl.exceptions.CryptoError, ValueError, TypeError):
+                sealed.append(None)
+        return sealed
     finally:
         secure_zero(dek)
 

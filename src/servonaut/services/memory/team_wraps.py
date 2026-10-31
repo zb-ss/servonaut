@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.services.memory.crypto import (
     X25519_KEY_LEN,
@@ -79,7 +83,7 @@ def _parse_recipient(raw: Any) -> Tuple[str, Any]:
         return "bad", None
     # The fingerprint we send back is what lets the service skip a member whose
     # key changed since; one that does not belong to this key is not trusted.
-    if len(key) != X25519_KEY_LEN or fingerprint(key) != claimed:
+    if len(key) != X25519_KEY_LEN or not any(key) or fingerprint(key) != claimed:
         return "bad", None
     return "ok", Recipient(user_id=user_id, fingerprint=claimed, public_key=key)
 
@@ -160,4 +164,73 @@ def seal_for_recipients(
             "recipient_fingerprint": r.fingerprint,
         }
         for r, wrapped in zip(entry.recipients, sealed)
+        if wrapped is not None
     ]
+
+
+class WrapPinStore:
+    """The key fingerprint last sealed for each team member (trust on first use).
+
+    A small JSON file, mode 0600, written atomically. It holds fingerprints
+    only (public values), never a key. A missing or unreadable file is an empty
+    store: every member is then new.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def _load(self) -> Dict[str, str]:
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError):
+            logger.warning("team wrap pins unreadable; treating every member as new")
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+    @staticmethod
+    def _key(team_slug: str, user_id: int) -> str:
+        return f"{team_slug}:{user_id}"
+
+    def get(self, team_slug: str, user_id: int) -> Optional[str]:
+        return self._load().get(self._key(team_slug, user_id))
+
+    def set_many(self, pins: Dict[Tuple[str, int], str]) -> None:
+        """Record several pins with one atomic write."""
+        if not pins:
+            return
+        data = self._load()
+        data.update({self._key(team, uid): fp for (team, uid), fp in pins.items()})
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".pins-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, sort_keys=True)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self._path)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
+def pinned_fingerprint(store: WrapPinStore, team_slug: str, user_id: int) -> Optional[str]:
+    """The fingerprint last sealed for *user_id* in *team_slug*, or None if new."""
+    return store.get(team_slug, user_id)
+
+
+def pin_fingerprint(store: WrapPinStore, team_slug: str, user_id: int, fp: str) -> None:
+    """Remember that data keys were sealed for *user_id*'s key *fp*."""
+    store.set_many({(team_slug, user_id): fp})
+
+
+def differs_from_pin(store: WrapPinStore, entry: MissingTeamWrap) -> Tuple[Tuple[Recipient, ...], int]:
+    """Split *entry*'s recipients into those matching their pin (or new) and a count of the rest."""
+    kept: List[Recipient] = []
+    for recipient in entry.recipients:
+        pinned = pinned_fingerprint(store, entry.team_slug, recipient.user_id)
+        if pinned is None or pinned == recipient.fingerprint:
+            kept.append(recipient)
+    return tuple(kept), len(entry.recipients) - len(kept)

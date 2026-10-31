@@ -71,8 +71,9 @@ class _Server:
         if path == SYNC:
             self.uploads.extend(json["envelopes"])
             response = {"accepted": [{"id": "env-1", "module": "os"}], "rejected": []}
-            if self.missing is not None:
-                response["missing_team_wraps"] = self.missing
+            missing = self.missing(self.uploads) if callable(self.missing) else self.missing
+            if missing is not None:
+                response["missing_team_wraps"] = missing
             return response
         self.wrap_posts.append({"path": path, "json": json})
         if self.wrap_effects:
@@ -98,9 +99,9 @@ def _drain(svc):
     return asyncio.run(svc.drain_now())
 
 
-def _opens(server: _Server, wrap: Dict[str, Any], pair) -> Dict[str, Any]:
+def _opens(server: _Server, wrap: Dict[str, Any], pair, index: int = 0) -> Dict[str, Any]:
     """The recipient's private key opens the wrap and the data key opens the upload."""
-    upload = server.uploads[0]
+    upload = server.uploads[index]
     shape = {k: upload[k] for k in ("iv", "tag", "ciphertext")}
     shape["wrapped_dek"] = wrap["wrapped_dek"]
     plain = crypto.decrypt_envelope(
@@ -276,24 +277,104 @@ def test_an_envelope_not_in_this_batch_is_not_wrapped(tmp_path):
     assert server.wrap_posts == []
 
 
-def test_no_data_key_reaches_the_log(tmp_path, caplog):
+def test_no_data_key_or_private_key_reaches_the_log(tmp_path, caplog):
     member, _ = _recipient(7)
-    server = _Server([_missing([member])], [RuntimeError("boom")])
+    bad, _ = _recipient(8, public_key_b64=base64.b64encode(b"\x00" * 32).decode())
+    server = _Server([_missing([member, bad]), "garbage"], [RuntimeError("boom")])
+    svc = _service(tmp_path, server)
     with caplog.at_level(logging.DEBUG):
-        _drain(_service(tmp_path, server))
+        _drain(svc)
     upload = server.uploads[0]
+    own = next(w for w in upload["dek_wraps"] if w["recipient_user_id"] == SELF_ID)
+    import nacl.public
+    dek = nacl.public.SealedBox(nacl.public.PrivateKey(svc._self_privkey)).decrypt(
+        base64.b64decode(own["wrapped_dek"])
+    )
+    secrets = {
+        "dek": dek, "private": svc._self_privkey,
+    }
+    text = caplog.text
+    for name, raw in secrets.items():
+        for form in (raw.hex(), base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode(), repr(raw)):
+            assert form not in text, name
     for wrap in upload["dek_wraps"]:
-        assert wrap["wrapped_dek"] not in caplog.text
+        assert wrap["wrapped_dek"] not in text
 
 
-def test_two_snapshots_of_one_module_in_a_batch_are_not_guessed(tmp_path):
-    member, _ = _recipient(7)
-    server = _Server([_missing([member])])
+def test_two_snapshots_of_one_module_each_get_their_wraps_over_two_batches(tmp_path):
+    member, pair = _recipient(7)
+
+    def missing(uploads):
+        return [_missing([member], envelope_id=f"env-{len(uploads)}")]
+
+    server = _Server(missing)
     svc = _service(tmp_path, server)
     svc.enqueue_module(SERVER, "os", _make_module_result(instance_id="web-1"))
-    svc._pending.append(svc._pending[0])  # a second "os" snapshot, same batch
+    svc.enqueue_module(SERVER, "os", _make_module_result(instance_id="web-1"))
+    first = asyncio.run(svc.drain_now())
+    second = asyncio.run(svc.drain_now())
+    assert (len(first.accepted), len(second.accepted)) == (1, 1)
+    assert [len(u["dek_wraps"]) for u in server.uploads] == [1, 1]
+    assert [p["json"]["wraps"][0]["envelope_id"] for p in server.wrap_posts] == ["env-1", "env-2"]
+    for index, post in enumerate(server.wrap_posts):
+        assert _opens(server, post["json"]["wraps"][0], pair, index)["observed"]["cpu_count"] == 4
+
+
+def test_a_cancelled_catch_up_wait_never_requeues_the_accepted_upload(tmp_path, monkeypatch):
+    member, _ = _recipient(7)
+    limited = RateLimitedError(
+        code="rate_limited", message="slow", status=429,
+        response_headers={"retry-after": "3"},
+    )
+    server = _Server([_missing([member])], [limited])
+
+    async def cancelled(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sync_module, "_pause", cancelled)
+    svc = _service(tmp_path, server)
+    svc.enqueue_module(SERVER, "os", _make_module_result(instance_id="web-1"))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(svc.drain_now())
+    assert svc.pending_count() == 0
+    assert svc._inflight is None
     asyncio.run(svc.drain_now())
-    assert server.wrap_posts == []
+    assert len(server.uploads) == 1  # no second upload
+
+
+@pytest.mark.parametrize("key", [b"\x00" * 32, b"\x01" + b"\x00" * 31, bytes.fromhex("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")])
+def test_a_bad_recipient_key_costs_only_that_recipient(tmp_path, key):
+    bad, _ = _recipient(
+        9, public_key_b64=base64.b64encode(key).decode(), fingerprint=crypto.fingerprint(key)
+    )
+    good, good_pair = _recipient(7)
+    server = _Server([_missing([bad, good])])
+    _drain(_service(tmp_path, server))
+    wraps = [w for p in server.wrap_posts for w in p["json"]["wraps"]]
+    assert [w["recipient_user_id"] for w in wraps] == [7]
+    assert _opens(server, wraps[0], good_pair)["observed"]["cpu_count"] == 4
+
+
+def test_a_member_whose_key_differs_from_the_one_sealed_for_before_is_skipped(tmp_path, caplog):
+    first, _ = _recipient(7)
+    server = _Server(lambda uploads: [_missing([first], envelope_id=f"env-{len(uploads)}")])
+    svc = _service(tmp_path, server)
+    _drain(svc)
+    assert len(server.wrap_posts) == 1
+    pin_file = tmp_path / "memory" / "team_wrap_pins.json"
+    assert pin_file.stat().st_mode & 0o777 == 0o600
+
+    swapped, _ = _recipient(7)  # same user, another key, not flagged key_changed
+    fresh, _ = _recipient(8)
+    server.missing = lambda uploads: [_missing([swapped, fresh], envelope_id="env-2")]
+    with caplog.at_level(logging.INFO):
+        _drain(svc)
+    sent = [w["recipient_user_id"] for w in server.wrap_posts[1]["json"]["wraps"]]
+    assert sent == [8]  # a new member is sealed (and pinned), the swapped key is not
+    assert sum("key changed" in r.getMessage() for r in caplog.records) == 1
+    server.missing = lambda uploads: [_missing([first], envelope_id="env-3")]
+    _drain(svc)
+    assert [w["recipient_user_id"] for w in server.wrap_posts[2]["json"]["wraps"]] == [7]
 
 
 def test_the_client_method_posts_wraps_with_a_json_keyword():

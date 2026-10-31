@@ -32,7 +32,7 @@ import random
 import re
 import tempfile
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
@@ -256,6 +256,11 @@ class MemorySyncService:
         # /api/v1/memory/instances POSTs when several envelopes for the
         # same id are rejected in one batch.
         self._registered_instance_ids: set[str] = set()
+
+        # The accepted batch's catch-up work, run by ``drain_now`` once the
+        # drain lock is released: ``(missing_team_wraps payload, own wraps)``.
+        self._team_top_up: Optional[tuple[Any, Dict[tuple[str, str], List[str]]]] = None
+        self._wrap_pins: Optional[Any] = None
 
         # Optional collaborator wired after construction to avoid an import
         # cycle (sync_service ← retrieval_service would be circular).
@@ -1232,10 +1237,16 @@ class MemorySyncService:
         """Remove one ordered batch, optionally scoped to one instance."""
         batch: List[SyncEnvelope] = []
         deferred: deque[SyncEnvelope] = deque()
+        # One snapshot per (instance, module) per batch: the service names an
+        # envelope in its answer, and with two of the same module we could not
+        # tell which data key it means. The later one goes in the next batch.
+        taken: set[tuple[str, str]] = set()
         while self._pending and len(batch) < _BATCH_SIZE:
             envelope = self._pending.popleft()
             wanted = instance_id is None or envelope.instance_id == instance_id
-            if wanted and not self._is_held(envelope.instance_id):
+            slot = (envelope.instance_id, envelope.module)
+            if wanted and not self._is_held(envelope.instance_id) and slot not in taken:
+                taken.add(slot)
                 batch.append(envelope)
             else:
                 deferred.append(envelope)
@@ -1257,7 +1268,14 @@ class MemorySyncService:
     async def drain_now(self, *, instance_id: Optional[str] = None) -> SyncBatchResult:
         """Serialize one manual or background queue drain."""
         async with self._drain_lock:
-            return await self._drain_now_unlocked(instance_id=instance_id)
+            self._team_top_up = None
+            result = await self._drain_now_unlocked(instance_id=instance_id)
+            top_up, self._team_top_up = self._team_top_up, None
+        # Outside the lock and after the batch is final: a cancellation or a
+        # slow wait here can no longer requeue an upload the service accepted.
+        if top_up is not None:
+            await self._top_up_team_wraps(*top_up)
+        return result
 
     async def _drain_now_unlocked(
         self, *, instance_id: Optional[str] = None
@@ -1930,7 +1948,7 @@ class MemorySyncService:
             )
             self._quota = quota
 
-        await self._top_up_team_wraps(response.get("missing_team_wraps"), self_wraps)
+        self._team_top_up = (response.get("missing_team_wraps"), self_wraps)
 
         return SyncBatchResult(accepted=accepted, rejected=rejected, quota=quota)
 
@@ -1980,17 +1998,22 @@ class MemorySyncService:
     ) -> None:
         from servonaut.services.memory.crypto import CryptoError  # noqa: PLC0415
         from servonaut.services.memory.team_wraps import (  # noqa: PLC0415
+            differs_from_pin,
             parse_missing_team_wraps,
             seal_for_recipients,
         )
 
+        pins = self._pin_store()
         entries = parse_missing_team_wraps(payload)
         by_grant: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
         changed_by_grant: Dict[tuple[str, str], int] = {}
         for entry in entries:
             grant = (entry.team_slug, entry.grant_id)
-            if entry.key_changed_count:
-                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + entry.key_changed_count
+            kept, differing = differs_from_pin(pins, entry)
+            entry = replace(entry, recipients=kept)
+            changed = entry.key_changed_count + differing
+            if changed:
+                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + changed
             candidates = self_wraps.get((entry.instance_id, entry.module), [])
             if len(candidates) != 1 or self._self_privkey is None:
                 # Not in this batch, or two snapshots of one module and no way
@@ -2014,34 +2037,58 @@ class MemorySyncService:
                 count,
             )
         for (team_slug, grant_id), wraps in by_grant.items():
-            if wraps:
-                await self._post_team_wraps(team_slug, grant_id, wraps)
+            if wraps and await self._post_team_wraps(team_slug, grant_id, wraps):
+                self._pin_sealed(pins, team_slug, wraps)
+
+    def _pin_store(self) -> Any:
+        from servonaut.services.memory.team_wraps import WrapPinStore  # noqa: PLC0415
+
+        path = self._queue_path.parent / "team_wrap_pins.json"
+        if self._wrap_pins is None or self._wrap_pins._path != path:
+            self._wrap_pins = WrapPinStore(path)
+        return self._wrap_pins
+
+    @staticmethod
+    def _pin_sealed(
+        pins: Any,
+        team_slug: str,
+        wraps: List[Dict[str, Any]],
+    ) -> None:
+        """Remember the keys a delivered batch of wraps was sealed for."""
+        sealed = {
+            (team_slug, w["recipient_user_id"]): w["recipient_fingerprint"] for w in wraps
+        }
+        try:
+            pins.set_many(sealed)
+        except OSError as exc:
+            logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
     async def _post_team_wraps(
         self, team_slug: str, grant_id: str, wraps: List[Dict[str, Any]]
-    ) -> None:
-        """POST one grant's wraps; wait once for a 429, skip a grant that is gone."""
+    ) -> bool:
+        """POST one grant's wraps; True when stored. Waits once for a 429."""
         from servonaut.services.memory.team_service import post_grant_wraps  # noqa: PLC0415
         from servonaut.services.retry_after import is_rate_limited, retry_after_seconds  # noqa: PLC0415
 
         for attempt in (1, 2):
             try:
                 await post_grant_wraps(self._api, team_slug, grant_id, wraps)
-                return
+                return True
             except APIError as exc:
                 if exc.status in (404, 409):
                     logger.info("team wrap top-up: a share is no longer live; skipped")
-                    return
+                    return False
                 if not is_rate_limited(exc) or attempt == 2:
                     logger.info("team wrap top-up: gave up (status %s)", exc.status)
-                    return
+                    return False
                 wait = retry_after_seconds(exc)
                 if wait is None:
                     wait = self._team_wrap_setting("team_wrap_retry_seconds")
                 if wait > self._team_wrap_setting("team_wrap_max_wait_seconds"):
                     logger.info("team wrap top-up: asked to wait too long; skipped")
-                    return
+                    return False
                 await _pause(wait)
+        return False
 
     async def _handle_rejection(
         self, rejection: SyncRejection, batch: List[SyncEnvelope]
