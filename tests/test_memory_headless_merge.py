@@ -61,7 +61,7 @@ class TestPassKey:
         assert pass_key(ROWS) == frozenset({(SHARE_ID, OWN_ID)})
 
     def test_a_member_row_pairs_with_nothing(self):
-        member = [_shared(instance_id=None, hostname="8.8.8.8")]
+        member = [_shared(instance_id=None, hostname="5.6.7.8")]
         assert pass_key(member) == frozenset({(SHARE_ID, "")})
 
     def test_no_shared_rows_is_an_empty_key(self):

@@ -138,7 +138,7 @@ class TestLaterReadyPass:
     def test_a_member_row_completes_into_the_shared_row_and_uploads_nothing(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="team note")
-        member = [_shared(instance_id=None, hostname="8.8.8.8")]
+        member = [_shared(instance_id=None, hostname="5.6.7.8")]
         _run(service, member, _locked(tmp_path, service))
         ready = _ready(tmp_path, service, Retrieval(notes={"content": "cloud note"}))
         _run(service, member, ready)
