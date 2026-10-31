@@ -267,12 +267,16 @@ def test_the_app_hands_the_vault_to_every_ssh_service():
     host = SimpleNamespace(
         vault_command_service=object(),
         memory_service=services[0], log_viewer_service=services[1], scan_service=services[2],
+        _connection_rows=lambda: ([], []),
     )
 
     ServonautApp._wire_vault_ssh(host)
 
     for service in services:
         service.set_vault_runtime.assert_called_once_with(host.vault_command_service, host.vault_lease_cache)
+    # The services that connect on their own are asked for the team rows and the fleet.
+    for service in (services[0], services[2]):
+        service.set_connection_rows.assert_called_once_with(host._connection_rows)
     assert isinstance(host.vault_lease_cache, VaultLeaseCache)
 
 

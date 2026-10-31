@@ -4579,10 +4579,7 @@ class ServonautTools:
         if profile is None or not getattr(profile, 'bastion_host', None):
             return conn, cleanup
         try:
-            rows = [*self._directory.custom_rows()]
-            for provider in ('aws', 'ovh', 'hetzner'):
-                rows.extend(self._directory.cached_provider_rows(provider))
-            rows.extend(await self._shared_server_rows())
+            _team_rows, rows = await self.connection_rows()
             hop = await bastion_lease(
                 profile, rows, vault_runtime=self._vault_runtime,
                 connection_service=self._connection_service,
@@ -4848,6 +4845,20 @@ class ServonautTools:
                 logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
         self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows, read)
         return [dict(row) for row in rows]
+
+    async def connection_rows(self) -> tuple[List[Dict], List[Dict]]:
+        """``(team_rows, fleet_rows)``: where a team key and a bastion's vault key are looked up.
+
+        The fleet is the custom servers, the cached servers of every
+        provider and the teams' shared servers. Also the memory service's
+        rows supplier, so a memory build hops like ``run_command`` does.
+        """
+        shared = await self._shared_server_rows()
+        rows = [*self._directory.custom_rows()]
+        for provider in ('aws', 'ovh', 'hetzner'):
+            rows.extend(self._directory.cached_provider_rows(provider))
+        rows.extend(shared)
+        return shared, rows
 
     @property
     def _shared_teams_read(self) -> frozenset:

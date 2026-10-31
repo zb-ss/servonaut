@@ -55,6 +55,40 @@ def _vault_runtime() -> Any:
         return None
 
 
+def _connection_rows_supplier(vault_runtime: Any, fleet: Any) -> Any:
+    """A rows supplier for ``MemoryService.set_connection_rows``.
+
+    Returns ``(team_rows, fleet_rows)``: the teams' shared servers (read once
+    per run, none when signed out or the read fails: a build never waits on
+    or fails for the team service) and the cached fleet plus those.
+    """
+    teams_service = getattr(vault_runtime, "teams", None)
+    state: Dict[str, Any] = {"rows": None, "lock": None}
+
+    async def shared_rows() -> List[Dict[str, Any]]:
+        if teams_service is None:
+            return []
+        if state["lock"] is None:
+            state["lock"] = asyncio.Lock()
+        async with state["lock"]:
+            if state["rows"] is None:
+                from servonaut.services.shared_servers import load_shared_servers  # noqa: PLC0415
+
+                try:
+                    teams = [t for t in await teams_service.list_teams() if isinstance(t, dict)]
+                    state["rows"] = (await load_shared_servers(teams_service, teams)).rows
+                except Exception as exc:  # noqa: BLE001 - signed out, offline, no team plan
+                    logger.debug("Team shared servers not listed (%s)", type(exc).__name__)
+                    state["rows"] = []
+        return list(state["rows"])
+
+    async def supply() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        shared = await shared_rows()
+        return shared, [*fleet.instances(), *shared]
+
+    return supply
+
+
 def _init_headless_services() -> Tuple[Any, Any, Any]:
     """Initialise Config, MemoryService and the cached fleet.
 
@@ -107,6 +141,9 @@ def _init_headless_services() -> Tuple[Any, Any, Any]:
         log_viewer_service.set_vault_runtime(vault_runtime)
 
     fleet = CachedFleet.from_config(config, custom_server_service, config_manager)
+    # Team keys and a bastion's vault key need the teams' servers and the fleet.
+    if vault_runtime is not None:
+        memory_service.set_connection_rows(_connection_rows_supplier(vault_runtime, fleet))
     return config, memory_service, fleet
 
 

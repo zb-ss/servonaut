@@ -260,6 +260,8 @@ class MemoryService(MemoryServiceInterface):
         # of the local connection by every SSH runner made here.
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        # Asked per build for (team_rows, fleet_rows); see set_connection_rows.
+        self._connection_rows: Any = None
         # Demo mode resolvers (identity until the app wires them): every
         # instance dict / id entering the public surface is mapped back to
         # the real record before probes, storage keys or the sync queue.
@@ -330,7 +332,11 @@ class MemoryService(MemoryServiceInterface):
             if hasattr(prober, "set_instance"):
                 prober.set_instance(instance)
 
-        ssh_runner = self._make_ssh_runner(instance)
+        connection_rows = await self._load_connection_rows()
+        for prober in selected_probers:
+            if hasattr(prober, "set_connection_rows"):
+                prober.set_connection_rows(*connection_rows)
+        ssh_runner = self._make_ssh_runner(instance, connection_rows=connection_rows)
 
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_PROBES)
 
@@ -1215,6 +1221,23 @@ class MemoryService(MemoryServiceInterface):
         self._vault_runtime = runtime
         self._vault_leases = leases
 
+    def set_connection_rows(self, supplier: Any) -> None:
+        """Ask *supplier* for ``(team_rows, fleet_rows)`` each time a build connects.
+
+        A server of the user's own without a local key connects with a team's
+        vault key when a team in the team rows shares it, and a bastion that
+        is one of the fleet rows hops with its own vault key (see
+        ``ssh_credentials.resolve_with_vault``). The rows change while the
+        app runs, so the supplier (a function or coroutine function) is
+        called per build, never cached.
+        """
+        self._connection_rows = supplier
+
+    async def _load_connection_rows(self) -> tuple[list, Optional[list]]:
+        from servonaut.services.ssh_credentials import load_connection_rows  # noqa: PLC0415
+
+        return await load_connection_rows(self._connection_rows)
+
     def set_sync_service(self, svc: Optional["_MemorySyncService"]) -> None:
         """Wire the optional sync service after construction.
 
@@ -1379,6 +1402,7 @@ class MemoryService(MemoryServiceInterface):
 
     def _make_ssh_runner(
         self, instance: Dict[str, Any], *, timeout: float = 5,
+        connection_rows: Optional[tuple[list, Optional[list]]] = None,
     ) -> Any:
         """Return an async SSH runner callable for *instance*.
 
@@ -1394,6 +1418,8 @@ class MemoryService(MemoryServiceInterface):
 
         Args:
             instance: Instance dict from ``app.instances``.
+            connection_rows: ``(team_rows, fleet_rows)`` already loaded for
+                this build; when None the first command asks the supplier.
 
         Returns:
             Async callable ``(command: str) -> (stdout: str, stderr: str, returncode: int)``.
@@ -1509,9 +1535,14 @@ class MemoryService(MemoryServiceInterface):
                 # A VaultCredentialError propagates: probers record it as the
                 # module's error instead of trying a local key.
                 try:
+                    team_rows, fleet_rows = (
+                        connection_rows if connection_rows is not None
+                        else await self._load_connection_rows()
+                    )
                     resolved.update(await resolve_with_vault(
                         conn, instance, vault_runtime=vault_runtime,
                         connection_service=connection_service, cache=vault_leases,
+                        team_rows=team_rows, rows=fleet_rows,
                     ))
                 except VaultCredentialError as exc:
                     _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))

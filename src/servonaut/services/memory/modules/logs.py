@@ -51,6 +51,16 @@ class LogsProber(ModuleProberInterface):
         self._connection_service = connection_service
         # Store the instance so probe() can pass it to probe_log_paths.
         self._instance: Optional[Dict[str, Any]] = None
+        # The rows a team key and a bastion's vault key are looked up in.
+        self._team_rows: List[Dict[str, Any]] = []
+        self._fleet_rows: Optional[List[Dict[str, Any]]] = None
+
+    def set_connection_rows(
+        self, team_rows: List[Dict[str, Any]], fleet_rows: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """Rows for this build's connection (``MemoryService`` sets them per build)."""
+        self._team_rows = list(team_rows)
+        self._fleet_rows = list(fleet_rows) if fleet_rows is not None else None
 
     def set_instance(self, instance: Dict[str, Any]) -> None:
         """Bind a server instance dict before calling ``probe()``.
@@ -101,6 +111,8 @@ class LogsProber(ModuleProberInterface):
                 instance,
                 self._ssh_service,
                 self._connection_service,
+                team_rows=self._team_rows,
+                rows=self._fleet_rows,
             )
             if probed_paths:
                 raw_output = "Readable log paths found:\n" + "\n".join(

@@ -174,6 +174,7 @@ class LogViewerService(LogViewerServiceInterface):
         ssh_service: "SSHServiceInterface",
         connection_service: "ConnectionServiceInterface",
         *,
+        team_rows: Iterable[Mapping[str, Any]] = (),
         rows: Optional[Iterable[Mapping[str, Any]]] = None,
     ) -> List[str]:
         """Return readable log paths, preferring cached memory when available.
@@ -216,7 +217,9 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        conn = await self.resolve_connection(instance, ssh_service, connection_service, rows=rows)
+        conn = await self.resolve_connection(
+            instance, ssh_service, connection_service, team_rows=team_rows, rows=rows,
+        )
         ssh_cmd = ssh_service.build_ssh_command(
             host=conn["host"],
             username=conn["username"],

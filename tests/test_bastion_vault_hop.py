@@ -496,11 +496,15 @@ class TestMcpHop:
                 raise shared_rows
             return list(shared_rows or [])
 
-        return SimpleNamespace(
+        from servonaut.mcp.tools import ServonautTools
+
+        tools = SimpleNamespace(
             _vault_runtime=runtime, _connection_service=service,
             _directory=SimpleNamespace(custom_rows=lambda: [], cached_provider_rows=lambda p: [BASTION] if p == "aws" else []),
             _shared_server_rows=shared,
         )
+        tools.connection_rows = lambda: ServonautTools.connection_rows(tools)
+        return tools
 
     @staticmethod
     def _call(tools, cleanup):

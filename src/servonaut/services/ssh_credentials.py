@@ -23,6 +23,7 @@ no cache and close the lease when they are done.
 
 from __future__ import annotations
 
+import inspect
 import ipaddress
 import logging
 import time
@@ -515,6 +516,32 @@ async def _with_hop(conn: Mapping[str, Any], instance: Mapping[str, Any], connec
     if hop is not None:
         applied["proxy_args"] = connection_service.get_proxy_args(profile, hop=hop)
     return applied
+
+
+#: Returns ``(team_rows, fleet_rows)``; may be a plain function or a coroutine function.
+ConnectionRowsSupplier = Callable[[], Any]
+
+
+async def load_connection_rows(
+    supplier: Optional[ConnectionRowsSupplier],
+) -> tuple[list[Mapping[str, Any]], Optional[list[Mapping[str, Any]]]]:
+    """``(team_rows, fleet_rows)`` from *supplier*, or no rows when it is unset or fails.
+
+    The rows are only needed for a team key and a bastion's vault key, so a
+    supplier that cannot answer (signed out, service down) leaves the
+    connection as the user's own setup resolves it, and never fails the build.
+    """
+    if supplier is None:
+        return [], None
+    try:
+        result = supplier()
+        if inspect.isawaitable(result):
+            result = await result
+        team_rows, fleet_rows = result
+        return list(team_rows or []), (list(fleet_rows) if fleet_rows is not None else None)
+    except Exception as exc:  # noqa: BLE001 - rows are an enhancement, never a reason to fail
+        logger.debug("Connection rows unavailable: %s", type(exc).__name__)
+        return [], None
 
 
 def ssh_identity_kwargs(conn: Mapping[str, Any]) -> dict[str, Any]:

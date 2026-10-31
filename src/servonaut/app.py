@@ -1170,6 +1170,18 @@ class ServonautApp(App):
             setter = getattr(service, "set_vault_runtime", None)
             if callable(setter):
                 setter(self.vault_command_service, self.vault_lease_cache)
+        # Rows are asked per build: the fleet changes while the app runs. Demo
+        # mode reads the real records, never the stand-in rows on screen.
+        for service in (getattr(self, "memory_service", None), getattr(self, "scan_service", None)):
+            rows_setter = getattr(service, "set_connection_rows", None)
+            if callable(rows_setter):
+                rows_setter(self._connection_rows)
+
+    def _connection_rows(self) -> tuple:
+        """``(team_rows, fleet_rows)`` for the services that connect on their own."""
+        from servonaut.screens._demo_resolve import fleet_rows, team_rows
+
+        return team_rows(self), fleet_rows(self)
 
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
