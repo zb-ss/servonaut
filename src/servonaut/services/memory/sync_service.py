@@ -32,6 +32,7 @@ import random
 import re
 import tempfile
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
@@ -48,6 +49,7 @@ from servonaut.services.api_client import (
     ValidationFailedError,
 )
 from servonaut.services.memory.interfaces import (
+    MemoryNotFound,
     INSTANCE_ID_RE,
     RESERVED_INSTANCE_IDS,
     BackendMaintenance,
@@ -106,6 +108,21 @@ logger = logging.getLogger(__name__)
 
 # Hard limits per spec §3.3
 _BATCH_SIZE = 50
+
+
+@dataclass
+class RemoteRead:
+    """What the service holds for one module of an instance, read without storing it.
+
+    ``status`` is ``"found"`` (``text`` or ``records`` set), ``"absent"``
+    (the service answered 404: nothing is stored under that id) or
+    ``"unavailable"`` (anything else: offline, locked, rate limited, a
+    refusal, undecryptable or malformed data, memory off for the server).
+    """
+
+    status: str
+    text: str = ""
+    records: List[Dict[str, Any]] = field(default_factory=list)
 
 # A team share's id is a UUID; an own server's id never has this shape.
 _SHARE_ID_RE = re.compile(
@@ -488,8 +505,12 @@ class MemorySyncService:
         content: str,
         *,
         probed_at: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Append an annotations envelope to the pending queue.
+
+        Returns whether the envelope is stored: queued AND appended to the
+        queue file. ``False`` means nothing was stored (and nothing is
+        queued), so a caller that must not lose the upload tries again later.
 
         Mirrors :meth:`enqueue_module` for all guard/persistence behaviour.
         The caller is responsible for hash-dedup: call this only when the
@@ -501,15 +522,15 @@ class MemorySyncService:
         - The queue is at capacity.
         """
         if not self.is_configured:
-            return
+            return False
 
         instance_id = instance.get("id") or instance.get("name", "")
         if self._is_folded(instance_id):
-            return
+            return False
         if self._memory_service.is_memory_disabled(
             instance_id, instance.get("name", "")
         ):
-            return
+            return False
 
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(
@@ -517,7 +538,7 @@ class MemorySyncService:
                 _QUEUE_CAP,
                 instance_id,
             )
-            return
+            return False
 
         env = SyncEnvelope(
             instance_id=instance_id,
@@ -531,17 +552,22 @@ class MemorySyncService:
             safe_metrics=None,
             plaintext_payload={"content": content},
         )
-        self._pending.append(env)
+        return self._store_envelope(env)
 
+    def _store_envelope(self, env: SyncEnvelope) -> bool:
+        """Queue *env* and append it to the queue file; undo the queueing if that fails."""
+        self._pending.append(env)
         if len(self._pending) >= _QUEUE_WATCHDOG_WARN:
             logger.warning(
                 "sync queue depth %d ≥ watchdog threshold %d",
                 len(self._pending),
                 _QUEUE_WATCHDOG_WARN,
             )
-
-        self._append_to_jsonl(env)
+        if not self._append_to_jsonl(env):
+            self._pending.remove(env)
+            return False
         self._notify_listeners()
+        return True
 
     def _parse_iso(self, ts: Optional[str]) -> Optional[datetime]:
         """Parse an ISO-8601 timestamp string into an aware datetime.
@@ -559,6 +585,57 @@ class MemorySyncService:
             return dt
         except (ValueError, TypeError):
             return None
+
+    async def _fetch_remote(self, instance_id: str, module: str) -> Optional[Any]:
+        """The decrypted envelope for *module*, ``None`` when the service holds none.
+
+        Raises for everything that is not a verified 404.
+        """
+        try:
+            return await self._retrieval_service.get_module(instance_id, module)
+        except MemoryNotFound:
+            return None
+
+    async def fetch_remote_notes(self, instance_id: str, instance_name: str = "") -> RemoteRead:
+        """Read the service's annotations for *instance_id* without storing them.
+
+        Unlike :meth:`pull_annotations` this never touches a local file or
+        the index and applies no last-writer-wins rule: the caller decides
+        what to do with the text. See :class:`RemoteRead` for the statuses.
+        """
+        if self._memory_service.is_memory_disabled(instance_id, instance_name):
+            return RemoteRead("unavailable")
+        if self._retrieval_service is None:
+            return RemoteRead("unavailable")
+        try:
+            envelope = await self._fetch_remote(instance_id, "annotations")
+        except Exception as exc:  # noqa: BLE001 — anything but a 404 is "could not read"
+            logger.info("remote notes unavailable for %s: %s", instance_id, type(exc).__name__)
+            return RemoteRead("unavailable")
+        if envelope is None:
+            return RemoteRead("absent")
+        content = envelope.plaintext.get("content") if isinstance(envelope.plaintext, dict) else None
+        if not isinstance(content, str):
+            return RemoteRead("unavailable")
+        return RemoteRead("found", text=content)
+
+    async def fetch_remote_findings(self, instance_id: str, instance_name: str = "") -> RemoteRead:
+        """Read the service's findings for *instance_id* without storing them (see :meth:`fetch_remote_notes`)."""
+        if self._memory_service.is_memory_disabled(instance_id, instance_name):
+            return RemoteRead("unavailable")
+        if self._retrieval_service is None:
+            return RemoteRead("unavailable")
+        try:
+            envelope = await self._fetch_remote(instance_id, "findings")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("remote findings unavailable for %s: %s", instance_id, type(exc).__name__)
+            return RemoteRead("unavailable")
+        if envelope is None:
+            return RemoteRead("absent")
+        records = envelope.plaintext.get("findings") if isinstance(envelope.plaintext, dict) else None
+        if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+            return RemoteRead("unavailable")
+        return RemoteRead("found", records=list(records))
 
     async def pull_annotations(
         self,
@@ -663,8 +740,12 @@ class MemorySyncService:
         records: List[Dict[str, Any]],
         *,
         probed_at: Optional[str] = None,
-    ) -> None:
+    ) -> bool:
         """Append a findings envelope to the pending queue.
+
+        Returns whether the envelope is stored (see :meth:`enqueue_annotations`).
+        ``True`` is also returned when nothing is due: the findings sync gate
+        is closed, or *records* is empty.
 
         Mirrors :meth:`enqueue_annotations` for all guard / persistence behaviour
         with an additional feature gate check.
@@ -683,20 +764,17 @@ class MemorySyncService:
             probed_at: ISO-8601 timestamp to stamp the envelope; defaults to now.
         """
         if not self.is_configured:
-            return
-        if not self._findings_sync_enabled():
-            return
+            return False
+        if not self._findings_sync_enabled() or not records:
+            return True
 
         instance_id = instance.get("id") or instance.get("name", "")
         if self._is_folded(instance_id):
-            return
+            return False
         if self._memory_service.is_memory_disabled(
             instance_id, instance.get("name", "")
         ):
-            return
-
-        if not records:
-            return
+            return False
 
         if len(self._pending) >= _QUEUE_CAP:
             logger.warning(
@@ -704,7 +782,7 @@ class MemorySyncService:
                 _QUEUE_CAP,
                 instance_id,
             )
-            return
+            return False
 
         env = SyncEnvelope(
             instance_id=instance_id,
@@ -718,17 +796,7 @@ class MemorySyncService:
             safe_metrics=None,
             plaintext_payload={"findings": records},
         )
-        self._pending.append(env)
-
-        if len(self._pending) >= _QUEUE_WATCHDOG_WARN:
-            logger.warning(
-                "sync queue depth %d ≥ watchdog threshold %d",
-                len(self._pending),
-                _QUEUE_WATCHDOG_WARN,
-            )
-
-        self._append_to_jsonl(env)
-        self._notify_listeners()
+        return self._store_envelope(env)
 
     async def pull_findings(
         self,
@@ -1164,6 +1232,18 @@ class MemorySyncService:
         self._pending.extendleft(reversed(deferred))
         return batch
 
+    def _dispatch_batch(self, batch: List[SyncEnvelope]) -> List[SyncEnvelope]:
+        """Return the envelopes of *batch* that may be sent now.
+
+        The others (a share folded, or held, since the batch was taken) go
+        back to the front of the queue; this is the only place that happens.
+        """
+        held = [env for env in batch if self._is_held(env.instance_id)]
+        if not held:
+            return batch
+        self._pending.extendleft(reversed(held))
+        return [env for env in batch if not self._is_held(env.instance_id)]
+
     async def drain_now(self, *, instance_id: Optional[str] = None) -> SyncBatchResult:
         """Serialize one manual or background queue drain."""
         async with self._drain_lock:
@@ -1216,6 +1296,17 @@ class MemorySyncService:
         self._notify_listeners()
 
         try:
+            await self._rate_limiter.acquire(RateLimitKey.SYNC)
+            # A share may have been folded while the batch waited for the rate
+            # limit: its envelopes go back to the queue once, and every path
+            # below (post, retry, split, cancel) works on what is dispatched.
+            batch = self._dispatch_batch(batch)
+            self._inflight = batch
+            if not batch:
+                self._inflight = None
+                self._state = "idle"
+                self._notify_listeners()
+                return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
             result = await self._post_batch(batch)
             self._inflight = None
             # Only reset to idle if a rejection handler didn't already halt/error us
@@ -1227,6 +1318,14 @@ class MemorySyncService:
                 self._quota = result.quota
             self._notify_listeners()
             return result
+
+        except asyncio.CancelledError:
+            # Cancelled mid-flight (shutdown, a restart of the loop): the
+            # envelopes were never sent, so each goes back to the queue once.
+            self._pending.extendleft(reversed(self._inflight or batch))
+            self._inflight = None
+            self._state = "idle"
+            raise
 
         except MissingSelfWrap:
             # Our crypto bug — re-raise so the caller (and tests) can see it
@@ -1760,16 +1859,6 @@ class MemorySyncService:
         """Encrypt and POST a batch of SyncEnvelopes. Returns SyncBatchResult."""
         import json as json_mod
 
-        await self._rate_limiter.acquire(RateLimitKey.SYNC)
-        # A share may have been folded while this batch waited for the rate
-        # limit: such envelopes go back to the queue instead of the wire.
-        held = [env for env in batch if self._is_held(env.instance_id)]
-        if held:
-            self._pending.extendleft(reversed(held))
-            batch = [env for env in batch if not self._is_held(env.instance_id)]
-            if not batch:
-                return SyncBatchResult(accepted=[], rejected=[], quota=self._quota)
-
         envelopes_payload: List[Dict[str, Any]] = []
         for env in batch:
             plaintext_bytes = json_mod.dumps(
@@ -2043,7 +2132,7 @@ class MemorySyncService:
             index_entry_provider({"instance_id": instance_id, "provider": "custom"}),
         )
 
-    def _append_to_jsonl(self, env: SyncEnvelope) -> None:
+    def _append_to_jsonl(self, env: SyncEnvelope) -> bool:
         """Append a SyncEnvelope to the persistent JSONL queue.
 
         Creates the parent directory with mode ``0o700`` and the file with
@@ -2095,8 +2184,10 @@ class MemorySyncService:
                 os.chmod(self._queue_path, 0o600)
             except OSError:
                 pass
+            return True
         except Exception as exc:
             logger.warning("Could not persist envelope to JSONL queue: %s", exc)
+            return False
 
     @property
     def _poison_path(self) -> Path:
