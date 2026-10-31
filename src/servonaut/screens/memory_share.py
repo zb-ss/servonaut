@@ -244,6 +244,8 @@ class ShareInstanceScreen(Screen):
         self._waiting: List[Any] = []
         # True while an error line is on show: a refresh must not wipe it.
         self._status_locked = False
+        # The confirmation write in flight; the next one waits for it.
+        self._pin_write: Optional["asyncio.Future[None]"] = None
 
     # ------------------------------------------------------------------
     # Compose
@@ -826,7 +828,7 @@ class ShareInstanceScreen(Screen):
         if service is None:
             return
         try:
-            await asyncio.to_thread(service.confirm_member_keys, action.team_slug, confirmed)
+            await self._save_confirmed(service, action.team_slug, confirmed)
         except (OSError, ValueError, MemoryBackendError) as exc:
             logger.error("Could not save the confirmed keys: %s", type(exc).__name__)
             self._show_error("Could not save the confirmed keys. Nothing was changed.")
@@ -837,6 +839,24 @@ class ShareInstanceScreen(Screen):
             await self._do_reshare(action)
         else:
             await self._do_share(action)
+
+    async def _save_confirmed(self, service: Any, team_slug: str, confirmed: List[Any]) -> None:
+        """Write confirmed keys, one write at a time.
+
+        Cancelling a worker does not stop the thread it is waiting on, so an
+        older write could finish after a newer one and bring its pin back. A
+        write is therefore kept running (shielded) when its worker is
+        cancelled, and the next one starts only once it is done.
+        """
+        while self._pin_write is not None and not self._pin_write.done():
+            await asyncio.wait([self._pin_write])
+        write = asyncio.ensure_future(
+            asyncio.to_thread(service.confirm_member_keys, team_slug, confirmed)
+        )
+        # Read the outcome even if the worker that started it was cancelled.
+        write.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._pin_write = write
+        await asyncio.shield(write)
 
     async def _top_up(self, action: _ShareAction) -> None:
         """Seal the latest snapshots for the members whose key was just confirmed."""
