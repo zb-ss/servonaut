@@ -162,6 +162,17 @@ def test_a_malformed_skip_list_pins_nobody_but_the_share_stands(tmp_path, skippe
     assert pinned_fingerprint(pins, SLUG, 2) is None
 
 
+def test_a_grant_response_without_a_skip_list_pins_nobody_but_the_share_stands(tmp_path):
+    svc, api, pins = _service(tmp_path)
+    lee, _p = _member(2, "Lee")
+    response = dict(api.post.return_value)
+    response.pop("skipped_recipients", None)
+    api.post.return_value = response
+    grant = _share(svc, [lee])
+    assert grant.id == "g"
+    assert pinned_fingerprint(pins, SLUG, 2) is None
+
+
 def test_share_again_does_not_pin_a_skipped_recipient(tmp_path):
     svc, api, pins = _service(tmp_path)
     lee, _p = _member(2, "Lee")
