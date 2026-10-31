@@ -2959,9 +2959,10 @@ class ServonautTools:
         instance = await self._memory_target(instance)
 
         try:
-            # Off the event loop: the record lock may be held by another process.
+            # Only the record transaction runs off the event loop (the lock may
+            # be held by another process); the sync queue is touched back here.
             result = await asyncio.to_thread(
-                self._memory_service.remember_finding,
+                self._memory_service.store_finding,
                 instance,
                 title=title,
                 body=body,
@@ -2984,6 +2985,7 @@ class ServonautTools:
             msg = f"Memory is disabled for instance {instance_id}; finding not saved."
             self._audit.log('remember_server_finding', args, msg, False, 'memory_disabled')
             return msg
+        self._memory_service.enqueue_findings_for(instance)
 
         finding_id = result.get("finding_id", "")
         auto_inject = result.get("auto_inject", False)

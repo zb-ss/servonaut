@@ -768,6 +768,7 @@ _PULL_FINDINGS_RESULT_MESSAGES: Dict[str, str] = {
     "opt_out": "Memory is disabled for this instance.",
     "not_found": "No findings found on the server for this instance.",
     "unavailable": "Memory Sync is not configured or not available.",
+    "busy": "Another Servonaut process is changing this server's memory; try again.",
 }
 
 
