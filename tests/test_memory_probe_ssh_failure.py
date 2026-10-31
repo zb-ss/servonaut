@@ -55,8 +55,10 @@ def _fake_ssh(stdout: bytes = b"", returncode: int = 0, diagnostics: str = "") -
         if "-E" in args:
             Path(args[args.index("-E") + 1]).write_text(diagnostics)
         process = MagicMock()
-        process.communicate = AsyncMock(return_value=(stdout, b""))
-        process.returncode = returncode
+        # The shared connection (-N) runs no command: it either opens or it fails.
+        opens_only = "-N" in args
+        process.communicate = AsyncMock(return_value=(b"" if opens_only else stdout, b""))
+        process.returncode = 0 if opens_only and not diagnostics else returncode
         process._transport = None
         return process
 

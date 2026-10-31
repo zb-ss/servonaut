@@ -1203,6 +1203,22 @@ class MemoryConfig:
             server, for the Servonaut service's ``Retry-After`` after the
             service refused a vault key lookup. A longer ask (or a second
             refusal) fails the server as rate limited.
+        ssh_max_connections_per_bastion: Most SSH connections open at once
+            through one bastion (``host``), shared by every concurrent build.
+            With connection sharing it gates opening each server's master.
+        ssh_max_connections_per_server: Most connections one server's build
+            opens at once where connections cannot be shared (Windows).
+        ssh_master_connect_timeout_seconds: Time a build's shared master
+            connection may take to log in.
+        ssh_control_persist_seconds: How long an idle master outlives its
+            build when it could not be closed explicitly.
+        ssh_connect_retry_backoff_seconds: Pause before the one retry of a
+            dropped connection; two failures before any answer make the
+            server unreachable.
+        ssh_control_socket_dir: Directory for each build's private socket
+            folder. Empty means a short system location (``/tmp``); set it
+            where ``/tmp`` is not writable. Too long a path (Unix sockets hold
+            about 100 bytes) turns connection sharing off.
     """
 
     enabled: bool = True
@@ -1265,6 +1281,19 @@ class MemoryConfig:
     # refused a vault lookup (once per server); a longer ask fails the server
     # at once as rate limited.
     vault_rate_limit_max_wait_seconds: float = 20.0
+    # Connections a fleet scan may open through one bastion (all builds share
+    # the cap), and per server when connections cannot be shared (Windows).
+    ssh_max_connections_per_bastion: int = 4
+    ssh_max_connections_per_server: int = 4
+    # A build shares one master connection per server (not on Windows): the
+    # time its own handshake may take (the 5 s probe deadline is for commands)
+    # and how long an idle master outlives its build if it is never closed.
+    ssh_master_connect_timeout_seconds: float = 20.0
+    ssh_control_persist_seconds: float = 30.0
+    # Pause before the one retry of a connection that dropped before any
+    # command of the build had answered.
+    ssh_connect_retry_backoff_seconds: float = 1.0
+    ssh_control_socket_dir: str = ""
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
