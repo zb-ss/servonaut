@@ -2537,7 +2537,7 @@ class ServonautTools:
                     result, True,
                 )
                 return result
-        if not stored_modules:
+        if not stored_modules and not self._has_notes_or_findings(iid, provider):
             hint = (
                 f"Call build_server_memory(instance_id='{iid}') to "
                 "probe the host and populate memory, then retry."
@@ -2583,6 +2583,7 @@ class ServonautTools:
                         "_trust_notice": MEMORY_TRUST_NOTICE,
                         "instance_id": iid,
                         "modules": sanitized,
+                        "annotations": self._notes_text(iid, provider),
                     },
                     indent=2,
                 )
@@ -2605,6 +2606,12 @@ class ServonautTools:
                 )
                 summary["_trust_notice"] = MEMORY_TRUST_NOTICE
                 result = json.dumps(summary)
+            elif format == "context_block" and not stored_modules:
+                # The context builder works from probed modules; notes and
+                # findings alone are rendered through the summary instead.
+                result = frame_as_untrusted(
+                    await self._memory_service.get_summary(meta, max_tokens=1500)
+                )
             elif format == "context_block":
                 from servonaut.services.ai_memory_injector import (
                     InstanceScope, build_memory_context,
@@ -2637,6 +2644,23 @@ class ServonautTools:
             result, True,
         )
         return result
+
+    def _notes_text(self, iid: str, provider: str) -> str:
+        """The record's notes as text (empty when there are none)."""
+        notes = self._memory_service.read_annotations(iid, provider)
+        return notes if isinstance(notes, str) else ""
+
+    def _has_notes_or_findings(self, iid: str, provider: str) -> bool:
+        """Whether the record holds notes or findings (it may have no probed module yet)."""
+        memory = self._memory_service
+        try:
+            notes = memory.read_annotations(iid, provider)
+            if isinstance(notes, str) and notes.strip():
+                return True
+            findings = memory.list_findings(iid, provider)
+            return isinstance(findings, list) and bool(findings)
+        except (OSError, ValueError):
+            return False
 
     async def _shared_memory(self, requested: Dict, target: Dict) -> Any:
         """What a team shares of this server, or None (nothing, or not wired).
