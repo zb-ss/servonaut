@@ -4,10 +4,12 @@ name: Desktop preview .deb
 # release and pre-release (vX.Y.Z and vX.Y.ZrcN):
 #
 #   resolve  decides what to build, from the release event or the inputs;
-#   qualify  builds the desktop payload from the release's tag commit, runs
-#            the desktop qualification's inspection, packaged self-test and
-#            window smoke on it, then packages that payload and installs the
-#            package; it never holds a write token;
+#   qualify  builds the desktop payload from the release's tag commit, as a
+#            release build whose runtime marker names the tag's release
+#            channel, runs the desktop qualification's inspection, packaged
+#            self-test and window smoke on it, then packages that payload,
+#            checks the package's marker and installs the package; it never
+#            holds a write token;
 #   publish  checks the package it was handed, attests its build provenance
 #            and uploads it with its SHA256SUMS, replacing only those two
 #            assets of the release.
@@ -21,7 +23,8 @@ name: Desktop preview .deb
 #   gh workflow run desktop-preview-deb.yml --ref vX.Y.Z -f tag=vX.Y.Z
 # dry_run does everything except the attestation and the upload. A dry run
 # may start from a branch; without a tag it rehearses that branch's commit as
-# if it were tagged rehearsal_version.
+# if it were tagged rehearsal_version. A tag from before the previews'
+# release identity is built only by its own copy, run with --ref on the tag.
 #
 # While the desktop app is known to be broken, set the repository variable
 # DESKTOP_PREVIEW_PUBLISH to off: published releases then get no preview, and
@@ -180,6 +183,8 @@ jobs:
       deb-asset: ${{ steps.plan.outputs.deb-asset }}
       sums-asset: ${{ steps.plan.outputs.sums-asset }}
       deb-sha256: ${{ steps.package.outputs.deb-sha256 }}
+      channel: ${{ steps.plan.outputs.channel }}
+      packaging-revision: ${{ steps.plan.outputs.packaging-revision }}
     env:
       TARGET: linux-x64-ubuntu-22.04
       TAG: ${{ needs.resolve.outputs.tag }}
@@ -292,6 +297,16 @@ jobs:
             PYTHONPATH="${GITHUB_WORKSPACE}/src" \
             "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview plan \
             --tag "${TAG}" --checkout "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/preview-plan"
+          # A dry run from a branch builds the tag with the tag's own scripts.
+          # A tag from before the previews' release identity plans neither the
+          # channel nor the packaging revision the steps below pass on, and
+          # has no marker check; only the tag's own copy of this workflow
+          # builds it.
+          if ! grep -q '^channel=' "${RUNNER_TEMP}/preview-plan" \
+            || ! grep -q '^packaging-revision=' "${RUNNER_TEMP}/preview-plan"; then
+            echo "::error::${TAG} predates the release identity of the desktop preview, so this copy of the workflow cannot build it. Run the tag's own: gh workflow run desktop-preview-deb.yml --ref ${TAG} -f tag=${TAG} -f dry_run=true"
+            exit 1
+          fi
           cat "${RUNNER_TEMP}/preview-plan" >> "${GITHUB_OUTPUT}"
           sed 's/^/    /' "${RUNNER_TEMP}/preview-plan"
 
@@ -314,6 +329,8 @@ jobs:
           checkout-path: ${{ github.workspace }}
           temporary-directory: ${{ steps.paths.outputs.wheel-tools-dir }}
 
+      # A release build: the tag decides the channel its runtime marker
+      # names, and the plan the packaging revision the update check orders by.
       - name: Build internal desktop onedir payload
         id: build
         env:
@@ -321,6 +338,8 @@ jobs:
           WHEEL_PATH: ${{ steps.wheel.outputs.wheel-path }}
           BUILD_DIR: ${{ steps.paths.outputs.build-dir }}
           COMMIT: ${{ steps.source.outputs.commit }}
+          CHANNEL: ${{ steps.plan.outputs.channel }}
+          PACKAGING_REVISION: ${{ steps.plan.outputs.packaging-revision }}
         run: |
           set -euo pipefail
           env -u PYTHONPATH -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
@@ -328,6 +347,9 @@ jobs:
             --wheel "${WHEEL_PATH}" \
             --target "${TARGET}" \
             --commit "${COMMIT}" \
+            --release-tag "${TAG}" \
+            --channel "${CHANNEL}" \
+            --packaging-revision "${PACKAGING_REVISION}" \
             --output-dir "${BUILD_DIR}"
           echo "payload-dir=${BUILD_DIR}/servonaut-desktop" >> "${GITHUB_OUTPUT}"
           echo "metadata-dir=${BUILD_DIR}/build-metadata" >> "${GITHUB_OUTPUT}"
@@ -384,7 +406,9 @@ jobs:
             --screenshot "${SCREENSHOT_DIR}/desktop-window-${TARGET}.png"
 
       # The payload qualified above, packaged as the release asset. The
-      # package's own fields must repeat what the tag says.
+      # package's own fields must repeat what the tag says. The Debian version
+      # is the product version alone: the packaging revision lives in the
+      # runtime marker, so no --revision is passed.
       - name: Package the qualified payload
         id: package
         env:
@@ -424,6 +448,23 @@ jobs:
           done
           echo "deb-path=${deb}" >> "${GITHUB_OUTPUT}"
           echo "deb-sha256=$(sha256sum "${deb}" | cut -d ' ' -f 1)" >> "${GITHUB_OUTPUT}"
+
+      # The runtime marker inside the package, the one the installed app
+      # reads, must carry the release identity the tag decides.
+      - name: Check the release identity of the package
+        env:
+          QUALIFIED_PYTHON: ${{ steps.qualification-env.outputs.python-path }}
+          DEB_PATH: ${{ steps.package.outputs.deb-path }}
+          PACKAGE_NAME: ${{ steps.plan.outputs.package-name }}
+        run: |
+          set -euo pipefail
+          marker="${RUNNER_TEMP}/packaged-runtime-marker.json"
+          dpkg-deb --fsys-tarfile "${DEB_PATH}" \
+            | tar --extract --to-stdout "./opt/${PACKAGE_NAME}/servonaut-runtime.json" > "${marker}"
+          env -u PYTHONHOME -u PYTHONUSERBASE -u PIP_CONFIG_FILE \
+            PYTHONPATH="${GITHUB_WORKSPACE}/src" \
+            "${QUALIFIED_PYTHON}" -m scripts.distribution.desktop_preview check-marker \
+            --tag "${TAG}" --marker "${marker}"
 
       # What a user does with the release asset: install it with apt, which
       # also installs its declared dependencies, run it, and purge it again.
@@ -532,6 +573,8 @@ jobs:
       DEB_ASSET: ${{ needs.qualify.outputs.deb-asset }}
       SUMS_ASSET: ${{ needs.qualify.outputs.sums-asset }}
       DEB_SHA256: ${{ needs.qualify.outputs.deb-sha256 }}
+      CHANNEL: ${{ needs.qualify.outputs.channel }}
+      PACKAGING_REVISION: ${{ needs.qualify.outputs.packaging-revision }}
     defaults:
       run:
         shell: bash
@@ -588,14 +631,36 @@ jobs:
           echo "Assets of ${TAG} now:"
           sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
 
+      # A package built by another run has other bytes, and the release mirror
+      # never replaces a file it has copied: the update manifest would then
+      # list a package GitHub no longer serves. So the first package stays.
+      - name: Keep the preview the release already carries
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          attached="${RUNNER_TEMP}/attached"
+          mkdir "${attached}"
+          for name in "${DEB_ASSET}" "${SUMS_ASSET}"; do
+            grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-before" || continue
+            gh release download "${TAG}" --dir "${attached}" --pattern "${name}"
+            if ! cmp -s "${attached}/${name}" "preview/${name}"; then
+              echo "::error::${TAG} already carries ${name} from another run. The release mirror never replaces a file it has copied, so a release's desktop preview .deb is attached once. Ship the fix with the next release; CONTRIBUTING.md describes how to take a broken preview off a release."
+              exit 1
+            fi
+            echo "${name} is already attached with these bytes."
+          done
+
       - name: Attest the package's build provenance
         if: env.DRY_RUN != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: preview/${{ needs.qualify.outputs.deb-asset }}
 
-      # --clobber replaces this workflow's own two assets, so a re-run is
-      # idempotent; every other asset of the release is left alone.
+      # --clobber lets a re-run of this publish job attach its own package
+      # again; a package another run built was refused above. Every other
+      # asset of the release is left alone.
       - name: Upload the preview to the release
         if: env.DRY_RUN != 'true'
         env:
@@ -627,6 +692,7 @@ jobs:
             fi
             echo ""
             echo "- Package: \`${PACKAGE_NAME}\` version \`${DEBIAN_VERSION}\` (${ARCHITECTURE}), built from \`${COMMIT}\`"
+            echo "- Release identity: channel \`${CHANNEL}\`, packaging revision \`${PACKAGING_REVISION}\`"
             echo "- Assets: \`${DEB_ASSET}\`, \`${SUMS_ASSET}\`"
             echo "- SHA-256: \`${DEB_SHA256}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

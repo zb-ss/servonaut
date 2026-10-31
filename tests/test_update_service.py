@@ -12,14 +12,17 @@ import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from servonaut.distribution import trust_root
 from servonaut.runtime import DistributionKind, RuntimeEvidence, resolve_runtime
 from servonaut.services.update_service import (
+    RELEASE_MANIFEST_URL_ENV,
     UpdateCheckResult,
     UpdateService,
+    default_manifest_url,
     latest_index_version,
 )
 
@@ -86,13 +89,62 @@ def test_source_missing_upgrade_command_has_no_side_effects():
     assert service.update_status is None
 
 
-def test_frozen_missing_upgrade_command_has_no_side_effects():
+def test_frozen_missing_upgrade_command_has_no_side_effects(monkeypatch):
+    monkeypatch.delenv(RELEASE_MANIFEST_URL_ENV, raising=False)
     service = _svc(kind=DistributionKind.FROZEN_CLI)
 
     assert service.get_upgrade_command() is None
     assert service.update_status is None
-    assert service.check_for_update() is None
+    # Unmarked, so no pinned manifest: nothing may be requested.
+    with patch.object(
+        urllib.request.OpenerDirector, "open", side_effect=AssertionError("unexpected request")
+    ) as request:
+        assert service.check_for_update() is None
     assert "signed build" in service.update_status
+    request.assert_not_called()
+
+
+# --- the pinned release manifest follows the build marker's channel ---------
+
+def _marked_runtime(kind, channel="stable", packaging_revision=1):
+    executable = Path(sys.executable)
+    return resolve_runtime(RuntimeEvidence(
+        executable=executable,
+        executable_root=executable.parent,
+        resource_root=Path("/resources"),
+        home=Path("/home/user"),
+        is_frozen=True,
+        package_version="2.27.0",
+        package_is_installed=True,
+        source_install_path=None,
+        path_console=None,
+        pipx_executable=None,
+        pipx_contains_servonaut=False,
+        marker={"schema_version": 1, "distribution": kind.value, "product_version": "2.27.0",
+                "channel": channel, "packaging_revision": packaging_revision,
+                "console_helper": "servonaut-cli"},
+    ))
+
+
+@pytest.mark.parametrize("kind", [DistributionKind.FROZEN_CLI, DistributionKind.PACKAGED_DESKTOP])
+@pytest.mark.parametrize("channel", ["stable", "preview"])
+def test_a_marked_build_defaults_to_the_manifest_of_its_channel(kind, channel):
+    runtime = _marked_runtime(kind, channel=channel)
+
+    assert runtime.release_channel == channel
+    assert default_manifest_url(runtime) == trust_root.DEFAULT_MANIFEST_URLS[channel]
+
+
+def test_an_unmarked_frozen_build_has_no_default_manifest():
+    runtime = _svc(kind=DistributionKind.FROZEN_CLI).runtime
+
+    assert runtime.packaging_revision is None
+    assert default_manifest_url(runtime) is None
+
+
+@pytest.mark.parametrize("kind", [DistributionKind.SOURCE, DistributionKind.PIP, DistributionKind.PIPX])
+def test_index_installations_have_no_default_manifest(kind):
+    assert default_manifest_url(_svc(kind=kind).runtime) is None
 
 
 # --- source/local installs are not silently "upgraded" -----------------------

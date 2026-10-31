@@ -11,7 +11,9 @@ import pytest
 from scripts.distribution import notarize_macos
 from scripts.distribution.notarize_macos import (
     MacosNotarizationError,
+    fetch_submission_log,
     main,
+    rejected_submission_id,
     staple_ticket,
     submit_notarization,
     validate_staple,
@@ -160,3 +162,159 @@ class TestNotaryCredentials:
         with pytest.raises(SystemExit) as excinfo:
             main(["--artifact", str(dmg), "--password", "not-on-argv", "--dry-run"])
         assert excinfo.value.code == 2
+
+
+_SUBMISSION = "2efe2717-52ef-43a5-96dc-0797e4ca1041"  # leak-guard:allow (synthetic id)
+_ISSUES = {
+    "status": "Invalid",
+    "issues": [
+        {
+            "severity": "error",
+            "path": "Servonaut.zip/Servonaut.app/Contents/MacOS/servonaut",
+            "message": "The executable does not have the hardened runtime enabled.",
+        }
+    ],
+}
+
+
+def _notary_service(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str,
+    submission_id: str = _SUBMISSION,
+    log_returncode: int = 0,
+) -> list[list[str]]:
+    """Put xcrun on PATH and answer submit and log the way notarytool does."""
+    monkeypatch.setattr(notarize_macos.shutil, "which", lambda name: f"/usr/bin/{name}")
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        if cmd[2] == "submit":
+            body = {"id": submission_id, "status": status, "message": "Processing complete"}
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+        if cmd[2] == "log":
+            if log_returncode:
+                return subprocess.CompletedProcess(cmd, log_returncode, "", "Error: HTTP 404")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(_ISSUES, indent=2), "")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    monkeypatch.setattr(notarize_macos.subprocess, "run", fake_run)
+    return commands
+
+
+def _api_key_argv(dmg: Path, key_file: Path) -> list[str]:
+    return [
+        "--artifact",
+        str(dmg),
+        "--api-key-file",
+        str(key_file),
+        "--api-key-id",
+        "KEYID",
+        "--api-issuer",
+        "issuer-id",
+        "--staple",
+    ]
+
+
+class TestRejectedSubmissionLog:
+    """A refused submission's log is printed, so the CI output shows why."""
+
+    @pytest.mark.parametrize("status", sorted(notarize_macos.REJECTED_STATUSES))
+    def test_the_log_of_a_refused_submission_is_printed(
+        self,
+        dmg: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        status: str,
+    ) -> None:
+        commands = _notary_service(monkeypatch, status=status)
+        key_file = tmp_path / "AuthKey_TEST.p8"
+        key_file.write_text("PRIVATE-KEY-MATERIAL-FOR-TEST", encoding="utf-8")
+
+        assert main(_api_key_argv(dmg, key_file)) == 1
+
+        submit, log = commands
+        assert log[:4] == ["/usr/bin/xcrun", "notarytool", "log", _SUBMISSION]
+        # The log is fetched with the submission's own credentials.
+        assert log[4:] == submit[submit.index("--key") : submit.index("--wait")]
+        assert log[4:] == [
+            "--key",
+            str(key_file.resolve()),
+            "--key-id",
+            "KEYID",
+            "--issuer",
+            "issuer-id",
+        ]
+        stderr = capsys.readouterr().err
+        assert f"Notarization log of submission {_SUBMISSION}:" in stderr
+        assert "does not have the hardened runtime enabled" in stderr
+        assert stderr.index("Notarization submission failed") < stderr.index("Notarization log")
+
+    def test_a_keychain_profile_fetches_the_log_with_that_profile(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands = _notary_service(monkeypatch, status="Invalid")
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "release-profile"]) == 1
+
+        assert commands[1][2:] == ["log", _SUBMISSION, "--keychain-profile", "release-profile"]
+
+    @pytest.mark.parametrize(
+        ("status", "submission_id"),
+        [
+            ("Accepted", _SUBMISSION),
+            # notarytool gave up waiting; Apple has not decided yet.
+            ("In Progress", _SUBMISSION),
+            ("Invalid", ""),
+            ("Invalid", "--keychain-profile"),
+        ],
+    )
+    def test_no_log_is_fetched_without_a_refused_submission(
+        self,
+        dmg: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        status: str,
+        submission_id: str,
+    ) -> None:
+        commands = _notary_service(monkeypatch, status=status, submission_id=submission_id)
+
+        main(["--artifact", str(dmg), "--keychain-profile", "release-profile"])
+
+        assert [command[2] for command in commands] == ["submit"]
+        assert "Notarization log" not in capsys.readouterr().err
+
+    def test_a_log_that_cannot_be_fetched_still_fails_the_submission(
+        self,
+        dmg: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _notary_service(monkeypatch, status="Rejected", log_returncode=1)
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "release-profile"]) == 1
+
+        stderr = capsys.readouterr().err
+        assert f"The notarization log of submission {_SUBMISSION} could not be fetched:" in stderr
+        assert "Error: HTTP 404" in stderr
+
+    def test_a_dry_run_never_fetches_a_log(
+        self, dmg: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        commands = _notary_service(monkeypatch, status="Invalid")
+
+        assert main(["--artifact", str(dmg), "--keychain-profile", "profile", "--dry-run"]) == 0
+        assert commands == []
+
+    def test_only_submission_ids_reach_notarytool(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        commands = _notary_service(monkeypatch, status="Invalid")
+
+        with pytest.raises(MacosNotarizationError, match="submission id"):
+            fetch_submission_log("--output-format", keychain_profile="profile")
+        assert commands == []
+        assert rejected_submission_id({"id": _SUBMISSION, "status": "Invalid"}) == _SUBMISSION
+        assert rejected_submission_id({"id": _SUBMISSION.upper(), "status": "Rejected"})
+        assert rejected_submission_id({"id": 7, "status": "Invalid"}) is None
+        assert rejected_submission_id({"status": "Invalid"}) is None

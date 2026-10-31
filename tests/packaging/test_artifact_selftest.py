@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -473,6 +474,24 @@ def test_isolated_environment_sets_utf8_and_case_insensitive_windows_vars(
     assert env["SystemRoot"] == r"C:\Windows"
     assert env["WINDIR"] == r"C:\Windows"
     assert env["PATHEXT"] == ".COM;.EXE;.BAT;.CMD"
+
+
+def test_isolated_environment_keeps_the_update_check_off_the_release_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from servonaut.services import update_service
+    from servonaut.utils.endpoints import LOOPBACK_HOSTS, endpoint_override
+
+    env = selftest._isolated_environment(
+        tmp_path, {update_service.RELEASE_MANIFEST_URL_ENV: "https://mirror.example.net/m.json"}
+    )
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    # The app accepts the override (a refused one would log a warning), and it is loopback.
+    override = endpoint_override(update_service.RELEASE_MANIFEST_URL_ENV)
+    assert override == selftest._UNREACHABLE_MANIFEST_URL
+    assert urllib.parse.urlsplit(override).hostname in LOOPBACK_HOSTS
 
 
 def test_the_boto3_probe_reports_missing_resource_definitions(monkeypatch: pytest.MonkeyPatch) -> None:

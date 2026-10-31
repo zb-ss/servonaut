@@ -3,6 +3,9 @@
 Credentials never travel on the command line: notarytool authenticates with a
 keychain profile (created once with ``xcrun notarytool store-credentials``) or
 with an App Store Connect API key file.
+
+When Apple refuses a submission, the command line fetches the submission's
+log, which lists the issues that made it fail, and prints it.
 """
 
 from __future__ import annotations
@@ -10,10 +13,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 from typing import Any, Optional
+
+# The final statuses of a submission Apple refused; its log says why.
+REJECTED_STATUSES = frozenset({"Invalid", "Rejected"})
+# notarytool names submissions by UUID; nothing else is passed on to it.
+_SUBMISSION_ID = re.compile(
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
 
 
 class MacosNotarizationError(Exception):
@@ -112,6 +123,41 @@ def submit_notarization(
     return False, raw_out, details
 
 
+def rejected_submission_id(details: dict[str, Any]) -> Optional[str]:
+    """The id of a submission Apple refused, or None for any other outcome."""
+    submission_id = details.get("id")
+    if details.get("status") not in REJECTED_STATUSES or not isinstance(submission_id, str):
+        return None
+    return submission_id if _SUBMISSION_ID.fullmatch(submission_id) else None
+
+
+def fetch_submission_log(
+    submission_id: str,
+    *,
+    keychain_profile: Optional[str] = None,
+    api_key_file: Optional[Path | str] = None,
+    api_key_id: Optional[str] = None,
+    api_issuer: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Fetch notarytool's log of one submission, with the same credentials.
+
+    Returns:
+        tuple[bool, str]: (is_success, the log or notarytool's error)
+
+    Raises:
+        MacosNotarizationError: If the id is not a submission id, credentials
+            are missing or notarytool is unavailable.
+    """
+    if not _SUBMISSION_ID.fullmatch(submission_id):
+        raise MacosNotarizationError(f"Not a notarization submission id: {submission_id!r}")
+    credential_args = _credential_args(keychain_profile, api_key_file, api_key_id, api_issuer)
+    cmd = [*_xcrun_tool_command("notarytool"), "log", submission_id, *credential_args]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode == 0:
+        return True, (res.stdout or "").strip()
+    return False, ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+
+
 def staple_ticket(
     artifact_path: Path | str,
     *,
@@ -150,6 +196,26 @@ def validate_staple(
     res = subprocess.run(cmd, capture_output=True, text=True)
     msg = (res.stdout + "\n" + res.stderr).strip()
     return res.returncode == 0, msg
+
+
+def _print_rejection_log(args: argparse.Namespace, details: dict[str, Any]) -> None:
+    """Print why Apple refused a submission, from its notarytool log."""
+    submission_id = rejected_submission_id(details)
+    if submission_id is None:
+        return
+    fetched, submission_log = fetch_submission_log(
+        submission_id,
+        keychain_profile=args.keychain_profile,
+        api_key_file=args.api_key_file,
+        api_key_id=args.api_key_id,
+        api_issuer=args.api_issuer,
+    )
+    heading = (
+        f"Notarization log of submission {submission_id}:"
+        if fetched
+        else f"The notarization log of submission {submission_id} could not be fetched:"
+    )
+    print(f"{heading}\n{submission_log}", file=sys.stderr)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -213,6 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         if not success:
             print(f"Notarization submission failed:\n{log}", file=sys.stderr)
+            _print_rejection_log(args, details)
             return 1
 
         print(f"Notarization succeeded for {args.artifact.name}")

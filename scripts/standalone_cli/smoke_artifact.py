@@ -78,6 +78,18 @@ _FORWARD_ENV_NAMES = (
 )
 _SAFE_LOCALE_NAMES = ("LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM")
 _WINDOWS_RUNTIME_NAMES = ("SystemRoot", "WINDIR", "ComSpec", "PATHEXT")
+# A packaged build checks the signed release manifest pinned for its channel.
+# Smoke children send that check to a loopback port where nothing listens, so
+# no smoke reaches the release host and the check reports that it is offline.
+_MANIFEST_URL_ENV = "SERVONAUT_RELEASE_MANIFEST_URL"
+_UNREACHABLE_MANIFEST_URL = "https://127.0.0.1:9/manifest.json"
+# The --update check also points the package-index check at a URL that check
+# refuses, so only a build that takes the packaged path can report offline.
+_UPDATE_SMOKE_ENVIRONMENT = {
+    _MANIFEST_URL_ENV: _UNREACHABLE_MANIFEST_URL,
+    "SERVONAUT_PYPI_URL": "http://package-index.invalid/pypi/servonaut/json",
+}
+_OFFLINE_UPDATE_STATUS = "Could not check for updates (offline)."
 _CALLER_ENVIRONMENT_CANARIES = {
     "AWS_ACCESS_KEY_ID": "caller-isolation-access-key",
     "AWS_PROFILE": "caller-isolation-profile",
@@ -376,6 +388,7 @@ def isolated_child_environment(home: Path) -> dict[str, str]:
         "AWS_EC2_METADATA_DISABLED": "true",
         "AWS_CONFIG_FILE": str(home / ".aws" / "config"),
         "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials"),
+        _MANIFEST_URL_ENV: _UNREACHABLE_MANIFEST_URL,
     }
     for name in _SAFE_LOCALE_NAMES:
         value = os.environ.get(name)
@@ -844,13 +857,17 @@ def run_smoke(request: SmokeRequest, policy: SmokePolicy) -> SmokeResult:
         if help_result.stderr:
             _fail("help wrote to stderr")
 
-        update = invoke("update", ["--update"], home=scratch / "update")
+        update = invoke(
+            "update",
+            ["--update"],
+            home=scratch / "update",
+            extra_env=_UPDATE_SMOKE_ENVIRONMENT,
+        )
         _require_exit(update, 0, "update")
         update_text = _decode(update.stdout, "update")
         if (
             f"Current version: {request.product_version}" not in update_text
-            or "Automatic updates are not configured for this packaged Servonaut build."
-            not in update_text
+            or _OFFLINE_UPDATE_STATUS not in update_text
         ):
             _fail("update output lacks packaged-build guidance")
         if update.stderr:

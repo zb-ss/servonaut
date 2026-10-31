@@ -27,6 +27,11 @@ _SEMVER_REGEX = re.compile(
     rf"(?:-({_PRERELEASE_IDENTIFIER}(?:\.{_PRERELEASE_IDENTIFIER})*))?"
     rf"(?:\+({_BUILD_IDENTIFIER}(?:\.{_BUILD_IDENTIFIER})*))?"
 )
+# A release candidate build carries its tag's Python package version, X.Y.ZrcN,
+# while manifests spell the same version X.Y.Z-rc.N.
+_CANDIDATE_VERSION_REGEX = re.compile(
+    rf"({_NUMERIC_IDENTIFIER})\.({_NUMERIC_IDENTIFIER})\.({_NUMERIC_IDENTIFIER})rc([1-9][0-9]*)"
+)
 _HEX_64_REGEX = re.compile(r"[0-9a-fA-F]{64}")
 _HEX_SIGNATURE_REGEX = re.compile(r"[0-9a-fA-F]{128}")
 # On platforms whose host version can be read, min_os is a dotted decimal
@@ -137,6 +142,43 @@ def parse_semver(version: object) -> SemVer:
         prerelease=tuple(prerelease.split(".")) if prerelease else (),
         build=tuple(build.split(".")) if build else (),
     )
+
+
+def parse_build_version(version: object) -> SemVer:
+    """Parse the product version a running build reports.
+
+    Accepts a semantic version, and a release candidate's X.Y.ZrcN, which
+    orders exactly like its manifest spelling X.Y.Z-rc.N.
+
+    Raises:
+        ManifestSchemaError: If the value is neither.
+    """
+    match = _CANDIDATE_VERSION_REGEX.fullmatch(version) if isinstance(version, str) else None
+    if match is None:
+        return parse_semver(version)
+    major, minor, patch, candidate = match.groups()
+    return SemVer(
+        major=int(major),
+        minor=int(minor),
+        patch=int(patch),
+        prerelease=("rc", candidate),
+    )
+
+
+def build_version_text(version: str) -> str:
+    """Spell a manifest version the way release tags and builds do.
+
+    A release candidate's manifest version X.Y.Z-rc.N reads X.Y.ZrcN; every
+    other version is returned unchanged.
+
+    Raises:
+        ManifestSchemaError: If the value is not a valid semantic version.
+    """
+    semver = parse_semver(version)
+    candidate = semver.prerelease
+    if len(candidate) == 2 and candidate[0] == "rc" and candidate[1].isdigit() and not semver.build:
+        return f"{semver.major}.{semver.minor}.{semver.patch}rc{int(candidate[1])}"
+    return version
 
 
 def parse_timestamp(value: object) -> datetime:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+from pathlib import Path
 
 import pytest
 
 from scripts.standalone_cli.release_identity import (
     DEVELOPMENT_IDENTITY,
     MAX_PACKAGING_REVISION,
+    CANDIDATE_TAG,
     PREVIEW_TAG,
     STABLE_TAG,
     ReleaseIdentity,
@@ -22,6 +25,10 @@ from scripts.standalone_cli.release_identity import (
     validate_marker_identity,
 )
 from servonaut import runtime
+
+_RELEASE_POLICY = (
+    Path(__file__).resolve().parents[2] / ".github" / "scripts" / "release-policy.py"
+)
 
 
 def test_marker_channels_match_the_runtime_parser() -> None:
@@ -124,7 +131,13 @@ def test_cli_options_can_be_required_for_builders_with_only_explicit_inputs() ->
 
 @pytest.mark.parametrize(
     ("tag", "channel", "version"),
-    [("v2.27.0", "stable", "2.27.0"), ("v2.27.0-preview.2", "preview", "2.27.0")],
+    [
+        ("v2.27.0", "stable", "2.27.0"),
+        ("v2.27.0-preview.2", "preview", "2.27.0"),
+        # A release candidate keeps its rc number: it is the product version.
+        ("v2.27.0rc1", "preview", "2.27.0rc1"),
+        ("v10.0.3rc12", "preview", "10.0.3rc12"),
+    ],
 )
 def test_release_tags_decide_the_channel(tag: str, channel: str, version: str) -> None:
     assert channel_for_release_tag(tag) == channel
@@ -132,11 +145,45 @@ def test_release_tags_decide_the_channel(tag: str, channel: str, version: str) -
 
 
 @pytest.mark.parametrize(
-    "tag", ["2.27.0", "v2.27", "v2.27.0-rc.1", "v2.27.0-preview.0", "v02.27.0", ""]
+    "tag",
+    [
+        "2.27.0",
+        "v2.27",
+        "v2.27.0-rc.1",
+        "v2.27.0-preview.0",
+        "v02.27.0",
+        "",
+        "v2.27.0rc0",
+        "v2.27.0rc01",
+        "v2.27.0-rc1",
+        "v2.27.0.rc1",
+        "v2.27.0rc",
+        "2.27.0rc1",
+        "v2.27.0rc1-preview.1",
+        "v2.27.0a1",
+        "v2.27.0rc1\n",
+    ],
 )
 def test_other_tags_are_refused(tag: str) -> None:
     with pytest.raises(ReleaseIdentityError, match="release tag"):
         channel_for_release_tag(tag)
+    with pytest.raises(ReleaseIdentityError, match="release tag"):
+        release_tag_product_version(tag)
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["v2.27.0rc1", "v10.0.3rc12", "v2.27.0", "v2.27.0rc0", "v2.27.0rc01", "v02.27.0rc1"],
+)
+def test_candidate_tags_match_the_release_workflow(tag: str) -> None:
+    """The build scripts cannot import the Release workflow's policy, so it is loaded here."""
+    spec = importlib.util.spec_from_file_location("release_policy", _RELEASE_POLICY)
+    assert spec is not None and spec.loader is not None
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+
+    expected = policy.CANDIDATE_TAG.fullmatch(tag) is not None
+    assert (CANDIDATE_TAG.fullmatch(tag) is not None) is expected
 
 
 def test_tag_patterns_match_the_release_candidate_policy() -> None:
@@ -151,6 +198,9 @@ def test_release_tag_identity_takes_the_channel_from_the_tag() -> None:
     assert identity_for_release_tag(
         "v2.27.0-preview.1", product_version="2.27.0", channel=None, packaging_revision="2"
     ) == ReleaseIdentity("preview", 2)
+    assert identity_for_release_tag(
+        "v2.27.0", product_version="2.27.0", channel="stable", packaging_revision="1"
+    ) == ReleaseIdentity("stable", 1)
     with pytest.raises(ReleaseIdentityError, match="contradicts"):
         identity_for_release_tag(
             "v2.27.0", product_version="2.27.0", channel="preview", packaging_revision="1"
@@ -158,4 +208,32 @@ def test_release_tag_identity_takes_the_channel_from_the_tag() -> None:
     with pytest.raises(ReleaseIdentityError, match="packaging-revision"):
         identity_for_release_tag(
             "v2.27.0", product_version="2.27.0", channel="stable", packaging_revision=None
+        )
+
+
+@pytest.mark.parametrize("channel", [None, "preview"])
+def test_a_release_candidate_follows_the_preview_channel(channel: str | None) -> None:
+    assert identity_for_release_tag(
+        "v2.27.0rc3", product_version="2.27.0rc3", channel=channel, packaging_revision="1"
+    ) == ReleaseIdentity("preview", 1)
+
+
+@pytest.mark.parametrize(
+    ("product_version", "channel", "reason"),
+    [
+        # The candidate's product version carries its rc number.
+        ("2.27.0", None, "does not match the product version"),
+        ("2.27.0rc2", None, "does not match the product version"),
+        ("2.27.0rc3", "stable", "contradicts the preview release tag"),
+    ],
+)
+def test_a_release_candidate_refuses_an_identity_its_tag_contradicts(
+    product_version: str, channel: str | None, reason: str
+) -> None:
+    with pytest.raises(ReleaseIdentityError, match=reason):
+        identity_for_release_tag(
+            "v2.27.0rc3",
+            product_version=product_version,
+            channel=channel,
+            packaging_revision="1",
         )

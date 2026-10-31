@@ -8,6 +8,7 @@ environment the workflow gives them.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -140,7 +141,7 @@ def test_only_the_built_in_token_reaches_the_publish_steps(workflow: str) -> Non
     assert "github.token" not in _job(workflow, "resolve")
     assert "github.token" not in _job(workflow, "qualify")
     publish = _job(workflow, "publish")
-    assert publish.count("GH_TOKEN: ${{ github.token }}") == 2
+    assert publish.count("GH_TOKEN: ${{ github.token }}") == 3
     assert "GH_TOKEN" not in publish.split("\n    steps:", 1)[0]
 
 
@@ -227,6 +228,7 @@ def test_the_package_is_qualified_before_it_leaves_the_job(workflow: str) -> Non
         "-m scripts.desktop_shell.smoke_artifact",
         "-m scripts.desktop_shell.window_smoke",
         "-m scripts.distribution.package_deb",
+        "- name: Check the release identity of the package",
         "- name: Install, run and remove the package",
         "- name: Hand the qualified package to the publish job",
     ]
@@ -268,6 +270,24 @@ def test_the_build_is_the_checked_out_commit_with_locked_tools(workflow: str) ->
     installs = [line for line in qualify.splitlines() if "pip" in line and " install " in line]
     assert installs and all("--require-hashes" in line for line in installs)
     assert "--upgrade" not in workflow
+
+
+def test_the_build_is_a_release_build_of_the_tag(workflow: str) -> None:
+    qualify = _job(workflow, "qualify")
+    build = _step(qualify, "Build internal desktop onedir payload")
+
+    assert '--release-tag "${TAG}"' in build
+    assert '--channel "${CHANNEL}"' in build
+    assert '--packaging-revision "${PACKAGING_REVISION}"' in build
+    assert "CHANNEL: ${{ steps.plan.outputs.channel }}" in build
+    assert "PACKAGING_REVISION: ${{ steps.plan.outputs.packaging-revision }}" in build
+    assert qualify.index("- name: Plan the preview from the release tag") < qualify.index(
+        "- name: Build internal desktop onedir payload"
+    )
+    # The Debian version stays the product version; the marker carries the revision.
+    package = _step(qualify, "Package the qualified payload")
+    assert "--revision" not in package
+    assert "--packaging-revision" not in package
 
 
 def test_linux_system_packages_follow_the_abi_contract(workflow: str) -> None:
@@ -323,6 +343,7 @@ def test_the_package_is_attested_before_it_is_uploaded(workflow: str) -> None:
         [
             "- name: Verify the package and write its checksums",
             "- name: Confirm the release and its tag",
+            "- name: Keep the preview the release already carries",
             "- name: Attest the package's build provenance",
             "- name: Upload the preview to the release",
         ],
@@ -723,6 +744,51 @@ def test_the_plan_step_names_a_tag_that_predates_the_tooling(
     assert "v2.27.0 predates the desktop preview packaging" in result.stdout
 
 
+def test_the_plan_step_names_a_tag_that_predates_the_release_identity(
+    workflow: str, tmp_path: Path
+) -> None:
+    """A dry run from a branch builds an older tag with that tag's own planner."""
+    checkout = tmp_path / "checkout"
+    tooling = checkout / "scripts" / "distribution"
+    tooling.mkdir(parents=True)
+    for package in (checkout / "scripts", tooling):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    # What the planner of a tag from before the release identity prints.
+    older = {
+        "tag": "v2.31.0rc9",
+        "product-version": "2.31.0rc9",
+        "debian-version": "2.31.0~rc9",
+        "package-name": "servonaut",
+        "architecture": "amd64",
+        "deb-asset": "servonaut-desktop-preview_2.31.0rc9_amd64.deb",
+        "sums-asset": "servonaut-desktop-preview_2.31.0rc9_SHA256SUMS",
+        "prerelease": "true",
+    }
+    (tooling / "desktop_preview.py").write_text(
+        "".join(f"print({f'{key}={value}'!r})\n" for key, value in older.items()),
+        encoding="utf-8",
+    )
+
+    result, outputs = _run(
+        workflow,
+        "Plan the preview from the release tag",
+        tmp_path,
+        cwd=checkout,
+        TAG="v2.31.0rc9",
+        QUALIFIED_PYTHON=sys.executable,
+        GITHUB_WORKSPACE=str(checkout),
+    )
+
+    assert result.returncode == 1
+    assert "::error::v2.31.0rc9 predates the release identity of the desktop preview" in result.stdout
+    assert (
+        "gh workflow run desktop-preview-deb.yml --ref v2.31.0rc9 -f tag=v2.31.0rc9 -f dry_run=true"
+        in result.stdout
+    )
+    # Nothing reaches the build step, which would refuse an empty channel.
+    assert outputs == {}
+
+
 @pytest.fixture
 def payload(tmp_path: Path) -> Path:
     root = tmp_path / "payload"
@@ -795,6 +861,101 @@ def test_the_package_step_fails_when_the_package_disagrees_with_the_tag(
     assert result.returncode == 1
     assert "The package's Version is 2.28.0~rc1, but v2.28.0rc1 needs 2.28.0rc1." in result.stdout
     assert "deb-sha256" not in outputs
+
+
+def _release_marker(payload: Path, tag: str, **fields: object) -> None:
+    """The runtime marker the desktop builder writes for a release build of the tag."""
+    preview = preview_for_tag(tag)
+    marker = {
+        "schema_version": 1,
+        "distribution": "packaged-desktop",
+        "product_version": preview.product_version,
+        "build_revision": "1234",
+        **preview.identity.marker_fields(),
+        "console_helper": "servonaut",
+        "desktop_child": "servonaut-desktop-child",
+        **fields,
+    }
+    (payload / "servonaut-runtime.json").write_text(json.dumps(marker), encoding="utf-8")
+
+
+def _packaged(tmp_path: Path, payload: Path, tag: str) -> dict[str, str]:
+    preview = preview_for_tag(tag)
+    deb, _, _ = package_deb(
+        payload_dir=payload,
+        output_dir=tmp_path / "deb",
+        product_version=preview.product_version,
+        maintainer=_MAINTAINER,
+        filename=preview.deb_asset,
+    )
+    return {
+        "TAG": tag,
+        "QUALIFIED_PYTHON": sys.executable,
+        "GITHUB_WORKSPACE": str(_REPO_ROOT),
+        "DEB_PATH": str(deb),
+        "PACKAGE_NAME": "servonaut",
+    }
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+@pytest.mark.parametrize("tag", ["v2.28.0rc1", "v2.28.0"])
+def test_the_marker_check_accepts_the_tags_release_build(
+    workflow: str, tmp_path: Path, payload: Path, tag: str
+) -> None:
+    _release_marker(payload, tag)
+
+    result, _ = _run(
+        workflow,
+        "Check the release identity of the package",
+        tmp_path,
+        cwd=_REPO_ROOT,
+        **_packaged(tmp_path, payload, tag),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    channel = preview_for_tag(tag).identity.channel
+    assert f"on the {channel} channel at packaging revision 1." in result.stdout
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        # What a build without --release-tag writes: the development identity.
+        ({"channel": "stable"}, "follows the stable channel"),
+        ({"packaging_revision": 2}, "at packaging revision 2"),
+    ],
+)
+def test_the_marker_check_refuses_another_build(
+    workflow: str, tmp_path: Path, payload: Path, fields: dict[str, object], reason: str
+) -> None:
+    _release_marker(payload, "v2.28.0rc1", **fields)
+
+    result, _ = _run(
+        workflow,
+        "Check the release identity of the package",
+        tmp_path,
+        cwd=_REPO_ROOT,
+        **_packaged(tmp_path, payload, "v2.28.0rc1"),
+    )
+
+    assert result.returncode == 1
+    assert reason in result.stderr
+
+
+@pytest.mark.skipif(not _HAS_DPKG_DEB, reason="dpkg-deb not installed")
+def test_the_marker_check_fails_without_a_marker_in_the_package(
+    workflow: str, tmp_path: Path, payload: Path
+) -> None:
+    env = _packaged(tmp_path, payload, "v2.28.0")
+    env["PACKAGE_NAME"] = "other"
+
+    result, _ = _run(
+        workflow, "Check the release identity of the package", tmp_path, cwd=_REPO_ROOT, **env
+    )
+
+    assert result.returncode != 0
+    assert "on the stable channel" not in result.stdout
 
 
 def _handed_over(tmp_path: Path, payload: Path, tag: str) -> tuple[Path, dict[str, str]]:
@@ -870,7 +1031,12 @@ def test_the_user_guide_matches_the_published_names() -> None:
     assert f"sudo apt install ./{preview.deb_asset}\n" in section
     assert "sudo apt remove servonaut\n" in section
     assert f"`{preview.debian_version}`" in section
-    assert "does **not** update itself yet" in section
+    # The packaged app checks for updates, but only ever reports them.
+    prose = " ".join(section.split())
+    assert "tells you when a newer one is out" in prose
+    assert "never installs it by itself" in prose
+    assert "(#updates-in-the-desktop-preview)" in section
+    assert "\n## Updates in the desktop preview\n" in guide
     assert "**preview**" in section
 
 
@@ -907,6 +1073,99 @@ gh() {
   esac
 }
 """
+
+
+def _keep(
+    workflow: str, tmp_path: Path, attached: dict[str, bytes]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """The check of what the release carries, against a release holding attached."""
+    preview = preview_for_tag("v2.28.0rc1")
+    workspace = tmp_path / "workspace"
+    (workspace / "preview").mkdir(parents=True)
+    for name, data in _this_run().items():
+        (workspace / "preview" / name).write_bytes(data)
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "notes.txt").write_text("published earlier\n", encoding="utf-8")
+    for name, data in attached.items():
+        (release / name).write_bytes(data)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / "assets-before").write_text(
+        "".join(f"{path.name}\n" for path in sorted(release.iterdir())), encoding="utf-8"
+    )
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-c", _GH_STUB + _script(workflow, "Keep the preview the release already carries")],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "TAG": preview.tag,
+            "DEB_ASSET": preview.deb_asset,
+            "SUMS_ASSET": preview.sums_asset,
+            "TEST_RELEASE": str(release),
+            "TEST_GH_LOG": str(log),
+        },
+    )
+    return result, log.read_text(encoding="utf-8").splitlines()
+
+
+def _this_run() -> dict[str, bytes]:
+    """The two assets as this run would attach them."""
+    preview = preview_for_tag("v2.28.0rc1")
+    return {preview.deb_asset: b"qualified package", preview.sums_asset: b"sums of this run\n"}
+
+
+def test_a_release_without_a_preview_gets_this_runs(workflow: str, tmp_path: Path) -> None:
+    result, calls = _keep(workflow, tmp_path, {})
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls == []
+
+
+def test_a_re_run_of_the_publish_job_may_attach_its_own_package_again(
+    workflow: str, tmp_path: Path
+) -> None:
+    result, calls = _keep(workflow, tmp_path, _this_run())
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    preview = preview_for_tag("v2.28.0rc1")
+    assert calls == [
+        f"release download v2.28.0rc1 --dir {tmp_path}/runner-temp/attached --pattern {name}"
+        for name in (preview.deb_asset, preview.sums_asset)
+    ]
+
+
+@pytest.mark.parametrize("asset", ["deb", "sums"])
+def test_a_package_built_by_another_run_never_replaces_the_attached_one(
+    workflow: str, tmp_path: Path, asset: str
+) -> None:
+    """A rebuilt package may differ, and the mirror keeps the first one."""
+    preview = preview_for_tag("v2.28.0rc1")
+    attached = _this_run()
+    name = preview.deb_asset if asset == "deb" else preview.sums_asset
+    attached[name] = b"built by another run"
+
+    result, _ = _keep(workflow, tmp_path, attached)
+
+    assert result.returncode == 1
+    assert f"::error::v2.28.0rc1 already carries {name} from another run." in result.stdout
+    assert "a release's desktop preview .deb is attached once" in result.stdout
+
+
+def test_the_attached_preview_is_checked_without_replacing_anything(workflow: str) -> None:
+    keep = _step(_job(workflow, "publish"), "Keep the preview the release already carries")
+
+    assert "if: env.DRY_RUN != 'true'" in keep
+    assert '"${RUNNER_TEMP}/assets-before"' in keep
+    assert "--clobber" not in keep
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "A release's `.deb` is attached once" in guide
 
 
 def _upload(workflow: str, tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
