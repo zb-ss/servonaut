@@ -453,3 +453,40 @@ class TestRecordBusyAudit:
         assert "another Servonaut" in result.lower() or "busy" in result.lower()
         audit_call = tools._audit.log.call_args
         assert audit_call.args[3] is False and audit_call.args[4] == "record_busy"
+
+
+class TestRecordLockDoesNotStallTheLoop:
+    def test_a_held_record_lock_does_not_block_other_coroutines(self, tmp_path):
+        import hashlib
+        import time
+
+        from servonaut.config.schema import MemoryConfig as _MC
+        from servonaut.services.memory.service import MemoryService
+        from servonaut.services.memory.store import LOCKS_DIR, MemoryStore
+        from servonaut.utils.file_lock import FileLock
+
+        store = MemoryStore(root=tmp_path)
+        store.set_record_lock_wait(0.6, 0.02)
+        service = MemoryService(store=store, config=_MC(enabled=True), probers=[])
+        tools = _make_tools(memory_service=service)
+        digest = hashlib.sha256(b"i-abc123").hexdigest()
+        other = FileLock(tmp_path / LOCKS_DIR / f"{digest}.lock", private_dir=True)
+        assert other.try_acquire()
+
+        async def scenario():
+            ticks = []
+
+            async def ticker():
+                while True:
+                    ticks.append(time.monotonic())
+                    await asyncio.sleep(0.02)
+
+            task = asyncio.create_task(ticker())
+            result = await tools.remember_server_finding("i-abc123", "t", "b")
+            task.cancel()
+            return result, len(ticks)
+
+        result, ticks = run(scenario())
+        other.release()
+        assert result.startswith("busy:")
+        assert ticks >= 10  # the loop kept running during the 0.6 s wait

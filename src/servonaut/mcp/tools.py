@@ -2959,7 +2959,9 @@ class ServonautTools:
         instance = await self._memory_target(instance)
 
         try:
-            result = self._memory_service.remember_finding(
+            # Off the event loop: the record lock may be held by another process.
+            result = await asyncio.to_thread(
+                self._memory_service.remember_finding,
                 instance,
                 title=title,
                 body=body,
