@@ -358,7 +358,7 @@ def test_the_unsigned_app_travels_as_an_archive(workflow: str) -> None:
         assert flag in archive
     assert "name: desktop-preview-macos-app-${{ matrix.target }}\n" in handoff
     assert "path: ${{ steps.handoff.outputs.archive-path }}\n" in handoff
-    assert "retention-days: 1\n" in handoff and "overwrite: true\n" in handoff
+    assert "overwrite: true\n" in handoff
     # The app handed on is the one assembled unsigned, not the ad-hoc copy.
     assert 'MACOS_DIR: ${{ steps.paths.outputs.macos-dir }}' in _step(
         qualify, "Archive the unsigned app for the sign job"
@@ -366,6 +366,19 @@ def test_the_unsigned_app_travels_as_an_archive(workflow: str) -> None:
     assert "name: desktop-preview-macos-app-${{ matrix.target }}\n" in _step(
         _job(workflow, "sign"), "Receive the unsigned app"
     )
+
+
+def test_the_unsigned_app_outlasts_the_wait_for_the_signing_approval(workflow: str) -> None:
+    """The sign job waits for a reviewer; the app it signs must still be there."""
+    handoff = _step(_job(workflow, "qualify"), "Hand the unsigned app to the sign job")
+    retention = int(re.search(r"\n          retention-days: (\d+)\n", handoff).group(1))
+    # A week covers the release train: a Monday candidate approved by Thursday.
+    assert retention >= 7
+    # Nothing waits between signing and publishing, so the image goes at once.
+    image = _step(_job(workflow, "sign"), "Hand the disk image to the publish job")
+    assert "retention-days: 1\n" in image
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert f"within {retention} days" in guide
 
 
 def test_a_dry_run_hands_no_disk_image_on(workflow: str) -> None:

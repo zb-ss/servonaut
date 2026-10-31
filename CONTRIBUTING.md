@@ -111,7 +111,11 @@ app from the release's tag commit on a macOS runner per architecture, runs the
 packaged self-test on it, and runs the self-test and the window smoke again on
 an ad-hoc signed copy under the hardened runtime. The `sign` job then waits for
 a reviewer to approve the run's deployment to the `desktop-signing`
-environment, which deploys only from `v*` tags and `release/*` branches. That
+environment, which deploys only from `v*` tags and `release/*` branches.
+Approve it within 7 days of the `qualify` jobs finishing: the unsigned apps
+they hand on are kept that long, and a later approval finds nothing to sign,
+so the run has to be started again from the `qualify` jobs ("Re-run all jobs",
+or a manual run on the tag). That
 environment holds the secrets `MACOS_CERTIFICATE_P12_BASE64` and
 `MACOS_CERTIFICATE_PASSWORD` (the Developer ID Application certificate) and
 `APPLE_NOTARY_KEY_P8_BASE64` (an App Store Connect API key for the notary
@@ -342,8 +346,9 @@ workflows described under
 [Release channels and notes](#release-channels-and-notes). While
 `DESKTOP_MACOS_PUBLISH` is `on`, each release's macOS preview waits for a
 second approval, in the `desktop-signing` environment, before anything is
-signed. Approve it once the release itself is out; rejecting it, or letting
-it expire, only skips the macOS preview, which a manual run can attach later.
+signed. Approve it once the release itself is out, and within 7 days of the
+run's `qualify` jobs; rejecting it, or letting it expire, only skips the macOS
+preview, which a manual run can attach later.
 The update manifests follow by themselves once the mirror has copied the
 release's desktop files.
 

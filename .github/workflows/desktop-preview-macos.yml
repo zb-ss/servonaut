@@ -13,8 +13,9 @@ name: Desktop preview macOS
 #            its window under the hardened runtime. It holds no secret and
 #            never a write token;
 #   sign     runs once a reviewer approves the desktop-signing environment,
-#            the only job that can reach the signing certificate and the
-#            notary key. It signs the unsigned app it was handed with the
+#            within the week the unsigned app is kept for it, the only job
+#            that can reach the signing certificate and the notary key. It
+#            signs the unsigned app it was handed with the
 #            Developer ID, notarizes and staples it, then packages, signs,
 #            notarizes and staples the disk image, and runs the self-test and
 #            the window smoke on the signed app;
@@ -549,12 +550,15 @@ jobs:
             echo "app-sha256-${TARGET}=$(shasum -a 256 "${archive}" | cut -d ' ' -f 1)"
           } >> "${GITHUB_OUTPUT}"
 
+      # The sign job may wait days for its approval, so the archive is kept
+      # for a week of it; an approval given later finds nothing to sign, and
+      # the run has to be started again from the qualify jobs.
       - name: Hand the unsigned app to the sign job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-preview-macos-app-${{ matrix.target }}
           path: ${{ steps.handoff.outputs.archive-path }}
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
           # A re-run of this run replaces the archive an earlier attempt handed over.
           overwrite: true
