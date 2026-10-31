@@ -24,7 +24,12 @@ from servonaut.desktop.driver import (
     DesktopDriverTransport,
     desktop_driver_class,
 )
-from servonaut.desktop.host import THEME_MESSAGE, DesktopHost, screen_colour
+from servonaut.desktop.host import (
+    OPEN_URL_MESSAGE,
+    THEME_MESSAGE,
+    DesktopHost,
+    screen_colour,
+)
 from servonaut.desktop.model import SecretToken
 
 
@@ -720,3 +725,59 @@ def test_screen_colour_is_left_out_for_terminal_colour_themes() -> None:
     assert screen_colour(app) == "#3b4252"
     app.theme = "ansi-dark"
     assert screen_colour(app) is None
+
+
+@pytest.mark.asyncio
+async def test_a_link_clicked_in_the_page_opens_in_the_browser(
+    loopback_listener: socket.socket, secret_token: SecretToken, monkeypatch
+) -> None:
+    """The page's open_url message goes to the driver, which checks and opens it."""
+    from servonaut.desktop import driver as driver_module
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        driver_module.webbrowser, "open", lambda url, new=0: opened.append(url) or True
+    )
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+    async with ClientSession() as session:
+        ws = await session.ws_connect(f"{origin}/ws", headers=headers, protocols=protocols)
+        await ws.send_str(json.dumps([OPEN_URL_MESSAGE, "https://servonaut.dev/docs"]))
+        # A scheme the driver refuses is still a well-formed message.
+        await ws.send_str(json.dumps([OPEN_URL_MESSAGE, "file:///etc/hosts"]))
+        # The pong proves both were handled and the session stayed open.
+        assert await _receive_pong(ws, "after-links") == ["pong", "after-links"]
+        for _ in range(100):
+            if opened:
+                break
+            await asyncio.sleep(0.02)
+        assert opened == ["https://servonaut.dev/docs"]
+    await host.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        [OPEN_URL_MESSAGE],
+        [OPEN_URL_MESSAGE, "https://x.test", "extra"],
+        [OPEN_URL_MESSAGE, {"url": "https://x.test"}],
+        [OPEN_URL_MESSAGE, None],
+    ],
+)
+async def test_a_malformed_link_message_ends_the_session(
+    loopback_listener: socket.socket, secret_token: SecretToken, message: list[Any]
+) -> None:
+    host = DesktopHost(
+        token=secret_token, listener=loopback_listener, app_factory=dummy_app_factory
+    )
+    origin = await host.start()
+    headers, protocols = _session_headers(origin, secret_token)
+    async with ClientSession() as session:
+        ws = await session.ws_connect(f"{origin}/ws", headers=headers, protocols=protocols)
+        await ws.send_str(json.dumps(message))
+        assert await _receive_close_code(ws) == 1008
+    await host.stop()

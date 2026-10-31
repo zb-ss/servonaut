@@ -104,3 +104,65 @@ class TestDescribePlatform:
     def test_nothing_left_reads_unknown(self, on):
         on("linux", freedesktop_os_release=lambda: {"NAME": "<<>>"})
         assert describe_platform() == "unknown"
+
+
+class TestCopyToClipboard:
+    """copy_to_clipboard: a registered writer first, else a bounded OS tool."""
+
+    @pytest.fixture(autouse=True)
+    def _no_writer(self):
+        platform_utils.set_clipboard_writer(None)
+        yield
+        platform_utils.set_clipboard_writer(None)
+
+    def test_a_registered_writer_replaces_the_os_tools(self, monkeypatch):
+        copied = []
+
+        def must_not_run(*args, **kwargs):
+            raise AssertionError("the OS tool ran despite a writer")
+
+        monkeypatch.setattr(platform_utils.subprocess, "run", must_not_run)
+        platform_utils.set_clipboard_writer(lambda text: copied.append(text) or True)
+        assert platform_utils.copy_to_clipboard("web-1") is True
+        assert copied == ["web-1"]
+
+    def test_the_writer_reports_its_own_failure(self):
+        platform_utils.set_clipboard_writer(lambda text: False)
+        assert platform_utils.copy_to_clipboard("web-1") is False
+
+    def test_the_os_tool_runs_with_a_time_limit(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "darwin")
+        monkeypatch.setattr(
+            platform_utils.subprocess, "run", lambda *a, **kw: calls.append((a, kw))
+        )
+        assert platform_utils.copy_to_clipboard("web-1") is True
+        (args, kwargs), = calls
+        assert args == (["pbcopy"],)
+        assert kwargs["input"] == b"web-1"
+        assert kwargs["timeout"] == platform_utils.CLIPBOARD_TOOL_TIMEOUT_SECONDS
+
+    def test_a_tool_that_hangs_counts_as_a_failure(self, monkeypatch):
+        import subprocess
+
+        def hangs(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "linux")
+        monkeypatch.setattr(platform_utils.shutil, "which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(platform_utils.subprocess, "run", hangs)
+        assert platform_utils.copy_to_clipboard("web-1") is False
+
+    def test_linux_prefers_wl_copy_then_xclip_then_xsel(self, monkeypatch):
+        monkeypatch.setattr(platform_utils, "get_os", lambda: "linux")
+        installed = {"xclip", "xsel"}
+        monkeypatch.setattr(
+            platform_utils.shutil, "which",
+            lambda name: f"/usr/bin/{name}" if name in installed else None,
+        )
+        assert platform_utils._clipboard_command() == ["xclip", "-selection", "clipboard"]
+        installed.add("wl-copy")
+        assert platform_utils._clipboard_command() == ["wl-copy"]
+        installed.clear()
+        assert platform_utils._clipboard_command() is None
+        assert platform_utils.copy_to_clipboard("web-1") is False
