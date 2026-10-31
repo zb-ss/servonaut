@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.interfaces import LogViewerServiceInterface
 from servonaut.services.memory.provider import instance_provider
@@ -176,8 +176,13 @@ class LogViewerService(LogViewerServiceInterface):
         *,
         team_rows: Iterable[Mapping[str, Any]] = (),
         rows: Optional[Iterable[Mapping[str, Any]]] = None,
+        runner: Optional[Callable[[str], Awaitable[Tuple[str, str, int]]]] = None,
     ) -> List[str]:
         """Return readable log paths, preferring cached memory when available.
+
+        With *runner* (a memory build's ssh runner) the compound command runs
+        through it instead of a connection of its own, so it shares the
+        build's connection, bastion cap and vault handling.
 
         Strategy:
             1. If a memory service is wired AND the ``logs`` module has
@@ -217,25 +222,32 @@ class LogViewerService(LogViewerServiceInterface):
             f"test -r {path} && echo {path}" for path in all_paths
         )
 
-        conn = await self.resolve_connection(
-            instance, ssh_service, connection_service, team_rows=team_rows, rows=rows,
-        )
-        ssh_cmd = ssh_service.build_ssh_command(
-            host=conn["host"],
-            username=conn["username"],
-            key_path=conn["key_path"],
-            proxy_args=conn["proxy_args"],
-            **_identity(conn),
-            remote_command=checks,
-            port=conn["port"],
-            extra_options=conn.get("extra_options") or [],
-        )
+        ssh_cmd = None
+        if runner is None:
+            conn = await self.resolve_connection(
+                instance, ssh_service, connection_service, team_rows=team_rows, rows=rows,
+            )
+            ssh_cmd = ssh_service.build_ssh_command(
+                host=conn["host"],
+                username=conn["username"],
+                key_path=conn["key_path"],
+                proxy_args=conn["proxy_args"],
+                **_identity(conn),
+                remote_command=checks,
+                port=conn["port"],
+                extra_options=conn.get("extra_options") or [],
+            )
 
         try:
-            stdout, _ = await run_ssh_subprocess(ssh_cmd, timeout=15)
+            if runner is not None:
+                # The last test's status is the command's: only the output counts.
+                stdout, _stderr, _code = await runner(checks)
+            else:
+                raw, _ = await run_ssh_subprocess(ssh_cmd, timeout=15)
+                stdout = raw.decode("utf-8", errors="replace")
             readable = [
                 line.strip()
-                for line in stdout.decode("utf-8", errors="replace").splitlines()
+                for line in stdout.splitlines()
                 if line.strip()
             ]
             logger.debug("Probed log paths for %s: %s", instance_id, readable)

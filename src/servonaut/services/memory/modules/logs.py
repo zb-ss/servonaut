@@ -77,9 +77,9 @@ class LogsProber(ModuleProberInterface):
     async def probe(self, ssh_runner: Any) -> ModuleResult:
         """Probe readable log paths and return a ``ModuleResult``.
 
-        The *ssh_runner* argument is accepted for interface compatibility but
-        is not used — ``LogViewerService.probe_log_paths`` manages its own
-        SSH subprocess.
+        The compound ``test -r`` command runs through *ssh_runner*, so it
+        shares the build's connection and limits; a cached ``logs`` module is
+        still served without connecting.
 
         Returns:
             A ``ModuleResult`` with ``observed={"probed_paths": [...]}`` and
@@ -113,6 +113,7 @@ class LogsProber(ModuleProberInterface):
                 self._connection_service,
                 team_rows=self._team_rows,
                 rows=self._fleet_rows,
+                runner=ssh_runner if callable(ssh_runner) else None,
             )
             if probed_paths:
                 raw_output = "Readable log paths found:\n" + "\n".join(
