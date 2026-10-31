@@ -18,6 +18,48 @@ from urllib.parse import urlparse
 WEBGL_REGISTRATION: Final[bytes] = (
     b"this.webglAddon=new p.WebglAddon,this.terminal.loadAddon(this.webglAddon),"
 )
+# The page script that receives the terminal's link clicks (bootstrap.js).
+_LINKS: Final[bytes] = b"window.servonautTerminalLinks"
+# Upstream opens links with window.open, which a web view refuses for a
+# script (and OSC 8 links ask confirm() first). The first two patches give
+# the terminal handlers that pass the link to the page script instead (a
+# hyperlink's hover names its address: its text need not be it). The
+# third keeps a click whose row the app redraws between press and release
+# (it does, on the press): upstream then sees a new link object and drops
+# the click; the same address at the same place is the same link. Each
+# anchor must appear exactly once in the pinned bundle.
+TERMINAL_LINK_PATCHES: Final[tuple[tuple[bytes, bytes], ...]] = (
+    (
+        b"new v.Terminal({allowProposedApi:!0,",
+        b"new v.Terminal({linkHandler:{activate:(e,t)=>"
+        + _LINKS
+        + b".hyperlink(e,t),hover:(e,t)=>"
+        + _LINKS
+        + b".hyperlinkHover(t),leave:()=>"
+        + _LINKS
+        + b".leave()},allowProposedApi:!0,",
+    ),
+    (
+        b"this.weblinksAddon=new S.WebLinksAddon,",
+        b"this.weblinksAddon=new S.WebLinksAddon((e,t)=>"
+        + _LINKS
+        + b".address(e,t),{hover:()=>"
+        + _LINKS
+        + b".addressHover(),leave:()=>"
+        + _LINKS
+        + b".leave()}),",
+    ),
+    (
+        b"t&&this._mouseDownLink===this._currentLink"
+        b"&&this._linkAtPosition(this._currentLink.link,t)"
+        b"&&this._currentLink.link.activate(e,this._currentLink.link.text)",
+        b"t&&this._mouseDownLink"
+        b"&&this._mouseDownLink.link.text===this._currentLink.link.text"
+        b"&&this._linkAtPosition(this._mouseDownLink.link,t)"
+        b"&&this._linkAtPosition(this._currentLink.link,t)"
+        b"&&this._currentLink.link.activate(e,this._currentLink.link.text)",
+    ),
+)
 DEFAULT_FONT_SIZE: Final[int] = 14
 MAX_ASSET_BYTES: Final[int] = 4 * 1024 * 1024  # 4 MiB bounded payload
 
@@ -36,6 +78,24 @@ def canvas_renderer(source: bytes) -> bytes:
             f"Expected exactly 1 WebGL registration in renderer bundle, found {count}"
         )
     return source.replace(WEBGL_REGISTRATION, b"", 1)
+
+
+def patch_terminal_links(source: bytes) -> bytes:
+    """Send the terminal's link clicks to the page script, and keep slow clicks."""
+    for original, routed in TERMINAL_LINK_PATCHES:
+        count = source.count(original)
+        if count != 1:
+            raise DesktopAssetError(
+                f"Expected exactly 1 link anchor {original!r} in renderer bundle, "
+                f"found {count}"
+            )
+        source = source.replace(original, routed, 1)
+    return source
+
+
+def desktop_terminal(source: bytes) -> bytes:
+    """The renderer bundle for the window: canvas drawing, links routed."""
+    return patch_terminal_links(canvas_renderer(source))
 
 
 def render_index_html(source: bytes, font_size: int = DEFAULT_FONT_SIZE) -> bytes:
@@ -352,8 +412,8 @@ def load_and_verify_assets(
                     f"expected {expected_source_size}, got {len(source_bytes)}"
                 )
 
-            if transform_name == "canvas_renderer_no_webgl":
-                transformed_bytes = canvas_renderer(source_bytes)
+            if transform_name == "desktop_terminal":
+                transformed_bytes = desktop_terminal(source_bytes)
             elif transform_name == "template_font_size":
                 transformed_bytes = render_index_html(source_bytes)
             elif transform_name is None:

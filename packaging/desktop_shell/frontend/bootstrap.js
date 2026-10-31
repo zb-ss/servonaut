@@ -16,6 +16,28 @@ window.startServonaut = (token) => {
       document.documentElement.style.setProperty("--servonaut-page", colour);
     }
   };
+  let session = null;
+  // A web view opens no window for a script, so the terminal's links go to
+  // the app, which opens them in the system browser. A hyperlink opens on a
+  // click. An address found in plain text takes Ctrl+click (Cmd+click on
+  // macOS), as in a terminal: the app may handle a click there itself.
+  const openLink = (event, uri, needsModifier) => {
+    if (needsModifier && !(event.ctrlKey || event.metaKey)) return;
+    if (session !== null && session.readyState === NativeWebSocket.OPEN) {
+      session.send(JSON.stringify(["open_url", uri]));
+    }
+  };
+  const linkHint = /Mac/.test(navigator.userAgent)
+    ? "Cmd+click to open the link"
+    : "Ctrl+click to open the link";
+  window.servonautTerminalLinks = Object.freeze({
+    hyperlink: (event, uri) => openLink(event, uri, false),
+    address: (event, uri) => openLink(event, uri, true),
+    // A hyperlink's text need not be its address: say where it goes.
+    hyperlinkHover: (uri) => { terminal.title = `Opens ${uri}`; },
+    addressHover: () => { terminal.title = linkHint; },
+    leave: () => { terminal.removeAttribute("title"); },
+  });
   window.WebSocket = class extends NativeWebSocket {
     constructor(url) {
       const target = new URL(url);
@@ -25,6 +47,7 @@ window.startServonaut = (token) => {
       super(url, ["servonaut.desktop.v1", `auth.${token}`]);
       token = "";
       window.WebSocket = NativeWebSocket;
+      session = this;
       this.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return;
         try {

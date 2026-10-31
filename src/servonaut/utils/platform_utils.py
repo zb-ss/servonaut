@@ -5,7 +5,19 @@ import platform
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Final, Optional
+
+# A clipboard tool returns in milliseconds. One that waits longer is waiting
+# for something it will not get (wl-copy waits for keyboard focus on GNOME),
+# and the interface must not freeze meanwhile. A bound, not a tunable.
+CLIPBOARD_TOOL_TIMEOUT_SECONDS: Final = 2.0
+
+ClipboardWriter = Callable[[str], bool]
+
+# Set while something other than the OS tools owns this process's clipboard.
+_clipboard_writer: Optional[ClipboardWriter] = None
 
 
 def get_os() -> str:
@@ -122,13 +134,33 @@ def _linux_name() -> str:
     return f"{name} {release.get('VERSION_ID', '')}".strip()
 
 
+def set_clipboard_writer(writer: Optional[ClipboardWriter]) -> None:
+    """Send :func:`copy_to_clipboard` to *writer* instead of the OS tools.
+
+    The desktop window registers one on Linux. There the clipboard belongs to
+    the focused window: GNOME offers background programs no way to set it, so
+    wl-copy waits for focus the window holds. ``None`` restores the OS tools.
+    """
+    global _clipboard_writer
+    _clipboard_writer = writer
+
+
+def clipboard_writer() -> Optional[ClipboardWriter]:
+    """The writer :func:`copy_to_clipboard` uses instead of the OS tools, if any."""
+    return _clipboard_writer
+
+
 def copy_to_clipboard(text: str) -> bool:
     """Copy text to system clipboard.
 
-    Uses platform-appropriate clipboard command:
+    Uses the writer registered with :func:`set_clipboard_writer` when there
+    is one, otherwise the platform-appropriate clipboard command:
     - macOS: pbcopy
     - Linux: wl-copy (Wayland), xclip, or xsel (X11)
     - Windows: clip
+
+    A command that has not finished within
+    ``CLIPBOARD_TOOL_TIMEOUT_SECONDS`` is stopped and counts as a failure.
 
     Args:
         text: Text to copy to clipboard.
@@ -136,26 +168,38 @@ def copy_to_clipboard(text: str) -> bool:
     Returns:
         True if copy succeeded, False otherwise.
     """
-    os_type = get_os()
+    writer = _clipboard_writer
+    if writer is not None:
+        return writer(text)
 
+    command = _clipboard_command()
+    if command is None:
+        return False
     try:
-        if os_type == 'darwin':
-            subprocess.run(['pbcopy'], input=text.encode(), check=True)
-            return True
-        elif os_type == 'linux':
-            clipboard_cmds = [
-                ['wl-copy'],
-                ['xclip', '-selection', 'clipboard'],
-                ['xsel', '--clipboard', '--input'],
-            ]
-            for cmd in clipboard_cmds:
-                if shutil.which(cmd[0]):
-                    subprocess.run(cmd, input=text.encode(), check=True)
-                    return True
-            return False
-        elif os_type == 'windows':
-            subprocess.run(['clip'], input=text.encode(), check=True)
-            return True
+        subprocess.run(
+            command,
+            input=text.encode(),
+            check=True,
+            timeout=CLIPBOARD_TOOL_TIMEOUT_SECONDS,
+        )
+    except (subprocess.SubprocessError, OSError):
         return False
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return False
+    return True
+
+
+def _clipboard_command() -> Optional[list[str]]:
+    """The first clipboard command this platform has, or ``None``."""
+    os_type = get_os()
+    if os_type == 'darwin':
+        return ['pbcopy']
+    if os_type == 'windows':
+        return ['clip']
+    if os_type == 'linux':
+        for command in (
+            ['wl-copy'],
+            ['xclip', '-selection', 'clipboard'],
+            ['xsel', '--clipboard', '--input'],
+        ):
+            if shutil.which(command[0]):
+                return command
+    return None

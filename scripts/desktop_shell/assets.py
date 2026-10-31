@@ -21,6 +21,42 @@ WEBGL_REGISTRATION = (
     b"this.webglAddon=new p.WebglAddon,this.terminal.loadAddon(this.webglAddon),"
 )
 
+# Mirrors servonaut.desktop.assets.TERMINAL_LINK_PATCHES (see there why); the assets lock
+# pins the result, so the two cannot drift apart unnoticed.
+_LINKS = b"window.servonautTerminalLinks"
+TERMINAL_LINK_PATCHES = (
+    (
+        b"new v.Terminal({allowProposedApi:!0,",
+        b"new v.Terminal({linkHandler:{activate:(e,t)=>"
+        + _LINKS
+        + b".hyperlink(e,t),hover:(e,t)=>"
+        + _LINKS
+        + b".hyperlinkHover(t),leave:()=>"
+        + _LINKS
+        + b".leave()},allowProposedApi:!0,",
+    ),
+    (
+        b"this.weblinksAddon=new S.WebLinksAddon,",
+        b"this.weblinksAddon=new S.WebLinksAddon((e,t)=>"
+        + _LINKS
+        + b".address(e,t),{hover:()=>"
+        + _LINKS
+        + b".addressHover(),leave:()=>"
+        + _LINKS
+        + b".leave()}),",
+    ),
+    (
+        b"t&&this._mouseDownLink===this._currentLink"
+        b"&&this._linkAtPosition(this._currentLink.link,t)"
+        b"&&this._currentLink.link.activate(e,this._currentLink.link.text)",
+        b"t&&this._mouseDownLink"
+        b"&&this._mouseDownLink.link.text===this._currentLink.link.text"
+        b"&&this._linkAtPosition(this._mouseDownLink.link,t)"
+        b"&&this._linkAtPosition(this._currentLink.link,t)"
+        b"&&this._currentLink.link.activate(e,this._currentLink.link.text)",
+    ),
+)
+
 _FORBIDDEN_CSP_TERMS = frozenset(
     {
         "'unsafe-eval'",
@@ -63,6 +99,24 @@ def canvas_renderer(source: bytes) -> bytes:
             f"Expected exactly 1 WebGL registration in renderer bundle, found {count}"
         )
     return source.replace(WEBGL_REGISTRATION, b"", 1)
+
+
+def patch_terminal_links(source: bytes) -> bytes:
+    """Send the terminal's link clicks to the page script, and keep slow clicks."""
+    for original, routed in TERMINAL_LINK_PATCHES:
+        count = source.count(original)
+        if count != 1:
+            raise AssetPolicyError(
+                f"Expected exactly 1 link anchor {original!r} in renderer bundle, "
+                f"found {count}"
+            )
+        source = source.replace(original, routed, 1)
+    return source
+
+
+def desktop_terminal(source: bytes) -> bytes:
+    """The renderer bundle for the window: canvas drawing, links routed."""
+    return patch_terminal_links(canvas_renderer(source))
 
 
 def render_index_html(source: bytes, font_size: int = 14) -> bytes:
@@ -267,8 +321,8 @@ def stage_frontend_assets(
             )
 
         transformed: bytes
-        if lock.transform == "canvas_renderer_no_webgl":
-            transformed = canvas_renderer(source_data)
+        if lock.transform == "desktop_terminal":
+            transformed = desktop_terminal(source_data)
         elif lock.transform == "template_font_size":
             transformed = render_index_html(source_data, font_size=font_size)
         elif lock.transform is None:
