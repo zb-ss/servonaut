@@ -768,6 +768,24 @@ class TeamMemoryService:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return int(data.get("wraps_deleted", 0))
 
+    async def post_grant_wraps(
+        self,
+        team_slug: str,
+        grant_id: str,
+        wraps: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Post catch-up wraps for members of a live grant.
+
+        Each wrap is ``{recipient_user_id, envelope_id, wrapped_dek,
+        recipient_fingerprint}``; the fingerprint makes the service skip a
+        member whose key changed since it was read.
+
+        Raises:
+            APIError: Unchanged, so callers can tell a revoked grant (409),
+                a missing one (404) and a rate limit (429) apart.
+        """
+        return await post_grant_wraps(self._api, team_slug, grant_id, wraps)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -838,3 +856,16 @@ def _translate_api_error(
     if isinstance(exc, GrantExistsError):
         return GrantAlreadyExistsError(team_slug=team_slug, instance_id=instance_id)
     return exc
+
+
+async def post_grant_wraps(
+    api: "APIClient",
+    team_slug: str,
+    grant_id: str,
+    wraps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """POST the catch-up wraps of one grant (shared by the sync path)."""
+    return await api.post(
+        f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}/wraps",
+        json={"wraps": wraps},
+    )

@@ -173,6 +173,11 @@ def _validate_reserved(instance_id: str) -> None:
         )
 
 
+async def _pause(seconds: float) -> None:
+    """Sleep before a retry (a seam for tests)."""
+    await asyncio.sleep(seconds)
+
+
 class MemorySyncService:
     """Manages background sync of memory module results to the server.
 
@@ -1865,6 +1870,9 @@ class MemorySyncService:
         import json as json_mod
 
         envelopes_payload: List[Dict[str, Any]] = []
+        # Our own sealed wrap of each envelope's data key, by (instance, module):
+        # what a later catch-up for team members opens. Never the raw key.
+        self_wraps: Dict[tuple[str, str], List[str]] = {}
         for env in batch:
             plaintext_bytes = json_mod.dumps(
                 env.plaintext_payload, separators=(",", ":")
@@ -1875,6 +1883,7 @@ class MemorySyncService:
                 self_user_id=self._self_user_id,
             )
             wire = enc.to_dict()
+            self._remember_self_wrap(self_wraps, env, wire)
             wire.update(
                 {
                     "instance_id": env.instance_id,
@@ -1921,7 +1930,118 @@ class MemorySyncService:
             )
             self._quota = quota
 
+        await self._top_up_team_wraps(response.get("missing_team_wraps"), self_wraps)
+
         return SyncBatchResult(accepted=accepted, rejected=rejected, quota=quota)
+
+    def _remember_self_wrap(
+        self,
+        self_wraps: Dict[tuple[str, str], List[str]],
+        env: SyncEnvelope,
+        wire: Dict[str, Any],
+    ) -> None:
+        """Note the wrap of *wire* addressed to this user, if it has one."""
+        wraps = wire.get("dek_wraps")
+        if not isinstance(wraps, list):
+            return
+        for wrap in wraps:
+            if isinstance(wrap, dict) and wrap.get("recipient_user_id") == self._self_user_id:
+                self_wraps.setdefault((env.instance_id, env.module), []).append(
+                    wrap.get("wrapped_dek")
+                )
+                return
+
+    def _team_wrap_setting(self, name: str) -> float:
+        """A numeric ``MemoryConfig`` field; its default when the config is a stand-in."""
+        value = getattr(getattr(self._config_manager.get(), "memory", None), name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        return float(getattr(MemoryConfig(), name))
+
+    async def _top_up_team_wraps(
+        self, payload: Any, self_wraps: Dict[tuple[str, str], List[str]]
+    ) -> None:
+        """Seal this batch's data keys for the members the service named.
+
+        Runs after the upload is accepted and can never change its outcome:
+        every failure is logged and dropped. The next sync asks again.
+        """
+        try:
+            await self._send_team_wraps(payload, self_wraps)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("team wrap top-up skipped: %s", type(exc).__name__)
+
+    async def _send_team_wraps(
+        self, payload: Any, self_wraps: Dict[tuple[str, str], List[str]]
+    ) -> None:
+        from servonaut.services.memory.crypto import CryptoError  # noqa: PLC0415
+        from servonaut.services.memory.team_wraps import (  # noqa: PLC0415
+            parse_missing_team_wraps,
+            seal_for_recipients,
+        )
+
+        entries = parse_missing_team_wraps(payload)
+        by_grant: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        changed_by_grant: Dict[tuple[str, str], int] = {}
+        for entry in entries:
+            grant = (entry.team_slug, entry.grant_id)
+            if entry.key_changed_count:
+                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + entry.key_changed_count
+            candidates = self_wraps.get((entry.instance_id, entry.module), [])
+            if len(candidates) != 1 or self._self_privkey is None:
+                # Not in this batch, or two snapshots of one module and no way
+                # to tell which one the service means: wrapping the wrong key
+                # would store a wrap that opens nothing.
+                logger.debug("team wrap top-up: no unambiguous envelope for an entry")
+                continue
+            try:
+                wraps = seal_for_recipients(
+                    entry, self_wrapped_dek=candidates[0], private_key=self._self_privkey
+                )
+            except (CryptoError, ValueError, TypeError) as exc:
+                logger.debug("team wrap top-up: could not seal (%s)", type(exc).__name__)
+                continue
+            by_grant.setdefault(grant, []).extend(wraps)
+
+        for grant, count in changed_by_grant.items():
+            logger.info(
+                "team wrap top-up: %d member key changed for a share; "
+                "not wrapped until the change is confirmed",
+                count,
+            )
+        for (team_slug, grant_id), wraps in by_grant.items():
+            if wraps:
+                await self._post_team_wraps(team_slug, grant_id, wraps)
+
+    async def _post_team_wraps(
+        self, team_slug: str, grant_id: str, wraps: List[Dict[str, Any]]
+    ) -> None:
+        """POST one grant's wraps; wait once for a 429, skip a grant that is gone."""
+        from servonaut.services.memory.team_service import post_grant_wraps  # noqa: PLC0415
+        from servonaut.services.retry_after import is_rate_limited, retry_after_seconds  # noqa: PLC0415
+
+        for attempt in (1, 2):
+            try:
+                await post_grant_wraps(self._api, team_slug, grant_id, wraps)
+                return
+            except APIError as exc:
+                if exc.status in (404, 409):
+                    logger.info("team wrap top-up: a share is no longer live; skipped")
+                    return
+                if not is_rate_limited(exc) or attempt == 2:
+                    logger.info("team wrap top-up: gave up (status %s)", exc.status)
+                    return
+                wait = retry_after_seconds(exc)
+                if wait is None:
+                    wait = self._team_wrap_setting("team_wrap_retry_seconds")
+                if wait > self._team_wrap_setting("team_wrap_max_wait_seconds"):
+                    logger.info("team wrap top-up: asked to wait too long; skipped")
+                    return
+                await _pause(wait)
 
     async def _handle_rejection(
         self, rejection: SyncRejection, batch: List[SyncEnvelope]

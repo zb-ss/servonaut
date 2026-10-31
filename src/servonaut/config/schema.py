@@ -1232,6 +1232,12 @@ class MemoryConfig:
             used as is, and refused (no sharing) when it contains a space or
             ``%``, is missing, or is too long (Unix sockets hold about 100
             bytes).
+        team_wrap_retry_seconds: Pause before the one retry of a catch-up
+            post for team members that the service refused as rate limited
+            without saying how long to wait.
+        team_wrap_max_wait_seconds: Longest pause honoured before that
+            retry; a longer ask gives up for this upload and the next sync
+            asks again.
     """
 
     enabled: bool = True
@@ -1311,6 +1317,10 @@ class MemoryConfig:
     ssh_control_socket_dir: str = ""
     # How long a team's list of shared servers is reused (see above).
     team_memory_cache_seconds: float = 60.0
+
+    # Catch-up wraps for team members after an upload (see the docstring).
+    team_wrap_retry_seconds: float = 5.0
+    team_wrap_max_wait_seconds: float = 30.0
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

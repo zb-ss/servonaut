@@ -490,6 +490,46 @@ def encrypt_envelope(
         secure_zero(dek)
 
 
+def reseal_dek(
+    wrapped_dek_b64: str,
+    *,
+    private_key: bytes,
+    recipient_public_keys: Sequence[bytes],
+) -> List[str]:
+    """Open a data key sealed for the caller and seal it for other recipients.
+
+    Used to top up an already-uploaded envelope with wraps for team members,
+    with the same sealed-box shape ``encrypt_envelope(additional_recipients=...)``
+    emits. The data key lives only in a local buffer that is zeroed on exit.
+
+    Args:
+        wrapped_dek_b64: The caller's own base64 sealed wrap of the data key.
+        private_key: Caller's raw 32-byte X25519 private key.
+        recipient_public_keys: Raw 32-byte X25519 public keys to seal for.
+
+    Returns:
+        One base64 sealed wrap per recipient, in the order given.
+
+    Raises:
+        DecryptionFailedError: If the caller's wrap cannot be opened.
+        InvalidEnvelopeError: If the wrap has an impossible size.
+    """
+    wrapped = validate_wrapped_dek(wrapped_dek_b64)
+    try:
+        dek = bytearray(nacl.public.SealedBox(nacl.public.PrivateKey(private_key)).decrypt(wrapped))
+    except (nacl.exceptions.CryptoError, ValueError, TypeError) as exc:
+        raise DecryptionFailedError("decryption failed") from exc
+    try:
+        return [
+            base64.b64encode(
+                nacl.public.SealedBox(nacl.public.PublicKey(key)).encrypt(bytes(dek))
+            ).decode()
+            for key in recipient_public_keys
+        ]
+    finally:
+        secure_zero(dek)
+
+
 def decrypt_envelope(
     envelope: Union["Envelope", Dict[str, Any]],
     *,
