@@ -16,6 +16,20 @@ The installer forwards a fixed set of environment variables to the server by ref
 
 This document lists every exposed tool.  The full canonical list (with JSON Schemas) lives in `src/servonaut/mcp/tool_schemas.py`.  When adding a tool, put the schema there — both the MCP server and the built-in chat adapter pick it up automatically.
 
+## Switching how Servonaut is installed
+
+The installer writes the full path of the `servonaut` command it ran from, for example `~/.local/bin/servonaut` for pipx or `/opt/servonaut/servonaut` for the desktop package. If you later remove that installation (say you uninstall the pipx copy after installing the desktop app), the agents still try to start the removed command and report that the server failed to connect.
+
+Servonaut fixes this itself: each time the TUI or desktop app starts, it checks the Servonaut entry of every agent `--mcp-install` supports and points any entry whose command no longer exists at the installation you are running. Only the command and its arguments change, entries that still work are left alone, and a notification names the agents it changed. Restart those agents to reconnect. The terminal shortcut from `servonaut --install-desktop` is checked the same way.
+
+To run the check yourself, for example from a headless install:
+
+```bash
+servonaut --mcp-repair
+```
+
+Entries you wrote yourself around a shell, such as `sh -c 'exec "$HOME/.local/bin/servonaut" --mcp'`, are never rewritten: `--mcp-repair` names the missing path so you can fix it, or replace the entry with `servonaut --mcp-install <agent>`. To turn the check at startup off, set `"repair_stale_install_paths": false` in `~/.servonaut/config.json`.
+
 ## Guard levels
 
 Every tool call passes through a `CommandGuard` configured in `config.mcp.guard_level`:

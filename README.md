@@ -422,6 +422,13 @@ references found in the local Servonaut config. Invalid agent JSON is refused
 instead of overwritten, and config writes are atomic without replacing
 symlinked dotfiles.
 
+If you change how Servonaut is installed (for example from pipx to the desktop
+app) and remove the old copy, the TUI and desktop app point agent entries that
+still name the removed command at the running installation when they start,
+and tell you which agents to restart. `servonaut --mcp-repair` runs the same
+check from the command line. See
+[Switching how Servonaut is installed](docs/mcp-tools.md#switching-how-servonaut-is-installed).
+
 SSH-backed MCP tools first use the configured local or vault key. If that key
 cannot authenticate and `SSH_AUTH_SOCK` was forwarded, Servonaut retries once
 using the agent without forcing the configured identity. Authentication

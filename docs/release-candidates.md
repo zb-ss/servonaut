@@ -208,7 +208,10 @@ sudo apt install ./servonaut-desktop-preview_2.28.0rc1_amd64.deb
 Start **Servonaut** from your applications menu, or run `servonaut-desktop`.
 The package is named `servonaut` and also provides the `servonaut` command;
 if you installed Servonaut with pipx as well, `which servonaut` shows which
-one your shell runs. Both use your configuration in `~/.servonaut/`.
+one your shell runs. Both use your configuration in `~/.servonaut/`. If you
+later uninstall the pipx copy, the desktop app points coding agents that
+still use it as their MCP server at its own `servonaut` command the next time
+it starts.
 
 A shortcut made by an earlier `servonaut --install-desktop`, which opens
 Servonaut in a terminal, may also be listed as **Servonaut**. Run

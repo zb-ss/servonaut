@@ -884,6 +884,7 @@ pipe) it lists what it found, stores nothing and exits `5`, unless `--yes` or
 | `servonaut --setup-ovh` | Guided OVHcloud credential setup |
 | `servonaut --mcp` | Start as an MCP server (stdio transport) |
 | `servonaut --mcp-install <agent>` | Auto-install MCP into `claude`, `opencode`, `cursor`, `windsurf`, `vscode`, `codex`, `agy`, `gemini`, or `all` |
+| `servonaut --mcp-repair` | Check every coding agent's Servonaut MCP entry and the terminal shortcut, and point the ones that name a removed Servonaut installation at this one. Prints one line per agent; exits with status 1 when an entry still needs a fix by hand |
 
 On a stable release, `servonaut --update` and the in-app update check offer
 stable releases only. New versions are published as release candidates (for
