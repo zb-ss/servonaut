@@ -772,8 +772,8 @@ class TestShareInstanceModuleSelection:
             sel = app.screen.query_one("#share-modules-list", SelectionList)
             sel.deselect("git")
             sel.select("databases")
-            await app.screen._do_share()
-            await pilot.pause()
+            app.screen.query_one("#share-btn-confirm").press()
+            await pilot.pause(0.3)
         kwargs = app.team_memory_service.share_instance.call_args.kwargs
         assert kwargs["team_slug"] == "ops"
         assert sorted(kwargs["modules"]) == [
@@ -789,8 +789,8 @@ class TestShareInstanceModuleSelection:
             await pilot.pause()
             sel = app.screen.query_one("#share-modules-list", SelectionList)
             sel.deselect_all()
-            await app.screen._do_share()
-            await pilot.pause()
+            app.screen.query_one("#share-btn-confirm").press()
+            await pilot.pause(0.3)
             status = app.screen.query_one("#share-status", Static)
             assert "at least one module" in str(status.render())
         app.team_memory_service.share_instance.assert_not_called()

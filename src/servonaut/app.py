@@ -1490,6 +1490,10 @@ class ServonautApp(App):
                 self.memory_sync_service.set_key_mismatch_listener(
                     _on_key_mismatch_notify
                 )
+            if hasattr(self.memory_sync_service, "set_key_change_listener"):
+                self.memory_sync_service.set_key_change_listener(
+                    self._announce_member_key_change
+                )
         except Exception as exc:
             logger.debug("MemorySyncService init failed: %s", exc)
 
@@ -1582,7 +1586,9 @@ class ServonautApp(App):
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
                 ),
-                pin_store_provider=default_pin_store,
+                pin_store_provider=lambda: default_pin_store(
+                    lock_wait=self.config_manager.get().memory.record_lock_wait
+                ),
                 future_skew_provider=lambda: (
                     self.config_manager.get().memory.team_memory_future_skew_seconds
                 ),
@@ -2374,6 +2380,25 @@ class ServonautApp(App):
                 cb(progress)
             except Exception:
                 logger.debug("_fleet_manual_scan_progress: _on_scan_progress raised", exc_info=True)
+
+    def _announce_member_key_change(self, pending: Any) -> None:
+        """Toast that a catch-up skipped a team member's changed key.
+
+        Names the server as the instance list shows it and says where to
+        confirm; never the member (demo mode must not leak a real name).
+        """
+        demo = bool(self.demo_mode) and self.redaction_service is not None
+        rows = (self._instances_pristine if demo else self.instances) or []
+        row = next((r for r in rows if isinstance(r, dict) and r.get("id") == pending.instance_id), None)
+        label = str(row.get("name") or row.get("id")) if row else "a server"
+        if row and demo:
+            label = self.redaction_service.redact_name(label)
+        self.notify(
+            f"A team member's memory key changed, so {label} is not shared with "
+            "them yet. Confirm it in Fleet Memory: select the server, then S.",
+            severity="warning",
+            markup=False,
+        )
 
     def _propagate_memory_key_material(self) -> None:
         """Mirror keypair material from MemorySyncService onto the app.

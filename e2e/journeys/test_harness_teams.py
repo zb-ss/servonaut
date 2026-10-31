@@ -211,3 +211,38 @@ async def test_creating_a_team_needs_the_teams_plan_and_no_owned_team(fake_cloud
     with pytest.raises(APIError) as again:
         await creator.create_team("Another")
     assert again.value.status == 403 and "already own" in again.value.message
+
+
+def test_a_teammate_s_memory_key_can_be_added_and_replaced_through_the_control_plane(fake_cloud):
+    import base64
+
+    import nacl.public
+
+    def public_b64() -> str:
+        return base64.b64encode(bytes(nacl.public.PrivateKey.generate().public_key)).decode()
+
+    with _client(fake_cloud) as client:
+        added = client.post("/__e2e/memory/team-member", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID, "public_key_b64": public_b64(),
+            "name": "Member",
+        })
+        assert added.status_code == 200
+        bad_role = client.post("/__e2e/memory/team-member", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID + 1, "public_key_b64": public_b64(),
+            "role": "superuser",
+        })
+        assert bad_role.status_code == 400
+    before = next(m for m in fake_cloud.memory.team_keys("team-a") if m["user_id"] == MEMBER_ID)
+    replacement = public_b64()
+    with _client(fake_cloud) as client:
+        answer = client.post("/__e2e/memory/rotate-member-key", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID, "public_key_b64": replacement,
+        })
+        assert answer.status_code == 200
+        unknown = client.post("/__e2e/memory/rotate-member-key", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID + 1, "public_key_b64": replacement,
+        })
+        assert unknown.status_code == 400
+    after = next(m for m in fake_cloud.memory.team_keys("team-a") if m["user_id"] == MEMBER_ID)
+    assert after["public_key_b64"] == replacement
+    assert after["fingerprint"] != before["fingerprint"]

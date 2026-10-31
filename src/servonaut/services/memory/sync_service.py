@@ -31,11 +31,12 @@ import os
 import random
 import re
 import tempfile
+import threading
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.api_client import (
     APIError,
@@ -70,7 +71,10 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
-from servonaut.services.memory.store import MemoryCorruptError, check_finding_record
+from servonaut.services.memory.store import (
+    EMPTY_NOTES_DIGEST, MemoryCorruptError, NotesFingerprint, RecordBusy,
+    RecordLockTimeout, check_finding_record,
+)
 from servonaut.services.memory.rate_limiter import RateLimitKey, RateLimiter
 from servonaut.services.memory.provider import index_entry_provider, instance_provider
 
@@ -149,6 +153,15 @@ _POISON_FILENAME = "sync_poison.jsonl"
 # Path constant; each MemorySyncService instance also stores this as
 # self._key_cache_path so tests can override it.
 _KEY_CACHE_PATH = Path.home() / ".servonaut" / "memory" / "keys.json"
+
+
+def local_keypair_cache_exists() -> bool:
+    """Whether this computer holds the passphrase-encrypted Memory Sync keypair.
+
+    The default location only; a running :class:`MemorySyncService` answers
+    for its own path with :meth:`MemorySyncService.is_enrolled_locally`.
+    """
+    return _KEY_CACHE_PATH.exists()
 
 
 def _now_iso() -> str:
@@ -261,6 +274,12 @@ class MemorySyncService:
         # drain lock is released: ``(missing_team_wraps payload, own wraps)``.
         self._team_top_up: Optional[tuple[Any, Dict[tuple[str, str], List[str]]]] = None
         self._wrap_pins: Optional[Any] = None
+        # Changed member keys a catch-up skipped this session, keyed
+        # (team, user, fingerprint); the listener hears each one once.
+        # (team slug, user id) -> the newest changed key waiting for that member
+        self._key_changes: Dict[tuple[str, int], Any] = {}
+        self._key_changes_lock = threading.Lock()
+        self._key_change_listener: Optional[Callable[[Any], None]] = None
 
         # Optional collaborator wired after construction to avoid an import
         # cycle (sync_service ← retrieval_service would be circular).
@@ -700,17 +719,49 @@ class MemorySyncService:
         content: str = decrypted.plaintext.get("content", "")
         server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
 
-        # 5. Read local bookkeeping.
+        # 5-8. Compare and write as one locked step, so a local edit landing
+        # between the two is never overwritten. A record that is busy right
+        # now keeps its local text; the next pull decides again.
+        try:
+            with self._memory_service.annotation_lock(instance_id, wait=False):
+                return self._apply_remote_annotations(instance_id, provider, content, server_ts)
+        except RecordBusy:
+            return "local_newer"
+
+    def _apply_remote_annotations(
+        self, instance_id: str, provider: str, content: str, server_ts: Optional[str]
+    ) -> str:
+        """Last-writer-wins between the service's notes and the local ones (record lock held)."""
         meta = self._memory_service.get_annotations_meta(instance_id)
         local_hash: str = meta.get("annotations_hash", "")
         local_modified: Optional[str] = meta.get("annotations_modified_at") or None
+        adopted = False
 
-        # 6. Unchanged short-circuit: same content already on disk.
+        try:
+            on_disk = self._memory_service.annotations_fingerprint(instance_id, provider)
+        except (OSError, MemoryCorruptError):
+            # Unreadable notes (a link, a permission): keep them untouched.
+            return "local_newer"
+        if self._nothing_to_protect(on_disk, local_hash):
+            # No notes, or notes emptied by hand: whatever the bookkeeping says,
+            # there is no local text to lose, so the service's notes win.
+            local_hash, local_modified = "", None
+        elif on_disk.digest != local_hash:
+            # Edited after the bookkeeping was written (an editor, a copy), or
+            # written by a release that kept no hash: adopt the file as a local
+            # edit, dated by its modified time, and let the timestamps decide.
+            local_hash, local_modified, adopted = on_disk.digest, on_disk.modified_at, True
+            self._memory_service.set_annotations_meta(
+                instance_id,
+                annotations_hash=local_hash,
+                annotations_modified_at=local_modified,
+            )
+
+        # Unchanged short-circuit: same content already on disk.
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if content_hash == local_hash:
             return "unchanged"
 
-        # 7. Last-writer-wins precedence.
         local_dt = self._parse_iso(local_modified)
         server_dt = self._parse_iso(server_ts)
 
@@ -720,7 +771,10 @@ class MemorySyncService:
             # Undatable server copy — keep known-good local.
             return "local_newer"
 
-        # 8. Server wins: write back to local store.
+        # Server wins. An adopted edit is the user's text: keep it as a draft
+        # first, and keep it in place when that cannot be done.
+        if adopted and not self._keep_displaced_notes(instance_id, provider):
+            return "local_newer"
         self._memory_service.write_annotations(instance_id, content, provider)
         self._memory_service.set_annotations_meta(
             instance_id,
@@ -729,6 +783,27 @@ class MemorySyncService:
             annotations_modified_at=server_ts,
         )
         return "updated"
+
+    @staticmethod
+    def _nothing_to_protect(on_disk: Optional[NotesFingerprint], recorded_hash: str) -> bool:
+        """Whether the local notes hold no text worth keeping over the service's.
+
+        Missing, or empty; except notes cleared on purpose in the app (their
+        recorded hash is the empty one), which are judged by their age.
+        """
+        if on_disk is None:
+            return True
+        return on_disk.size == 0 and recorded_hash != EMPTY_NOTES_DIGEST
+
+    def _keep_displaced_notes(self, instance_id: str, provider: str) -> bool:
+        """Save the local notes as a draft before they are replaced; whether it worked."""
+        try:
+            text = self._memory_service.read_annotations_strict(instance_id, provider)
+            self._memory_service.write_annotation_draft(instance_id, text, provider)
+        except (OSError, ValueError):
+            logger.warning("pull_annotations: could not keep the local notes as a draft")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Findings sync methods
@@ -832,6 +907,8 @@ class MemorySyncService:
         - ``"not_found"``  — server has no findings envelope for this instance.
         - ``"unchanged"``  — server returned no findings to merge.
         - ``"updated"``    — at least one finding was created or updated locally.
+        - ``"busy"``       — another process held this server's record; nothing
+          was merged, try again.
         """
         # 1. Opt-out gate (both id and name).
         if self._memory_service.is_memory_disabled(instance_id, instance_name):
@@ -861,20 +938,33 @@ class MemorySyncService:
         if not isinstance(incoming, list):
             return "not_found"
 
-        # 5. Merge into local store.
-        stats = self._memory_service.merge_findings(instance_id, incoming, provider)
-
-        # 6. Update findings bookkeeping in the index.
+        # 5-6. Merge into the local store and update the bookkeeping. The
+        # merge waits for the record lock, so it runs off the event loop; a
+        # record another process holds is reported, not waited out in the UI.
         server_ts: Optional[str] = decrypted.probed_at or decrypted.created_at
+        try:
+            stats = await asyncio.to_thread(
+                self._merge_pulled_findings, instance_id, incoming, provider, server_ts
+            )
+        except RecordLockTimeout:
+            return "busy"
+
+        return (
+            "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
+        )
+
+    def _merge_pulled_findings(
+        self, instance_id: str, incoming: List[Dict[str, Any]], provider: str,
+        server_ts: Optional[str],
+    ) -> Dict[str, int]:
+        """Blocking: merge *incoming* findings and record the sync bookkeeping."""
+        stats = self._memory_service.merge_findings(instance_id, incoming, provider)
         self._memory_service.set_findings_meta(
             instance_id,
             findings_synced_at=server_ts,
             findings_count=stats.get("active_after", 0),
         )
-
-        return (
-            "updated" if (stats.get("created") or stats.get("updated")) else "unchanged"
-        )
+        return stats
 
     # Modules the CLI must NOT push: server-generated only.
     _BACKFILL_SKIP_MODULES: frozenset = frozenset({"ai_summary"})
@@ -1998,22 +2088,26 @@ class MemorySyncService:
     ) -> None:
         from servonaut.services.memory.crypto import CryptoError  # noqa: PLC0415
         from servonaut.services.memory.team_wraps import (  # noqa: PLC0415
-            differs_from_pin,
             parse_missing_team_wraps,
             seal_for_recipients,
+            merge_seen,
+            split_by_trust,
+            stored_wraps,
         )
 
         pins = self._pin_store()
         entries = parse_missing_team_wraps(payload)
         by_grant: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        seen_by_grant: Dict[tuple[str, str], Dict[Any, Optional[str]]] = {}
         changed_by_grant: Dict[tuple[str, str], int] = {}
         for entry in entries:
             grant = (entry.team_slug, entry.grant_id)
-            kept, differing = differs_from_pin(pins, entry)
-            entry = replace(entry, recipients=kept)
-            changed = entry.key_changed_count + differing
-            if changed:
-                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + changed
+            split = split_by_trust(pins, entry)
+            merge_seen(seen_by_grant.setdefault(grant, {}), split.seen)
+            entry = replace(entry, recipients=split.sealable)
+            if split.changed:
+                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + len(split.changed)
+                self._record_key_changes(entry.instance_id, split.changed)
             candidates = self_wraps.get((entry.instance_id, entry.module), [])
             if len(candidates) != 1 or self._self_privkey is None:
                 # Not in this batch, or two snapshots of one module and no way
@@ -2037,58 +2131,124 @@ class MemorySyncService:
                 count,
             )
         for (team_slug, grant_id), wraps in by_grant.items():
-            if wraps and await self._post_team_wraps(team_slug, grant_id, wraps):
-                self._pin_sealed(pins, team_slug, wraps)
+            if not wraps:
+                continue
+            response = await self._post_team_wraps(team_slug, grant_id, wraps)
+            stored = stored_wraps(wraps, response) if response is not None else []
+            if stored:
+                await self._pin_sealed(
+                    pins, team_slug, stored, seen_by_grant[(team_slug, grant_id)]
+                )
+
+    def set_key_change_listener(self, listener: Optional[Callable[[Any], None]]) -> None:
+        """Call *listener* once for each changed key a catch-up newly skips."""
+        self._key_change_listener = listener
+
+    def pending_key_changes(self) -> List[Any]:
+        """The skipped keys this session that still wait for the user's confirmation.
+
+        A key that has been pinned since (confirmed, or sealed for) is no longer
+        waiting and is dropped from the registry here.
+        """
+        pins = self._pin_store()
+        with self._key_changes_lock:
+            for key, pending in list(self._key_changes.items()):
+                change = pending.change
+                if pins.get(change.team_slug, change.user_id) == change.fingerprint:
+                    del self._key_changes[key]
+            return list(self._key_changes.values())
+
+    def _record_key_changes(self, instance_id: str, changes: Iterable[Any]) -> None:
+        """Remember each changed key once; a newer key for a member replaces the older.
+
+        Only what can still be acted on is kept, so the registry stays one entry
+        per member. The listener runs outside the lock.
+        """
+        from servonaut.services.memory.team_wraps import PendingKeyChange  # noqa: PLC0415
+
+        announce = []
+        with self._key_changes_lock:
+            for change in changes:
+                key = (change.team_slug, change.user_id)
+                known = self._key_changes.get(key)
+                if known is not None and known.change.fingerprint == change.fingerprint:
+                    continue
+                pending = PendingKeyChange(change=change, instance_id=instance_id)
+                self._key_changes[key] = pending
+                announce.append(pending)
+        listener = self._key_change_listener
+        if listener is None:
+            return
+        for pending in announce:
+            try:
+                listener(pending)
+            except Exception as exc:  # a toast must never cost the upload
+                logger.warning("key change listener failed: %s", type(exc).__name__)
 
     def _pin_store(self) -> Any:
         from servonaut.services.memory.team_wraps import WrapPinStore  # noqa: PLC0415
 
         path = self._queue_path.parent / "team_wrap_pins.json"
         if self._wrap_pins is None or self._wrap_pins._path != path:
-            self._wrap_pins = WrapPinStore(path)
+            self._wrap_pins = WrapPinStore(path, lock_wait=self._record_lock_wait)
         return self._wrap_pins
 
+    def _record_lock_wait(self) -> Tuple[float, float]:
+        """``(timeout, poll)`` seconds from the memory settings, the defaults when unusable."""
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        memory = getattr(self._config_manager.get(), "memory", None)
+        wait = getattr(memory, "record_lock_wait", None)
+        result = wait() if callable(wait) else None
+        if isinstance(result, tuple) and len(result) == 2:
+            return result
+        return MemoryConfig().record_lock_wait()
+
     @staticmethod
-    def _pin_sealed(
+    async def _pin_sealed(
         pins: Any,
         team_slug: str,
         wraps: List[Dict[str, Any]],
+        seen: Dict[Any, Optional[str]],
     ) -> None:
-        """Remember the keys a delivered batch of wraps was sealed for."""
-        sealed = {
-            (team_slug, w["recipient_user_id"]): w["recipient_fingerprint"] for w in wraps
-        }
+        """Remember the keys a delivered batch of wraps was sealed for.
+
+        A pin the user confirmed (or anything else changed) while the batch
+        was on its way is left as it is. The write runs in a thread: another
+        process may hold the pin file's lock.
+        """
+        from servonaut.services.memory.team_wraps import pins_of  # noqa: PLC0415
+
         try:
-            pins.set_many(sealed)
+            await asyncio.to_thread(pins.set_if_seen, pins_of(team_slug, wraps), seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
     async def _post_team_wraps(
         self, team_slug: str, grant_id: str, wraps: List[Dict[str, Any]]
-    ) -> bool:
-        """POST one grant's wraps; True when stored. Waits once for a 429."""
+    ) -> Optional[Dict[str, Any]]:
+        """POST one grant's wraps; the response when accepted, else None. Waits once for a 429."""
         from servonaut.services.memory.team_service import post_grant_wraps  # noqa: PLC0415
         from servonaut.services.retry_after import is_rate_limited, retry_after_seconds  # noqa: PLC0415
 
         for attempt in (1, 2):
             try:
-                await post_grant_wraps(self._api, team_slug, grant_id, wraps)
-                return True
+                return await post_grant_wraps(self._api, team_slug, grant_id, wraps)
             except APIError as exc:
                 if exc.status in (404, 409):
                     logger.info("team wrap top-up: a share is no longer live; skipped")
-                    return False
+                    return None
                 if not is_rate_limited(exc) or attempt == 2:
                     logger.info("team wrap top-up: gave up (status %s)", exc.status)
-                    return False
+                    return None
                 wait = retry_after_seconds(exc)
                 if wait is None:
                     wait = self._team_wrap_setting("team_wrap_retry_seconds")
                 if wait > self._team_wrap_setting("team_wrap_max_wait_seconds"):
                     logger.info("team wrap top-up: asked to wait too long; skipped")
-                    return False
+                    return None
                 await _pause(wait)
-        return False
+        return None
 
     async def _handle_rejection(
         self, rejection: SyncRejection, batch: List[SyncEnvelope]

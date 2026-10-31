@@ -875,7 +875,12 @@ class ChatPanel(Widget):
             try:
                 if hasattr(memory_service, "build_report"):
                     report = await memory_service.build_report(inst)
-                    if report.has_any_success:
+                    if report.unsaved_message:
+                        self.app.notify(
+                            report.unsaved_message, severity="warning",
+                            markup=False, timeout=20,
+                        )
+                    elif report.has_any_success:
                         self.app.notify(
                             f"Memory built for {name}: {report.count} modules."
                         )

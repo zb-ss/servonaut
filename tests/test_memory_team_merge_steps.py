@@ -69,14 +69,14 @@ class TestRemoteState:
         report = _run(service, [_own(), _shared()], _sync(configured=False, enrolled=False))
         assert report.copies == 1
 
-    def test_sync_locked_merges_but_backs_up_nothing(self, tmp_path):
+    def test_sync_locked_merges_locally_and_backs_up_nothing(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="team note")
         listing = AsyncMock(return_value=[])
         report = _run(service, [_own(), _shared()], _sync(configured=False, enrolled=True), listing)
         listing.assert_not_awaited()
         assert service.read_annotations(OWN_ID, "aws") == "team note"
-        assert report.copies == 0 and SHARE_ID in report.kept
+        assert report.copies == 1 and SHARE_ID not in report.kept
         assert (tmp_path / LEGACY / SHARE_ID / "annotations.md").is_file()
 
 

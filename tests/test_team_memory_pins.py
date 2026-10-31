@@ -15,13 +15,14 @@ from servonaut.services.memory.team_service import (
     KeyChangedError,
     TeamMemberKey,
     TeamMemoryService,
+    UnusableMemberKeyError,
 )
 from servonaut.services.memory.team_wraps import WrapPinStore, pinned_fingerprint
 
 SLUG = "team-a"
 OWNER = "i-owner-1"
 GRANT = {"id": "g", "instance_id": OWNER, "required_role": "member", "modules": ["os"],
-         "created_at": "2026-10-01T10:00:00Z"}
+         "created_at": "2026-10-01T10:00:00Z", "skipped_recipients": []}
 
 
 def run(coro):
@@ -121,7 +122,7 @@ def test_a_key_that_is_not_the_claimed_fingerprints_key_is_refused_before_a_revo
     # The service keeps the pinned fingerprint but hands over another key.
     liar = _member(2, claim=honest.fingerprint)
     pins.set_many({(SLUG, 2): honest.fingerprint})
-    with pytest.raises(KeyChangedError):
+    with pytest.raises(UnusableMemberKeyError):
         run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [liar]))
     api.delete.assert_not_awaited()
     api.post.assert_not_awaited()
@@ -130,7 +131,7 @@ def test_a_key_that_is_not_the_claimed_fingerprints_key_is_refused_before_a_revo
 def test_a_malformed_key_is_refused_before_a_revoke(tmp_path):
     svc, api, _ = _service(tmp_path)
     bad = TeamMemberKey(2, "d" * 64, "not base64!!", "member", "Lee")
-    with pytest.raises(KeyChangedError):
+    with pytest.raises(UnusableMemberKeyError):
         run(svc.reshare_instance(SLUG, "g", OWNER, "member", ["os"], [bad]))
     api.delete.assert_not_awaited()
 

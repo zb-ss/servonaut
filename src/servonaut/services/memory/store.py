@@ -6,11 +6,20 @@ Per-module JSON files live at::
 
 A global ``index.json`` tracks which instances have been scanned and when.
 All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
+
+Locks. A record lock (:meth:`MemoryStore.annotation_lock`) serialises changes
+to one server's folder. Every read-modify-write of ``index.json`` runs under
+the single index lock (an in-process lock plus ``<root>/.locks/index.lock``
+for other processes), which the record lock may enclose. The order is always
+record lock first, index lock second, never the reverse: nothing takes a
+record lock while holding the index lock.
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
 import json
 import logging
 import os
@@ -18,11 +27,17 @@ import re
 import secrets
 import stat
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
+from servonaut.config.schema import (
+    DEFAULT_RECORD_LOCK_POLL_SECONDS,
+    DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS,
+)
 from servonaut.services.memory.provider import provider_slug
+from servonaut.utils.file_lock import FileLock, FileLockTimeout
 
 if TYPE_CHECKING:
     from servonaut.config.schema import MemoryConfig
@@ -41,9 +56,77 @@ INDEX_VERSION = 1
 # Not ``*.json``: module globbing must never read it as a module.
 TEAM_MERGED_MARKER = "team_merged.marker"
 
+#: Folder under the memory root that holds the cross-process lock files.
+LOCKS_DIR = ".locks"
+
+#: Lock file, inside :data:`LOCKS_DIR`, held while ``index.json`` is rewritten.
+INDEX_LOCK = "index.lock"
+
+#: File under the memory root held by the one running team-copy merge pass.
+TEAM_MERGE_LOCK = "team_merge.lock"
+
 
 class MemoryCorruptError(ValueError):
     """Stored memory that cannot be trusted: a wrong shape, or a symlink where a plain file belongs."""
+
+
+class RecordLockTimeout(FileLockTimeout):
+    """Another process kept a server's record locked for the whole wait.
+
+    An ``OSError``, so callers that treat an unwritable record as a failed
+    write (the merge keeps the copy, a save keeps the draft) need no change.
+    """
+
+
+class RecordBusy(RecordLockTimeout):
+    """A record is locked right now and the caller chose not to wait for it."""
+
+
+class NotesFingerprint(NamedTuple):
+    """What the notes file holds right now: exact-bytes digest, size, mtime (ISO UTC)."""
+
+    digest: str
+    size: int
+    modified_at: str
+
+
+#: SHA-256 of no text at all: the recorded hash of notes cleared on purpose.
+EMPTY_NOTES_DIGEST = hashlib.sha256(b"").hexdigest()
+
+
+class _HeldOsLock:
+    """The OS lock the outermost holder of a record lock owns."""
+
+    def __init__(self, lock: FileLock) -> None:
+        self.lock = lock
+
+
+def _record_locked(method):
+    """Run a store method that changes one instance's folder under its record lock.
+
+    Bounded wait, like every user-driven write; callers that already hold the
+    lock (the merge, in its non-waiting mode) nest inside it.
+    """
+    @functools.wraps(method)
+    def locked(self, instance_id, *args, **kwargs):
+        with self.annotation_lock(instance_id):
+            return method(self, instance_id, *args, **kwargs)
+
+    return locked
+
+
+def _index_locked(method):
+    """Run a store method that rewrites ``index.json`` under the index lock.
+
+    The read that feeds the write happens inside the lock, so two writers
+    never start from the same copy of the index.
+    """
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._index_lock():
+            return method(self, *args, **kwargs)
+
+    return locked
 
 
 def _draft_stamp() -> str:
@@ -66,7 +149,9 @@ def _read_plain_text(path: Path) -> str:
         if path.is_symlink():
             raise MemoryCorruptError(f"{path.name} is a symlink") from exc
         raise
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+    # newline="": the text is exactly the bytes on disk, so what is hashed
+    # and compared is what was written, whatever the line endings.
+    with os.fdopen(fd, "r", encoding="utf-8", newline="") as fh:
         return fh.read()
 
 
@@ -191,7 +276,8 @@ def _write_private_atomic(path: Path, text: str, *, as_json: bool = False) -> No
         0o600,
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # newline="": no translation, so the file holds exactly the encoded text.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             if as_json:
                 json.dump(text, fh, indent=2)
             else:
@@ -276,9 +362,33 @@ class MemoryStore:
         # Which server each share is (see :meth:`set_share_identity`), kept so
         # an index entry created later still records it.
         self._share_identities: Dict[str, Dict[str, Any]] = {}
-        # One lock per instance guards compare-and-write of its annotations.
+        # One lock per instance guards compare-and-write of its record; the
+        # outermost holder in this process also takes an OS lock, so another
+        # process (app, CLI, MCP server) is excluded too.
         self._annotation_locks: Dict[str, threading.RLock] = {}
+        self._os_locks: Dict[str, _HeldOsLock] = {}
         self._locks_guard = threading.Lock()
+        # Serialises every read-modify-write of index.json: this lock between
+        # threads, an OS lock between processes (see the module docstring).
+        self._index_thread_lock = threading.RLock()
+        self._index_depth = 0
+        self._record_lock_wait = (
+            DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS, DEFAULT_RECORD_LOCK_POLL_SECONDS,
+        )
+
+    @property
+    def root(self) -> Path:
+        """The memory root this store files everything under."""
+        return self._root
+
+    @property
+    def record_lock_wait(self) -> tuple[float, float]:
+        """``(timeout, poll)`` seconds a change waits for another process's lock."""
+        return self._record_lock_wait
+
+    def set_record_lock_wait(self, timeout: float, poll: float) -> None:
+        """Set how long a change waits for another process holding the same record."""
+        self._record_lock_wait = (timeout, poll)
 
     def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
         """Map every incoming instance id through *resolver* (fake → real)."""
@@ -316,6 +426,7 @@ class MemoryStore:
     # Write
     # ------------------------------------------------------------------
 
+    @_record_locked
     def save_module(
         self,
         instance_id: str,
@@ -572,6 +683,7 @@ class MemoryStore:
     # Clear
     # ------------------------------------------------------------------
 
+    @_record_locked
     def clear(
         self,
         instance_id: str,
@@ -634,10 +746,42 @@ class MemoryStore:
             logger.error("Index migration failed: %s", exc)
             return {"version": INDEX_VERSION, "instances": {}}
 
+    @contextlib.contextmanager
+    def _index_lock(self):
+        """Hold the lock that serialises changes to ``index.json``. Re-entrant.
+
+        Waits at most :attr:`record_lock_wait` for both stages, then fails with
+        :class:`RecordLockTimeout` (an ``OSError``) before anything is changed.
+        """
+        timeout, poll = self._record_lock_wait
+        deadline = time.monotonic() + timeout
+        if not self._index_thread_lock.acquire(timeout=timeout):
+            raise RecordLockTimeout("another thread is changing the memory index")
+        try:
+            if self._index_depth:
+                yield
+                return
+            lock = FileLock(self._root / LOCKS_DIR / INDEX_LOCK, private_dir=True)
+            try:
+                lock.acquire_until(deadline, poll)
+            except FileLockTimeout as exc:
+                raise RecordLockTimeout(
+                    "another Servonaut process is changing the memory index"
+                ) from exc
+            self._index_depth = 1
+            try:
+                yield
+            finally:
+                self._index_depth = 0
+                lock.release()
+        finally:
+            self._index_thread_lock.release()
+
     def _save_index(self, index: Dict[str, Any]) -> None:
         """Persist *index* to disk atomically."""
         _atomic_write_json(self._index_path, index)
 
+    @_index_locked
     def update_index(
         self,
         instance_id: str,
@@ -687,6 +831,7 @@ class MemoryStore:
         if identity is not None:
             entry["share_identity"] = dict(identity)
 
+    @_index_locked
     def ensure_index_entry(
         self, instance_id: str, name: str, provider: str, modules: List[str]
     ) -> None:
@@ -713,6 +858,7 @@ class MemoryStore:
         self._apply_share_identity(instance_id, stored)
         self._save_index(index)
 
+    @_index_locked
     def _remove_from_index(self, instance_id: str) -> None:
         """Remove *instance_id* from the index (called by ``clear``)."""
         instance_id = self._resolve_id(instance_id)
@@ -809,10 +955,41 @@ class MemoryStore:
         path = self.get_annotations_path(instance_id, provider)
         try:
             if path.exists():
-                return path.read_text(encoding="utf-8")
+                with open(path, "r", encoding="utf-8", newline="") as fh:
+                    return fh.read()
         except OSError:
             pass
         return ""
+
+    def annotations_fingerprint(
+        self, instance_id: str, provider: str = "custom"
+    ) -> Optional[NotesFingerprint]:
+        """The exact bytes' SHA-256, size and modified time of the notes file.
+
+        ``None`` when there is no notes file. Unlike :meth:`read_annotations`
+        this never decodes the text, so a file that is not valid UTF-8 still
+        has a fingerprint. A symlink in place of the file raises
+        ``MemoryCorruptError``; other read errors raise ``OSError``.
+        """
+        _validate_instance_id(instance_id)
+        path = self.get_annotations_path(instance_id, provider)
+        if not path.is_symlink() and not path.exists():
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            if path.is_symlink():
+                raise MemoryCorruptError(f"{path.name} is a symlink") from exc
+            raise
+        with os.fdopen(fd, "rb") as fh:
+            data = fh.read()
+            modified = os.fstat(fh.fileno()).st_mtime
+        return NotesFingerprint(
+            digest=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            modified_at=datetime.fromtimestamp(modified, tz=timezone.utc).isoformat(),
+        )
 
     def read_annotations_strict(
         self,
@@ -837,6 +1014,8 @@ class MemoryStore:
         instance_id: str,
         content: str,
         provider: str = "custom",
+        *,
+        modified_at: Optional[str] = None,
     ) -> Path:
         """Write *content* as ``annotations.md`` for *instance_id* atomically.
 
@@ -847,6 +1026,9 @@ class MemoryStore:
             instance_id: Instance identifier (validated against path traversal).
             content: Markdown content to persist.
             provider: Provider slug used to select the storage sub-directory.
+            modified_at: When given, the notes' hash and this modified time
+                are recorded in the same record-locked step, so a pull never
+                judges the new text by the old bookkeeping.
 
         Returns:
             The ``Path`` of the written ``annotations.md`` file.
@@ -855,7 +1037,21 @@ class MemoryStore:
             ValueError: If *instance_id* fails safety validation.
         """
         with self.annotation_lock(instance_id):
-            return self._write_annotations_locked(instance_id, content, provider)
+            path = self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
+            return path
+
+    def _record_notes_meta(
+        self, instance_id: str, content: str, modified_at: Optional[str]
+    ) -> None:
+        """Record the hash and modified time of notes just written (record lock held)."""
+        if modified_at is None:
+            return
+        self.set_annotations_meta(
+            instance_id,
+            annotations_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            annotations_modified_at=modified_at,
+        )
 
     def _write_annotations_locked(
         self, instance_id: str, content: str, provider: str
@@ -894,6 +1090,7 @@ class MemoryStore:
             "annotations_modified_at": entry.get("annotations_modified_at", ""),
         }
 
+    @_index_locked
     def set_annotations_meta(
         self,
         instance_id: str,
@@ -936,34 +1133,83 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def annotation_lock(self, instance_id: str):
+    def annotation_lock(self, instance_id: str, *, wait: bool = True):
         """Hold the lock that serialises changes to one instance's annotations.
 
-        Re-entrant. In-process only: another process writing the same file is
-        not excluded.
+        Re-entrant. Threads are ordered by an in-process lock; the outermost
+        holder also takes an OS lock on ``<root>/.locks/<sha256 of the id>.lock``
+        so a second process writing the same record waits (bounded by
+        :attr:`record_lock_wait`) and then fails with :class:`RecordLockTimeout`,
+        an ``OSError``, before it has changed anything. With ``wait=False``
+        (background work that must not hold up an interface) a busy record
+        raises :class:`RecordBusy` at once instead.
         """
         instance_id = self._resolve_id(instance_id)
         with self._locks_guard:
             lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
-        with lock:
-            yield
+        timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        # One budget for both stages: a thread holding the in-process lock
+        # must not let a waiter outlast the configured bound.
+        deadline = time.monotonic() + timeout
+        if not self._take_thread_lock(lock, wait, timeout):
+            busy = RecordLockTimeout if wait else RecordBusy
+            raise busy("another thread is changing this server's memory")
+        try:
+            held = self._os_locks.get(instance_id)
+            if held is not None:  # nested in this process: already excluded
+                yield
+                return
+            held = self._take_os_lock(instance_id, wait=wait, deadline=deadline)
+            self._os_locks[instance_id] = held
+            try:
+                yield
+            finally:
+                del self._os_locks[instance_id]
+                held.lock.release()
+        finally:
+            lock.release()
+
+    @staticmethod
+    def _take_thread_lock(lock: "threading.RLock", wait: bool, timeout: float) -> bool:
+        if not wait:
+            return lock.acquire(blocking=False)
+        return lock.acquire(timeout=timeout)
+
+    def _take_os_lock(
+        self, instance_id: str, *, wait: bool = True, deadline: Optional[float] = None,
+    ) -> "_HeldOsLock":
+        digest = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+        lock = FileLock(self._root / LOCKS_DIR / f"{digest}.lock", private_dir=True)
+        timeout, poll = self._record_lock_wait if wait else (0.0, 0.0)
+        if deadline is None:
+            deadline = time.monotonic() + timeout
+        try:
+            lock.acquire_until(deadline, poll)
+        except FileLockTimeout as exc:
+            busy = RecordLockTimeout if wait else RecordBusy
+            raise busy(
+                "another Servonaut process is changing this server's memory"
+            ) from exc
+        return _HeldOsLock(lock)
 
     def write_annotations_if_unchanged(
-        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom",
+        *, modified_at: Optional[str] = None,
     ) -> bool:
         """Write *content* only if the notes still hash to *expected_hash*.
 
         The comparison and the write happen under :meth:`annotation_lock`, so
         a merge that holds the lock cannot be overwritten in between. An
-        absent file hashes as empty text. Returns whether it wrote.
+        absent file hashes as empty text. With *modified_at* the hash and
+        time are recorded in the same step (see :meth:`write_annotations`).
+        Returns whether it wrote.
         """
-        import hashlib
-
         with self.annotation_lock(instance_id):
             current = self.read_annotations_strict(instance_id, provider)
             if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
                 return False
             self._write_annotations_locked(instance_id, content, provider)
+            self._record_notes_meta(instance_id, content, modified_at)
             return True
 
     def write_annotation_draft(
@@ -973,7 +1219,9 @@ class MemoryStore:
 
         The name is ``annotations.unsaved-<UTC time>.md`` (a numeric suffix
         when taken); the file is created mode 0600 without following links
-        and appears complete or not at all.
+        and appears complete or not at all. It takes no record lock: a draft
+        is a new file, and it is what keeps the user's text when the record
+        is busy.
         """
         _validate_instance_id(instance_id)
         directory = self._checked_dir(instance_id, provider)
@@ -981,7 +1229,7 @@ class MemoryStore:
         tmp = directory / f".draft-{secrets.token_hex(8)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(content)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -1029,6 +1277,10 @@ class MemoryStore:
                 continue
             found.append(child.name)
         return found
+
+    def merge_pass_lock(self) -> FileLock:
+        """The lock that lets one team-copy merge pass run per computer at a time."""
+        return FileLock(self._root / TEAM_MERGE_LOCK)
 
     def read_merge_marker(self, instance_id: str, provider: str) -> Optional[Dict[str, Any]]:
         """The marker saying this folder was merged elsewhere, or ``None``.
@@ -1093,6 +1345,7 @@ class MemoryStore:
         state = (entry.get("cloud_imports") or {}).get(share_id)
         return dict(state) if isinstance(state, dict) else None
 
+    @_index_locked
     def set_cloud_import(
         self, instance_id: str, share_id: str, state: str, upload_pending: bool
     ) -> None:
@@ -1116,6 +1369,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         self._remove_from_index(instance_id)
 
+    @_index_locked
     def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
         """Record which server a share is, on its index entry.
 
@@ -1156,6 +1410,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         return self._instance_dir(instance_id, provider) / "findings"
 
+    @_record_locked
     def save_finding(
         self,
         instance_id: str,
@@ -1284,6 +1539,7 @@ class MemoryStore:
         results.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return results
 
+    @_record_locked
     def delete_finding(
         self,
         instance_id: str,
@@ -1343,6 +1599,7 @@ class MemoryStore:
             "findings_synced_at": entry.get("findings_synced_at", ""),
         }
 
+    @_index_locked
     def set_findings_meta(
         self,
         instance_id: str,
