@@ -2014,6 +2014,7 @@ class MemorySyncService:
             parse_missing_team_wraps,
             seal_for_recipients,
             split_by_trust,
+            stored_wraps,
         )
 
         pins = self._pin_store()
@@ -2052,8 +2053,12 @@ class MemorySyncService:
                 count,
             )
         for (team_slug, grant_id), wraps in by_grant.items():
-            if wraps and await self._post_team_wraps(team_slug, grant_id, wraps):
-                self._pin_sealed(pins, team_slug, wraps, seen_by_grant[(team_slug, grant_id)])
+            if not wraps:
+                continue
+            response = await self._post_team_wraps(team_slug, grant_id, wraps)
+            stored = stored_wraps(wraps, response) if response is not None else []
+            if stored:
+                self._pin_sealed(pins, team_slug, stored, seen_by_grant[(team_slug, grant_id)])
 
     def set_key_change_listener(self, listener: Optional[Callable[[Any], None]]) -> None:
         """Call *listener* once for each changed key a catch-up newly skips."""
@@ -2114,30 +2119,29 @@ class MemorySyncService:
 
     async def _post_team_wraps(
         self, team_slug: str, grant_id: str, wraps: List[Dict[str, Any]]
-    ) -> bool:
-        """POST one grant's wraps; True when stored. Waits once for a 429."""
+    ) -> Optional[Dict[str, Any]]:
+        """POST one grant's wraps; the response when accepted, else None. Waits once for a 429."""
         from servonaut.services.memory.team_service import post_grant_wraps  # noqa: PLC0415
         from servonaut.services.retry_after import is_rate_limited, retry_after_seconds  # noqa: PLC0415
 
         for attempt in (1, 2):
             try:
-                await post_grant_wraps(self._api, team_slug, grant_id, wraps)
-                return True
+                return await post_grant_wraps(self._api, team_slug, grant_id, wraps)
             except APIError as exc:
                 if exc.status in (404, 409):
                     logger.info("team wrap top-up: a share is no longer live; skipped")
-                    return False
+                    return None
                 if not is_rate_limited(exc) or attempt == 2:
                     logger.info("team wrap top-up: gave up (status %s)", exc.status)
-                    return False
+                    return None
                 wait = retry_after_seconds(exc)
                 if wait is None:
                     wait = self._team_wrap_setting("team_wrap_retry_seconds")
                 if wait > self._team_wrap_setting("team_wrap_max_wait_seconds"):
                     logger.info("team wrap top-up: asked to wait too long; skipped")
-                    return False
+                    return None
                 await _pause(wait)
-        return False
+        return None
 
     async def _handle_rejection(
         self, rejection: SyncRejection, batch: List[SyncEnvelope]

@@ -69,7 +69,8 @@ class _KeyBackend(_Backend):
             self.wrap_posts.append(body)
             stored = {w["recipient_user_id"] for w in body["wraps"]}
             self.missing = [m for m in self.missing if m["user_id"] not in stored]
-            return {"wraps_stored": len(body["wraps"])}
+            return {"wraps_stored": len(body["wraps"]), "wraps_unchanged": 0,
+                    "skipped_recipients": []}
         return await super()._post(path, **kw)
 
 

@@ -429,6 +429,9 @@ class GrantCoverage:
 
     envelopes: Tuple[CoverageEnvelope, ...]
     pending: Tuple[Dict[str, Any], ...]
+    # Whom the service says this report is about; checked against the request.
+    grant_id: Optional[str] = None
+    instance_id: Optional[str] = None
 
 
 def _parse_coverage_envelope(raw: Any) -> Optional[CoverageEnvelope]:
@@ -473,8 +476,43 @@ def parse_grant_coverage(payload: Any) -> GrantCoverage:
     pending = payload.get("pending_recipients")
     return GrantCoverage(
         envelopes=tuple(envelopes),
+        grant_id=_optional_text(payload.get("grant_id")),
+        instance_id=_optional_text(payload.get("instance_id")),
         pending=tuple(dict(p) for p in pending if isinstance(p, dict)) if isinstance(pending, list) else (),
     )
+
+
+def stored_wraps(wraps: List[Dict[str, Any]], response: Any) -> List[Dict[str, Any]]:
+    """The posted *wraps* the service says it stored.
+
+    Read strictly from ``wraps_stored``, ``wraps_unchanged`` and
+    ``skipped_recipients`` (``[{user_id, reason}]``): a response that does not
+    fit, or that stored nothing, means no wrap counts as stored. A recipient
+    named in ``skipped_recipients`` never counts, whatever else it says.
+    """
+    if not isinstance(response, dict):
+        return []
+    stored, unchanged, skipped = (
+        response.get("wraps_stored"), response.get("wraps_unchanged"),
+        response.get("skipped_recipients"),
+    )
+    if not all(_is_count(n) for n in (stored, unchanged)) or not isinstance(skipped, list):
+        logger.debug("wraps response ignored: unexpected shape")
+        return []
+    skipped_ids = set()
+    for item in skipped:
+        user_id = item.get("user_id") if isinstance(item, dict) else None
+        if not isinstance(user_id, int) or isinstance(user_id, bool):
+            logger.debug("wraps response ignored: malformed skipped_recipients")
+            return []
+        skipped_ids.add(user_id)
+    if stored + unchanged == 0:
+        return []
+    return [w for w in wraps if w["recipient_user_id"] not in skipped_ids]
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 @dataclass(frozen=True)

@@ -80,7 +80,7 @@ class _Server:
             effect = self.wrap_effects.pop(0)
             if isinstance(effect, Exception):
                 raise effect
-        return {"wraps_stored": len(json["wraps"])}
+        return {"wraps_stored": len(json["wraps"]), "wraps_unchanged": 0, "skipped_recipients": []}
 
 
 def _service(tmp_path, server: _Server):

@@ -62,8 +62,40 @@ def test_top_up_leaves_a_key_confirmed_while_the_wraps_were_posted(tmp_path):
 
     async def racing(*args, **kwargs):
         pins.set_many({(SLUG, 3): CONFIRMED})
-        return {"wraps_stored": 1}
+        return {"wraps_stored": 1, "wraps_unchanged": 0, "skipped_recipients": []}
 
     api.post.side_effect = racing
-    run(svc.top_up_grant(SLUG, "g"))
+    run(svc.top_up_grant(SLUG, "g", OWNER, ["os"]))
     assert pinned_fingerprint(pins, SLUG, 3) == CONFIRMED
+
+
+def test_a_catch_up_wrap_the_service_skipped_is_not_pinned(tmp_path):
+    kept, _p1 = _recipient(7)
+    skipped, _p2 = _recipient(8)
+
+    class Skipping(_Server):
+        async def post(self, path, *, json=None, **kw):
+            answer = await super().post(path, json=json, **kw)
+            if path == WRAPS:
+                return {"wraps_stored": 1, "wraps_unchanged": 0,
+                        "skipped_recipients": [{"user_id": 8, "reason": "key_changed"}]}
+            return answer
+
+    server = Skipping([_missing([kept, skipped])])
+    svc = _sync_service(tmp_path, server)
+    _drain(svc)
+    assert svc._pin_store().get("team-a", 7) == kept["fingerprint"]
+    assert svc._pin_store().get("team-a", 8) is None
+
+
+def test_a_catch_up_response_that_cannot_be_read_pins_nothing(tmp_path):
+    entry, _p = _recipient(7)
+
+    class Odd(_Server):
+        async def post(self, path, *, json=None, **kw):
+            answer = await super().post(path, json=json, **kw)
+            return {"wraps_stored": 1} if path == WRAPS else answer
+
+    svc = _sync_service(tmp_path, Odd([_missing([entry])]))
+    _drain(svc)
+    assert svc._pin_store().get("team-a", 7) is None

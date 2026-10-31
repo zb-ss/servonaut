@@ -66,6 +66,7 @@ from servonaut.services.memory.team_wraps import (
     previous_pin,
     parse_grant_coverage,
     split_recipients,
+    stored_wraps,
 )
 
 if TYPE_CHECKING:
@@ -144,6 +145,16 @@ class ShareGoneError(MemoryBackendError):
 
     def __init__(self) -> None:
         super().__init__("That share no longer exists.")
+
+
+class ServiceBusyError(MemoryBackendError):
+    """Raised when the service answered ``conflict_retry`` (HTTP 409).
+
+    The share is still live; another change to it was in progress.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("The service was busy changing this share. Try again.")
 
 
 class InsufficientWrapsRequired(MemoryBackendError):
@@ -281,10 +292,11 @@ class WrapEntry:
 
 @dataclass(frozen=True)
 class TopUpResult:
-    """What a top-up did: whom it sealed for, and whose key still waits."""
+    """What a top-up did: whom it shared with, who could not be added, and whose key waits."""
 
     sealed_names: tuple
     waiting: tuple
+    skipped_names: tuple = ()  # sealed for, but the service did not store the wrap
 
 
 @dataclass(frozen=True)
@@ -770,6 +782,11 @@ class TeamMemoryService:
         batch: Dict[tuple, str] = {}
         for change in changes:
             check_segment(change.team_slug, "team")
+            if change.team_slug != team_slug:
+                raise ValueError("a confirmation belongs to another team")
+            if (not isinstance(change.user_id, int) or isinstance(change.user_id, bool)
+                    or change.user_id <= 0):
+                raise ValueError("user id is not a valid member id")
             if not _FINGERPRINT.fullmatch(change.fingerprint or ""):
                 raise ValueError("fingerprint is not a valid key fingerprint")
             batch[(change.team_slug, change.user_id)] = change.fingerprint
@@ -886,6 +903,9 @@ class TeamMemoryService:
                         "recipient_user_id": member.user_id,
                         "envelope_id": actual_env_id,
                         "wrapped_dek": base64.b64encode(sealed).decode(),
+                        # Lets the service skip a member who rotated since the
+                        # key was read, instead of storing a wrap nobody can open.
+                        "recipient_fingerprint": member.derived_fingerprint(),
                     })
                 except Exception as exc:
                     logger.warning(
@@ -912,7 +932,21 @@ class TeamMemoryService:
             KeyError: If no self-wrap is found.
             nacl.exceptions.CryptoError: On decryption failure.
         """
-        import base64 as _b64
+        wrapped_b64 = self._self_wrap(raw_env, key_material)
+        wrapped_bytes = base64.b64decode(wrapped_b64)
+        priv_key = nacl.public.PrivateKey(key_material.private_key)
+        box = nacl.public.SealedBox(priv_key)
+        dek = box.decrypt(wrapped_bytes)
+        return dek
+
+    @staticmethod
+    def _self_wrap(raw_env: Dict[str, Any], key_material: Any) -> str:
+        """The base64 wrap of the data key addressed to the caller.
+
+        Raises:
+            KeyError: If the envelope holds no wrap for the caller.
+            ValueError: If the wrap is not text.
+        """
         user_id = key_material.user_id
 
         # §3.7 shape: single wrapped_dek pre-addressed to caller
@@ -928,12 +962,9 @@ class TeamMemoryService:
                 raise KeyError(f"No self-wrap found for user_id={user_id}")
         else:
             raise KeyError("Envelope has neither 'wrapped_dek' nor 'dek_wraps'")
-
-        wrapped_bytes = _b64.b64decode(wrapped_b64)
-        priv_key = nacl.public.PrivateKey(key_material.private_key)
-        box = nacl.public.SealedBox(priv_key)
-        dek = box.decrypt(wrapped_bytes)
-        return dek
+        if not isinstance(wrapped_b64, str) or not wrapped_b64:
+            raise ValueError("self-wrap is not text")
+        return wrapped_b64
 
     async def revoke_grant(self, team_slug: str, grant_id: str) -> Grant:
         """Soft-revoke a team memory grant.
@@ -1008,8 +1039,7 @@ class TeamMemoryService:
         try:
             data = await self._api.get(f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}/wraps")
         except APIError as exc:
-            if exc.status in (404, 409):
-                raise ShareGoneError() from exc
+            self._raise_share_error(exc, team_slug)
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return parse_grant_coverage(data)
 
@@ -1022,20 +1052,41 @@ class TeamMemoryService:
             waiting.update({c.user_id: c for c in split.changed})
         return list(waiting.values())
 
-    async def top_up_grant(self, team_slug: str, grant_id: str) -> "TopUpResult":
+    async def top_up_grant(
+        self,
+        team_slug: str,
+        grant_id: str,
+        instance_id: str,
+        modules: Optional[List[str]],
+    ) -> "TopUpResult":
         """Seal the newest snapshots for the members still missing a wrap.
 
         Only members whose key is trusted (sealed for or confirmed before) or
         new are sealed for; a member whose key is waiting for confirmation is
-        returned in ``waiting`` and left alone.
+        returned in ``waiting`` and left alone. The data key always comes from
+        the caller's own envelope of that snapshot, never from the reply.
+
+        Args:
+            team_slug: Team slug identifier.
+            grant_id: The live share.
+            instance_id: The server the share is for.
+            modules: The modules the share covers (None means all).
 
         Raises:
             ShareGoneError: The share is gone or no longer live.
-            MemoryBackendError: Memory Sync is locked.
+            ServiceBusyError: The service was busy changing the share.
+            MemoryBackendError: Memory Sync is locked, or the service answered
+                for a different share.
         """
         from servonaut.services.api_client import APIError
 
+        check_segment(instance_id, "server")
         coverage = await self.grant_coverage(team_slug, grant_id)
+        if coverage.grant_id != grant_id or coverage.instance_id != instance_id:
+            logger.warning("top-up: the coverage reply is not for the requested share")
+            raise MemoryBackendError(
+                "The service answered for a different share. Nothing was shared."
+            )
         pins = self._pins()
         material = self._key_store_provider()
         if material is None:
@@ -1048,11 +1099,14 @@ class TeamMemoryService:
             split = split_recipients(pins, team_slug, envelope.missing)
             seen.update(split.seen)
             waiting.update({c.user_id: c for c in split.changed})
-            if not split.sealable or envelope.wrapped_dek is None:
+            if not split.sealable or (modules is not None and envelope.module not in modules):
+                continue
+            own_wrap = await self._own_wrap_of(instance_id, envelope, material)
+            if own_wrap is None:
                 continue
             try:
                 sealed = self._crypto.reseal_dek(
-                    envelope.wrapped_dek,
+                    own_wrap,
                     private_key=material.private_key,
                     recipient_public_keys=[r.public_key for r in split.sealable],
                 )
@@ -1069,21 +1123,58 @@ class TeamMemoryService:
                     "wrapped_dek": wrapped,
                     "recipient_fingerprint": recipient.fingerprint,
                 })
+        stored: List[Dict[str, Any]] = []
         if wraps:
             try:
-                await post_grant_wraps(self._api, team_slug, grant_id, wraps)
+                response = await post_grant_wraps(self._api, team_slug, grant_id, wraps)
             except APIError as exc:
-                if exc.status in (404, 409):
-                    raise ShareGoneError() from exc
+                self._raise_share_error(exc, team_slug)
                 raise
-            self._pin_posted(team_slug, wraps, seen)
-        return TopUpResult(sealed_names=tuple(names.values()), waiting=tuple(waiting.values()))
+            stored = stored_wraps(wraps, response)
+            self._pin_posted(team_slug, stored, seen)
+        stored_ids = {w["recipient_user_id"] for w in stored}
+        return TopUpResult(
+            sealed_names=tuple(n for uid, n in names.items() if uid in stored_ids),
+            waiting=tuple(waiting.values()),
+            skipped_names=tuple(n for uid, n in names.items() if uid not in stored_ids),
+        )
+
+    async def _own_wrap_of(self, instance_id: str, envelope: Any, material: Any) -> Optional[str]:
+        """The caller's own wrap of *envelope*'s data key, or None to skip it.
+
+        Fetched from the caller's own latest envelope of that module and only
+        used when it is the very snapshot the coverage names: what the
+        coverage reply carries is not trusted as a source of data keys.
+        """
+        try:
+            raw = await self._retrieval_service.get_module_envelope_raw(
+                instance_id, envelope.module
+            )
+        except Exception as exc:  # noqa: BLE001 — one snapshot never stops the others
+            logger.debug("top-up: own envelope not fetched (%s)", type(exc).__name__)
+            return None
+        if not isinstance(raw, dict) or raw.get("id") != envelope.envelope_id:
+            logger.debug("top-up: a snapshot is not the caller's latest; skipped")
+            return None
+        try:
+            return self._self_wrap(raw, material)
+        except (KeyError, TypeError, ValueError):
+            logger.debug("top-up: no own wrap for a snapshot; skipped")
+            return None
+
+    @staticmethod
+    def _raise_share_error(exc: Any, team_slug: str) -> None:
+        """Raise the typed error for a 404 or 409 answer; return for anything else."""
+        if exc.status == 404 or (exc.status == 409 and exc.code == "grant_not_live"):
+            raise ShareGoneError() from exc
+        if exc.status == 409 and exc.code == "conflict_retry":
+            raise ServiceBusyError() from exc
 
     def _pin_posted(
         self, team_slug: str, wraps: List[Dict[str, Any]], seen: Dict[tuple, Optional[str]]
     ) -> None:
         pins = self._pins()
-        if pins is None:
+        if pins is None or not wraps:
             return
         try:
             pins.set_if_seen({(team_slug, w["recipient_user_id"]): w["recipient_fingerprint"]

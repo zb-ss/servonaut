@@ -759,7 +759,9 @@ class ShareInstanceScreen(Screen):
             return
         self._say_to("#share-status", "[$text-warning]Sharing the latest snapshots…[/$text-warning]")
         try:
-            result = await service.top_up_grant(team_slug, grant.id)
+            result = await service.top_up_grant(
+                team_slug, grant.id, self._instance_id(), grant.modules
+            )
         except Exception as exc:  # noqa: BLE001
             if self._gone(exc):
                 return

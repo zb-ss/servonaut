@@ -178,7 +178,7 @@ def test_grant_coverage_parses_strictly_and_drops_bad_entries_whole(tmp_path):
 @pytest.mark.parametrize("status", [404, 409])
 def test_coverage_of_a_gone_share_is_a_typed_error(tmp_path, status):
     svc, api, _ = _service(tmp_path)
-    api.get.side_effect = APIError(code="x", message="gone", status=status)
+    api.get.side_effect = APIError(code="grant_not_live" if status == 409 else "x", message="gone", status=status)
     with pytest.raises(ShareGoneError):
         run(svc.grant_coverage(SLUG, "g"))
 
@@ -192,8 +192,8 @@ def test_top_up_seals_only_for_trusted_or_new_keys_and_pins_what_it_sealed(tmp_p
         _descriptor(4, confirmed_pair, flagged=True),
         _descriptor(5, waiting_pair, flagged=True, name="Lee"),
     ])
-    api.post.return_value = {"wraps_stored": 2}
-    result = run(svc.top_up_grant(SLUG, "g"))
+    api.post.return_value = {"wraps_stored": 2, "wraps_unchanged": 0, "skipped_recipients": []}
+    result = run(svc.top_up_grant(SLUG, "g", OWNER, ["os"]))
     [call] = api.post.await_args_list
     assert call.args[0] == f"/api/v1/teams/{SLUG}/memory/grant/g/wraps"
     wraps = call.kwargs["json"]["wraps"]
@@ -209,16 +209,9 @@ def test_top_up_seals_only_for_trusted_or_new_keys_and_pins_what_it_sealed(tmp_p
 def test_top_up_with_nothing_trusted_posts_nothing(tmp_path):
     svc, api, _ = _service(tmp_path)
     api.get.return_value = _coverage(svc, [_descriptor(5, _pair(), flagged=True, name="Lee")])
-    result = run(svc.top_up_grant(SLUG, "g"))
+    result = run(svc.top_up_grant(SLUG, "g", OWNER, ["os"]))
     api.post.assert_not_awaited()
     assert result.sealed_names == () and [c.user_id for c in result.waiting] == [5]
-
-
-def test_top_up_skips_an_envelope_the_caller_has_no_wrap_for(tmp_path):
-    svc, api, _ = _service(tmp_path)
-    api.get.return_value = _coverage(svc, [_descriptor(3, _pair())], wrapped=None)
-    run(svc.top_up_grant(SLUG, "g"))
-    api.post.assert_not_awaited()
 
 
 @pytest.mark.parametrize("status", [404, 409])
@@ -226,9 +219,9 @@ def test_top_up_of_a_gone_share_is_a_typed_error_and_pins_nothing(tmp_path, stat
     svc, api, pins = _service(tmp_path)
     pair = _pair()
     api.get.return_value = _coverage(svc, [_descriptor(3, pair)])
-    api.post.side_effect = APIError(code="x", message="gone", status=status)
+    api.post.side_effect = APIError(code="grant_not_live" if status == 409 else "x", message="gone", status=status)
     with pytest.raises(ShareGoneError):
-        run(svc.top_up_grant(SLUG, "g"))
+        run(svc.top_up_grant(SLUG, "g", OWNER, ["os"]))
     assert pinned_fingerprint(pins, SLUG, 3) is None
 
 
@@ -236,8 +229,8 @@ def test_a_wrap_that_opens_with_the_members_own_key(tmp_path):
     svc, api, _ = _service(tmp_path)
     pair = _pair()
     api.get.return_value = _coverage(svc, [_descriptor(3, pair)])
-    api.post.return_value = {"wraps_stored": 1}
-    run(svc.top_up_grant(SLUG, "g"))
+    api.post.return_value = {"wraps_stored": 1, "wraps_unchanged": 0, "skipped_recipients": []}
+    run(svc.top_up_grant(SLUG, "g", OWNER, ["os"]))
     wrapped = api.post.await_args.kwargs["json"]["wraps"][0]["wrapped_dek"]
     dek = nacl.public.SealedBox(nacl.public.PrivateKey(pair.private_key)).decrypt(
         base64.b64decode(wrapped))
