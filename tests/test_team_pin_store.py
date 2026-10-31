@@ -24,7 +24,7 @@ FP_A, FP_B, FP_C = "a" * 64, "b" * 64, "c" * 64
 def _writer(path: str, worker: int, count: int) -> None:
     store = WrapPinStore(__import__("pathlib").Path(path))
     for index in range(count):
-        store.set_many({("team-a", worker * 1000 + index): FP_A})
+        store.set_many({("team-a", (worker + 1) * 1000 + index + 1): FP_A})
 
 
 def test_parallel_processes_do_not_lose_each_others_pins(tmp_path):
@@ -38,7 +38,7 @@ def test_parallel_processes_do_not_lose_each_others_pins(tmp_path):
         assert proc.exitcode == 0
     store = WrapPinStore(path)
     kept = sum(
-        store.get("team-a", w * 1000 + i) == FP_A for w in range(4) for i in range(25)
+        store.get("team-a", (w + 1) * 1000 + i + 1) == FP_A for w in range(4) for i in range(25)
     )
     assert kept == 100
 
@@ -70,7 +70,7 @@ def test_automatic_writes_never_overwrite_an_unreadable_file(tmp_path):
     path = tmp_path / "pins.json"
     path.write_text("{broken")
     store = WrapPinStore(path)
-    written = store.set_if_seen({("team-a", 2): FP_A}, {("team-a", 2): UNREADABLE_PIN})
+    written = store.set_if_seen({("team-a", 2): FP_A}, {("team-a", 2, FP_A): UNREADABLE_PIN})
     assert written == set()
     assert path.read_text() == "{broken"
     assert not list(tmp_path.glob("*.unreadable-*"))
@@ -95,7 +95,7 @@ def test_an_automatic_write_leaves_a_pin_that_changed_since_it_was_seen(tmp_path
     store.set_many({("team-a", 2): FP_B})
     written = store.set_if_seen(
         {("team-a", 2): FP_A, ("team-a", 3): FP_C, ("team-a", 4): FP_A},
-        {("team-a", 2): FP_A, ("team-a", 3): FP_A, ("team-a", 4): None},
+        {("team-a", 2, FP_A): FP_A, ("team-a", 3, FP_C): FP_A, ("team-a", 4, FP_A): None},
     )
     assert written == {("team-a", 3), ("team-a", 4)}
     assert store.get("team-a", 2) == FP_B

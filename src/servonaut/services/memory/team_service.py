@@ -37,6 +37,7 @@ Stream 2) so this service compiles independently.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -60,13 +61,17 @@ from servonaut.services.memory.team_wraps import (
     GrantCoverage,
     KeyChange,
     KeyTrust,
+    UNCONFIRMED,
+    acknowledge_wraps,
     classify_key,
     derive_fingerprint,
+    merge_seen,
     optional_fingerprint,
+    pins_of,
     previous_pin,
+    read_skips,
     parse_grant_coverage,
     split_recipients,
-    stored_wraps,
 )
 
 if TYPE_CHECKING:
@@ -297,6 +302,9 @@ class TopUpResult:
     sealed_names: tuple
     waiting: tuple
     skipped_names: tuple = ()  # sealed for, but the service did not store the wrap
+    # Why each of ``skipped_names`` was not stored: a skip reason of the
+    # service, or ``"unconfirmed"``.
+    skipped_reasons: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -714,7 +722,7 @@ class TeamMemoryService:
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug, instance_id=instance_id) from exc
 
-        self._pin_sealed(team_slug, wraps, eligible_members, seen)
+        await self._pin_after_grant(team_slug, wraps, eligible_members, seen, data)
         return _parse_grant(data)
 
     def _pins(self) -> Any:
@@ -740,7 +748,7 @@ class TeamMemoryService:
         seen: Dict[tuple, Optional[str]] = {}
         for member in members:
             pinned = pins.get(team_slug, member.user_id) if pins else None
-            seen[(team_slug, member.user_id)] = pinned
+            seen[(team_slug, member.user_id, member.fingerprint)] = pinned
             trust = classify_key(
                 member.public_key_b64, member.fingerprint,
                 flagged=member.key_changed, pinned=pinned,
@@ -792,24 +800,39 @@ class TeamMemoryService:
             batch[(change.team_slug, change.user_id)] = change.fingerprint
         pins.set_many(batch)
 
-    def _pin_sealed(
+    async def _pin_after_grant(
         self,
         team_slug: str,
         wraps: List[Dict[str, Any]],
         members: List[TeamMemberKey],
         seen: Dict[tuple, Optional[str]],
+        response: Any,
     ) -> None:
-        """Remember the fingerprints a grant was sealed for.
+        """Remember the keys a created grant was sealed for.
 
-        A pin that changed since the trust decision (*seen*) is left alone.
+        A recipient the service skipped was not sealed for, so it is not
+        remembered; a skip list that cannot be read means nobody is. A pin that
+        changed since the trust decision (*seen*) is left alone.
         """
+        skips = read_skips(response.get("skipped_recipients", []) if isinstance(response, dict) else None)
         pins = self._pins()
-        sealed = {w["recipient_user_id"] for w in wraps}
-        if pins is None or not sealed:
+        if skips is None or pins is None:
+            return
+        by_user = {m.user_id: m.derived_fingerprint() or m.fingerprint for m in members}
+        sealed = {
+            (team_slug, w["recipient_user_id"]): by_user[w["recipient_user_id"]]
+            for w in wraps
+            if w["recipient_user_id"] not in skips and w["recipient_user_id"] in by_user
+        }
+        await self._set_if_seen(pins, sealed, seen)
+
+    @staticmethod
+    async def _set_if_seen(pins: Any, sealed: Dict[tuple, str], seen: Dict[tuple, Optional[str]]) -> None:
+        """Write automatic pins off the event loop: the file lock may be busy."""
+        if not sealed:
             return
         try:
-            pins.set_if_seen({(team_slug, m.user_id): m.derived_fingerprint() or m.fingerprint
-                              for m in members if m.user_id in sealed}, seen)
+            await asyncio.to_thread(pins.set_if_seen, sealed, seen)
         except OSError as exc:
             logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
@@ -1097,7 +1120,7 @@ class TeamMemoryService:
         seen: Dict[tuple, Optional[str]] = {}
         for envelope in coverage.envelopes:
             split = split_recipients(pins, team_slug, envelope.missing)
-            seen.update(split.seen)
+            merge_seen(seen, split.seen)
             waiting.update({c.user_id: c for c in split.changed})
             if not split.sealable or (modules is not None and envelope.module not in modules):
                 continue
@@ -1124,19 +1147,25 @@ class TeamMemoryService:
                     "recipient_fingerprint": recipient.fingerprint,
                 })
         stored: List[Dict[str, Any]] = []
+        skipped: Dict[int, str] = {}
         if wraps:
             try:
                 response = await post_grant_wraps(self._api, team_slug, grant_id, wraps)
             except APIError as exc:
                 self._raise_share_error(exc, team_slug)
                 raise
-            stored = stored_wraps(wraps, response)
-            self._pin_posted(team_slug, stored, seen)
+            ack = acknowledge_wraps(wraps, response)
+            stored, skipped = list(ack.stored), ack.skipped
+            pins = self._pins()
+            if pins is not None:
+                await self._set_if_seen(pins, pins_of(team_slug, stored), seen)
         stored_ids = {w["recipient_user_id"] for w in stored}
+        not_stored = [uid for uid in names if uid not in stored_ids]
         return TopUpResult(
             sealed_names=tuple(n for uid, n in names.items() if uid in stored_ids),
             waiting=tuple(waiting.values()),
-            skipped_names=tuple(n for uid, n in names.items() if uid not in stored_ids),
+            skipped_names=tuple(names[uid] for uid in not_stored),
+            skipped_reasons=tuple(skipped.get(uid, UNCONFIRMED) for uid in not_stored),
         )
 
     async def _own_wrap_of(self, instance_id: str, envelope: Any, material: Any) -> Optional[str]:
@@ -1169,18 +1198,6 @@ class TeamMemoryService:
             raise ShareGoneError() from exc
         if exc.status == 409 and exc.code == "conflict_retry":
             raise ServiceBusyError() from exc
-
-    def _pin_posted(
-        self, team_slug: str, wraps: List[Dict[str, Any]], seen: Dict[tuple, Optional[str]]
-    ) -> None:
-        pins = self._pins()
-        if pins is None or not wraps:
-            return
-        try:
-            pins.set_if_seen({(team_slug, w["recipient_user_id"]): w["recipient_fingerprint"]
-                              for w in wraps}, seen)
-        except OSError as exc:
-            logger.warning("team wrap pins not saved: %s", type(exc).__name__)
 
     async def post_grant_wraps(
         self,
