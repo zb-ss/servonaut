@@ -44,6 +44,19 @@ async def test_get_server_memory_returns_the_merged_team_copy(mcp, fake_cloud, a
     assert listing.count(fleet.APP_1.instance_id) == 1
 
 
+async def test_a_team_copy_with_only_a_note_is_returned_not_reported_missing(
+    mcp, fake_cloud, account_home,
+):
+    _share_app_1(fake_cloud)
+    home = account_home("mcp-team-copy-notes-only")
+    seed_team_copy(home.home, with_module=False)
+    async with mcp(home) as session:
+        result = await session.call("get_server_memory", {"instance_id": fleet.APP_1.name})
+
+    assert TEAM_NOTE in result and "missing" not in result
+    assert TEAM_NOTE in own_notes(home.home)
+
+
 async def test_a_note_deleted_meanwhile_does_not_come_back_on_the_next_session(
     mcp, fake_cloud, account_home,
 ):
