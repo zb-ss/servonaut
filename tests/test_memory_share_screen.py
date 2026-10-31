@@ -244,3 +244,18 @@ async def test_the_form_fits_a_narrow_terminal():
         for sel in ("#share-btn-revoke", "#share-btn-reshare", "#share-btn-purge", "#share-btn-cancel"):
             region = screen.query_one(sel).region
             assert region.width > 0 and region.right <= 100, sel
+
+
+async def test_toggling_demo_mode_redraws_the_team_and_readers():
+    backend = _Backend(members=[_member(1, "Real Person")])
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        assert "Real Person" in _text(screen, "#share-readers")
+        app.demo_mode = True
+        app.redaction_service = MagicMock()
+        app.redaction_service.redact_name = lambda n: "stand-in"
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        assert "Real Person" not in _text(screen, "#share-readers")
+        assert screen.query_one("#share-team-select", Select).value == SLUG

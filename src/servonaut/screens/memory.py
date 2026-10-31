@@ -371,6 +371,11 @@ class MemoryScreen(Screen):
         Binding("H", "build_ai_summary", "Generate Hosted", show=True),
     ]
 
+    # What a team shares of this server (see ``_request_shared``); class
+    # defaults so a screen built without ``__init__`` still renders.
+    _shared: Any = None
+    _shared_requested = False
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         return check_action_passthrough(self, action)
 
@@ -385,9 +390,6 @@ class MemoryScreen(Screen):
         # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
         self._has_local_memory = False
-        # What a team shares of this server (see ``_request_shared``).
-        self._shared: Any = None
-        self._shared_requested = False
 
     @property
     def _target(self) -> dict:

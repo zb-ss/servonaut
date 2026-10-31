@@ -315,6 +315,26 @@ class ShareInstanceScreen(Screen):
             return redaction.redact_name(name)
         return name
 
+    def _say(self, widget: Static, markup: str) -> None:
+        """Write one status text. Callers pass fixed text, text run through
+        ``rich.markup.escape``, or names from :func:`_names` (stand-ins in
+        demo mode), so nothing real reaches a demo recording."""
+        widget.update(markup)
+
+    def _say_to(self, selector: str, markup: str) -> None:
+        self._say(self.query_one(selector, Static), markup)
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the team names and the readers for the new demo mode."""
+        if not self._teams:
+            return
+        select = self.query_one("#share-team-select", Select)
+        chosen = select.value
+        select.set_options([(self._team_label(t), t.get("slug", "?")) for t in self._teams])
+        if isinstance(chosen, str):
+            select.value = chosen
+        self._render_form(self._selected_team(), None)
+
     # ------------------------------------------------------------------
     # Who can read it, and the share that exists
     # ------------------------------------------------------------------
@@ -349,7 +369,7 @@ class ShareInstanceScreen(Screen):
             return
         status = self.query_one("#share-status", Static)
         if reload or slug not in self._keys_by_team:
-            status.update("[$text-warning]Checking who can read it…[/$text-warning]")
+            self._say(status, "[$text-warning]Checking who can read it…[/$text-warning]")
             try:
                 self._keys_by_team[slug] = await team_memory_service.list_team_member_keys(slug)
                 self._grant = await team_memory_service.find_live_grant(slug, self._instance_id())
@@ -360,7 +380,7 @@ class ShareInstanceScreen(Screen):
                 self._show_error(f"Could not check the share: {exc}")
                 self._render_form(slug)
                 return
-            status.update("")
+            self._say(status, "")
         self._render_form(slug)
 
     def _instance_id(self) -> str:
@@ -372,7 +392,7 @@ class ShareInstanceScreen(Screen):
         keys = self._keys_by_team.get(slug)
         readers = self.query_one("#share-readers", Static)
         if keys is None:
-            readers.update("")
+            self._say(readers, "")
         else:
             service = getattr(self.app, "team_memory_service", None)
             eligible = service.eligible_members(keys, role) if service else keys
@@ -391,7 +411,7 @@ class ShareInstanceScreen(Screen):
                 line += (
                     f"\nNo memory key yet: {waiting}. Ask them to set up Memory Sync."
                 )
-            readers.update(line)
+            self._say(readers, line)
         self._render_existing()
 
     def _render_existing(self) -> None:
@@ -404,7 +424,7 @@ class ShareInstanceScreen(Screen):
         modules = ", ".join(grant.modules) if grant.modules else "all modules"
         from rich.markup import escape
 
-        self.query_one("#share-existing-text", Static).update(
+        self._say_to("#share-existing-text",
             f"Already shared with this team: role {escape(grant.required_role)}, "
             f"modules {escape(modules)}."
         )
@@ -412,7 +432,7 @@ class ShareInstanceScreen(Screen):
     def _show_error(self, message: str) -> None:
         from rich.markup import escape
 
-        self.query_one("#share-status", Static).update(
+        self._say_to("#share-status",
             f"[$text-error]{escape(message)}[/$text-error]"
         )
 
@@ -448,7 +468,7 @@ class ShareInstanceScreen(Screen):
         # widen into "share everything".
         modules = list(self.query_one("#share-modules-list", SelectionList).selected)
         if not modules:
-            self.query_one("#share-status", Static).update(
+            self._say_to("#share-status",
                 "[$text-error]Select at least one module to share.[/$text-error]"
             )
             return None
@@ -460,16 +480,16 @@ class ShareInstanceScreen(Screen):
         team_memory_service = getattr(self.app, "team_memory_service", None)
         status = self.query_one("#share-status", Static)
         if team_memory_service is None:
-            status.update("[$text-error]Team memory service not available.[/$text-error]")
+            self._say(status, "[$text-error]Team memory service not available.[/$text-error]")
             return
         try:
             choices = self._form_choices()
             if choices is None:
                 return
             team_slug, role, modules = choices
-            status.update("[$text-warning]Fetching member keys…[/$text-warning]")
+            self._say(status, "[$text-warning]Fetching member keys…[/$text-warning]")
             member_keys = await team_memory_service.list_team_member_keys(team_slug)
-            status.update("[$text-warning]Sharing…[/$text-warning]")
+            self._say(status, "[$text-warning]Sharing…[/$text-warning]")
             grant = await team_memory_service.share_instance(
                 team_slug=team_slug,
                 instance_id=self._instance_id(),
@@ -501,7 +521,7 @@ class ShareInstanceScreen(Screen):
             self.app.pop_screen()
             return
         self._grant = grant
-        self.query_one("#share-status", Static).update(
+        self._say_to("#share-status",
             "[$text-success]Shared successfully.[/$text-success]"
         )
         self._render_form(team_slug, pending)
@@ -519,7 +539,7 @@ class ShareInstanceScreen(Screen):
             return
         self.app.notify("Sharing stopped. Members can no longer read it.", markup=False)
         self._grant = None
-        self.query_one("#share-status", Static).update("")
+        self._say_to("#share-status", "")
         self._render_form(team_slug)
 
     async def _do_reshare(self) -> None:
@@ -533,7 +553,7 @@ class ShareInstanceScreen(Screen):
         _, role, modules = choices
         status = self.query_one("#share-status", Static)
         try:
-            status.update("[$text-warning]Sharing again…[/$text-warning]")
+            self._say(status, "[$text-warning]Sharing again…[/$text-warning]")
             member_keys = await service.list_team_member_keys(team_slug)
             new_grant = await service.reshare_instance(
                 team_slug, grant.id, self._instance_id(), role, modules, member_keys,
@@ -563,7 +583,7 @@ class ShareInstanceScreen(Screen):
             f"Sharing stopped and {deleted} member copies deleted.", markup=False,
         )
         self._grant = None
-        self.query_one("#share-status", Static).update("")
+        self._say_to("#share-status", "")
         self._render_form(team_slug)
 
 
