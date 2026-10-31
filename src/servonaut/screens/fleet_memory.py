@@ -32,6 +32,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.services.memory.fleet_scan_service import row_reason_text
@@ -144,6 +145,10 @@ class FleetScanSummaryModal(ModalScreen[None]):
         margin-left: 1;
     }
     """
+
+    # Nothing skipped unless the summary says so: a modal built without the
+    # argument (or by an older caller) still renders.
+    _skipped: List[str] = []
 
     def __init__(
         self,
@@ -431,7 +436,20 @@ class FleetMemoryScreen(Screen):
         """
         scan_service = getattr(self.app, "fleet_scan_service", None)
         reasons = getattr(scan_service, "last_reasons", None)
-        text = row_reason_text(reasons.get(raw_id, "")) if isinstance(reasons, dict) else ""
+        if not isinstance(reasons, dict):
+            return "—"
+        # The scan files a reason under the id of the row it probed, which in
+        # demo mode is a stand-in; the merged table asks with the real id.
+        # Both are compared by their real id, so no path needs the other's.
+        wanted = real_instance_id(self.app, raw_id)
+        code = reasons.get(raw_id, "") or next(
+            (
+                value for key, value in reasons.items()
+                if real_instance_id(self.app, key) == wanted
+            ),
+            "",
+        )
+        text = row_reason_text(code)
         return f"[red]{text}[/red]" if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
@@ -755,6 +773,14 @@ class FleetMemoryScreen(Screen):
             eligible.append(inst)
         return eligible
 
+    def _only_stopped_candidates(self, stale_only: bool) -> bool:
+        """True when the fleet has servers the scan would skip as stopped."""
+        scan_service = getattr(self.app, "fleet_scan_service", None)
+        skipped = getattr(scan_service, "skipped_instances", None)
+        if not callable(skipped):
+            return False
+        return bool(skipped(memory_fleet_rows(self.app), stale_only=stale_only))
+
     def _launch_bulk_scan(self, stale_only: bool) -> None:
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
@@ -774,6 +800,13 @@ class FleetMemoryScreen(Screen):
         # for a minor optimisation (disk reads, not SSH).  If this becomes
         # measurable on very large fleets, hoist the list and thread it through.
         instances = self._eligible_instances(stale_only, memory_service)
+        if not instances and self._only_stopped_candidates(stale_only):
+            # Nothing to probe, but the scan still records which servers it
+            # skipped and why; it starts no connection.
+            self._scanning = self.app.start_fleet_manual_scan(
+                memory_fleet_rows(self.app), stale_only=stale_only
+            )
+            return
         if not instances:
             msg = (
                 "No stale memory to refresh."

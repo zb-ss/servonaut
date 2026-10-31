@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from unittest.mock import patch
 
 from servonaut.screens.fleet_memory import FleetMemoryScreen
 from servonaut.services.memory.fleet_scan_service import FleetScanService
@@ -121,3 +122,63 @@ class TestRowShowsReason:
         )
         screen._populate_table()
         assert "web-1" not in table.add_row.call_args.args[-1]
+
+
+class TestDemoModeReasons:
+    """The scan files a reason under the id of the row it probed (a fake one in
+    demo mode); the merged table knows the real id. Both must find it."""
+
+    def _demo_screen(self, merged_id: str):
+        row = {"id": "demo-1", "name": "demo-1", "provider": "aws"}
+        screen, table = _screen({"demo-1": "stopped"}, [row])
+        redaction = MagicMock()
+        redaction.real_instance_id = lambda value: "i-real" if value == "demo-1" else value
+        redaction.redact_name = lambda value: "demo-1"
+        redaction.redact_instance_id = lambda value: "demo-1"
+        redaction.redact_provider = lambda value: value
+        screen.app.demo_mode = True
+        screen.app.redaction_service = redaction
+        screen.app.real_instance_id = redaction.real_instance_id
+        return screen, table, merged_id
+
+    def test_the_merged_table_finds_the_reason_by_the_real_id(self) -> None:
+        screen, table, real_id = self._demo_screen("i-real")
+        with patch("servonaut.screens.fleet_memory.compute_memory_status", return_value="none"):
+            screen._populate_table_from_merged(
+                [{"id": real_id, "name": "web", "provider": "aws", "source": "local"}]
+            )
+        assert "stopped" in table.add_row.call_args.args[-1]
+
+    def test_the_local_table_still_finds_it_by_the_listed_id(self) -> None:
+        screen, table, _ = self._demo_screen("i-real")
+        screen._populate_table()
+        assert "stopped" in table.add_row.call_args.args[-1]
+
+
+class TestAllStoppedFleet:
+    def _launch(self, rows):
+        service = _scan_service(_report("ok", "ok"))
+        screen, _ = _screen({}, rows)
+        screen.app.fleet_scan_service = service
+        screen.app.start_fleet_manual_scan = MagicMock(return_value=True)
+        screen.app._fleet_manual_scan_in_progress = False
+        screen._set_progress = MagicMock()
+        screen._launch_bulk_scan(stale_only=False)
+        return screen.app
+
+    def test_stopped_servers_alone_still_get_a_skipped_summary(self) -> None:
+        stopped = {"id": "web-1", "name": "web-1", "provider": "aws", "state": "stopped"}
+        app = self._launch([stopped])
+        app.start_fleet_manual_scan.assert_called_once()
+
+    def test_an_empty_fleet_still_says_there_is_nothing_to_scan(self) -> None:
+        app = self._launch([])
+        app.start_fleet_manual_scan.assert_not_called()
+        assert app.notify.call_args.args[0] == "No instances available to scan."
+
+    def test_the_scan_probes_nothing_and_reports_the_skip(self) -> None:
+        stopped = {"id": "web-1", "name": "web-1", "state": "stopped"}
+        service = _scan_service(_report("ok", "ok"))
+        result = asyncio.run(service.scan([stopped], stale_only=False))
+        assert result.skipped == ["web-1"] and service.last_reasons == {"web-1": "stopped"}
+        service._memory_service.build_report.assert_not_called()

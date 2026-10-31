@@ -192,6 +192,19 @@ class FleetScanService:
         """
         return self._partition(instances, stale_only=stale_only)[0]
 
+    def skipped_instances(
+        self,
+        instances: List[Dict[str, Any]],
+        *,
+        stale_only: bool,
+    ) -> List[Dict[str, Any]]:
+        """Return the subset of *instances* :meth:`scan` skips as stopped.
+
+        Lets a caller tell an empty fleet from one whose servers are all
+        stopped, which still produces a skipped summary.
+        """
+        return self._partition(instances, stale_only=stale_only)[1]
+
     def _partition(
         self,
         instances: List[Dict[str, Any]],
