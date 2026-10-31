@@ -51,12 +51,16 @@ def test_cli_build_prints_saved_modules_and_warns_about_the_rest(capsys):
     assert "not saved" in captured.err
 
 
-def test_cli_build_json_lists_unsaved_modules(capsys):
+def test_cli_build_json_keeps_stdout_a_map_of_saved_modules(capsys):
     args = SimpleNamespace(json=True, modules=None)
-    _cmd_build(args, None, _service(_partial()), dict(SERVER))
-    out = json.loads(capsys.readouterr().out)
-    assert set(out) == {"runtimes", "_unsaved"}
-    assert out["_unsaved"] == ["os"]
+    assert _cmd_build(args, None, _service(_partial()), dict(SERVER)) == _EXIT_PARTIAL_FAILURE
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    # Every value is a module object, so a script can read each one alike;
+    # the modules that were not saved are named on stderr and in the exit code.
+    assert set(out) == {"runtimes"}
+    assert all(isinstance(value, dict) and value["module"] == key for key, value in out.items())
+    assert "not saved" in captured.err
 
 
 def test_cli_refresh_does_not_claim_a_refresh_for_unsaved_modules(capsys):

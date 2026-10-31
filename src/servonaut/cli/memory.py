@@ -331,8 +331,8 @@ def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
                 }
                 for k, v in results.items()
             }
-            if report.unsaved:
-                out["_unsaved"] = sorted(report.unsaved)
+            # Saved modules only: the unsaved ones are named on stderr and in
+            # the exit code, so every value stays a module object.
             print(json.dumps(out, indent=2))
         else:
             iid = inst.get("id") or inst.get("name", "?")
