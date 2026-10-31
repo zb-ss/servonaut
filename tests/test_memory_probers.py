@@ -516,7 +516,7 @@ class TestLogsProber:
         # Both probers return different path lists for different instances.
         def _make_log_viewer(expected_instance_id, paths):
             mock_log_viewer = MagicMock()
-            async def _probe(inst, ssh_svc, conn_svc):
+            async def _probe(inst, ssh_svc, conn_svc, **_rows):
                 assert inst["id"] == expected_instance_id, (
                     f"LogsProber called probe_log_paths with wrong instance: "
                     f"expected {expected_instance_id!r}, got {inst['id']!r}"
@@ -570,13 +570,13 @@ class TestLogsProber:
         instance_b = {"id": "i-def456", "name": "db-1", "public_ip": "10.0.0.2"}
 
         # Each log viewer only succeeds for the correct instance.
-        async def _probe_log_paths_a(inst, ssh_svc, conn_svc):
+        async def _probe_log_paths_a(inst, ssh_svc, conn_svc, **_rows):
             await asyncio.sleep(0)  # yield to allow interleaving
             if inst["id"] != "i-abc123":
                 raise AssertionError(f"prober_a called with wrong instance {inst['id']!r}")
             return ["/var/log/nginx/access.log"]
 
-        async def _probe_log_paths_b(inst, ssh_svc, conn_svc):
+        async def _probe_log_paths_b(inst, ssh_svc, conn_svc, **_rows):
             await asyncio.sleep(0)
             if inst["id"] != "i-def456":
                 raise AssertionError(f"prober_b called with wrong instance {inst['id']!r}")
