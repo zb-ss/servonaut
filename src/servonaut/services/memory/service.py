@@ -274,6 +274,9 @@ class MemoryService(MemoryServiceInterface):
         connection_service: Optional connection service for resolving SSH params.
     """
 
+    # Class-level so a stand-in built without __init__ still works.
+    _connection_rows: Any = None
+
     def __init__(
         self,
         store: Optional[MemoryStore] = None,
