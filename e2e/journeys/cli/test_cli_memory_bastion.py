@@ -55,7 +55,5 @@ def test_a_build_through_a_bastion_opens_one_shared_connection_and_closes_it(
     socket_pattern = _option(masters[0], "ControlPath")
     assert socket_pattern and {_option(a, "ControlPath") for a in commands} == {socket_pattern}
     assert len(exits) == 1 and _option(exits[0], "ControlPath") == socket_pattern
-    # The bastion saw the master's hop (and the log-path check, which connects
-    # on its own), not one hop per probe command.
-    hops = [f["destination"] for f in sshd.bastion.sessions("forward")]
-    assert set(hops) == {f"{APP_1.private_ip}:22"} and len(hops) <= 2 < len(commands), hops
+    # The bastion saw the master's single hop, not one per probe command.
+    assert [f["destination"] for f in sshd.bastion.sessions("forward")] == [f"{APP_1.private_ip}:22"]
