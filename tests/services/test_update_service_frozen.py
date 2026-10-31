@@ -781,12 +781,20 @@ class TestReleaseCandidateBuilds:
         service.check_for_update()
         return service
 
-    @pytest.mark.parametrize("newer", ["2.31.0-rc.3", "2.31.0-rc.10", "2.31.0"])
-    def test_a_newer_candidate_or_the_release_is_offered(self, tmp_path, trust_setup, linux_x64, newer) -> None:
+    @pytest.mark.parametrize(
+        ("newer", "offered"),
+        [("2.31.0-rc.3", "2.31.0rc3"), ("2.31.0-rc.10", "2.31.0rc10"), ("2.31.0", "2.31.0")],
+    )
+    def test_a_newer_candidate_or_the_release_is_offered_as_its_tag_spells_it(
+        self, tmp_path, trust_setup, linux_x64, newer, offered
+    ) -> None:
         service = self._check(tmp_path, trust_setup, newer)
 
         assert service.last_check_result is UpdateCheckResult.UPDATE_AVAILABLE
-        assert service.latest_version == newer
+        assert service.latest_version == offered
+        assert service.update_status == f"Update available: v{offered}"
+        # The manifest itself keeps its own spelling.
+        assert service.latest_manifest.product_version == newer
 
     @pytest.mark.parametrize("same_or_older", ["2.31.0-rc.2", "2.31.0-rc.1", "2.30.9"])
     def test_its_own_candidate_or_an_older_one_is_not_offered(

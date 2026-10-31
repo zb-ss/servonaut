@@ -165,6 +165,22 @@ def parse_build_version(version: object) -> SemVer:
     )
 
 
+def build_version_text(version: str) -> str:
+    """Spell a manifest version the way release tags and builds do.
+
+    A release candidate's manifest version X.Y.Z-rc.N reads X.Y.ZrcN; every
+    other version is returned unchanged.
+
+    Raises:
+        ManifestSchemaError: If the value is not a valid semantic version.
+    """
+    semver = parse_semver(version)
+    candidate = semver.prerelease
+    if len(candidate) == 2 and candidate[0] == "rc" and candidate[1].isdigit() and not semver.build:
+        return f"{semver.major}.{semver.minor}.{semver.patch}rc{int(candidate[1])}"
+    return version
+
+
 def parse_timestamp(value: object) -> datetime:
     """Parse an ISO 8601 manifest timestamp into an aware UTC-based datetime.
 

@@ -13,6 +13,7 @@ from servonaut.distribution.manifest import (
     ReleaseArtifact,
     ReleaseChannel,
     ReleaseManifest,
+    build_version_text,
 )
 from servonaut.distribution import manifest as manifest_module
 from servonaut.distribution import trust as trust_module
@@ -178,6 +179,24 @@ class TestSemVerAndDowngrade:
     def test_build_version_refuses_other_candidate_spellings(self, version: object) -> None:
         with pytest.raises(ManifestSchemaError, match="Invalid semantic version string"):
             parse_build_version(version)
+
+    @pytest.mark.parametrize(
+        ("manifest_version", "text"),
+        [
+            ("2.28.0-rc.3", "2.28.0rc3"),
+            ("2.28.0-rc.10", "2.28.0rc10"),
+            ("2.28.0", "2.28.0"),
+            ("2.28.0-beta.1", "2.28.0-beta.1"),
+            ("2.28.0-rc.1.2", "2.28.0-rc.1.2"),
+            ("2.28.0-rc.3+build.7", "2.28.0-rc.3+build.7"),
+        ],
+    )
+    def test_a_manifest_version_reads_as_its_tag_spells_it(
+        self, manifest_version: str, text: str
+    ) -> None:
+        assert build_version_text(manifest_version) == text
+        if text != manifest_version:
+            assert parse_build_version(text) == parse_semver(manifest_version)
 
     def test_a_manifest_version_must_be_a_semantic_version(self) -> None:
         # Only the running build may use the package spelling.

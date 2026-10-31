@@ -35,6 +35,7 @@ from servonaut.distribution import (
     ReleaseChannel,
     ReleaseManifest,
     TrustPolicy,
+    build_version_text,
     channels_accepted_by,
     check_downgrade,
     release_trust_policy,
@@ -377,7 +378,8 @@ class UpdateService:
 
         self._latest_manifest = manifest
         self._target_artifact = target
-        self._latest = manifest.product_version
+        # Offered as its tag spells it: a candidate reads X.Y.ZrcN, not X.Y.Z-rc.N.
+        self._latest = build_version_text(manifest.product_version)
         return self._record(UpdateCheckResult.UPDATE_AVAILABLE)
 
     def _record(self, result: UpdateCheckResult) -> Optional[str]:
