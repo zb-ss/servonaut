@@ -50,6 +50,9 @@ TEAM_MERGED_MARKER = "team_merged.marker"
 #: Folder under the memory root that holds the cross-process lock files.
 LOCKS_DIR = ".locks"
 
+#: File under the memory root held by the one running team-copy merge pass.
+TEAM_MERGE_LOCK = "team_merge.lock"
+
 
 class MemoryCorruptError(ValueError):
     """Stored memory that cannot be trusted: a wrong shape, or a symlink where a plain file belongs."""
@@ -309,6 +312,11 @@ class MemoryStore:
         self._record_lock_wait = (
             DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS, DEFAULT_RECORD_LOCK_POLL_SECONDS,
         )
+
+    @property
+    def root(self) -> Path:
+        """The memory root this store files everything under."""
+        return self._root
 
     @property
     def record_lock_wait(self) -> tuple[float, float]:
@@ -1091,6 +1099,10 @@ class MemoryStore:
                 continue
             found.append(child.name)
         return found
+
+    def merge_pass_lock(self) -> FileLock:
+        """The lock that lets one team-copy merge pass run per computer at a time."""
+        return FileLock(self._root / TEAM_MERGE_LOCK)
 
     def read_merge_marker(self, instance_id: str, provider: str) -> Optional[Dict[str, Any]]:
         """The marker saying this folder was merged elsewhere, or ``None``.

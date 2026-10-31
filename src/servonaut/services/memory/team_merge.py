@@ -14,15 +14,25 @@ losing anything:
 
 The merge is non-destructive. What the service holds is only READ (never
 written into the copy), the copy's folder is never moved or deleted, and its
-queued uploads are dropped only after everything is stored. When the target
-is verified to contain everything, a small marker is written into the copy's
-folder; a later pass skips a marked copy, so a note the user deleted since is
-never brought back. Anything short of that (an unreadable file, a service
-that could not be read, a failed write) leaves no marker, and the next pass
-repeats the idempotent steps. The same rules fold the entry a share left
-behind when it was removed and added again under a new id (see
-:func:`same_share`), and a member's memory that earlier releases filed under
-the team's label.
+queued uploads are dropped only after everything is stored. Once the copy's
+own data is verified to be in the target, a small marker is written into the
+copy's folder; a later pass never merges that data again, so a note the user
+deleted since is never brought back. The marker also says whether the
+service's notes and findings for the share are still owed
+(``remote_pending``: Memory Sync was locked here, or a read was unavailable).
+A later pass with Memory Sync usable reads the service for the share, merges
+only that into the marker's target and clears the flag; uploads the target
+owes continue after that. With Memory Sync not set up nothing is owed. A
+marker from an earlier release has no flag and reads as false. Anything short
+of a verified local merge (an unreadable file, a failed write) leaves no
+marker, and the next pass repeats the idempotent steps. The same rules fold
+the entry a share left behind when it was removed and added again under a new
+id (see :func:`same_share`), and a member's memory that earlier releases
+filed under the team's label.
+
+Only one pass runs per computer at a time (a lock beside the memory root); a
+pass that finds it busy does nothing. The app, the CLI and the MCP server run
+the same pass.
 
 Data that cannot be read (a note that does not decode, a finding file that
 does not parse, a symlink where a file belongs) is never treated as empty:
@@ -80,6 +90,7 @@ class TeamMergeReport:
     findings: int = 0
     modules: int = 0
     kept: List[str] = field(default_factory=list)
+    skipped: bool = False
 
     def message(self) -> str:
         copies = f"{self.copies} team {'copy' if self.copies == 1 else 'copies'}"
@@ -367,13 +378,25 @@ class TeamCopyMerger:
         """The merge marker in *source*'s folder; raises for a corrupt one."""
         return self._store.read_merge_marker(source.instance_id, source.provider)
 
-    def mark_merged(self, source: MemoryKey, target: MemoryKey, *, upload_pending: bool) -> None:
-        self._store.write_merge_marker(source.instance_id, source.provider, {
+    def mark_merged(
+        self, source: MemoryKey, target: MemoryKey, *, upload_pending: bool,
+        remote_pending: bool = False,
+    ) -> Dict[str, Any]:
+        """Write the marker and return what it holds.
+
+        ``remote_pending`` says the service's notes and findings for the share
+        are still owed to the target (Memory Sync was locked, or a read was
+        unavailable).
+        """
+        data = {
             "target_provider": target.provider,
             "target_id": target.instance_id,
             "merged_at": datetime.now(tz=timezone.utc).isoformat(),
             "upload_pending": upload_pending,
-        })
+            "remote_pending": remote_pending,
+        }
+        self._store.write_merge_marker(source.instance_id, source.provider, data)
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -573,10 +596,7 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
         return
     marker = _marker(plan, run)
     if marker is not None:
-        # Merged once: never again, whatever its target is now, so text the
-        # user deleted since does not come back. Only owed uploads continue.
-        if marker.get("upload_pending"):
-            await _retry_uploads(plan, run, marker)
+        await _continue_marked(plan, run, marker)
         return
     remote_notes, remote_records, settled = "", [], run.state == SYNC_OFF
     if run.state == SYNC_READY:
@@ -593,21 +613,89 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
     report.notes += stats.notes
     report.findings += stats.findings
     report.modules += stats.modules
-    if not stats.verified or not settled:
+    if not stats.verified:
         logger.warning("Team copy %s not marked: not everything it held can be confirmed in the target", source_id)
         report.kept.append(source_id)
         return
-    owes = plan.uploads and run.state == SYNC_READY and (stats.held_notes or stats.held_findings)
-    merger.mark_merged(plan.source, plan.target, upload_pending=owes)
+    # The local part is stored: mark it now, whatever the service part, so a
+    # note the user deletes later is never merged back. The service part is
+    # owed (``remote_pending``) until a pass can read and settle it.
+    owes = plan.uploads and run.state != SYNC_OFF and (stats.held_notes or stats.held_findings)
+    data = merger.mark_merged(
+        plan.source, plan.target, upload_pending=owes, remote_pending=not settled
+    )
     report.copies += 1
-    if run.sync_service is not None and plan.uploads and not owes:
-        run.sync_service.drop_pending_for({source_id})
-    if owes:
-        await _retry_uploads(plan, run, {
-            "target_provider": plan.target.provider, "target_id": plan.target.instance_id,
-        })
+    if settled:
+        await _settle_uploads(plan, run, data)
     if source_id != plan.target.instance_id:
         store.remove_index_entry(source_id)
+
+
+async def _settle_uploads(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> None:
+    """Drop the copy's queued uploads, or finish the ones the target owes."""
+    if marker.get("upload_pending"):
+        await _retry_uploads(plan, run, marker)
+    elif run.sync_service is not None and plan.uploads:
+        run.sync_service.drop_pending_for({plan.source.instance_id})
+
+
+async def _continue_marked(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> None:
+    """A marked copy is never merged locally again; only the service part and uploads continue.
+
+    Merged once means a note the user deleted since does not come back. A
+    marker from an earlier release has no ``remote_pending`` and reads false.
+    """
+    if marker.get("remote_pending") is True:
+        marker = await _complete_remote(plan, run, marker)
+    if marker.get("remote_pending") is True:
+        return
+    if marker.get("upload_pending"):
+        await _retry_uploads(plan, run, marker)
+
+
+async def _complete_remote(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge what the service holds into the marker's target; clear the flag when stored.
+
+    Needs a usable Memory Sync. Only the service's text and records are
+    merged (source equals target); the copy's own data is not read again.
+    Returns the marker as it stands afterwards.
+    """
+    if run.state != SYNC_READY:
+        return marker
+    source_id, report = plan.source.instance_id, run.report
+    target = MemoryKey(str(marker.get("target_provider") or ""), str(marker.get("target_id") or ""))
+    store, name = run.memory_service._store, str(plan.target_row.get("name") or "")
+    if not target.provider or not target.instance_id or not store.is_addressable(
+        target.instance_id, target.provider
+    ):
+        logger.warning("Team copy %s: the target its marker names is not addressable", source_id)
+        return marker
+    if run.memory_service.is_memory_disabled(target.instance_id, name):
+        return marker
+    notes, findings = await run.read_remote(source_id, name)
+    if notes.status == "unavailable" or findings.status == "unavailable":
+        report.kept.append(source_id)
+        return marker
+    stats = run.merger.merge(
+        target, target, source_label=plan.label, merged_on=run.merged_on, target_name=name,
+        remote_notes=notes.text if notes.status == "found" else "",
+        remote_records=findings.records if findings.status == "found" else [],
+    )
+    report.notes += stats.notes
+    report.findings += stats.findings
+    if not stats.verified:
+        report.kept.append(source_id)
+        return marker
+    same_target = target == plan.target
+    owes = bool(marker.get("upload_pending")) or (
+        plan.uploads and same_target and (stats.held_notes or stats.held_findings)
+    )
+    data = run.merger.mark_merged(plan.source, target, upload_pending=owes, remote_pending=False)
+    if stats.changed:
+        report.copies += 1
+    if not owes and run.sync_service is not None and plan.uploads:
+        run.sync_service.drop_pending_for({source_id})
+    return data
 
 
 async def _fold_cloud_only(plan: MergePlan, run: _Pass, name: str) -> None:
@@ -668,17 +756,44 @@ async def merge_team_copies(
 
     *rows* are the real records (never demo-redacted). Nothing is moved or
     deleted. With Memory Sync usable, each unmarked copy reads what the service
-    holds for its share id (one pair of reads per id); a marker is written into
-    the copy's folder only when the target is verified to hold everything and
-    both reads were ``found`` or ``absent``. A marked copy is never merged
-    again; only its owed uploads are retried. No marker is written while
-    Memory Sync is set up but locked, or when a read failed: the next pass
-    repeats the idempotent steps. A share with no folder here is merged from
-    the service alone and recorded on the target's index entry. *absent_ids*
-    (kept by the caller for the run) remembers shares the service verifiably
-    holds nothing for. One copy that fails never stops the others.
+    holds for its share id (one pair of reads per id). A marker is written into
+    the copy's folder once the copy's own data is verified in the target; it
+    carries ``remote_pending`` when the service part was not read and settled
+    (Memory Sync locked, or a read unavailable), and a later pass with Memory
+    Sync usable completes it. A marked copy is never merged locally again. A
+    share with no folder here is merged from the service alone and recorded on
+    the target's index entry. *absent_ids* (kept by the caller for the run)
+    remembers shares the service verifiably holds nothing for. A pass that
+    finds another pass running on this computer returns a report with
+    ``skipped`` set. One copy that fails never stops the others.
     """
     report = TeamMergeReport()
+    lock = memory_service._store.merge_pass_lock()
+    try:
+        held = lock.try_acquire()
+    except OSError as exc:
+        logger.warning("Team copy merge skipped: its lock cannot be taken (%s)", type(exc).__name__)
+        held = False
+    if not held:
+        logger.debug("Team copy merge skipped: another pass is running on this computer")
+        report.skipped = True
+        return report
+    try:
+        await _merge_pass(memory_service, sync_service, rows, report, today, absent_ids)
+    finally:
+        lock.release()
+    return report
+
+
+async def _merge_pass(
+    memory_service: Any,
+    sync_service: Any,
+    rows: Sequence[Mapping[str, Any]],
+    report: TeamMergeReport,
+    today: Optional[str],
+    absent_ids: Optional[Set[str]],
+) -> None:
+    """The plans of one pass, run while the machine-wide pass lock is held."""
     merger = TeamCopyMerger(memory_service)
     store = memory_service._store
     merged_on = today or datetime.now(tz=timezone.utc).date().isoformat()
@@ -695,4 +810,3 @@ async def merge_team_copies(
         except _PLAN_ERRORS as exc:
             logger.warning("Team copy %s kept: %s", plan.source.instance_id, type(exc).__name__)
             report.kept.append(plan.source.instance_id)
-    return report
