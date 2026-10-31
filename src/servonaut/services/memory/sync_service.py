@@ -36,7 +36,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 from servonaut.services.api_client import (
     APIError,
@@ -2124,8 +2124,19 @@ class MemorySyncService:
 
         path = self._queue_path.parent / "team_wrap_pins.json"
         if self._wrap_pins is None or self._wrap_pins._path != path:
-            self._wrap_pins = WrapPinStore(path)
+            self._wrap_pins = WrapPinStore(path, lock_wait=self._record_lock_wait)
         return self._wrap_pins
+
+    def _record_lock_wait(self) -> Tuple[float, float]:
+        """``(timeout, poll)`` seconds from the memory settings, the defaults when unusable."""
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        memory = getattr(self._config_manager.get(), "memory", None)
+        wait = getattr(memory, "record_lock_wait", None)
+        result = wait() if callable(wait) else None
+        if isinstance(result, tuple) and len(result) == 2:
+            return result
+        return MemoryConfig().record_lock_wait()
 
     @staticmethod
     def _pin_sealed(
