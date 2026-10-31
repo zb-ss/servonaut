@@ -9,6 +9,8 @@ import pytest
 
 from e2e.harness.fake_cloud.routes_memory import MemoryCloud
 
+pytestmark = [pytest.mark.e2e_pr]
+
 OWNER_ID, TEAM = 1, "team-a"
 
 
