@@ -16,10 +16,10 @@
       "source": "packaging/desktop_shell/frontend/bootstrap.js",
       "route": "/bootstrap.js",
       "content_type": "text/javascript; charset=utf-8",
-      "source_sha256": "276135ee45679b9dd2908b12344fcb3eefa3ad92c2a3e633538bf33cd52a092b",
-      "source_size": 2077,
-      "transformed_sha256": "276135ee45679b9dd2908b12344fcb3eefa3ad92c2a3e633538bf33cd52a092b",
-      "transformed_size": 2077,
+      "source_sha256": "17a75d9fe384be60162b9294b8fe7156da5d4af91a3d4cf5af55b5bc1e03428b",
+      "source_size": 3227,
+      "transformed_sha256": "17a75d9fe384be60162b9294b8fe7156da5d4af91a3d4cf5af55b5bc1e03428b",
+      "transformed_size": 3227,
       "transform": null,
       "license": "servonaut"
     },
@@ -40,9 +40,9 @@
       "content_type": "text/javascript; charset=utf-8",
       "source_sha256": "c1e7f29ed0facdd331181d6262f92acfc1cf908569d9e013c16038142a23a470",
       "source_size": 514152,
-      "transformed_sha256": "cafb16e597f4b2a3d0dc43d3d500abb97701154b730ab2702ee07a57ec94898b",
-      "transformed_size": 514078,
-      "transform": "canvas_renderer_no_webgl",
+      "transformed_sha256": "0f8741997360149f4723ed014669e23aed5f17fc869bcde2f7094e9a1725f3d4",
+      "transformed_size": 514509,
+      "transform": "desktop_terminal",
       "license": "textual_serve"
     },
     "xterm.css": {

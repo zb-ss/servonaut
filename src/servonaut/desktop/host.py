@@ -52,6 +52,9 @@ SESSION_CONNECTED_MESSAGE: Final[str] = "Desktop session connected"
 # the terminal grid leaves at the window's edges matches it. The page's own
 # script reads it; Textual's ignores messages it does not know.
 THEME_MESSAGE: Final[str] = "servonaut_theme"
+# The page asks the app to open a link the user clicked in the terminal (a
+# hyperlink, or an address found in the text). The driver checks and opens it.
+OPEN_URL_MESSAGE: Final[str] = "open_url"
 _HEX_COLOUR: Final[re.Pattern[str]] = re.compile(r"#[0-9a-f]{6}")
 
 
@@ -451,6 +454,12 @@ class DesktopHost:
                     and isinstance(envelope[1], str)
                 ):
                     await ws.send_json(["pong", envelope[1]])
+                elif (
+                    kind == OPEN_URL_MESSAGE
+                    and len(envelope) == 2
+                    and isinstance(envelope[1], str)
+                ):
+                    transport.open_page_link(envelope[1])
                 else:
                     raise ValueError("Unsupported message")
             except (ValueError, TypeError, KeyError, OverflowError):

@@ -127,3 +127,17 @@ async def test_ssh_failures_are_still_shown_in_red() -> None:
 ])
 def test_only_the_saved_host_key_note_counts_as_a_notice(line: str, expected: bool) -> None:
     assert is_known_hosts_notice(line) is expected
+
+
+@pytest.mark.asyncio
+async def test_the_servers_output_is_shown_as_text_not_markup() -> None:
+    planted = "[link=https://evil.example]https://docs.example.com[/link] [bold]x[/bold] [/oops]"
+    lines = await _lines_after("", stdout=planted.encode() + b"\n")
+
+    # The log may wrap the line; read it back whole.
+    shown = " ".join(strip.text.strip() for strip in lines if strip.text.strip())
+    assert planted in shown
+    # No hidden link: what the line says is all it is.
+    assert all(
+        segment.style is None or not segment.style.link for strip in lines for segment in strip
+    )

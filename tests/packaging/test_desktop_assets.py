@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 
 from scripts.desktop_shell.assets import (
+    TERMINAL_LINK_PATCHES,
     WEBGL_REGISTRATION,
     AssetPolicyError,
     build_csp_header,
     canvas_renderer,
+    desktop_terminal,
     find_upstream_static_dir,
     load_staged_assets,
     render_index_html,
@@ -69,6 +71,21 @@ def test_bootstrap_js_protocol_and_security() -> None:
     )
     assert 'target.origin !== expected.origin || target.pathname !== "/ws"' in js
     assert 'document.body.classList.add("-startup-error");' in js
+
+
+def test_bootstrap_js_sends_terminal_links_to_the_app() -> None:
+    js = (_FRONTEND_ROOT / "bootstrap.js").read_text(encoding="utf-8")
+    # A web view opens no window for a script: links go over the session.
+    assert "window.open" not in js
+    assert 'session.send(JSON.stringify(["open_url", uri]));' in js
+    assert "session.readyState === NativeWebSocket.OPEN" in js
+    # Hyperlinks open on a click; addresses found in text take Ctrl/Cmd.
+    assert "hyperlink: (event, uri) => openLink(event, uri, false)," in js
+    assert "address: (event, uri) => openLink(event, uri, true)," in js
+    assert "if (needsModifier && !(event.ctrlKey || event.metaKey)) return;" in js
+    assert "window.servonautTerminalLinks = Object.freeze({" in js
+    # A hyperlink's text may differ from its address: the hover names it.
+    assert "hyperlinkHover: (uri) => { terminal.title = `Opens ${uri}`; }," in js
 
 
 def test_style_css_properties() -> None:
@@ -149,6 +166,51 @@ def test_canvas_renderer_transform() -> None:
         canvas_renderer(dummy_source + WEBGL_REGISTRATION)
 
 
+def _renderer_with_link_anchors(middle: bytes = b"") -> bytes:
+    terminal, web_links, mouse_up = (original for original, _ in TERMINAL_LINK_PATCHES)
+    return (
+        b"a;" + terminal + b"b;" + WEBGL_REGISTRATION + web_links + middle + b"c;" + mouse_up
+    )
+
+
+def test_desktop_terminal_transform_routes_both_kinds_of_link() -> None:
+    transformed = desktop_terminal(_renderer_with_link_anchors())
+    assert WEBGL_REGISTRATION not in transformed
+    for original, routed in TERMINAL_LINK_PATCHES:
+        assert original not in transformed
+        assert transformed.count(routed) == 1
+    # The page script receives OSC 8 hyperlinks (and their hover, which names
+    # the address) and detected addresses.
+    assert b"linkHandler:{activate:(e,t)=>window.servonautTerminalLinks.hyperlink(e,t)," in transformed
+    assert b"hover:(e,t)=>window.servonautTerminalLinks.hyperlinkHover(t)," in transformed
+    assert b"WebLinksAddon((e,t)=>window.servonautTerminalLinks.address(e,t)," in transformed
+    # A press and release on the same address count as a click, even when the
+    # app redrew the row in between (upstream compares link objects).
+    assert b"this._mouseDownLink===this._currentLink" not in transformed
+    assert b"this._mouseDownLink.link.text===this._currentLink.link.text" in transformed
+
+
+def test_desktop_terminal_transform_requires_each_anchor_once() -> None:
+    terminal, web_links, _ = (original for original, _ in TERMINAL_LINK_PATCHES)
+    with pytest.raises(AssetPolicyError, match="Expected exactly 1 link anchor"):
+        desktop_terminal(b"a;" + WEBGL_REGISTRATION + web_links)
+    with pytest.raises(AssetPolicyError, match="Expected exactly 1 link anchor"):
+        desktop_terminal(_renderer_with_link_anchors(terminal))
+
+
+def test_the_pinned_renderer_bundle_takes_the_desktop_transform() -> None:
+    upstream = find_upstream_static_dir()
+    if upstream is None:
+        pytest.skip("textual-serve is not installed")
+    source = (upstream / "js" / "textual.js").read_bytes()
+    lock = load_assets_lock(_LOCK_PATH)["textual.js"]
+    if hashlib.sha256(source).hexdigest() != lock.source_sha256:
+        pytest.skip("installed textual-serve differs from the pinned bundle")
+    transformed = desktop_terminal(source)
+    assert lock.transform == "desktop_terminal"
+    assert hashlib.sha256(transformed).hexdigest() == lock.transformed_sha256
+
+
 def test_render_index_html_transform() -> None:
     source = b'<html><div data-font-size="FONT_SIZE"></div></html>'
     transformed = render_index_html(source, font_size=16)
@@ -166,12 +228,12 @@ def test_frontend_staging_synthetic_pipeline(tmp_path: Path) -> None:
     (upstream_dir / "fonts").mkdir()
 
     # Upstream source files
-    mock_js = b"console.log('init');" + WEBGL_REGISTRATION + b"console.log('ready');"
+    mock_js = _renderer_with_link_anchors()
     mock_js_file = upstream_dir / "js" / "mock.js"
     mock_js_file.write_bytes(mock_js)
     mock_js_sha = hashlib.sha256(mock_js).hexdigest()
 
-    mock_js_transformed = canvas_renderer(mock_js)
+    mock_js_transformed = desktop_terminal(mock_js)
     mock_js_trans_sha = hashlib.sha256(mock_js_transformed).hexdigest()
 
     mock_font = b"mock-ttf-binary-data"
@@ -207,7 +269,7 @@ def test_frontend_staging_synthetic_pipeline(tmp_path: Path) -> None:
                 "source_size": len(mock_js),
                 "transformed_sha256": mock_js_trans_sha,
                 "transformed_size": len(mock_js_transformed),
-                "transform": "canvas_renderer_no_webgl",
+                "transform": "desktop_terminal",
                 "license": "textual_serve",
             },
             "mock.ttf": {
