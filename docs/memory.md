@@ -300,6 +300,34 @@ Memory is configured under the `memory` key in `~/.servonaut/config.json`:
 - `disabled_modules` — module names that are globally skipped.
 - `per_server_overrides` — map keyed by **either** cloud ID or name; `{"memory_disabled": true}` opts that server out entirely.
 
+### Connections and rate limits
+
+A memory refresh connects the same way `servonaut ssh` does: a server of your own with no local key uses the vault key of a team that shares it, and the hop to a bastion uses the bastion's own vault key when it has one. These keys tune how probes connect; the defaults suit most fleets.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `vault_rate_limit_max_wait_seconds` | `20` | When the Servonaut service is limiting requests from this computer, a server's refresh waits once for the time the service asks (up to this long), then tries again. A second refusal, or a longer ask, reports the server as rate limited. |
+| `vault_rate_limit_jitter_seconds` | `2` | A random extra pause added to that wait, so servers refused together do not all retry at the same moment. |
+| `ssh_max_connections_per_bastion` | `4` | Most SSH logins in progress at once through one bastion, across every server being refreshed. |
+| `ssh_max_connections_per_server` | `4` | Most connections one server's refresh opens at once where connections cannot be shared (Windows). |
+| `ssh_master_connect_timeout_seconds` | `20` | Time the refresh's shared connection may take to log in. |
+| `ssh_control_persist_seconds` | `30` | How long an idle shared connection stays open if it could not be closed when the refresh ended. |
+| `ssh_close_timeout_seconds` | `5` | Time allowed for closing the shared connection when a refresh ends. |
+| `ssh_connect_retry_backoff_seconds` | `1` | Pause before the one retry of a connection that dropped before anything answered. |
+| `ssh_control_socket_dir` | `""` | Where the shared connection's private socket folder is created. Empty uses your temporary directory, or `/tmp` when that path is too long for a socket. |
+
+On Linux and macOS a refresh opens **one** SSH connection per server and runs every probe over it, so a fleet behind one bastion no longer floods its SSH daemon. Windows' OpenSSH cannot share connections; the per-server cap applies there instead. A server counts as unreachable only when no probe command answered and one retry failed too.
+
+Stopped and terminated servers (AWS, OVH, Hetzner) are skipped and counted as "skipped: stopped", not as failures. After a scan, Fleet Memory shows why each server's refresh did not succeed: login refused, unreachable, no answer in time, no usable vault key, rate limited, host key not trusted, or stopped (skipped).
+
+### Servers a team also shares
+
+When a team shares a server that is also one of your own, memory treats it as one server: Fleet Memory lists it once, a scan probes it once, and the AI chat gets one memory block for it. Notes and findings you write for it are kept with your own server.
+
+Earlier releases could keep a separate record for the team's copy. The first time Servonaut sees both, it merges that copy into your own record without losing anything: newer probe results replace older ones, findings are merged record by record, and notes are never overwritten. A note only the copy had is added under a heading that says where it came from. The copy's folder is left on disk, marked with a `team_merged.marker` file, and is not merged again. Servonaut then says once what it merged.
+
+A team's server you do not own yourself keeps its own record, filed under `~/.servonaut/memory/shared/<share id>/` rather than under the team's name.
+
 ---
 
 ## Secret redaction

@@ -23,10 +23,12 @@ no cache and close the lease when they are done.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import ipaddress
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
@@ -87,6 +89,16 @@ class VaultLeaseCache:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._entries: dict[tuple[str, ...], tuple[Any, float]] = {}
+        self._inflight: dict[tuple[str, ...], "asyncio.Future[Any]"] = {}
+        # Bumped when a binding changes: a lookup that started before cannot
+        # publish its lease, and a later caller does not join it.
+        self._generations: dict[tuple[str, ...], int] = {}
+        self._epoch = 0
+        self._waiters: dict["asyncio.Future[Any]", int] = {}
+
+    def generation(self, key: tuple[str, ...]) -> tuple[int, int]:
+        """A token that changes whenever *key*'s binding is forgotten (or the cache cleared)."""
+        return self._epoch, self._generations.get(key, 0)
 
     def get(self, key: tuple[str, ...]) -> Any:
         entry = self._entries.get(key)
@@ -99,7 +111,12 @@ class VaultLeaseCache:
             return None
         return lease
 
-    def put(self, key: tuple[str, ...], lease: Any, ttl_seconds: Optional[float]) -> None:
+    def put(
+        self, key: tuple[str, ...], lease: Any, ttl_seconds: Optional[float],
+        generation: Optional[tuple[int, int]] = None,
+    ) -> None:
+        if generation is not None and generation != self.generation(key):
+            return  # the binding changed while this lookup ran
         reuse = (
             float(ttl_seconds) - _EXPIRY_MARGIN_SECONDS
             if isinstance(ttl_seconds, (int, float)) and not isinstance(ttl_seconds, bool) and ttl_seconds > 0
@@ -108,12 +125,60 @@ class VaultLeaseCache:
         if reuse > 0:
             self._entries[key] = (lease, self._clock() + reuse)
 
+    async def single_flight(
+        self, key: tuple[str, ...], fetch: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """The cached lease for *key*, or the one lookup every concurrent caller shares.
+
+        Callers that arrive while a lookup for *key* is running wait for it
+        instead of sending their own (two servers behind one bastion share
+        the bastion's lease). A failure reaches every waiting caller; the
+        next call looks again. A cancelled caller leaves the lookup running
+        for the others; the lookup ends when the last caller waiting for it goes.
+        """
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(fetch())
+            self._inflight[key] = task
+            task.add_done_callback(lambda done, key=key: self._finish(key, done))
+        self._waiters[task] = self._waiters.get(task, 0) + 1
+        try:
+            return await asyncio.shield(task)
+        finally:
+            remaining = self._waiters[task] - 1
+            if remaining > 0:
+                self._waiters[task] = remaining
+            else:
+                del self._waiters[task]
+                # Nobody is waiting for this lookup any more: do not finish
+                # activating a credential for an abandoned operation.
+                if not task.done():
+                    if self._inflight.get(key) is task:
+                        del self._inflight[key]  # a caller arriving now starts a fresh lookup
+                    task.cancel()
+
+    def _finish(self, key: tuple[str, ...], task: "asyncio.Future[Any]") -> None:
+        # A lookup started after forget() may have replaced this one.
+        if self._inflight.get(key) is task:
+            del self._inflight[key]
+        if not task.cancelled():
+            # Every waiter may have been cancelled: never leave the error unretrieved.
+            task.exception()
+
     def forget(self, instance: Mapping[str, Any]) -> None:
-        """Stop reusing a server's lease (its binding changed)."""
-        self._entries.pop(lease_key(instance), None)
+        """Stop reusing a server's lease (its binding changed), including a lookup in flight."""
+        key = lease_key(instance)
+        self._entries.pop(key, None)
+        self._inflight.pop(key, None)
+        self._generations[key] = self._generations.get(key, 0) + 1
 
     def clear(self) -> None:
         self._entries.clear()
+        self._inflight.clear()
+        self._epoch += 1
 
 
 def _check_lease(lease: Any) -> None:
@@ -147,10 +212,20 @@ async def vault_lease(
             )
         return None
     key = lease_key(instance)
-    if cache is not None:
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
+    if cache is None:
+        return await _fetch_lease(instance, vault_runtime, native, None, key)
+    generation = cache.generation(key)
+    return await cache.single_flight(
+        key, lambda: _fetch_lease(instance, vault_runtime, native, cache, key, generation),
+    )
+
+
+async def _fetch_lease(
+    instance: Mapping[str, Any], vault_runtime: Any, native: bool,
+    cache: Optional[VaultLeaseCache], key: tuple[str, ...],
+    generation: Optional[tuple[int, int]] = None,
+) -> Any:
+    """One lookup of *instance*'s lease at the vault runtime (see :func:`vault_lease`)."""
     try:
         lease = await vault_runtime.resolve_ssh(instance)
     except Exception as exc:  # noqa: BLE001 - every failure fails closed
@@ -165,7 +240,7 @@ async def vault_lease(
         return None
     _check_lease(lease)
     if cache is not None:
-        cache.put(key, lease, getattr(vault_runtime, "agent_key_ttl_seconds", None))
+        cache.put(key, lease, getattr(vault_runtime, "agent_key_ttl_seconds", None), generation)
     return lease
 
 
@@ -270,6 +345,7 @@ async def bastion_lease(
     vault_runtime: Any,
     connection_service: Any,
     cache: Optional[VaultLeaseCache] = None,
+    raise_rate_limited: bool = False,
 ) -> Any:
     """The vault lease of *profile*'s bastion, or None to keep the user's own hop setup.
 
@@ -308,13 +384,13 @@ async def bastion_lease(
     name = str(row.get("name") or row.get("id") or profile.bastion_host)
     if _behind_proxy(row, name, connection_service):
         return None
-    lease = await _bastion_row_lease(row, name, vault_runtime, cache)
+    lease = await _bastion_row_lease(row, name, vault_runtime, cache, raise_rate_limited)
     if lease is not None or is_shared_row(row) or getattr(profile, "bastion_key", None):
         return lease
     team = team_twin(row, rows)
     if team is None or _behind_proxy(team, name, connection_service):
         return None
-    lease = await _bastion_row_lease(team, name, vault_runtime, cache)
+    lease = await _bastion_row_lease(team, name, vault_runtime, cache, raise_rate_limited)
     if lease is not None:
         logger.info("The hop to the bastion %s uses the key of the team %s", name, row_team_label(team))
     return lease
@@ -376,6 +452,7 @@ def _behind_proxy(row: Mapping[str, Any], name: str, connection_service: Any) ->
 
 async def _bastion_row_lease(
     row: Mapping[str, Any], name: str, vault_runtime: Any, cache: Optional[VaultLeaseCache],
+    raise_rate_limited: bool = False,
 ) -> Any:
     """The vault lease of the bastion's server *row* (:func:`bastion_lease`), or None."""
     try:
@@ -383,6 +460,8 @@ async def _bastion_row_lease(
     except VaultCredentialError as exc:
         if _is_untrusted(exc):
             raise VaultCredentialError(f"The bastion {name}: {exc}") from exc
+        if raise_rate_limited and rate_limit_wait(exc)[0]:
+            raise
         logger.warning("The vault key of the bastion %s cannot be used here: %s", name, exc)
         return None
 
@@ -404,8 +483,10 @@ def apply_vault_lease(
     profile = _route_profile(applied, instance, connection_service)
     if profile is not None and connection_service is not None:
         proxy_args = connection_service.get_proxy_args(profile, hop=hop)
+    # The route actually used: callers that cap connections per bastion key on it.
     applied.update(
         {
+            **({"profile": profile} if profile is not None else {}),
             "username": getattr(lease, "login_user", None) or applied.get("username"),
             # The lease is the only private-key source: a local key file left
             # here would be offered before the agent's key.
@@ -444,8 +525,13 @@ async def resolve_with_vault(
     cache: Optional[VaultLeaseCache] = None,
     team_rows: Iterable[Mapping[str, Any]] = (),
     rows: Optional[Iterable[Mapping[str, Any]]] = None,
+    raise_rate_limited: bool = False,
 ) -> dict[str, Any]:
     """*conn* unchanged, or with the server's vault credential applied.
+
+    With *raise_rate_limited*, a team-key lookup the service refused for
+    rate limiting raises instead of falling back to the user's own
+    connection, so a caller that can wait for Retry-After gets to.
 
     A server of the user's own without a vault credential or a local key
     for its key pair connects with a team's vault key or SSH certificate
@@ -471,6 +557,7 @@ async def resolve_with_vault(
     async def hop_for(profile: Any) -> Any:
         return await bastion_lease(
             profile, fleet, vault_runtime=vault_runtime, connection_service=connection_service, cache=cache,
+            raise_rate_limited=raise_rate_limited,
         )
 
     lease = await vault_lease(instance, vault_runtime, cache=cache)
@@ -485,6 +572,8 @@ async def resolve_with_vault(
     try:
         lease = await vault_lease(team, vault_runtime, cache=cache)
     except VaultCredentialError as exc:
+        if raise_rate_limited and rate_limit_wait(exc)[0]:
+            raise
         logger.warning("Not using the team's key for %s here: %s", instance.get("name") or instance.get("id"), exc)
         return await _with_hop(conn, instance, connection_service, hop_for)
     if lease is None:
@@ -511,10 +600,60 @@ async def _with_hop(conn: Mapping[str, Any], instance: Mapping[str, Any], connec
     profile = _route_profile(applied, instance, connection_service)
     if profile is None or connection_service is None:
         return applied
+    applied["profile"] = profile  # the route actually used (see apply_vault_lease)
     hop = await hop_for(profile)
     if hop is not None:
         applied["proxy_args"] = connection_service.get_proxy_args(profile, hop=hop)
     return applied
+
+
+def rate_limit_wait(exc: BaseException) -> tuple[bool, Optional[float]]:
+    """``(rate_limited, seconds)`` for a vault failure.
+
+    *rate_limited* is true when the Servonaut service refused the lookup with
+    429 (or reads are paused after such a refusal); *seconds* is how long it
+    asked to wait, None when it did not say. Looks through the chain
+    :func:`vault_lease` raises from.
+    """
+    from servonaut.services.retry_after import is_rate_limited, retry_after_seconds
+    from servonaut.services.vault.binding_reads import BindingReadsPaused
+
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            break
+        if isinstance(seen, BindingReadsPaused) and seen.retry_after is not None:
+            return True, seen.retry_after
+        if isinstance(seen, Exception) and is_rate_limited(seen):
+            return True, retry_after_seconds(seen)
+        seen = seen.__cause__
+    return False, None
+
+
+#: Returns ``(team_rows, fleet_rows)``; may be a plain function or a coroutine function.
+ConnectionRowsSupplier = Callable[[], Any]
+
+
+async def load_connection_rows(
+    supplier: Optional[ConnectionRowsSupplier],
+) -> tuple[list[Mapping[str, Any]], Optional[list[Mapping[str, Any]]]]:
+    """``(team_rows, fleet_rows)`` from *supplier*, or no rows when it is unset or fails.
+
+    The rows are only needed for a team key and a bastion's vault key, so a
+    supplier that cannot answer (signed out, service down) leaves the
+    connection as the user's own setup resolves it, and never fails the build.
+    """
+    if supplier is None:
+        return [], None
+    try:
+        result = supplier()
+        if inspect.isawaitable(result):
+            result = await result
+        team_rows, fleet_rows = result
+        return list(team_rows or []), (list(fleet_rows) if fleet_rows is not None else None)
+    except Exception as exc:  # noqa: BLE001 - rows are an enhancement, never a reason to fail
+        logger.debug("Connection rows unavailable: %s", type(exc).__name__)
+        return [], None
 
 
 def ssh_identity_kwargs(conn: Mapping[str, Any]) -> dict[str, Any]:

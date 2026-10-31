@@ -27,7 +27,8 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
+from servonaut.services.shared_servers import own_twin
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -382,12 +383,21 @@ class MemoryScreen(Screen):
 
     @property
     def _target(self) -> dict:
-        """The real record behind the displayed row (itself outside demo mode)."""
+        """The real record behind the displayed row (itself outside demo mode).
+
+        A team's copy of a server the user owns stands for the user's own
+        row: its notes, findings and probes are the own row's, so nothing
+        new lands on the copy.
+        """
         try:
             app = self.app
         except RuntimeError:  # no running app: nothing was redacted either
             return self._instance
-        return connection_instance(app, self._instance)
+        real = connection_instance(app, self._instance)
+        if not isinstance(real, dict) or real.get("is_shared") is not True:
+            return real
+        twin = own_twin(real, real_fleet_rows(app) or [])
+        return dict(twin) if twin is not None else real
 
     # ------------------------------------------------------------------
     # Compose
@@ -1221,7 +1231,9 @@ class MemoryScreen(Screen):
             if result is None or result == content:
                 return
             self.run_worker(
-                self._save_annotations(instance_id, provider, memory_service, result),
+                self._save_annotations(
+                    instance_id, provider, memory_service, result, expected=content
+                ),
                 exclusive=False,
                 group="memory_mutation",
                 name="memory_annotations_save",
@@ -1238,17 +1250,58 @@ class MemoryScreen(Screen):
             _on_close,
         )
 
+    @staticmethod
+    def _write_unless_changed(
+        memory_service: Any,
+        instance_id: str,
+        provider: str,
+        text: str,
+        expected: Optional[str],
+    ) -> Optional[Path]:
+        """Write *text* unless the notes differ from *expected*.
+
+        Returns None when the notes were written, else the draft the text was
+        kept in. The editor holds the notes as they were when it opened. A
+        merge or another editor may have changed the file since, and writing
+        the editor's text would drop that. The text is then kept beside the
+        notes as a new private ``annotations.unsaved-<time>.md`` file and
+        nothing is overwritten. The comparison and the write are one step
+        under the store's annotation lock, so a merge cannot slip in between.
+        """
+        if expected is None:
+            memory_service.write_annotations(instance_id, text, provider)
+            return None
+        digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+        if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
+            return None
+        return memory_service.write_annotation_draft(instance_id, text, provider)
+
     async def _save_annotations(
-        self, instance_id: str, provider: str, memory_service: Any, text: str
+        self,
+        instance_id: str,
+        provider: str,
+        memory_service: Any,
+        text: str,
+        expected: Optional[str] = None,
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
         try:
-            await asyncio.to_thread(
-                memory_service.write_annotations, instance_id, text, provider
+            draft = await asyncio.to_thread(
+                self._write_unless_changed, memory_service, instance_id, provider, text, expected
             )
         except Exception as exc:
             self.app.notify(
                 f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        if draft is not None:
+            # Only the file name: its folder names the server, which demo mode hides.
+            self.app.notify(
+                "The notes changed while you were editing (a team merge or another "
+                f"edit), so nothing was overwritten. Your text is kept in {draft.name} "
+                "next to the notes: open the notes again and copy in what you need from it.",
+                severity="warning",
+                markup=False,
             )
             return
         self.app.notify("Annotations saved.", severity="information")

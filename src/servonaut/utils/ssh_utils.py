@@ -413,3 +413,63 @@ async def run_ssh_subprocess(
                     pass
     finally:
         log.close()
+
+
+async def run_ssh_daemonizing(
+    ssh_cmd: Sequence[Union[str, os.PathLike]],
+    stderr_path: Union[str, os.PathLike],
+    timeout: float = 30,
+) -> SSHOutput:
+    """Run an ``ssh -f`` command that leaves a background master, waiting for the parent only.
+
+    ``run_ssh_subprocess`` waits for end-of-file on its output pipes; the
+    master forked by ``-f`` can keep them open (older OpenSSH clients do not
+    redirect them), so that wait would last for the master's lifetime. Here
+    stdout is discarded and stderr goes to the file *stderr_path*, and only
+    the exit of the parent process (after authentication) is awaited.
+
+    Raises:
+        SSHCalledProcessError: ssh exited with a nonzero status.
+        asyncio.TimeoutError: the parent did not exit within *timeout*; it is killed.
+    """
+    log = SshLog()
+    try:
+        with open(stderr_path, "wb") as stderr_file:
+            proc = await asyncio.create_subprocess_exec(
+                *log.command(ssh_cmd),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=stderr_file,
+                env=log.environment(),
+                **background_process_kwargs(),
+            )
+        track_background_process(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # The process can exit between cancellation and kill.
+            await proc.wait()
+            raise
+        finally:
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+        diagnostics = log.read()
+        try:
+            with open(stderr_path, "rb") as stderr_file:
+                stderr = with_diagnostics(diagnostics, stderr_file.read())
+        except OSError:
+            stderr = with_diagnostics(diagnostics, b"")
+        if proc.returncode:
+            raise SSHCalledProcessError(
+                proc.returncode, ssh_cmd, output=b"", stderr=stderr, diagnostics=diagnostics,
+            )
+        return SSHOutput(b"", stderr, proc.returncode, diagnostics)
+    finally:
+        log.close()

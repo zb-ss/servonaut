@@ -283,6 +283,10 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         vault_runtime=vault_runtime,
         team_policy=team_policy,
     )
+    if memory_service is not None:
+        # A memory build hops through a bastion's vault key and falls back to
+        # a team's key like the other tools do.
+        memory_service.set_connection_rows(tools.connection_rows)
     return tools
 
 

@@ -13,7 +13,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static, Tex
 
 from servonaut.config.schema import CustomServer
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import replace_instances
+from servonaut.screens._demo_resolve import reconcile_team_memory, replace_instances
 
 
 class CustomServersScreen(Screen):
@@ -325,6 +325,7 @@ class CustomServersScreen(Screen):
         replace_instances(
             self.app, "custom", self.app.custom_server_service.list_as_instances()
         )
+        reconcile_team_memory(self.app)
 
     def action_back(self) -> None:
         """Navigate back to main menu."""

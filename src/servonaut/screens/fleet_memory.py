@@ -32,9 +32,12 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import real_instance_id
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 
 # Status constants and classifier live in the dependency-free service module
@@ -143,10 +146,15 @@ class FleetScanSummaryModal(ModalScreen[None]):
     }
     """
 
+    # Nothing skipped unless the summary says so: a modal built without the
+    # argument (or by an older caller) still renders.
+    _skipped: List[str] = []
+
     def __init__(
         self,
         succeeded: List[str],
         failed: List[Dict[str, Any]],
+        skipped: Optional[List[str]] = None,
     ) -> None:
         """Initialise the summary.
 
@@ -154,19 +162,24 @@ class FleetScanSummaryModal(ModalScreen[None]):
             succeeded: Instance identifiers whose scan produced ≥1 module.
             failed: ``[{"instance": <name>, "reason": <code>, "failures":
                 [{module, reason, message}, …]}]`` for failed scans.
+            skipped: Servers not probed because they are stopped.
         """
         super().__init__()
         self._succeeded = succeeded
         self._failed = failed
+        self._skipped = skipped or []
 
     def compose(self) -> ComposeResult:
-        total = len(self._succeeded) + len(self._failed)
+        total = len(self._succeeded) + len(self._failed) + len(self._skipped)
+        skipped_text = (
+            f", [dim]{len(self._skipped)} skipped: stopped[/dim]" if self._skipped else ""
+        )
         yield Container(
             Static(
                 f"[bold $text-accent]Fleet scan complete[/bold $text-accent] — "
                 f"[$text-success]{len(self._succeeded)} succeeded[/$text-success], "
-                f"[$text-error]{len(self._failed)} failed[/$text-error] "
-                f"({total} total)",
+                f"[$text-error]{len(self._failed)} failed[/$text-error]"
+                f"{skipped_text} ({total} total)",
                 id="fleet-scan-title",
             ),
             VerticalScroll(
@@ -215,6 +228,11 @@ class FleetScanSummaryModal(ModalScreen[None]):
                 extra = len(entry.get("failures", [])) - 3
                 if extra > 0:
                     lines.append(f"      [dim]… and {extra} more[/dim]")
+        if self._skipped:
+            lines.append("")
+            lines.append("[dim]Skipped: stopped[/dim]:")
+            for name in self._skipped:
+                lines.append(f"  • {escape(name)}")
         if not lines:
             lines.append("[dim]No activity.[/dim]")
         return "\n".join(lines)
@@ -329,6 +347,7 @@ class FleetMemoryScreen(Screen):
         table.add_column("Modules", key="modules", width=10)
         table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
+        table.add_column("Last scan", key="reason", width=20)
         self._refresh_auto_scan_status()
         self._launch_populate()
         # Memory Sync unlock is offered HERE (on entering a memory section),
@@ -385,7 +404,9 @@ class FleetMemoryScreen(Screen):
             return
 
         try:
-            merged = await fleet_service.get_merged_fleet()
+            merged = await fleet_service.get_merged_fleet(
+                hidden_ids=folded_share_ids(self.app)
+            )
         except BackendMaintenance:
             self.app.notify(
                 "Memory cloud sync is in maintenance — showing local data only.",
@@ -406,6 +427,30 @@ class FleetMemoryScreen(Screen):
             return
 
         self._populate_table_from_merged(merged)
+
+    def _reason_cell(self, raw_id: str) -> str:
+        """Cell text for why the row's latest scan did not succeed, or ``—``.
+
+        The reason stays on the scan service until that row is probed again,
+        so it survives table rebuilds and leaving the panel.
+        """
+        scan_service = getattr(self.app, "fleet_scan_service", None)
+        reasons = getattr(scan_service, "last_reasons", None)
+        if not isinstance(reasons, dict):
+            return "—"
+        # The scan files a reason under the id of the row it probed, which in
+        # demo mode is a stand-in; the merged table asks with the real id.
+        # Both are compared by their real id, so no path needs the other's.
+        wanted = real_instance_id(self.app, raw_id)
+        code = reasons.get(raw_id, "") or next(
+            (
+                value for key, value in reasons.items()
+                if real_instance_id(self.app, key) == wanted
+            ),
+            "",
+        )
+        text = row_reason_text(code)
+        return f"[red]{text}[/red]" if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -488,6 +533,7 @@ class FleetMemoryScreen(Screen):
                 "modules": modules_count,
                 "drift_7d": drift_7d,
                 "age": age_text,
+                "reason": self._reason_cell(raw_iid),
             })
 
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -503,6 +549,7 @@ class FleetMemoryScreen(Screen):
                 str(row["modules"]) if row["modules"] else "—",
                 str(row["drift_7d"]) if row.get("drift_7d") else "—",
                 row["age"],
+                row["reason"],
             )
 
         self.query_one("#fleet-memory-status", Static).update(
@@ -512,7 +559,7 @@ class FleetMemoryScreen(Screen):
     def _populate_table(self) -> None:
         """Rebuild table rows + status footer from local app state (no remote)."""
         memory_service = getattr(self.app, "memory_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
 
         self._rows = []
         for inst in instances:
@@ -549,6 +596,7 @@ class FleetMemoryScreen(Screen):
                 "modules": modules_count,
                 "drift_7d": 0,
                 "age": age_text,
+                "reason": self._reason_cell(iid),
             })
 
         table = self.query_one("#fleet-memory-table", DataTable)
@@ -563,6 +611,7 @@ class FleetMemoryScreen(Screen):
                 str(row["modules"]) if row["modules"] else "—",
                 "—",
                 row["age"],
+                row["reason"],
             )
 
         # Status footer — one glance tells the operator where to act.
@@ -708,7 +757,7 @@ class FleetMemoryScreen(Screen):
         service is not wired — used by pre-scan count display and legacy paths.
         """
         fleet_scan_service = getattr(self.app, "fleet_scan_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
         if fleet_scan_service is not None:
             return fleet_scan_service.eligible_instances(
                 instances, stale_only=stale_only
@@ -723,6 +772,14 @@ class FleetMemoryScreen(Screen):
                 continue
             eligible.append(inst)
         return eligible
+
+    def _only_stopped_candidates(self, stale_only: bool) -> bool:
+        """True when the fleet has servers the scan would skip as stopped."""
+        scan_service = getattr(self.app, "fleet_scan_service", None)
+        skipped = getattr(scan_service, "skipped_instances", None)
+        if not callable(skipped):
+            return False
+        return bool(skipped(memory_fleet_rows(self.app), stale_only=stale_only))
 
     def _launch_bulk_scan(self, stale_only: bool) -> None:
         memory_service = getattr(self.app, "memory_service", None)
@@ -743,6 +800,13 @@ class FleetMemoryScreen(Screen):
         # for a minor optimisation (disk reads, not SSH).  If this becomes
         # measurable on very large fleets, hoist the list and thread it through.
         instances = self._eligible_instances(stale_only, memory_service)
+        if not instances and self._only_stopped_candidates(stale_only):
+            # Nothing to probe, but the scan still records which servers it
+            # skipped and why; it starts no connection.
+            self._scanning = self.app.start_fleet_manual_scan(
+                memory_fleet_rows(self.app), stale_only=stale_only
+            )
+            return
         if not instances:
             msg = (
                 "No stale memory to refresh."
@@ -763,7 +827,7 @@ class FleetMemoryScreen(Screen):
         # completion hook are routed back to whichever Fleet Memory screen is
         # mounted via the app's _fleet_manual_scan_progress / on_fleet_manual_scan_done.
         started = self.app.start_fleet_manual_scan(
-            self.app.instances or [], stale_only=stale_only
+            memory_fleet_rows(self.app), stale_only=stale_only
         )
         if not started:
             self._set_progress("")
@@ -870,8 +934,9 @@ class FleetMemoryScreen(Screen):
         row["status"] = new_status
         row["modules"] = new_modules
         row["age"] = new_age
+        row["reason"] = self._reason_cell(raw_id)
 
-        # Update visible table cells (columns 4=status, 5=modules, 7=age).
+        # Update visible table cells (columns 4=status, 5=modules, 7=age, 8=last scan).
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
             table.update_cell_at(
@@ -886,6 +951,7 @@ class FleetMemoryScreen(Screen):
                 Coordinate(row_index, 7),
                 new_age,
             )
+            table.update_cell_at(Coordinate(row_index, 8), row["reason"])
         except Exception:
             # Widget may be gone (screen navigated away during scan) — ignore.
             pass
@@ -924,7 +990,7 @@ class FleetMemoryScreen(Screen):
 
         try:
             result = await fleet_scan_service.scan(
-                self.app.instances or [],
+                memory_fleet_rows(self.app),
                 stale_only=stale_only,
                 on_progress=self._on_scan_progress,
             )
@@ -953,13 +1019,14 @@ class FleetMemoryScreen(Screen):
         self._refresh_auto_scan_status()
         self._launch_populate()
         self.app.notify(
-            f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed.",
+            f"Fleet scan done: {result.summary_text()}.",
             markup=False,
         )
         if result.failed:
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     def on_fleet_auto_scan_done(self, result: Any) -> None:
@@ -991,7 +1058,9 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         if getattr(result, "failed", None):
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     # ------------------------------------------------------------------

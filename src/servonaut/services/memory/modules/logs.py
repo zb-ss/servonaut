@@ -51,6 +51,16 @@ class LogsProber(ModuleProberInterface):
         self._connection_service = connection_service
         # Store the instance so probe() can pass it to probe_log_paths.
         self._instance: Optional[Dict[str, Any]] = None
+        # The rows a team key and a bastion's vault key are looked up in.
+        self._team_rows: List[Dict[str, Any]] = []
+        self._fleet_rows: Optional[List[Dict[str, Any]]] = None
+
+    def set_connection_rows(
+        self, team_rows: List[Dict[str, Any]], fleet_rows: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        """Rows for this build's connection (``MemoryService`` sets them per build)."""
+        self._team_rows = list(team_rows)
+        self._fleet_rows = list(fleet_rows) if fleet_rows is not None else None
 
     def set_instance(self, instance: Dict[str, Any]) -> None:
         """Bind a server instance dict before calling ``probe()``.
@@ -67,9 +77,9 @@ class LogsProber(ModuleProberInterface):
     async def probe(self, ssh_runner: Any) -> ModuleResult:
         """Probe readable log paths and return a ``ModuleResult``.
 
-        The *ssh_runner* argument is accepted for interface compatibility but
-        is not used — ``LogViewerService.probe_log_paths`` manages its own
-        SSH subprocess.
+        The compound ``test -r`` command runs through *ssh_runner*, so it
+        shares the build's connection and limits; a cached ``logs`` module is
+        still served without connecting.
 
         Returns:
             A ``ModuleResult`` with ``observed={"probed_paths": [...]}`` and
@@ -96,11 +106,19 @@ class LogsProber(ModuleProberInterface):
         probed_paths: List[str] = []
         raw_output = ""
 
+        # The build's own rows ride on its runner, like the instance: the
+        # prober is shared, so concurrent builds would overwrite its fields.
+        carried = getattr(ssh_runner, "connection_rows", None)
+        team_rows, fleet_rows = carried if isinstance(carried, tuple) else (self._team_rows, self._fleet_rows)
+
         try:
             probed_paths = await self._log_viewer_service.probe_log_paths(
                 instance,
                 self._ssh_service,
                 self._connection_service,
+                team_rows=team_rows,
+                rows=fleet_rows,
+                runner=ssh_runner if callable(ssh_runner) else None,
             )
             if probed_paths:
                 raw_output = "Readable log paths found:\n" + "\n".join(

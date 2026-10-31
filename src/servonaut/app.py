@@ -1170,6 +1170,18 @@ class ServonautApp(App):
             setter = getattr(service, "set_vault_runtime", None)
             if callable(setter):
                 setter(self.vault_command_service, self.vault_lease_cache)
+        # Rows are asked per build: the fleet changes while the app runs. Demo
+        # mode reads the real records, never the stand-in rows on screen.
+        for service in (getattr(self, "memory_service", None), getattr(self, "scan_service", None)):
+            rows_setter = getattr(service, "set_connection_rows", None)
+            if callable(rows_setter):
+                rows_setter(self._connection_rows)
+
+    def _connection_rows(self) -> tuple:
+        """``(team_rows, fleet_rows)`` for the services that connect on their own."""
+        from servonaut.screens._demo_resolve import fleet_rows, team_rows
+
+        return team_rows(self), fleet_rows(self)
 
     def init_paid_services(self) -> None:
         """Initialize paid-tier services (API client, sync, teams, etc.).
@@ -1441,6 +1453,9 @@ class ServonautApp(App):
             )
             if self.memory_service is not None and hasattr(self.memory_service, "set_sync_service"):
                 self.memory_service.set_sync_service(self.memory_sync_service)
+            # No share-keyed envelope is uploaded before the shared servers
+            # are listed and the shares that fold into own servers are known.
+            self.memory_sync_service.hold_unfolded_shares()
             if hasattr(self.memory_sync_service, "set_key_material_listener"):
                 self.memory_sync_service.set_key_material_listener(
                     self._propagate_memory_key_material
@@ -2097,7 +2112,9 @@ class ServonautApp(App):
 
         if self.fleet_scan_service is None or self.memory_service is None:
             return False
-        instances = self.instances or []
+        from servonaut.services.memory.team_fold import memory_fleet_rows
+
+        instances = memory_fleet_rows(self)
         if not instances:
             logger.debug("fleet auto-scan: instances not loaded yet; will retry")
             return False
@@ -2124,6 +2141,86 @@ class ServonautApp(App):
     # ------------------------------------------------------------------
     # App-owned manual fleet scan (survives screen navigation)
     # ------------------------------------------------------------------
+
+    def expect_team_memory_load(self, name: str) -> None:
+        """Note that the inventory load *name* was started and will settle.
+
+        While share-keyed uploads are held, they wait for every such load:
+        the shared servers and each own provider's rows, since a share's
+        twin can arrive from any of them. Counted, so a load restarted by an
+        exclusive worker is awaited once per start.
+        """
+        loads = self.__dict__.setdefault("_team_memory_loads", {})
+        loads[name] = loads.get(name, 0) + 1
+
+    def settle_team_memory_load(self, name: str) -> None:
+        """Note that a load started with :meth:`expect_team_memory_load` ended
+        (rows arrived, it failed, or it was cancelled)."""
+        loads = self.__dict__.setdefault("_team_memory_loads", {})
+        if loads.get(name, 0) > 0:
+            loads[name] -= 1
+
+    def release_team_memory_hold(self) -> None:
+        """Let share-keyed memory envelopes upload once every load has settled.
+
+        Call it after a load settled and its reconcile (if any) ended. It does
+        nothing while another load of this run is still outstanding.
+        """
+        if any(self.__dict__.get("_team_memory_loads", {}).values()):
+            return
+        sync = getattr(self, "memory_sync_service", None)
+        release = getattr(sync, "release_share_hold", None)
+        if callable(release):
+            release()
+
+    def reconcile_team_memory(self) -> bool:
+        """Fold the memory of team copies into the user's own servers.
+
+        Runs once the team's shared servers and the user's own are listed.
+        A team's copy of a server the user owns is merged into the user's
+        own record without losing anything (see
+        :mod:`servonaut.services.memory.team_merge`); the sync service is
+        told which shares are folded so nothing is uploaded for them. The
+        worker has its own group so no other memory work cancels it.
+
+        Returns whether the merge worker was started; its end lifts the hold
+        on share-keyed uploads.
+        """
+        from servonaut.screens._demo_resolve import real_fleet_rows
+
+        if self.memory_service is None:
+            return False
+        rows = real_fleet_rows(self)
+        if not rows or not any(row.get("is_shared") is True for row in rows):
+            return False
+        self.run_worker(
+            self._do_reconcile_team_memory(rows),
+            name="team_memory_merge",
+            group="memory_team_merge",
+            exclusive=True,
+            exit_on_error=False,
+        )
+        return True
+
+    async def _do_reconcile_team_memory(self, rows: list) -> None:
+        from servonaut.services.memory.team_fold import absorbed_share_ids
+        from servonaut.services.memory.team_merge import merge_team_copies
+
+        sync = getattr(self, "memory_sync_service", None)
+        try:
+            if sync is not None:
+                sync.set_folded_instance_ids(absorbed_share_ids(rows))
+            report = await merge_team_copies(
+                self.memory_service, sync, rows,
+                absent_ids=self.__dict__.setdefault("_team_memory_absent_ids", set()),
+            )
+        except Exception:  # noqa: BLE001 — a failed merge leaves every copy where it was
+            logger.exception("Merging team copies of server memory failed")
+            return
+        finally:
+            self.release_team_memory_hold()
+        if report.copies:
+            self.notify(report.message(), markup=False)
 
     def start_fleet_manual_scan(
         self,
@@ -2207,8 +2304,7 @@ class ServonautApp(App):
 
         # Success path: notify and hand off to the screen.
         self.notify(
-            f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed.",
+            f"Fleet scan done: {result.summary_text()}.",
             markup=False,
         )
         self._refresh_fleet_panels_after_scan(result, quiet=False)

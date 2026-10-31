@@ -3726,8 +3726,14 @@ class ChatPanel(Widget):
             InstanceScope, build_memory_context, resolve_instance_scope,
         )
 
+        from servonaut.services.memory.team_fold import memory_fleet_rows, own_row_for
+
+        # One block per server: a team's copy of a server the user owns
+        # stands for the user's own row.
+        if instance:
+            instance = own_row_for(self.app, instance) or instance
         explicit: List[Dict[str, Any]] = [instance] if instance else []
-        candidates = list(getattr(self.app, "instances", []) or [])
+        candidates = memory_fleet_rows(self.app)
         scopes: List[InstanceScope] = resolve_instance_scope(
             prompt=prompt,
             explicit=explicit,

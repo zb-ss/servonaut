@@ -10,10 +10,14 @@ All writes are atomic (tmp file + ``os.replace``) with mode ``0o600``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import secrets
+import stat
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -32,6 +36,64 @@ logger = logging.getLogger(__name__)
 MEMORY_ROOT = Path.home() / ".servonaut" / "memory"
 INDEX_PATH = MEMORY_ROOT / "index.json"
 INDEX_VERSION = 1
+
+# Marker written into a team copy's folder once its memory is merged elsewhere.
+# Not ``*.json``: module globbing must never read it as a module.
+TEAM_MERGED_MARKER = "team_merged.marker"
+
+
+class MemoryCorruptError(ValueError):
+    """Stored memory that cannot be trusted: a wrong shape, or a symlink where a plain file belongs."""
+
+
+def _draft_stamp() -> str:
+    """UTC timestamp, to the microsecond, for a conflict draft's name."""
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _is_plain(path: Path, want_dir: bool) -> bool:
+    """Whether *path* exists as a plain file (or directory), not a symlink."""
+    mode = path.lstat().st_mode
+    return stat.S_ISDIR(mode) if want_dir else stat.S_ISREG(mode)
+
+
+def _read_plain_text(path: Path) -> str:
+    """Read a UTF-8 file that is not a symlink; raises ``MemoryCorruptError`` for a link."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if path.is_symlink():
+            raise MemoryCorruptError(f"{path.name} is a symlink") from exc
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _load_object(path: Path) -> Dict[str, Any]:
+    """Parse a JSON object from a plain file; anything else is ``MemoryCorruptError``."""
+    data = json.loads(_read_plain_text(path))
+    if not isinstance(data, dict):
+        raise MemoryCorruptError(f"{path.name} does not hold a JSON object")
+    return data
+
+
+def check_finding_record(record: Any, label: str = "finding") -> None:
+    """Raise ``MemoryCorruptError`` unless *record* is a finding of the stored shape.
+
+    An object with a text ``id`` whose ``created_at``, ``updated_at`` and
+    ``superseded_by`` are text when present. Local files and records read
+    from the service are held to the same schema.
+    """
+    if not isinstance(record, dict):
+        raise MemoryCorruptError(f"{label}: not an object")
+    if not isinstance(record.get("id"), str):
+        raise MemoryCorruptError(f"{label}: finding id is not text")
+    for key in ("created_at", "updated_at", "superseded_by"):
+        value = record.get(key)
+        if value is not None and not isinstance(value, str):
+            raise MemoryCorruptError(f"{label}: {key} is not text")
+
 
 # Regex that detects forbidden characters/sequences in instance IDs.
 _UNSAFE_ID_RE = re.compile(r"[/\\]|\.\.")
@@ -114,33 +176,40 @@ def _validate_finding_id(finding_id: str) -> None:
         )
 
 
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write *data* as JSON to *path* atomically with mode 0o600.
+def _write_private_atomic(path: Path, text: str, *, as_json: bool = False) -> None:
+    """Write *text* (or JSON for it) to *path* atomically with mode 0o600.
 
-    Uses a sibling ``.tmp`` file + ``os.replace`` so readers never see a
-    partially written file.  The tmp file is removed on failure.
+    A fresh, uniquely named temp file is created exclusively and without
+    following links, then renamed over *path*, so a link planted at a guessable
+    temp name is never written through and readers never see a partial file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     fd = os.open(
         tmp_path,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
         0o600,
     )
     try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=2)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if as_json:
+                json.dump(text, fh, indent=2)
+            else:
+                fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    # Belt-and-suspenders: ensure mode is right even if umask stripped bits.
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, path)
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write *data* as JSON to *path* atomically with mode 0o600 (see :func:`_write_private_atomic`)."""
+    _write_private_atomic(path, data, as_json=True)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +273,12 @@ class MemoryStore:
         # Demo mode hands screens redacted rows; their fake ids must never
         # become directory names or index keys. Identity until wired.
         self._resolve_id: Callable[[str], str] = lambda instance_id: instance_id
+        # Which server each share is (see :meth:`set_share_identity`), kept so
+        # an index entry created later still records it.
+        self._share_identities: Dict[str, Dict[str, Any]] = {}
+        # One lock per instance guards compare-and-write of its annotations.
+        self._annotation_locks: Dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
 
     def set_instance_id_resolver(self, resolver: Optional[Callable[[str], str]]) -> None:
         """Map every incoming instance id through *resolver* (fake → real)."""
@@ -310,10 +385,15 @@ class MemoryStore:
         self,
         instance_id: str,
         provider: str = "custom",
+        *,
+        strict: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
         """Return all stored modules for *instance_id* as ``{module: data}``.
 
-        Missing or corrupt modules are silently omitted.
+        Missing or corrupt modules are silently omitted. With ``strict`` a
+        module file that cannot be read or parsed raises ``OSError`` or
+        ``ValueError`` instead, so a caller that must not mistake it for an
+        absent module can tell the two apart.
         """
         _validate_instance_id(instance_id)
         result: Dict[str, Dict[str, Any]] = {}
@@ -331,12 +411,19 @@ class MemoryStore:
         for instance_dir in dirs_to_search:
             if not instance_dir.exists():
                 continue
+            if strict and instance_dir.is_symlink():
+                raise MemoryCorruptError("memory folder is a symlink")
             for json_file in instance_dir.glob("*.json"):
                 module_name = json_file.stem
                 try:
-                    with open(json_file, "r") as fh:
-                        result[module_name] = json.load(fh)
+                    if strict:
+                        result[module_name] = _load_object(json_file)
+                    else:
+                        with open(json_file, "r") as fh:
+                            result[module_name] = json.load(fh)
                 except (json.JSONDecodeError, OSError) as exc:
+                    if strict:
+                        raise
                     logger.warning(
                         "Skipping corrupt module file %s: %s", json_file, exc
                     )
@@ -590,7 +677,40 @@ class MemoryStore:
                 "annotations_hash": annotations_hash,
             }
         )
+        self._apply_share_identity(instance_id, entry)
         instances[instance_id] = entry
+        self._save_index(index)
+
+    def _apply_share_identity(self, instance_id: str, entry: Dict[str, Any]) -> None:
+        """Record on *entry* which server a share is, when that is known."""
+        identity = self._share_identities.get(instance_id)
+        if identity is not None:
+            entry["share_identity"] = dict(identity)
+
+    def ensure_index_entry(
+        self, instance_id: str, name: str, provider: str, modules: List[str]
+    ) -> None:
+        """Make sure the index lists *instance_id* with a name, provider and modules.
+
+        A missing entry is created like :meth:`update_index` does. An existing
+        entry keeps its scan times and counters; only a missing name, a
+        provider that differs, and modules not yet listed are filled in. A
+        skeletal entry (one created for bookkeeping keys alone) is completed.
+        """
+        instance_id = self._resolve_id(instance_id)
+        entry = self._load_index().get("instances", {}).get(instance_id)
+        if entry is None or "last_scan" not in entry:
+            self.update_index(instance_id, name, provider, modules)
+            return
+        wanted = {"name": entry.get("name") or name, "provider": provider}
+        merged = sorted(set(entry.get("modules", [])) | set(modules))
+        if all(entry.get(k) == v for k, v in wanted.items()) and merged == entry.get("modules"):
+            return
+        index = self._load_index()
+        stored = index["instances"][instance_id]
+        stored.update(wanted)
+        stored["modules"] = merged
+        self._apply_share_identity(instance_id, stored)
         self._save_index(index)
 
     def _remove_from_index(self, instance_id: str) -> None:
@@ -694,6 +814,24 @@ class MemoryStore:
             pass
         return ""
 
+    def read_annotations_strict(
+        self,
+        instance_id: str,
+        provider: str = "custom",
+    ) -> str:
+        """Like :meth:`read_annotations`, but an unreadable file raises.
+
+        ``""`` means there is no annotations file (or it is empty). A file
+        that exists and cannot be read or decoded raises ``OSError`` or
+        ``ValueError`` (``UnicodeDecodeError``), so a caller that rewrites
+        the notes never treats unreadable text as empty. A symlink in place of
+        the file raises ``MemoryCorruptError``.
+        """
+        path = self.get_annotations_path(instance_id, provider)
+        if not path.is_symlink() and not path.exists():
+            return ""
+        return _read_plain_text(path)
+
     def write_annotations(
         self,
         instance_id: str,
@@ -716,24 +854,16 @@ class MemoryStore:
         Raises:
             ValueError: If *instance_id* fails safety validation.
         """
+        with self.annotation_lock(instance_id):
+            return self._write_annotations_locked(instance_id, content, provider)
+
+    def _write_annotations_locked(
+        self, instance_id: str, content: str, provider: str
+    ) -> Path:
         _validate_instance_id(instance_id)
         final_path = self.get_annotations_path(instance_id, provider)
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = final_path.with_suffix(".md.tmp")
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, final_path)
+        _write_private_atomic(final_path, content)
         logger.debug(
             "Wrote annotations.md for %s at %s", instance_id, final_path
         )
@@ -792,6 +922,7 @@ class MemoryStore:
         index = self._load_index()
         instances = index.setdefault("instances", {})
         entry = instances.setdefault(instance_id, {})
+        self._apply_share_identity(instance_id, entry)
         if annotations_hash is not None:
             entry["annotations_hash"] = annotations_hash
         if annotations_synced_at is not None:
@@ -799,6 +930,209 @@ class MemoryStore:
         if annotations_modified_at is not None:
             entry["annotations_modified_at"] = annotations_modified_at
         self._save_index(index)
+
+    # ------------------------------------------------------------------
+    # Annotation writers that must not lose each other's text
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def annotation_lock(self, instance_id: str):
+        """Hold the lock that serialises changes to one instance's annotations.
+
+        Re-entrant. In-process only: another process writing the same file is
+        not excluded.
+        """
+        instance_id = self._resolve_id(instance_id)
+        with self._locks_guard:
+            lock = self._annotation_locks.setdefault(instance_id, threading.RLock())
+        with lock:
+            yield
+
+    def write_annotations_if_unchanged(
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+    ) -> bool:
+        """Write *content* only if the notes still hash to *expected_hash*.
+
+        The comparison and the write happen under :meth:`annotation_lock`, so
+        a merge that holds the lock cannot be overwritten in between. An
+        absent file hashes as empty text. Returns whether it wrote.
+        """
+        import hashlib
+
+        with self.annotation_lock(instance_id):
+            current = self.read_annotations_strict(instance_id, provider)
+            if hashlib.sha256(current.encode("utf-8")).hexdigest() != expected_hash:
+                return False
+            self._write_annotations_locked(instance_id, content, provider)
+            return True
+
+    def write_annotation_draft(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> Path:
+        """Keep *content* beside the notes as a new private file, never replacing another.
+
+        The name is ``annotations.unsaved-<UTC time>.md`` (a numeric suffix
+        when taken); the file is created mode 0600 without following links
+        and appears complete or not at all.
+        """
+        _validate_instance_id(instance_id)
+        directory = self._checked_dir(instance_id, provider)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = directory / f".draft-{secrets.token_hex(8)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+                fh.flush()
+                os.fsync(fh.fileno())
+            stamp = _draft_stamp()
+            for attempt in range(1000):
+                suffix = "" if attempt == 0 else f"-{attempt}"
+                final = directory / f"annotations.unsaved-{stamp}{suffix}.md"
+                try:
+                    os.link(tmp, final)  # fails if the name exists, even as a link
+                except FileExistsError:
+                    continue
+                return final
+            raise OSError("no free draft name")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Team copies
+    # ------------------------------------------------------------------
+
+    def find_instance_dirs(self, instance_id: str) -> List[str]:
+        """Provider folders under the root that hold a folder for *instance_id*.
+
+        Found by scanning the root, not the index, so a copy filed under a
+        renamed team's label is found on every retry. Only plain
+        directories count: a symlink at either level, a file and unsafe
+        names are skipped.
+        """
+        try:
+            _validate_instance_id(instance_id)
+            root = self._root.resolve()
+            children = sorted(self._root.iterdir())
+        except (ValueError, OSError):
+            return []
+        found: List[str] = []
+        for child in children:
+            candidate = child / instance_id
+            try:
+                if _UNSAFE_ID_RE.search(child.name):
+                    continue
+                if not _is_plain(child, True) or not _is_plain(candidate, True):
+                    continue
+                candidate.resolve().relative_to(root)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            found.append(child.name)
+        return found
+
+    def read_merge_marker(self, instance_id: str, provider: str) -> Optional[Dict[str, Any]]:
+        """The marker saying this folder was merged elsewhere, or ``None``.
+
+        Raises ``MemoryCorruptError`` for a marker that is a link or not an object.
+        """
+        path = self._checked_dir(instance_id, provider) / TEAM_MERGED_MARKER
+        if not path.is_symlink() and not path.exists():
+            return None
+        return _load_object(path)
+
+    def write_merge_marker(self, instance_id: str, provider: str, data: Dict[str, Any]) -> None:
+        """Record atomically (mode 0600) that this folder is merged; the folder is kept."""
+        directory = self._checked_dir(instance_id, provider)
+        directory.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(directory / TEAM_MERGED_MARKER, data)
+
+    def is_addressable(self, instance_id: str, provider: str) -> bool:
+        """Whether *instance_id* under *provider* names a directory inside the memory root.
+
+        Both parts must be safe path components, and the resolved directory
+        (symlinks followed) must lie within the root.
+        """
+        try:
+            _validate_instance_id(instance_id)
+            _validate_instance_id(_provider_slug(provider))
+            path = self._instance_dir(instance_id, provider)
+            # A folder that is a symlink must resolve all the way: a loop or a
+            # dangling link then raises on every Python version (3.13 stopped
+            # raising for a loop in a non-strict resolve). A folder that does
+            # not exist yet resolves leniently, as a target must.
+            for folder in (path.parent, path):
+                if folder.is_symlink():
+                    folder.resolve(strict=True)
+            path.resolve().relative_to(self._root.resolve())
+        except (ValueError, OSError, RuntimeError):
+            # RuntimeError: a symlink loop (Path.resolve on Python 3.12).
+            return False
+        return True
+
+    def _checked_dir(self, instance_id: str, provider: str) -> Path:
+        """The instance directory, refused with ``ValueError`` unless addressable."""
+        if not self.is_addressable(instance_id, provider):
+            raise ValueError(f"memory directory for {instance_id!r} is outside the memory root")
+        return self._instance_dir(instance_id, provider)
+
+    def has_instance_dir(self, instance_id: str, provider: str = "custom") -> bool:
+        """Whether any memory is filed on disk for *instance_id* under *provider*.
+
+        Raises:
+            ValueError: If the id or provider slug is unsafe, or the directory
+                would lie outside the memory root.
+        """
+        return self._checked_dir(instance_id, provider).is_dir()
+
+    def get_cloud_import(self, instance_id: str, share_id: str) -> Optional[Dict[str, Any]]:
+        """The state of importing *share_id*'s service-only memory into *instance_id*, or ``None``.
+
+        ``{"state": "importing" | "imported", "upload_pending": bool}``.
+        """
+        entry = self.get_index_entry(instance_id) or {}
+        state = (entry.get("cloud_imports") or {}).get(share_id)
+        return dict(state) if isinstance(state, dict) else None
+
+    def set_cloud_import(
+        self, instance_id: str, share_id: str, state: str, upload_pending: bool
+    ) -> None:
+        """Record on *instance_id*'s index entry how far importing *share_id* has come.
+
+        Written before anything is imported (``importing``), so an interrupted
+        import is found and repeated, and flipped to ``imported`` once the
+        target is verified. Creates a minimal entry when none exists yet.
+        """
+        _validate_instance_id(instance_id)
+        _validate_instance_id(share_id)
+        index = self._load_index()
+        entry = index.setdefault("instances", {}).setdefault(self._resolve_id(instance_id), {})
+        entry.setdefault("cloud_imports", {})[share_id] = {
+            "state": state, "upload_pending": bool(upload_pending),
+        }
+        self._save_index(index)
+
+    def remove_index_entry(self, instance_id: str) -> None:
+        """Drop *instance_id*'s index entry; its folder and files are untouched."""
+        _validate_instance_id(instance_id)
+        self._remove_from_index(instance_id)
+
+    def set_share_identity(self, instance_id: str, identity: Dict[str, Any]) -> bool:
+        """Record which server a share is, on its index entry.
+
+        A share gets a new id whenever it is removed and added again; the
+        identity (the recorded instance id, else host, port and login) is how
+        an entry left behind by the old id is matched to the new one. Only an
+        existing entry is updated. Returns whether the entry changed.
+        """
+        _validate_instance_id(instance_id)
+        self._share_identities[instance_id] = dict(identity)
+        index = self._load_index()
+        entry = index.get("instances", {}).get(instance_id)
+        if entry is None or entry.get("share_identity") == identity:
+            return False
+        entry["share_identity"] = dict(identity)
+        self._save_index(index)
+        return True
 
     # ------------------------------------------------------------------
     # Findings storage
@@ -899,6 +1233,7 @@ class MemoryStore:
         provider: str = "custom",
         *,
         include_superseded: bool = False,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return all findings for *instance_id*, sorted newest-first by ``created_at``.
 
@@ -908,6 +1243,9 @@ class MemoryStore:
             include_superseded: When ``False`` (default), findings whose
                 ``"superseded_by"`` key is non-empty are excluded.  Pass
                 ``True`` to include them.
+            strict: When ``True``, a finding file that cannot be read or
+                parsed raises ``OSError`` / ``ValueError`` instead of being
+                skipped.
 
         Returns:
             List of finding dicts.  Malformed files are silently skipped.
@@ -919,15 +1257,23 @@ class MemoryStore:
         """
         _validate_instance_id(instance_id)
         findings_dir = self._findings_dir(instance_id, provider)
+        if strict and findings_dir.is_symlink():
+            raise MemoryCorruptError("findings folder is a symlink")
         if not findings_dir.exists():
             return []
 
         results: List[Dict[str, Any]] = []
         for json_file in findings_dir.glob("*.json"):
             try:
-                with open(json_file, "r") as fh:
-                    record: Dict[str, Any] = json.load(fh)
+                if strict:
+                    record = _load_object(json_file)
+                    check_finding_record(record, json_file.name)
+                else:
+                    with open(json_file, "r") as fh:
+                        record = json.load(fh)
             except (json.JSONDecodeError, OSError) as exc:
+                if strict:
+                    raise
                 logger.warning("Skipping corrupt finding file %s: %s", json_file, exc)
                 continue
             if not include_superseded and record.get("superseded_by"):
@@ -1024,6 +1370,7 @@ class MemoryStore:
         index = self._load_index()
         instances = index.setdefault("instances", {})
         entry = instances.setdefault(instance_id, {})
+        self._apply_share_identity(instance_id, entry)
         if findings_count is not None:
             entry["findings_count"] = findings_count
         if findings_synced_at is not None:
