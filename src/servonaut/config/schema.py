@@ -1199,6 +1199,10 @@ class MemoryConfig:
         auto_scan_stale_only: When ``True`` the auto-scan loop probes only
             instances whose memory is stale or missing, skipping fresh ones.
             Set to ``False`` to force a full fleet re-probe on every tick.
+        vault_rate_limit_max_wait_seconds: How long a probe waits, once per
+            server, for the Servonaut service's ``Retry-After`` after the
+            service refused a vault key lookup. A longer ask (or a second
+            refusal) fails the server as rate limited.
     """
 
     enabled: bool = True
@@ -1253,6 +1257,14 @@ class MemoryConfig:
     # string means "no expiry recorded" (legacy / not remembered).  Refreshed
     # every time the passphrase is successfully (re-)stored.
     sync_remember_expires_at: str = ""
+
+    # ------------------------------------------------------------------
+    # Fleet-scan connection behaviour (ADDITIVE — no migration needed)
+    # ------------------------------------------------------------------
+    # Longest a probe waits for the Servonaut service's Retry-After after it
+    # refused a vault lookup (once per server); a longer ask fails the server
+    # at once as rate limited.
+    vault_rate_limit_max_wait_seconds: float = 20.0
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

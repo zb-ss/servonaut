@@ -23,11 +23,12 @@ no cache and close the lease when they are done.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ipaddress
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
@@ -88,6 +89,7 @@ class VaultLeaseCache:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._entries: dict[tuple[str, ...], tuple[Any, float]] = {}
+        self._inflight: dict[tuple[str, ...], "asyncio.Future[Any]"] = {}
 
     def get(self, key: tuple[str, ...]) -> Any:
         entry = self._entries.get(key)
@@ -108,6 +110,33 @@ class VaultLeaseCache:
         )
         if reuse > 0:
             self._entries[key] = (lease, self._clock() + reuse)
+
+    async def single_flight(
+        self, key: tuple[str, ...], fetch: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """The cached lease for *key*, or the one lookup every concurrent caller shares.
+
+        Callers that arrive while a lookup for *key* is running wait for it
+        instead of sending their own (two servers behind one bastion share
+        the bastion's lease). A failure reaches every waiting caller; the
+        next call looks again. A cancelled caller leaves the lookup running
+        for the others.
+        """
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(fetch())
+            self._inflight[key] = task
+            task.add_done_callback(lambda done, key=key: self._finish(key, done))
+        return await asyncio.shield(task)
+
+    def _finish(self, key: tuple[str, ...], task: "asyncio.Future[Any]") -> None:
+        self._inflight.pop(key, None)
+        if not task.cancelled():
+            # Every waiter may have been cancelled: never leave the error unretrieved.
+            task.exception()
 
     def forget(self, instance: Mapping[str, Any]) -> None:
         """Stop reusing a server's lease (its binding changed)."""
@@ -148,10 +177,18 @@ async def vault_lease(
             )
         return None
     key = lease_key(instance)
-    if cache is not None:
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
+    if cache is None:
+        return await _fetch_lease(instance, vault_runtime, native, None, key)
+    return await cache.single_flight(
+        key, lambda: _fetch_lease(instance, vault_runtime, native, cache, key),
+    )
+
+
+async def _fetch_lease(
+    instance: Mapping[str, Any], vault_runtime: Any, native: bool,
+    cache: Optional[VaultLeaseCache], key: tuple[str, ...],
+) -> Any:
+    """One lookup of *instance*'s lease at the vault runtime (see :func:`vault_lease`)."""
     try:
         lease = await vault_runtime.resolve_ssh(instance)
     except Exception as exc:  # noqa: BLE001 - every failure fails closed
@@ -516,6 +553,29 @@ async def _with_hop(conn: Mapping[str, Any], instance: Mapping[str, Any], connec
     if hop is not None:
         applied["proxy_args"] = connection_service.get_proxy_args(profile, hop=hop)
     return applied
+
+
+def rate_limit_wait(exc: BaseException) -> tuple[bool, Optional[float]]:
+    """``(rate_limited, seconds)`` for a vault failure.
+
+    *rate_limited* is true when the Servonaut service refused the lookup with
+    429 (or reads are paused after such a refusal); *seconds* is how long it
+    asked to wait, None when it did not say. Looks through the chain
+    :func:`vault_lease` raises from.
+    """
+    from servonaut.services.retry_after import is_rate_limited, retry_after_seconds
+    from servonaut.services.vault.binding_reads import BindingReadsPaused
+
+    seen: BaseException | None = exc
+    for _ in range(8):
+        if seen is None:
+            break
+        if isinstance(seen, BindingReadsPaused) and seen.retry_after is not None:
+            return True, seen.retry_after
+        if isinstance(seen, Exception) and is_rate_limited(seen):
+            return True, retry_after_seconds(seen)
+        seen = seen.__cause__
+    return False, None
 
 
 #: Returns ``(team_rows, fleet_rows)``; may be a plain function or a coroutine function.

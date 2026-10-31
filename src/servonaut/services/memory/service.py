@@ -54,6 +54,9 @@ SSH_FAILED_BUILD_REASON = "ssh_connection_failed"
 
 #: ``ModuleBuildFailure.reason`` when the server's vault key cannot be used.
 VAULT_CREDENTIAL_FAILURE = "vault_credential_unavailable"
+#: ``ModuleBuildFailure.reason`` when the Servonaut service rate-limited the
+#: server's vault key lookup twice (after waiting for its Retry-After once).
+VAULT_RATE_LIMITED = "vault_rate_limited"
 #: ``ModuleBuildFailure.reason`` when no probe command answered in time.
 SSH_NO_RESPONSE = "ssh_no_response"
 
@@ -66,8 +69,17 @@ _SSH_FAILURE_MESSAGES: Dict[str, str] = {
     "ssh_unreachable": "The server could not be reached over SSH.",
     "ssh_failed": "SSH failed before any probe command ran.",
     SSH_NO_RESPONSE: "The server did not answer any probe command over SSH in time.",
+    VAULT_RATE_LIMITED: (
+        "The Servonaut service is limiting requests from this computer, so the server's vault "
+        "key could not be fetched. Nothing is wrong with the setup: try again later."
+    ),
 }
 _SNAPSHOT_KEPT = "Nothing was probed; the stored memory was kept."
+
+
+async def _wait(seconds: float) -> None:
+    """Sleep *seconds* (a seam for tests)."""
+    await asyncio.sleep(seconds)
 
 
 @dataclass(frozen=True)
@@ -100,7 +112,7 @@ class ModuleBuildFailure:
         reason: Machine-readable code: ``"timeout"`` | ``"exception"`` |
             ``"ssh_host_key_<kind>"`` | ``"ssh_auth_failed"`` |
             ``"ssh_unreachable"`` | ``"ssh_failed"`` | ``"ssh_no_response"`` |
-            ``"vault_credential_unavailable"``.
+            ``"vault_credential_unavailable"`` | ``"vault_rate_limited"``.
         message: Short human-readable detail (redacted exception message).
     """
 
@@ -1221,6 +1233,15 @@ class MemoryService(MemoryServiceInterface):
         self._vault_runtime = runtime
         self._vault_leases = leases
 
+    def _setting(self, name: str) -> float:
+        """A numeric ``MemoryConfig`` field; its default when the config is a stand-in."""
+        value = getattr(self._config, name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        return float(getattr(MemoryConfig(), name))
+
     def set_connection_rows(self, supplier: Any) -> None:
         """Ask *supplier* for ``(team_rows, fleet_rows)`` each time a build connects.
 
@@ -1505,6 +1526,7 @@ class MemoryService(MemoryServiceInterface):
 
         from servonaut.services.ssh_credentials import (  # noqa: PLC0415
             VaultCredentialError,
+            rate_limit_wait,
             resolve_with_vault,
             ssh_identity_kwargs,
         )
@@ -1513,6 +1535,9 @@ class MemoryService(MemoryServiceInterface):
         # The vault credential is applied on the first command (it needs the
         # event loop); later commands reuse it.
         resolved: Dict[str, Any] = {}
+        # The one resolution every command awaits: probers start together, and
+        # a lookup each would be refused by the service's rate limit.
+        resolution: List["asyncio.Future[None]"] = []
 
         def _record_problem(reason: str, message: str) -> None:
             # Concurrent probers fail alike; keep and log the first.
@@ -1522,31 +1547,63 @@ class MemoryService(MemoryServiceInterface):
                 )
                 _real_runner.connection_problem = SshConnectionProblem(reason, message)  # type: ignore[attr-defined]
 
+        async def _resolve_credentials() -> None:
+            """Apply the vault credential, waiting once if the service rate-limits the lookup.
+
+            Raises:
+                VaultCredentialError: the credential cannot be used (the
+                    reason is recorded for the build report).
+            """
+            team_rows, fleet_rows = (
+                connection_rows if connection_rows is not None
+                else await self._load_connection_rows()
+            )
+            max_wait = self._setting("vault_rate_limit_max_wait_seconds")
+            waited = False
+            while True:
+                try:
+                    resolved.update(await resolve_with_vault(
+                        conn, instance, vault_runtime=vault_runtime,
+                        connection_service=connection_service, cache=vault_leases,
+                        team_rows=team_rows, rows=fleet_rows,
+                    ))
+                    return
+                except VaultCredentialError as exc:
+                    limited, asked = rate_limit_wait(exc)
+                    if not limited:
+                        _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))
+                        raise
+                    seconds = asked if asked is not None else max_wait
+                    if waited or seconds > max_wait:
+                        message = _SSH_FAILURE_MESSAGES[VAULT_RATE_LIMITED]
+                        _record_problem(VAULT_RATE_LIMITED, message)
+                        raise VaultCredentialError(message) from exc
+                    waited = True
+                    logger.info(
+                        "Vault lookup for %s rate limited: waiting %.0f s", instance.get("id", "?"), seconds,
+                    )
+                    await _wait(seconds)
+
+        async def _ensure_resolved() -> None:
+            if resolved:
+                return
+            if not resolution or resolution[0].cancelled():
+                resolution[:] = [asyncio.ensure_future(_resolve_credentials())]
+            # Shielded: one cancelled prober must not cancel the others' resolution.
+            await asyncio.shield(resolution[0])
+
         async def _real_runner(command: str) -> tuple[str, str, int]:
             """Execute *command* on the remote host and return (stdout, stderr, rc)."""
             _real_runner.commands_started += 1  # type: ignore[attr-defined]
             known: Optional[SshConnectionProblem] = _real_runner.connection_problem  # type: ignore[attr-defined]
             if known is not None:
                 # Every later command would fail the same way: stop connecting.
-                if known.reason == VAULT_CREDENTIAL_FAILURE:
+                if known.reason in (VAULT_CREDENTIAL_FAILURE, VAULT_RATE_LIMITED):
                     raise VaultCredentialError(known.message)
                 return "", known.message, SSH_FAILURE_EXIT_CODE
-            if not resolved:
-                # A VaultCredentialError propagates: probers record it as the
-                # module's error instead of trying a local key.
-                try:
-                    team_rows, fleet_rows = (
-                        connection_rows if connection_rows is not None
-                        else await self._load_connection_rows()
-                    )
-                    resolved.update(await resolve_with_vault(
-                        conn, instance, vault_runtime=vault_runtime,
-                        connection_service=connection_service, cache=vault_leases,
-                        team_rows=team_rows, rows=fleet_rows,
-                    ))
-                except VaultCredentialError as exc:
-                    _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))
-                    raise
+            # A VaultCredentialError propagates: probers record it as the
+            # module's error instead of trying a local key.
+            await _ensure_resolved()
             ssh_cmd = ssh_service.build_ssh_command(
                 host=resolved["host"],
                 username=resolved["username"],

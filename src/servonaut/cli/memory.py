@@ -133,12 +133,18 @@ def _init_headless_services() -> Tuple[Any, Any, Any]:
     )
     # Back-reference for log-viewer cache lookups.
     log_viewer_service.set_memory_service(memory_service)
-    # Probes use a server's Servonaut Vault key when it has one. One CLI run
-    # needs no lease cache; the private agents end with the process.
+    # Probes use a server's Servonaut Vault key when it has one. One lease
+    # cache serves the whole run, so servers behind one bastion share its
+    # lease (and one lookup) instead of fetching it once each. The vault
+    # runtime owns every lease; the cache never closes one, and the private
+    # agents end with the process.
     vault_runtime = _vault_runtime()
     if vault_runtime is not None:
-        memory_service.set_vault_runtime(vault_runtime)
-        log_viewer_service.set_vault_runtime(vault_runtime)
+        from servonaut.services.ssh_credentials import VaultLeaseCache  # noqa: PLC0415
+
+        vault_leases = VaultLeaseCache()
+        memory_service.set_vault_runtime(vault_runtime, vault_leases)
+        log_viewer_service.set_vault_runtime(vault_runtime, vault_leases)
 
     fleet = CachedFleet.from_config(config, custom_server_service, config_manager)
     # Team keys and a bastion's vault key need the teams' servers and the fleet.
