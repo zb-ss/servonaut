@@ -1577,6 +1577,9 @@ class ServonautApp(App):
                 crypto=self.memory_crypto,
                 key_store_provider=lambda: self._memory_key_material,
                 retrieval_service=self.memory_retrieval_service,
+                cache_ttl_provider=lambda: (
+                    self.config_manager.get().memory.team_memory_cache_seconds
+                ),
             )
         except Exception as exc:
             logger.debug("TeamMemoryService init failed: %s", exc)

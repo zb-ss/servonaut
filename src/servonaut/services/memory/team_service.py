@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING
@@ -122,12 +123,17 @@ class TeamMemberKey:
         fingerprint: 64-char hex SHA-256 of the public key.
         public_key_b64: Base64-encoded raw 32-byte X25519 public key.
         role: Member's role in the team (``"owner"`` | ``"admin"`` | ``"member"`` | ``"viewer"``).
+        name: Display name of the member ("" when the service sends none).
+        key_changed: ``True`` when the member's key changed since it was
+            last trusted.
     """
 
     user_id: int
     fingerprint: str
     public_key_b64: str
     role: str
+    name: str = ""
+    key_changed: bool = False
 
     @property
     def public_key_bytes(self) -> bytes:
@@ -148,6 +154,9 @@ class Grant:
         granted_by_user_id: Numeric user ID of the granter.
         created_at: Grant creation timestamp.
         revoked_at: Revocation timestamp, or ``None`` if still active.
+        pending_recipients: Eligible members who cannot read the share yet
+            (``{user_id, name, role, reason}``; reason ``"no_memory_key"``).
+            Only the create response carries them.
     """
 
     id: str
@@ -158,6 +167,12 @@ class Grant:
     granted_by_user_id: int
     created_at: datetime
     revoked_at: Optional[datetime]
+    pending_recipients: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def is_live(self) -> bool:
+        """Whether the grant still lets members read."""
+        return self.revoked_at is None and self.status != "revoked"
 
 
 @dataclass(frozen=True)
@@ -229,6 +244,8 @@ class TeamMemoryService:
         crypto: Crypto module (``servonaut.services.memory.crypto``).
         key_store_provider: Callable returning the active ``KeyMaterial``.
         retrieval_service: Duck-typed retrieval service (see module docstring).
+        cache_ttl_provider: Returns how long, in seconds, a list of a team's
+            shared servers is reused. ``0`` (the default) asks every time.
     """
 
     _FEATURE = "memory_team_share"
@@ -248,12 +265,16 @@ class TeamMemoryService:
         crypto: Any,
         key_store_provider: Callable[[], Any],
         retrieval_service: Any,
+        cache_ttl_provider: Optional[Callable[[], float]] = None,
     ) -> None:
         self._api = api_client
         self._auth = auth_service
         self._crypto = crypto
         self._key_store_provider = key_store_provider
         self._retrieval_service = retrieval_service
+        self._cache_ttl_provider = cache_ttl_provider or (lambda: 0.0)
+        # team slug -> (monotonic time of the answer, the answer)
+        self._shared_memo: Dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # Entitlement gate helper
@@ -297,9 +318,38 @@ class TeamMemoryService:
                     fingerprint=item["fingerprint"],
                     public_key_b64=item["public_key_b64"],
                     role=item["role"],
+                    name=str(item.get("name") or ""),
+                    key_changed=bool(item.get("key_changed", False)),
                 )
             )
         return members
+
+    def eligible_members(
+        self, members: List[TeamMemberKey], required_role: str
+    ) -> List[TeamMemberKey]:
+        """The members whose role is at or above *required_role*."""
+        required_order = self._ROLE_ORDER.get(required_role, 0)
+        return [
+            m for m in members
+            if self._ROLE_ORDER.get(m.role, 0) >= required_order
+        ]
+
+    def _forget_shared(self, team_slug: str) -> None:
+        """Drop the remembered list of *team_slug*: a share just changed."""
+        self._shared_memo.pop(team_slug, None)
+
+    async def find_live_grant(
+        self, team_slug: str, instance_id: str
+    ) -> Optional[Grant]:
+        """The live grant sharing *instance_id* with the team, if any.
+
+        The id comes from the list route, the only place the service gives it.
+        """
+        for shared in await self.list_shared_instances(team_slug):
+            grant = shared.grant
+            if grant.instance_id == instance_id and grant.is_live:
+                return grant
+        return None
 
     async def list_shared_instances(self, team_slug: str) -> List[SharedInstance]:
         """List instances shared with the caller through this team.
@@ -318,6 +368,10 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        ttl = float(self._cache_ttl_provider() or 0.0)
+        remembered = self._shared_memo.get(team_slug)
+        if ttl > 0 and remembered and time.monotonic() - remembered[0] < ttl:
+            return list(remembered[1])
         try:
             data = await self._api.get(f"/api/v1/teams/{team_slug}/memory")
         except Exception as exc:
@@ -333,7 +387,8 @@ class TeamMemoryService:
                     readable_modules=item.get("readable_modules", []),
                 )
             )
-        return result
+        self._shared_memo[team_slug] = (time.monotonic(), result)
+        return list(result)
 
     async def read_team_envelope(
         self,
@@ -404,12 +459,12 @@ class TeamMemoryService:
             The created ``Grant``.
 
         Note:
-            Narrowing an existing share is not possible in place: the API
-            has no per-module wrap revocation, and a second grant for the
-            same instance is refused (``grant_exists``). Revoke the grant,
-            purge its wraps (:meth:`revoke_grant` + :meth:`purge_grant`,
-            which drop every non-granter wrap on the instance), then share
-            again with the narrower module list.
+            A second grant for the same instance is refused
+            (``grant_exists``). To change a share, :meth:`reshare_instance`
+            revokes the grant and shares again; the service reuses the wraps
+            it already holds. Only :meth:`purge_grant` removes members'
+            copies, and a narrower module list needs that purge first: the
+            API has no per-module wrap revocation.
 
         Raises:
             ValueError: If ``modules`` is ``None`` or empty.
@@ -433,11 +488,7 @@ class TeamMemoryService:
             m for m in raw_modules if isinstance(m, str) and m in selected
         ]
 
-        required_order = self._ROLE_ORDER.get(required_role, 0)
-        eligible_members = [
-            m for m in member_pubkeys
-            if self._ROLE_ORDER.get(m.role, 0) >= required_order
-        ]
+        eligible_members = self.eligible_members(member_pubkeys, required_role)
 
         if not module_names or not eligible_members:
             wraps: List[Dict[str, Any]] = []
@@ -457,6 +508,7 @@ class TeamMemoryService:
             "wraps": wraps,
         }
 
+        self._forget_shared(team_slug)
         try:
             data = await self._api.post(
                 f"/api/v1/teams/{team_slug}/memory/grant",
@@ -466,6 +518,26 @@ class TeamMemoryService:
             raise _translate_api_error(exc, team_slug=team_slug, instance_id=instance_id) from exc
 
         return _parse_grant(data)
+
+    async def reshare_instance(
+        self,
+        team_slug: str,
+        grant_id: str,
+        instance_id: str,
+        required_role: str,
+        modules: List[str],
+        member_pubkeys: List[TeamMemberKey],
+    ) -> Grant:
+        """Replace a live grant: revoke it, then share again.
+
+        There is no purge in between: the service reuses the wraps that are
+        already stored, so deleting them would only recreate them. A failed
+        revoke raises before any new grant is requested.
+        """
+        await self.revoke_grant(team_slug, grant_id)
+        return await self.share_instance(
+            team_slug, instance_id, required_role, modules, member_pubkeys
+        )
 
     async def _build_wraps(
         self,
@@ -603,6 +675,7 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        self._forget_shared(team_slug)
         try:
             data = await self._api.delete(
                 f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}"
@@ -628,6 +701,7 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        self._forget_shared(team_slug)
         try:
             data = await self._api.post(
                 f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}/purge",
@@ -658,6 +732,9 @@ def _parse_grant(data: Dict[str, Any]) -> Grant:
             if revoked_raw
             else None
         ),
+        pending_recipients=[
+            dict(p) for p in data.get("pending_recipients") or [] if isinstance(p, dict)
+        ],
     )
 
 

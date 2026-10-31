@@ -1222,6 +1222,9 @@ class MemoryConfig:
         ssh_connect_retry_backoff_seconds: Pause before the one retry of a
             dropped connection; two failures before any answer make the
             server unreachable.
+        team_memory_cache_seconds: How long the list of servers a team shares
+            is reused before the Servonaut service is asked again. ``0`` asks
+            every time.
         ssh_control_socket_dir: Directory for each build's private socket
             folder. Empty means the system temp directory (``TMPDIR``) when a
             socket path fits there, else ``/tmp`` when that is usable; with
@@ -1306,6 +1309,8 @@ class MemoryConfig:
     ssh_connect_retry_backoff_seconds: float = 1.0
     ssh_close_timeout_seconds: float = 5.0
     ssh_control_socket_dir: str = ""
+    # How long a team's list of shared servers is reused (see above).
+    team_memory_cache_seconds: float = 60.0
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
