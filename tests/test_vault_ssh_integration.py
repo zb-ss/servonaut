@@ -118,6 +118,7 @@ def test_native_command_uses_private_agent_with_a_public_identity_file() -> None
     assert "StrictHostKeyChecking=yes" in command
 
 
+@pytest.mark.real_ssh_process  # runs the real client only to evaluate its configuration
 def test_native_command_effectively_uses_only_verified_host_key_policy() -> None:
     manager = MagicMock()
     manager.get.return_value = AppConfig(ssh=SSHConfig())

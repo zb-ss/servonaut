@@ -32,9 +32,12 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
+from servonaut.services.memory.fleet_scan_service import row_reason_text
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.team_fold import folded_share_ids, memory_fleet_rows
 from servonaut.utils.instance_resolver import display_name
 
 # Status constants and classifier live in the dependency-free service module
@@ -57,11 +60,18 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+#: Status of a team's shared server that has no local record: its age and
+#: module count come from the team's list. Local to this screen, because it
+#: is not a state the scan service produces.
+STATUS_SHARED = "shared"
+
 _STATUS_CELL: Dict[str, str] = {
     STATUS_FRESH: "[green]● Fresh[/green]",
     STATUS_STALE: "[yellow]● Stale[/yellow]",
     STATUS_NONE: "[dim]○ Not probed[/dim]",
     STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
+    # A server a team shares, read from the team's copy (read-only).
+    STATUS_SHARED: "[blue]● Shared[/blue]",
 }
 
 # Source column rendering (width 8)
@@ -69,6 +79,7 @@ _SOURCE_CELL: Dict[str, str] = {
     "local": "[dim]local[/dim]",
     "remote": "[blue]cloud[/blue]",
     "merged": "[green]synced[/green]",
+    "team": "[blue]team[/blue]",
 }
 
 
@@ -143,10 +154,15 @@ class FleetScanSummaryModal(ModalScreen[None]):
     }
     """
 
+    # Nothing skipped unless the summary says so: a modal built without the
+    # argument (or by an older caller) still renders.
+    _skipped: List[str] = []
+
     def __init__(
         self,
         succeeded: List[str],
         failed: List[Dict[str, Any]],
+        skipped: Optional[List[str]] = None,
     ) -> None:
         """Initialise the summary.
 
@@ -154,19 +170,24 @@ class FleetScanSummaryModal(ModalScreen[None]):
             succeeded: Instance identifiers whose scan produced ≥1 module.
             failed: ``[{"instance": <name>, "reason": <code>, "failures":
                 [{module, reason, message}, …]}]`` for failed scans.
+            skipped: Servers not probed because they are stopped.
         """
         super().__init__()
         self._succeeded = succeeded
         self._failed = failed
+        self._skipped = skipped or []
 
     def compose(self) -> ComposeResult:
-        total = len(self._succeeded) + len(self._failed)
+        total = len(self._succeeded) + len(self._failed) + len(self._skipped)
+        skipped_text = (
+            f", [dim]{len(self._skipped)} skipped: stopped[/dim]" if self._skipped else ""
+        )
         yield Container(
             Static(
                 f"[bold $text-accent]Fleet scan complete[/bold $text-accent] — "
                 f"[$text-success]{len(self._succeeded)} succeeded[/$text-success], "
-                f"[$text-error]{len(self._failed)} failed[/$text-error] "
-                f"({total} total)",
+                f"[$text-error]{len(self._failed)} failed[/$text-error]"
+                f"{skipped_text} ({total} total)",
                 id="fleet-scan-title",
             ),
             VerticalScroll(
@@ -215,6 +236,11 @@ class FleetScanSummaryModal(ModalScreen[None]):
                 extra = len(entry.get("failures", [])) - 3
                 if extra > 0:
                     lines.append(f"      [dim]… and {extra} more[/dim]")
+        if self._skipped:
+            lines.append("")
+            lines.append("[dim]Skipped: stopped[/dim]:")
+            for name in self._skipped:
+                lines.append(f"  • {escape(name)}")
         if not lines:
             lines.append("[dim]No activity.[/dim]")
         return "\n".join(lines)
@@ -329,6 +355,7 @@ class FleetMemoryScreen(Screen):
         table.add_column("Modules", key="modules", width=10)
         table.add_column("Drift 7d", key="drift_7d", width=6)
         table.add_column("Last probed", key="age", width=14)
+        table.add_column("Last scan", key="reason", width=20)
         self._refresh_auto_scan_status()
         self._launch_populate()
         # Memory Sync unlock is offered HERE (on entering a memory section),
@@ -360,6 +387,178 @@ class FleetMemoryScreen(Screen):
         """Re-populate the fleet rows so names and ids follow the demo toggle."""
         self._launch_populate()
 
+    _SHARED_KEYS = ("source", "status", "modules", "age")
+
+    def _shared_fields(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Row fields from a team's list, for a shared server with no local record.
+
+        Reads only what the reader already holds: a redraw never asks the
+        service. Empty when the server has a local record or no team lists it.
+        """
+        inst = row.get("instance") or {}
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None or row.get("status") in (STATUS_FRESH, STATUS_STALE):
+            return {}
+        candidates = row.get("grant_candidates") or []
+        if not candidates and (own := self._share_candidate(inst)) is not None:
+            candidates = [own]
+        listings = [
+            found for c in candidates
+            if (found := reader.cached_listing(c.team_slug, c.instance_id)) is not None
+        ]
+        if not listings:
+            return {}
+        # Every grant adds what it covers: count each module once.
+        names = {m for found in listings for m in found.modules}
+        count = len(names) if names else max(found.module_count for found in listings)
+        newest = max((found.last_probe_at for found in listings), default="")
+        return {
+            "source": "team",
+            "status": STATUS_SHARED,
+            "modules": count,
+            "age": _human_age(newest) if newest else "—",
+        }
+
+    def _share_candidate(self, inst: Dict[str, Any]) -> Any:
+        """The team and owner's instance id behind a shared row, else None."""
+        from servonaut.services.memory.shared_view import share_candidates
+
+        real = connection_instance(self.app, inst)
+        if not isinstance(real, dict) or real.get("is_shared") is not True:
+            return None
+        found = share_candidates(real, [])
+        return found[0] if found else None
+
+    async def _prefetch_shared_listings(self) -> None:
+        """Ask once per team what it shares, then bring the rows in line.
+
+        Runs when the screen fills or refreshes, never on a redraw; the
+        service call is reused for ``memory.team_memory_cache_seconds``.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None:
+            return
+        slugs = {
+            c.team_slug
+            for row in self._rows
+            if not row.get("memory_only")
+            and (c := self._share_candidate(row.get("instance") or {})) is not None
+        }
+        await reader.prefetch_all(extra_slugs=sorted(slugs))
+        self._sync_shared_rows()
+
+    def _sync_shared_rows(self) -> None:
+        """Make the rows match the reader's listings, revocations included.
+
+        Existing rows gain, update or lose their shared look; a grant with no
+        row of its own gets a read-only, memory-only row; there is one row
+        per server however many teams list it.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None:
+            return
+        from servonaut.services.memory.shared_view import ShareCandidate
+
+        listings = reader.cached_listings()
+        by_id: Dict[str, List[Any]] = {}
+        for (_slug, instance_id), listing in sorted(listings.items()):
+            if instance_id:
+                by_id.setdefault(instance_id, []).append(ShareCandidate(
+                    listing.team_slug, listing.team_name, instance_id))
+        self._rows = [r for r in self._rows if not r.get("memory_only")]
+        seen: set = set()
+        for row in self._rows:
+            inst = row.get("instance") or {}
+            own = self._share_candidate(inst)
+            ids = {str(row.get("raw_id") or ""), str(inst.get("instance_id") or "")}
+            if own is not None:
+                ids.add(own.instance_id)
+            # Every grant that covers this server stays on its one row.
+            found = [c for i in sorted(ids) for c in by_id.get(i, [])]
+            if found:
+                row["grant_candidates"] = found
+            else:
+                row.pop("grant_candidates", None)
+            self._decorate_shared(row)
+            seen.update(i for i in ids if i)
+        for instance_id, candidates in by_id.items():
+            if instance_id not in seen:
+                first = listings[(candidates[0].team_slug, instance_id)]
+                self._rows.append(self._memory_only_row(first, candidates))
+        self._redraw_table()
+
+    def _decorate_shared(self, row: Dict[str, Any]) -> None:
+        """Give *row* its shared look, or take it away, keeping its own fields.
+
+        The row's own fields are captured before the first decoration, so a
+        revoked share restores what the row really was (local or cloud).
+        """
+        fields = self._shared_fields(row)
+        if fields:
+            row.setdefault("_before_share", {k: row.get(k) for k in self._SHARED_KEYS})
+            for key, value in fields.items():
+                row[key] = value
+        elif "_before_share" in row:
+            for key, value in row.pop("_before_share").items():
+                row[key] = value
+
+    def _memory_only_row(self, listing: Any, candidates: List[Any]) -> Dict[str, Any]:
+        """A read-only row for a server a team shares that the user does not list."""
+        from servonaut.services.memory.shared_view import apply_display_names
+
+        real_id = listing.instance_id
+        instance: Dict[str, Any] = {
+            "is_shared": True, "state": "shared", "memory_only": True,
+            # The real values; what is shown is derived from them (and from
+            # demo mode) by apply_display_names, also while a screen is open.
+            "real_id": real_id,
+            "real_name": str(listing.instance.get("display_name") or real_id),
+            "real_provider": str(listing.instance.get("provider") or "shared"),
+            "team_slug": listing.team_slug, "team_name": listing.team_name,
+            "instance_id": real_id, "grant_candidates": list(candidates),
+        }
+        apply_display_names(instance, self.app)
+        shown_id, name, provider = instance["id"], instance["name"], instance["provider"]
+        return {
+            "grant_candidates": list(candidates),
+            "instance": instance, "id": shown_id, "name": name, "provider": provider,
+            "raw_id": real_id, "raw_provider": "shared", "source": "team",
+            "status": STATUS_SHARED,
+            "modules": len({m for c in candidates
+                            if (found := self.app.shared_memory_reader.cached_listing(
+                                c.team_slug, c.instance_id)) is not None
+                            for m in found.modules}) or listing.module_count,
+            "drift_7d": 0,
+            "age": _human_age(listing.last_probe_at) if listing.last_probe_at else "—",
+            "reason": "—", "memory_only": True,
+        }
+
+    def _redraw_table(self) -> None:
+        """Draw ``self._rows`` again (cursor kept), without rebuilding them."""
+        try:
+            table = self.query_one("#fleet-memory-table", DataTable)
+            cursor = table.cursor_row
+            table.clear()
+            for row in self._rows:
+                table.add_row(
+                    escape(str(row["name"])),
+                    escape(str(row["id"])),
+                    escape(str(row["provider"])),
+                    _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
+                    _STATUS_CELL.get(row["status"], "—"),
+                    str(row["modules"]) if row["modules"] else "—",
+                    str(row["drift_7d"]) if row.get("drift_7d") else "—",
+                    row["age"],
+                    row["reason"],
+                )
+            if self._rows and cursor is not None:
+                table.move_cursor(row=min(cursor, len(self._rows) - 1))
+            self.query_one("#fleet-memory-status", Static).update(
+                self._summary_line_from_rows(self._rows)
+            )
+        except Exception:  # noqa: BLE001 — the screen was left meanwhile
+            return
+
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
         fleet_service = getattr(self.app, "fleet_service", None)
@@ -385,7 +584,9 @@ class FleetMemoryScreen(Screen):
             return
 
         try:
-            merged = await fleet_service.get_merged_fleet()
+            merged = await fleet_service.get_merged_fleet(
+                hidden_ids=folded_share_ids(self.app)
+            )
         except BackendMaintenance:
             self.app.notify(
                 "Memory cloud sync is in maintenance — showing local data only.",
@@ -406,6 +607,30 @@ class FleetMemoryScreen(Screen):
             return
 
         self._populate_table_from_merged(merged)
+
+    def _reason_cell(self, raw_id: str) -> str:
+        """Cell text for why the row's latest scan did not succeed, or ``—``.
+
+        The reason stays on the scan service until that row is probed again,
+        so it survives table rebuilds and leaving the panel.
+        """
+        scan_service = getattr(self.app, "fleet_scan_service", None)
+        reasons = getattr(scan_service, "last_reasons", None)
+        if not isinstance(reasons, dict):
+            return "—"
+        # The scan files a reason under the id of the row it probed, which in
+        # demo mode is a stand-in; the merged table asks with the real id.
+        # Both are compared by their real id, so no path needs the other's.
+        wanted = real_instance_id(self.app, raw_id)
+        code = reasons.get(raw_id, "") or next(
+            (
+                value for key, value in reasons.items()
+                if real_instance_id(self.app, key) == wanted
+            ),
+            "",
+        )
+        text = row_reason_text(code)
+        return f"[red]{text}[/red]" if text else "—"
 
     def _populate_table_from_merged(self, merged: List[Dict[str, Any]]) -> None:
         """Populate the table from get_merged_fleet() rows."""
@@ -473,7 +698,7 @@ class FleetMemoryScreen(Screen):
                     modules_count = len(mods)
                     age_text = _human_age(_latest_probed_at(mods))
 
-            self._rows.append({
+            row = {
                 "instance": inst,
                 "id": iid,
                 "name": iname,
@@ -488,7 +713,10 @@ class FleetMemoryScreen(Screen):
                 "modules": modules_count,
                 "drift_7d": drift_7d,
                 "age": age_text,
-            })
+                "reason": self._reason_cell(raw_iid),
+            }
+            self._decorate_shared(row)
+            self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
@@ -503,16 +731,29 @@ class FleetMemoryScreen(Screen):
                 str(row["modules"]) if row["modules"] else "—",
                 str(row["drift_7d"]) if row.get("drift_7d") else "—",
                 row["age"],
+                row["reason"],
             )
 
         self.query_one("#fleet-memory-status", Static).update(
             self._summary_line_from_rows(self._rows)
         )
+        self._start_shared_prefetch()
+
+    def _start_shared_prefetch(self) -> None:
+        """Look up the team-shared rows without blocking the table."""
+        if getattr(self.app, "shared_memory_reader", None) is None:
+            return
+        self.run_worker(
+            self._prefetch_shared_listings(),
+            name="fleet_memory_shared",
+            group="memory_shared_listing",
+            exclusive=True,
+        )
 
     def _populate_table(self) -> None:
         """Rebuild table rows + status footer from local app state (no remote)."""
         memory_service = getattr(self.app, "memory_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
 
         self._rows = []
         for inst in instances:
@@ -531,7 +772,7 @@ class FleetMemoryScreen(Screen):
                 modules_count = len(modules)
                 age_text = _human_age(_latest_probed_at(modules))
 
-            self._rows.append({
+            row = {
                 "instance": inst,
                 "id": iid,
                 "name": iname,
@@ -549,7 +790,10 @@ class FleetMemoryScreen(Screen):
                 "modules": modules_count,
                 "drift_7d": 0,
                 "age": age_text,
-            })
+                "reason": self._reason_cell(iid),
+            }
+            self._decorate_shared(row)
+            self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
@@ -563,12 +807,14 @@ class FleetMemoryScreen(Screen):
                 str(row["modules"]) if row["modules"] else "—",
                 "—",
                 row["age"],
+                row["reason"],
             )
 
         # Status footer — one glance tells the operator where to act.
         self.query_one("#fleet-memory-status", Static).update(
             self._summary_line_from_rows(self._rows)
         )
+        self._start_shared_prefetch()
 
     # ------------------------------------------------------------------
     # Summary helpers (shared between populate paths and live updater)
@@ -581,10 +827,12 @@ class FleetMemoryScreen(Screen):
         Counts statuses directly from the rows so the live-update path and
         the post-populate path can't drift.
         """
-        fresh = stale = none_count = opt_out = 0
+        fresh = stale = none_count = opt_out = shared = 0
         for row in rows:
             s = row.get("status", STATUS_NONE)
-            if s == STATUS_FRESH:
+            if s == STATUS_SHARED:
+                shared += 1
+            elif s == STATUS_FRESH:
                 fresh += 1
             elif s == STATUS_STALE:
                 stale += 1
@@ -598,7 +846,9 @@ class FleetMemoryScreen(Screen):
             f"[$text-success]{fresh} fresh[/$text-success]  ·  "
             f"[$text-warning]{stale} stale[/$text-warning]  ·  "
             f"{none_count} not probed  ·  "
-            f"[$text-error]{opt_out} opted-out[/$text-error][/dim]"
+            f"[$text-error]{opt_out} opted-out[/$text-error]"
+            + (f"  ·  {shared} shared by a team" if shared else "")
+            + "[/dim]"
         )
 
     def _selected_row(self) -> Optional[Dict[str, Any]]:
@@ -627,12 +877,19 @@ class FleetMemoryScreen(Screen):
             self.app.notify("Select a row first.", severity="warning")
             return
         from servonaut.screens.memory import MemoryScreen
-        self.app.push_screen(MemoryScreen(row["instance"]))
+        # The app's own record, so demo mode keeps redacting what the screen
+        # shows; the grants found for it ride along separately.
+        self.app.push_screen(
+            MemoryScreen(row["instance"], grant_candidates=row.get("grant_candidates"))
+        )
 
     def action_share_selected(self) -> None:
         row = self._selected_row()
         if not row:
             self.app.notify("Select a row first.", severity="warning")
+            return
+        if row.get("memory_only"):
+            self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
         auth = getattr(self.app, "auth_service", None)
         if auth is None or not auth.has_feature("memory_team_share"):
@@ -660,6 +917,9 @@ class FleetMemoryScreen(Screen):
         row = self._selected_row()
         if not row:
             self.app.notify("Select a row first.", severity="warning")
+            return
+        if row.get("memory_only"):
+            self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
@@ -708,7 +968,7 @@ class FleetMemoryScreen(Screen):
         service is not wired — used by pre-scan count display and legacy paths.
         """
         fleet_scan_service = getattr(self.app, "fleet_scan_service", None)
-        instances = self.app.instances or []
+        instances = memory_fleet_rows(self.app)
         if fleet_scan_service is not None:
             return fleet_scan_service.eligible_instances(
                 instances, stale_only=stale_only
@@ -723,6 +983,14 @@ class FleetMemoryScreen(Screen):
                 continue
             eligible.append(inst)
         return eligible
+
+    def _only_stopped_candidates(self, stale_only: bool) -> bool:
+        """True when the fleet has servers the scan would skip as stopped."""
+        scan_service = getattr(self.app, "fleet_scan_service", None)
+        skipped = getattr(scan_service, "skipped_instances", None)
+        if not callable(skipped):
+            return False
+        return bool(skipped(memory_fleet_rows(self.app), stale_only=stale_only))
 
     def _launch_bulk_scan(self, stale_only: bool) -> None:
         memory_service = getattr(self.app, "memory_service", None)
@@ -743,6 +1011,13 @@ class FleetMemoryScreen(Screen):
         # for a minor optimisation (disk reads, not SSH).  If this becomes
         # measurable on very large fleets, hoist the list and thread it through.
         instances = self._eligible_instances(stale_only, memory_service)
+        if not instances and self._only_stopped_candidates(stale_only):
+            # Nothing to probe, but the scan still records which servers it
+            # skipped and why; it starts no connection.
+            self._scanning = self.app.start_fleet_manual_scan(
+                memory_fleet_rows(self.app), stale_only=stale_only
+            )
+            return
         if not instances:
             msg = (
                 "No stale memory to refresh."
@@ -763,7 +1038,7 @@ class FleetMemoryScreen(Screen):
         # completion hook are routed back to whichever Fleet Memory screen is
         # mounted via the app's _fleet_manual_scan_progress / on_fleet_manual_scan_done.
         started = self.app.start_fleet_manual_scan(
-            self.app.instances or [], stale_only=stale_only
+            memory_fleet_rows(self.app), stale_only=stale_only
         )
         if not started:
             self._set_progress("")
@@ -853,6 +1128,8 @@ class FleetMemoryScreen(Screen):
 
         # Recompute status using the same helper as the populate paths.
         new_status = compute_memory_status(inst, memory_service)
+        if row.get("status") == STATUS_SHARED and new_status not in (STATUS_FRESH, STATUS_STALE):
+            return  # still only the team's copy: nothing new to show
 
         new_modules: Any = row.get("modules", 0)
         new_age: str = row.get("age", "—")
@@ -870,8 +1147,9 @@ class FleetMemoryScreen(Screen):
         row["status"] = new_status
         row["modules"] = new_modules
         row["age"] = new_age
+        row["reason"] = self._reason_cell(raw_id)
 
-        # Update visible table cells (columns 4=status, 5=modules, 7=age).
+        # Update visible table cells (columns 4=status, 5=modules, 7=age, 8=last scan).
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
             table.update_cell_at(
@@ -886,6 +1164,7 @@ class FleetMemoryScreen(Screen):
                 Coordinate(row_index, 7),
                 new_age,
             )
+            table.update_cell_at(Coordinate(row_index, 8), row["reason"])
         except Exception:
             # Widget may be gone (screen navigated away during scan) — ignore.
             pass
@@ -924,7 +1203,7 @@ class FleetMemoryScreen(Screen):
 
         try:
             result = await fleet_scan_service.scan(
-                self.app.instances or [],
+                memory_fleet_rows(self.app),
                 stale_only=stale_only,
                 on_progress=self._on_scan_progress,
             )
@@ -953,13 +1232,14 @@ class FleetMemoryScreen(Screen):
         self._refresh_auto_scan_status()
         self._launch_populate()
         self.app.notify(
-            f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed.",
+            f"Fleet scan done: {result.summary_text()}.",
             markup=False,
         )
         if result.failed:
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     def on_fleet_auto_scan_done(self, result: Any) -> None:
@@ -991,7 +1271,9 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         if getattr(result, "failed", None):
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     # ------------------------------------------------------------------

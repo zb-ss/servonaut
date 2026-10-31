@@ -16,6 +16,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from rich.markup import escape
+from rich.text import Text
 from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.styles import CSS_FILES as _APP_CSS_FILES
@@ -27,7 +28,15 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Input, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import connection_instance
+from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
+from servonaut.services.shared_servers import own_twin
+from servonaut.services.memory.shared_view import (
+    apply_display_names,
+    combine_shared,
+    merge_shared,
+    share_candidates,
+    shared_source_text,
+)
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -365,10 +374,31 @@ class MemoryScreen(Screen):
         Binding("H", "build_ai_summary", "Generate Hosted", show=True),
     ]
 
+    # Actions that reach the server itself or change its stored memory.
+    _HOST_ACTIONS = frozenset(
+        {"refresh_all", "refresh_module", "pin_key", "clear_module", "sync_now", "annotate"}
+    )
+    _HOST_BUTTONS = (
+        "#btn_refresh_all", "#btn_refresh_module", "#btn_pin_key",
+        "#btn_clear_module", "#btn_sync_now", "#btn_empty_probe", "#btn_annotate",
+    )
+
+    @property
+    def _read_only(self) -> bool:
+        """True for a server only a team's memory lists: no host to reach."""
+        return self._instance.get("memory_only") is True
+
+    # What a team shares of this server (see ``_request_shared``); class
+    # defaults so a screen built without ``__init__`` still renders.
+    _shared: Any = None
+    _shared_requested = False
+
     def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if self._read_only and action in self._HOST_ACTIONS:
+            return False
         return check_action_passthrough(self, action)
 
-    def __init__(self, instance: dict) -> None:
+    def __init__(self, instance: dict, grant_candidates: Any = None) -> None:
         """Initialise MemoryScreen.
 
         Args:
@@ -378,16 +408,28 @@ class MemoryScreen(Screen):
         # The row as displayed: demo-mode stand-ins when demo mode is on.
         # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
+        # Grants the fleet screen found for this server, kept apart from the
+        # record so the app can keep redacting that record in place.
+        self._grant_candidates = list(grant_candidates or [])
         self._has_local_memory = False
 
     @property
     def _target(self) -> dict:
-        """The real record behind the displayed row (itself outside demo mode)."""
+        """The real record behind the displayed row (itself outside demo mode).
+
+        A team's copy of a server the user owns stands for the user's own
+        row: its notes, findings and probes are the own row's, so nothing
+        new lands on the copy.
+        """
         try:
             app = self.app
         except RuntimeError:  # no running app: nothing was redacted either
             return self._instance
-        return connection_instance(app, self._instance)
+        real = connection_instance(app, self._instance)
+        if not isinstance(real, dict) or real.get("is_shared") is not True:
+            return real
+        twin = own_twin(real, real_fleet_rows(app) or [])
+        return dict(twin) if twin is not None else real
 
     # ------------------------------------------------------------------
     # Compose
@@ -411,6 +453,7 @@ class MemoryScreen(Screen):
                     "[dim]Memory scan: checking…[/dim]",
                     id="memory-local-status",
                 ),
+                Static("", id="memory-shared-source", classes="hidden"),
                 Static(
                     "[$text-warning]Memory disabled for this server.[/$text-warning]",
                     id="memory-opt-out-banner",
@@ -510,6 +553,8 @@ class MemoryScreen(Screen):
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
         self._render_table()
+        self._apply_read_only()
+        self._request_shared()
         self._refresh_sync_status()
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
@@ -532,6 +577,8 @@ class MemoryScreen(Screen):
         The displayed row is redacted or restored in place by the app, so
         the title only needs redrawing.
         """
+        if self._read_only:
+            apply_display_names(self._instance, self.app)
         self._render_title()
         self._render_table()
 
@@ -591,13 +638,25 @@ class MemoryScreen(Screen):
             self._set_summary_actions_enabled(False)
             return
 
+        local_modules = all_modules
+        all_modules = merge_shared(local_modules, self._shared)
+        # Modules shown from the team's copy: their text is the owner's, so
+        # it is drawn literally (never as markup).
+        shared_names = {
+            name for name, module in (self._shared.modules.items() if self._shared else ())
+            if all_modules.get(name) is module
+        }
+        in_use = bool(shared_names)
+        self._show_shared_source(self._shared, shared_names)
+
         if not all_modules:
             # Empty: show the CTA so users know how to populate memory.
             self._set_empty_state_visible(True)
             self._set_summary_actions_enabled(False)
             return
         self._set_empty_state_visible(False)
-        self._set_summary_actions_enabled(True)
+        # The summary is built from this device's own memory only.
+        self._set_summary_actions_enabled(bool(local_modules))
 
         # Determine stale modules
         try:
@@ -649,11 +708,12 @@ class MemoryScreen(Screen):
                     obs_str = self.app.redaction_service.scrub_stream(obs_str)
                     decl_str = self.app.redaction_service.scrub_stream(decl_str)
 
+                literal = module_name in shared_names
                 table.add_row(
                     module_name,
-                    key,
-                    obs_str,
-                    decl_str,
+                    Text(str(key)) if literal else key,
+                    Text(obs_str) if literal else obs_str,
+                    Text(decl_str) if literal else decl_str,
                     probed_at_display,
                     age_display,
                     key=f"{module_name}::{key}",
@@ -662,6 +722,79 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _request_shared(self) -> None:
+        """Once per screen, look for memory a team shares of this server.
+
+        Runs on opening only (never on a redraw), and the reader reuses its
+        answer for ``memory.team_memory_cache_seconds`` across screens.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None or self._shared_requested:
+            return
+        self._shared_requested = True
+        candidates = list(share_candidates(self._target, real_fleet_rows(self.app)))
+        # Grants the fleet screen found for this server (an own row, or a
+        # memory-only row several teams share).
+        for extra in [*self._grant_candidates, *(self._instance.get("grant_candidates") or [])]:
+            if all((c.team_slug, c.instance_id) != (extra.team_slug, extra.instance_id)
+                   for c in candidates):
+                candidates.append(extra)
+        if not candidates:
+            return
+        self.run_worker(
+            self._load_shared(reader, candidates),
+            group="memory_shared_read",
+            name="memory_shared_read",
+            exclusive=True,
+        )
+
+    async def _load_shared(self, reader: Any, candidates: List[Any]) -> None:
+        found = []
+        for candidate in candidates:
+            try:
+                found.append(await reader.read(
+                    candidate.team_slug, candidate.team_name, candidate.instance_id
+                ))
+            except Exception as exc:  # noqa: BLE001 — a fallback must never break the screen
+                logger.warning("Could not read shared memory: %s", exc)
+        combined = combine_shared(found)
+        if combined is not None:
+            self._shared = combined
+            self._render_table()
+
+    def _apply_read_only(self) -> None:
+        """Turn off what needs a host when the server only has shared memory."""
+        if not self._read_only:
+            return
+        for selector in self._HOST_BUTTONS:
+            try:
+                self.query_one(selector, Button).disabled = True
+            except Exception:  # noqa: BLE001 - not every control is mounted
+                pass
+
+    def _show_shared_source(self, shared: Any, shown: Any) -> None:
+        """Say which team the rows that are not local come from."""
+        label = self.query_one("#memory-shared-source", Static)
+        lines = []
+        if shared is not None and shown:
+            redaction = getattr(self.app, "redaction_service", None)
+            demo = getattr(self.app, "demo_mode", False) and redaction is not None
+
+            def redact(team: str) -> str:
+                return redaction.redact_name(team) if demo else team
+
+            lines.append(escape(shared_source_text(shared, shared.team_name, redact, shown)))
+        if self._read_only:
+            lines.append(
+                "Read-only: this server has no connection of its own, so it "
+                "cannot be probed, refreshed or cleared."
+            )
+        if not lines:
+            label.add_class("hidden")
+            return
+        label.update("[dim]" + "\n".join(lines) + "[/dim]")
+        label.remove_class("hidden")
 
     def _set_empty_state_visible(self, visible: bool) -> None:
         """Show or hide the T11 empty-state CTA."""
@@ -1221,7 +1354,9 @@ class MemoryScreen(Screen):
             if result is None or result == content:
                 return
             self.run_worker(
-                self._save_annotations(instance_id, provider, memory_service, result),
+                self._save_annotations(
+                    instance_id, provider, memory_service, result, expected=content
+                ),
                 exclusive=False,
                 group="memory_mutation",
                 name="memory_annotations_save",
@@ -1238,17 +1373,58 @@ class MemoryScreen(Screen):
             _on_close,
         )
 
+    @staticmethod
+    def _write_unless_changed(
+        memory_service: Any,
+        instance_id: str,
+        provider: str,
+        text: str,
+        expected: Optional[str],
+    ) -> Optional[Path]:
+        """Write *text* unless the notes differ from *expected*.
+
+        Returns None when the notes were written, else the draft the text was
+        kept in. The editor holds the notes as they were when it opened. A
+        merge or another editor may have changed the file since, and writing
+        the editor's text would drop that. The text is then kept beside the
+        notes as a new private ``annotations.unsaved-<time>.md`` file and
+        nothing is overwritten. The comparison and the write are one step
+        under the store's annotation lock, so a merge cannot slip in between.
+        """
+        if expected is None:
+            memory_service.write_annotations(instance_id, text, provider)
+            return None
+        digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+        if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
+            return None
+        return memory_service.write_annotation_draft(instance_id, text, provider)
+
     async def _save_annotations(
-        self, instance_id: str, provider: str, memory_service: Any, text: str
+        self,
+        instance_id: str,
+        provider: str,
+        memory_service: Any,
+        text: str,
+        expected: Optional[str] = None,
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
         try:
-            await asyncio.to_thread(
-                memory_service.write_annotations, instance_id, text, provider
+            draft = await asyncio.to_thread(
+                self._write_unless_changed, memory_service, instance_id, provider, text, expected
             )
         except Exception as exc:
             self.app.notify(
                 f"Could not save annotations: {exc}", severity="error", markup=False
+            )
+            return
+        if draft is not None:
+            # Only the file name: its folder names the server, which demo mode hides.
+            self.app.notify(
+                "The notes changed while you were editing (a team merge or another "
+                f"edit), so nothing was overwritten. Your text is kept in {draft.name} "
+                "next to the notes: open the notes again and copy in what you need from it.",
+                severity="warning",
+                markup=False,
             )
             return
         self.app.notify("Annotations saved.", severity="information")

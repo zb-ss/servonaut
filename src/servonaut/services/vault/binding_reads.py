@@ -26,7 +26,15 @@ _SIGNED_OUT = "signed_out"
 
 
 class BindingReadsPaused(VaultUserError):
-    """The service refused a binding read, so reads are paused for a while."""
+    """The service refused a binding read, so reads are paused for a while.
+
+    *retry_after* is the seconds until reads resume after a rate limit
+    (429); None for any other pause.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class PersonalBindingReads:
@@ -126,7 +134,8 @@ class PersonalBindingReads:
         remaining = max(0.0, self._paused_until - self._clock())
         return BindingReadsPaused(
             "the Servonaut service is limiting requests from this computer; "
-            f"nothing is wrong with your setup, so {wait_text(remaining)}"
+            f"nothing is wrong with your setup, so {wait_text(remaining)}",
+            retry_after=remaining,
         )
 
     def _session_digest(self) -> bytes | None:

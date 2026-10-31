@@ -116,7 +116,7 @@ class TestAtomicWrite:
         # Patch fdopen so the write itself fails.
         original_open = os.fdopen
 
-        def patched_fdopen(fd, mode):
+        def patched_fdopen(fd, mode, **kwargs):
             os.close(fd)  # release the fd so we don't leak it
             raise OSError("simulated write error")
 

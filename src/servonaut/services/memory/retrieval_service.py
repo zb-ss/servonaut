@@ -27,6 +27,7 @@ from servonaut.services.memory.interfaces import (
     DecryptedEnvelope,
     KeyMaterial,
     MemoryBackendError,
+    MemoryNotFound,
     ReservedInstanceIdError,
     UpsellRequired,
 )
@@ -234,7 +235,7 @@ class MemoryRetrievalService:
         return UpsellRequired(plan)
 
     def _map_404(self, exc: NotFoundError) -> "MemoryBackendError":
-        return MemoryBackendError("access_revoked")
+        return MemoryNotFound("access_revoked")
 
     # ------------------------------------------------------------------
     # Public API

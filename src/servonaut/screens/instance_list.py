@@ -24,6 +24,7 @@ from servonaut.screens._demo_resolve import (
     connection_instance,
     fleet_rows,
     real_instance_id,
+    reconcile_team_memory,
     refuse_unresolved,
     replace_instances,
     team_rows,
@@ -205,6 +206,21 @@ class InstanceListScreen(Screen):
         )
 
     def on_mount(self) -> None:
+        """Start the loads; share-keyed memory uploads wait for all of them.
+
+        The start-up itself counts as a load, so nothing is released before
+        every load this run needs has registered itself.
+        """
+        self._expect_team_memory_load("startup")
+        try:
+            self._load_on_mount()
+        finally:
+            settle = getattr(self.app, "settle_team_memory_load", None)
+            if callable(settle):
+                settle("startup")
+            self._release_team_memory_hold()
+
+    def _load_on_mount(self) -> None:
         """Load instances using stale-while-revalidate strategy.
 
         1. If app already has cached data (loaded at startup), show it immediately
@@ -283,6 +299,7 @@ class InstanceListScreen(Screen):
         progress = self.query_one(ProgressIndicator)
         progress.start("Loading instances...")
 
+        self._expect_team_memory_load("aws")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=force_refresh),
             name="fetch_instances",
@@ -304,6 +321,7 @@ class InstanceListScreen(Screen):
 
         inventory = self.app.provider_inventory("aws")
         if inventory is not None:
+            self._expect_team_memory_load("aws")
             self.run_worker(
                 inventory.fetch_instances_cached(force_refresh=True),
                 name="background_refresh",
@@ -322,6 +340,7 @@ class InstanceListScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting OVH instance refresh")
+        self._expect_team_memory_load("ovh")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=True),
             name="ovh_refresh",
@@ -342,6 +361,7 @@ class InstanceListScreen(Screen):
         import logging
         logger = logging.getLogger(__name__)
         logger.info("Starting Hetzner instance refresh")
+        self._expect_team_memory_load("hetzner")
         self.run_worker(
             inventory.fetch_instances_cached(force_refresh=True),
             name="hetzner_refresh",
@@ -363,11 +383,13 @@ class InstanceListScreen(Screen):
         team_service = getattr(self.app, "team_service", None)
         auth = getattr(self.app, "auth_service", None)
         if team_service is None or auth is None or not auth.is_authenticated:
+            self._release_team_memory_hold()
             if any(row.get("is_shared") is True for row in self.app.instances or []):
                 self._instances = replace_instances(self.app, "shared", [])
                 self._update_table()
                 self._update_status_bar()
             return
+        self._expect_team_memory_load("shared")
         self.run_worker(
             load_shared_servers(team_service),
             name="shared_refresh",
@@ -375,6 +397,46 @@ class InstanceListScreen(Screen):
             exclusive=True,
             exit_on_error=False,
         )
+
+    def _reconcile_team_memory(self) -> bool:
+        """Fold the memory of team copies into the user's own servers (see the app).
+
+        Returns whether the merge was started.
+        """
+        return reconcile_team_memory(self.app)
+
+    def _expect_team_memory_load(self, name: str) -> None:
+        """Tell the app an inventory load started: share-keyed uploads wait for it."""
+        expect = getattr(self.app, "expect_team_memory_load", None)
+        if callable(expect):
+            expect(name)
+
+    def _reconcile_or_release(self) -> None:
+        """After a load: start the merge, or lift the upload hold when none runs."""
+        if not self._reconcile_team_memory():
+            self._release_team_memory_hold()
+
+    _LOAD_NAMES = {
+        "shared_refresh": "shared",
+        "ovh_refresh": "ovh",
+        "hetzner_refresh": "hetzner",
+        "fetch_instances": "aws",
+        "background_refresh": "aws",
+    }
+
+    def _settle_team_memory_load(self, event: Worker.StateChanged) -> None:
+        """An inventory load ended (rows, error or cancel): it no longer holds uploads back."""
+        name = self._LOAD_NAMES.get(event.worker.name)
+        finished = (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED)
+        settle = getattr(self.app, "settle_team_memory_load", None)
+        if name is not None and event.state in finished and callable(settle):
+            settle(name)
+
+    def _release_team_memory_hold(self) -> None:
+        """No shared servers will fold: lift the hold on share-keyed uploads (see the app)."""
+        release = getattr(self.app, "release_team_memory_hold", None)
+        if callable(release):
+            release()
 
     def _shared_servers_loaded(self, worker: Worker) -> None:
         """List what :meth:`_fetch_shared_servers` found."""
@@ -386,6 +448,7 @@ class InstanceListScreen(Screen):
             logging.getLogger(__name__).info(
                 "Team shared servers not listed: %s", worker.error,
             )
+            self._release_team_memory_hold()
             return
         found = worker.result
         # The team key tier of SSH connect reads the user's teams from here.
@@ -397,6 +460,8 @@ class InstanceListScreen(Screen):
         self._instances = replace_instances(self.app, "shared", found.rows)
         self._update_table()
         self._update_status_bar()
+        if not self._reconcile_team_memory():
+            self._release_team_memory_hold()
         if found.problems:
             self.app.notify(
                 "Some team servers could not be listed: " + "; ".join(found.problems),
@@ -410,11 +475,13 @@ class InstanceListScreen(Screen):
         Args:
             event: Worker state changed event.
         """
+        self._settle_team_memory_load(event)
         if event.state == WorkerState.CANCELLED:
             # A cancelled worker counts as finished but has no result.
             # Pressing R cancels the refreshes still running and starts new
             # ones; reading the cancelled ones as empty would clear rows or
             # report "no instances" before the new results arrive.
+            self._release_team_memory_hold()
             return
 
         if event.worker.name == "shared_refresh" and event.worker.is_finished:
@@ -423,6 +490,7 @@ class InstanceListScreen(Screen):
 
         if event.worker.name == "ovh_refresh" and event.worker.is_finished:
             if event.worker.error:
+                self._release_team_memory_hold()
                 self.app.notify(
                     f"OVH refresh error: {event.worker.error}",
                     severity="error",
@@ -435,6 +503,7 @@ class InstanceListScreen(Screen):
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("ovh")
+                self._reconcile_or_release()
                 fetch_error = getattr(
                     self.app.provider_inventory("ovh"), "last_fetch_error", None
                 )
@@ -453,6 +522,7 @@ class InstanceListScreen(Screen):
 
         if event.worker.name == "hetzner_refresh" and event.worker.is_finished:
             if event.worker.error:
+                self._release_team_memory_hold()
                 # markup=False because the worker error message can
                 # include server-controlled text (Hetzner names, label
                 # values, error strings). The project mandates the flag
@@ -469,6 +539,7 @@ class InstanceListScreen(Screen):
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("hetzner")
+                self._reconcile_or_release()
                 inventory = self.app.provider_inventory("hetzner")
                 fetch_error = getattr(inventory, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:
@@ -500,6 +571,7 @@ class InstanceListScreen(Screen):
                     progress.stop()
 
                 if event.worker.error:
+                    self._release_team_memory_hold()
                     self._handle_fetch_error(event.worker.error, is_background)
                 else:
                     new_instances = event.worker.result or []
@@ -523,6 +595,7 @@ class InstanceListScreen(Screen):
                     self._update_table()
                     self._update_status_bar()
                     self._report_duplicate_accounts("aws")
+                    self._reconcile_or_release()
 
                     aws = self.app.provider_inventory("aws")
                     fetch_error = getattr(aws, "last_fetch_error", None)

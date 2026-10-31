@@ -363,6 +363,10 @@ def _proxy_command_problem(command: str) -> str:
     words = shlex.split(command)
     if words[:1] == ["exec"]:
         words = words[1:]
+    # Servonaut's fail-closed proxy for commands bound to a shared connection:
+    # it runs nothing and always fails.
+    if words == ["false"]:
+        return ""
     # A bare "ssh" is found on PATH, i.e. this shim again, and checked there.
     if words[:1] != ["ssh"]:
         return f"ProxyCommand {words[0] if words else ''!r} is not allowed"

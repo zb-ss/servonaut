@@ -320,4 +320,6 @@ def _build_mcp_tools_for_this_app(app):
         guard=CommandGuard(cfg.mcp, app.config_manager),
         audit=AuditTrail(cfg.mcp.audit_path),
         auth_service=app.auth_service,
+        memory_service=getattr(app, "memory_service", None),
+        shared_memory_reader=getattr(app, "shared_memory_reader", None),
     )

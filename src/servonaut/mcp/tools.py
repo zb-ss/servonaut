@@ -37,8 +37,14 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.team_fold import absorbed_share_ids
+from servonaut.services.memory.shared_view import (
+    merge_shared,
+    share_candidates,
+    shared_source_text,
+)
 from servonaut.services.shared_servers import (
-    as_shared_row, fold_shared_rows, lacks_own_key, team_key_fallback, team_key_target,
+    as_shared_row, fold_shared_rows, lacks_own_key, own_twin, team_key_fallback, team_key_target,
     with_team_key,
 )
 from servonaut.services.team_rules import (
@@ -228,6 +234,24 @@ def _ovh_cloud_project_id(instance: Dict) -> str:
     return project_id if sep and project_id and instance_part else ''
 
 
+class _MergedMemory:
+    """The memory service, with one server's modules replaced by a merged set.
+
+    Lets the existing context builder render local and team-shared modules
+    together without writing the shared ones anywhere.
+    """
+
+    def __init__(self, service: Any, modules: Dict) -> None:
+        self._service = service
+        self._modules = modules
+
+    def get_all_modules(self, *_args: Any, **_kwargs: Any) -> Dict:
+        return self._modules
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._service, name)
+
+
 class ServonautTools:
     """Implements all MCP tools using Servonaut services."""
 
@@ -252,8 +276,10 @@ class ServonautTools:
                  account_registry=None,
                  vault_runtime=None,
                  apply_team_rules: bool = True,
-                 team_policy=None) -> None:
+                 team_policy=None,
+                 shared_memory_reader=None) -> None:
         self._config_manager = config_manager
+        self._shared_memory_reader = shared_memory_reader
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
         self._cache_service = cache_service
@@ -410,6 +436,14 @@ class ServonautTools:
     @property
     def has_memory(self) -> bool:
         return self._memory_service is not None
+
+    def set_shared_memory_reader(self, reader) -> None:
+        """Bind the reader of team-shared memory (the app holds the unlocked key).
+
+        Pushed in after construction, like the secret provider: the reader
+        exists only once the memory cloud services are up.
+        """
+        self._shared_memory_reader = reader
 
     def set_secret_provider(self, provider) -> None:
         """Bind/rebind the active secret store used by the DB tools.
@@ -2454,6 +2488,8 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        requested = instance
+        instance = await self._memory_target(instance)
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
@@ -2484,15 +2520,34 @@ class ServonautTools:
         # agent a machine-readable `missing` code and a clear hint so it can
         # self-heal by calling build_server_memory.
         stored_modules = self._memory_service.get_all_modules(iid, provider)
+        shared = await self._shared_memory(requested, instance)
+        if shared is not None:
+            merged = merge_shared(stored_modules, shared)
+            if any(merged.get(n) is m for n, m in shared.modules.items()):
+                result = self._shared_memory_text(
+                    iid, merged, shared, format, provider=provider, name=iname,
+                )
+                self._audit.log(
+                    'get_server_memory', {'instance_id': instance_id, 'format': format},
+                    result, True,
+                )
+                return result
         if not stored_modules:
+            hint = (
+                f"Call build_server_memory(instance_id='{iid}') to "
+                "probe the host and populate memory, then retry."
+            )
+            if requested.get('is_shared') is True and self._shared_memory_reader is None:
+                hint = (
+                    "This server is shared through a team. Memory a team "
+                    "shares can only be read from the Servonaut app with "
+                    "Memory Sync unlocked; this server cannot open it."
+                )
             payload = json.dumps({
                 "error": {
                     "code": "missing",
                     "message": f"No memory stored for {iid}.",
-                    "hint": (
-                        f"Call build_server_memory(instance_id='{iid}') to "
-                        "probe the host and populate memory, then retry."
-                    ),
+                    "hint": hint,
                 }
             })
             self._audit.log(
@@ -2578,6 +2633,81 @@ class ServonautTools:
         )
         return result
 
+    async def _shared_memory(self, requested: Dict, target: Dict) -> Any:
+        """What a team shares of this server, or None (nothing, or not wired).
+
+        Read-only and best effort: any failure reads as nothing shared.
+        """
+        reader = self._shared_memory_reader
+        if reader is None:
+            return None
+        try:
+            rows = await self._shared_server_rows()
+            candidates = share_candidates(target, rows) or share_candidates(requested, rows)
+            from servonaut.services.memory.shared_view import combine_shared
+
+            return combine_shared([
+                await reader.read(c.team_slug, c.team_name, c.instance_id)
+                for c in candidates
+            ])
+        except Exception as exc:  # noqa: BLE001 — a fallback must never fail the tool
+            logger.debug("Shared memory not read (%s)", type(exc).__name__)
+        return None
+
+    def _shared_memory_text(
+        self, iid: str, modules: Dict, shared: Any, fmt: str,
+        *, provider: str, name: str,
+    ) -> str:
+        """Memory in which at least one module is a team's shared copy.
+
+        The local store cannot summarise it, so the modules are rendered
+        directly, through each format's own contract, and the output says
+        where the shared part comes from.
+        """
+        from servonaut.services.ai_memory_injector import (
+            MEMORY_TRUST_NOTICE, frame_as_untrusted,
+        )
+
+        shown = {n for n, m in shared.modules.items() if modules.get(n) is m}
+        source = shared_source_text(shared, shared.team_name, shown=shown)
+        if fmt == "stack_summary":
+            from servonaut.services.memory.stack_summary import build_stack_summary
+
+            summary = build_stack_summary(modules, provider=provider)
+            summary["_trust_notice"] = MEMORY_TRUST_NOTICE
+            summary["source"] = source
+            return json.dumps(summary)
+        if fmt == "context_block":
+            from servonaut.services.ai_memory_injector import (
+                InstanceScope, build_memory_context,
+            )
+
+            config = self._config_manager.get()
+            body, _telemetry = build_memory_context(
+                instances=[InstanceScope(id=iid, name=name or iid, provider=provider)],
+                prompt="",
+                memory_service=_MergedMemory(self._memory_service, modules),
+                config_memory=config.memory,
+                redaction_enabled=getattr(config.memory, "redaction_enabled", True),
+            )
+            return body or "<!-- empty memory context -->"
+        if fmt == "full":
+            return json.dumps({
+                "_trust_notice": MEMORY_TRUST_NOTICE,
+                "instance_id": iid,
+                "source": source,
+                "modules": {
+                    name: {k: v for k, v in mod.items() if k != "raw_output"}
+                    for name, mod in modules.items()
+                },
+            }, indent=2)
+        lines = [f"# Server memory: {iid}", f"_{source}_", ""]
+        for name in sorted(modules):
+            lines.append(f"## {name}")
+            for key, value in (modules[name].get("observed") or {}).items():
+                lines.append(f"- {key}: {value}")
+        return frame_as_untrusted("\n".join(lines)[:6000])
+
     async def _run_memory_build(
         self,
         tool_name: str,
@@ -2610,15 +2740,24 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        # Authorisation and team rules above ran for the reference the agent
+        # gave; the memory itself belongs to the server, so a team's copy of
+        # an own server is built (and later read) on the own record.
+        requested = instance
+        instance = await self._memory_target(instance)
 
         iid = instance.get('id') or instance.get('name', instance_id)
         iname = instance.get('name', '')
         config = self._config_manager.get()
 
-        # Per-server opt-out check (checks both id and name).  Shape mirrors
-        # get_server_memory so agents can detect all "refused" outcomes with
-        # a single `error.code` lookup.
-        if (not config.memory.enabled) or config.memory.is_instance_disabled(iid, iname):
+        # Per-server opt-out check (checks both id and name) on the record
+        # built and on the reference given.  Shape mirrors get_server_memory
+        # so agents can detect all "refused" outcomes with a single
+        # `error.code` lookup.
+        if (not config.memory.enabled) or any(
+            config.memory.is_instance_disabled(row.get('id') or row.get('name', ''), row.get('name', ''))
+            for row in (instance, requested)
+        ):
             payload = json.dumps({
                 "error": {
                     "code": "opt_out",
@@ -2660,6 +2799,7 @@ class ServonautTools:
             HOST_KEY_BUILD_REASON,
             SSH_FAILED_BUILD_REASON,
         )
+        from servonaut.services.memory.status import STOPPED_REASON
         if overall_reason:
             response["reason"] = overall_reason
             if overall_reason == "all_probers_failed":
@@ -2679,7 +2819,9 @@ class ServonautTools:
                 )
             elif overall_reason == "opt_out":
                 response["message"] = f"Memory disabled for {iid}."
-            elif overall_reason in (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON) and failures:
+            elif overall_reason in (
+                HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON, STOPPED_REASON,
+            ) and failures:
                 response["message"] = failures[0]["message"]
 
         payload = json.dumps(response)
@@ -2737,7 +2879,9 @@ class ServonautTools:
             return "Error: memory subsystem not wired."
 
         config = self._config_manager.get()
-        all_entries = self._memory_service.list_all()
+        all_entries = await self._without_folded_team_copies(
+            self._memory_service.list_all(),
+        )
 
         # Filter instances that are opted out — agents should not see memory
         # for servers that have opted out of the memory subsystem.
@@ -2806,6 +2950,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        instance = await self._memory_target(instance)
 
         try:
             result = self._memory_service.remember_finding(
@@ -2889,6 +3034,7 @@ class ServonautTools:
         )
         if error is not None:
             return error
+        instance = await self._memory_target(instance)
 
         resolved_id = instance.get('id') or instance.get('name', instance_id)
         provider = instance_provider(instance)
@@ -4579,10 +4725,7 @@ class ServonautTools:
         if profile is None or not getattr(profile, 'bastion_host', None):
             return conn, cleanup
         try:
-            rows = [*self._directory.custom_rows()]
-            for provider in ('aws', 'ovh', 'hetzner'):
-                rows.extend(self._directory.cached_provider_rows(provider))
-            rows.extend(await self._shared_server_rows())
+            _team_rows, rows = await self.connection_rows()
             hop = await bastion_lease(
                 profile, rows, vault_runtime=self._vault_runtime,
                 connection_service=self._connection_service,
@@ -4849,6 +4992,20 @@ class ServonautTools:
         self._shared_memo = (now + _SHARED_SERVERS_MEMO_TTL_SECONDS, rows, read)
         return [dict(row) for row in rows]
 
+    async def connection_rows(self) -> tuple[List[Dict], List[Dict]]:
+        """``(team_rows, fleet_rows)``: where a team key and a bastion's vault key are looked up.
+
+        The fleet is the custom servers, the cached servers of every
+        provider and the teams' shared servers. Also the memory service's
+        rows supplier, so a memory build hops like ``run_command`` does.
+        """
+        shared = await self._shared_server_rows()
+        rows = [*self._directory.custom_rows()]
+        for provider in ('aws', 'ovh', 'hetzner'):
+            rows.extend(self._directory.cached_provider_rows(provider))
+        rows.extend(shared)
+        return shared, rows
+
     @property
     def _shared_teams_read(self) -> frozenset:
         """The teams whose servers the last :meth:`_shared_server_rows` read in full."""
@@ -4859,6 +5016,40 @@ class ServonautTools:
         if self._team_policy is None:
             return []
         return await self._team_policy.refresh(teams)
+
+    async def _without_folded_team_copies(self, entries: List[Dict]) -> List[Dict]:
+        """*entries* without the memory a team filed for a server the user owns.
+
+        That record is the same server as the own one (it is merged into it,
+        see ``team_merge``); listing both shows one machine twice. Entries stay
+        as they were when the fleet cannot be read: listing a copy twice is
+        safer than hiding a server.
+        """
+        try:
+            _team_rows, rows = await self.connection_rows()
+        except Exception as exc:  # noqa: BLE001 - a degraded provider must not block a listing
+            logger.warning("Could not list servers to fold team copies (%s)", type(exc).__name__)
+            return entries
+        folded = absorbed_share_ids(rows)
+        return [entry for entry in entries if entry.get('instance_id', '') not in folded]
+
+    async def _memory_target(self, instance: Dict) -> Dict:
+        """The row whose memory *instance* has: the user's own row for a team's
+        copy of a server they own, else *instance* itself.
+
+        A note or finding given as ``<team>/<name>`` or a share id belongs
+        to the server, so it lands on the user's own record rather than on
+        the team's copy.
+        """
+        if instance.get('is_shared') is not True:
+            return instance
+        try:
+            own = await self._directory.all_instances()
+        except Exception as exc:  # noqa: BLE001 - a degraded provider must not block memory
+            logger.warning("Could not list servers to find the own row (%s)", type(exc).__name__)
+            return instance
+        twin = own_twin(instance, own)
+        return dict(twin) if twin is not None else instance
 
     async def _find_shared(self, reference: str) -> Optional[Dict]:
         """The team shared server *reference* names (id, name or ``<team>/<name>``).

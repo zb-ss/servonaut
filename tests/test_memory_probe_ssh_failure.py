@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from servonaut.utils.ssh_utils import SSHOutput
 from servonaut.config.schema import AppConfig, MemoryConfig
 from servonaut.services.connection_service import ConnectionService
 from servonaut.services.memory.modules.os import OSProber
@@ -55,8 +56,11 @@ def _fake_ssh(stdout: bytes = b"", returncode: int = 0, diagnostics: str = "") -
         if "-E" in args:
             Path(args[args.index("-E") + 1]).write_text(diagnostics)
         process = MagicMock()
-        process.communicate = AsyncMock(return_value=(stdout, b""))
-        process.returncode = returncode
+        # The shared connection (-N) runs no command: it either opens or it fails.
+        opens_only = "-N" in args
+        process.communicate = AsyncMock(return_value=(b"" if opens_only else stdout, b""))
+        process.returncode = 0 if opens_only and not diagnostics else returncode
+        process.wait = AsyncMock(return_value=process.returncode)
         process._transport = None
         return process
 
@@ -139,9 +143,15 @@ def test_a_server_that_answers_nothing_in_time_keeps_the_stored_snapshot(tmp_pat
     _build(service, _fake_ssh(stdout=OS_RELEASE))
     before = _stored(service)
 
-    with patch("servonaut.utils.ssh_utils.run_ssh_subprocess",
-               AsyncMock(side_effect=asyncio.TimeoutError)):
+    commands = AsyncMock(side_effect=asyncio.TimeoutError)
+    # The shared connection opens; every command then times out.
+    with patch("servonaut.utils.ssh_utils.run_ssh_subprocess", commands), patch(
+        "servonaut.utils.ssh_utils.run_ssh_daemonizing", AsyncMock(return_value=SSHOutput(b"", b"", 0, "")),
+    ):
         report = _run(service.build_report(dict(SERVER)))
+
+    # The timeout path itself ran (not some other failure that looks alike).
+    assert commands.await_count >= 1
 
     assert report.overall_reason == SSH_FAILED_BUILD_REASON
     assert report.failures[0].reason == "ssh_no_response"

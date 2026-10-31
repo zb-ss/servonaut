@@ -1199,6 +1199,48 @@ class MemoryConfig:
         auto_scan_stale_only: When ``True`` the auto-scan loop probes only
             instances whose memory is stale or missing, skipping fresh ones.
             Set to ``False`` to force a full fleet re-probe on every tick.
+        vault_rate_limit_max_wait_seconds: How long a probe waits, once per
+            server, for the Servonaut service's ``Retry-After`` after the
+            service refused a vault key lookup. A longer ask (or a second
+            refusal) fails the server as rate limited.
+        vault_rate_limit_jitter_seconds: Random extra pause (up to this long)
+            added to that wait so servers refused together do not all retry
+            at the same moment.
+        ssh_max_connections_per_bastion: Most SSH handshakes in progress at
+            once through one bastion (``host`` and port), shared by every
+            concurrent build. With connection sharing it gates opening each
+            server's master; an open master no longer counts.
+        ssh_max_connections_per_server: Most connections one server's build
+            opens at once where connections cannot be shared (Windows).
+        ssh_master_connect_timeout_seconds: Time a build's shared master
+            connection may take to log in.
+        ssh_control_persist_seconds: How long an idle master outlives its
+            build when it could not be closed explicitly.
+        ssh_close_timeout_seconds: Time ``ssh -O exit`` may take to end a
+            build's shared connection; past it the connection ends by itself
+            after ``ssh_control_persist_seconds`` of idleness.
+        ssh_connect_retry_backoff_seconds: Pause before the one retry of a
+            dropped connection; two failures before any answer make the
+            server unreachable.
+        team_memory_cache_seconds: How long the list of servers a team shares
+            is reused before the Servonaut service is asked again. ``0`` asks
+            every time.
+        team_memory_future_skew_seconds: How far ahead of now a team's shared
+            copy may claim to have been probed before the stamp is replaced by
+            the current time (so it cannot outrank a newer local snapshot).
+        ssh_control_socket_dir: Directory for each build's private socket
+            folder. Empty means the system temp directory (``TMPDIR``) when a
+            socket path fits there, else ``/tmp`` when that is usable; with
+            neither, connections are not shared. A configured directory is
+            used as is, and refused (no sharing) when it contains a space or
+            ``%``, is missing, or is too long (Unix sockets hold about 100
+            bytes).
+        team_wrap_retry_seconds: Pause before the one retry of a catch-up
+            post for team members that the service refused as rate limited
+            without saying how long to wait.
+        team_wrap_max_wait_seconds: Longest pause honoured before that
+            retry; a longer ask gives up for this upload and the next sync
+            asks again.
     """
 
     enabled: bool = True
@@ -1253,6 +1295,36 @@ class MemoryConfig:
     # string means "no expiry recorded" (legacy / not remembered).  Refreshed
     # every time the passphrase is successfully (re-)stored.
     sync_remember_expires_at: str = ""
+
+    # ------------------------------------------------------------------
+    # Fleet-scan connection behaviour (ADDITIVE — no migration needed)
+    # ------------------------------------------------------------------
+    # Longest a probe waits for the Servonaut service's Retry-After after it
+    # refused a vault lookup (once per server); a longer ask fails the server
+    # at once as rate limited.
+    vault_rate_limit_max_wait_seconds: float = 20.0
+    vault_rate_limit_jitter_seconds: float = 2.0
+    # Connections a fleet scan may open through one bastion (all builds share
+    # the cap), and per server when connections cannot be shared (Windows).
+    ssh_max_connections_per_bastion: int = 4
+    ssh_max_connections_per_server: int = 4
+    # A build shares one master connection per server (not on Windows): the
+    # time its own handshake may take (the 5 s probe deadline is for commands)
+    # and how long an idle master outlives its build if it is never closed.
+    ssh_master_connect_timeout_seconds: float = 20.0
+    ssh_control_persist_seconds: float = 30.0
+    # Pause before the one retry of a connection that dropped before any
+    # command of the build had answered.
+    ssh_connect_retry_backoff_seconds: float = 1.0
+    ssh_close_timeout_seconds: float = 5.0
+    ssh_control_socket_dir: str = ""
+    # How long a team's list of shared servers is reused (see above).
+    team_memory_cache_seconds: float = 60.0
+    team_memory_future_skew_seconds: float = 300.0
+
+    # Catch-up wraps for team members after an upload (see the docstring).
+    team_wrap_retry_seconds: float = 5.0
+    team_wrap_max_wait_seconds: float = 30.0
 
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore

@@ -16,7 +16,8 @@ the hermetic FakeCloud:
    who can then read the item's metadata and log in to ``server-1`` with a
    certificate the team CA issued for their own device. ``server-1`` is also
    ``edge-1`` of the member's own AWS fleet, whose key pair has no key on
-   their computer: by that name too it connects with the team's certificate;
+   their computer: by that name too it connects with the team's certificate,
+   and so does a memory build of it;
 5. removed from the team, the member no longer sees its vault.
 
 FakeCloud answers each person for the token they hold (``FakeCloud.add_user``).
@@ -218,6 +219,15 @@ async def test_an_invited_member_gets_the_team_vault_and_server(
         "Example team's key" in by_own_name.stderr, by_own_name.describe()
     assert "SSH resolution tier: ca" in by_own_name.stderr, by_own_name.describe()
     assert server_1.certificate_logins()[-1].accepted
+
+    # A memory build of that edge-1 connects the same way: with the team's
+    # certificate, not ssh's default keys, which this server refuses.
+    logins_before = len(server_1.certificate_logins())
+    built = cli(member, "memory", "build", fleet.EDGE_1.name)
+    assert built.returncode == 0, built.describe()
+    assert "Built memory for" in built.stdout, built.describe()
+    memory_logins = server_1.certificate_logins()[logins_before:]
+    assert memory_logins and all(login.accepted for login in memory_logins), memory_logins
 
     # 5. Removed from the team, the member no longer sees its vault.
     member_row = next(m for m in fake_cloud.account.members(TEAM_SLUG) if m["user"] and m["user"]["id"] == MEMBER_ID)

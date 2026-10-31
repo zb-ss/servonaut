@@ -11,7 +11,9 @@ the deterministic :mod:`summariser` module.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import random
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -22,8 +24,12 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
 from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
+from .ssh_mux import DIRECT_OPTIONS, ControlMaster, multiplexing_supported
+from .status import STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, _validate_finding_id
+from .team_merge import share_identity
 from .summariser import build_summary_markdown
+from servonaut.services.shared_servers import is_shared_row
 from servonaut.services.ssh_host_keys import (
     SSH_FAILURE_EXIT_CODE,
     HostKeyProblem,
@@ -52,8 +58,16 @@ HOST_KEY_BUILD_REASON = "host_key_verification_failed"
 # Nothing is persisted: empty output would overwrite the stored snapshot.
 SSH_FAILED_BUILD_REASON = "ssh_connection_failed"
 
+# Shown when a single build is asked for a stopped or terminated server.
+_STOPPED_MESSAGE = (
+    "The server is stopped, so nothing was probed; the stored memory was kept."
+)
+
 #: ``ModuleBuildFailure.reason`` when the server's vault key cannot be used.
 VAULT_CREDENTIAL_FAILURE = "vault_credential_unavailable"
+#: ``ModuleBuildFailure.reason`` when the Servonaut service rate-limited the
+#: server's vault key lookup twice (after waiting for its Retry-After once).
+VAULT_RATE_LIMITED = "vault_rate_limited"
 #: ``ModuleBuildFailure.reason`` when no probe command answered in time.
 SSH_NO_RESPONSE = "ssh_no_response"
 
@@ -66,8 +80,33 @@ _SSH_FAILURE_MESSAGES: Dict[str, str] = {
     "ssh_unreachable": "The server could not be reached over SSH.",
     "ssh_failed": "SSH failed before any probe command ran.",
     SSH_NO_RESPONSE: "The server did not answer any probe command over SSH in time.",
+    VAULT_RATE_LIMITED: (
+        "The Servonaut service is limiting requests from this computer, so the server's vault "
+        "key could not be fetched. Nothing is wrong with the setup: try again later."
+    ),
 }
 _SNAPSHOT_KEPT = "Nothing was probed; the stored memory was kept."
+
+
+_MULTIPLEX_ERROR_MARKERS = (
+    "controlpath", "controlpersist", "controlmaster", "unix_listener", "mux_",
+)
+
+
+def _is_multiplex_error(diagnostics: str) -> bool:
+    """Whether ssh's messages say it cannot share a connection here (not that the server failed)."""
+    text = (diagnostics or "").lower()
+    return any(marker in text for marker in _MULTIPLEX_ERROR_MARKERS)
+
+
+def _jitter(limit: float) -> float:
+    """A random extra pause of up to *limit* seconds (a seam for tests)."""
+    return random.uniform(0.0, limit) if limit > 0 else 0.0
+
+
+async def _wait(seconds: float) -> None:
+    """Sleep *seconds* (a seam for tests)."""
+    await asyncio.sleep(seconds)
 
 
 @dataclass(frozen=True)
@@ -100,7 +139,7 @@ class ModuleBuildFailure:
         reason: Machine-readable code: ``"timeout"`` | ``"exception"`` |
             ``"ssh_host_key_<kind>"`` | ``"ssh_auth_failed"`` |
             ``"ssh_unreachable"`` | ``"ssh_failed"`` | ``"ssh_no_response"`` |
-            ``"vault_credential_unavailable"``.
+            ``"vault_credential_unavailable"`` | ``"vault_rate_limited"``.
         message: Short human-readable detail (redacted exception message).
     """
 
@@ -117,9 +156,10 @@ class BuildReport:
         successes: ``module_name → ModuleResult`` for probers that returned.
         failures: Per-module probe failures (timeouts, exceptions).
         overall_reason: Machine-readable code when ``successes`` is empty
-            (``"opt_out"`` | ``"disabled"`` | ``"no_modules_matched"`` |
-            ``"all_probers_failed"`` | ``HOST_KEY_BUILD_REASON`` |
-            ``SSH_FAILED_BUILD_REASON``); ``None`` on partial / full success.
+            (``"opt_out"`` | ``"disabled"`` | ``"stopped"`` |
+            ``"no_modules_matched"`` | ``"all_probers_failed"`` |
+            ``HOST_KEY_BUILD_REASON`` | ``SSH_FAILED_BUILD_REASON``);
+            ``None`` on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
@@ -138,10 +178,11 @@ class BuildReport:
     def unreached_message(self) -> Optional[str]:
         """Why no probe command reached the server, or None.
 
-        Set for a refused host key and a failed SSH connection; nothing was
-        stored in either case.
+        Set for a refused host key, a failed SSH connection and a stopped
+        server; nothing was stored in any of those cases.
         """
-        if self.overall_reason in (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON) and self.failures:
+        unreached = (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON, STOPPED_REASON)
+        if self.overall_reason in unreached and self.failures:
             return self.failures[0].message
         return None
 
@@ -235,6 +276,9 @@ class MemoryService(MemoryServiceInterface):
         connection_service: Optional connection service for resolving SSH params.
     """
 
+    # Class-level so a stand-in built without __init__ still works.
+    _connection_rows: Any = None
+
     def __init__(
         self,
         store: Optional[MemoryStore] = None,
@@ -260,6 +304,10 @@ class MemoryService(MemoryServiceInterface):
         # of the local connection by every SSH runner made here.
         self._vault_runtime: Any = None
         self._vault_leases: Any = None
+        # Connection caps per bastion, shared by every build of this service.
+        self._bastion_gates: Dict[tuple[str, int], asyncio.Semaphore] = {}
+        # Asked per build for (team_rows, fleet_rows); see set_connection_rows.
+        self._connection_rows: Any = None
         # Demo mode resolvers (identity until the app wires them): every
         # instance dict / id entering the public surface is mapped back to
         # the real record before probes, storage keys or the sync queue.
@@ -320,6 +368,13 @@ class MemoryService(MemoryServiceInterface):
             logger.info("Memory disabled for instance %s via per_server_overrides", instance_id)
             return BuildReport(overall_reason="opt_out")
 
+        if is_stopped_instance(instance):
+            logger.info("Memory build for %s skipped: server is stopped", instance_id)
+            return BuildReport(
+                failures=[ModuleBuildFailure("provider", STOPPED_REASON, _STOPPED_MESSAGE)],
+                overall_reason=STOPPED_REASON,
+            )
+
         selected_probers = self._select_probers(modules)
         if not selected_probers:
             logger.debug("No probers to run for %s (modules=%s)", instance_id, modules)
@@ -330,7 +385,11 @@ class MemoryService(MemoryServiceInterface):
             if hasattr(prober, "set_instance"):
                 prober.set_instance(instance)
 
-        ssh_runner = self._make_ssh_runner(instance)
+        connection_rows = await self._load_connection_rows()
+        for prober in selected_probers:
+            if hasattr(prober, "set_connection_rows"):
+                prober.set_connection_rows(*connection_rows)
+        ssh_runner = self._make_ssh_runner(instance, connection_rows=connection_rows, multiplex=True)
 
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_PROBES)
 
@@ -372,7 +431,17 @@ class MemoryService(MemoryServiceInterface):
                     )
 
         tasks = [run_one(p) for p in selected_probers]
-        raw_results = await asyncio.gather(*tasks)
+        try:
+            # Connection preparation (vault lookup, Retry-After, bastion slot,
+            # shared connection) has a budget of its own; the probers' command
+            # clocks start only once it is done.
+            prepare = getattr(ssh_runner, "prepare", None)
+            if prepare is not None:
+                await prepare()
+            raw_results = await asyncio.gather(*tasks)
+        finally:
+            # Success, failure or cancellation: the shared connection ends with the build.
+            await self._close_runner(ssh_runner)
 
         host_key_problem = getattr(ssh_runner, "host_key_problem", None)
         if isinstance(host_key_problem, HostKeyProblem):
@@ -420,6 +489,9 @@ class MemoryService(MemoryServiceInterface):
             probed_modules.append(result.module)
 
         if probed_modules:
+            if is_shared_row(instance):
+                # So a re-share can be matched to this entry, from any surface.
+                self._store.set_share_identity(instance_id, share_identity(instance))
             self._store.update_index(
                 instance_id=instance_id,
                 name=name,
@@ -671,6 +743,22 @@ class MemoryService(MemoryServiceInterface):
         """
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations(instance_id, content, provider)
+
+    def write_annotations_if_unchanged(
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+    ) -> bool:
+        """Write the notes only if they still hash to *expected_hash* (see the store)."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.write_annotations_if_unchanged(
+            instance_id, expected_hash, content, provider
+        )
+
+    def write_annotation_draft(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> Path:
+        """Keep *content* beside the notes as a private, uniquely named draft."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.write_annotation_draft(instance_id, content, provider)
 
     def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
         """Return the annotations metadata dict for *instance_id*.
@@ -1215,6 +1303,57 @@ class MemoryService(MemoryServiceInterface):
         self._vault_runtime = runtime
         self._vault_leases = leases
 
+    def _setting(self, name: str) -> float:
+        """A numeric ``MemoryConfig`` field; its default when the config is a stand-in."""
+        value = getattr(getattr(self, "_config", None), name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        from servonaut.config.schema import MemoryConfig  # noqa: PLC0415
+
+        return float(getattr(MemoryConfig(), name))
+
+    def _text_setting(self, name: str) -> str:
+        """A string ``MemoryConfig`` field; empty when the config is a stand-in."""
+        value = getattr(getattr(self, "_config", None), name, "")
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    async def _close_runner(runner: Any) -> None:
+        close = getattr(runner, "close", None)
+        if close is not None:
+            await close()
+
+    def _bastion_gate(self, route: Any) -> Optional[asyncio.Semaphore]:
+        """The semaphore capping connections through *route*'s bastion across every build, or None."""
+        bastion_host = getattr(route, "bastion_host", None)
+        if not isinstance(bastion_host, str) or not bastion_host:
+            return None
+        port = getattr(route, "ssh_port", 22)
+        key = (bastion_host.casefold(), port if isinstance(port, int) else 22)
+        gate = self._bastion_gates.get(key)
+        if gate is None:
+            gate = self._bastion_gates[key] = asyncio.Semaphore(
+                max(1, int(self._setting("ssh_max_connections_per_bastion")))
+            )
+        return gate
+
+    def set_connection_rows(self, supplier: Any) -> None:
+        """Ask *supplier* for ``(team_rows, fleet_rows)`` each time a build connects.
+
+        A server of the user's own without a local key connects with a team's
+        vault key when a team in the team rows shares it, and a bastion that
+        is one of the fleet rows hops with its own vault key (see
+        ``ssh_credentials.resolve_with_vault``). The rows change while the
+        app runs, so the supplier (a function or coroutine function) is
+        called per build, never cached.
+        """
+        self._connection_rows = supplier
+
+    async def _load_connection_rows(self) -> tuple[list, Optional[list]]:
+        from servonaut.services.ssh_credentials import load_connection_rows  # noqa: PLC0415
+
+        return await load_connection_rows(self._connection_rows)
+
     def set_sync_service(self, svc: Optional["_MemorySyncService"]) -> None:
         """Wire the optional sync service after construction.
 
@@ -1379,6 +1518,8 @@ class MemoryService(MemoryServiceInterface):
 
     def _make_ssh_runner(
         self, instance: Dict[str, Any], *, timeout: float = 5,
+        connection_rows: Optional[tuple[list, Optional[list]]] = None,
+        multiplex: bool = False,
     ) -> Any:
         """Return an async SSH runner callable for *instance*.
 
@@ -1394,6 +1535,11 @@ class MemoryService(MemoryServiceInterface):
 
         Args:
             instance: Instance dict from ``app.instances``.
+            connection_rows: ``(team_rows, fleet_rows)`` already loaded for
+                this build; when None the first command asks the supplier.
+            multiplex: Share one master connection between the commands
+                (not on Windows). The caller must ``await runner.close()``
+                when it is done.
 
         Returns:
             Async callable ``(command: str) -> (stdout: str, stderr: str, returncode: int)``.
@@ -1479,6 +1625,7 @@ class MemoryService(MemoryServiceInterface):
 
         from servonaut.services.ssh_credentials import (  # noqa: PLC0415
             VaultCredentialError,
+            rate_limit_wait,
             resolve_with_vault,
             ssh_identity_kwargs,
         )
@@ -1487,6 +1634,9 @@ class MemoryService(MemoryServiceInterface):
         # The vault credential is applied on the first command (it needs the
         # event loop); later commands reuse it.
         resolved: Dict[str, Any] = {}
+        # The one resolution every command awaits: probers start together, and
+        # a lookup each would be refused by the service's rate limit.
+        resolution: List["asyncio.Future[None]"] = []
 
         def _record_problem(reason: str, message: str) -> None:
             # Concurrent probers fail alike; keep and log the first.
@@ -1496,96 +1646,366 @@ class MemoryService(MemoryServiceInterface):
                 )
                 _real_runner.connection_problem = SshConnectionProblem(reason, message)  # type: ignore[attr-defined]
 
-        async def _real_runner(command: str) -> tuple[str, str, int]:
-            """Execute *command* on the remote host and return (stdout, stderr, rc)."""
-            _real_runner.commands_started += 1  # type: ignore[attr-defined]
-            known: Optional[SshConnectionProblem] = _real_runner.connection_problem  # type: ignore[attr-defined]
-            if known is not None:
-                # Every later command would fail the same way: stop connecting.
-                if known.reason == VAULT_CREDENTIAL_FAILURE:
-                    raise VaultCredentialError(known.message)
-                return "", known.message, SSH_FAILURE_EXIT_CODE
-            if not resolved:
-                # A VaultCredentialError propagates: probers record it as the
-                # module's error instead of trying a local key.
+        master = ControlMaster(
+            persist_seconds=self._setting("ssh_control_persist_seconds"),
+            connect_timeout=self._setting("ssh_master_connect_timeout_seconds"),
+            socket_dir=self._text_setting("ssh_control_socket_dir"),
+            close_timeout=self._setting("ssh_close_timeout_seconds"),
+        ) if multiplex else None
+        # Connections that cannot be shared are capped per server here and per
+        # bastion across every build of this service.
+        server_gate = asyncio.Semaphore(max(1, int(self._setting("ssh_max_connections_per_server"))))
+        retry_backoff = self._setting("ssh_connect_retry_backoff_seconds")
+        recovery_lock = asyncio.Lock()
+        reopened: List[bool] = []
+
+        def _bastion_gate() -> Optional[asyncio.Semaphore]:
+            # A team route resolved with no rules goes direct: its "profile" is
+            # None on purpose, not a cue to use the own row's bastion.
+            route = resolved["profile"] if "profile" in resolved else profile
+            return self._bastion_gate(route)
+
+        def _argv(remote_command: Optional[str], control_options: List[str]) -> List[str]:
+            """The ssh command for *remote_command* (none: the connection alone)."""
+            # A command bound to the shared connection must never dial on its
+            # own: OpenSSH silently connects normally when the control socket
+            # is gone, outside every gate. A proxy that always fails (first
+            # value wins, ahead of any ProxyJump) makes it fail fast instead.
+            bound = (
+                remote_command is not None and "ControlMaster=no" in control_options
+                and "ControlPath=none" not in control_options
+            )
+            return ssh_service.build_ssh_command(
+                host=resolved["host"],
+                username=resolved["username"],
+                key_path=resolved.get("key_path"),
+                proxy_args=[] if bound else (resolved.get("proxy_args") or []),
+                remote_command=remote_command,
+                port=resolved.get("port"),
+                extra_options=[
+                    *(["ProxyCommand=false"] if bound else []),
+                    "BatchMode=yes", *control_options, *(resolved.get("extra_options") or []),
+                ],
+                **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
+            )
+
+        def _classify(exc: CalledProcessError) -> Optional[str]:
+            """Why ssh itself failed in *exc* (None: the remote command ran); records a refused host key."""
+            diagnostics = getattr(exc, "diagnostics", "") or ""
+            failure = ssh_connection_failure(exc.returncode, exc.output, diagnostics)
+            if exc.returncode == SSH_FAILURE_EXIT_CODE:
+                problem = detect_host_key_problem(
+                    diagnostics, exc.returncode,
+                    HostKeyTarget.for_connection(
+                        resolved.get("host", conn["host"]), resolved.get("port", conn.get("port")),
+                        instance=instance, profile=profile,
+                    ),
+                    connection_service.host_key_policy(),
+                    stdout=exc.output,
+                )
+                # Every probe command is refused alike; log the first.
+                if problem is not None and _real_runner.host_key_problem is None:  # type: ignore[attr-defined]
+                    logger.warning(
+                        "Memory probe of %s refused: %s",
+                        instance.get("id", "?"), problem.message,
+                    )
+                    _real_runner.host_key_problem = problem  # type: ignore[attr-defined]
+            return failure
+
+        def _is_final(failure: str) -> bool:
+            """Whether retrying cannot help: a refused login or host key is the same every time."""
+            return failure == "ssh_auth_failed" or _real_runner.host_key_problem is not None  # type: ignore[attr-defined]
+
+        async def _open_master(record: bool = True) -> None:
+            """Share one connection for the build, or leave the commands to connect on their own."""
+            assert master is not None
+            for attempt in (0, 1):
+                gate = _bastion_gate()
+                try:
+                    async with gate if gate is not None else contextlib.nullcontext():
+                        if not await master.open(lambda opts: _argv(None, opts)):
+                            return
+                    return
+                except CalledProcessError as exc:
+                    failure = _classify(exc) or "ssh_failed"
+                    if _is_multiplex_error(getattr(exc, "diagnostics", "")):
+                        logger.info("SSH multiplexing is unavailable here; connecting per command")
+                        return
+                    if _is_final(failure) or attempt == 1:
+                        if record:
+                            _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
+                        return
+                except asyncio.TimeoutError:
+                    if attempt == 1:
+                        if record:
+                            _record_problem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
+                        return
+                except OSError as exc:
+                    logger.error("SSH master error for instance %s: %s", instance.get("id", "?"), exc)
+                    return
+                await _wait(retry_backoff)
+
+        async def _resolve_credentials() -> None:
+            """Apply the vault credential, waiting once if the service rate-limits the lookup.
+
+            Raises:
+                VaultCredentialError: the credential cannot be used (the
+                    reason is recorded for the build report).
+            """
+            team_rows, fleet_rows = (
+                connection_rows if connection_rows is not None
+                else await self._load_connection_rows()
+            )
+            max_wait = self._setting("vault_rate_limit_max_wait_seconds")
+            waited = False
+            while True:
                 try:
                     resolved.update(await resolve_with_vault(
                         conn, instance, vault_runtime=vault_runtime,
                         connection_service=connection_service, cache=vault_leases,
+                        team_rows=team_rows, rows=fleet_rows, raise_rate_limited=True,
                     ))
+                    break
                 except VaultCredentialError as exc:
-                    _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))
+                    limited, asked = rate_limit_wait(exc)
+                    if not limited:
+                        _record_problem(VAULT_CREDENTIAL_FAILURE, str(exc))
+                        raise
+                    seconds = asked if asked is not None else max_wait
+                    if waited or seconds > max_wait:
+                        message = _SSH_FAILURE_MESSAGES[VAULT_RATE_LIMITED]
+                        _record_problem(VAULT_RATE_LIMITED, message)
+                        raise VaultCredentialError(message) from exc
+                    waited = True
+                    # Servers that were refused together must not all retry at once.
+                    seconds += _jitter(self._setting("vault_rate_limit_jitter_seconds"))
+                    logger.info(
+                        "Vault lookup for %s rate limited: waiting %.0f s", instance.get("id", "?"), seconds,
+                    )
+                    await _wait(seconds)
+            if master is not None:
+                await _open_master()
+
+        def _needs_new_resolution(task: "asyncio.Future[None]") -> bool:
+            """Whether the next command starts its own resolution.
+
+            A cancelled one, or one that failed for a reason other than the
+            vault refusing the credential (a transient error: the old code
+            retried per command), is not replayed to every later command.
+            """
+            if task.cancelled():
+                return True
+            return task.done() and task.exception() is not None and not isinstance(
+                task.exception(), VaultCredentialError,
+            )
+
+        async def _ensure_resolved() -> None:
+            # `resolved` fills before the shared connection opens: wait for the
+            # whole step so no command connects on its own meanwhile.
+            if resolution and resolution[0].done() and not resolution[0].cancelled() and resolved:
+                return
+            if not resolution or _needs_new_resolution(resolution[0]):
+                task = asyncio.ensure_future(_resolve_credentials())
+                # The build owns it (see _close); never leave its error unretrieved.
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())
+                resolution[:] = [task]
+            # Shielded: one cancelled prober must not cancel the others' resolution.
+            await asyncio.shield(resolution[0])
+
+        async def _execute(command: str, control: List[str]) -> tuple[str, str, int, Optional[str]]:
+            """One ssh run of *command*: ``(stdout, stderr, returncode, failure)``.
+
+            *failure* is why ssh itself failed, None when the remote command
+            ran (whatever its exit status).
+            """
+            # Not sharing: say so, so the user's own ssh configuration cannot
+            # start a master that nobody owns or closes.
+            ssh_cmd = _argv(command, control or (list(DIRECT_OPTIONS) if multiplexing_supported() else []))
+            async with contextlib.AsyncExitStack() as gates:
+                if not control:
+                    await gates.enter_async_context(server_gate)
+                    bastion_gate = _bastion_gate()
+                    if bastion_gate is not None:
+                        await gates.enter_async_context(bastion_gate)
+                try:
+                    # Memory probes retain their short deadline; monitoring supplies
+                    # its configured budget to allow time for the SSH handshake.
+                    stdout_bytes, stderr_bytes = await run_ssh_subprocess(
+                        ssh_cmd, timeout=timeout, check=True,
+                    )
+                except CalledProcessError as exc:
+                    failure = _classify(exc)
+                    return (
+                        exc.output.decode("utf-8", errors="replace"),
+                        exc.stderr.decode("utf-8", errors="replace"),
+                        exc.returncode, failure,
+                    )
+            return (
+                stdout_bytes.decode("utf-8", errors="replace"),
+                stderr_bytes.decode("utf-8", errors="replace"), 0, None,
+            )
+
+        async def _recover_master() -> None:
+            """The shared connection is gone: reopen it once under the gates, else go direct."""
+            assert master is not None
+            async with recovery_lock:
+                if not (master.is_open and not master.socket_alive()):
+                    return  # another command already recovered it
+                master.mark_lost()
+                if not reopened:
+                    reopened.append(True)
+                    logger.info("The shared SSH connection for %s ended; reopening it once", instance.get("id", "?"))
+                    await _open_master(record=False)
+
+        async def _run_once(command: str) -> tuple[str, str, int, Optional[str]]:
+            """Run *command* over the shared connection, or on its own connection when there is none."""
+            control = master.command_options() if master is not None and master.is_open else []
+            result = await _execute(command, control)
+            if control and result[3] is not None and not master.socket_alive():
+                await _recover_master()
+                control = master.command_options() if master.is_open else []
+                result = await _execute(command, control)
+            return result
+
+        def _may_retry(attempt: int) -> bool:
+            # Only a connection that dropped before anything answered may be a
+            # transient overload of the bastion; one retry decides.
+            return attempt == 0 and _real_runner.commands_answered == 0  # type: ignore[attr-defined]
+
+        # Commands in flight, and a connection failure that may still be
+        # overturned by a command that is yet to answer (see _fail_verdict).
+        flight: Dict[str, Any] = {"running": 0, "provisional": None}
+
+        def _fail_verdict(reason: str, message: str) -> None:
+            """No command has answered and this one failed for good: the server's verdict.
+
+            With other commands still in flight the verdict waits for them:
+            one of them may yet answer, and a late failure of one command
+            must not discard what the others bring.
+            """
+            if _real_runner.commands_answered:  # type: ignore[attr-defined]
+                return
+            if _is_final(reason) or flight["running"] <= 1:
+                _record_problem(reason, message)
+            else:
+                flight["provisional"] = (reason, message)
+
+        def _settle() -> None:
+            if flight["running"] == 0 and flight["provisional"] and not _real_runner.commands_answered:  # type: ignore[attr-defined]
+                _record_problem(*flight["provisional"])
+            flight["provisional"] = None if flight["running"] == 0 else flight["provisional"]
+
+        async def _real_runner(command: str) -> tuple[str, str, int]:
+            """Execute *command* on the remote host and return (stdout, stderr, rc)."""
+            _real_runner.commands_started += 1  # type: ignore[attr-defined]
+            flight["running"] += 1
+            try:
+                return await _run_command(command)
+            finally:
+                flight["running"] -= 1
+                _settle()
+
+        async def _run_command(command: str) -> tuple[str, str, int]:
+            def known_problem() -> Optional[tuple[str, str, int]]:
+                known: Optional[SshConnectionProblem] = _real_runner.connection_problem  # type: ignore[attr-defined]
+                if known is None and flight["provisional"]:
+                    known = SshConnectionProblem(*flight["provisional"])
+                if known is None:
+                    return None
+                # Every later command would fail the same way: stop connecting.
+                if known.reason in (VAULT_CREDENTIAL_FAILURE, VAULT_RATE_LIMITED):
+                    raise VaultCredentialError(known.message)
+                return "", known.message, SSH_FAILURE_EXIT_CODE
+
+            if (stop := known_problem()) is not None:
+                return stop
+            # A VaultCredentialError propagates: probers record it as the
+            # module's error instead of trying a local key.
+            await _ensure_resolved()
+            for attempt in (0, 1):
+                if (stop := known_problem()) is not None:
+                    return stop
+                try:
+                    stdout, stderr, code, failure = await _run_once(command)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "SSH runner timed out executing %r for instance %s",
+                        command[:80],
+                        instance.get("id", "?"),
+                    )
+                    if _may_retry(attempt):
+                        await _wait(retry_backoff)
+                        continue
                     raise
-            ssh_cmd = ssh_service.build_ssh_command(
-                host=resolved["host"],
-                username=resolved["username"],
-                key_path=resolved.get("key_path"),
-                proxy_args=resolved.get("proxy_args") or [],
-                remote_command=command,
-                port=resolved.get("port"),
-                extra_options=["BatchMode=yes", *(resolved.get("extra_options") or [])],
-                **{k: v for k, v in ssh_identity_kwargs(resolved).items() if v},
+                except OSError as exc:
+                    logger.error(
+                        "SSH runner error for instance %s: %s",
+                        instance.get("id", "?"),
+                        exc,
+                    )
+                    _fail_verdict("ssh_failed", _SSH_FAILURE_MESSAGES["ssh_failed"])
+                    return "", str(exc), 1
+                if failure is None:
+                    # Also a remote command that exited non-zero: it ran.
+                    _real_runner.commands_answered += 1  # type: ignore[attr-defined]
+                    flight["provisional"] = None
+                    return stdout, stderr, code
+                if not _is_final(failure) and _may_retry(attempt):
+                    await _wait(retry_backoff)
+                    continue
+                _fail_verdict(failure, _SSH_FAILURE_MESSAGES[failure])
+                return stdout, stderr, code
+            raise AssertionError("unreachable: the second attempt always returns or raises")  # pragma: no cover
+
+        async def _prepare() -> None:
+            """Resolve the credentials and open the shared connection, within the preparation budget.
+
+            A failure is the server's verdict (recorded as the connection
+            problem, with the existing reasons); the probers then fail fast.
+            """
+            budget = (
+                3 * self._setting("ssh_master_connect_timeout_seconds")
+                + self._setting("ssh_connect_retry_backoff_seconds")
+                + self._setting("vault_rate_limit_max_wait_seconds")
+                + self._setting("vault_rate_limit_jitter_seconds")
             )
             try:
-                # Memory probes retain their short deadline; monitoring supplies
-                # its configured budget to allow time for the SSH handshake.
-                stdout_bytes, stderr_bytes = await run_ssh_subprocess(
-                    ssh_cmd, timeout=timeout, check=True,
-                )
-                stdout = stdout_bytes.decode("utf-8", errors="replace")
-                stderr = stderr_bytes.decode("utf-8", errors="replace")
-                _real_runner.commands_answered += 1  # type: ignore[attr-defined]
-                return stdout, stderr, 0
-            except CalledProcessError as exc:
-                stderr = exc.stderr.decode("utf-8", errors="replace")
-                diagnostics = getattr(exc, "diagnostics", "") or ""
-                failure = ssh_connection_failure(exc.returncode, exc.output, diagnostics)
-                if failure is None:
-                    # The remote command ran and exited non-zero.
-                    _real_runner.commands_answered += 1  # type: ignore[attr-defined]
-                if exc.returncode == SSH_FAILURE_EXIT_CODE:
-                    problem = detect_host_key_problem(
-                        diagnostics, exc.returncode,
-                        HostKeyTarget.for_connection(
-                            resolved.get("host", conn["host"]), resolved.get("port", conn.get("port")),
-                            instance=instance, profile=profile,
-                        ),
-                        connection_service.host_key_policy(),
-                        stdout=exc.output,
-                    )
-                    # Every probe command is refused alike; log the first.
-                    if problem is not None and _real_runner.host_key_problem is None:  # type: ignore[attr-defined]
-                        logger.warning(
-                            "Memory probe of %s refused: %s",
-                            instance.get("id", "?"), problem.message,
-                        )
-                        _real_runner.host_key_problem = problem  # type: ignore[attr-defined]
-                if failure is not None:
-                    _record_problem(failure, _SSH_FAILURE_MESSAGES[failure])
-                return (
-                    exc.output.decode("utf-8", errors="replace"),
-                    stderr,
-                    exc.returncode,
-                )
+                await asyncio.wait_for(_ensure_resolved(), timeout=budget)
+            except VaultCredentialError:
+                pass  # recorded by the resolution
             except asyncio.TimeoutError:
-                logger.warning(
-                    "SSH runner timed out executing %r for instance %s",
-                    command[:80],
-                    instance.get("id", "?"),
-                )
+                _record_problem(SSH_NO_RESPONSE, _SSH_FAILURE_MESSAGES[SSH_NO_RESPONSE])
+            except Exception as exc:  # noqa: BLE001 - the commands try again (transient)
+                logger.warning("Preparing the connection for %s failed: %s", instance.get("id", "?"), type(exc).__name__)
+
+        async def _cleanup() -> None:
+            for task in resolution:
+                if not task.done():
+                    task.cancel()
+            if resolution:
+                await asyncio.gather(*resolution, return_exceptions=True)
+            if master is not None:
+                await master.close(lambda opts: _argv(None, opts) if resolved else [])
+
+        async def _close() -> None:
+            """End the build's shared connection and remove its socket directory.
+
+            Runs as its own task: a cancel of the build is propagated only
+            once the cleanup has finished (bounded), so the master is not
+            left running with its socket directory already removed.
+            """
+            task = asyncio.ensure_future(_cleanup())
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await asyncio.wait({task}, timeout=2 * self._setting("ssh_close_timeout_seconds"))
                 raise
-            except OSError as exc:
-                logger.error(
-                    "SSH runner error for instance %s: %s",
-                    instance.get("id", "?"),
-                    exc,
-                )
-                _record_problem("ssh_failed", _SSH_FAILURE_MESSAGES["ssh_failed"])
-                return "", str(exc), 1
 
         # Attach instance so LogsProber can read it from the runner directly,
         # eliminating the shared _instance field race in concurrent build_report calls.
         _real_runner.instance = instance  # type: ignore[attr-defined]
+        # The build's (team_rows, fleet_rows), for modules that resolve connections themselves.
+        _real_runner.connection_rows = connection_rows  # type: ignore[attr-defined]
         # Set when ssh refuses the host key; build_report() reports it.
         _real_runner.host_key_problem = None  # type: ignore[attr-defined]
         # Set when no command can reach the server (login refused, host
@@ -1596,4 +2016,8 @@ class MemoryService(MemoryServiceInterface):
         # timed out) has nothing from the server either.
         _real_runner.commands_started = 0  # type: ignore[attr-defined]
         _real_runner.commands_answered = 0  # type: ignore[attr-defined]
+        # Ends the shared connection; build_report() calls it when the build ends.
+        _real_runner.close = _close  # type: ignore[attr-defined]
+        # Awaited once by build_report() before any prober starts.
+        _real_runner.prepare = _prepare  # type: ignore[attr-defined]
         return _real_runner

@@ -86,7 +86,10 @@ class FakeCloud(LoopbackServer):
         self.agent_rules = AgentRulesCloud()
         self.ai = AiState()
         self.hosted_mcp = HostedMcpState()
-        self.memory = MemoryCloud(lambda: self._store.snapshot().user_id)
+        self.memory = MemoryCloud(
+            lambda: (current_account().user_id if current_account() else self._store.snapshot().user_id),
+            lambda: self._store.snapshot().user_id,
+        )
         self.configs = ConfigSnapshots()
         self.secrets = SecretsData()
         self.vault = VaultCloud(

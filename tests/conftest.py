@@ -41,6 +41,66 @@ def _isolated_known_hosts(_session_known_hosts, monkeypatch: pytest.MonkeyPatch)
     )
 
 
+SSH_PROGRAMS = ("ssh", "scp", "sftp")
+#: Launches of an ssh client the guard refused in the running test (the test fails at teardown).
+SSH_LAUNCH_VIOLATIONS: list[str] = []
+
+
+def _is_ssh_program(program: object) -> bool:
+    """Whether *program* (str, bytes or path, with any directory or .exe) names an ssh client."""
+    try:
+        text = os.fsdecode(program)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    name = text.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name.removesuffix(".exe") in SSH_PROGRAMS
+
+
+def _refuse_ssh(program: object) -> None:
+    if _is_ssh_program(program):
+        SSH_LAUNCH_VIOLATIONS.append(os.fsdecode(program))  # type: ignore[arg-type]
+        raise AssertionError(f"a unit test tried to start {program!r}; replace the subprocess seam")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ssh_processes(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Fail a unit test that would start a real ssh, scp or sftp client.
+
+    A test that forgot to replace a subprocess seam used to reach the network
+    (or fail only on machines with an ssh client), and code under test can
+    swallow the refusal: so every refused launch is recorded and fails the
+    test at teardown. A test that runs a real client on purpose carries the
+    ``real_ssh_process`` marker.
+    """
+    SSH_LAUNCH_VIOLATIONS.clear()
+    if request.node.get_closest_marker("real_ssh_process"):
+        yield
+        return
+    import asyncio
+    import subprocess
+
+    real_exec = asyncio.create_subprocess_exec
+    real_popen_init = subprocess.Popen.__init__
+
+    async def guarded_exec(program, *args, **kwargs):
+        _refuse_ssh(program)
+        return await real_exec(program, *args, **kwargs)
+
+    def guarded_popen_init(self, args, *rest, **kwargs):
+        if isinstance(args, (str, bytes, os.PathLike)):
+            _refuse_ssh(args if kwargs.get("shell") is not True else str(args).split(None, 1)[0])
+        elif args:
+            _refuse_ssh(args[0])
+        return real_popen_init(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", guarded_exec)
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen_init)
+    yield
+    if SSH_LAUNCH_VIOLATIONS:
+        launched, SSH_LAUNCH_VIOLATIONS[:] = list(SSH_LAUNCH_VIOLATIONS), []
+        pytest.fail(f"the test tried to start a real ssh client ({launched}); replace the subprocess seam")
+
+
 @pytest.fixture(autouse=True)
 def _no_team_agent_rules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Start every test with no team agent rules loaded and only the bundled keys.
@@ -161,6 +221,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the env-var-gated markers so strict-markers mode is happy."""
+    config.addinivalue_line(
+        "markers", "real_ssh_process: the test starts a stand-in ssh program on purpose",
+    )
     for marker, env_var in E2E_MARKER_ENV_VARS.items():
         config.addinivalue_line(
             "markers",

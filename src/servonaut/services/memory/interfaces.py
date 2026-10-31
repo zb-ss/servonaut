@@ -682,6 +682,10 @@ class MemoryBackendError(Exception):
     """Base class for errors raised by memory backend services."""
 
 
+class MemoryNotFound(MemoryBackendError):
+    """The service answered 404: it holds nothing under that id (verified absence)."""
+
+
 class BackendMaintenance(MemoryBackendError):
     """Server returned 503 feature_disabled (kill-switch active)."""
 

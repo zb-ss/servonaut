@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Collection, Dict, List, Optional, TYPE_CHECKING
 
 from servonaut.services.api_client import ForbiddenEntitlementError
 from servonaut.services.memory.interfaces import (
@@ -103,7 +103,9 @@ class FleetService:
         except APIError as exc:
             raise MemoryBackendError(str(exc)) from exc
 
-    async def get_merged_fleet(self) -> List[Dict[str, Any]]:
+    async def get_merged_fleet(
+        self, hidden_ids: Collection[str] = ()
+    ) -> List[Dict[str, Any]]:
         """Merge local and remote fleet into a unified row list.
 
         Each row is a dict with keys:
@@ -112,11 +114,18 @@ class FleetService:
 
         Remote errors (BackendMaintenance, UpsellRequired) result in a
         local-only list with a ``remote_error`` key set to the exception class name.
+
+        *hidden_ids* are the ids of a team's copies of servers the user
+        also owns (see :mod:`~servonaut.services.memory.team_fold`): they
+        are left out of the local and the remote side alike, so a server
+        is listed once.
         """
+        hidden = set(hidden_ids)
         # Local index
         local_entries = self._get_local_entries()
         local_by_id: Dict[str, Dict[str, Any]] = {
             e["instance_id"]: e for e in local_entries
+            if e["instance_id"] not in hidden
         }
 
         # Remote fleet (best-effort)
@@ -135,7 +144,7 @@ class FleetService:
         remote_by_id: Dict[str, RemoteFleetItem] = {}
         for item in remote_items:
             iid = item.instance.get("instance_id", item.instance.get("id", ""))
-            if iid:
+            if iid and iid not in hidden:
                 remote_by_id[iid] = item
 
         # Union of all known IDs
