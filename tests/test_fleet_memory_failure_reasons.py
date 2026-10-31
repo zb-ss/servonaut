@@ -24,6 +24,18 @@ CASES = [
 ]
 
 
+def _bind_app(widget: Any, app: Any) -> None:
+    """Give one widget instance a fake ``app`` without touching its class.
+
+    Assigning ``app`` on the production class would leak into every later
+    test in the process, so the instance gets a private subclass instead.
+    """
+    widget.__class__ = type(
+        widget.__class__.__name__, (widget.__class__,), {"app": property(lambda self: app)}
+    )
+
+
+
 def _report(overall: str, reason: str) -> Any:
     report = MagicMock()
     report.has_any_success = False
@@ -59,7 +71,7 @@ def _screen(last_reasons: Dict[str, str], instances: List[Dict[str, Any]]):
     app.memory_service = memory_service
     app.instances = instances
     app.fleet_scan_service = MagicMock(last_reasons=last_reasons)
-    type(screen).app = property(lambda self: app)
+    _bind_app(screen, app)
     table = MagicMock()
     screen.query_one = MagicMock(return_value=table)
     return screen, table

@@ -16,6 +16,18 @@ from servonaut.services.shared_servers import shared_row
 TEAM = {"slug": "team-a", "name": "Team A", "id": 7}
 
 
+def _bind_app(widget: Any, app: Any) -> None:
+    """Give one widget instance a fake ``app`` without touching its class.
+
+    Assigning ``app`` on the production class would leak into every later
+    test in the process, so the instance gets a private subclass instead.
+    """
+    widget.__class__ = type(
+        widget.__class__.__name__, (widget.__class__,), {"app": property(lambda self: app)}
+    )
+
+
+
 def _own(**changes: Any) -> Dict[str, Any]:
     row = {
         "id": "i-0abc0abc0abc0abc0", "name": "web-1", "state": "running",
@@ -81,7 +93,7 @@ class TestFleetMemoryTable:
         screen.query_one = MagicMock(return_value=table)
         own, twin = _own(), _shared()
         app = _app([own, twin], memory_service=None)
-        type(screen).app = property(lambda self: app)
+        _bind_app(screen, app)
         screen._populate_table()
         assert [row["id"] for row in screen._rows] == [own["id"]]
 
@@ -98,7 +110,7 @@ class TestFleetMemoryTable:
             _fleet_manual_scan_in_progress=False,
         )
         app.start_fleet_manual_scan.return_value = True
-        type(screen).app = property(lambda self: app)
+        _bind_app(screen, app)
         screen._launch_bulk_scan(stale_only=False)
         assert app.start_fleet_manual_scan.call_args.args[0] == [own]
 
@@ -124,7 +136,7 @@ class TestChatScope:
         config.chat_inject_server_memory = True
         app = _app([twin, own], memory_service=memory)
         app.config_manager.get.return_value = config
-        type(panel).app = property(lambda self: app)
+        _bind_app(panel, app)
         seen: List[Any] = []
 
         def build(**kwargs: Any):
@@ -189,7 +201,7 @@ class TestWritesLandOnTheOwnRow:
         own, twin = _own(), _shared()
         app = _app([own, twin])
         screen = MemoryScreen(twin)
-        type(screen).app = property(lambda self: app)
+        _bind_app(screen, app)
         assert screen._target["id"] == own["id"]
 
     def test_a_shared_only_row_keeps_its_own_target(self):
@@ -198,5 +210,5 @@ class TestWritesLandOnTheOwnRow:
         twin = _shared(instance_id=None, hostname="8.8.8.8")
         app = _app([_own(), twin])
         screen = MemoryScreen(twin)
-        type(screen).app = property(lambda self: app)
+        _bind_app(screen, app)
         assert screen._target["id"] == twin["id"]
