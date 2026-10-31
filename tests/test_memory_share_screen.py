@@ -465,7 +465,7 @@ ODD_NAMES = ["[link=x", "[/bold]", "[@click=app.quit]", "[bold]Odd[/bold] Name"]
 
 
 @pytest.mark.parametrize("name", ODD_NAMES)
-def test_the_shared_markup_escape_makes_every_bracket_literal(name):
+async def test_the_shared_markup_escape_makes_every_bracket_literal(name):
     from rich.text import Text
 
     from servonaut.utils.markup import escape_markup
