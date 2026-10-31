@@ -1257,24 +1257,24 @@ class MemoryScreen(Screen):
         provider: str,
         text: str,
         expected: Optional[str],
-    ) -> bool:
-        """Write *text* unless the notes differ from *expected*; return whether it wrote.
+    ) -> Optional[Path]:
+        """Write *text* unless the notes differ from *expected*.
 
-        The editor holds the notes as they were when it opened. A merge or
-        another editor may have changed the file since, and writing the
-        editor's text would drop that. The text is then kept beside the notes
-        as a new private ``annotations.unsaved-<time>.md`` file and nothing is
-        overwritten. The comparison and the write are one step under the
-        store's annotation lock, so a merge cannot slip in between.
+        Returns None when the notes were written, else the draft the text was
+        kept in. The editor holds the notes as they were when it opened. A
+        merge or another editor may have changed the file since, and writing
+        the editor's text would drop that. The text is then kept beside the
+        notes as a new private ``annotations.unsaved-<time>.md`` file and
+        nothing is overwritten. The comparison and the write are one step
+        under the store's annotation lock, so a merge cannot slip in between.
         """
         if expected is None:
             memory_service.write_annotations(instance_id, text, provider)
-            return True
+            return None
         digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
         if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
-            return True
-        memory_service.write_annotation_draft(instance_id, text, provider)
-        return False
+            return None
+        return memory_service.write_annotation_draft(instance_id, text, provider)
 
     async def _save_annotations(
         self,
@@ -1286,7 +1286,7 @@ class MemoryScreen(Screen):
     ) -> None:
         """Worker: write the notes off the UI thread, then record the change."""
         try:
-            written = await asyncio.to_thread(
+            draft = await asyncio.to_thread(
                 self._write_unless_changed, memory_service, instance_id, provider, text, expected
             )
         except Exception as exc:
@@ -1294,11 +1294,12 @@ class MemoryScreen(Screen):
                 f"Could not save annotations: {exc}", severity="error", markup=False
             )
             return
-        if not written:
+        if draft is not None:
+            # Only the file name: its folder names the server, which demo mode hides.
             self.app.notify(
                 "The notes changed while you were editing (a team merge or another "
-                "edit), so nothing was overwritten. Your text is saved as "
-                "annotations.unsaved-<time>.md next to the notes; reopen the editor to merge it.",
+                f"edit), so nothing was overwritten. Your text is kept in {draft.name} "
+                "next to the notes: open the notes again and copy in what you need from it.",
                 severity="warning",
                 markup=False,
             )

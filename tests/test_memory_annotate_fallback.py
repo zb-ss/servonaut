@@ -346,6 +346,9 @@ async def test_notes_changed_while_the_editor_was_open_are_not_overwritten(
     assert "Annotations saved." not in [message for message, _ in app.notes]
     kept = next((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
     assert kept.read_text() == "my edited note\n"
+    # The warning names the file the text was kept in, not a pattern.
+    warning = next(message for message, level in app.notes if level == "warning")
+    assert kept.name in warning and "<time>" not in warning
     app.memory_sync_service.enqueue_annotations.assert_not_called()
 
 
@@ -374,7 +377,7 @@ def test_a_merge_between_the_comparison_and_the_write_cannot_be_overwritten(tmp_
         assert thread.is_alive()
         store.write_annotations("custom-web-1", "BASE\n\nMERGED NOTE", "custom")
     thread.join(2)
-    assert outcome == [False]
+    assert len(outcome) == 1 and outcome[0] is not None  # kept as a draft
     assert service.read_annotations("custom-web-1", "custom") == "BASE\n\nMERGED NOTE"
     drafts = list((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
     assert [d.read_text() for d in drafts] == ["USER EDIT"]
@@ -386,6 +389,6 @@ def test_two_rejected_saves_keep_both_drafts(tmp_path: Path) -> None:
     service.write_annotations("custom-web-1", "BASE", "custom")
     service.write_annotations("custom-web-1", "CHANGED", "custom")
     for text in ("first draft", "second draft"):
-        assert MemoryScreen._write_unless_changed(service, "custom-web-1", "custom", text, "BASE") is False
+        assert MemoryScreen._write_unless_changed(service, "custom-web-1", "custom", text, "BASE") is not None
     drafts = sorted((tmp_path / "custom" / "custom-web-1").glob("annotations.unsaved-*.md"))
     assert sorted(d.read_text() for d in drafts) == ["first draft", "second draft"]
