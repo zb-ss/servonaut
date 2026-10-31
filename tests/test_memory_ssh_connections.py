@@ -626,7 +626,7 @@ class TestMasterOpenIgnoresInheritedPipes:
         bin_dir, pid_file = self._fake_ssh(tmp_path)
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
         monkeypatch.setattr("servonaut.services.memory.ssh_mux.get_os", lambda: "linux")
-        master = ControlMaster(persist_seconds=5, connect_timeout=3, socket_dir=str(tmp_path))
+        master = ControlMaster(persist_seconds=5, connect_timeout=3)
 
         async def go():
             started = time.monotonic()

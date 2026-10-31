@@ -1243,6 +1243,7 @@ def test_memory_build_reports_changed_key_and_keeps_snapshot(tmp_path, known_hos
         process = MagicMock()
         process.communicate = AsyncMock(return_value=(b"", b""))
         process.returncode = 255
+        process.wait = AsyncMock(return_value=255)
         process._transport = None
         return process
 
