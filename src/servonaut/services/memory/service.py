@@ -25,7 +25,7 @@ from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, Module
 from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
 from .ssh_mux import DIRECT_OPTIONS, ControlMaster, multiplexing_supported
-from .status import STOPPED_REASON, is_stopped_instance
+from .status import BUSY_BUILD_REASON, STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, RecordLockTimeout, _validate_finding_id
 from .team_merge import share_identity
 from .summariser import build_summary_markdown
@@ -153,18 +153,24 @@ class BuildReport:
     """Outcome of a single ``build_report()`` invocation.
 
     Attributes:
-        successes: ``module_name → ModuleResult`` for probers that returned.
-        failures: Per-module probe failures (timeouts, exceptions).
+        successes: ``module_name → ModuleResult`` for modules that were
+            probed AND stored.
+        failures: Per-module probe failures (timeouts, exceptions, a record
+            another process kept busy).
+        unsaved: ``module_name → ModuleResult`` for modules that were probed
+            but not stored because their record stayed busy; nothing probed
+            is lost to a caller that wants to show or retry them.
         overall_reason: Machine-readable code when ``successes`` is empty
             (``"opt_out"`` | ``"disabled"`` | ``"stopped"`` |
             ``"no_modules_matched"`` | ``"all_probers_failed"`` |
-            ``HOST_KEY_BUILD_REASON`` | ``SSH_FAILED_BUILD_REASON``);
-            ``None`` on partial / full success.
+            ``"record_busy"`` | ``HOST_KEY_BUILD_REASON`` |
+            ``SSH_FAILED_BUILD_REASON``); ``None`` on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
     failures: List[ModuleBuildFailure] = field(default_factory=list)
     overall_reason: Optional[str] = None
+    unsaved: Dict[str, ModuleResult] = field(default_factory=dict)
 
     @property
     def count(self) -> int:
@@ -173,6 +179,18 @@ class BuildReport:
     @property
     def has_any_success(self) -> bool:
         return bool(self.successes)
+
+    @property
+    def unsaved_message(self) -> Optional[str]:
+        """Which probed modules were not stored, and what to do, or None."""
+        if not self.unsaved:
+            return None
+        n = len(self.unsaved)
+        noun = "module was" if n == 1 else "modules were"
+        return (
+            f"{n} {noun} probed but not saved: another Servonaut process was "
+            "changing this server's memory. Run it again."
+        )
 
     @property
     def unreached_message(self) -> Optional[str]:
@@ -475,6 +493,7 @@ class MemoryService(MemoryServiceInterface):
             )
 
         successes: Dict[str, ModuleResult] = {}
+        unsaved: Dict[str, ModuleResult] = {}
         failures: List[ModuleBuildFailure] = []
         probed_modules: List[str] = []
 
@@ -487,22 +506,23 @@ class MemoryService(MemoryServiceInterface):
             # Stamp probed_at if the prober didn't set it.
             if not result.probed_at:
                 result.probed_at = datetime.now(tz=timezone.utc).isoformat()
-            successes[result.module] = result
             # The save may wait for a record another process holds: keep that
             # wait off the event loop, and let one busy module not cost the rest.
             try:
                 await asyncio.to_thread(self._save_result, result, instance_id, provider)
             except RecordLockTimeout:
                 result.partial = True
+                unsaved[result.module] = result
                 failures.append(ModuleBuildFailure(
                     module=result.module,
-                    reason="record_busy",
+                    reason=BUSY_BUILD_REASON,
                     message=(
                         "Another Servonaut process was changing this server's memory, "
                         "so this result was not saved. Try again."
                     ),
                 ))
                 continue
+            successes[result.module] = result
             self._enqueue_result(result, instance_id, provider, instance)
             probed_modules.append(result.module)
 
@@ -518,12 +538,15 @@ class MemoryService(MemoryServiceInterface):
             )
 
         overall_reason: Optional[str] = None
-        if not successes and failures:
+        if not successes and unsaved:
+            overall_reason = BUSY_BUILD_REASON
+        elif not successes and failures:
             overall_reason = "all_probers_failed"
         return BuildReport(
             successes=successes,
             failures=failures,
             overall_reason=overall_reason,
+            unsaved=unsaved,
         )
 
     async def refresh(

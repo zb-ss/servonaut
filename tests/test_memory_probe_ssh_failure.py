@@ -232,7 +232,7 @@ def test_the_memory_screen_shows_why_nothing_was_probed():
         overall_reason=SSH_FAILED_BUILD_REASON,
     ))
 
-    assert _run(MemoryScreen(dict(SERVER))._refresh_memory(service)) == message
+    assert _run(MemoryScreen(dict(SERVER))._refresh_notice(service)) == (message, "error")
 
 
 def test_the_cli_says_the_memory_was_not_updated(tmp_path, capsys):

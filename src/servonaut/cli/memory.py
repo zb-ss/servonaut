@@ -298,6 +298,18 @@ def _report_unreached(inst: Dict[str, Any], message: str, use_json: bool = False
     return _EXIT_GENERIC_ERROR
 
 
+def _report_unsaved(report: Any) -> int:
+    """Say which probed modules were not stored; the exit code reflects it.
+
+    Nothing saved is a generic error, some saved is a partial failure.
+    """
+    message = report.unsaved_message
+    if message is None:
+        return _EXIT_SUCCESS
+    print(message, file=sys.stderr)
+    return _EXIT_PARTIAL_FAILURE if report.has_any_success else _EXIT_GENERIC_ERROR
+
+
 def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]) -> int:
     """Handle ``memory build``."""
     use_json = getattr(args, "json", False)
@@ -309,7 +321,7 @@ def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
         if report.unreached_message:
             return _report_unreached(inst, report.unreached_message, use_json)
         if use_json:
-            out = {
+            out: Dict[str, Any] = {
                 k: {
                     "module": v.module,
                     "probed_at": v.probed_at,
@@ -319,14 +331,16 @@ def _cmd_build(args: Any, config: Any, memory_service: Any, inst: Dict[str, Any]
                 }
                 for k, v in results.items()
             }
+            if report.unsaved:
+                out["_unsaved"] = sorted(report.unsaved)
             print(json.dumps(out, indent=2))
         else:
             iid = inst.get("id") or inst.get("name", "?")
             if results:
                 print(f"Built memory for {iid}: {', '.join(sorted(results))}")
-            else:
+            elif not report.unsaved:
                 print(f"No modules probed for {iid} (check opt-out / disabled modules).")
-        return _EXIT_SUCCESS
+        return _report_unsaved(report)
 
     return _run_async(_do_build())
 
@@ -373,6 +387,8 @@ async def _build_all(
                     skipped.append(iid)
             elif report.unreached_message:
                 failures.append((iid, report.unreached_message))
+            elif report.unsaved_message:
+                failures.append((iid, report.unsaved_message))
 
     await asyncio.gather(*(one(i) for i in instances))
     return failures
@@ -413,8 +429,9 @@ def _cmd_refresh(args: Any, config: Any, memory_service: Any, inst: Dict[str, An
             return _report_unreached(inst, report.unreached_message)
         results = report.successes
         iid = inst.get("id") or inst.get("name", "?")
-        print(f"Refreshed memory for {iid}: {', '.join(sorted(results)) if results else '(none)'}")
-        return _EXIT_SUCCESS
+        if results or not report.unsaved:
+            print(f"Refreshed memory for {iid}: {', '.join(sorted(results)) if results else '(none)'}")
+        return _report_unsaved(report)
 
     return _run_async(_do_refresh())
 
