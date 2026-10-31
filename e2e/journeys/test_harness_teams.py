@@ -213,7 +213,7 @@ async def test_creating_a_team_needs_the_teams_plan_and_no_owned_team(fake_cloud
     assert again.value.status == 403 and "already own" in again.value.message
 
 
-def test_a_teammate_s_memory_key_can_be_replaced_through_the_control_plane(fake_cloud):
+def test_a_teammate_s_memory_key_can_be_added_and_replaced_through_the_control_plane(fake_cloud):
     import base64
 
     import nacl.public
@@ -221,7 +221,17 @@ def test_a_teammate_s_memory_key_can_be_replaced_through_the_control_plane(fake_
     def public_b64() -> str:
         return base64.b64encode(bytes(nacl.public.PrivateKey.generate().public_key)).decode()
 
-    fake_cloud.memory.add_team_member("team-a", MEMBER_ID, public_b64(), name="Member")
+    with _client(fake_cloud) as client:
+        added = client.post("/__e2e/memory/team-member", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID, "public_key_b64": public_b64(),
+            "name": "Member",
+        })
+        assert added.status_code == 200
+        bad_role = client.post("/__e2e/memory/team-member", json={
+            "team_slug": "team-a", "user_id": MEMBER_ID + 1, "public_key_b64": public_b64(),
+            "role": "superuser",
+        })
+        assert bad_role.status_code == 400
     before = next(m for m in fake_cloud.memory.team_keys("team-a") if m["user_id"] == MEMBER_ID)
     replacement = public_b64()
     with _client(fake_cloud) as client:

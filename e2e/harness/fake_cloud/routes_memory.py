@@ -938,4 +938,18 @@ def add_routes(app: web.Application, store: ScenarioStore, memory: MemoryCloud) 
             return web.json_response({"error": type(exc).__name__}, status=400)
         return web.json_response({"ok": True})
 
+    async def add_team_member(request: web.Request) -> web.Response:
+        # A teammate with a memory key, for a walk of team memory sharing in
+        # the QA sandbox (the journeys call the method in process).
+        body = await json_body(request)
+        try:
+            memory.add_team_member(
+                str(body["team_slug"]), int(body["user_id"]), str(body["public_key_b64"]),
+                role=str(body.get("role") or "member"), name=str(body.get("name") or ""),
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            return web.json_response({"error": type(exc).__name__}, status=400)
+        return web.json_response({"ok": True})
+
+    router.add_post(f"{CONTROL_PREFIX}memory/team-member", add_team_member)
     router.add_post(f"{CONTROL_PREFIX}memory/rotate-member-key", rotate_member_key)
