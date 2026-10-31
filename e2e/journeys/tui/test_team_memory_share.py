@@ -20,6 +20,8 @@ No screen lists a team's grants yet, so the journey reads the grant the
 
 from __future__ import annotations
 
+import re
+
 import base64
 
 import pytest
@@ -152,7 +154,8 @@ async def test_share_memory_with_the_team(tui, seed, fake_cloud, monkeypatch):
         await _synced(t)
         await _open_share(t)
         await _confirm_share(t)
-        await t.wait_for_toast(rf"^Shared {HOST.instance_id} with team {TEAM}\.$")
+        # Named as the screen shows them: the server and the team, not their ids.
+        await t.wait_for_toast(rf"^Shared {re.escape(HOST.name)} with team Ops\.$")
         await t.wait_for_screen("FleetMemoryScreen")
 
         (grant,) = fake_cloud.memory.grants(TEAM)
@@ -174,16 +177,15 @@ async def test_share_memory_with_the_team(tui, seed, fake_cloud, monkeypatch):
         data_keys = [envelope_key(e, owner, keypair[1]) for e in stored]
         fake_cloud.assert_absent_on_wire(MARKER, PASSPHRASE, keypair[1], teammate[1], *data_keys)
 
-        # A second share of the same instance is refused, with the reason.
+        # Opened again, the form shows the share that exists instead of
+        # offering a second one: Share is off, Revoke and Share again are on.
         await _open_share(t)
-        await _confirm_share(t)
-        await t.wait_until(
-            lambda: "Share failed: A live grant already exists"
-            in plain(t.on_screen("#share-status").render()),
-            desc="refusal shown",
-        )
+        panel = t.on_screen("#share-existing")
+        await t.wait_until(lambda: panel.has_class("-shown"), desc="the existing share shown")
+        assert t.on_screen("#share-btn-confirm").disabled
+        assert not t.on_screen("#share-btn-reshare").disabled
         assert len(fake_cloud.memory.grants(TEAM)) == 1
-    fake_cloud.assert_no_unexpected_errors(*FIRST_SYNC, ("POST", GRANT_PATH, 409))
+    fake_cloud.assert_no_unexpected_errors(*FIRST_SYNC)
 
 
 async def test_share_only_the_selected_modules(tui, seed, fake_cloud, monkeypatch):
@@ -206,7 +208,8 @@ async def test_share_only_the_selected_modules(tui, seed, fake_cloud, monkeypatc
                 desc="refusal shown",
             )
             raise KnownGap("the deselected module's data key was wrapped for the team")
-        await t.wait_for_toast(rf"^Shared {HOST.instance_id} with team {TEAM}\.$")
+        # Named as the screen shows them: the server and the team, not their ids.
+        await t.wait_for_toast(rf"^Shared {re.escape(HOST.name)} with team Ops\.$")
 
     (grant,) = fake_cloud.memory.grants(TEAM)
     assert "services" not in grant["modules"] and "os" in grant["modules"]
