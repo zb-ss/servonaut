@@ -29,6 +29,11 @@ from textual.widgets import Button, DataTable, Footer, Input, Static
 from servonaut.screens._binding_guard import check_action_passthrough
 from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
 from servonaut.services.shared_servers import own_twin
+from servonaut.services.memory.shared_view import (
+    merge_shared,
+    share_candidates,
+    shared_source_text,
+)
 from servonaut.services.memory.provider import instance_provider
 from servonaut.services.memory.status import (
     STATUS_FRESH,
@@ -380,6 +385,9 @@ class MemoryScreen(Screen):
         # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
         self._has_local_memory = False
+        # What a team shares of this server (see ``_request_shared``).
+        self._shared: Any = None
+        self._shared_requested = False
 
     @property
     def _target(self) -> dict:
@@ -421,6 +429,7 @@ class MemoryScreen(Screen):
                     "[dim]Memory scan: checking…[/dim]",
                     id="memory-local-status",
                 ),
+                Static("", id="memory-shared-source", classes="hidden"),
                 Static(
                     "[$text-warning]Memory disabled for this server.[/$text-warning]",
                     id="memory-opt-out-banner",
@@ -520,6 +529,7 @@ class MemoryScreen(Screen):
         table.add_column("ProbedAt", key="probed_at")
         table.add_column("Age", key="age")
         self._render_table()
+        self._request_shared()
         self._refresh_sync_status()
         self._refresh_ai_status()
         self.set_interval(5, self._refresh_statuses)
@@ -601,13 +611,21 @@ class MemoryScreen(Screen):
             self._set_summary_actions_enabled(False)
             return
 
+        local_modules = all_modules
+        all_modules = merge_shared(local_modules, self._shared)
+        in_use = self._shared is not None and any(
+            all_modules.get(name) is module for name, module in self._shared.modules.items()
+        )
+        self._show_shared_source(self._shared, in_use)
+
         if not all_modules:
             # Empty: show the CTA so users know how to populate memory.
             self._set_empty_state_visible(True)
             self._set_summary_actions_enabled(False)
             return
         self._set_empty_state_visible(False)
-        self._set_summary_actions_enabled(True)
+        # The summary is built from this device's own memory only.
+        self._set_summary_actions_enabled(bool(local_modules))
 
         # Determine stale modules
         try:
@@ -672,6 +690,53 @@ class MemoryScreen(Screen):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _request_shared(self) -> None:
+        """Once per screen, look for memory a team shares of this server.
+
+        Runs on opening only (never on a redraw), and the reader reuses its
+        answer for ``memory.team_memory_cache_seconds`` across screens.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None or self._shared_requested:
+            return
+        self._shared_requested = True
+        candidates = share_candidates(self._target, real_fleet_rows(self.app))
+        if not candidates:
+            return
+        self.run_worker(
+            self._load_shared(reader, candidates),
+            group="memory_shared_read",
+            name="memory_shared_read",
+            exclusive=True,
+        )
+
+    async def _load_shared(self, reader: Any, candidates: List[Any]) -> None:
+        for candidate in candidates:
+            try:
+                shared = await reader.read(
+                    candidate.team_slug, candidate.team_name, candidate.instance_id
+                )
+            except Exception as exc:  # noqa: BLE001 — a fallback must never break the screen
+                logger.warning("Could not read shared memory: %s", exc)
+                continue
+            if shared is not None:
+                self._shared = shared
+                self._render_table()
+                return
+
+    def _show_shared_source(self, shared: Any, in_use: bool) -> None:
+        """Say which team the rows that are not local come from."""
+        label = self.query_one("#memory-shared-source", Static)
+        if shared is None or not in_use:
+            label.add_class("hidden")
+            return
+        name = shared.team_name
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            name = redaction.redact_name(name)
+        label.update(f"[dim]{escape(shared_source_text(shared, name))}[/dim]")
+        label.remove_class("hidden")
 
     def _set_empty_state_visible(self, visible: bool) -> None:
         """Show or hide the T11 empty-state CTA."""

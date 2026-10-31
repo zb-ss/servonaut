@@ -32,7 +32,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Static
 
 from servonaut.screens._binding_guard import check_action_passthrough
-from servonaut.screens._demo_resolve import real_instance_id
+from servonaut.screens._demo_resolve import connection_instance, real_instance_id
 from servonaut.widgets.safe_header import SafeHeader
 from servonaut.widgets.sidebar import Sidebar
 from servonaut.services.memory.fleet_scan_service import row_reason_text
@@ -60,11 +60,18 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+#: Status of a team's shared server that has no local record: its age and
+#: module count come from the team's list. Local to this screen, because it
+#: is not a state the scan service produces.
+STATUS_SHARED = "shared"
+
 _STATUS_CELL: Dict[str, str] = {
     STATUS_FRESH: "[green]● Fresh[/green]",
     STATUS_STALE: "[yellow]● Stale[/yellow]",
     STATUS_NONE: "[dim]○ Not probed[/dim]",
     STATUS_OPT_OUT: "[red]⛔ Opted-out[/red]",
+    # A server a team shares, read from the team's copy (read-only).
+    STATUS_SHARED: "[blue]● Shared[/blue]",
 }
 
 # Source column rendering (width 8)
@@ -72,6 +79,7 @@ _SOURCE_CELL: Dict[str, str] = {
     "local": "[dim]local[/dim]",
     "remote": "[blue]cloud[/blue]",
     "merged": "[green]synced[/green]",
+    "team": "[blue]team[/blue]",
 }
 
 
@@ -379,6 +387,82 @@ class FleetMemoryScreen(Screen):
         """Re-populate the fleet rows so names and ids follow the demo toggle."""
         self._launch_populate()
 
+    def _shared_fields(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Row fields from a team's list, for a shared server with no local record.
+
+        Reads only what the reader already holds: a redraw never asks the
+        service. Empty when the server has a local record or no team lists it.
+        """
+        inst = row.get("instance") or {}
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None or row.get("status") in (STATUS_FRESH, STATUS_STALE):
+            return {}
+        candidate = self._share_candidate(inst)
+        if candidate is None:
+            return {}
+        listing = reader.cached_listing(candidate.team_slug, candidate.instance_id)
+        if listing is None:
+            return {}
+        return {
+            "source": "team",
+            "status": STATUS_SHARED,
+            "modules": listing.module_count,
+            "age": _human_age(listing.last_probe_at) if listing.last_probe_at else "—",
+        }
+
+    def _share_candidate(self, inst: Dict[str, Any]) -> Any:
+        """The team and owner's instance id behind a shared row, else None."""
+        from servonaut.services.memory.shared_view import share_candidates
+
+        real = connection_instance(self.app, inst)
+        if not isinstance(real, dict) or real.get("is_shared") is not True:
+            return None
+        found = share_candidates(real, [])
+        return found[0] if found else None
+
+    async def _prefetch_shared_listings(self) -> None:
+        """Ask once per team what it shares, then fill the shared rows in.
+
+        Runs when the screen fills or refreshes, never on a redraw; the
+        service call is reused for ``memory.team_memory_cache_seconds``.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None:
+            return
+        slugs = {
+            c.team_slug
+            for row in self._rows
+            if (c := self._share_candidate(row.get("instance") or {})) is not None
+        }
+        for slug in sorted(slugs):
+            try:
+                await reader.prefetch_listing(slug)
+            except Exception as exc:  # noqa: BLE001 — the team's copy is optional
+                logger.warning("Could not list what team memory shares: %s", exc)
+        self._apply_shared_listings()
+
+    def _apply_shared_listings(self) -> None:
+        """Update the shared rows (and their cells) from the reader's listings."""
+        try:
+            table = self.query_one("#fleet-memory-table", DataTable)
+        except Exception:  # noqa: BLE001 — screen left meanwhile
+            return
+        for index, row in enumerate(self._rows):
+            fields = self._shared_fields(row)
+            if not fields or row.get("status") == STATUS_SHARED:
+                continue
+            row.update(fields)
+            for column, value in (
+                (3, _SOURCE_CELL["team"]),
+                (4, _STATUS_CELL[STATUS_SHARED]),
+                (5, str(fields["modules"]) if fields["modules"] else "—"),
+                (7, fields["age"]),
+            ):
+                table.update_cell_at(Coordinate(index, column), value)
+        self.query_one("#fleet-memory-status", Static).update(
+            self._summary_line_from_rows(self._rows)
+        )
+
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
         fleet_service = getattr(self.app, "fleet_service", None)
@@ -518,7 +602,7 @@ class FleetMemoryScreen(Screen):
                     modules_count = len(mods)
                     age_text = _human_age(_latest_probed_at(mods))
 
-            self._rows.append({
+            row = {
                 "instance": inst,
                 "id": iid,
                 "name": iname,
@@ -534,7 +618,9 @@ class FleetMemoryScreen(Screen):
                 "drift_7d": drift_7d,
                 "age": age_text,
                 "reason": self._reason_cell(raw_iid),
-            })
+            }
+            row.update(self._shared_fields(row))
+            self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
@@ -554,6 +640,18 @@ class FleetMemoryScreen(Screen):
 
         self.query_one("#fleet-memory-status", Static).update(
             self._summary_line_from_rows(self._rows)
+        )
+        self._start_shared_prefetch()
+
+    def _start_shared_prefetch(self) -> None:
+        """Look up the team-shared rows without blocking the table."""
+        if getattr(self.app, "shared_memory_reader", None) is None:
+            return
+        self.run_worker(
+            self._prefetch_shared_listings(),
+            name="fleet_memory_shared",
+            group="memory_shared_listing",
+            exclusive=True,
         )
 
     def _populate_table(self) -> None:
@@ -578,7 +676,7 @@ class FleetMemoryScreen(Screen):
                 modules_count = len(modules)
                 age_text = _human_age(_latest_probed_at(modules))
 
-            self._rows.append({
+            row = {
                 "instance": inst,
                 "id": iid,
                 "name": iname,
@@ -597,7 +695,9 @@ class FleetMemoryScreen(Screen):
                 "drift_7d": 0,
                 "age": age_text,
                 "reason": self._reason_cell(iid),
-            })
+            }
+            row.update(self._shared_fields(row))
+            self._rows.append(row)
 
         table = self.query_one("#fleet-memory-table", DataTable)
         table.clear()
@@ -618,6 +718,7 @@ class FleetMemoryScreen(Screen):
         self.query_one("#fleet-memory-status", Static).update(
             self._summary_line_from_rows(self._rows)
         )
+        self._start_shared_prefetch()
 
     # ------------------------------------------------------------------
     # Summary helpers (shared between populate paths and live updater)
@@ -630,10 +731,12 @@ class FleetMemoryScreen(Screen):
         Counts statuses directly from the rows so the live-update path and
         the post-populate path can't drift.
         """
-        fresh = stale = none_count = opt_out = 0
+        fresh = stale = none_count = opt_out = shared = 0
         for row in rows:
             s = row.get("status", STATUS_NONE)
-            if s == STATUS_FRESH:
+            if s == STATUS_SHARED:
+                shared += 1
+            elif s == STATUS_FRESH:
                 fresh += 1
             elif s == STATUS_STALE:
                 stale += 1
@@ -647,7 +750,9 @@ class FleetMemoryScreen(Screen):
             f"[$text-success]{fresh} fresh[/$text-success]  ·  "
             f"[$text-warning]{stale} stale[/$text-warning]  ·  "
             f"{none_count} not probed  ·  "
-            f"[$text-error]{opt_out} opted-out[/$text-error][/dim]"
+            f"[$text-error]{opt_out} opted-out[/$text-error]"
+            + (f"  ·  {shared} shared by a team" if shared else "")
+            + "[/dim]"
         )
 
     def _selected_row(self) -> Optional[Dict[str, Any]]:
@@ -917,6 +1022,8 @@ class FleetMemoryScreen(Screen):
 
         # Recompute status using the same helper as the populate paths.
         new_status = compute_memory_status(inst, memory_service)
+        if row.get("status") == STATUS_SHARED and new_status not in (STATUS_FRESH, STATUS_STALE):
+            return  # still only the team's copy: nothing new to show
 
         new_modules: Any = row.get("modules", 0)
         new_age: str = row.get("age", "—")

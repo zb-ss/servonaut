@@ -166,6 +166,7 @@ class ServonautApp(App):
     ai_summary_service = None
     export_service = None
     team_memory_service = None
+    shared_memory_reader = None
     memory_crypto = None
     _memory_key_material = None
 
@@ -1580,6 +1581,11 @@ class ServonautApp(App):
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
                 ),
+            )
+            from servonaut.services.memory.shared_view import SharedMemoryReader
+            self.shared_memory_reader = SharedMemoryReader(
+                self.team_memory_service,
+                lambda: self.config_manager.get().memory.team_memory_cache_seconds,
             )
         except Exception as exc:
             logger.debug("TeamMemoryService init failed: %s", exc)

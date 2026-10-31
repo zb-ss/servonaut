@@ -421,6 +421,63 @@ class TeamMemoryService:
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
 
+    async def read_shared_module(
+        self, team_slug: str, instance_id: str, module: str
+    ) -> Optional[Dict[str, Any]]:
+        """Open the newest copy of a shared module the caller can read.
+
+        Returns ``{"observed", "declared", "probed_at", "is_latest"}``, or
+        ``None`` when there is nothing to read: no grant (the service
+        answers ``404 access_revoked``), a module that is not shared, a
+        locked Memory Sync key, or a copy that cannot be opened. Nothing is
+        ever written back: a member does not upload into the owner's server.
+
+        Raises:
+            UpsellRequired: If ``memory_team_share`` is not in the plan.
+            BackendMaintenance: On 503.
+        """
+        self._require_feature()
+        material = self._key_store_provider()
+        if material is None:
+            return None
+        from servonaut.services.api_client import NotFoundError
+
+        try:
+            raw = await self._api.get(
+                f"/api/v1/teams/{team_slug}/memory/{instance_id}/{module}"
+            )
+        except NotFoundError:
+            return None
+        except Exception as exc:
+            raise _translate_api_error(exc, team_slug=team_slug) from exc
+        return self._open_shared(raw, material, module)
+
+    def _open_shared(
+        self, raw: Dict[str, Any], material: Any, module: str
+    ) -> Optional[Dict[str, Any]]:
+        """Decrypt one team envelope with the member's own key."""
+        import json
+
+        try:
+            plaintext = self._crypto.decrypt_envelope(
+                raw,
+                self_user_id=material.user_id,
+                self_private_key=material.private_key,
+                self_public_key=material.public_key,
+            )
+            payload = json.loads(plaintext.decode("utf-8"))
+        except (self._crypto.CryptoError, ValueError) as exc:
+            logger.warning("Could not open the shared %r copy: %s", module, exc)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "observed": payload.get("observed") or {},
+            "declared": payload.get("declared") or {},
+            "probed_at": str(raw.get("probed_at") or ""),
+            "is_latest": bool(raw.get("is_latest", True)),
+        }
+
     async def share_instance(
         self,
         team_slug: str,
