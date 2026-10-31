@@ -406,14 +406,17 @@ class FleetMemoryScreen(Screen):
             found for c in candidates
             if (found := reader.cached_listing(c.team_slug, c.instance_id)) is not None
         ]
-        listing = max(listings, key=lambda found: found.module_count, default=None)
-        if listing is None:
+        if not listings:
             return {}
+        # Every grant adds what it covers: count each module once.
+        names = {m for found in listings for m in found.modules}
+        count = len(names) if names else max(found.module_count for found in listings)
+        newest = max((found.last_probe_at for found in listings), default="")
         return {
             "source": "team",
             "status": STATUS_SHARED,
-            "modules": listing.module_count,
-            "age": _human_age(listing.last_probe_at) if listing.last_probe_at else "—",
+            "modules": count,
+            "age": _human_age(newest) if newest else "—",
         }
 
     def _share_candidate(self, inst: Dict[str, Any]) -> Any:
@@ -520,7 +523,12 @@ class FleetMemoryScreen(Screen):
             "grant_candidates": list(candidates),
             "instance": instance, "id": shown_id, "name": name, "provider": provider,
             "raw_id": real_id, "raw_provider": "shared", "source": "team",
-            "status": STATUS_SHARED, "modules": listing.module_count, "drift_7d": 0,
+            "status": STATUS_SHARED,
+            "modules": len({m for c in candidates
+                            if (found := self.app.shared_memory_reader.cached_listing(
+                                c.team_slug, c.instance_id)) is not None
+                            for m in found.modules}) or listing.module_count,
+            "drift_7d": 0,
             "age": _human_age(listing.last_probe_at) if listing.last_probe_at else "—",
             "reason": "—", "memory_only": True,
         }
@@ -869,11 +877,11 @@ class FleetMemoryScreen(Screen):
             self.app.notify("Select a row first.", severity="warning")
             return
         from servonaut.screens.memory import MemoryScreen
-        instance = row["instance"]
-        if row.get("grant_candidates"):
-            # A copy: the app's own server record is not ours to annotate.
-            instance = dict(instance, grant_candidates=row["grant_candidates"])
-        self.app.push_screen(MemoryScreen(instance))
+        # The app's own record, so demo mode keeps redacting what the screen
+        # shows; the grants found for it ride along separately.
+        self.app.push_screen(
+            MemoryScreen(row["instance"], grant_candidates=row.get("grant_candidates"))
+        )
 
     def action_share_selected(self) -> None:
         row = self._selected_row()

@@ -267,3 +267,28 @@ async def test_shared_authored_text_is_shown_literally(tmp_path):
         rows = await _cells(app, pilot)
         cell = rows[0][2]
         assert isinstance(cell, Text) and cell.plain == "[bold]Keep literal[/bold] and [/]"
+
+
+async def test_disjoint_grants_from_two_teams_both_show_with_their_own_label(tmp_path):
+    from servonaut.services.memory.shared_view import ShareCandidate
+
+    row = dict(MEMORY_ONLY_ROW)
+    row["grant_candidates"] = [ShareCandidate("team-a", "Team A", "i-owner-1"),
+                               ShareCandidate("team-b", "Team B", "i-owner-1")]
+    a = SharedMemory("team-a", "Team A", {"os": {"observed": {"distro": "Debian 12"}, "declared": {},
+                                                  "probed_at": "2026-10-20T08:00:00+00:00"}})
+    b = SharedMemory("team-b", "Team B", {"services": {"observed": {"nginx": "up"}, "declared": {},
+                                                        "probed_at": "2026-10-21T08:00:00+00:00"}})
+    reader = MagicMock()
+    reader.read = AsyncMock(side_effect=[a, b])
+    app = _host(tmp_path, row, reader)
+    async with app.run_test(headless=True) as pilot:
+        for _ in range(100):
+            await pilot.pause(0.05)
+            if app.screen.query_one("#memory-table", DataTable).row_count >= 2:
+                break
+        names = sorted(str(app.screen.query_one("#memory-table", DataTable).get_row_at(i)[0])
+                       for i in range(app.screen.query_one("#memory-table", DataTable).row_count))
+        assert names == ["os", "services"]
+        label = str(app.screen.query_one("#memory-shared-source", Static).render())
+        assert "Team A (os)" in label and "Team B (services)" in label

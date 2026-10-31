@@ -35,6 +35,8 @@ class SharedMemory:
     team_slug: str
     team_name: str
     modules: Dict[str, Dict[str, Any]]
+    #: Which team each module came from, when several teams were combined.
+    sources: Dict[str, str] = field(default_factory=dict)
 
     @property
     def probed_at(self) -> str:
@@ -58,6 +60,7 @@ class SharedListing:
     module_count: int
     last_probe_at: str
     instance: Dict[str, Any] = field(default_factory=dict)
+    modules: tuple = ()
 
     @property
     def instance_id(self) -> str:
@@ -137,6 +140,7 @@ class SharedMemoryReader:
                 module_count=len(item.readable_modules),
                 last_probe_at=str(item.instance.get("last_probe_at") or ""),
                 instance=dict(item.instance),
+                modules=tuple(item.readable_modules),
             )
         self._listings = {k: v for k, v in self._listings.items() if k[0] != team_slug}
         self._listings.update(fresh)
@@ -281,8 +285,41 @@ def merge_shared(
     return merged
 
 
-def shared_source_text(shared: SharedMemory, team_name: str) -> str:
-    """The plain label of where shared memory comes from."""
+def combine_shared(found: Any) -> Optional[SharedMemory]:
+    """One view of what several teams share of a server (None if nothing).
+
+    Each module comes from the team whose copy is newest, and remembers
+    which team that was.
+    """
+    parts = [s for s in found if s is not None and s.modules]
+    if not parts:
+        return None
+    modules: Dict[str, Dict[str, Any]] = {}
+    sources: Dict[str, str] = {}
+    for part in parts:
+        for name, module in part.modules.items():
+            mine = modules.get(name)
+            if mine is None or (module.get("probed_at") or "") > (mine.get("probed_at") or ""):
+                modules[name] = module
+                sources[name] = part.team_name
+    return SharedMemory(parts[0].team_slug, parts[0].team_name, modules, sources)
+
+
+def shared_source_text(
+    shared: SharedMemory, team_name: str, redact: Callable[[str], str] = lambda n: n
+) -> str:
+    """The plain label of where shared memory comes from.
+
+    One team: "Shared by <team>, probed <date>". Several: each team with
+    the modules it supplied. *redact* maps a team name to what may be shown.
+    """
     probed = shared.probed_at[:16].replace("T", " ")
     when = f", probed {probed}" if probed else ""
-    return f"Shared by {team_name}{when}"
+    teams = sorted(set(shared.sources.values()))
+    if len(teams) <= 1:
+        return f"Shared by {team_name}{when}"
+    parts = [
+        f"{redact(team)} ({', '.join(sorted(m for m, t in shared.sources.items() if t == team))})"
+        for team in teams
+    ]
+    return f"Shared by {'; '.join(parts)}{when}"

@@ -150,12 +150,17 @@ class MemoryCloud:
         """A teammate with an enrolled keypair (their private key stays with the test)."""
         if role not in TEAM_ROLES:
             raise ValueError(f"role must be one of {TEAM_ROLES}")
+        # As the real service: a strictly decoded 32-byte key, fingerprinted
+        # over those bytes.
+        raw = base64.b64decode(public_key_b64, validate=True)
+        if len(raw) != X25519_KEY:
+            raise ValueError("public_key must be a 32-byte X25519 key")
         with self._lock:
             self._members.setdefault(team_slug, []).append(
                 {
                     "user_id": user_id,
                     "public_key_b64": public_key_b64,
-                    "fingerprint": hashlib.sha256(base64.b64decode(public_key_b64)).hexdigest(),
+                    "fingerprint": hashlib.sha256(raw).hexdigest(),
                     "role": role,
                 }
             )
@@ -436,6 +441,8 @@ def _key_problem(body: dict[str, Any]) -> Optional[str]:
     """Why an enrolled key is not a wrapped X25519 key, or None."""
     if not has_size(body["public_key"], X25519_KEY):
         return "public_key must be a 32-byte X25519 key"
+    if body.get("fingerprint") != hashlib.sha256(base64.b64decode(body["public_key"])).hexdigest():
+        return "fingerprint must be the SHA-256 of the public key"
     try:
         wrapped = json.loads(body["wrapped_private_key"])
     except ValueError:

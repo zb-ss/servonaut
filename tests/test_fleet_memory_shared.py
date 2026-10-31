@@ -39,6 +39,9 @@ SHARED_ROW: Dict[str, Any] = {
 TEAMS = [{"slug": "team-a", "name": "Team A"}, {"slug": "team-b", "name": "Team B"}]
 
 
+_NAMES = ["os", "services", "runtimes", "git", "logs"]
+
+
 def _shared(instance_id: str = "i-owner-1", modules: int = 3, name: str = "owner-web") -> SharedInstance:
     grant = Grant(
         id="g-1", instance_id=instance_id, required_role="member", modules=None,
@@ -49,7 +52,7 @@ def _shared(instance_id: str = "i-owner-1", modules: int = 3, name: str = "owner
         grant=grant,
         instance={"instance_id": instance_id, "display_name": name, "provider": "aws",
                   "last_probe_at": "2026-10-20T08:00:00+00:00"},
-        readable_modules=["os"] * modules,
+        readable_modules=_NAMES[:modules],
     )
 
 
@@ -230,3 +233,48 @@ async def test_a_warm_cache_refresh_still_turns_a_revoked_row_back(tmp_path):
         await pilot.pause(0.1)
         row = _cells(app)[0]
         assert "Shared" not in str(row[4]) and str(row[5]) == "—"
+
+
+async def test_the_fleet_count_is_the_union_of_modules_across_grants(tmp_path):
+    a = _shared(modules=1)                      # os
+    b = _shared(modules=2)                      # os + services
+    b = SharedInstance(grant=b.grant, instance=b.instance, readable_modules=["services"])
+    app, _ = _host(tmp_path, _Team({"team-a": [a], "team-b": [b]}), rows=[])
+    async with app.run_test(headless=True) as pilot:
+        await _wait_for(pilot, lambda: _table(app).row_count and str(_cells(app)[0][5]) == "2")
+        assert _table(app).row_count == 1
+
+
+async def _open_detail(app, pilot):
+    from servonaut.screens.memory import MemoryScreen
+
+    await _wait_for(pilot, lambda: app.screen._rows and app.screen._rows[0].get("grant_candidates"))
+    app.screen.action_open_selected()
+    await _wait_for(pilot, lambda: isinstance(app.screen, MemoryScreen))
+    return app.screen
+
+
+def _title(screen) -> str:
+    return str(screen.query_one("#memory-title", Static).render())
+
+
+@pytest.mark.parametrize("row", [
+    {"id": "i-owner-1", "name": "owner-web", "provider": "aws", "public_ip": "8.8.8.8"},
+    dict(SHARED_ROW),
+], ids=["own-row", "ssh-share-row"])
+async def test_the_open_memory_screen_follows_demo_mode_for_a_row_with_grants(tmp_path, row):
+    app, _ = _host(tmp_path, _Team({"team-a": [_shared()]}), rows=[dict(row)])
+    async with app.run_test(headless=True) as pilot:
+        detail = await _open_detail(app, pilot)
+        shown = app.instances[0]
+        assert detail._instance is shown, "the screen must hold the app's own record"
+        assert row["name"] in _title(detail)
+        # What the app does when demo mode is switched on: redact in place.
+        shown["name"] = "stand-in-name"
+        detail.refresh_after_demo_toggle()
+        await pilot.pause(0.1)
+        assert row["name"] not in _title(detail) and "stand-in-name" in _title(detail)
+        shown["name"] = row["name"]
+        detail.refresh_after_demo_toggle()
+        await pilot.pause(0.1)
+        assert row["name"] in _title(detail)

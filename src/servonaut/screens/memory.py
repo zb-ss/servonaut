@@ -32,6 +32,7 @@ from servonaut.screens._demo_resolve import connection_instance, real_fleet_rows
 from servonaut.services.shared_servers import own_twin
 from servonaut.services.memory.shared_view import (
     apply_display_names,
+    combine_shared,
     merge_shared,
     share_candidates,
     shared_source_text,
@@ -397,7 +398,7 @@ class MemoryScreen(Screen):
             return False
         return check_action_passthrough(self, action)
 
-    def __init__(self, instance: dict) -> None:
+    def __init__(self, instance: dict, grant_candidates: Any = None) -> None:
         """Initialise MemoryScreen.
 
         Args:
@@ -407,6 +408,9 @@ class MemoryScreen(Screen):
         # The row as displayed: demo-mode stand-ins when demo mode is on.
         # Everything that probes, reads or writes memory uses ``_target``.
         self._instance = instance
+        # Grants the fleet screen found for this server, kept apart from the
+        # record so the app can keep redacting that record in place.
+        self._grant_candidates = list(grant_candidates or [])
         self._has_local_memory = False
 
     @property
@@ -732,7 +736,7 @@ class MemoryScreen(Screen):
         candidates = list(share_candidates(self._target, real_fleet_rows(self.app)))
         # Grants the fleet screen found for this server (an own row, or a
         # memory-only row several teams share).
-        for extra in self._instance.get("grant_candidates") or []:
+        for extra in [*self._grant_candidates, *(self._instance.get("grant_candidates") or [])]:
             if all((c.team_slug, c.instance_id) != (extra.team_slug, extra.instance_id)
                    for c in candidates):
                 candidates.append(extra)
@@ -746,18 +750,18 @@ class MemoryScreen(Screen):
         )
 
     async def _load_shared(self, reader: Any, candidates: List[Any]) -> None:
+        found = []
         for candidate in candidates:
             try:
-                shared = await reader.read(
+                found.append(await reader.read(
                     candidate.team_slug, candidate.team_name, candidate.instance_id
-                )
+                ))
             except Exception as exc:  # noqa: BLE001 — a fallback must never break the screen
                 logger.warning("Could not read shared memory: %s", exc)
-                continue
-            if shared is not None:
-                self._shared = shared
-                self._render_table()
-                return
+        combined = combine_shared(found)
+        if combined is not None:
+            self._shared = combined
+            self._render_table()
 
     def _apply_read_only(self) -> None:
         """Turn off what needs a host when the server only has shared memory."""
@@ -774,11 +778,13 @@ class MemoryScreen(Screen):
         label = self.query_one("#memory-shared-source", Static)
         lines = []
         if shared is not None and in_use:
-            name = shared.team_name
             redaction = getattr(self.app, "redaction_service", None)
-            if getattr(self.app, "demo_mode", False) and redaction is not None:
-                name = redaction.redact_name(name)
-            lines.append(escape(shared_source_text(shared, name)))
+            redact = (
+                redaction.redact_name
+                if getattr(self.app, "demo_mode", False) and redaction is not None
+                else (lambda n: n)
+            )
+            lines.append(escape(shared_source_text(shared, redact(shared.team_name), redact)))
         if self._read_only:
             lines.append(
                 "Read-only: this server has no connection of its own, so it "

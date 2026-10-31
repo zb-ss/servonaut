@@ -2644,12 +2644,12 @@ class ServonautTools:
         try:
             rows = await self._shared_server_rows()
             candidates = share_candidates(target, rows) or share_candidates(requested, rows)
-            for candidate in candidates:
-                shared = await reader.read(
-                    candidate.team_slug, candidate.team_name, candidate.instance_id
-                )
-                if shared is not None:
-                    return shared
+            from servonaut.services.memory.shared_view import combine_shared
+
+            return combine_shared([
+                await reader.read(c.team_slug, c.team_name, c.instance_id)
+                for c in candidates
+            ])
         except Exception as exc:  # noqa: BLE001 — a fallback must never fail the tool
             logger.debug("Shared memory not read (%s)", type(exc).__name__)
         return None
