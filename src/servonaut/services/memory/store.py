@@ -168,33 +168,40 @@ def _validate_finding_id(finding_id: str) -> None:
         )
 
 
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write *data* as JSON to *path* atomically with mode 0o600.
+def _write_private_atomic(path: Path, text: str, *, as_json: bool = False) -> None:
+    """Write *text* (or JSON for it) to *path* atomically with mode 0o600.
 
-    Uses a sibling ``.tmp`` file + ``os.replace`` so readers never see a
-    partially written file.  The tmp file is removed on failure.
+    A fresh, uniquely named temp file is created exclusively and without
+    following links, then renamed over *path*, so a link planted at a guessable
+    temp name is never written through and readers never see a partial file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     fd = os.open(
         tmp_path,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
         0o600,
     )
     try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, indent=2)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if as_json:
+                json.dump(text, fh, indent=2)
+            else:
+                fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise
-    # Belt-and-suspenders: ensure mode is right even if umask stripped bits.
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, path)
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write *data* as JSON to *path* atomically with mode 0o600 (see :func:`_write_private_atomic`)."""
+    _write_private_atomic(path, data, as_json=True)
 
 
 # ---------------------------------------------------------------------------
@@ -848,21 +855,7 @@ class MemoryStore:
         _validate_instance_id(instance_id)
         final_path = self.get_annotations_path(instance_id, provider)
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = final_path.with_suffix(".md.tmp")
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-        except Exception:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, final_path)
+        _write_private_atomic(final_path, content)
         logger.debug(
             "Wrote annotations.md for %s at %s", instance_id, final_path
         )

@@ -199,3 +199,36 @@ class TestDraftsAndMarkers:
         (tmp_path / "root" / "team a" / ID / "team_merged.marker").write_text("[1]")
         with pytest.raises(MemoryCorruptError):
             store.read_merge_marker(ID, "team a")
+
+
+class TestFreshTempFiles:
+    """Writers create a fresh exclusive temp file; a planted link at the old fixed name is harmless."""
+
+    def _plant(self, tmp_path, name):
+        d = tmp_path / "root" / "aws" / ID
+        d.mkdir(parents=True, exist_ok=True)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("KEEP")
+        os.symlink(victim, d / name)
+        return victim
+
+    def test_annotations(self, tmp_path):
+        store = _store(tmp_path)
+        victim = self._plant(tmp_path, "annotations.md.tmp")
+        store.write_annotations(ID, "new", "aws")
+        assert victim.read_text() == "KEEP" and store.read_annotations(ID, "aws") == "new"
+
+    def test_modules_findings_and_the_marker(self, tmp_path):
+        store = _store(tmp_path)
+        victim = self._plant(tmp_path, "os.json.tmp")
+        store.save_module(ID, "os", {"module": "os"}, "aws")
+        assert victim.read_text() == "KEEP"
+        victim = self._plant(tmp_path, "team_merged.marker.tmp")
+        store.write_merge_marker(ID, "aws", {"target_id": "x"})
+        assert victim.read_text() == "KEEP" and store.read_merge_marker(ID, "aws")["target_id"] == "x"
+
+    def test_no_temp_file_is_left_behind(self, tmp_path):
+        store = _store(tmp_path)
+        store.write_annotations(ID, "new", "aws")
+        store.save_module(ID, "os", {"module": "os"}, "aws")
+        assert not list((tmp_path / "root" / "aws" / ID).glob("*.tmp"))
