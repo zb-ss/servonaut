@@ -19,11 +19,15 @@ own data is verified to be in the target, a small marker is written into the
 copy's folder; a later pass never merges that data again, so a note the user
 deleted since is never brought back. The marker also says whether the
 service's notes and findings for the share are still owed
-(``remote_pending``: Memory Sync was locked here, or a read was unavailable).
-A later pass with Memory Sync usable reads the service for the share, merges
-only that into the marker's target and clears the flag; uploads the target
-owes continue after that. With Memory Sync not set up nothing is owed. A
-marker from an earlier release has no flag and reads as false. Anything short
+(``remote_notes_pending`` / ``remote_findings_pending``: Memory Sync was
+locked here, or that read was unavailable; each part settles on its own).
+A later pass with Memory Sync usable reads the service for the share and
+merges only what it holds beyond the copy's own data (the service's copy is
+usually what this computer uploaded from it, so a note deleted since is not
+brought back), into the marker's target, and only while that is still the
+server's own record; uploads the target owes continue after that. With Memory Sync not set up nothing is owed. A
+marker from an earlier release has the single ``remote_pending`` flag, which
+owes both parts. Anything short
 of a verified local merge (an unreadable file, a failed write) leaves no
 marker, and the next pass repeats the idempotent steps. The same rules fold
 the entry a share left behind when it was removed and added again under a new
@@ -143,6 +147,25 @@ def is_contained_text(own: str, wanted: str) -> bool:
     haystack = [line.rstrip() for line in own.splitlines()]
     size = len(needle)
     return any(haystack[i:i + size] == needle for i in range(len(haystack) - size + 1))
+
+
+def text_beyond(remote: str, held: str) -> str:
+    """The lines of *remote* that *held* does not already have.
+
+    A line counts as held when the same line (ignoring trailing blanks) is
+    in *held*; blank lines separate what is left. Used so the service's copy
+    of a note the user already had, and may have deleted since, is not
+    merged again.
+    """
+    present = {line.rstrip() for line in held.splitlines() if line.strip()}
+    kept: List[str] = []
+    for line in remote.splitlines():
+        if line.strip() and line.rstrip() in present:
+            continue
+        if not line.strip() and (not kept or not kept[-1].strip()):
+            continue
+        kept.append(line.rstrip())
+    return "\n".join(kept).strip()
 
 
 def _effective_time(record: Mapping[str, Any]) -> str:
@@ -398,20 +421,24 @@ class TeamCopyMerger:
 
     def mark_merged(
         self, source: MemoryKey, target: MemoryKey, *, upload_pending: bool,
-        remote_pending: bool = False,
+        notes_pending: bool = False, findings_pending: bool = False,
     ) -> Dict[str, Any]:
         """Write the marker and return what it holds.
 
-        ``remote_pending`` says the service's notes and findings for the share
-        are still owed to the target (Memory Sync was locked, or a read was
-        unavailable).
+        ``notes_pending`` and ``findings_pending`` say the service's notes or
+        findings for the share are still owed to the target (Memory Sync was
+        locked, or that read was unavailable). They settle separately.
+        ``remote_pending`` (either owed) is kept for the readers of the
+        single flag that earlier releases wrote.
         """
         data = {
             "target_provider": target.provider,
             "target_id": target.instance_id,
             "merged_at": datetime.now(tz=timezone.utc).isoformat(),
             "upload_pending": upload_pending,
-            "remote_pending": remote_pending,
+            "remote_pending": notes_pending or findings_pending,
+            "remote_notes_pending": notes_pending,
+            "remote_findings_pending": findings_pending,
         }
         self._store.write_merge_marker(source.instance_id, source.provider, data)
         return data
@@ -549,6 +576,18 @@ def _queue_upload(sync_service: Any, memory_service: Any, plan: MergePlan) -> bo
     return stored
 
 
+def pending_parts(marker: Mapping[str, Any]) -> Tuple[bool, bool]:
+    """Which parts of the service's data a marker still owes: ``(notes, findings)``.
+
+    A marker from an earlier release has only the single ``remote_pending``
+    flag, which owes both.
+    """
+    if "remote_notes_pending" in marker or "remote_findings_pending" in marker:
+        return marker.get("remote_notes_pending") is True, marker.get("remote_findings_pending") is True
+    legacy = marker.get("remote_pending") is True
+    return legacy, legacy
+
+
 @dataclass
 class _Pass:
     """What one pass shares between its plans."""
@@ -561,6 +600,7 @@ class _Pass:
     report: TeamMergeReport
     absent: Set[str]
     remote: Dict[str, Tuple[Any, Any]] = field(default_factory=dict)
+    target_mismatch_logged: bool = False
 
     async def read_remote(self, share_id: str, name: str) -> Tuple[Any, Any]:
         """The service's notes and findings for a share id (read once per pass)."""
@@ -616,14 +656,16 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
     if marker is not None:
         await _continue_marked(plan, run, marker)
         return
-    remote_notes, remote_records, settled = "", [], run.state == SYNC_OFF
+    remote_notes, remote_records = "", []
+    notes_pending = findings_pending = run.state != SYNC_OFF
     if run.state == SYNC_READY:
         notes, findings = await run.read_remote(source_id, name)
         if notes.status == "found":
             remote_notes = notes.text
         if findings.status == "found":
             remote_records = findings.records
-        settled = notes.status != "unavailable" and findings.status != "unavailable"
+        notes_pending = notes.status == "unavailable"
+        findings_pending = findings.status == "unavailable"
     stats = merger.merge(
         plan.source, plan.target, source_label=plan.label, merged_on=run.merged_on,
         target_name=name, remote_notes=remote_notes, remote_records=remote_records,
@@ -640,10 +682,11 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
     # owed (``remote_pending``) until a pass can read and settle it.
     owes = plan.uploads and run.state != SYNC_OFF and (stats.held_notes or stats.held_findings)
     data = merger.mark_merged(
-        plan.source, plan.target, upload_pending=owes, remote_pending=not settled
+        plan.source, plan.target, upload_pending=owes,
+        notes_pending=notes_pending, findings_pending=findings_pending,
     )
     report.copies += 1
-    if settled:
+    if not (notes_pending or findings_pending):
         await _settle_uploads(plan, run, data)
     if source_id != plan.target.instance_id:
         store.remove_index_entry(source_id)
@@ -660,58 +703,94 @@ async def _settle_uploads(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -
 async def _continue_marked(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> None:
     """A marked copy is never merged locally again; only the service part and uploads continue.
 
-    Merged once means a note the user deleted since does not come back. A
-    marker from an earlier release has no ``remote_pending`` and reads false.
+    Merged once means a note the user deleted since does not come back. Both
+    continue only into the target the marker names, and only while that is
+    still the plan's target; otherwise the marker is left as it is (the data
+    stays in the copy and on the service) and the copy is counted as kept.
     """
-    if marker.get("remote_pending") is True:
+    if (marker.get("target_provider"), marker.get("target_id")) != (
+        plan.target.provider, plan.target.instance_id,
+    ):
+        if any(pending_parts(marker)) or marker.get("upload_pending"):
+            _note_other_target(plan, run)
+        return
+    if any(pending_parts(marker)):
         marker = await _complete_remote(plan, run, marker)
-    if marker.get("remote_pending") is True:
+    if any(pending_parts(marker)):
         return
     if marker.get("upload_pending"):
         await _retry_uploads(plan, run, marker)
 
 
-async def _complete_remote(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge what the service holds into the marker's target; clear the flag when stored.
+def _note_other_target(plan: MergePlan, run: _Pass) -> None:
+    run.report.kept.append(plan.source.instance_id)
+    if not run.target_mismatch_logged:
+        run.target_mismatch_logged = True
+        logger.info("A merged team copy's target is no longer its server's own record; left as it is")
 
-    Needs a usable Memory Sync. Only the service's text and records are
-    merged (source equals target); the copy's own data is not read again.
+
+def _beyond_copy(plan: MergePlan, run: _Pass, notes: Any, findings: Any) -> Tuple[str, List[Dict[str, Any]]]:
+    """What the service holds beyond the copy's own data (the copy is never modified)."""
+    store, source = run.memory_service._store, plan.source
+    text = ""
+    if notes is not None and notes.status == "found":
+        text = text_beyond(notes.text, store.read_annotations_strict(source.instance_id, source.provider))
+    records: List[Dict[str, Any]] = []
+    if findings is not None and findings.status == "found":
+        records = [
+            r for r in findings.records
+            if not finding_contained(r, store.get_finding(source.instance_id, r["id"], source.provider))
+        ]
+    return text, records
+
+
+async def _complete_remote(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge what the service holds beyond the copy into the target; clear what is stored.
+
+    Needs a usable Memory Sync. The service's copy of a share is usually what
+    this computer uploaded from the same local copy, so only text and records
+    the copy's own folder lacks are merged (a note the user deleted since is
+    not brought back). Notes and findings settle separately: a part that was
+    read is cleared from the marker while an unavailable one stays owed.
     Returns the marker as it stands afterwards.
     """
     if run.state != SYNC_READY:
         return marker
-    source_id, report = plan.source.instance_id, run.report
-    target = MemoryKey(str(marker.get("target_provider") or ""), str(marker.get("target_id") or ""))
-    store, name = run.memory_service._store, str(plan.target_row.get("name") or "")
-    if not target.provider or not target.instance_id or not store.is_addressable(
-        target.instance_id, target.provider
-    ):
-        logger.warning("Team copy %s: the target its marker names is not addressable", source_id)
-        return marker
+    source_id, report, target = plan.source.instance_id, run.report, plan.target
+    name = str(plan.target_row.get("name") or "")
     if run.memory_service.is_memory_disabled(target.instance_id, name):
         return marker
+    notes_owed, findings_owed = pending_parts(marker)
     notes, findings = await run.read_remote(source_id, name)
-    if notes.status == "unavailable" or findings.status == "unavailable":
+    notes_owed_now = notes_owed and notes.status != "unavailable"
+    findings_owed_now = findings_owed and findings.status != "unavailable"
+    if (notes_owed and not notes_owed_now) or (findings_owed and not findings_owed_now):
         report.kept.append(source_id)
+    if not (notes_owed_now or findings_owed_now):
         return marker
+    text, records = _beyond_copy(
+        plan, run, notes if notes_owed_now else None, findings if findings_owed_now else None
+    )
     stats = run.merger.merge(
         target, target, source_label=plan.label, merged_on=run.merged_on, target_name=name,
-        remote_notes=notes.text if notes.status == "found" else "",
-        remote_records=findings.records if findings.status == "found" else [],
+        remote_notes=text, remote_records=records,
     )
     report.notes += stats.notes
     report.findings += stats.findings
     if not stats.verified:
         report.kept.append(source_id)
         return marker
-    same_target = target == plan.target
     owes = bool(marker.get("upload_pending")) or (
-        plan.uploads and same_target and (stats.held_notes or stats.held_findings)
+        plan.uploads and (stats.held_notes or stats.held_findings)
     )
-    data = run.merger.mark_merged(plan.source, target, upload_pending=owes, remote_pending=False)
+    data = run.merger.mark_merged(
+        plan.source, target, upload_pending=owes,
+        notes_pending=notes_owed and not notes_owed_now,
+        findings_pending=findings_owed and not findings_owed_now,
+    )
     if stats.changed:
         report.copies += 1
-    if not owes and run.sync_service is not None and plan.uploads:
+    if not owes and not any(pending_parts(data)) and run.sync_service is not None and plan.uploads:
         run.sync_service.drop_pending_for({source_id})
     return data
 
