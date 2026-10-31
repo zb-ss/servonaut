@@ -2397,7 +2397,6 @@ class ServonautApp(App):
             f"A team member's memory key changed, so {label} is not shared with "
             "them yet. Confirm it in Fleet Memory: select the server, then S.",
             severity="warning",
-            timeout=10,
             markup=False,
         )
 

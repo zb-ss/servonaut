@@ -47,3 +47,9 @@ def test_in_demo_mode_the_server_is_a_stand_in():
 def test_an_unknown_server_is_still_announced_without_its_id():
     message = _toast(_app(), _pending("i-unknown"))
     assert "i-unknown" not in message and "a server" in message
+
+
+def test_the_toast_uses_the_default_lifetime():
+    app = _app()
+    _toast(app, _pending())
+    assert "timeout" not in app.notify.call_args.kwargs
