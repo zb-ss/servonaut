@@ -48,11 +48,13 @@ class SharedListing:
 
     Attributes:
         team_slug: Slug of the team sharing it.
+        team_name: Name of that team.
         module_count: How many modules the user can read.
         last_probe_at: When the server was last probed (``""`` if unknown).
     """
 
     team_slug: str
+    team_name: str
     module_count: int
     last_probe_at: str
     instance: Dict[str, Any] = field(default_factory=dict)
@@ -69,6 +71,9 @@ class SharedMemoryReader:
         team_service: The :class:`TeamMemoryService` to ask.
         ttl_provider: Returns how long, in seconds, an answer is reused.
         clock: Monotonic clock, replaceable in tests.
+        teams_provider: Async callable returning the user's teams
+            (``[{"slug", "name"}]``); lets :meth:`prefetch_all` find grants
+            the user's server list says nothing about.
     """
 
     def __init__(
@@ -76,7 +81,9 @@ class SharedMemoryReader:
         team_service: Any,
         ttl_provider: Callable[[], float],
         clock: Callable[[], float] = time.monotonic,
+        teams_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
+        self._teams_provider = teams_provider
         self._team_service = team_service
         self._ttl_provider = ttl_provider
         self._clock = clock
@@ -94,7 +101,25 @@ class SharedMemoryReader:
         """The last listing of *instance_id*, without asking the service."""
         return self._listings.get((team_slug, instance_id))
 
-    async def prefetch_listing(self, team_slug: str) -> None:
+    async def prefetch_all(self, extra_slugs: Any = ()) -> None:
+        """List what every team of the user shares (plus *extra_slugs*)."""
+        teams: Dict[str, str] = {}
+        if self._teams_provider is not None:
+            try:
+                for team in await self._teams_provider() or []:
+                    if isinstance(team, dict) and isinstance(team.get("slug"), str):
+                        teams[team["slug"]] = str(team.get("name") or team["slug"])
+            except Exception as exc:  # noqa: BLE001 — the team list is optional
+                logger.debug("Teams not listed for shared memory: %s", exc)
+        for slug in extra_slugs:
+            teams.setdefault(slug, slug)
+        for slug in sorted(teams):
+            try:
+                await self.prefetch_listing(slug, teams[slug])
+            except Exception as exc:  # noqa: BLE001 — one team must not hide the rest
+                logger.warning("Could not list what team %s shares: %s", slug, exc)
+
+    async def prefetch_listing(self, team_slug: str, team_name: str = "") -> None:
         """Ask the service what *team_slug* shares and keep the answer."""
         try:
             shared = await self._team_service.list_shared_instances(team_slug)
@@ -108,6 +133,7 @@ class SharedMemoryReader:
             instance_id = item.grant.instance_id or str(item.instance.get("instance_id") or "")
             fresh[(team_slug, instance_id)] = SharedListing(
                 team_slug=team_slug,
+                team_name=team_name or team_slug,
                 module_count=len(item.readable_modules),
                 last_probe_at=str(item.instance.get("last_probe_at") or ""),
                 instance=dict(item.instance),

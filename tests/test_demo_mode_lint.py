@@ -381,11 +381,15 @@ _ALLOWLIST: List[AllowlistEntry] = [
         "Updates consent disclosure from a closed provider-label map; "
         "no user or server content is interpolated.",
     ),
-    # fleet_memory.py — a shared server's cells hold a module count, an age and
-    # fixed labels; the team's name is never shown here.
-    AllowlistEntry("screens/fleet_memory.py", "_apply_shared_listings", "update",
-                   "Writes a module count, an age and fixed labels for a team's "
-                   "shared server; no server or team name is rendered."),
+    # fleet_memory.py — shared rows hold a module count, an age and fixed labels;
+    # a memory-only row's name, id and provider are redacted when it is built
+    # (_memory_only_row) and the redraw only writes those display values.
+    AllowlistEntry("screens/fleet_memory.py", "_sync_shared_rows", "update",
+                   "dict.update of row fields (count, age, fixed labels); not a widget write."),
+    AllowlistEntry("screens/fleet_memory.py", "_redraw_table", "update",
+                   "Summary counts only; no server or team name is rendered."),
+    AllowlistEntry("screens/fleet_memory.py", "_redraw_table", "add_row",
+                   "Writes the rows' display values, which are redacted when the row is built."),
     # chat_panel.py — banner, stats, quota, and consent modal UI labels.
     AllowlistEntry("widgets/chat_panel.py", "_update_memory_banner", "update",
                    "Updates memory injection status banner with a hard-coded "

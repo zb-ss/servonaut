@@ -146,3 +146,17 @@ async def test_a_server_no_team_shares_asks_nothing(tmp_path):
     async with app.run_test(headless=True) as pilot:
         await pilot.pause(0.3)
     reader.read.assert_not_awaited()
+
+
+async def test_shared_notes_and_findings_are_shown_read_only(tmp_path):
+    shared = SharedMemory("team-a", "Team A", {
+        "annotations": {"observed": {"note": "Restart workers after deploy."}, "declared": {},
+                        "content": "Restart workers after deploy.",
+                        "probed_at": "2026-10-20T08:00:00+00:00"},
+    })
+    app = _host(tmp_path, dict(SHARED_ROW), _reader(shared))
+    async with app.run_test(headless=True) as pilot:
+        rows = await _cells(app, pilot)
+        assert ["annotations", "note", "Restart workers after deploy."] == rows[0][:3]
+    # Nothing was written into the member's own editable record.
+    assert app.memory_service.get_all_modules("share-1", "shared") == {}

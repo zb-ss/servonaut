@@ -387,6 +387,8 @@ class FleetMemoryScreen(Screen):
         """Re-populate the fleet rows so names and ids follow the demo toggle."""
         self._launch_populate()
 
+    _SHARED_KEYS = ("source", "status", "modules", "age")
+
     def _shared_fields(self, row: Dict[str, Any]) -> Dict[str, Any]:
         """Row fields from a team's list, for a shared server with no local record.
 
@@ -421,7 +423,7 @@ class FleetMemoryScreen(Screen):
         return found[0] if found else None
 
     async def _prefetch_shared_listings(self) -> None:
-        """Ask once per team what it shares, then fill the shared rows in.
+        """Ask once per team what it shares, then bring the rows in line.
 
         Runs when the screen fills or refreshes, never on a redraw; the
         service call is reused for ``memory.team_memory_cache_seconds``.
@@ -432,36 +434,95 @@ class FleetMemoryScreen(Screen):
         slugs = {
             c.team_slug
             for row in self._rows
-            if (c := self._share_candidate(row.get("instance") or {})) is not None
+            if not row.get("memory_only")
+            and (c := self._share_candidate(row.get("instance") or {})) is not None
         }
-        for slug in sorted(slugs):
-            try:
-                await reader.prefetch_listing(slug)
-            except Exception as exc:  # noqa: BLE001 — the team's copy is optional
-                logger.warning("Could not list what team memory shares: %s", exc)
-        self._apply_shared_listings()
+        await reader.prefetch_all(extra_slugs=sorted(slugs))
+        self._sync_shared_rows()
 
-    def _apply_shared_listings(self) -> None:
-        """Update the shared rows (and their cells) from the reader's listings."""
+    def _sync_shared_rows(self) -> None:
+        """Make the rows match the reader's listings, revocations included.
+
+        Existing rows gain, update or lose their shared look; a grant with no
+        row of its own gets a read-only, memory-only row; there is one row
+        per server however many teams list it.
+        """
+        reader = getattr(self.app, "shared_memory_reader", None)
+        if reader is None:
+            return
+        listings = reader.cached_listings()
+        self._rows = [r for r in self._rows if not r.get("memory_only")]
+        seen: set = set()
+        for row in self._rows:
+            fields = self._shared_fields(row)
+            if fields:
+                row.setdefault("_before_share", {k: row.get(k) for k in self._SHARED_KEYS})
+                row.update(fields)
+            elif "_before_share" in row:
+                row.update(row.pop("_before_share"))
+            inst = row.get("instance") or {}
+            candidate = self._share_candidate(inst)
+            seen.update({str(row.get("raw_id") or ""), str(inst.get("instance_id") or "")})
+            if candidate is not None:
+                seen.add(candidate.instance_id)
+        for (_slug, instance_id), listing in sorted(listings.items()):
+            if instance_id and instance_id not in seen:
+                seen.add(instance_id)
+                self._rows.append(self._memory_only_row(listing))
+        self._redraw_table()
+
+    def _memory_only_row(self, listing: Any) -> Dict[str, Any]:
+        """A read-only row for a server a team shares that the user does not list."""
+        real_id = listing.instance_id
+        name = str(listing.instance.get("display_name") or real_id)
+        provider = str(listing.instance.get("provider") or "shared")
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            shown_id = redaction.redact_instance_id(real_id)
+            name = redaction.redact_name(name)
+            provider = redaction.redact_provider(provider)
+        else:
+            shown_id = real_id
+        instance = {
+            "id": shown_id, "name": name, "provider": provider, "is_shared": True,
+            "state": "shared", "memory_only": True,
+            # Kept for the lookups the Memory screen makes; never displayed.
+            "team_slug": listing.team_slug, "team_name": listing.team_name,
+            "instance_id": real_id,
+        }
+        return {
+            "instance": instance, "id": shown_id, "name": name, "provider": provider,
+            "raw_id": real_id, "raw_provider": "shared", "source": "team",
+            "status": STATUS_SHARED, "modules": listing.module_count, "drift_7d": 0,
+            "age": _human_age(listing.last_probe_at) if listing.last_probe_at else "—",
+            "reason": "—", "memory_only": True,
+        }
+
+    def _redraw_table(self) -> None:
+        """Draw ``self._rows`` again (cursor kept), without rebuilding them."""
         try:
             table = self.query_one("#fleet-memory-table", DataTable)
-        except Exception:  # noqa: BLE001 — screen left meanwhile
+            cursor = table.cursor_row
+            table.clear()
+            for row in self._rows:
+                table.add_row(
+                    escape(str(row["name"])),
+                    escape(str(row["id"])),
+                    escape(str(row["provider"])),
+                    _SOURCE_CELL.get(row.get("source", "local"), "[dim]local[/dim]"),
+                    _STATUS_CELL.get(row["status"], "—"),
+                    str(row["modules"]) if row["modules"] else "—",
+                    str(row["drift_7d"]) if row.get("drift_7d") else "—",
+                    row["age"],
+                    row["reason"],
+                )
+            if self._rows and cursor is not None:
+                table.move_cursor(row=min(cursor, len(self._rows) - 1))
+            self.query_one("#fleet-memory-status", Static).update(
+                self._summary_line_from_rows(self._rows)
+            )
+        except Exception:  # noqa: BLE001 — the screen was left meanwhile
             return
-        for index, row in enumerate(self._rows):
-            fields = self._shared_fields(row)
-            if not fields or row.get("status") == STATUS_SHARED:
-                continue
-            row.update(fields)
-            for column, value in (
-                (3, _SOURCE_CELL["team"]),
-                (4, _STATUS_CELL[STATUS_SHARED]),
-                (5, str(fields["modules"]) if fields["modules"] else "—"),
-                (7, fields["age"]),
-            ):
-                table.update_cell_at(Coordinate(index, column), value)
-        self.query_one("#fleet-memory-status", Static).update(
-            self._summary_line_from_rows(self._rows)
-        )
 
     def _launch_populate(self) -> None:
         """Launch async populate if fleet_service is available; else sync fallback."""
@@ -788,6 +849,9 @@ class FleetMemoryScreen(Screen):
         if not row:
             self.app.notify("Select a row first.", severity="warning")
             return
+        if row.get("memory_only"):
+            self.app.notify("This server is shared by a team and is read-only.", severity="warning")
+            return
         auth = getattr(self.app, "auth_service", None)
         if auth is None or not auth.has_feature("memory_team_share"):
             from servonaut.widgets.upsell_modal import UpsellModal
@@ -814,6 +878,9 @@ class FleetMemoryScreen(Screen):
         row = self._selected_row()
         if not row:
             self.app.notify("Select a row first.", severity="warning")
+            return
+        if row.get("memory_only"):
+            self.app.notify("This server is shared by a team and is read-only.", severity="warning")
             return
         memory_service = getattr(self.app, "memory_service", None)
         if memory_service is None:
