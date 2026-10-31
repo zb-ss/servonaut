@@ -351,6 +351,8 @@ Snapshots you take after sharing reach the team's members as well: after each up
 | `team_memory_future_skew_seconds` | `300` | How far in the future a shared snapshot's date may be before it counts as now, so a wrong clock cannot outrank your own newer snapshot. |
 | `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads without saying for how long. |
 | `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload; past it, the next sync tries again. |
+| `record_lock_timeout_seconds` | `5` | How long a change to a server's notes or findings waits for another Servonaut process (the app, the CLI, an MCP server) that is writing the same record; past it the change fails like any failed write and is kept for a retry. |
+| `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
 
 ---
 
