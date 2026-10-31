@@ -128,6 +128,44 @@ def _appdata() -> Path:
     return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
 
 
+def _opencode_config_path() -> Path:
+    if _get_os() == "windows":
+        return _appdata() / "opencode" / "opencode.json"
+    return Path.home() / ".config" / "opencode" / "opencode.json"
+
+
+def _vscode_config_path() -> Path:
+    os_type = _get_os()
+    if os_type == "darwin":
+        return (
+            Path.home() / "Library" / "Application Support" / "Code" / "User" / "mcp.json"
+        )
+    if os_type == "windows":
+        return _appdata() / "Code" / "User" / "mcp.json"
+    return Path.home() / ".config" / "Code" / "User" / "mcp.json"
+
+
+_CONFIG_PATHS: dict[str, Callable[[], Path]] = {
+    "claude": lambda: Path.home() / ".claude.json",
+    "opencode": _opencode_config_path,
+    "cursor": lambda: Path.home() / ".cursor" / "mcp.json",
+    "windsurf": lambda: Path.home() / ".codeium" / "windsurf" / "mcp_config.json",
+    "vscode": _vscode_config_path,
+    "codex": lambda: _codex_home() / "config.toml",
+    "agy": lambda: Path.home() / ".gemini" / "config" / "mcp_config.json",
+    "gemini": lambda: Path.home() / ".gemini" / "settings.json",
+}
+
+
+def client_config_path(client: str) -> Path:
+    """Return the user-level config file the installer writes for *client*.
+
+    Raises:
+        KeyError: *client* is not one of ``SUPPORTED_TARGETS``.
+    """
+    return _CONFIG_PATHS[client]()
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     """Load an agent config without risking replacement of invalid content."""
     if not path.exists():
@@ -311,7 +349,7 @@ def _report_installed(config_path: Path, command: str, args: list[str]) -> None:
 
 def _install_claude(command: str, args: list[str]) -> None:
     """Install into Claude Code (~/.claude.json)."""
-    config_path = Path.home() / ".claude.json"
+    config_path = client_config_path("claude")
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Claude config")
@@ -386,12 +424,7 @@ def _install_opencode(command: str, args: list[str]) -> None:
 
     See https://opencode.ai/docs/mcp-servers/
     """
-    os_type = _get_os()
-    if os_type == "windows":
-        config_path = _appdata() / "opencode" / "opencode.json"
-    else:
-        config_path = Path.home() / ".config" / "opencode" / "opencode.json"
-
+    config_path = client_config_path("opencode")
     config = _load_json(config_path)
     servers, layout = _opencode_server_map(config)
 
@@ -418,7 +451,7 @@ def _install_cursor(command: str, args: list[str]) -> None:
 
     See https://cursor.com/docs/mcp
     """
-    config_path = Path.home() / ".cursor" / "mcp.json"
+    config_path = client_config_path("cursor")
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Cursor config")
@@ -445,7 +478,7 @@ def _install_windsurf(command: str, args: list[str]) -> None:
 
     See https://docs.windsurf.com/windsurf/cascade/mcp
     """
-    config_path = Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+    config_path = client_config_path("windsurf")
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Windsurf config")
@@ -473,21 +506,7 @@ def _install_vscode(command: str, args: list[str]) -> None:
 
     See https://code.visualstudio.com/docs/copilot/chat/mcp-servers
     """
-    os_type = _get_os()
-    if os_type == "darwin":
-        config_path = (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Code"
-            / "User"
-            / "mcp.json"
-        )
-    elif os_type == "windows":
-        config_path = _appdata() / "Code" / "User" / "mcp.json"
-    else:
-        config_path = Path.home() / ".config" / "Code" / "User" / "mcp.json"
-
+    config_path = client_config_path("vscode")
     config = _load_json(config_path)
     servers = _mapping_at(config, "servers", context="VS Code config")
 
@@ -515,7 +534,7 @@ def _install_agy(command: str, args: list[str]) -> None:
     transport), so the JSON shape matches Claude Code and Cursor. The `agy`
     binary ships no `mcp` subcommand, so the file is written directly.
     """
-    config_path = Path.home() / ".gemini" / "config" / "mcp_config.json"
+    config_path = client_config_path("agy")
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Antigravity config")
@@ -559,7 +578,7 @@ def _enable_gemini_policy(config: dict[str, Any]) -> None:
 
 def _install_gemini(command: str, args: list[str]) -> None:
     """Install into Gemini CLI user settings (~/.gemini/settings.json)."""
-    config_path = Path.home() / ".gemini" / "settings.json"
+    config_path = client_config_path("gemini")
     config = _load_json(config_path)
 
     servers = _mapping_at(config, "mcpServers", context="Gemini config")
@@ -627,9 +646,17 @@ def _split_codex_block(text: str) -> tuple[list[str], list[str], list[str]]:
 
 
 def _preserved_codex_lines(block: list[str]) -> list[str]:
-    """Return the block's lines minus the header and the keys we manage.
+    """Return the block's lines minus the header and the keys we manage."""
+    kept = _codex_lines_without(block, _CODEX_MANAGED_KEYS)
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return kept
 
-    Multi-line values for a managed key are skipped in full by tracking
+
+def _codex_lines_without(block: list[str], keys: tuple[str, ...]) -> list[str]:
+    """Return the block's lines after its header, minus the assignments to *keys*.
+
+    Multi-line values for a removed key are skipped in full by tracking
     bracket depth, so a `args = [\\n  "--mcp",\\n]` form leaves no orphans.
     """
     kept: list[str] = []
@@ -643,15 +670,12 @@ def _preserved_codex_lines(block: list[str]) -> list[str]:
             continue
 
         key, sep, value = line.partition("=")
-        if sep and key.strip().strip('"') in _CODEX_MANAGED_KEYS:
+        if sep and key.strip().strip('"') in keys:
             depth = _toml_bracket_delta(value)
             skipping = depth > 0
             continue
 
         kept.append(line)
-
-    while kept and not kept[-1].strip():
-        kept.pop()
     return kept
 
 
@@ -760,7 +784,7 @@ def _install_codex(command: str, args: list[str]) -> None:
 
     See https://github.com/openai/codex/blob/main/docs/config.md
     """
-    config_path = _codex_home() / "config.toml"
+    config_path = client_config_path("codex")
 
     text = config_path.read_text() if config_path.exists() else ""
     before, block, after = _split_codex_block(text)
