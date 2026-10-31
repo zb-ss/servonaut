@@ -1356,6 +1356,10 @@ class MemoryService(MemoryServiceInterface):
         """
         self._connection_rows = supplier
 
+    async def connection_rows(self) -> tuple[list, Optional[list]]:
+        """``(team_rows, fleet_rows)`` from the supplier; no rows when none is set."""
+        return await self._load_connection_rows()
+
     async def _load_connection_rows(self) -> tuple[list, Optional[list]]:
         from servonaut.services.ssh_credentials import load_connection_rows  # noqa: PLC0415
 
