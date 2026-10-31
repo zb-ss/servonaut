@@ -1007,8 +1007,60 @@ def _stored(tmp_path: Path, signed_at: datetime = SIGNED_AT, signer: tuple[Any, 
     return bucket, _fetcher(_github_sums(directory, plan)), manifest
 
 
-def _refresh(bucket: FakeBucket, now: datetime, fetcher: Any, key: str = PREVIEW_JSON, channel: str = "preview") -> str:
-    return mirror.refresh_manifest(bucket, "b", key, channel, SIGNER, now, (14, 7), REPO, fetcher, POLICY_FOR)
+def _refresh(
+    bucket: FakeBucket, now: datetime, fetcher: Any, key: str = PREVIEW_JSON, channel: str = "preview",
+    newest: str | None = "v1.2.3",
+) -> str:
+    return mirror.refresh_manifest(bucket, "b", key, channel, SIGNER, now, (14, 7), REPO, fetcher, POLICY_FOR, newest=newest)
+
+
+def _github_release(
+    tag: str, desktop: bool = True, *, prerelease: bool | None = None, draft: bool = False,
+    published_at: str = "2026-01-02T03:04:05Z", macos_only: bool = False,
+) -> dict[str, Any]:
+    """A release as GitHub's REST API lists it, with the assets that matter here."""
+    version = tag[1:]
+    names = ["install.sh", "install.ps1", "install-scripts_SHA256SUMS"]
+    if desktop:
+        linux, macos = mirror.desktop_checksums_names(version)
+        names += [macos] if macos_only else [linux, macos]
+    return {
+        "tag_name": tag,
+        "draft": draft,
+        "prerelease": "rc" in tag if prerelease is None else prerelease,
+        "published_at": None if draft else published_at,
+        "assets": [{"name": name} for name in names],
+    }
+
+
+def test_github_says_which_release_each_update_manifest_must_name() -> None:
+    releases = [
+        _github_release("v1.4.0", draft=True),
+        # Not a release tag of this project.
+        {**_github_release("v1.5.0"), "tag_name": "v1.5.0-preview.1"},
+        _github_release("v1.3.0rc3", desktop=False),
+        _github_release("v1.3.0rc2"),
+        # A final version marked as a pre-release is never a stable release.
+        _github_release("v1.2.9", prerelease=True),
+        _github_release("v1.2.4", desktop=False),
+        _github_release("v1.2.3", macos_only=True),
+        _github_release("v1.2.2"),
+    ]
+
+    assert mirror.newest_desktop_release(releases, "stable") == ("v1.2.3", "2026-01-02T03:04:05Z")
+    assert mirror.newest_desktop_release(releases, "preview") == ("v1.3.0rc2", "2026-01-02T03:04:05Z")
+    # channels/pre.json follows every release, with desktop files or not.
+    assert mirror.newest_release(releases) == ("v1.3.0rc3", "2026-01-02T03:04:05Z")
+    assert mirror.newest_desktop_release([_github_release("v1.3.0rc1")], "stable") is None
+    assert mirror.newest_release([]) is None
+
+
+@pytest.mark.parametrize("text", ['{"tag_name": "v1.2.3"}', '["v1.2.3"]', "not json"])
+def test_a_release_list_that_is_not_githubs_is_refused(tmp_path: Path, text: str) -> None:
+    (tmp_path / "releases.json").write_text(text)
+
+    with pytest.raises(mirror.MirrorError, match="GitHub's release list"):
+        mirror.github_releases(str(tmp_path / "releases.json"))
 
 
 def test_a_manifest_with_enough_time_left_is_not_re_signed(tmp_path: Path) -> None:
@@ -1049,6 +1101,34 @@ def test_a_manifest_whose_files_github_no_longer_lists_is_not_renewed(tmp_path: 
     with pytest.raises(mirror.MirrorError, match="GitHub's SHA256SUMS do not list its digest, so it is not re-signed"):
         _refresh(bucket, SIGNED_AT + timedelta(days=8), _fetcher({}))
     assert bucket.objects[PREVIEW_JSON]["data"] == before
+
+
+@pytest.mark.parametrize("key,channel,kind", [
+    (PREVIEW_JSON, "preview", "release or candidate"),
+    (STABLE_JSON, "stable", "stable release"),
+])
+def test_an_older_signed_manifest_put_back_is_never_renewed(tmp_path: Path, key: str, channel: str, kind: str) -> None:
+    """Its expiry is what stops it holding apps back, so the refresh must not lift it."""
+    bucket, github, _ = _stored(tmp_path, key=key)
+    before = bucket.objects[key]["data"]
+
+    with pytest.raises(mirror.MirrorError) as refused:
+        _refresh(bucket, SIGNED_AT + timedelta(days=40), github, key, channel, newest="v1.2.4")
+
+    assert str(refused.value) == (
+        f"it names v1.2.3, but GitHub's newest {kind} with desktop files is v1.2.4, so it is not re-signed; "
+        "mirror v1.2.4 to replace it"
+    )
+    assert bucket.objects[key]["data"] == before
+    # One that is not due is left as it is; the audit reports it.
+    assert _refresh(bucket, SIGNED_AT + timedelta(days=1), github, key, channel, newest="v1.2.4").endswith("not due")
+
+
+def test_without_a_github_release_with_desktop_files_nothing_is_renewed(tmp_path: Path) -> None:
+    bucket, github, _ = _stored(tmp_path)
+
+    with pytest.raises(mirror.MirrorError, match="GitHub lists no release or candidate with desktop files"):
+        _refresh(bucket, SIGNED_AT + timedelta(days=8), github, newest=None)
 
 
 def test_a_manifest_no_pinned_key_signed_is_not_renewed(tmp_path: Path) -> None:
@@ -1345,9 +1425,12 @@ def _with_manifests(
     return served, plan
 
 
-def _audit(served: dict[str, tuple[int, str, bytes]], latest: str = "v1.2.3") -> list[str]:
+def _audit(
+    served: dict[str, tuple[int, str, bytes]], latest: str = "v1.2.3", releases: list[dict[str, Any]] | None = None
+) -> list[str]:
     return mirror.audit(
-        BASE, REPO, latest, "2026-01-02T03:04:05Z", NOW, _fetcher(served), manifests=True, policy_for=POLICY_FOR
+        BASE, REPO, latest, "2026-01-02T03:04:05Z", NOW, _fetcher(served), manifests=True, policy_for=POLICY_FOR,
+        releases=releases,
     )
 
 
@@ -1477,6 +1560,44 @@ def test_a_release_without_desktop_files_leaves_the_last_manifest_in_place(tmp_p
     served[f"{BASE}/{PREVIEW_JSON}"] = manifests["v1.2.5"]
     assert _audit(served, latest="v1.2.4") == [
         "manifest/preview.json: names v1.2.5, which is newer than v1.2.4 in channels/pre.json"
+    ]
+
+
+def test_pre_json_behind_githubs_newest_release_fails_only_after_the_grace_period(tmp_path: Path) -> None:
+    served, _ = _published(tmp_path)
+    late = [_github_release("v1.2.4rc1", published_at="2026-01-02T03:04:05Z"), _github_release("v1.2.3")]
+    fresh = [_github_release("v1.2.4rc1", published_at="2026-01-02T23:00:00Z"), _github_release("v1.2.3")]
+
+    def audit(releases: list[dict[str, Any]]) -> list[str]:
+        return mirror.audit(BASE, REPO, "v1.2.3", "2026-01-02T03:04:05Z", NOW, _fetcher(served), releases=releases)
+
+    assert audit(fresh) == []
+    assert audit(late) == ["channels/pre.json: names v1.2.3, but GitHub's newest release is v1.2.4rc1"]
+    assert audit([_github_release("v1.2.3")]) == []
+
+
+def test_an_older_signed_manifest_put_back_fails_the_audit(tmp_path: Path) -> None:
+    """With no desktop files in the newest release, only GitHub tells an older manifest apart."""
+    directory, plan = _plan(_subdir(tmp_path, "scripts"), "v1.2.5")
+    plan["assets"] = [raw for raw in plan["assets"] if not raw["name"].startswith("servonaut-desktop-preview")]
+    channel = mirror.manifest_for(plan, BASE, REPO, "")
+    served = _served(directory, plan)
+    served.update(_github_sums(directory, plan))
+    for key in ("latest.json", "channels/pre.json"):
+        served[f"{BASE}/{key}"] = (200, "application/json", json.dumps(channel).encode())
+    desktop_dir, desktop_plan, manifest = _update_manifest(tmp_path, "v1.2.3", signed_at=NOW)
+    served.update(_github_sums(desktop_dir, desktop_plan))
+    served[f"{BASE}/{STABLE_JSON}"] = served[f"{BASE}/{PREVIEW_JSON}"] = (200, "application/json", _body(manifest))
+    releases = [
+        _github_release("v1.2.5", desktop=False),
+        _github_release("v1.2.4rc1"),
+        _github_release("v1.2.3"),
+    ]
+
+    # Without GitHub's releases the older manifest passes; with them it does not.
+    assert _audit(served, latest="v1.2.5") == []
+    assert _audit(served, latest="v1.2.5", releases=releases) == [
+        "manifest/preview.json: names v1.2.3, but GitHub's newest release or candidate with desktop files is v1.2.4rc1"
     ]
 
 
@@ -1677,7 +1798,7 @@ def test_the_refresh_tells_the_audit_whether_manifests_are_signed(
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
     monkeypatch.setattr(mirror, "bucket_client", _no_bucket)
 
-    assert mirror.main(["refresh", "--repo", REPO]) == 0
+    assert mirror.main(["refresh", "--repo", REPO, "--github-releases", str(tmp_path / "unread.json")]) == 0
 
     assert (tmp_path / "output").read_text() == "signing=false\n"
     assert "::notice::" in capsys.readouterr().out
@@ -1694,8 +1815,9 @@ def test_the_refresh_command_renews_each_manifest_and_reports_the_one_it_cannot(
     bucket.objects[STABLE_JSON] = {"data": _body(forged), "etag": '"s"', "type": "application/json", "cache": "c", "meta": {}}
     monkeypatch.setattr(mirror, "bucket_client", lambda: (bucket, "b"))
     monkeypatch.setattr(mirror, "fetch", github)
+    (tmp_path / "releases.json").write_text(json.dumps([_github_release("v1.2.3")]))
 
-    code = mirror.main(["refresh", "--repo", REPO])
+    code = mirror.main(["refresh", "--repo", REPO, "--github-releases", str(tmp_path / "releases.json")])
 
     output = capsys.readouterr()
     assert code == 1
@@ -1716,6 +1838,19 @@ def test_a_failed_refresh_fails_the_audit(tmp_path: Path, monkeypatch: pytest.Mo
     assert mirror.main([*args, "--refresh-result", "success"]) == 0
     assert mirror.main([*args, "--refresh-result", "failure"]) == 1
     assert "the update manifest refresh ended with failure" in (tmp_path / "audit.md").read_text()
+
+
+def test_the_audit_command_compares_pre_json_with_githubs_releases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    served, _ = _published(tmp_path)
+    monkeypatch.setattr(mirror, "fetch", _fetcher(served))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    (tmp_path / "releases.json").write_text(json.dumps([_github_release("v1.2.4rc1"), _github_release("v1.2.3")]))
+    args = ["audit", "--base", BASE, "--repo", REPO, "--github-latest-tag", "v1.2.3",
+            "--github-latest-published-at", "2026-01-02T03:04:05Z", "--report", str(tmp_path / "audit.md")]
+
+    assert mirror.main(args) == 0
+    assert mirror.main([*args, "--github-releases", str(tmp_path / "releases.json")]) == 1
+    assert "GitHub's newest release is v1.2.4rc1" in (tmp_path / "audit.md").read_text()
 
 
 def test_the_audit_command_checks_the_manifests_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1986,6 +2121,24 @@ def test_the_audit_runs_daily_only_while_the_mirror_is_on(workflow: str) -> None
     assert "vars.RELEASE_MIRROR == 'on'" in audit
     assert "(github.event_name == 'schedule' || inputs.audit == true)" in audit
     assert "if: failure() && steps.audit.outcome == 'failure'" in audit
+
+
+def test_the_refresh_and_the_audit_learn_the_newest_releases_from_github(workflow: str) -> None:
+    refresh = _job(workflow, "refresh")
+    listing = _step(refresh, "List GitHub's releases")
+    assert "          GH_TOKEN: ${{ github.token }}\n" in listing
+    assert "secrets." not in listing
+    releases = 'gh api "repos/${GH_REPO}/releases?per_page=100" > "${RUNNER_TEMP}/releases.json"'
+    assert releases in _script(refresh, "List GitHub's releases")
+    assert refresh.index("- name: List GitHub's releases") < refresh.index(
+        "- name: Re-sign the update manifests before they expire"
+    )
+    assert '--github-releases "${RUNNER_TEMP}/releases.json"' in _script(
+        workflow, "Re-sign the update manifests before they expire"
+    )
+    audit = _script(workflow, "Compare the mirror with GitHub")
+    assert releases in audit
+    assert '--github-releases "${RUNNER_TEMP}/releases.json"' in audit
 
 
 def test_the_manifests_are_re_signed_daily_before_the_audit(workflow: str) -> None:

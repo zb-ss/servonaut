@@ -23,9 +23,12 @@ Subcommands, in the order the workflow runs them:
                 newer release a pinned key signed
   notes         add or refresh the mirror links in the release notes
   refresh       re-sign the update manifests with a fresh expiry before they
-                expire, while GitHub still lists every file they name
+                expire, while each still names GitHub's newest release with
+                desktop files on its channel and GitHub still lists every
+                file it names
   audit         re-check the channel files, every file they list and the
-                update manifests against GitHub
+                update manifests against GitHub, including which release
+                each should name
 
 The bucket is reached with the standard AWS_ACCESS_KEY_ID and
 AWS_SECRET_ACCESS_KEY variables plus MIRROR_ENDPOINT and MIRROR_BUCKET; the
@@ -778,6 +781,65 @@ def github_desktop_digests(repo: str, tag: str, fetcher: Fetcher | None = None) 
     return listed
 
 
+def github_releases(path: str) -> list[dict[str, Any]]:
+    """GitHub's releases as its REST API lists them, from a file the workflow wrote."""
+    try:
+        releases = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise MirrorError(f"GitHub's release list could not be read ({type(error).__name__})") from None
+    if not isinstance(releases, list) or not all(isinstance(release, dict) for release in releases):
+        raise MirrorError("GitHub's release list is not a list of releases")
+    return releases
+
+
+def published_releases(releases: Iterable[dict[str, Any]]) -> list[tuple[Version, dict[str, Any]]]:
+    """The published releases and candidates among GitHub's releases, each with its version."""
+    found = []
+    for release in releases:
+        tag = release.get("tag_name")
+        if release.get("draft") or not isinstance(tag, str) or not TAG_PATTERN.match(tag):
+            continue
+        found.append((parse_tag(tag), release))
+    return found
+
+
+def newest_release(releases: Iterable[dict[str, Any]]) -> tuple[str, str] | None:
+    """GitHub's newest release, candidates included, and when it was published.
+
+    channels/pre.json names it once it is mirrored.
+    """
+    published = published_releases(releases)
+    if not published:
+        return None
+    _, release = max(published, key=lambda entry: entry[0])
+    return release["tag_name"], str(release.get("published_at") or "")
+
+
+# What each build channel's update manifest names, as error messages spell it.
+MANIFEST_RELEASES = {"stable": "stable release", "preview": "release or candidate"}
+
+
+def newest_desktop_release(releases: Iterable[dict[str, Any]], build_channel: str) -> tuple[str, str] | None:
+    """The newest release a build channel's update manifest must name, and when it was published.
+
+    It is the newest one GitHub carries desktop SHA256SUMS for: a stable
+    release for stable.json, a release or candidate for preview.json. A
+    release without desktop files leaves the manifest at the one before.
+    """
+    newest: tuple[Version, dict[str, Any]] | None = None
+    for version, release in published_releases(releases):
+        if build_channel == "stable" and (release.get("prerelease") or not version.final):
+            continue
+        names = {asset.get("name") for asset in release.get("assets") or [] if isinstance(asset, dict)}
+        if not names & set(desktop_checksums_names(release["tag_name"][1:])):
+            continue
+        if newest is None or version > newest[0]:
+            newest = (version, release)
+    if newest is None:
+        return None
+    return newest[1]["tag_name"], str(newest[1].get("published_at") or "")
+
+
 def unlisted_artifacts(manifest: Any, listed: dict[str, str]) -> list[str]:
     """The files of a manifest whose digest GitHub's SHA256SUMS do not list."""
     return [
@@ -816,11 +878,16 @@ def refresh_manifest(
     repo: str,
     fetcher: Fetcher | None = None,
     policy_for: PolicyFor | None = None,
+    *,
+    newest: str | None,
 ) -> str:
     """Re-sign an update manifest with a fresh expiry once fewer than the refresh days remain.
 
     Only a manifest a pinned key signed is renewed, with its release and
-    files unchanged, and only while GitHub's SHA256SUMS still list them.
+    files unchanged, only while it names newest, the release GitHub says it
+    must name (newest_desktop_release), and only while GitHub's SHA256SUMS
+    still list its files. Its expiry is what stops an old signed manifest put
+    back in the bucket from holding apps back, so one is never renewed.
     """
     from servonaut.distribution.manifest import parse_timestamp
 
@@ -833,6 +900,14 @@ def refresh_manifest(
         if manifest.expires_at and parse_timestamp(manifest.expires_at) - now >= timedelta(days=refresh_days):
             return f"valid until {manifest.expires_at}, not due"
         tag = manifest_tag(manifest.product_version)
+        kind = MANIFEST_RELEASES[build_channel]
+        if newest is None:
+            raise MirrorError(f"GitHub lists no {kind} with desktop files, so it is not re-signed")
+        if parse_tag(tag) < parse_tag(newest):
+            raise MirrorError(
+                f"it names {tag}, but GitHub's newest {kind} with desktop files is {newest}, so it is not "
+                f"re-signed; mirror {newest} to replace it"
+            )
         unlisted = unlisted_artifacts(manifest, github_desktop_digests(repo, tag, fetcher))
         if unlisted:
             raise MirrorError(f"{unlisted[0]}, so it is not re-signed")
@@ -1059,6 +1134,15 @@ def release_mismatch(manifest: Any, tag: str, channel: dict[str, Any], channel_k
     return []
 
 
+def settled(published_at: str, now: datetime, grace: timedelta) -> bool:
+    """Whether a release was published more than grace ago, so the mirror should carry it by now."""
+    try:
+        published = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return now - published > grace
+
+
 def update_manifest_problems(
     base: str,
     repo: str,
@@ -1069,11 +1153,15 @@ def update_manifest_problems(
     refresh_days: int,
     fetcher: Fetcher,
     policy_for: PolicyFor | None = None,
+    newest: tuple[str, str] | None = None,
+    grace: timedelta = timedelta(hours=6),
 ) -> list[str]:
     """Where a published update manifest breaks what the app and GitHub expect.
 
     channel is the channel file it follows and that file's manifest, or
-    None when the file itself failed the audit.
+    None when the file itself failed the audit; newest is the release GitHub
+    says it must name and when that was published (newest_desktop_release),
+    or None when not known.
     """
     from servonaut.distribution import ManifestError, ReleaseManifest, verify_manifest
     from servonaut.distribution.manifest import parse_timestamp
@@ -1094,6 +1182,12 @@ def update_manifest_problems(
     except MirrorError as error:
         return [str(error)]
     problems = []
+    # An older signed manifest put back in the bucket verifies, so only
+    # GitHub can tell that it holds apps back.
+    if newest and parse_tag(tag) < parse_tag(newest[0]) and settled(newest[1], now, grace):
+        problems.append(
+            f"names {tag}, but GitHub's newest {MANIFEST_RELEASES[build_channel]} with desktop files is {newest[0]}"
+        )
     # The refresh re-signs a manifest once fewer than refresh_days remain; a
     # day of slack keeps the audit from racing it.
     if manifest.expires_at and parse_timestamp(manifest.expires_at) - now < timedelta(days=refresh_days - 1):
@@ -1119,10 +1213,16 @@ def audit(
     manifests: bool = False,
     refresh_days: int = DEFAULT_REFRESH_DAYS,
     policy_for: PolicyFor | None = None,
+    releases: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    """Every way the published channel files, and the update manifests when signed, disagree with GitHub."""
+    """Every way the published channel files, and the update manifests when signed, disagree with GitHub.
+
+    With GitHub's releases, channels/pre.json must also name the newest
+    release, and each update manifest the newest one with desktop files.
+    """
     problems: list[str] = []
     channels: dict[str, dict[str, Any] | None] = {}
+    newest = newest_release(releases) if releases is not None else None
     for key in (LATEST_KEY, PRE_KEY):
         url = f"{base.rstrip('/')}/{key}"
         channels[key] = None
@@ -1140,13 +1240,17 @@ def audit(
         if not found:
             channels[key] = manifest
         if key == LATEST_KEY and not found and github_latest_tag and manifest.get("tag") != github_latest_tag:
-            published = datetime.fromisoformat(github_latest_published_at.replace("Z", "+00:00"))
-            if now - published > grace:
+            if settled(github_latest_published_at, now, grace):
                 problems.append(f"{key}: names {manifest.get('tag')}, but GitHub's latest release is {github_latest_tag}")
+        if key == PRE_KEY and not found and newest and manifest.get("tag") != newest[0]:
+            if settled(newest[1], now, grace):
+                problems.append(f"{key}: names {manifest.get('tag')}, but GitHub's newest release is {newest[0]}")
     if manifests:
         for channel_key, (key, build_channel) in UPDATE_MANIFESTS.items():
+            expected = newest_desktop_release(releases, build_channel) if releases is not None else None
             found = update_manifest_problems(
-                base, repo, key, build_channel, (channel_key, channels[channel_key]), now, refresh_days, fetcher, policy_for
+                base, repo, key, build_channel, (channel_key, channels[channel_key]), now, refresh_days, fetcher,
+                policy_for, newest=expected, grace=grace,
             )
             problems += [f"{key}: {problem}" for problem in found]
     return problems
@@ -1290,13 +1394,19 @@ def command_refresh(args: argparse.Namespace) -> None:
         return
     days = manifest_days(args.validity_days, args.refresh_days)
     prefix = check_prefix(args.prefix)
+    # Which release each manifest must name comes from GitHub, never the bucket.
+    releases = github_releases(args.github_releases)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     client, bucket = bucket_client()
     lines, failures = [title, ""], []
     for manifest_key, build_channel in UPDATE_MANIFESTS.values():
         key = prefix + manifest_key
+        newest = newest_desktop_release(releases, build_channel)
         try:
-            outcome = refresh_manifest(client, bucket, key, build_channel, signer, now, days, args.repo, fetch)
+            outcome = refresh_manifest(
+                client, bucket, key, build_channel, signer, now, days, args.repo, fetch,
+                newest=newest[0] if newest else None,
+            )
         except MirrorError as error:
             failures.append(f"{key}: {error}")
             outcome = f"failed: {error}"
@@ -1328,6 +1438,7 @@ def command_audit(args: argparse.Namespace) -> None:
         fetch,
         manifests=args.manifests,
         refresh_days=refresh_days,
+        releases=github_releases(args.github_releases) if args.github_releases else None,
     )
     if args.refresh_result and args.refresh_result != "success":
         problems.append(f"the update manifest refresh ended with {args.refresh_result}, see its log")
@@ -1368,6 +1479,8 @@ def parser() -> argparse.ArgumentParser:
     refresh_cmd = commands.add_parser("refresh")
     refresh_cmd.add_argument("--repo", required=True)
     refresh_cmd.add_argument("--prefix", default="")
+    # GitHub's releases, as GET /repos/{repo}/releases lists them.
+    refresh_cmd.add_argument("--github-releases", required=True)
     # Empty values, from unset repository variables, mean the defaults.
     for sub in (manifests_cmd, refresh_cmd):
         sub.add_argument("--validity-days", default="")
@@ -1381,6 +1494,7 @@ def parser() -> argparse.ArgumentParser:
     audit_cmd.add_argument("--repo", required=True)
     audit_cmd.add_argument("--github-latest-tag", required=True)
     audit_cmd.add_argument("--github-latest-published-at", required=True)
+    audit_cmd.add_argument("--github-releases", default="")
     audit_cmd.add_argument("--report", default="")
     audit_cmd.add_argument("--manifests", action="store_true")
     audit_cmd.add_argument("--refresh-days", default="")

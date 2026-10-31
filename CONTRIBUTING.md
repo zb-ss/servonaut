@@ -214,11 +214,18 @@ disk images gets a manifest without them, so Macs are offered nothing for it.
 
 Every day a `refresh` job re-signs the manifests with a fresh expiry once
 fewer than `RELEASE_MANIFEST_REFRESH_DAYS` days (a repository variable;
-default 7) are left, as long as GitHub's `SHA256SUMS` still list every file
-they name. An audit then downloads both channel files, every file they list
-and both update manifests, compares them with GitHub, checks the manifests'
-signatures and expiry, and opens a "Release mirror audit failed" issue (or
-comments on the open one) when anything disagrees.
+default 7) are left, as long as each still names GitHub's newest release with
+desktop files on its channel (the newest stable release for `stable.json`,
+the newest release or candidate for `preview.json`) and GitHub's `SHA256SUMS`
+still list every file it names. Which release that is comes from GitHub, never
+from the mirror, so an older signed manifest put back in the bucket expires
+instead of being renewed; mirroring the newest release replaces it. An audit
+then downloads both channel files, every file they list and both update
+manifests, compares them with GitHub, including whether `channels/pre.json`
+names GitHub's newest release and each manifest the newest one with desktop
+files, checks the manifests' signatures and expiry, and opens a "Release
+mirror audit failed" issue (or comments on the open one) when anything
+disagrees.
 
 The repository variable `RELEASE_MIRROR` switches the mirror. While it is
 `off`, or unset, runs end with a notice and upload nothing, and the audit does
