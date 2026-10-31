@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 
-import nacl.public
 import pytest
 
 from servonaut.services.memory import crypto
@@ -17,7 +16,7 @@ from servonaut.services.memory.team_wraps import (
     split_by_trust,
 )
 
-KEY = bytes(nacl.public.PrivateKey.generate().public_key)
+KEY = bytes(range(1, 33))  # fixed: parametrize ids must match across xdist workers
 KEY_B64 = base64.b64encode(KEY).decode()
 FP = crypto.fingerprint(KEY)
 OTHER_FP = "b" * 64

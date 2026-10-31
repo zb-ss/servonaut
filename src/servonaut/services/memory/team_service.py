@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -55,6 +56,14 @@ from servonaut.services.memory.interfaces import (
 )
 from servonaut.services.memory.path_segments import check_segment
 from servonaut.services.memory.retrieval_service import _validate_instance_id
+from servonaut.services.memory.team_wraps import (
+    GrantCoverage,
+    KeyChange,
+    KeyTrust,
+    classify_key,
+    parse_grant_coverage,
+    split_recipients,
+)
 
 if TYPE_CHECKING:
     from servonaut.services.api_client import APIClient
@@ -86,21 +95,52 @@ class GrantAlreadyExistsError(MemoryBackendError):
         )
 
 
-class KeyChangedError(MemoryBackendError):
-    """Raised when a share would seal for a member whose key changed.
+def display_name(name: str, user_id: int) -> str:
+    """The member as people are told about them."""
+    return name or f"member {user_id}"
 
-    A changed key needs the owner's confirmation, which no screen offers yet,
-    so nothing is revoked, sealed or sent.
+
+class KeyChangedError(MemoryBackendError):
+    """Raised when a share would seal for a member whose key needs confirming.
+
+    Nothing is revoked, sealed or sent. :meth:`TeamMemoryService.confirm_member_keys`
+    records the user's confirmation, after which the same call goes through.
 
     Attributes:
-        names: Display names of the members whose key changed.
+        changes: One :class:`KeyChange` per member to confirm.
+        names: Display names of those members.
+    """
+
+    def __init__(self, changes: List[KeyChange]) -> None:
+        self.changes = list(changes)
+        self.names = [display_name(c.name, c.user_id) for c in self.changes]
+        super().__init__(
+            "The memory key of " + ", ".join(self.names or ["a member"]) + " has changed."
+        )
+
+
+class UnusableMemberKeyError(MemoryBackendError):
+    """Raised when the service sends a member key that is not the key it names.
+
+    Not confirmable: nothing is sealed for it and nothing was changed.
+
+    Attributes:
+        names: Display names of the members concerned.
     """
 
     def __init__(self, names: List[str]) -> None:
         self.names = names
         super().__init__(
-            "The memory key of " + ", ".join(names or ["a member"]) + " has changed."
+            "The service sent a memory key for " + ", ".join(names or ["a member"])
+            + " that does not match its fingerprint. Nothing was changed."
         )
+
+
+class ShareGoneError(MemoryBackendError):
+    """Raised when a share is no longer live (HTTP 404 or 409 from the service)."""
+
+    def __init__(self) -> None:
+        super().__init__("That share no longer exists.")
 
 
 class InsufficientWrapsRequired(MemoryBackendError):
@@ -144,6 +184,8 @@ class TeamMemberKey:
         name: Display name of the member ("" when the service sends none).
         key_changed: ``True`` when the member's key changed since it was
             last trusted.
+        previous_fingerprint: The replaced key's fingerprint, when reported.
+        key_rotated_at: When the key was replaced, as the service wrote it.
     """
 
     user_id: int
@@ -152,6 +194,8 @@ class TeamMemberKey:
     role: str
     name: str = ""
     key_changed: bool = False
+    previous_fingerprint: Optional[str] = None
+    key_rotated_at: Optional[str] = None
 
     def derived_fingerprint(self) -> Optional[str]:
         """The fingerprint of the key actually held, or None if it is not a key.
@@ -238,6 +282,14 @@ class WrapEntry:
     recipient_user_id: int
     envelope_id: str
     wrapped_dek: str
+
+
+@dataclass(frozen=True)
+class TopUpResult:
+    """What a top-up did: whom it sealed for, and whose key still waits."""
+
+    sealed_names: tuple
+    waiting: tuple
 
 
 @dataclass(frozen=True)
@@ -365,6 +417,8 @@ class TeamMemoryService:
                     role=item["role"],
                     name=str(item.get("name") or ""),
                     key_changed=bool(item.get("key_changed", False)),
+                    previous_fingerprint=_optional_str(item.get("previous_fingerprint")),
+                    key_rotated_at=_optional_str(item.get("key_rotated_at")),
                 )
             )
         return members
@@ -667,27 +721,62 @@ class TeamMemoryService:
         return self._pin_store_provider() if self._pin_store_provider else None
 
     def _refuse_changed_keys(self, team_slug: str, members: List[TeamMemberKey]) -> None:
-        """Raise before anything is sent if a member's key changed.
+        """Raise before anything is sent if a member's key may not be sealed for.
 
-        A key changed when the service says so, or when it differs from the
-        fingerprint this client last sealed for that member.
+        An unusable key is refused outright; a changed one (flagged by the
+        service, or different from what was sealed for before) can be confirmed
+        with :meth:`confirm_member_keys`. A confirmed key passes whatever the
+        service's flag says.
         """
-        from servonaut.services.memory.team_wraps import pinned_fingerprint
-
         pins = self._pins()
-        changed = []
+        unusable: List[str] = []
+        changes: List[KeyChange] = []
         for member in members:
-            derived = member.derived_fingerprint()
-            pinned = pinned_fingerprint(pins, team_slug, member.user_id) if pins else None
-            if (
-                member.key_changed
-                or derived is None
-                or derived != member.fingerprint
-                or (pinned is not None and pinned != derived)
-            ):
-                changed.append(member.name or f"member {member.user_id}")
-        if changed:
-            raise KeyChangedError(changed)
+            pinned = pins.get(team_slug, member.user_id) if pins else None
+            trust = classify_key(
+                member.public_key_b64, member.fingerprint,
+                flagged=member.key_changed, pinned=pinned,
+            )
+            if trust is KeyTrust.UNUSABLE:
+                unusable.append(display_name(member.name, member.user_id))
+            elif trust is KeyTrust.CHANGED:
+                previous = pinned if pinned not in (None, member.fingerprint) else None
+                changes.append(KeyChange(
+                    team_slug=team_slug,
+                    user_id=member.user_id,
+                    name=member.name,
+                    fingerprint=member.fingerprint,
+                    previous_fingerprint=previous or member.previous_fingerprint,
+                    rotated_at=member.key_rotated_at,
+                ))
+        if unusable:
+            raise UnusableMemberKeyError(unusable)
+        if changes:
+            raise KeyChangedError(changes)
+
+    def confirm_member_keys(self, team_slug: str, changes: List[KeyChange]) -> None:
+        """Record that the user checked and trusts these members' current keys.
+
+        All or nothing: the pins are validated first and written in one atomic
+        write. Afterwards the key counts as sealed-for, so Share, Share again
+        and the top-up accept it.
+
+        Raises:
+            ValueError: A slug or fingerprint is not well formed.
+            MemoryBackendError: Pins cannot be kept here.
+            OSError: The pins could not be written.
+        """
+        check_segment(team_slug, "team")
+        pins = self._pins()
+        if pins is None:
+            raise MemoryBackendError("Confirmed keys cannot be saved here.")
+        batch: Dict[tuple, str] = {}
+        for change in changes:
+            check_segment(change.team_slug, "team")
+            if not _FINGERPRINT.fullmatch(change.fingerprint or ""):
+                raise ValueError("fingerprint is not a valid key fingerprint")
+            batch[(change.team_slug, change.user_id)] = change.fingerprint
+        pins.set_many(batch)
 
     def _pin_sealed(
         self, team_slug: str, wraps: List[Dict[str, Any]], members: List[TeamMemberKey]
@@ -900,6 +989,91 @@ class TeamMemoryService:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return int(data.get("wraps_deleted", 0))
 
+    async def grant_coverage(self, team_slug: str, grant_id: str) -> GrantCoverage:
+        """Who cannot read the newest snapshots of a live share yet.
+
+        Raises:
+            ShareGoneError: The share is gone or no longer live.
+            UpsellRequired: If ``memory_team_share`` is not in the plan.
+        """
+        from servonaut.services.api_client import APIError
+
+        self._require_feature()
+        check_segment(team_slug, "team")
+        check_segment(grant_id, "grant")
+        try:
+            data = await self._api.get(f"/api/v1/teams/{team_slug}/memory/grant/{grant_id}/wraps")
+        except APIError as exc:
+            if exc.status in (404, 409):
+                raise ShareGoneError() from exc
+            raise _translate_api_error(exc, team_slug=team_slug) from exc
+        return parse_grant_coverage(data)
+
+    async def top_up_grant(self, team_slug: str, grant_id: str) -> "TopUpResult":
+        """Seal the newest snapshots for the members still missing a wrap.
+
+        Only members whose key is trusted (sealed for or confirmed before) or
+        new are sealed for; a member whose key is waiting for confirmation is
+        returned in ``waiting`` and left alone.
+
+        Raises:
+            ShareGoneError: The share is gone or no longer live.
+            MemoryBackendError: Memory Sync is locked.
+        """
+        from servonaut.services.api_client import APIError
+
+        coverage = await self.grant_coverage(team_slug, grant_id)
+        pins = self._pins()
+        material = self._key_store_provider()
+        if material is None:
+            raise MemoryBackendError("Unlock Memory Sync first.")
+        wraps: List[Dict[str, Any]] = []
+        names: Dict[int, str] = {}
+        waiting: Dict[int, KeyChange] = {}
+        for envelope in coverage.envelopes:
+            split = split_recipients(pins, team_slug, envelope.missing)
+            waiting.update({c.user_id: c for c in split.changed})
+            if not split.sealable or envelope.wrapped_dek is None:
+                continue
+            try:
+                sealed = self._crypto.reseal_dek(
+                    envelope.wrapped_dek,
+                    private_key=material.private_key,
+                    recipient_public_keys=[r.public_key for r in split.sealable],
+                )
+            except (self._crypto.CryptoError, ValueError, TypeError) as exc:
+                logger.debug("top-up: could not seal a snapshot (%s)", type(exc).__name__)
+                continue
+            for recipient, wrapped in zip(split.sealable, sealed):
+                if wrapped is None:
+                    continue
+                names[recipient.user_id] = display_name(recipient.name, recipient.user_id)
+                wraps.append({
+                    "recipient_user_id": recipient.user_id,
+                    "envelope_id": envelope.envelope_id,
+                    "wrapped_dek": wrapped,
+                    "recipient_fingerprint": recipient.fingerprint,
+                })
+        if wraps:
+            try:
+                await post_grant_wraps(self._api, team_slug, grant_id, wraps)
+            except APIError as exc:
+                if exc.status in (404, 409):
+                    raise ShareGoneError() from exc
+                raise
+            self._pin_posted(team_slug, wraps)
+        return TopUpResult(sealed_names=tuple(names.values()), waiting=tuple(waiting.values()))
+
+    def _pin_posted(self, team_slug: str, wraps: List[Dict[str, Any]]) -> None:
+        pins = self._pins()
+        if pins is None:
+            return
+        try:
+            pins.set_many({(team_slug, w["recipient_user_id"]): w["recipient_fingerprint"]
+                           for w in wraps})
+        except OSError as exc:
+            logger.warning("team wrap pins not saved: %s", type(exc).__name__)
+
     async def post_grant_wraps(
         self,
         team_slug: str,
@@ -922,6 +1096,13 @@ class TeamMemoryService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value else None
+
 
 def _parse_grant(data: Dict[str, Any]) -> Grant:
     """Parse a raw server grant dict into a ``Grant`` dataclass."""

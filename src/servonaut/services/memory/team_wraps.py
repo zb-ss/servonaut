@@ -299,6 +299,71 @@ def pin_fingerprint(store: WrapPinStore, team_slug: str, user_id: int, fp: str) 
 
 
 @dataclass(frozen=True)
+class CoverageEnvelope:
+    """One snapshot of a live share and the members that cannot read it yet."""
+
+    envelope_id: str
+    module: str
+    snapshot_version: Optional[int]
+    wrapped_dek: Optional[str]  # the caller's own wrap; None when it holds none
+    missing: Tuple[Recipient, ...]
+
+
+@dataclass(frozen=True)
+class GrantCoverage:
+    """Who can read the newest snapshots of a live share."""
+
+    envelopes: Tuple[CoverageEnvelope, ...]
+    pending: Tuple[Dict[str, Any], ...]
+
+
+def _parse_coverage_envelope(raw: Any) -> Optional[CoverageEnvelope]:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        check_segment(raw.get("envelope_id"), "envelope")
+    except ValueError:
+        return None
+    wrapped = raw.get("wrapped_dek")
+    if wrapped is not None and not _text(wrapped):
+        return None
+    missing = raw.get("missing_recipients")
+    if not _text(raw.get("module")) or not isinstance(missing, list):
+        return None
+    version = raw.get("snapshot_version")
+    return CoverageEnvelope(
+        envelope_id=raw["envelope_id"],
+        module=raw["module"],
+        snapshot_version=version if isinstance(version, int) and not isinstance(version, bool) else None,
+        wrapped_dek=wrapped,
+        missing=tuple(r for r in map(_parse_recipient, missing) if r is not None),
+    )
+
+
+def parse_grant_coverage(payload: Any) -> GrantCoverage:
+    """The usable part of a share's coverage report.
+
+    A malformed envelope is dropped whole and a malformed recipient on its own;
+    only shapes and counts are logged, never an id or a key.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("envelopes"), list):
+        logger.debug("grant coverage ignored: unexpected shape (%s)", type(payload).__name__)
+        return GrantCoverage((), ())
+    envelopes = []
+    for raw in payload["envelopes"]:
+        envelope = _parse_coverage_envelope(raw)
+        if envelope is None:
+            logger.debug("grant coverage envelope ignored: malformed (%s)", type(raw).__name__)
+            continue
+        envelopes.append(envelope)
+    pending = payload.get("pending_recipients")
+    return GrantCoverage(
+        envelopes=tuple(envelopes),
+        pending=tuple(dict(p) for p in pending if isinstance(p, dict)) if isinstance(pending, list) else (),
+    )
+
+
+@dataclass(frozen=True)
 class TrustSplit:
     """An entry's recipients, divided by whether they may be sealed for now."""
 
