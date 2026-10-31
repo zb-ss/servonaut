@@ -35,12 +35,11 @@ name: Desktop preview macOS
 # dry_run signs and notarizes for real, but hands no disk image on, so no
 # notarized build of an unreleased commit becomes downloadable: only reports
 # and screenshots are kept, and nothing is attested or uploaded. The signing
-# environment deploys only from release tags and release/* branches, so every
-# run starts from one of those. Without a tag, a dry run rehearses its
-# branch's commit as if it were tagged rehearsal_version. Name a rehearsal
-# branch anything but release/X.Y.Z, which the Release workflow takes for an
-# open release candidate:
-#   gh workflow run desktop-preview-macos.yml --ref release/<branch> -f dry_run=true -f rehearsal_version=X.Y.Z
+# environment deploys only from release tags and the one rehearsal branch,
+# release/macos-signing-rehearsal, so every run starts from one of those.
+# Without a tag, a dry run rehearses that branch's commit as if it were
+# tagged rehearsal_version:
+#   gh workflow run desktop-preview-macos.yml --ref release/macos-signing-rehearsal -f dry_run=true -f rehearsal_version=X.Y.Z
 #
 # A published release gets the macOS preview only while two repository
 # variables allow it: DESKTOP_PREVIEW_PUBLISH (on or off, unset is on), which
@@ -97,6 +96,8 @@ jobs:
           INPUT_REHEARSAL_VERSION: ${{ inputs.rehearsal_version }}
           PREVIEW_PUBLISH: ${{ vars.DESKTOP_PREVIEW_PUBLISH }}
           MACOS_PUBLISH: ${{ vars.DESKTOP_MACOS_PUBLISH }}
+          # The one branch the desktop-signing environment deploys from.
+          REHEARSAL_BRANCH: release/macos-signing-rehearsal
         run: |
           set -euo pipefail
           version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(rc[1-9][0-9]*)?'
@@ -168,11 +169,13 @@ jobs:
               fi
               # The desktop-signing environment deploys only from these refs; a
               # run from any other would qualify both targets and then wait for
-              # an approval that cannot be given.
+              # an approval that must not be given. This check only helps an
+              # honest run: a changed copy of the workflow skips it, which is
+              # why the environment itself allows nothing else.
               case "${GITHUB_REF}" in
-                refs/tags/v*|refs/heads/release/*) ;;
+                refs/tags/v*|"refs/heads/${REHEARSAL_BRANCH}") ;;
                 *)
-                  echo "::error::Signing runs only from a release tag or a release/* branch, not ${GITHUB_REF}. Run this workflow with --ref ${tag} or --ref release/<branch>."
+                  echo "::error::Signing runs only from a release tag or the rehearsal branch ${REHEARSAL_BRANCH}, not ${GITHUB_REF}. Run this workflow with --ref ${tag} or --ref ${REHEARSAL_BRANCH}."
                   exit 1
                   ;;
               esac

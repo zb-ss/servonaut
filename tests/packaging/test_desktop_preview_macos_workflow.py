@@ -651,12 +651,20 @@ def test_the_sign_job_checks_what_it_was_handed(workflow: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_REHEARSAL_BRANCH = "release/macos-signing-rehearsal"
+
+
 def _resolve(workflow: str, tmp_path: Path, **env: str):
+    # The step's own setting, as the workflow gives it.
+    branch = re.search(
+        r"^          REHEARSAL_BRANCH: (\S+)$", _step(workflow, "Decide what to build"), re.MULTILINE
+    ).group(1)
     return _run(
         workflow,
         "Decide what to build",
         tmp_path,
         **{
+            "REHEARSAL_BRANCH": branch,
             "GITHUB_SHA": "c" * 40,
             "RELEASE_TAG": "",
             "INPUT_TAG": "",
@@ -725,7 +733,7 @@ def test_a_release_event_for_another_ref_fails(workflow: str, tmp_path: Path) ->
     assert result.returncode == 1
 
 
-@pytest.mark.parametrize("ref", ["refs/tags/v2.28.0rc1", "refs/heads/release/2.28.0"])
+@pytest.mark.parametrize("ref", ["refs/tags/v2.28.0rc1", f"refs/heads/{_REHEARSAL_BRANCH}"])
 def test_a_manual_run_starts_where_the_signing_environment_deploys(
     workflow: str, tmp_path: Path, ref: str
 ) -> None:
@@ -745,7 +753,15 @@ def test_a_manual_run_starts_where_the_signing_environment_deploys(
 
 @pytest.mark.parametrize(
     "ref",
-    ["refs/heads/master", "refs/heads/feature/example", "refs/heads/release", "refs/pull/1/merge"],
+    [
+        "refs/heads/master",
+        "refs/heads/feature/example",
+        "refs/heads/release",
+        # Anyone who can push could create another release/ branch.
+        "refs/heads/release/2.28.0",
+        f"refs/heads/{_REHEARSAL_BRANCH}-other",
+        "refs/pull/1/merge",
+    ],
 )
 def test_a_manual_run_elsewhere_is_refused_before_it_builds(
     workflow: str, tmp_path: Path, ref: str
@@ -760,8 +776,9 @@ def test_a_manual_run_elsewhere_is_refused_before_it_builds(
     )
 
     assert result.returncode == 1
-    assert f"Signing runs only from a release tag or a release/* branch, not {ref}." in (
-        result.stdout
+    assert (
+        f"Signing runs only from a release tag or the rehearsal branch {_REHEARSAL_BRANCH}, not {ref}."
+        in result.stdout
     )
     assert outputs == {}
 
@@ -1768,6 +1785,21 @@ def test_the_user_guide_matches_the_published_names() -> None:
     assert "macOS 13" in section
 
 
+def test_the_signing_environment_carries_nothing_but_the_apple_signing(workflow: str) -> None:
+    """The update manifest key decides what every packaged app is offered."""
+    assert "RELEASE_MANIFEST" not in workflow
+    secrets = set(re.findall(r"secrets\.([A-Z0-9_]+)", workflow))
+    assert secrets == set(_SECRETS)
+    # Compared as prose, whatever the line wrapping.
+    guide = " ".join((_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+    assert (
+        f"deploys only from `v*` tags and the rehearsal branch `{_REHEARSAL_BRANCH}`" in guide
+    )
+    # Reviewers check where a pending deployment runs before they approve it.
+    assert "Before approving a pending `desktop-signing` deployment" in guide
+    assert "`RELEASE_MANIFEST_SIGNING_KEY` belongs to the `release-mirror` environment only" in guide
+
+
 def test_the_switch_signing_and_rehearsal_are_documented(workflow: str) -> None:
     guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     preview = preview_for_tag("v2.31.0rc1")
@@ -1783,7 +1815,9 @@ def test_the_switch_signing_and_rehearsal_are_documented(workflow: str) -> None:
     ):
         assert command in guide
     # The rehearsal is the one the workflow itself describes.
-    assert "--ref release/<branch> -f dry_run=true -f rehearsal_version=X.Y.Z" in workflow
+    assert (
+        f"--ref {_REHEARSAL_BRANCH} -f dry_run=true -f rehearsal_version=X.Y.Z" in workflow
+    )
     assert (
         f"gh release delete-asset v2.31.0rc1 {preview.macos_dmg_asset('macos-arm64')} "
         "--yes --repo zb-ss/servonaut"

@@ -111,22 +111,31 @@ app from the release's tag commit on a macOS runner per architecture, runs the
 packaged self-test on it, and runs the self-test and the window smoke again on
 an ad-hoc signed copy under the hardened runtime. The `sign` job then waits for
 a reviewer to approve the run's deployment to the `desktop-signing`
-environment, which deploys only from `v*` tags and `release/*` branches.
-Approve it within 7 days of the `qualify` jobs finishing: the unsigned apps
-they hand on are kept that long, and a later approval finds nothing to sign,
-so the run has to be started again from the `qualify` jobs ("Re-run all jobs",
-or a manual run on the tag). That
-environment holds the secrets `MACOS_CERTIFICATE_P12_BASE64` and
-`MACOS_CERTIFICATE_PASSWORD` (the Developer ID Application certificate) and
-`APPLE_NOTARY_KEY_P8_BASE64` (an App Store Connect API key for the notary
+environment, which deploys only from `v*` tags and the rehearsal branch
+`release/macos-signing-rehearsal`, both of which must be protected by rulesets
+that let only administrators create, update or delete them. Approve it within
+7 days of the `qualify` jobs finishing: the unsigned apps they hand on are kept
+that long, and a later approval finds nothing to sign, so the run has to be
+started again from the `qualify` jobs ("Re-run all jobs", or a manual run on
+the tag). That environment holds the secrets `MACOS_CERTIFICATE_P12_BASE64`
+and `MACOS_CERTIFICATE_PASSWORD` (the Developer ID Application certificate)
+and `APPLE_NOTARY_KEY_P8_BASE64` (an App Store Connect API key for the notary
 service), and the variables `MACOS_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
-`APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`. The job signs the app,
-notarizes and staples it, packages, signs, notarizes and staples the disk
+`APPLE_NOTARY_KEY_ID` and `APPLE_NOTARY_ISSUER_ID`, and nothing else:
+`RELEASE_MANIFEST_SIGNING_KEY` belongs to the `release-mirror` environment
+only, since it decides what every packaged app is offered. The job signs the
+app, notarizes and staples it, packages, signs, notarizes and staples the disk
 image, has Gatekeeper assess both, and runs the self-test and the window smoke
 on the signed app. Its temporary keychain and key files are removed however
 the job ends. When notarization refuses a submission, the job prints the
 notary service's log. Only then does `publish` attest the two images and
 attach the three assets, replacing nothing else on the release.
+
+Before approving a pending `desktop-signing` deployment, open the run and check
+that it was started from a `v*` tag, or from `release/macos-signing-rehearsal`
+at a commit you know. Reject any other: a run from another branch can carry a
+changed copy of the workflow that skips its own checks and reads the signing
+secrets.
 
 A release's macOS preview is attached once. A disk image signed again never
 has the same bytes, because its secure timestamps and notarization ticket
@@ -145,10 +154,10 @@ names the command that attaches the preview later, on the tag itself:
 manual run ignores both variables. Add `-f dry_run=true` to build, sign and
 notarize for real without keeping or attaching a disk image: only reports and
 screenshots are uploaded, so no notarized build of an unreleased commit
-becomes downloadable. To rehearse signing without a release, push a branch
-whose name starts with `release/` but is not `release/X.Y.Z` (the Release
-workflow takes such a branch for an open candidate), and rehearse its commit
-as a version of your choice:
+becomes downloadable. To rehearse signing without a release, push the commit
+to the rehearsal branch `release/macos-signing-rehearsal` (an administrator's
+job, and never `release/X.Y.Z`, which the Release workflow takes for an open
+candidate), and rehearse it as a version of your choice:
 
 ```bash
 gh workflow run desktop-preview-macos.yml --ref release/macos-signing-rehearsal -f dry_run=true -f rehearsal_version=X.Y.Z
@@ -364,8 +373,9 @@ workflows described under
 `DESKTOP_MACOS_PUBLISH` is `on`, each release's macOS preview waits for a
 second approval, in the `desktop-signing` environment, before anything is
 signed. Approve it once the release itself is out, and within 7 days of the
-run's `qualify` jobs; rejecting it, or letting it expire, only skips the macOS
-preview, which a manual run can attach later.
+run's `qualify` jobs, after checking that the run started from that release's
+tag; rejecting it, or letting it expire, only skips the macOS preview, which a
+manual run can attach later.
 The update manifests follow by themselves once the mirror has copied the
 release's desktop files.
 
