@@ -69,3 +69,56 @@ def test_a_newer_local_module_keeps_the_local_answer():
     local = {"os": {"observed": {"distro": "Local 13"}, "probed_at": "2030-01-01T00:00:00+00:00"}}
     out = asyncio.run(_tools(reader, local=local).get_server_memory("web-1", format="full"))
     assert json.loads(out)["modules"]["os"]["observed"] == {"distro": "Local 13"}
+
+
+def test_stack_summary_stays_json_for_a_shared_module():
+    reader = MagicMock()
+    reader.read = AsyncMock(return_value=_shared())
+    out = asyncio.run(_tools(reader).get_server_memory("web-1", format="stack_summary"))
+    assert isinstance(json.loads(out), dict)
+
+
+def test_context_block_uses_the_existing_framing():
+    reader = MagicMock()
+    reader.read = AsyncMock(return_value=_shared())
+    out = asyncio.run(_tools(reader).get_server_memory("web-1", format="context_block"))
+    assert "<CONTEXT" in out and "Debian 12" in out
+
+
+def test_without_a_reader_a_shared_server_says_the_app_is_needed():
+    out = asyncio.run(_tools(None).get_server_memory("web-1"))
+    error = json.loads(out)["error"]
+    assert error["code"] == "missing"
+    assert "build_server_memory" not in error["hint"]
+    assert "Servonaut app" in error["hint"]
+
+
+def test_the_tuis_own_tools_get_the_shared_reader():
+    from tests.test_app_team_policy import _app
+
+    app = _app_with_services()
+    assert app.servonaut_tools._shared_memory_reader is app.shared_memory_reader
+    assert app.shared_memory_reader is not None
+
+
+def test_the_relay_tools_are_built_with_the_memory_service_and_reader():
+    from servonaut.widgets.relay_indicator import _build_mcp_tools_for_this_app
+
+    app = MagicMock()
+    tools = _build_mcp_tools_for_this_app(app)
+    assert tools._shared_memory_reader is app.shared_memory_reader
+    assert tools._memory_service is app.memory_service
+
+
+def _app_with_services():
+    from tests.test_app_team_policy import _app
+
+    import tempfile
+    from pathlib import Path
+
+    app = _app(Path(tempfile.mkdtemp()))
+    app.auth_service = MagicMock(is_authenticated=True)
+    app.run_worker = MagicMock(
+        side_effect=lambda work, **_kw: work.close() if hasattr(work, "close") else None)
+    app.init_paid_services()
+    return app

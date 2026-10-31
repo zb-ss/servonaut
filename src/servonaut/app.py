@@ -1591,6 +1591,8 @@ class ServonautApp(App):
                 lambda: self.config_manager.get().memory.team_memory_cache_seconds,
                 teams_provider=self.auth_service.list_teams,
             )
+            if getattr(self, "servonaut_tools", None) is not None:
+                self.servonaut_tools.set_shared_memory_reader(self.shared_memory_reader)
         except Exception as exc:
             logger.debug("TeamMemoryService init failed: %s", exc)
 
