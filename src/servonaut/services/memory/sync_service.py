@@ -261,6 +261,10 @@ class MemorySyncService:
         # drain lock is released: ``(missing_team_wraps payload, own wraps)``.
         self._team_top_up: Optional[tuple[Any, Dict[tuple[str, str], List[str]]]] = None
         self._wrap_pins: Optional[Any] = None
+        # Changed member keys a catch-up skipped this session, keyed
+        # (team, user, fingerprint); the listener hears each one once.
+        self._key_changes: Dict[tuple[str, int, str], Any] = {}
+        self._key_change_listener: Optional[Callable[[Any], None]] = None
 
         # Optional collaborator wired after construction to avoid an import
         # cycle (sync_service ← retrieval_service would be circular).
@@ -1998,9 +2002,9 @@ class MemorySyncService:
     ) -> None:
         from servonaut.services.memory.crypto import CryptoError  # noqa: PLC0415
         from servonaut.services.memory.team_wraps import (  # noqa: PLC0415
-            differs_from_pin,
             parse_missing_team_wraps,
             seal_for_recipients,
+            split_by_trust,
         )
 
         pins = self._pin_store()
@@ -2009,11 +2013,11 @@ class MemorySyncService:
         changed_by_grant: Dict[tuple[str, str], int] = {}
         for entry in entries:
             grant = (entry.team_slug, entry.grant_id)
-            kept, differing = differs_from_pin(pins, entry)
-            entry = replace(entry, recipients=kept)
-            changed = entry.key_changed_count + differing
-            if changed:
-                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + changed
+            split = split_by_trust(pins, entry)
+            entry = replace(entry, recipients=split.sealable)
+            if split.changed:
+                changed_by_grant[grant] = changed_by_grant.get(grant, 0) + len(split.changed)
+                self._record_key_changes(entry.instance_id, split.changed)
             candidates = self_wraps.get((entry.instance_id, entry.module), [])
             if len(candidates) != 1 or self._self_privkey is None:
                 # Not in this batch, or two snapshots of one module and no way
@@ -2039,6 +2043,35 @@ class MemorySyncService:
         for (team_slug, grant_id), wraps in by_grant.items():
             if wraps and await self._post_team_wraps(team_slug, grant_id, wraps):
                 self._pin_sealed(pins, team_slug, wraps)
+
+    def set_key_change_listener(self, listener: Optional[Callable[[Any], None]]) -> None:
+        """Call *listener* once for each changed key a catch-up newly skips."""
+        self._key_change_listener = listener
+
+    def pending_key_changes(self) -> List[Any]:
+        """The skipped keys this session that still wait for the user's confirmation."""
+        pins = self._pin_store()
+        return [
+            pending for pending in self._key_changes.values()
+            if pins.get(pending.change.team_slug, pending.change.user_id)
+            != pending.change.fingerprint
+        ]
+
+    def _record_key_changes(self, instance_id: str, changes: Iterable[Any]) -> None:
+        from servonaut.services.memory.team_wraps import PendingKeyChange  # noqa: PLC0415
+
+        for change in changes:
+            key = (change.team_slug, change.user_id, change.fingerprint)
+            if key in self._key_changes:
+                continue
+            pending = PendingKeyChange(change=change, instance_id=instance_id)
+            self._key_changes[key] = pending
+            if self._key_change_listener is None:
+                continue
+            try:
+                self._key_change_listener(pending)
+            except Exception as exc:  # a toast must never cost the upload
+                logger.warning("key change listener failed: %s", type(exc).__name__)
 
     def _pin_store(self) -> Any:
         from servonaut.services.memory.team_wraps import WrapPinStore  # noqa: PLC0415
