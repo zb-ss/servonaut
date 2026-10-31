@@ -437,7 +437,10 @@ class CommandOverlay(ModalScreen):
                 saw_stdout = True
                 line = _shown(raw_line.decode("utf-8", errors="replace").rstrip("\n"))
                 self._output_lines.append(_scrub(line))
-                self.app.call_from_thread(output_widget.append_output, line)
+                # Escaped: the server's output is text, not markup. Unescaped,
+                # a line could draw a link that shows one address and opens
+                # another, or break the log with an unbalanced "[/tag]".
+                self.app.call_from_thread(output_widget.append_output, escape(line))
 
             stderr_thread.join(timeout=5)
             return_code = process.wait()
