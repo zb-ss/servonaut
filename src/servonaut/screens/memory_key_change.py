@@ -133,6 +133,21 @@ class MemberKeyChangeScreen(Screen[Optional[List[KeyChange]]]):
     def on_mount(self) -> None:
         self.query_one("#keychange-btn-cancel", Button).focus()
 
+    def _say(self, widget: Static, markup: str) -> None:
+        """Write *markup*; the demo-mode scrub is a second line of defence after the stand-in names."""
+        redaction = getattr(self.app, "redaction_service", None)
+        if getattr(self.app, "demo_mode", False) and redaction is not None:
+            markup = redaction.scrub_stream(markup)
+        widget.update(markup)
+
+    def refresh_after_demo_toggle(self) -> None:
+        """Redraw the member names for the new demo mode; the ticks stay."""
+        for index, change in enumerate(self._changes):
+            self._say(self.query(".keychange-details")[index], self._describe(change))
+            self.query_one(f"#keychange-check-{index}", Checkbox).label = (
+                f"{escape(self._shown_name(change))}'s key matches"
+            )
+
     def _ticked(self) -> List[KeyChange]:
         return [
             change for index, change in enumerate(self._changes)

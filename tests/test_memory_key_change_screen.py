@@ -161,3 +161,21 @@ async def test_the_buttons_stay_on_screen_when_the_list_is_long_on_a_small_termi
             assert region.height > 0 and region.bottom <= 30, (button, region)
         scroll = screen.query_one("#keychange-scroll")
         assert scroll.max_scroll_y > 0  # the body scrolls instead of pushing the buttons away
+
+
+async def test_toggling_demo_mode_redraws_names_and_keeps_the_ticks():
+    app = _Host([_change(name="Real Person")])
+    async with app.run_test(size=(120, 50)) as pilot:
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one(Checkbox).value = True
+        assert "Real Person" in _text(screen, "#keychange-list")
+        app.demo_mode = True
+        app.redaction_service = MagicMock()
+        app.redaction_service.redact_name = lambda n: "stand-in"
+        app.redaction_service.scrub_stream = lambda t: t
+        screen.refresh_after_demo_toggle()
+        await pilot.pause()
+        shown = _text(screen, "#keychange-list") + str(screen.query_one(Checkbox).label)
+        assert "Real Person" not in shown and "stand-in" in shown
+        assert screen.query_one(Checkbox).value is True

@@ -46,3 +46,8 @@
 #keychange-btn-row Button {
     margin-left: 1;
 }
+
+#keychange-btn-cancel,
+#keychange-btn-confirm {
+    min-width: 16;
+}

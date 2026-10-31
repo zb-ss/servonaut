@@ -218,6 +218,10 @@ MemoryScreen.-narrow #memory-ai-row .memory-row-buttons Button:first-child {
     margin-top: 1;
 }
 
+#share-btn-keys {
+    min-width: 16;
+}
+
 #share-btn-cancel {
     margin-right: 1;
 }
