@@ -20,14 +20,17 @@ name: Desktop preview macOS
 #            notarizes and staples the disk image, and runs the self-test and
 #            the window smoke on the signed app;
 #   publish  checks the disk images it was handed, attests their build
-#            provenance and uploads them with their SHA256SUMS, replacing only
-#            those three assets of the release.
+#            provenance and uploads them with their SHA256SUMS, touching no
+#            other asset of the release. A release's macOS preview is
+#            attached once: images signed by another run never replace the
+#            ones it carries, because they never have the same bytes and the
+#            release mirror never replaces a file it has copied.
 #
 # Nothing is uploaded unless every step passed. The PyPI publish and the
 # Linux preview are separate workflows with no dependency on this one.
 #
-# Re-run a release on the tag itself, so the provenance names the commit
-# that was built:
+# Attach the preview to a release that went out without one on the tag
+# itself, so the provenance names the commit that was built:
 #   gh workflow run desktop-preview-macos.yml --ref vX.Y.Z -f tag=vX.Y.Z
 # dry_run signs and notarizes for real, but hands no disk image on, so no
 # notarized build of an unreleased commit becomes downloadable: only reports
@@ -1105,6 +1108,29 @@ jobs:
           echo "Assets of ${TAG} now:"
           sed 's/^/    /' "${RUNNER_TEMP}/assets-before"
 
+      # A disk image signed again never has the same bytes: its secure
+      # timestamps and notarization ticket differ on every run. The release
+      # mirror never replaces a file it has copied, so a release's macOS
+      # preview is attached once. Only a re-run of this run's publish job,
+      # with the images this run signed, may attach them again.
+      - name: Keep the macOS preview the release already carries
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          attached="${RUNNER_TEMP}/attached"
+          mkdir "${attached}"
+          for name in "${ARM64_DMG}" "${X64_DMG}" "${SUMS_ASSET}"; do
+            grep -qxF -- "${name}" "${RUNNER_TEMP}/assets-before" || continue
+            gh release download "${TAG}" --dir "${attached}" --pattern "${name}"
+            if ! cmp -s "${attached}/${name}" "preview/${name}"; then
+              echo "::error::${TAG} already carries ${name} from another run. A disk image signed again never has the same bytes, and the release mirror never replaces a file it has copied, so a release's macOS preview is attached once. Ship the fix with the next release; CONTRIBUTING.md describes how to take a broken preview off a release."
+              exit 1
+            fi
+            echo "${name} is already attached with these bytes."
+          done
+
       - name: Attest the disk images' build provenance
         if: env.DRY_RUN != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -1113,8 +1139,9 @@ jobs:
             preview/${{ needs.qualify.outputs.dmg-asset-macos-arm64 }}
             preview/${{ needs.qualify.outputs.dmg-asset-macos-x64 }}
 
-      # --clobber replaces this workflow's own three assets, so a re-run is
-      # idempotent; every other asset of the release is left alone.
+      # --clobber lets a re-run of this publish job attach its own images
+      # again; images another run signed were refused above. Every other
+      # asset of the release is left alone.
       - name: Upload the macOS preview to the release
         if: env.DRY_RUN != 'true'
         env:

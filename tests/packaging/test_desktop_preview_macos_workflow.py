@@ -200,7 +200,14 @@ def test_only_the_built_in_token_reaches_the_publish_steps(workflow: str) -> Non
     for job in ("resolve", "qualify", "sign"):
         assert "github.token" not in _job(workflow, job)
     publish = _job(workflow, "publish")
-    assert publish.count("GH_TOKEN: ${{ github.token }}") == 2
+    readers = (
+        "Confirm the release and its tag",
+        "Keep the macOS preview the release already carries",
+        "Upload the macOS preview to the release",
+    )
+    assert publish.count("GH_TOKEN: ${{ github.token }}") == len(readers)
+    for name in readers:
+        assert "          GH_TOKEN: ${{ github.token }}\n" in _step(publish, name), name
     assert "GH_TOKEN" not in publish.split("\n    steps:", 1)[0]
 
 
@@ -412,6 +419,7 @@ def test_a_dry_run_hands_no_disk_image_on(workflow: str) -> None:
         "Receive the signed disk images",
         "Verify the disk images and write their checksums",
         "Confirm the release and its tag",
+        "Keep the macOS preview the release already carries",
         "Attest the disk images' build provenance",
         "Upload the macOS preview to the release",
     ):
@@ -1549,8 +1557,10 @@ def _upload(workflow: str, tmp_path: Path, **env: str) -> subprocess.CompletedPr
     release = tmp_path / "release"
     release.mkdir()
     linux = preview_for_tag("v2.28.0rc1")
-    for name in ("notes.txt", linux.deb_asset, linux.sums_asset, images["ARM64_DMG"]):
+    for name in ("notes.txt", linux.deb_asset, linux.sums_asset):
         (release / name).write_text("published earlier\n", encoding="utf-8")
+    # A re-run of this publish job, after an attempt that attached one image.
+    (release / images["ARM64_DMG"]).write_bytes((received / images["ARM64_DMG"]).read_bytes())
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     (runner_temp / "assets-before").write_text(
@@ -1617,6 +1627,102 @@ def test_the_upload_fails_if_the_published_images_do_not_match(
     assert "FAILED" in result.stdout + result.stderr
 
 
+def _keep(
+    workflow: str, tmp_path: Path, attached: dict[str, bytes]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """The check of what the release carries, against a release holding attached."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _, images = _signed_images(workspace)
+    (workspace / "preview" / images["SUMS_ASSET"]).write_text("sums of this run\n", encoding="utf-8")
+    release = tmp_path / "release"
+    release.mkdir()
+    linux = preview_for_tag("v2.28.0rc1")
+    for name in (linux.deb_asset, linux.sums_asset):
+        (release / name).write_text("published earlier\n", encoding="utf-8")
+    for name, data in attached.items():
+        (release / name).write_bytes(data)
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / "assets-before").write_text(
+        "".join(f"{path.name}\n" for path in sorted(release.iterdir())), encoding="utf-8"
+    )
+    log = tmp_path / "gh.log"
+    log.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        ["bash", "-c", _GH_STUB + _script(workflow, "Keep the macOS preview the release already carries")],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PATH": os.environ["PATH"],
+            "RUNNER_TEMP": str(runner_temp),
+            "TEST_RELEASE": str(release),
+            "TEST_GH_LOG": str(log),
+            **images,
+        },
+    )
+    return result, log.read_text(encoding="utf-8").splitlines()
+
+
+def _this_run(tmp_path: Path) -> dict[str, bytes]:
+    """The three assets as this run would attach them."""
+    preview = preview_for_tag("v2.28.0rc1")
+    images = {
+        preview.macos_dmg_asset(target): f"signed image {target}".encode() for target in MACOS_TARGETS
+    }
+    return {**images, preview.macos_sums_asset: b"sums of this run\n"}
+
+
+def test_a_release_without_a_macos_preview_gets_this_runs(workflow: str, tmp_path: Path) -> None:
+    result, calls = _keep(workflow, tmp_path, {})
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls == []
+
+
+def test_a_re_run_of_the_publish_job_may_attach_its_own_images_again(
+    workflow: str, tmp_path: Path
+) -> None:
+    # An earlier attempt of this run attached one image before it failed.
+    preview = preview_for_tag("v2.28.0rc1")
+    image = preview.macos_dmg_asset("macos-arm64")
+
+    result, calls = _keep(workflow, tmp_path, {image: _this_run(tmp_path)[image]})
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls == [f"release download v2.28.0rc1 --dir {tmp_path}/runner-temp/attached --pattern {image}"]
+
+
+@pytest.mark.parametrize("asset", ["macos-arm64", "macos-x64", "sums"])
+def test_images_signed_by_another_run_never_replace_the_attached_ones(
+    workflow: str, tmp_path: Path, asset: str
+) -> None:
+    """A re-signed image never matches, and the mirror keeps the first one."""
+    preview = preview_for_tag("v2.28.0rc1")
+    attached = _this_run(tmp_path)
+    name = preview.macos_sums_asset if asset == "sums" else preview.macos_dmg_asset(asset)
+    attached[name] = b"signed by another run"
+
+    result, _ = _keep(workflow, tmp_path, attached)
+
+    assert result.returncode == 1
+    assert f"::error::v2.28.0rc1 already carries {name} from another run." in result.stdout
+    assert "a release's macOS preview is attached once" in result.stdout
+
+
+def test_the_release_is_checked_before_anything_is_attested(workflow: str) -> None:
+    publish = _job(workflow, "publish")
+    keep = _step(publish, "Keep the macOS preview the release already carries")
+
+    assert "          GH_TOKEN: ${{ github.token }}\n" in keep
+    assert '"${RUNNER_TEMP}/assets-before"' in keep
+    assert "--clobber" not in keep
+    guide = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "A release's macOS preview is attached once." in guide
+
+
 def test_both_images_are_attested_before_they_are_uploaded(workflow: str) -> None:
     publish = _job(workflow, "publish")
     attest = _step(publish, "Attest the disk images' build provenance")
@@ -1629,6 +1735,7 @@ def test_both_images_are_attested_before_they_are_uploaded(workflow: str) -> Non
             "- name: Receive the signed disk images",
             "- name: Verify the disk images and write their checksums",
             "- name: Confirm the release and its tag",
+            "- name: Keep the macOS preview the release already carries",
             "- name: Attest the disk images' build provenance",
             "- name: Upload the macOS preview to the release",
             "- name: Summarize",

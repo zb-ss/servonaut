@@ -128,6 +128,14 @@ the job ends. When notarization refuses a submission, the job prints the
 notary service's log. Only then does `publish` attest the two images and
 attach the three assets, replacing nothing else on the release.
 
+A release's macOS preview is attached once. A disk image signed again never
+has the same bytes, because its secure timestamps and notarization ticket
+differ on every run, and the release mirror never replaces a file it has
+copied. So `publish` refuses images from another run when the release already
+carries its macOS preview; only a re-run of the same run's `publish` job,
+with the images that run signed, may attach them again. A broken macOS
+preview is fixed in the next release.
+
 A published release gets the macOS preview only while the repository variable
 `DESKTOP_MACOS_PUBLISH` is `on`; unset counts as `off`, and
 `DESKTOP_PREVIEW_PUBLISH` set to `off` holds it back too. Any other value
@@ -149,7 +157,9 @@ gh workflow run desktop-preview-macos.yml --ref release/macos-signing-rehearsal 
 To take a broken macOS preview off a release, delete its two disk images and
 its `SHA256SUMS` the same way as the Linux package, for example
 `gh release delete-asset v2.31.0rc1 servonaut-desktop-preview_2.31.0rc1_macos-arm64.dmg --yes --repo zb-ss/servonaut`,
-then run the release mirror for that tag again.
+then run the release mirror for that tag again. Do not attach new images to
+that release afterwards: once the mirror has copied the first ones, it
+refuses the replacements, and that tag's mirror runs fail.
 
 Every published release and candidate also carries the install scripts,
 `install.sh` and `install.ps1`, with `install-scripts_SHA256SUMS`, attached by
