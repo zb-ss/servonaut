@@ -74,7 +74,7 @@ def _ids(*ids):
 def _run(service, rows, sync, *ids):
     listing = None if sync is None else _ids(*ids)
     return asyncio.run(merge_team_copies(
-        service, sync, rows, today="2026-10-31", list_remote_ids=listing))
+        service, sync, rows, today="2026-10-31"))
 
 
 def _copy_dir(root, slug=LEGACY, share=SHARE_ID):
@@ -250,17 +250,6 @@ class TestDiscovery:
         assert (_copy_dir(tmp_path) / "annotations.md").is_file()
         assert _marker(tmp_path)["target_provider"] == "shared"
 
-    def test_an_old_share_id_folds_into_the_new_one_and_leaves_the_index(self, tmp_path):
-        service = _service(tmp_path)
-        row = _member_row()
-        service._store.write_annotations(OTHER, "kept note", "shared")
-        service.update_index(OTHER, "web-1", "shared", [])
-        service._store.set_share_identity(OTHER, share_identity(row))
-        sync = _sync(tmp_path, service)
-        report = _run(service, [row], sync)
-        assert report.copies == 1 and service.read_annotations(SHARE_ID, "shared") == "kept note"
-        assert (tmp_path / "shared" / OTHER / "annotations.md").is_file()     # never moved
-        assert service._store.get_index_entry(OTHER) is None
 
 
 class TestUnsafeData:
@@ -294,20 +283,52 @@ class TestUnsafeData:
 
 
 class TestCloudOnly:
-    def test_a_share_with_no_folder_is_merged_from_the_service_once(self, tmp_path):
+    def test_a_share_with_no_folder_is_merged_from_the_service_and_recorded_on_the_target(self, tmp_path):
         service = _service(tmp_path)
         retrieval = Retrieval(notes={"content": "only in the cloud"}, findings=None)
         sync = _sync(tmp_path, service, retrieval)
         rows = [_own(), _shared()]
-        assert _run(service, rows, sync, SHARE_ID).copies == 1
+        assert _run(service, rows, sync).copies == 1
         assert service.read_annotations(OWN_ID, "aws") == "only in the cloud"
-        assert _marker(tmp_path, "shared")["target_id"] == OWN_ID
+        assert not (tmp_path / "shared").exists()                    # no folder made for the share
+        assert service._store.share_merged(OWN_ID, SHARE_ID)
         calls = len(retrieval.calls)
-        _run(service, rows, sync, SHARE_ID)
-        assert len(retrieval.calls) == calls                       # marked: not read again
+        _run(service, rows, sync)
+        assert len(retrieval.calls) == calls                         # recorded: not read again
 
-    def test_a_share_the_service_does_not_list_is_left_alone(self, tmp_path):
+    def test_a_verified_absence_is_remembered_for_the_run_only(self, tmp_path):
         service = _service(tmp_path)
-        sync = _sync(tmp_path, service)
-        report = _run(service, [_own(), _shared()], sync)
-        assert report.copies == 0 and not (tmp_path / "shared").exists()
+        retrieval = Retrieval(notes=None, findings=None)
+        sync = _sync(tmp_path, service, retrieval)
+        absent = set()
+        asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
+        assert absent == {SHARE_ID} and not service._store.share_merged(OWN_ID, SHARE_ID)
+        calls = len(retrieval.calls)
+        asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
+        assert len(retrieval.calls) == calls
+
+    def test_an_unreadable_service_records_nothing(self, tmp_path):
+        service = _service(tmp_path)
+        retrieval = Retrieval(notes=RuntimeError("offline"), findings=RuntimeError("offline"))
+        sync = _sync(tmp_path, service, retrieval)
+        absent = set()
+        asyncio.run(merge_team_copies(service, sync, [_own(), _shared()], absent_ids=absent))
+        assert absent == set() and not service._store.share_merged(OWN_ID, SHARE_ID)
+
+    def test_locked_or_unset_sync_reads_nothing_for_a_share_with_no_folder(self, tmp_path):
+        service = _service(tmp_path)
+        retrieval = Retrieval(notes={"content": "x"}, findings=None)
+        for kwargs in ({"configured": False, "enrolled": True}, {"configured": False, "enrolled": False}):
+            sync = _sync(tmp_path, service, retrieval, **kwargs)
+            assert _run(service, [_own(), _shared()], sync).copies == 0
+        assert retrieval.calls == []
+
+    def test_a_members_canonical_folder_is_not_a_copy_of_itself(self, tmp_path):
+        service = _service(tmp_path)
+        service._store.write_annotations(SHARE_ID, "canonical", "shared")
+        retrieval = Retrieval(notes={"content": "cloud"}, findings=None)
+        sync = _sync(tmp_path, service, retrieval)
+        report = _run(service, [_member_row()], sync)
+        assert report.copies == 0 and retrieval.calls == []
+        assert service.read_annotations(SHARE_ID, "shared") == "canonical"
+        assert not (tmp_path / "shared" / SHARE_ID / TEAM_MERGED_MARKER).exists()

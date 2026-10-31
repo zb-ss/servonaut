@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.services.memory.store import MemoryStore
+from servonaut.services.memory.sync_service import RemoteRead
 from servonaut.services.memory.team_merge import merge_team_copies, share_identity
 from tests.test_memory_team_merge import (
     FIRST,
@@ -31,8 +32,8 @@ def _sync(configured: bool = True, enrolled: bool = True, **overrides: Any) -> M
     sync = MagicMock()
     sync.is_configured = configured
     sync.is_enrolled_locally = MagicMock(return_value=enrolled)
-    sync.pull_annotations = AsyncMock(return_value="not_found")
-    sync.pull_findings = AsyncMock(return_value="not_found")
+    sync.fetch_remote_notes = AsyncMock(return_value=RemoteRead("absent"))
+    sync.fetch_remote_findings = AsyncMock(return_value=RemoteRead("absent"))
     for name, value in overrides.items():
         setattr(sync, name, value)
     return sync
@@ -46,7 +47,7 @@ def _ids(*ids: str):
 
 def _run(service, rows, sync=None, listing=None, **kwargs):
     return asyncio.run(merge_team_copies(
-        service, sync, rows, today="2026-10-31", list_remote_ids=listing, **kwargs
+        service, sync, rows, today="2026-10-31", **kwargs
     ))
 
 

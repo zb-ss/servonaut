@@ -77,38 +77,6 @@ def test_a_twin_that_loads_after_the_shared_rows_is_merged():
     assert seen == [[_shared()["id"]], [_shared()["id"], _own()["id"]]]
 
 
-def test_the_fleet_listing_is_passed_to_the_merge_and_names_share_ids(monkeypatch):
-    from types import SimpleNamespace
-
-    app = _app([_own(), _shared()])
-    item = lambda **instance: SimpleNamespace(instance=instance)
-    app.fleet_service = MagicMock()
-    app.fleet_service.get_remote_fleet = AsyncMock(
-        return_value=SimpleNamespace(total=2, items=[item(instance_id="a"), item(id="b")])
-    )
-    seen = {}
-
-    async def merged(*args, **kwargs):
-        seen["ids"] = await kwargs["list_remote_ids"]()
-        return TeamMergeReport()
-
-    monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", merged)
-    asyncio.run(app._do_reconcile_team_memory(app.instances))
-    assert seen["ids"] == {"a", "b"}
-
-
-def test_an_incomplete_listing_is_an_error():
-    from types import SimpleNamespace
-
-    app = _app([])
-    app.fleet_service = MagicMock()
-    app.fleet_service.get_remote_fleet = AsyncMock(
-        return_value=SimpleNamespace(total=5, items=[])
-    )
-    with pytest.raises(RuntimeError):
-        asyncio.run(app._remote_memory_ids())
-
-
 def test_the_upload_hold_ends_when_the_merge_ends_even_if_it_fails(monkeypatch):
     app = _app([_own(), _shared()])
 

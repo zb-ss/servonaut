@@ -17,6 +17,7 @@ import pytest
 from servonaut.config.schema import MemoryConfig
 from servonaut.services.memory.service import MemoryService
 from servonaut.services.memory.store import MemoryStore
+from servonaut.services.memory.sync_service import RemoteRead
 from servonaut.services.memory.team_merge import (
     MemoryKey,
     copy_module_wins,
@@ -78,7 +79,7 @@ def _run(service: MemoryService, rows: List[Dict[str, Any]], sync: Any = None):
     async def listing():
         return [SHARE_ID]
     return asyncio.run(
-        merge_team_copies(service, sync, rows, today="2026-10-31", list_remote_ids=listing)
+        merge_team_copies(service, sync, rows, today="2026-10-31")
     )
 
 
@@ -192,8 +193,8 @@ class TestSyncSide:
     def _sync(self) -> MagicMock:
         sync = MagicMock()
         sync.is_configured = True
-        sync.pull_annotations = AsyncMock(return_value="not_found")
-        sync.pull_findings = AsyncMock(return_value="not_found")
+        sync.fetch_remote_notes = AsyncMock(return_value=RemoteRead("absent"))
+        sync.fetch_remote_findings = AsyncMock(return_value=RemoteRead("absent"))
         return sync
 
 
@@ -208,16 +209,15 @@ class TestReshare:
         assert report.copies == 0
         assert (tmp_path / "shared" / old_id / "annotations.md").is_file()
 
-    def test_an_ambiguous_identity_is_counted_and_never_merged(self, tmp_path):
+    def test_an_earlier_share_ids_folder_is_never_touched_even_with_a_recorded_identity(self, tmp_path):
         service = _service(tmp_path)
         old_id = "22222222-aaaa-bbbb-cccc-000000000002"  # leak-guard:allow
-        rows = [
-            _shared(instance_id=None, hostname="8.8.8.8"),
-            _shared(id="33333333-aaaa-bbbb-cccc-000000000003", instance_id=None, hostname="8.8.8.8"),  # leak-guard:allow
-        ]
+        row = _shared(instance_id=None, hostname="8.8.8.8")
         service._store.write_annotations(old_id, "kept note", "shared")
         service.update_index(old_id, "web-1", "shared", [])
         from servonaut.services.memory.team_merge import share_identity
-        service._store.set_share_identity(old_id, share_identity(rows[0]))
-        report = _run(service, rows)
-        assert (report.copies, report.undecided) == (0, 1)
+        service._store.set_share_identity(old_id, share_identity(row))
+        report = _run(service, [row])
+        assert report.copies == 0
+        assert (tmp_path / "shared" / old_id / "annotations.md").read_text() == "kept note"
+        assert not (tmp_path / "shared" / old_id / "team_merged.marker").exists()

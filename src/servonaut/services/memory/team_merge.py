@@ -35,7 +35,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import (
-    Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple,
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple,
 )
 
 from servonaut.services.memory.provider import (
@@ -80,7 +80,6 @@ class TeamMergeReport:
     findings: int = 0
     modules: int = 0
     kept: List[str] = field(default_factory=list)
-    undecided: int = 0
 
     def message(self) -> str:
         copies = f"{self.copies} team {'copy' if self.copies == 1 else 'copies'}"
@@ -256,13 +255,14 @@ class TeamCopyMerger:
         if local:
             store.get_all_modules(source.instance_id, source.provider, strict=True)
         store.read_annotations_strict(target.instance_id, target.provider)
+        target_modules = store.get_all_modules(target.instance_id, target.provider, strict=True)
         everything = list(records) + list(remote_records)
         stats = MergeStats(
             held_notes=bool((theirs + remote_notes).strip()), held_findings=bool(everything)
         )
         before = self._finding_snapshot(target)
         if local:
-            stats.modules = self._merge_modules(source, target)
+            stats.modules = self._merge_modules(source, target, target_modules)
         stats.notes = self._merge_notes(target, theirs, source_label, merged_on)
         stats.notes += self._merge_notes(target, remote_notes, REMOTE_LABEL, merged_on)
         self._merge_findings(target, everything)
@@ -312,10 +312,12 @@ class TeamCopyMerger:
                 return False
         return True
 
-    def _merge_modules(self, source: MemoryKey, target: MemoryKey) -> int:
+    def _merge_modules(
+        self, source: MemoryKey, target: MemoryKey, target_modules: Dict[str, Dict[str, Any]]
+    ) -> int:
         store, changed = self._store, 0
         for module, data in store.get_all_modules(source.instance_id, source.provider, strict=True).items():
-            kept = store.get_module(target.instance_id, module, target.provider)
+            kept = target_modules.get(module)
             if not copy_module_wins(kept, data):
                 continue
             moved = dict(data)
@@ -381,18 +383,21 @@ class TeamCopyMerger:
 
 @dataclass(frozen=True)
 class MergePlan:
-    """One record to fold into another."""
+    """One record to fold into another.
+
+    ``cloud_only`` marks a share with no folder of its own on this computer:
+    only what the service holds for it is merged.
+    """
 
     source: MemoryKey
     target: MemoryKey
     label: str
     target_row: Mapping[str, Any]
     uploads: bool
+    cloud_only: bool = False
 
 
-def _label(row: Mapping[str, Any], earlier: bool) -> str:
-    if earlier:
-        return "an earlier share of this server"
+def _label(row: Mapping[str, Any]) -> str:
     team = str(row.get("team_name") or row.get("team_slug") or "").strip()
     return f"the {team} team's copy of this server" if team else "a team's copy of this server"
 
@@ -400,69 +405,47 @@ def _label(row: Mapping[str, Any], earlier: bool) -> str:
 Discover = Callable[[str], Sequence[str]]
 
 
-def plan_merges(
-    rows: Sequence[Mapping[str, Any]],
-    index_entries: Sequence[Mapping[str, Any]],
-    discover: Discover,
-) -> Tuple[List[MergePlan], int]:
-    """What to fold, from the real *rows*, the memory index's entries and the folders on disk.
+def plan_merges(rows: Sequence[Mapping[str, Any]], discover: Discover) -> List[MergePlan]:
+    """What to fold, from the real *rows* and the folders on disk.
 
     *discover* names the provider folders that hold a folder for a share id
-    (the store scans the memory root; the index is not consulted, so a copy is
-    found on every retry whatever the index says). For every shared row each
-    such folder folds into the row's current key: the user's own row when
-    :func:`own_twin` confirms one, else the shared row itself (a member's
-    view; uploads stay as they were). A row with no folder yet still gets one
-    plan whose source is the neutral slug, used only if the service holds
-    something for the share. An index entry that recorded the identity of a
-    share no row carries any more (the share was removed and added again
-    under a new id) folds its folders into the row that is now the same
-    server. An entry matching several rows, or none, stays where it is; the
-    count of ambiguous ones is returned.
+    (the store scans the memory root; the index is not consulted). For every
+    shared row each such folder other than the row's own current key folds
+    into that key: the user's own row when :func:`own_twin` confirms one, else
+    the shared row itself (a member's view; uploads stay as they were). A
+    member's canonical folder is not a copy of itself and gets no plan. A row
+    with no folder at all gets one cloud-only plan. Memory filed under an
+    earlier share id (a share removed and added again) is not touched.
     """
     plans: List[MergePlan] = []
-    shared = [row for row in rows if is_shared_row(row) and row.get("id")]
-    current = {str(row.get("id") or "") for row in rows}
-    for row in shared:
+    for row in rows:
+        if not (is_shared_row(row) and row.get("id")):
+            continue
         twin = own_twin(row, rows)
         target_row = twin if twin is not None else row
         target = own_key(target_row)
         share_id = str(row.get("id") or "")
         keys = [MemoryKey(slug, share_id) for slug in discover(share_id)]
-        keys = [key for key in keys if key != target] or [MemoryKey(SHARED_MEMORY_PROVIDER, share_id)]
-        for key in keys:
-            plans.append(MergePlan(key, target, _label(row, False), target_row, twin is not None))
-
-    undecided = 0
-    for entry in index_entries:
-        identity, entry_id = entry.get("share_identity"), str(entry.get("instance_id") or "")
-        if not isinstance(identity, dict) or not entry_id or entry_id in current:
-            continue
-        matches = [row for row in shared if same_share(identity, share_identity(row))]
-        if len(matches) != 1:
-            undecided += 1
-            continue
-        row = matches[0]
-        twin = own_twin(row, rows)
-        target_row = twin if twin is not None else row
-        for slug in discover(entry_id):
+        sources = [key for key in keys if key != target]
+        label = _label(row)
+        if sources:
+            plans.extend(MergePlan(key, target, label, target_row, twin is not None) for key in sources)
+        elif not keys:
             plans.append(MergePlan(
-                MemoryKey(slug, entry_id), own_key(target_row), _label(row, True),
-                target_row, twin is not None,
+                MemoryKey(SHARED_MEMORY_PROVIDER, share_id), target, label, target_row,
+                twin is not None, cloud_only=True,
             ))
-    return plans, undecided
+    return plans
 
 
 # ---------------------------------------------------------------------------
 # The pass
 # ---------------------------------------------------------------------------
 
-#: Lists the share ids the sync service holds memory for (one request).
-RemoteIdLister = Callable[[], Awaitable[Collection[str]]]
-
 #: What a single copy's merge can raise: unreadable, malformed or unsafe local
-#: data. A plan that raises one is left as it was; the pass goes on.
-_PLAN_ERRORS = (OSError, ValueError, KeyError)
+#: data (a wrong-typed value surfaces as ``AttributeError`` / ``TypeError``).
+#: A plan that raises one is left as it was; the pass goes on.
+_PLAN_ERRORS = (OSError, ValueError, KeyError, AttributeError, TypeError)
 
 #: How Memory Sync stands on this computer: not set up (no remote copy can be
 #: read here), set up but locked, or usable.
@@ -479,21 +462,10 @@ def sync_state(sync_service: Any) -> str:
     return SYNC_LOCKED if callable(enrolled) and bool(enrolled()) else SYNC_OFF
 
 
-async def _remote_ids(lister: Optional[RemoteIdLister]) -> Optional[Set[str]]:
-    """The share ids the service holds memory for, or None when that is unknown."""
-    if lister is None:
-        return None
-    try:
-        return {str(item) for item in await lister()}
-    except Exception as exc:  # noqa: BLE001 — unknown listing: no copy is marked
-        logger.warning("Team copy listing failed: %s", type(exc).__name__)
-        return None
-
-
 def _record_identities(memory_service: Any, rows: Sequence[Mapping[str, Any]]) -> None:
     """Note which server each shared-only row is (see :func:`same_share`).
 
-    The store keeps it for entries not created yet.
+    Recorded for a later release to use; nothing here merges by it.
     """
     store = memory_service._store
     for row in rows:
@@ -504,17 +476,23 @@ def _record_identities(memory_service: Any, rows: Sequence[Mapping[str, Any]]) -
 def _queue_upload(sync_service: Any, memory_service: Any, plan: MergePlan) -> bool:
     """Queue the own row's annotations and findings; True when all of it is stored.
 
-    A duplicate upload is harmless, so this runs again on every retry.
+    Read strictly: a file that cannot be read is a retryable failure, never
+    "nothing to upload". An absent or empty note is nothing to upload. A
+    duplicate upload is harmless, so this runs again on every retry.
     """
-    target = plan.target
+    target, store = plan.target, memory_service._store
+    try:
+        text = store.read_annotations_strict(target.instance_id, target.provider)
+        records = store.list_findings(
+            target.instance_id, target.provider, include_superseded=True, strict=True
+        )
+    except _PLAN_ERRORS as exc:
+        logger.warning("Upload for %s deferred: %s", target.instance_id, type(exc).__name__)
+        return False
     instance = {"id": target.instance_id, "name": str(plan.target_row.get("name") or "")}
     stored = True
-    text = memory_service.read_annotations(target.instance_id, target.provider)
     if text.strip():
         stored = bool(sync_service.enqueue_annotations(instance, text)) and stored
-    records = memory_service.list_findings(
-        target.instance_id, target.provider, include_superseded=True
-    )
     if records:
         stored = bool(sync_service.enqueue_findings(instance, records)) and stored
     return stored
@@ -528,9 +506,9 @@ class _Pass:
     memory_service: Any
     sync_service: Any
     state: str
-    remote_ids: Optional[Set[str]]
     merged_on: str
     report: TeamMergeReport
+    absent: Set[str]
     remote: Dict[str, Tuple[Any, Any]] = field(default_factory=dict)
 
     async def read_remote(self, share_id: str, name: str) -> Tuple[Any, Any]:
@@ -543,16 +521,13 @@ class _Pass:
         return self.remote[share_id]
 
 
-def _remote_settled(run: _Pass, share_id: str) -> bool:
-    """Whether the service's side of *share_id* is known: nothing there, or read."""
-    if run.state == SYNC_OFF:
-        return True
-    return run.state == SYNC_READY and run.remote_ids is not None
-
-
 async def _retry_uploads(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) -> None:
     """Finish the uploads a marked copy still owes; clear the flag when stored."""
-    if run.state != SYNC_READY or not plan.uploads:
+    same_target = (
+        marker.get("target_provider") == plan.target.provider
+        and marker.get("target_id") == plan.target.instance_id
+    )
+    if run.state != SYNC_READY or not plan.uploads or not same_target:
         return
     if not _queue_upload(run.sync_service, run.memory_service, plan):
         return
@@ -560,47 +535,41 @@ async def _retry_uploads(plan: MergePlan, run: _Pass, marker: Dict[str, Any]) ->
     run.merger.mark_merged(plan.source, plan.target, upload_pending=False)
 
 
-def _is_done(plan: MergePlan, run: _Pass) -> Optional[Dict[str, Any]]:
-    """The copy's marker when it was merged into this plan's target and that still exists."""
-    merger, source, target = run.merger, plan.source, plan.target
-    if not _has_dir(merger, source):
-        return None
-    marker = merger.marker(source)
-    if (
-        marker
-        and marker.get("target_provider") == target.provider
-        and marker.get("target_id") == target.instance_id
-        and _has_dir(merger, target)
-    ):
-        return marker
-    return None
-
-
-def _has_dir(merger: TeamCopyMerger, key: MemoryKey) -> bool:
+def _marker(plan: MergePlan, run: _Pass) -> Optional[Dict[str, Any]]:
+    """The marker in the plan's source folder, if it has one."""
+    merger = run.merger
     try:
-        return merger.has_copy(key)
+        if not merger.has_copy(plan.source):
+            return None
     except ValueError:
-        return False
+        return None
+    return merger.marker(plan.source)
 
 
 async def _fold(plan: MergePlan, run: _Pass) -> None:
     """Merge one copy into its target; mark it merged only when everything is stored."""
     source_id, report, merger = plan.source.instance_id, run.report, run.merger
     name = str(plan.target_row.get("name") or "")
+    store = run.memory_service._store
     if run.memory_service.is_memory_disabled(plan.target.instance_id, name):
         report.kept.append(source_id)
         return
-    marker = _is_done(plan, run)
+    if not store.is_addressable(plan.target.instance_id, plan.target.provider):
+        logger.warning("Team copy %s kept: its target folder is not addressable", source_id)
+        report.kept.append(source_id)
+        return
+    if plan.cloud_only:
+        await _fold_cloud_only(plan, run, name)
+        return
+    marker = _marker(plan, run)
     if marker is not None:
+        # Merged once: never again, whatever its target is now, so text the
+        # user deleted since does not come back. Only owed uploads continue.
         if marker.get("upload_pending"):
             await _retry_uploads(plan, run, marker)
         return
-    listed = run.state == SYNC_READY and run.remote_ids is not None and source_id in run.remote_ids
-    on_disk = _has_dir(merger, plan.source)
-    if not on_disk and not listed:
-        return  # nothing here, and nothing at the service
-    remote_notes, remote_records, settled = "", [], _remote_settled(run, source_id)
-    if listed:
+    remote_notes, remote_records, settled = "", [], run.state == SYNC_OFF
+    if run.state == SYNC_READY:
         notes, findings = await run.read_remote(source_id, name)
         if notes.status == "found":
             remote_notes = notes.text
@@ -624,9 +593,44 @@ async def _fold(plan: MergePlan, run: _Pass) -> None:
     if run.sync_service is not None and plan.uploads and not owes:
         run.sync_service.drop_pending_for({source_id})
     if owes:
-        await _retry_uploads(plan, run, {"upload_pending": True})
-    if plan.source.instance_id != plan.target.instance_id:
-        run.memory_service._store.remove_index_entry(source_id)
+        await _retry_uploads(plan, run, {
+            "target_provider": plan.target.provider, "target_id": plan.target.instance_id,
+        })
+    if source_id != plan.target.instance_id:
+        store.remove_index_entry(source_id)
+
+
+async def _fold_cloud_only(plan: MergePlan, run: _Pass, name: str) -> None:
+    """Merge what the service holds for a share that has no folder here.
+
+    Needs a usable Memory Sync. Completion is recorded on the target's index
+    entry (never in a folder of its own); a verified absence is only
+    remembered for this run.
+    """
+    share_id, store, report = plan.source.instance_id, run.memory_service._store, run.report
+    if run.state != SYNC_READY or share_id in run.absent:
+        return
+    if store.share_merged(plan.target.instance_id, share_id):
+        return
+    notes, findings = await run.read_remote(share_id, name)
+    if notes.status == "unavailable" or findings.status == "unavailable":
+        return
+    if notes.status == "absent" and findings.status == "absent":
+        run.absent.add(share_id)
+        return
+    stats = run.merger.merge(
+        plan.source, plan.target, source_label=plan.label, merged_on=run.merged_on,
+        target_name=name, remote_notes=notes.text, remote_records=findings.records,
+    )
+    report.notes += stats.notes
+    report.findings += stats.findings
+    if not stats.verified:
+        report.kept.append(share_id)
+        return
+    if plan.uploads and not _queue_upload(run.sync_service, run.memory_service, plan):
+        return  # not recorded: the next pass repeats the merge and tries again
+    store.record_share_merged(plan.target.instance_id, share_id)
+    report.copies += 1
 
 
 async def merge_team_copies(
@@ -635,43 +639,34 @@ async def merge_team_copies(
     rows: Sequence[Mapping[str, Any]],
     *,
     today: Optional[str] = None,
-    list_remote_ids: Optional[RemoteIdLister] = None,
+    absent_ids: Optional[Set[str]] = None,
 ) -> TeamMergeReport:
     """Fold every team copy of a server's memory into the user's own record.
 
     *rows* are the real records (never demo-redacted). Nothing is moved or
-    deleted. A copy is merged (modules, notes, findings, and the service's
-    notes and findings, which are only read) and checked; then a marker is
-    written into its folder. A marked copy is skipped by later passes, which
-    only finish its uploads. No marker is written while Memory Sync is set up
-    but locked, while the one listing *list_remote_ids* (asked only if some
-    copy is unmarked) failed, or when reading the service for a listed share
-    failed: the next pass repeats the idempotent steps. With Memory Sync not
-    set up, nothing is read from the service. A share id the listing names
-    that has no local folder is merged from the service alone. One copy that
-    fails never stops the others.
+    deleted. With Memory Sync usable, each unmarked copy reads what the service
+    holds for its share id (one pair of reads per id); a marker is written into
+    the copy's folder only when the target is verified to hold everything and
+    both reads were ``found`` or ``absent``. A marked copy is never merged
+    again; only its owed uploads are retried. No marker is written while
+    Memory Sync is set up but locked, or when a read failed: the next pass
+    repeats the idempotent steps. A share with no folder here is merged from
+    the service alone and recorded on the target's index entry. *absent_ids*
+    (kept by the caller for the run) remembers shares the service verifiably
+    holds nothing for. One copy that fails never stops the others.
     """
     report = TeamMergeReport()
     merger = TeamCopyMerger(memory_service)
     store = memory_service._store
     merged_on = today or datetime.now(tz=timezone.utc).date().isoformat()
     _record_identities(memory_service, rows)
-    plans, report.undecided = plan_merges(rows, memory_service.list_all(), store.find_instance_dirs)
-    plans = [p for p in plans if store.is_addressable(p.source.instance_id, p.source.provider)]
-    state = sync_state(sync_service)
-    run = _Pass(merger, memory_service, sync_service, state, None, merged_on, report)
-    pending: List[MergePlan] = []
+    plans = plan_merges(rows, store.find_instance_dirs)
+    plans = [p for p in plans if p.cloud_only or store.is_addressable(p.source.instance_id, p.source.provider)]
+    run = _Pass(
+        merger, memory_service, sync_service, sync_state(sync_service), merged_on, report,
+        absent_ids if absent_ids is not None else set(),
+    )
     for plan in plans:
-        try:
-            marker = _is_done(plan, run)
-            if marker is None or marker.get("upload_pending"):
-                pending.append(plan)
-        except _PLAN_ERRORS as exc:
-            logger.warning("Team copy %s kept: %s", plan.source.instance_id, type(exc).__name__)
-            report.kept.append(plan.source.instance_id)
-    if state == SYNC_READY and pending:
-        run.remote_ids = await _remote_ids(list_remote_ids)
-    for plan in pending:
         try:
             await _fold(plan, run)
         except _PLAN_ERRORS as exc:

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from servonaut.services.memory.store import MemoryStore
+from servonaut.services.memory.sync_service import RemoteRead
 from servonaut.services.memory.team_merge import (
     MemoryKey,
     TeamCopyMerger,
@@ -51,8 +52,8 @@ def _listing(ids: Iterable[str]):
 def _sync(**overrides: Any) -> MagicMock:
     sync = MagicMock()
     sync.is_configured = True
-    sync.pull_annotations = AsyncMock(return_value="not_found")
-    sync.pull_findings = AsyncMock(return_value="not_found")
+    sync.fetch_remote_notes = AsyncMock(return_value=RemoteRead("absent"))
+    sync.fetch_remote_findings = AsyncMock(return_value=RemoteRead("absent"))
     for name, value in overrides.items():
         setattr(sync, name, value)
     return sync
@@ -62,7 +63,7 @@ def _run(service, rows, sync=None, listing=None) -> TeamMergeReport:
     if listing is None and sync is not None:
         listing = _listing([])
     return asyncio.run(
-        merge_team_copies(service, sync, rows, today="2026-10-31", list_remote_ids=listing)
+        merge_team_copies(service, sync, rows, today="2026-10-31")
     )
 
 
@@ -121,26 +122,24 @@ class TestPullBeforeMerge:
 
 
 
-class TestListingFirst:
-    """C4: one fleet listing decides which share ids are pulled."""
+class TestPerIdReads:
+    """With Memory Sync usable each unmarked copy reads its own share id; otherwise nothing is read."""
 
-    def test_only_listed_ids_are_pulled(self, tmp_path):
+    def test_one_pair_of_reads_per_copy(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="note")
         sync = _sync()
-        report = _run(service, [_own(), _shared()], sync, _listing([]))
-        sync.pull_annotations.assert_not_awaited()
-        sync.pull_findings.assert_not_awaited()
+        report = _run(service, [_own(), _shared()], sync)
+        sync.fetch_remote_notes.assert_awaited_once()
+        sync.fetch_remote_findings.assert_awaited_once()
         assert report.copies == 1
 
-    def test_without_sync_nothing_is_listed_or_pulled(self, tmp_path):
+    def test_without_sync_nothing_is_read(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="note")
         sync = _sync(is_configured=False, is_enrolled_locally=lambda: False)
-        listing = AsyncMock(return_value=[])
-        report = _run(service, [_own(), _shared()], sync, listing)
-        listing.assert_not_awaited()
-        sync.pull_annotations.assert_not_awaited()
+        report = _run(service, [_own(), _shared()], sync)
+        sync.fetch_remote_notes.assert_not_awaited()
         assert report.copies == 1
 
 
