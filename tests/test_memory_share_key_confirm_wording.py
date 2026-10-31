@@ -115,3 +115,44 @@ async def test_a_confirmation_shows_the_member_name_literally(name):
         label = str(app.screen.query_one("#keychange-check-0").label)
     assert shown.startswith(f"{name}\nNew key:"), shown
     assert label == f"{name}'s key matches"
+
+
+# --- names beside markup render literally, even with a trailing backslash ---
+
+@pytest.mark.parametrize("name", ["web-1\\", "[link=x", "[/bold]", "a\\[b"])
+async def test_the_title_shows_the_server_name_literally(name):
+    from tests.test_memory_share_screen import INSTANCE, _Backend, _Host
+
+    app = _Host(_Backend(members=[_member(1, "Lee")]), shown_instance={**INSTANCE, "name": name})
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        title = _text(screen, "#share-title")
+    assert title == f"Share Memory: {name}"
+
+
+@pytest.mark.parametrize("name", NAMES)
+async def test_the_readers_line_shows_member_names_literally(name):
+    from tests.test_memory_share_screen import _Backend, _Host
+
+    app = _Host(_Backend(members=[_member(1, name)]))
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _open(app, pilot)
+        text = _text(screen, "#share-readers")
+    assert f"Will be able to read it (1): {name}\n" in text
+
+
+@pytest.mark.parametrize("name", NAMES)
+async def test_the_waiting_line_shows_member_names_literally(name):
+    from tests.test_memory_share_key_confirm import _descriptor
+    from tests.test_memory_share_screen import _grant
+
+    changed = _member(2, name, key_changed=True)
+    backend = _KeyBackend(members=[_member(1, "Kim Member"), changed],
+                          live=[_grant("g-1", required_role="member", modules=["os"])])
+    backend.missing = [_descriptor(changed, previous_fingerprint="c" * 64)]
+    app = _KeyHost(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _live_panel(app, pilot)
+        await _settle(pilot, screen, lambda: screen.query_one("#share-btn-keys", Button).display)
+        text = _text(screen, "#share-existing-text")
+    assert text.endswith(f"waiting for your confirmation: {name}"), text
