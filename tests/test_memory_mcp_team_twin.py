@@ -112,3 +112,41 @@ def test_build_keeps_the_opt_out_of_the_team_reference():
     out = run(tools.build_server_memory(TWIN["id"]))
     assert "opt_out" in out
     memory.build_report.assert_not_called()
+
+
+def _listed_ids(out):
+    import json
+
+    return [entry["instance_id"] for entry in json.loads(out)]
+
+
+def test_listing_leaves_out_the_team_copy_of_an_own_server():
+    entries = [
+        {"instance_id": OWN["id"], "name": "web-1", "provider": "aws"},
+        {"instance_id": TWIN["id"], "name": "web-1", "provider": "team a"},
+    ]
+    memory = _make_memory_service(list_all_return=entries)
+    memory.list_all = MagicMock(return_value=entries)
+    tools = _tools(memory)
+    tools._directory.cached_provider_rows = MagicMock(return_value=[OWN])
+    tools._directory.custom_rows = MagicMock(return_value=[])
+    assert _listed_ids(run(tools.list_server_memories())) == [OWN["id"]]
+
+
+def test_listing_keeps_the_copy_of_a_shared_only_server():
+    entries = [{"instance_id": TWIN["id"], "name": "web-1", "provider": "shared"}]
+    memory = _make_memory_service(list_all_return=entries)
+    memory.list_all = MagicMock(return_value=entries)
+    tools = _tools(memory)
+    tools._directory.cached_provider_rows = MagicMock(return_value=[])
+    tools._directory.custom_rows = MagicMock(return_value=[])
+    assert _listed_ids(run(tools.list_server_memories())) == [TWIN["id"]]
+
+
+def test_listing_still_works_when_the_fleet_cannot_be_read():
+    entries = [{"instance_id": OWN["id"], "name": "web-1", "provider": "aws"}]
+    memory = _make_memory_service(list_all_return=entries)
+    memory.list_all = MagicMock(return_value=entries)
+    tools = _tools(memory)
+    tools.connection_rows = AsyncMock(side_effect=RuntimeError("offline"))
+    assert _listed_ids(run(tools.list_server_memories())) == [OWN["id"]]

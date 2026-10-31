@@ -37,6 +37,7 @@ from servonaut.services.accounts.headless import (
 )
 from servonaut.services.accounts.registry import UnknownAccountError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.team_fold import absorbed_share_ids
 from servonaut.services.shared_servers import (
     as_shared_row, fold_shared_rows, lacks_own_key, own_twin, team_key_fallback, team_key_target,
     with_team_key,
@@ -2750,7 +2751,9 @@ class ServonautTools:
             return "Error: memory subsystem not wired."
 
         config = self._config_manager.get()
-        all_entries = self._memory_service.list_all()
+        all_entries = await self._without_folded_team_copies(
+            self._memory_service.list_all(),
+        )
 
         # Filter instances that are opted out — agents should not see memory
         # for servers that have opted out of the memory subsystem.
@@ -4885,6 +4888,22 @@ class ServonautTools:
         if self._team_policy is None:
             return []
         return await self._team_policy.refresh(teams)
+
+    async def _without_folded_team_copies(self, entries: List[Dict]) -> List[Dict]:
+        """*entries* without the memory a team filed for a server the user owns.
+
+        That record is the same server as the own one (it is merged into it,
+        see ``team_merge``); listing both shows one machine twice. Entries stay
+        as they were when the fleet cannot be read: listing a copy twice is
+        safer than hiding a server.
+        """
+        try:
+            _team_rows, rows = await self.connection_rows()
+        except Exception as exc:  # noqa: BLE001 - a degraded provider must not block a listing
+            logger.warning("Could not list servers to fold team copies (%s)", type(exc).__name__)
+            return entries
+        folded = absorbed_share_ids(rows)
+        return [entry for entry in entries if entry.get('instance_id', '') not in folded]
 
     async def _memory_target(self, instance: Dict) -> Dict:
         """The row whose memory *instance* has: the user's own row for a team's

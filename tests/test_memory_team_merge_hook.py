@@ -57,3 +57,19 @@ def test_a_failed_merge_is_silent_and_leaves_the_copies(monkeypatch):
     monkeypatch.setattr("servonaut.services.memory.team_merge.merge_team_copies", boom)
     asyncio.run(app._do_reconcile_team_memory(app.instances))
     app.notify.assert_not_called()
+
+
+def test_a_twin_that_loads_after_the_shared_rows_is_merged():
+    # Shared rows first, then the provider row the share is a copy of.
+    app = _app([_shared()])
+    seen = []
+
+    async def record(rows):
+        seen.append([row["id"] for row in rows])
+
+    app._do_reconcile_team_memory = record
+    app.run_worker = lambda coro, **kw: asyncio.run(coro)
+    app.reconcile_team_memory()
+    app.instances = [_shared(), _own()]
+    app.reconcile_team_memory()
+    assert seen == [[_shared()["id"]], [_shared()["id"], _own()["id"]]]

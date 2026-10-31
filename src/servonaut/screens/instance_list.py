@@ -24,6 +24,7 @@ from servonaut.screens._demo_resolve import (
     connection_instance,
     fleet_rows,
     real_instance_id,
+    reconcile_team_memory,
     refuse_unresolved,
     replace_instances,
     team_rows,
@@ -378,9 +379,7 @@ class InstanceListScreen(Screen):
 
     def _reconcile_team_memory(self) -> None:
         """Fold the memory of team copies into the user's own servers (see the app)."""
-        reconcile = getattr(self.app, "reconcile_team_memory", None)
-        if callable(reconcile):
-            reconcile()
+        reconcile_team_memory(self.app)
 
     def _shared_servers_loaded(self, worker: Worker) -> None:
         """List what :meth:`_fetch_shared_servers` found."""
@@ -442,6 +441,7 @@ class InstanceListScreen(Screen):
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("ovh")
+                self._reconcile_team_memory()
                 fetch_error = getattr(
                     self.app.provider_inventory("ovh"), "last_fetch_error", None
                 )
@@ -476,6 +476,7 @@ class InstanceListScreen(Screen):
                 self._update_table()
                 self._update_status_bar()
                 self._report_duplicate_accounts("hetzner")
+                self._reconcile_team_memory()
                 inventory = self.app.provider_inventory("hetzner")
                 fetch_error = getattr(inventory, "last_fetch_error", None)
                 if isinstance(fetch_error, str) and fetch_error:

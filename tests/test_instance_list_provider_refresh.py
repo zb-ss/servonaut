@@ -318,3 +318,27 @@ def test_ovh_refresh_warning_says_which_rows_are_cached(partial, demo, expected)
 
     assert [c.args[0] for c in calls] == [expected]
     assert calls[0].kwargs == {"severity": "warning", "markup": False}
+
+
+@pytest.mark.parametrize(
+    "name, row", [("ovh_refresh", OVH_ROW), ("hetzner_refresh", HETZNER_ROW)],
+)
+def test_a_finished_provider_load_folds_team_memory_again(name, row):
+    # The shared rows may have arrived first: a twin that lands later still
+    # has to be merged.
+    app = _app(aws_fresh=True)
+    screen, _ = _screen(app)
+    screen._instances = [AWS_ROW]
+
+    _finish_provider_refresh(screen, app, name, [dict(row)])
+
+    app.reconcile_team_memory.assert_called_once_with()
+
+
+def test_a_failed_provider_load_does_not_fold_team_memory():
+    app = _app(aws_fresh=True)
+    screen, _ = _screen(app)
+    worker = SimpleNamespace(name="ovh_refresh", is_finished=True, error=RuntimeError("x"), result=None)
+    with _with_app(app):
+        screen.on_worker_state_changed(SimpleNamespace(worker=worker, state=WorkerState.ERROR))
+    app.reconcile_team_memory.assert_not_called()
