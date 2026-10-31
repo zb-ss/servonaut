@@ -33,6 +33,45 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Per-row failure reasons
+# ---------------------------------------------------------------------------
+
+# Short row texts, keyed by the reason code of a build's first failure. No host
+# names or addresses: the Fleet Memory screen also shows them in demo mode.
+# ``vault_rate_limited`` is matched by value so this module does not depend on
+# where that constant lives.
+_ROW_REASON_TEXT: Dict[str, str] = {
+    "ssh_auth_failed": "login refused",
+    "ssh_unreachable": "unreachable",
+    "ssh_failed": "SSH failed",
+    "ssh_no_response": "no answer in time",
+    "timeout": "no answer in time",
+    "vault_credential_unavailable": "no usable vault key",
+    "vault_rate_limited": "rate limited",
+    STOPPED_REASON: "stopped (skipped)",
+}
+_HOST_KEY_REASON_PREFIX = "ssh_host_key_"
+_ROW_REASON_FALLBACK = "failed"
+
+
+def row_reason_text(code: str) -> str:
+    """Short, name-free text for a scan reason *code* (``""`` for no reason)."""
+    if not code:
+        return ""
+    if code.startswith(_HOST_KEY_REASON_PREFIX):
+        return "host key not trusted"
+    return _ROW_REASON_TEXT.get(code, _ROW_REASON_FALLBACK)
+
+
+def _failure_code(report: Any) -> str:
+    """The most specific reason code of a build that produced nothing."""
+    failures = getattr(report, "failures", None) or []
+    if failures and getattr(failures[0], "reason", ""):
+        return str(failures[0].reason)
+    return str(getattr(report, "overall_reason", None) or "unknown")
+
+
+# ---------------------------------------------------------------------------
 # DTOs
 # ---------------------------------------------------------------------------
 
@@ -224,10 +263,11 @@ class FleetScanService:
         async def _probe_one(inst: Dict[str, Any]) -> None:
             nonlocal completed
             name = inst.get("name") or inst.get("id") or "unknown"
+            row_id = inst.get("id") or inst.get("name", "")
             logger.info("FleetScanService: probing %s", name)
             async with semaphore:
                 ok = False
-                self.last_reasons.pop(inst.get("id") or inst.get("name", ""), None)
+                self.last_reasons.pop(row_id, None)
                 try:
                     ms = self._memory_service
                     if hasattr(ms, "build_report"):
@@ -236,6 +276,7 @@ class FleetScanService:
                             result.succeeded.append(name)
                             ok = True
                         else:
+                            self.last_reasons[row_id] = _failure_code(report)
                             result.failed.append({
                                 "instance": name,
                                 "reason": report.overall_reason or "unknown",
@@ -255,6 +296,7 @@ class FleetScanService:
                             result.succeeded.append(name)
                             ok = True
                         else:
+                            self.last_reasons[row_id] = "no_modules_returned"
                             result.failed.append({
                                 "instance": name,
                                 "reason": "no_modules_returned",
@@ -267,6 +309,7 @@ class FleetScanService:
                     logger.exception(
                         "FleetScanService: probe failed for %s", name
                     )
+                    self.last_reasons[row_id] = "exception"
                     result.failed.append({
                         "instance": name,
                         "reason": "exception",
