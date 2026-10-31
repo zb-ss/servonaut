@@ -24,6 +24,8 @@ from servonaut.services.memory.status import (
     STATUS_STALE as _STATUS_STALE,
     STATUS_NONE as _STATUS_NONE,
     STATUS_OPT_OUT as _STATUS_OPT_OUT,
+    STOPPED_REASON,
+    is_stopped_instance,
     compute_memory_status as _compute_status,
 )
 
@@ -71,10 +73,21 @@ class FleetScanResult:
             ``"instance"`` (name), ``"reason"`` (code string), and
             ``"failures"`` (list of per-module dicts with ``module``,
             ``reason``, ``message`` keys).
+        skipped: Display names of servers that were not probed because the
+            provider reports them stopped or terminated. They are neither
+            succeeded nor failed.
     """
 
     succeeded: List[str] = field(default_factory=list)
     failed: List[Dict[str, Any]] = field(default_factory=list)
+    skipped: List[str] = field(default_factory=list)
+
+    def summary_text(self) -> str:
+        """One-line outcome for toasts: ``3 ok, 1 failed, 2 skipped: stopped``."""
+        text = f"{len(self.succeeded)} ok, {len(self.failed)} failed"
+        if self.skipped:
+            text += f", {len(self.skipped)} skipped: stopped"
+        return text
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +117,9 @@ class FleetScanService:
     ) -> None:
         self._memory_service = memory_service
         self._max_parallel = max_parallel
+        #: ``instance id → reason code`` of each row's latest scan outcome;
+        #: a row keeps its entry until the next probe of that row.
+        self.last_reasons: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -120,6 +136,9 @@ class FleetScanService:
         Mirrors ``FleetMemoryScreen._eligible_instances``:
 
         - Opted-out instances are always excluded.
+        - Stopped or terminated servers are excluded (see
+          :func:`~servonaut.services.memory.status.is_stopped_instance`);
+          :meth:`scan` reports them as skipped.
         - When *stale_only* is ``True``, fresh and never-probed instances
           are excluded so the scan targets only servers that need refreshing.
         - When *stale_only* is ``False``, all non-opted-out instances are
@@ -132,15 +151,28 @@ class FleetScanService:
         Returns:
             Filtered list preserving original order.
         """
+        return self._partition(instances, stale_only=stale_only)[0]
+
+    def _partition(
+        self,
+        instances: List[Dict[str, Any]],
+        *,
+        stale_only: bool,
+    ) -> "tuple[List[Dict[str, Any]], List[Dict[str, Any]]]":
+        """Split *instances* into ``(to probe, skipped because stopped)``."""
         eligible: List[Dict[str, Any]] = []
+        stopped: List[Dict[str, Any]] = []
         for inst in instances:
             status = _compute_status(inst, self._memory_service)
             if status == _STATUS_OPT_OUT:
                 continue
             if stale_only and status != _STATUS_STALE:
                 continue
+            if is_stopped_instance(inst):
+                stopped.append(inst)
+                continue
             eligible.append(inst)
-        return eligible
+        return eligible, stopped
 
     async def scan(
         self,
@@ -167,7 +199,7 @@ class FleetScanService:
                 non-blocking.
 
         Returns:
-            :class:`FleetScanResult` with ``succeeded`` and ``failed`` lists.
+            :class:`FleetScanResult` with ``succeeded``, ``failed`` and ``skipped`` lists.
 
         Raises:
             asyncio.CancelledError: When the surrounding worker is cancelled.
@@ -175,13 +207,17 @@ class FleetScanService:
                 the result's ``failed`` list so a single bad SSH connection
                 never aborts the whole scan.
         """
-        eligible = self.eligible_instances(instances, stale_only=stale_only)
+        eligible, stopped = self._partition(instances, stale_only=stale_only)
+        result = FleetScanResult()
+        for inst in stopped:
+            name = inst.get("name") or inst.get("id") or "unknown"
+            result.skipped.append(name)
+            self.last_reasons[inst.get("id") or inst.get("name", "")] = STOPPED_REASON
         if not eligible:
             logger.debug("FleetScanService.scan: no eligible instances, skipping")
-            return FleetScanResult()
+            return result
 
         semaphore = asyncio.Semaphore(self._max_parallel)
-        result = FleetScanResult()
         total = len(eligible)
         completed = 0
 
@@ -191,6 +227,7 @@ class FleetScanService:
             logger.info("FleetScanService: probing %s", name)
             async with semaphore:
                 ok = False
+                self.last_reasons.pop(inst.get("id") or inst.get("name", ""), None)
                 try:
                     ms = self._memory_service
                     if hasattr(ms, "build_report"):
@@ -260,8 +297,9 @@ class FleetScanService:
         # CancelledError propagates out of gather and then out of this method.
         await asyncio.gather(*(_probe_one(i) for i in eligible))
         logger.info(
-            "FleetScanService.scan complete: %d succeeded, %d failed",
+            "FleetScanService.scan complete: %d succeeded, %d failed, %d skipped",
             len(result.succeeded),
             len(result.failed),
+            len(result.skipped),
         )
         return result

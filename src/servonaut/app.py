@@ -2219,8 +2219,7 @@ class ServonautApp(App):
 
         # Success path: notify and hand off to the screen.
         self.notify(
-            f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed.",
+            f"Fleet scan done: {result.summary_text()}.",
             markup=False,
         )
         self._refresh_fleet_panels_after_scan(result, quiet=False)

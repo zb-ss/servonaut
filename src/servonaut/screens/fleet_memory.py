@@ -147,6 +147,7 @@ class FleetScanSummaryModal(ModalScreen[None]):
         self,
         succeeded: List[str],
         failed: List[Dict[str, Any]],
+        skipped: Optional[List[str]] = None,
     ) -> None:
         """Initialise the summary.
 
@@ -154,19 +155,24 @@ class FleetScanSummaryModal(ModalScreen[None]):
             succeeded: Instance identifiers whose scan produced ≥1 module.
             failed: ``[{"instance": <name>, "reason": <code>, "failures":
                 [{module, reason, message}, …]}]`` for failed scans.
+            skipped: Servers not probed because they are stopped.
         """
         super().__init__()
         self._succeeded = succeeded
         self._failed = failed
+        self._skipped = skipped or []
 
     def compose(self) -> ComposeResult:
-        total = len(self._succeeded) + len(self._failed)
+        total = len(self._succeeded) + len(self._failed) + len(self._skipped)
+        skipped_text = (
+            f", [dim]{len(self._skipped)} skipped: stopped[/dim]" if self._skipped else ""
+        )
         yield Container(
             Static(
                 f"[bold $text-accent]Fleet scan complete[/bold $text-accent] — "
                 f"[$text-success]{len(self._succeeded)} succeeded[/$text-success], "
-                f"[$text-error]{len(self._failed)} failed[/$text-error] "
-                f"({total} total)",
+                f"[$text-error]{len(self._failed)} failed[/$text-error]"
+                f"{skipped_text} ({total} total)",
                 id="fleet-scan-title",
             ),
             VerticalScroll(
@@ -215,6 +221,11 @@ class FleetScanSummaryModal(ModalScreen[None]):
                 extra = len(entry.get("failures", [])) - 3
                 if extra > 0:
                     lines.append(f"      [dim]… and {extra} more[/dim]")
+        if self._skipped:
+            lines.append("")
+            lines.append("[dim]Skipped: stopped[/dim]:")
+            for name in self._skipped:
+                lines.append(f"  • {escape(name)}")
         if not lines:
             lines.append("[dim]No activity.[/dim]")
         return "\n".join(lines)
@@ -953,13 +964,14 @@ class FleetMemoryScreen(Screen):
         self._refresh_auto_scan_status()
         self._launch_populate()
         self.app.notify(
-            f"Fleet scan done: {len(result.succeeded)} ok, "
-            f"{len(result.failed)} failed.",
+            f"Fleet scan done: {result.summary_text()}.",
             markup=False,
         )
         if result.failed:
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     def on_fleet_auto_scan_done(self, result: Any) -> None:
@@ -991,7 +1003,9 @@ class FleetMemoryScreen(Screen):
         self._launch_populate()
         if getattr(result, "failed", None):
             self.app.push_screen(
-                FleetScanSummaryModal(result.succeeded, result.failed)
+                FleetScanSummaryModal(
+                    result.succeeded, result.failed, getattr(result, "skipped", None)
+                )
             )
 
     # ------------------------------------------------------------------

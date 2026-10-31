@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from servonaut.utils.instance_resolver import AmbiguousInstanceError
 from servonaut.services.memory.provider import instance_provider
+from servonaut.services.memory.status import STOPPED_REASON
 from servonaut.services.ssh_host_keys import home_relative
 from servonaut.utils.editor import editor_argv
 
@@ -298,11 +299,13 @@ async def _build_all(
     instances: List[Dict[str, Any]],
     memory_service: Any,
     modules: Optional[List[str]],
+    skipped: Optional[List[str]] = None,
 ) -> List[Tuple[str, str]]:
     """Build memory for all *instances*, at most 5 concurrent probes.
 
     Returns ``(instance id, reason)`` for every server whose build failed or
-    could not reach it.
+    could not reach it. Servers the provider reports stopped are not
+    failures: their ids are appended to *skipped* when given.
     """
     sem = asyncio.Semaphore(5)
     failures: List[Tuple[str, str]] = []
@@ -323,7 +326,10 @@ async def _build_all(
             except Exception as exc:
                 failures.append((iid, str(exc)))
                 return
-            if report.unreached_message:
+            if report.overall_reason == STOPPED_REASON:
+                if skipped is not None:
+                    skipped.append(iid)
+            elif report.unreached_message:
                 failures.append((iid, report.unreached_message))
 
     await asyncio.gather(*(one(i) for i in instances))
@@ -343,8 +349,11 @@ def _cmd_build_all(
         return _EXIT_NOT_FOUND
 
     modules = getattr(args, "modules", None) or None
-    failures = _run_async(_build_all(instances, memory_service, modules))
+    skipped: List[str] = []
+    failures = _run_async(_build_all(instances, memory_service, modules, skipped))
 
+    if skipped:
+        print(f"{len(skipped)} server(s) skipped: stopped", file=sys.stderr)
     if failures:
         for iid, reason in failures:
             print(f"FAILED {iid}: {reason}", file=sys.stderr)

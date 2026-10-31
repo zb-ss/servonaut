@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from .interfaces import MemoryServiceInterface, MemoryModuleMissingError, ModuleProberInterface, ModuleResult
 from .provider import instance_provider
 from .redaction import default_redactor, noop_redactor, scan_for_secrets
+from .status import STOPPED_REASON, is_stopped_instance
 from .store import MemoryStore, _validate_finding_id
 from .summariser import build_summary_markdown
 from servonaut.services.ssh_host_keys import (
@@ -51,6 +52,11 @@ HOST_KEY_BUILD_REASON = "host_key_verification_failed"
 # (login refused, host unreachable, unusable vault key, no answer in time).
 # Nothing is persisted: empty output would overwrite the stored snapshot.
 SSH_FAILED_BUILD_REASON = "ssh_connection_failed"
+
+# Shown when a single build is asked for a stopped or terminated server.
+_STOPPED_MESSAGE = (
+    "The server is stopped, so nothing was probed; the stored memory was kept."
+)
 
 #: ``ModuleBuildFailure.reason`` when the server's vault key cannot be used.
 VAULT_CREDENTIAL_FAILURE = "vault_credential_unavailable"
@@ -129,9 +135,10 @@ class BuildReport:
         successes: ``module_name → ModuleResult`` for probers that returned.
         failures: Per-module probe failures (timeouts, exceptions).
         overall_reason: Machine-readable code when ``successes`` is empty
-            (``"opt_out"`` | ``"disabled"`` | ``"no_modules_matched"`` |
-            ``"all_probers_failed"`` | ``HOST_KEY_BUILD_REASON`` |
-            ``SSH_FAILED_BUILD_REASON``); ``None`` on partial / full success.
+            (``"opt_out"`` | ``"disabled"`` | ``"stopped"`` |
+            ``"no_modules_matched"`` | ``"all_probers_failed"`` |
+            ``HOST_KEY_BUILD_REASON`` | ``SSH_FAILED_BUILD_REASON``);
+            ``None`` on partial / full success.
     """
 
     successes: Dict[str, ModuleResult] = field(default_factory=dict)
@@ -150,10 +157,11 @@ class BuildReport:
     def unreached_message(self) -> Optional[str]:
         """Why no probe command reached the server, or None.
 
-        Set for a refused host key and a failed SSH connection; nothing was
-        stored in either case.
+        Set for a refused host key, a failed SSH connection and a stopped
+        server; nothing was stored in any of those cases.
         """
-        if self.overall_reason in (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON) and self.failures:
+        unreached = (HOST_KEY_BUILD_REASON, SSH_FAILED_BUILD_REASON, STOPPED_REASON)
+        if self.overall_reason in unreached and self.failures:
             return self.failures[0].message
         return None
 
@@ -333,6 +341,13 @@ class MemoryService(MemoryServiceInterface):
         if self._config.is_instance_disabled(instance_id, name):
             logger.info("Memory disabled for instance %s via per_server_overrides", instance_id)
             return BuildReport(overall_reason="opt_out")
+
+        if is_stopped_instance(instance):
+            logger.info("Memory build for %s skipped: server is stopped", instance_id)
+            return BuildReport(
+                failures=[ModuleBuildFailure("provider", STOPPED_REASON, _STOPPED_MESSAGE)],
+                overall_reason=STOPPED_REASON,
+            )
 
         selected_probers = self._select_probers(modules)
         if not selected_probers:
