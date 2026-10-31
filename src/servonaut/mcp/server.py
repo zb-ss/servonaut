@@ -60,6 +60,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
     from servonaut.mcp.guards import CommandGuard
     from servonaut.mcp.audit import AuditTrail
     from servonaut.mcp.tools import ServonautTools
+    from servonaut.services.memory.headless_merge import HeadlessTeamMerge
 
     # Startup sweep for crash-left decrypted Bitwarden key files under
     # ~/.servonaut/tmp/ (>24 h old). The per-call finally and the atexit
@@ -282,6 +283,7 @@ def build_headless_tools(config_manager=None, accounts=None, *, vault_runtime=No
         account_registry=accounts,
         vault_runtime=vault_runtime,
         team_policy=team_policy,
+        team_merge=HeadlessTeamMerge(memory_service) if memory_service is not None else None,
     )
     if memory_service is not None:
         # A memory build hops through a bastion's vault key and falls back to
