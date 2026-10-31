@@ -187,3 +187,22 @@ class TestChangedKeys:
         svc._retrieval_service.list_instance_modules = AsyncMock(return_value={"modules": []})
         run(svc.share_instance(SLUG, OWNER, "admin", ["os"], self._members()))
         api.post.assert_awaited_once()
+
+
+def test_the_real_access_revoked_code_is_nothing_shared():
+    from servonaut.services.api_client import APIError
+
+    m = _material()
+    api = _api({})
+    api.get.side_effect = APIError(code="access_revoked", message="no readable copy", status=404)
+    assert run(_service(api, m).read_shared_module(SLUG, OWNER, "os")) is None
+
+
+def test_another_error_status_is_still_an_error():
+    from servonaut.services.api_client import APIError
+
+    m = _material()
+    api = _api({})
+    api.get.side_effect = APIError(code="boom", message="x", status=500)
+    with pytest.raises(APIError):
+        run(_service(api, m).read_shared_module(SLUG, OWNER, "os"))

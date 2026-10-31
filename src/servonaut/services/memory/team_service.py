@@ -488,14 +488,18 @@ class TeamMemoryService:
         material = self._key_store_provider()
         if material is None:
             return None
-        from servonaut.services.api_client import NotFoundError
+        from servonaut.services.api_client import APIError
 
         try:
             raw = await self._api.get(
                 f"/api/v1/teams/{team_slug}/memory/{instance_id}/{module}"
             )
-        except NotFoundError:
-            return None
+        except APIError as exc:
+            # 404 whatever its code (the service says ``access_revoked``):
+            # there is nothing this member may read.
+            if exc.status == 404:
+                return None
+            raise _translate_api_error(exc, team_slug=team_slug) from exc
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
         return self._open_shared(raw, material, instance_id, module)

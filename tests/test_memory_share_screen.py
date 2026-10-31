@@ -449,3 +449,35 @@ async def test_a_team_name_with_markup_is_shown_literally_in_the_picker():
         select = screen.query_one("#share-team-select", Select)
         shown = " ".join(str(w.render()) for w in select.query("SelectCurrent Static"))
         assert "[bold]Odd[/bold] Team" in shown
+
+
+def _not_found():
+    from servonaut.services.api_client import APIError
+    return APIError(code="not_found", message="HTTP 404", status=404)
+
+
+async def test_share_again_on_a_share_that_no_longer_exists_says_so_and_refreshes():
+    backend = _Backend(members=[_member(1, "Kim Member")], live=[_grant("g-1")])
+    backend.fail_delete = _not_found()
+    app = _Host(backend)
+    async with app.run_test(size=(120, 50)) as pilot:
+        screen = await _live_panel(app, pilot)
+        backend.live = []  # the share is gone by now
+        screen.query_one("#share-btn-reshare", Button).press()
+        await _settle(pilot, screen, lambda: "no longer exists" in _text(screen, "#share-status"), "message")
+        await _settle(pilot, screen, lambda: not screen.query_one("#share-existing").has_class("-shown"), "panel gone")
+        assert "404" not in _text(screen, "#share-status")
+        assert not screen.query_one("#share-btn-confirm", Button).disabled
+    assert backend.posted == []
+
+
+async def test_revoke_and_purge_of_a_vanished_share_say_so_too():
+    for button, failing in (("#share-btn-revoke", "fail_delete"),):
+        backend = _Backend(members=[_member(1, "Kim Member")], live=[_grant("g-1")])
+        setattr(backend, failing, _not_found())
+        app = _Host(backend)
+        async with app.run_test(size=(120, 50)) as pilot:
+            screen = await _live_panel(app, pilot)
+            backend.live = []
+            screen.query_one(button, Button).press()
+            await _settle(pilot, screen, lambda: "no longer exists" in _text(screen, "#share-status"), "message")

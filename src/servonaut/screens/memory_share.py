@@ -488,6 +488,23 @@ class ShareInstanceScreen(Screen):
             f"modules {escape(modules)}."
         )
 
+    def _gone(self, exc: Exception) -> bool:
+        """True (after saying so) when the service no longer knows the share.
+
+        A revoke or purge answered 404: the share was removed meanwhile, so
+        the form is refreshed to what is shared now instead of showing a
+        raw status.
+        """
+        from servonaut.services.api_client import APIError
+
+        if not (isinstance(exc, APIError) and exc.status == 404):
+            return False
+        self._grant = None
+        self._keys_by_team.pop(self._selected_team(), None)
+        self._show_error("That share no longer exists. The form shows what is shared now.")
+        self._start_refresh(reload=True)
+        return True
+
     def _show_error(self, message: str) -> None:
         from rich.markup import escape
 
@@ -600,6 +617,8 @@ class ShareInstanceScreen(Screen):
         try:
             await service.revoke_grant(team_slug, grant.id)
         except Exception as exc:  # noqa: BLE001
+            if self._gone(exc):
+                return
             logger.error("Revoke failed: %s", exc)
             self._show_error(self._explain("Revoke failed", exc))
             return
@@ -625,6 +644,8 @@ class ShareInstanceScreen(Screen):
                 team_slug, grant.id, self._instance_id(), role, modules, member_keys,
             )
         except Exception as exc:  # noqa: BLE001
+            if self._gone(exc):
+                return
             logger.error("Share again failed: %s", exc)
             # The revoke may have gone through: show what is true now.
             self._keys_by_team.pop(team_slug, None)
@@ -642,6 +663,8 @@ class ShareInstanceScreen(Screen):
         try:
             deleted = await service.purge_grant(team_slug, grant.id)
         except Exception as exc:  # noqa: BLE001
+            if self._gone(exc):
+                return
             logger.error("Purge failed: %s", exc)
             self._show_error(self._explain("Could not delete the copies", exc))
             return
