@@ -1581,6 +1581,9 @@ class ServonautApp(App):
                 cache_ttl_provider=lambda: (
                     self.config_manager.get().memory.team_memory_cache_seconds
                 ),
+                future_skew_provider=lambda: (
+                    self.config_manager.get().memory.team_memory_future_skew_seconds
+                ),
             )
             from servonaut.services.memory.shared_view import SharedMemoryReader
             self.shared_memory_reader = SharedMemoryReader(

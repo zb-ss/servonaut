@@ -38,7 +38,8 @@ def _sealed_for(material: Any, payload: Dict[str, Any], probed_at: str) -> Dict[
     )
     data = env.to_dict()
     data["wrapped_dek"] = data.pop("dek_wraps")[0]["wrapped_dek"]
-    data.update({"id": "e-1", "probed_at": probed_at, "is_latest": True})
+    data.update({"id": "e-1", "probed_at": probed_at, "is_latest": True,
+        "instance_id": OWNER_INSTANCE, "module": "os"})
     return data
 
 

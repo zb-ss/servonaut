@@ -1225,6 +1225,9 @@ class MemoryConfig:
         team_memory_cache_seconds: How long the list of servers a team shares
             is reused before the Servonaut service is asked again. ``0`` asks
             every time.
+        team_memory_future_skew_seconds: How far ahead of now a team's shared
+            copy may claim to have been probed before the stamp is replaced by
+            the current time (so it cannot outrank a newer local snapshot).
         ssh_control_socket_dir: Directory for each build's private socket
             folder. Empty means the system temp directory (``TMPDIR``) when a
             socket path fits there, else ``/tmp`` when that is usable; with
@@ -1317,6 +1320,7 @@ class MemoryConfig:
     ssh_control_socket_dir: str = ""
     # How long a team's list of shared servers is reused (see above).
     team_memory_cache_seconds: float = 60.0
+    team_memory_future_skew_seconds: float = 300.0
 
     # Catch-up wraps for team members after an upload (see the docstring).
     team_wrap_retry_seconds: float = 5.0

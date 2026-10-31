@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from servonaut.services.memory.interfaces import MemoryBackendError
@@ -55,6 +55,11 @@ class SharedListing:
     team_slug: str
     module_count: int
     last_probe_at: str
+    instance: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def instance_id(self) -> str:
+        return str(self.instance.get("instance_id") or "")
 
 
 class SharedMemoryReader:
@@ -81,6 +86,10 @@ class SharedMemoryReader:
     def _fresh(self, stamped_at: float) -> bool:
         return self._clock() - stamped_at < float(self._ttl_provider() or 0.0)
 
+    def cached_listings(self) -> Dict[Tuple[str, str], SharedListing]:
+        """Every listing held, keyed by ``(team_slug, owner's instance id)``."""
+        return dict(self._listings)
+
     def cached_listing(self, team_slug: str, instance_id: str) -> Optional[SharedListing]:
         """The last listing of *instance_id*, without asking the service."""
         return self._listings.get((team_slug, instance_id))
@@ -92,13 +101,19 @@ class SharedMemoryReader:
         except MemoryBackendError as exc:
             logger.debug("Team %s lists nothing shared: %s", team_slug, exc)
             return
+        # The fresh answer replaces the team's old one whole, so a grant that
+        # was revoked or narrowed disappears instead of lingering.
+        fresh: Dict[Tuple[str, str], SharedListing] = {}
         for item in shared:
             instance_id = item.grant.instance_id or str(item.instance.get("instance_id") or "")
-            self._listings[(team_slug, instance_id)] = SharedListing(
+            fresh[(team_slug, instance_id)] = SharedListing(
                 team_slug=team_slug,
                 module_count=len(item.readable_modules),
                 last_probe_at=str(item.instance.get("last_probe_at") or ""),
+                instance=dict(item.instance),
             )
+        self._listings = {k: v for k, v in self._listings.items() if k[0] != team_slug}
+        self._listings.update(fresh)
 
     async def read(
         self, team_slug: str, team_name: str, instance_id: str
@@ -126,15 +141,37 @@ class SharedMemoryReader:
                 return None
             modules: Dict[str, Dict[str, Any]] = {}
             for module in match.readable_modules:
-                opened = await self._team_service.read_shared_module(
-                    team_slug, match.grant.instance_id, module
-                )
+                try:
+                    opened = await self._team_service.read_shared_module(
+                        team_slug, match.grant.instance_id, module
+                    )
+                except ValueError as exc:  # an unsafe id from the service: skip it
+                    logger.warning("Skipped shared module %r: %s", module, exc)
+                    continue
                 if opened is not None:
-                    modules[module] = opened
+                    modules[module] = _for_display(opened)
         except MemoryBackendError as exc:
             logger.debug("Nothing readable from team %s: %s", team_slug, exc)
             return None
         return SharedMemory(team_slug, team_name, modules) if modules else None
+
+
+def _for_display(module: Dict[str, Any]) -> Dict[str, Any]:
+    """*module*, with authored notes and findings also as ``observed`` rows.
+
+    The payloads stay under their own keys (``content``, ``findings``); the
+    rows only let a table show them. Read-only: nothing here is saved.
+    """
+    shown = dict(module)
+    observed = dict(shown.get("observed") or {})
+    if isinstance(shown.get("content"), str):
+        observed.setdefault("note", shown["content"])
+    if isinstance(shown.get("findings"), list):
+        for index, record in enumerate(shown["findings"], 1):
+            text = record.get("title") or record.get("text") if isinstance(record, dict) else record
+            observed.setdefault(f"finding {index}", str(text if text else record))
+    shown["observed"] = observed
+    return shown
 
 
 @dataclass(frozen=True)

@@ -41,7 +41,7 @@ import base64
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING
 
 import nacl.public
@@ -53,6 +53,7 @@ from servonaut.services.memory.interfaces import (
     UpsellRequired,
     ValidationFailed,
 )
+from servonaut.services.memory.path_segments import check_segment
 from servonaut.services.memory.retrieval_service import _validate_instance_id
 
 if TYPE_CHECKING:
@@ -82,6 +83,23 @@ class GrantAlreadyExistsError(MemoryBackendError):
         super().__init__(
             f"A live grant already exists for instance {instance_id!r} "
             f"in team {team_slug!r}. Revoke the existing grant first."
+        )
+
+
+class KeyChangedError(MemoryBackendError):
+    """Raised when a share would seal for a member whose key changed.
+
+    A changed key needs the owner's confirmation, which no screen offers yet,
+    so nothing is revoked, sealed or sent.
+
+    Attributes:
+        names: Display names of the members whose key changed.
+    """
+
+    def __init__(self, names: List[str]) -> None:
+        self.names = names
+        super().__init__(
+            "The memory key of " + ", ".join(names or ["a member"]) + " has changed."
         )
 
 
@@ -246,6 +264,8 @@ class TeamMemoryService:
         retrieval_service: Duck-typed retrieval service (see module docstring).
         cache_ttl_provider: Returns how long, in seconds, a list of a team's
             shared servers is reused. ``0`` (the default) asks every time.
+        future_skew_provider: Returns how far ahead of now, in seconds, a
+            shared copy's ``probed_at`` may be before it is clamped to now.
     """
 
     _FEATURE = "memory_team_share"
@@ -266,6 +286,7 @@ class TeamMemoryService:
         key_store_provider: Callable[[], Any],
         retrieval_service: Any,
         cache_ttl_provider: Optional[Callable[[], float]] = None,
+        future_skew_provider: Optional[Callable[[], float]] = None,
     ) -> None:
         self._api = api_client
         self._auth = auth_service
@@ -273,6 +294,7 @@ class TeamMemoryService:
         self._key_store_provider = key_store_provider
         self._retrieval_service = retrieval_service
         self._cache_ttl_provider = cache_ttl_provider or (lambda: 0.0)
+        self._future_skew_provider = future_skew_provider or (lambda: 300.0)
         # team slug -> (monotonic time of the answer, the answer)
         self._shared_memo: Dict[str, tuple] = {}
 
@@ -305,6 +327,7 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        check_segment(team_slug, "team")
         try:
             data = await self._api.get(f"/api/v1/memory/keys/team/{team_slug}")
         except Exception as exc:
@@ -368,6 +391,7 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        check_segment(team_slug, "team")
         ttl = float(self._cache_ttl_provider() or 0.0)
         remembered = self._shared_memo.get(team_slug)
         if ttl > 0 and remembered and time.monotonic() - remembered[0] < ttl:
@@ -437,6 +461,8 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        for value, what in ((team_slug, "team"), (instance_id, "server"), (module, "module")):
+            check_segment(value, what)
         material = self._key_store_provider()
         if material is None:
             return None
@@ -450,14 +476,23 @@ class TeamMemoryService:
             return None
         except Exception as exc:
             raise _translate_api_error(exc, team_slug=team_slug) from exc
-        return self._open_shared(raw, material, module)
+        return self._open_shared(raw, material, instance_id, module)
 
     def _open_shared(
-        self, raw: Dict[str, Any], material: Any, module: str
+        self, raw: Dict[str, Any], material: Any, instance_id: str, module: str
     ) -> Optional[Dict[str, Any]]:
-        """Decrypt one team envelope with the member's own key."""
+        """Decrypt one team envelope with the member's own key.
+
+        The reply must name the server and module that were asked for: the
+        ciphertext is not bound to either, so a copy of another server must
+        not pass as this one.
+        """
         import json
 
+        if not isinstance(raw, dict) or raw.get("instance_id") != instance_id \
+                or raw.get("module") != module:
+            logger.warning("Shared %r reply does not match the request", module)
+            return None
         try:
             plaintext = self._crypto.decrypt_envelope(
                 raw,
@@ -471,12 +506,34 @@ class TeamMemoryService:
             return None
         if not isinstance(payload, dict):
             return None
-        return {
+        opened: Dict[str, Any] = {
             "observed": payload.get("observed") or {},
             "declared": payload.get("declared") or {},
-            "probed_at": str(raw.get("probed_at") or ""),
+            "probed_at": self._clamped(str(raw.get("probed_at") or "")),
             "is_latest": bool(raw.get("is_latest", True)),
         }
+        # Authored modules carry their own payload: keep it, read-only.
+        for key in ("content", "findings"):
+            if key in payload:
+                opened[key] = payload[key]
+        return opened
+
+    def _clamped(self, probed_at: str) -> str:
+        """*probed_at*, or now when it lies further ahead than the allowed skew.
+
+        The stamp comes from outside the ciphertext, so an absurd future one
+        must not make a shared copy look newer than the local snapshot.
+        """
+        try:
+            stamp = datetime.fromisoformat(probed_at.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if stamp > now + timedelta(seconds=float(self._future_skew_provider())):
+            return now.isoformat()
+        return probed_at
 
     async def share_instance(
         self,
@@ -520,8 +577,8 @@ class TeamMemoryService:
             (``grant_exists``). To change a share, :meth:`reshare_instance`
             revokes the grant and shares again; the service reuses the wraps
             it already holds. Only :meth:`purge_grant` removes members'
-            copies, and a narrower module list needs that purge first: the
-            API has no per-module wrap revocation.
+            copies; narrowing a share is the same revoke plus a replacement
+            module list, with no purge.
 
         Raises:
             ValueError: If ``modules`` is ``None`` or empty.
@@ -534,6 +591,10 @@ class TeamMemoryService:
         self._require_feature()
         if not modules:
             raise ValueError("Select at least one module to share.")
+        check_segment(team_slug, "team")
+        check_segment(instance_id, "server")
+        eligible_members = self.eligible_members(member_pubkeys, required_role)
+        self._refuse_changed_keys(eligible_members)
 
         # Spec §3.2: GET /memory/{instance_id} returns
         # {"instance": ..., "modules": ["os", "runtimes", ...]}  — strings, not dicts.
@@ -545,7 +606,6 @@ class TeamMemoryService:
             m for m in raw_modules if isinstance(m, str) and m in selected
         ]
 
-        eligible_members = self.eligible_members(member_pubkeys, required_role)
 
         if not module_names or not eligible_members:
             wraps: List[Dict[str, Any]] = []
@@ -576,6 +636,13 @@ class TeamMemoryService:
 
         return _parse_grant(data)
 
+    @staticmethod
+    def _refuse_changed_keys(members: List[TeamMemberKey]) -> None:
+        """Raise before anything is sent if a member's key changed."""
+        changed = [m.name or f"member {m.user_id}" for m in members if m.key_changed]
+        if changed:
+            raise KeyChangedError(changed)
+
     async def reshare_instance(
         self,
         team_slug: str,
@@ -591,6 +658,7 @@ class TeamMemoryService:
         already stored, so deleting them would only recreate them. A failed
         revoke raises before any new grant is requested.
         """
+        self._refuse_changed_keys(self.eligible_members(member_pubkeys, required_role))
         await self.revoke_grant(team_slug, grant_id)
         return await self.share_instance(
             team_slug, instance_id, required_role, modules, member_pubkeys
@@ -732,6 +800,8 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        check_segment(team_slug, "team")
+        check_segment(grant_id, "grant")
         self._forget_shared(team_slug)
         try:
             data = await self._api.delete(
@@ -758,6 +828,8 @@ class TeamMemoryService:
             BackendMaintenance: On 503.
         """
         self._require_feature()
+        check_segment(team_slug, "team")
+        check_segment(grant_id, "grant")
         self._forget_shared(team_slug)
         try:
             data = await self._api.post(
