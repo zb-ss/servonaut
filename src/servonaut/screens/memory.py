@@ -1263,14 +1263,18 @@ class MemoryScreen(Screen):
         The editor holds the notes as they were when it opened. A merge or
         another editor may have changed the file since, and writing the
         editor's text would drop that. The text is then kept beside the notes
-        as ``annotations.unsaved.md`` and nothing is overwritten.
+        as a new private ``annotations.unsaved-<time>.md`` file and nothing is
+        overwritten. The comparison and the write are one step under the
+        store's annotation lock, so a merge cannot slip in between.
         """
-        if expected is not None and memory_service.read_annotations(instance_id, provider) != expected:
-            path = memory_service.get_annotations_path(instance_id, provider)
-            path.with_name("annotations.unsaved.md").write_text(text, encoding="utf-8")
-            return False
-        memory_service.write_annotations(instance_id, text, provider)
-        return True
+        if expected is None:
+            memory_service.write_annotations(instance_id, text, provider)
+            return True
+        digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+        if memory_service.write_annotations_if_unchanged(instance_id, digest, text, provider):
+            return True
+        memory_service.write_annotation_draft(instance_id, text, provider)
+        return False
 
     async def _save_annotations(
         self,
@@ -1294,7 +1298,7 @@ class MemoryScreen(Screen):
             self.app.notify(
                 "The notes changed while you were editing (a team merge or another "
                 "edit), so nothing was overwritten. Your text is saved as "
-                "annotations.unsaved.md next to the notes; reopen the editor to merge it.",
+                "annotations.unsaved-<time>.md next to the notes; reopen the editor to merge it.",
                 severity="warning",
                 markup=False,
             )

@@ -733,6 +733,22 @@ class MemoryService(MemoryServiceInterface):
         instance_id = self._resolve_id(instance_id)
         return self._store.write_annotations(instance_id, content, provider)
 
+    def write_annotations_if_unchanged(
+        self, instance_id: str, expected_hash: str, content: str, provider: str = "custom"
+    ) -> bool:
+        """Write the notes only if they still hash to *expected_hash* (see the store)."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.write_annotations_if_unchanged(
+            instance_id, expected_hash, content, provider
+        )
+
+    def write_annotation_draft(
+        self, instance_id: str, content: str, provider: str = "custom"
+    ) -> Path:
+        """Keep *content* beside the notes as a private, uniquely named draft."""
+        instance_id = self._resolve_id(instance_id)
+        return self._store.write_annotation_draft(instance_id, content, provider)
+
     def get_annotations_meta(self, instance_id: str) -> Dict[str, Any]:
         """Return the annotations metadata dict for *instance_id*.
 
