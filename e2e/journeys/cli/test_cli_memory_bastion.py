@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-from servonaut.config.schema import MemoryConfig
 from e2e.harness import fleet, remote_fleet
 from e2e.harness.seed import HomeSeeder
 from e2e.harness.shims import jump_host
@@ -33,17 +32,13 @@ def test_a_build_through_a_bastion_opens_one_shared_connection_and_closes_it(
 ):
     sandbox = journey.new_sandbox()
     seeder = HomeSeeder(sandbox.home, api_url=fake_cloud.url)
-    # A short folder inside the test root: the sandbox allows writes only there.
-    mux_dir = journey.ctx.root / "mux"
-    mux_dir.mkdir(exist_ok=True)
-    remote_fleet.seed_app_1_behind_bastion(
-        sshd, seeder, sandbox.home, memory=MemoryConfig(ssh_control_socket_dir=str(mux_dir)),
-    )
+    remote_fleet.seed_app_1_behind_bastion(sshd, seeder, sandbox.home)
     sshd.target.remote.write("/etc/hostname", f"{APP_1.name}\n")
 
     result = cli(sandbox, "memory", "build", APP_1.name)
 
     assert result.returncode == 0, result.describe()
+    assert "Built memory for" in result.stdout, result.describe()
     calls = [c.argv for c in journey.shims.calls("ssh")]
     masters = [a for a in calls if _option(a, "ControlMaster") == "yes"]
     commands = [a for a in calls if _option(a, "ControlMaster") == "no" and "-O" not in a]
