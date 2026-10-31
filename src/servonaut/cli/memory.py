@@ -155,6 +155,42 @@ def _init_headless_services() -> Tuple[Any, Any, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Team copies
+# ---------------------------------------------------------------------------
+
+#: Subcommands that read or change one server's record, or probe: they merge a
+#: team's copy into the user's own record first. ``clear`` and ``purge`` do not
+#: (no merge right before deleting).
+_MERGING_COMMANDS = frozenset({"build", "refresh", "show", "export", "annotate", "pin", "pull"})
+
+
+async def _merge_team_copies(memory_service: Any) -> Any:
+    from servonaut.services.memory.headless_merge import HeadlessTeamMerge  # noqa: PLC0415
+
+    _team_rows, fleet_rows = await memory_service.connection_rows()
+    if not fleet_rows:
+        return None
+    return await HeadlessTeamMerge(memory_service).run(fleet_rows)
+
+
+def _merge_team_copies_first(memory_service: Any) -> None:
+    """Fold team copies into the user's own records before the command reads them.
+
+    Reads the rows the run already reads once (signed out, or no vault runtime,
+    means no shared rows and no pass). What was merged goes to stderr so
+    ``--json`` stdout is unchanged; a failed pass is logged and never fails the
+    command.
+    """
+    try:
+        report = _run_async(_merge_team_copies(memory_service))
+    except Exception as exc:  # noqa: BLE001 - the command goes on without the merge
+        logger.warning("Merging team copies of server memory failed (%s)", type(exc).__name__)
+        return
+    if report is not None and report.copies:
+        print(report.message(), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # Instance resolution
 # ---------------------------------------------------------------------------
 
@@ -838,6 +874,9 @@ def run_memory(args: Any) -> int:
     # entirely, so we route it before _resolve_or_exit.
     if memory_command == "purge":
         return _cmd_purge(args, memory_service)
+
+    if memory_command in _MERGING_COMMANDS:
+        _merge_team_copies_first(memory_service)
 
     # --all path for build
     if memory_command == "build" and getattr(args, "all", False):

@@ -1134,6 +1134,15 @@ DEFAULT_REMEMBER_TTL_DAYS = 30
 # polling cadence adjustable without changing the client implementation.
 DEFAULT_AI_SUMMARY_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_AI_SUMMARY_POLL_TIMEOUT_SECONDS = 75.0
+DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS = 5.0
+DEFAULT_RECORD_LOCK_POLL_SECONDS = 0.05
+
+
+def _usable_seconds(value: Any, default: float) -> float:
+    """*value* as seconds when it is a finite, non-negative number, else *default*."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value) if math.isfinite(value) and value >= 0 else default
 
 # User-editable prompt for the optional client-side enhancement path.
 DEFAULT_MEMORY_AI_ENHANCEMENT_PROMPT = (
@@ -1241,6 +1250,11 @@ class MemoryConfig:
         team_wrap_max_wait_seconds: Longest pause honoured before that
             retry; a longer ask gives up for this upload and the next sync
             asks again.
+        record_lock_timeout_seconds: How long a change to one server's notes
+            or findings waits for another Servonaut process (the app, the
+            CLI, an MCP server) that is writing the same record, before it
+            fails as a failed write and the change is kept for a retry.
+        record_lock_poll_seconds: How often that wait looks again.
     """
 
     enabled: bool = True
@@ -1326,9 +1340,25 @@ class MemoryConfig:
     team_wrap_retry_seconds: float = 5.0
     team_wrap_max_wait_seconds: float = 30.0
 
+    # Wait for another process holding the same server's record (see above).
+    record_lock_timeout_seconds: float = DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS
+    record_lock_poll_seconds: float = DEFAULT_RECORD_LOCK_POLL_SECONDS
+
     # ------------------------------------------------------------------
     # Helpers used by MemoryService / MemoryStore
     # ------------------------------------------------------------------
+
+    def record_lock_wait(self) -> tuple[float, float]:
+        """The validated ``(timeout, poll)`` seconds for the record lock.
+
+        A value that is not a finite, non-negative number (a hand-edited
+        config) falls back to its default; the poll is never zero.
+        """
+        timeout = _usable_seconds(
+            self.record_lock_timeout_seconds, DEFAULT_RECORD_LOCK_TIMEOUT_SECONDS
+        )
+        poll = _usable_seconds(self.record_lock_poll_seconds, DEFAULT_RECORD_LOCK_POLL_SECONDS)
+        return timeout, poll or DEFAULT_RECORD_LOCK_POLL_SECONDS
 
     def is_module_enabled(self, instance_id: str, module: str) -> bool:
         """Return ``True`` if *module* should be probed for *instance_id*.

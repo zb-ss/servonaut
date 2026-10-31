@@ -118,7 +118,7 @@ class TestTargetAndRemoteSafety:
         assert SHARE_ID in report.kept and report.copies == 1
         assert service.read_annotations(OTHER_OWN, "aws") == "second copy note"
 
-    def test_a_remote_finding_with_a_wrong_typed_time_is_unavailable_and_nothing_is_marked(self, tmp_path):
+    def test_a_remote_finding_with_a_wrong_typed_time_is_unavailable_and_stays_owed(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="local")
         service._store.save_finding(OWN_ID, {"id": FIRST, "title": "x", "created_at": OLD}, "aws")
@@ -126,7 +126,7 @@ class TestTargetAndRemoteSafety:
         sync = _sync(tmp_path, service, Retrieval(notes=None, findings=bad))
         _second_copy(service)
         report = _run(service, [_own(), _shared()] + _second_pair(), sync)
-        assert _marker(tmp_path) is None and SHARE_ID in report.kept
+        assert _marker(tmp_path)["remote_pending"] is True
         assert service.read_annotations(OTHER_OWN, "aws") == "second copy note"
 
     def test_an_unexpected_error_type_from_one_copy_is_contained(self, tmp_path, monkeypatch):

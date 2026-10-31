@@ -127,17 +127,18 @@ class TestRemoteIsReadNotWritten:
 
 
 class TestMarker:
-    def test_an_unreadable_service_leaves_no_marker_and_a_later_pass_finishes(self, tmp_path):
+    def test_an_unreadable_service_marks_the_local_merge_and_a_later_pass_finishes(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="local")
         retrieval = Retrieval(notes=RuntimeError("offline"), findings=RuntimeError("offline"))
         sync = _sync(tmp_path, service, retrieval)
         first = _run(service, [_own(), _shared()], sync, SHARE_ID)
         assert service.read_annotations(OWN_ID, "aws") == "local"        # merged locally
-        assert first.copies == 0 and SHARE_ID in first.kept and _marker(tmp_path) is None
+        assert first.copies == 1 and _marker(tmp_path)["remote_pending"] is True
         retrieval.answers.update(annotations={"content": "cloud"}, findings=None)
         second = _run(service, [_own(), _shared()], sync, SHARE_ID)
         assert second.copies == 1 and "cloud" in service.read_annotations(OWN_ID, "aws")
+        assert _marker(tmp_path)["remote_pending"] is False
         assert _marker(tmp_path)["target_id"] == OWN_ID
 
     def test_a_verified_absence_is_settled(self, tmp_path):
@@ -169,13 +170,13 @@ class TestMarker:
         monkeypatch.setattr(MemoryStore, "write_merge_marker", real)
         assert _run(service, [_own(), _shared()], sync).copies == 1
 
-    def test_a_locked_sync_merges_locally_and_marks_nothing(self, tmp_path):
+    def test_a_locked_sync_merges_locally_and_marks_the_service_part_as_owed(self, tmp_path):
         service = _service(tmp_path)
         _put_copy(service, notes="team note")
         sync = _sync(tmp_path, service, configured=False, enrolled=True)
         report = _run(service, [_own(), _shared()], sync)
         assert service.read_annotations(OWN_ID, "aws") == "team note"
-        assert report.copies == 0 and _marker(tmp_path) is None
+        assert report.copies == 1 and _marker(tmp_path)["remote_pending"] is True
 
     def test_sync_not_set_up_marks_after_the_local_merge(self, tmp_path):
         service = _service(tmp_path)

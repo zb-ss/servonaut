@@ -151,6 +151,15 @@ _POISON_FILENAME = "sync_poison.jsonl"
 _KEY_CACHE_PATH = Path.home() / ".servonaut" / "memory" / "keys.json"
 
 
+def local_keypair_cache_exists() -> bool:
+    """Whether this computer holds the passphrase-encrypted Memory Sync keypair.
+
+    The default location only; a running :class:`MemorySyncService` answers
+    for its own path with :meth:`MemorySyncService.is_enrolled_locally`.
+    """
+    return _KEY_CACHE_PATH.exists()
+
+
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 

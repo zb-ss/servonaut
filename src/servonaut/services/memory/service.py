@@ -297,6 +297,9 @@ class MemoryService(MemoryServiceInterface):
             else MemoryStore(redactor=_select_redactor(config))
         )
         self._config = config
+        wait = getattr(config, "record_lock_wait", None)
+        if callable(wait):
+            self._store.set_record_lock_wait(*wait())
         self._probers: List[ModuleProberInterface] = probers or []
         self._ssh_service = ssh_service
         self._connection_service = connection_service
@@ -951,40 +954,42 @@ class MemoryService(MemoryServiceInterface):
         fid = "f_" + uuid.uuid4().hex[:26]
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Handle supersede: if the referenced finding exists, mark it.
-        effective_supersede: Optional[str] = None
-        if supersede_id:
-            try:
-                _validate_finding_id(supersede_id)
-                old_record = self._store.get_finding(instance_id, supersede_id, provider)
-                if old_record is not None:
-                    old_record["superseded_by"] = fid
-                    old_record["updated_at"] = now_iso
-                    self._store.save_finding(instance_id, old_record, provider)
-                    effective_supersede = supersede_id
-            except ValueError:
-                pass  # invalid supersede_id — ignore silently
+        # One locked step: another process may supersede or prune the same record.
+        with self._store.annotation_lock(instance_id):
+            # Handle supersede: if the referenced finding exists, mark it.
+            effective_supersede: Optional[str] = None
+            if supersede_id:
+                try:
+                    _validate_finding_id(supersede_id)
+                    old_record = self._store.get_finding(instance_id, supersede_id, provider)
+                    if old_record is not None:
+                        old_record["superseded_by"] = fid
+                        old_record["updated_at"] = now_iso
+                        self._store.save_finding(instance_id, old_record, provider)
+                        effective_supersede = supersede_id
+                except ValueError:
+                    pass  # invalid supersede_id — ignore silently
 
-        # Secret scan (warn, never block — findings convention mirrors annotations).
-        warnings = scan_for_secrets(body)
+            # Secret scan (warn, never block — findings convention mirrors annotations).
+            warnings = scan_for_secrets(body)
 
-        # Build and persist record.
-        record: Dict[str, Any] = {
-            "id": fid,
-            "instance_id": instance_id,
-            "title": title,
-            "body": body,
-            "tags": tags,
-            "confidence": confidence,
-            "source": source,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-            "superseded_by": None,
-        }
-        self._store.save_finding(instance_id, record, provider)
+            # Build and persist record.
+            record: Dict[str, Any] = {
+                "id": fid,
+                "instance_id": instance_id,
+                "title": title,
+                "body": body,
+                "tags": tags,
+                "confidence": confidence,
+                "source": source,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "superseded_by": None,
+            }
+            self._store.save_finding(instance_id, record, provider)
 
-        # Prune over-cap findings (never prunes the record just saved).
-        pruned_ids = self._prune_findings(instance_id, provider, fid)
+            # Prune over-cap findings (never prunes the record just saved).
+            pruned_ids = self._prune_findings(instance_id, provider, fid)
 
         # Update meta with fresh active count.
         active_count = len(
@@ -1143,66 +1148,68 @@ class MemoryService(MemoryServiceInterface):
         updated = 0
         skipped = 0
 
-        for record in incoming:
-            fid = record.get("id", "")
-            try:
-                _validate_finding_id(fid)
-            except (ValueError, TypeError):
-                skipped += 1
-                continue
-
-            local = self._store.get_finding(instance_id, fid, provider)
-            if local is None:
+        # Read-compare-write per record, excluding other processes too.
+        with self._store.annotation_lock(instance_id):
+            for record in incoming:
+                fid = record.get("id", "")
                 try:
-                    self._store.save_finding(instance_id, dict(record), provider)
-                    created += 1
-                except Exception as exc:
-                    logger.warning(
-                        "merge_findings: could not save %s for %s: %s",
-                        fid, instance_id, exc,
-                    )
+                    _validate_finding_id(fid)
+                except (ValueError, TypeError):
                     skipped += 1
-                continue
+                    continue
 
-            # Effective timestamp: max(created_at, updated_at).
-            def _eff_ts(r: Dict[str, Any]) -> str:
-                return max(
-                    r.get("created_at") or "",
-                    r.get("updated_at") or "",
-                )
-
-            local_ts = _eff_ts(local)
-            incoming_ts = _eff_ts(record)
-
-            if incoming_ts > local_ts:
-                # Incoming wins — but apply monotonic superseded_by from local.
-                merged = dict(record)
-                local_sup = local.get("superseded_by")
-                inc_sup = merged.get("superseded_by")
-                if local_sup and not inc_sup:
-                    merged["superseded_by"] = local_sup
-                try:
-                    self._store.save_finding(instance_id, merged, provider)
-                    updated += 1
-                except Exception as exc:
-                    logger.warning(
-                        "merge_findings: could not save %s for %s: %s",
-                        fid, instance_id, exc,
-                    )
-                    skipped += 1
-            else:
-                # Local wins — still apply monotonic superseded_by from incoming.
-                inc_sup = record.get("superseded_by")
-                if inc_sup and not local.get("superseded_by"):
-                    local["superseded_by"] = inc_sup
+                local = self._store.get_finding(instance_id, fid, provider)
+                if local is None:
                     try:
-                        self._store.save_finding(instance_id, local, provider)
+                        self._store.save_finding(instance_id, dict(record), provider)
+                        created += 1
                     except Exception as exc:
                         logger.warning(
-                            "merge_findings: could not update superseded_by for %s: %s",
-                            fid, exc,
+                            "merge_findings: could not save %s for %s: %s",
+                            fid, instance_id, exc,
                         )
-                skipped += 1
+                        skipped += 1
+                    continue
+
+                # Effective timestamp: max(created_at, updated_at).
+                def _eff_ts(r: Dict[str, Any]) -> str:
+                    return max(
+                        r.get("created_at") or "",
+                        r.get("updated_at") or "",
+                    )
+
+                local_ts = _eff_ts(local)
+                incoming_ts = _eff_ts(record)
+
+                if incoming_ts > local_ts:
+                    # Incoming wins — but apply monotonic superseded_by from local.
+                    merged = dict(record)
+                    local_sup = local.get("superseded_by")
+                    inc_sup = merged.get("superseded_by")
+                    if local_sup and not inc_sup:
+                        merged["superseded_by"] = local_sup
+                    try:
+                        self._store.save_finding(instance_id, merged, provider)
+                        updated += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "merge_findings: could not save %s for %s: %s",
+                            fid, instance_id, exc,
+                        )
+                        skipped += 1
+                else:
+                    # Local wins — still apply monotonic superseded_by from incoming.
+                    inc_sup = record.get("superseded_by")
+                    if inc_sup and not local.get("superseded_by"):
+                        local["superseded_by"] = inc_sup
+                        try:
+                            self._store.save_finding(instance_id, local, provider)
+                        except Exception as exc:
+                            logger.warning(
+                                "merge_findings: could not update superseded_by for %s: %s",
+                                fid, exc,
+                            )
+                    skipped += 1
 
         active_after = len(
             self._store.list_findings(instance_id, provider, include_superseded=False)
@@ -1348,6 +1355,10 @@ class MemoryService(MemoryServiceInterface):
         called per build, never cached.
         """
         self._connection_rows = supplier
+
+    async def connection_rows(self) -> tuple[list, Optional[list]]:
+        """``(team_rows, fleet_rows)`` from the supplier; no rows when none is set."""
+        return await self._load_connection_rows()
 
     async def _load_connection_rows(self) -> tuple[list, Optional[list]]:
         from servonaut.services.ssh_credentials import load_connection_rows  # noqa: PLC0415

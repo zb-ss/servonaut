@@ -326,6 +326,10 @@ When a team shares a server that is also one of your own, memory treats it as on
 
 Earlier releases could keep a separate record for the team's copy. The first time Servonaut sees both, it merges that copy into your own record without losing anything: newer probe results replace older ones, findings are merged record by record, and notes are never overwritten. A note only the copy had is added under a heading that says where it came from. The copy's folder is left on disk, marked with a `team_merged.marker` file, and is not merged again. Servonaut then says once what it merged.
 
+The merge runs wherever you use memory, not only in the app. The `servonaut memory` commands that read or change a server's record or probe it (`build`, including `--all`, `refresh`, `show`, `export`, `annotate`, `pin` and `pull`) run one pass first, and so do the memory tools of `servonaut --mcp` and of the relay (`get_server_memory`, `list_server_memories`, `build_server_memory`, `refresh_server_memory`, `recall_server_findings`, `remember_server_finding`). `clear` and `purge` do not merge before deleting. The command prints what it merged to stderr, so `--json` output stays data; a pass that fails is logged and never fails the command. Signed out, or without a vault runtime, there are no team servers and nothing to merge. Only one pass runs on a computer at a time, and the app, the CLI and the MCP server take a per-server lock before changing a record, so running them together does not lose notes. If another process holds a record for longer than `memory.record_lock_timeout_seconds` (default 5), the change fails like any failed write and is kept for a retry.
+
+The CLI and the MCP server never unlock Memory Sync, so they never read from or upload to the Servonaut service. While Memory Sync is set up but locked, the copy's own notes, findings and modules are merged once and the copy is marked as merged, with a note in its `team_merged.marker` that the service's notes and findings for the server are still owed. A note you delete afterwards is not brought back by later passes. The next pass in the app with Memory Sync unlocked reads the service's part, merges only that, and then sends what you owe the service. A computer where Memory Sync was never set up owes nothing.
+
 A team's server you do not own yourself keeps its own record, filed under `~/.servonaut/memory/shared/<share id>/` rather than under the team's name.
 
 ### Sharing memory with a team
@@ -347,6 +351,8 @@ Snapshots you take after sharing reach the team's members as well: after each up
 | `team_memory_future_skew_seconds` | `300` | How far in the future a shared snapshot's date may be before it counts as now, so a wrong clock cannot outrank your own newer snapshot. |
 | `team_wrap_retry_seconds` | `5` | Wait before retrying when the service limits key uploads without saying for how long. |
 | `team_wrap_max_wait_seconds` | `30` | Longest wait for a rate-limited key upload; past it, the next sync tries again. |
+| `record_lock_timeout_seconds` | `5` | How long a change to a server's notes or findings waits for another Servonaut process (the app, the CLI, an MCP server) that is writing the same record; past it the change fails like any failed write and is kept for a retry. |
+| `record_lock_poll_seconds` | `0.05` | How often that wait looks again. |
 
 ---
 

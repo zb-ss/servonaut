@@ -277,8 +277,12 @@ class ServonautTools:
                  vault_runtime=None,
                  apply_team_rules: bool = True,
                  team_policy=None,
-                 shared_memory_reader=None) -> None:
+                 shared_memory_reader=None,
+                 team_merge=None) -> None:
         self._config_manager = config_manager
+        # Runs the team-copy merge before a memory tool reads or changes a
+        # record (a HeadlessTeamMerge). None in the app, which runs its own.
+        self._team_merge = team_merge
         self._shared_memory_reader = shared_memory_reader
         self._aws_service = aws_service
         self._custom_server_service = custom_server_service
@@ -2879,6 +2883,7 @@ class ServonautTools:
             return "Error: memory subsystem not wired."
 
         config = self._config_manager.get()
+        await self._merge_team_copies()
         all_entries = await self._without_folded_team_copies(
             self._memory_service.list_all(),
         )
@@ -5033,6 +5038,21 @@ class ServonautTools:
         folded = absorbed_share_ids(rows)
         return [entry for entry in entries if entry.get('instance_id', '') not in folded]
 
+    async def _merge_team_copies(self) -> None:
+        """Fold team copies into the user's own records before a memory tool reads them.
+
+        Once per distinct set of shared servers (the runner remembers). Rows
+        that cannot be read or a failed pass are logged, never failures of
+        the tool.
+        """
+        if self._team_merge is None:
+            return
+        try:
+            _team_rows, rows = await self.connection_rows()
+            await self._team_merge.run(rows)
+        except Exception as exc:  # noqa: BLE001 - the tool answers from what is stored
+            logger.warning("Merging team copies skipped (%s)", type(exc).__name__)
+
     async def _memory_target(self, instance: Dict) -> Dict:
         """The row whose memory *instance* has: the user's own row for a team's
         copy of a server they own, else *instance* itself.
@@ -5041,6 +5061,7 @@ class ServonautTools:
         to the server, so it lands on the user's own record rather than on
         the team's copy.
         """
+        await self._merge_team_copies()
         if instance.get('is_shared') is not True:
             return instance
         try:
